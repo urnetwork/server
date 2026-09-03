@@ -8831,16 +8831,21 @@ Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads `github-backup-archive.service` state and MainPID plus the
 effective `remote-backup-archive.service` active state, substate, MainPID,
 result, exit status, restart policy, restart delay, and its four non-secret
-PostgreSQL/Redis source endpoint values directly on that backup host, and queries the
-producer-owned `urnetwork_backup_archive_heartbeat_timestamp_seconds` values
-alongside the progress gauges. It expects exactly the four archive names above.
+PostgreSQL/Redis source endpoint values directly on that backup host. From the
+same effective unit it reads `BRINGYOUR_BACKUP_MOUNT`, then uses `mountpoint`
+and direct `findmnt` source, filesystem type, and options to classify that exact
+destination as missing, read-only, read-write, or unknown. In particular,
+ext4's `emergency_ro` overrides a simultaneous top-level `rw` mount flag. The
+probe also queries the producer-owned
+`urnetwork_backup_archive_heartbeat_timestamp_seconds` values alongside the
+progress gauges. It expects exactly the four archive names above.
 Samples older than 90 seconds are observation loss even when their archive
 timestamp value is old. The newest valid generation is selected during the
 short Mimir staleness overlap after a label change. Metric values must be
 finite, generations must be non-empty, archive and heartbeat timestamps may
 not be more than five minutes in the future, and each in-progress gauge must be
 uniquely present and equal to zero or one. The query and direct discriminator
-carry no credentials, repository names, paths, or backup contents.
+carry no credentials, repository names, private key paths, or backup contents.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
 at least one complete generation; and each newest completion is no more than
@@ -8856,6 +8861,9 @@ itself may still use that VPN to inspect Planetoid. An executing data pull has
 a nonzero MainPID. Otherwise its last invocation has `Result=success` and
 `ExecMainStatus=0`; `ActiveState=activating` with `SubState=auto-restart` and a
 zero MainPID is a failed attempt waiting for its retry, not active progress.
+The configured archive path is a real mountpoint whose direct options contain
+`rw` and contain neither `ro` nor `emergency_ro`. Serial queue and active-phase
+attribution are valid only while this volume contract is healthy.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -8865,9 +8873,14 @@ BROKEN:
 - `backup-archive-metrics-invalid` is immediate for an ambiguous progress
   series, a value outside `{0,1}`, an empty generation, or an impossible
   timestamp. Do not coerce these values in Grafana.
-- `backup-archive-missing` after two probes means no atomic completed artifact
-  exists. `in_progress=1` makes a first run operationally pending; it does not
-  create a recovery point.
+- `backup-archive-missing` after two probes means no atomic completed
+  generation is observable through the latest-timestamp metric. It can mean no
+  artifact exists, or that a pre-fix writer overwrote its off-volume metric
+  while the archive was unavailable and discarded the last-known row. Resolve
+  any volume alert and inspect the root-owned latest tier before choosing
+  between those states. `in_progress=1` makes a first run operationally
+  pending; it does not create a recovery point. Never infer physical absence
+  from metric absence or manufacture a timestamp.
 - `backup-archive-stale` is immediate once the newest real completion is more
   than five days old. A current scrape of an old value proves the telemetry
   path while reporting an expired recovery-point objective. When
@@ -8878,6 +8891,19 @@ BROKEN:
   and its sibling gauge is one, frame it as `queued-behind=<sibling>`: the
   script serializes those two sources, so zero describes the next phase rather
   than an idle scheduler. Never start a second catch-up run for that phase.
+  This queue interpretation is forbidden when the direct archive volume is
+  missing, read-only, or unknown; an old `in_progress=1` and live PID do not
+  prove that rsync retains a writable destination.
+- `backup-archive-volume-unavailable` is immediate when the unit's configured
+  archive path is not a mountpoint, its options contain `ro` or
+  `emergency_ro`, or its writable state cannot be established. Stop treating
+  phase gauges as progress. With explicit operator authority, stop both writer
+  units before touching storage, identify the current partition by stable LUKS
+  UUID rather than mutable `/dev/sdX`, inspect USB/UAS, block-I/O, and SMART
+  evidence, repair or replace the proven physical fault, close only a stale
+  unmounted mapper, unlock the current volume, run `e2fsck` offline, and mount
+  normally. Never live-remount an aborted ext4 journal read-write or let a
+  writer target the bare directory beneath a missing mount.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
   MainPID, or its producer heartbeat value is absent or more than 90 seconds
@@ -8983,8 +9009,9 @@ commit, and never restart the current job, rerun an already-current playbook,
 or hand-edit the metric merely to change the panel.
 
 Ownership is deliberately split. The quote bug, refresh race, atomic writers,
-bounded failed-pull retry, and monitor detector are software/configuration
-work. Making the archive disk available before unattended timers and
+bounded failed-pull retry, writer-side read-write preflight, and monitor
+detector are software/configuration work. Making the archive disk available
+before unattended timers and
 authorizing a catch-up run are operator work. A persistent mount may require an
 approved fstab/systemd-mount design; replacement media and additional free
 capacity are hardware work. Software cannot attach an absent disk or create
@@ -9192,11 +9219,51 @@ confirms that the direct path cannot preserve an active multi-hour mapping,
 the operational closure remains a pinned stable public/no-CGNAT WAN path with
 adequate conntrack lifetime/capacity, never the management VPN.
 
+The `2026-09-03T13:18:01Z` storage failure superseded the apparent healthy
+serial-transfer interpretation. During the Redis phase, the GlyphTech BB Plus
+U.2 external enclosure on `usb 10-2` accumulated UAS command timeouts. Two
+device-reset attempts completed without restoring readiness; the SCSI layer
+offlined the device, reads and writes to the underlying disk returned I/O
+errors, JBD2 aborted the encrypted ext4 journal, and ext4 reported
+`Remounting filesystem read-only`. The live mount temporarily exposed both
+`rw` and `emergency_ro`, so checking only the ordinary mount flag would have
+been a false negative. Rsync then reported filesystem error 30 while the unit
+and phase metric remained active.
+
+At `14:16:05Z` the enclosure disconnected, removing the mount. Thirteen seconds
+later the same 7 TB partition reappeared on a different USB controller and
+mutable block name as `/dev/sdc1`; its LUKS UUID still matched the archive, but
+it was locked while the stale mapper still named the vanished `sda1`. This is
+not an intentional read-only mount and cannot be recovered by
+`mount -o remount,rw`. A September 1 control already contained another UAS
+reset and ten read I/O errors for this enclosure, so today is a recurrent
+storage/transport fault rather than a one-off rsync or network failure. The
+remaining hardware discriminator is SMART/media evidence versus cable, port,
+or enclosure stability; the current bridge does not expose SMART through
+UDisks. Recover offline in the order prescribed by
+`backup-archive-volume-unavailable`, then require three one-minute read-write
+observations, a bounded write/read/delete check, 30 minutes without another
+USB/UAS, block-I/O, journal, or remount event, and one validated atomic backup
+generation. The writer scripts must reject `ro` and `emergency_ro` before any
+future phase, but that software guard cannot repair the external SSD path.
+The host then rebooted and, at `14:25:18Z`, ext4 replayed the journal and
+mounted the same filesystem read-write with no subsequent runtime error count.
+That proves present mount availability, not an offline full-filesystem check or
+transport durability. Both archive units were inactive afterward. Their
+pre-fix failure exit had refreshed the off-volume data metric while the mount
+was absent, so a focused raw-Mimir read at `14:33Z` contained fresh zero phase
+gauges but no PostgreSQL or Redis latest row. The monitor must report that as
+unknown completion visibility rather than claiming the physical artifacts are
+gone. The fixed data and code writers preserve strictly validated last-known
+latest rows while resetting phases during volume loss; when the volume is
+healthy, the existing bounded refresh reconstructs current rows from disk.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
 deployed unquoted metrics list; then read the owning systemd unit, mountpoint,
-free space, and bounded journal. On the next fixed long-running GitHub phase,
+direct mount options, free space, and bounded kernel/unit journal. On the next
+fixed long-running GitHub phase,
 require two consecutive raw Mimir samples with exactly one organization gauge
 at one and both producer heartbeat values no more than 90 seconds old, followed
 by final zeros and no heartbeat helper after exit. Verify archive recovery only

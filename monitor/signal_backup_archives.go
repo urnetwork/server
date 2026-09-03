@@ -35,6 +35,17 @@ remote_pg_source=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 
 remote_pg_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PG_PORT=//p' | tail -n 1)
 remote_redis_source=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_REDIS_REMOTE=//p' | tail -n 1)
 remote_redis_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_REDIS_PORT=//p' | tail -n 1)
+remote_mount=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_MOUNT=//p' | tail -n 1)
+remote_mount_present=0
+remote_mount_source=unknown
+remote_mount_fstype=unknown
+remote_mount_options=unknown
+if test -n "${remote_mount}" && mountpoint -q -- "${remote_mount}"; then
+	remote_mount_present=1
+	remote_mount_source=$(findmnt -rn -T "${remote_mount}" -o SOURCE 2>/dev/null | head -n 1)
+	remote_mount_fstype=$(findmnt -rn -T "${remote_mount}" -o FSTYPE 2>/dev/null | head -n 1)
+	remote_mount_options=$(findmnt -rn -T "${remote_mount}" -o OPTIONS 2>/dev/null | head -n 1)
+fi
 case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
 case "${github_main_pid}" in ''|*[!0-9]*) github_main_pid=0 ;; esac
 case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
@@ -48,6 +59,10 @@ case "${remote_pg_source}" in '') remote_pg_source=unknown ;; esac
 case "${remote_pg_port}" in ''|*[!0-9]*) remote_pg_port=0 ;; esac
 case "${remote_redis_source}" in '') remote_redis_source=unknown ;; esac
 case "${remote_redis_port}" in ''|*[!0-9]*) remote_redis_port=0 ;; esac
+case "${remote_mount}" in '') remote_mount=unknown ;; esac
+case "${remote_mount_source}" in '') remote_mount_source=unknown ;; esac
+case "${remote_mount_fstype}" in '') remote_mount_fstype=unknown ;; esac
+case "${remote_mount_options}" in '') remote_mount_options=unknown ;; esac
 printf 'github_unit_state=%s\n' "${github_unit_state}"
 printf 'github_main_pid=%s\n' "${github_main_pid}"
 printf 'remote_unit_state=%s\n' "${remote_unit_state}"
@@ -60,7 +75,12 @@ printf 'remote_exit_status=%s\n' "${remote_exit_status}"
 printf 'remote_pg_source=%s\n' "${remote_pg_source}"
 printf 'remote_pg_port=%s\n' "${remote_pg_port}"
 printf 'remote_redis_source=%s\n' "${remote_redis_source}"
-printf 'remote_redis_port=%s\n' "${remote_redis_port}"`
+printf 'remote_redis_port=%s\n' "${remote_redis_port}"
+printf 'remote_mount=%s\n' "${remote_mount}"
+printf 'remote_mount_present=%s\n' "${remote_mount_present}"
+printf 'remote_mount_source=%s\n' "${remote_mount_source}"
+printf 'remote_mount_fstype=%s\n' "${remote_mount_fstype}"
+printf 'remote_mount_options=%s\n' "${remote_mount_options}"`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -117,6 +137,12 @@ type backupArchiveWriterObservation struct {
 	remotePGPort       int64
 	remoteRedisSource  string
 	remoteRedisPort    int64
+	remoteMount        string
+	remoteMountPresent bool
+	remoteMountState   string
+	remoteMountSource  string
+	remoteMountFSType  string
+	remoteMountOptions string
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -273,10 +299,12 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			now,
 			observation,
 			metricHost.name,
+			writers[observation.host].remoteMountState,
 			backupArchiveQueuedBehind(observation, writers[observation.host], observations),
 		)...)
 	}
 	for _, host := range backupHosts {
+		findings = append(findings, evaluateBackupArchiveVolume(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveRun(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
@@ -340,6 +368,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_pg_port",
 		"remote_redis_source",
 		"remote_redis_port",
+		"remote_mount",
+		"remote_mount_present",
+		"remote_mount_source",
+		"remote_mount_fstype",
+		"remote_mount_options",
 	}
 	if len(values) != len(required) {
 		return backupArchiveWriterObservation{}, fmt.Errorf("expected %d properties; got %q", len(required), strings.TrimSpace(output))
@@ -353,6 +386,22 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		if matched, _ := regexp.MatchString(`^[a-z-]+$`, values[key]); !matched {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
 		}
+	}
+	if matched, _ := regexp.MatchString(`^(unknown|(?:/[A-Za-z0-9._-]+)+/?)$`, values["remote_mount"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount %q", values["remote_mount"])
+	}
+	if matched, _ := regexp.MatchString(`^(unknown|(?:/[A-Za-z0-9._-]+)+)$`, values["remote_mount_source"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_source %q", values["remote_mount_source"])
+	}
+	if matched, _ := regexp.MatchString(`^(unknown|[A-Za-z0-9._+-]+)$`, values["remote_mount_fstype"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_fstype %q", values["remote_mount_fstype"])
+	}
+	if matched, _ := regexp.MatchString(`^(unknown|[A-Za-z0-9,._=:+/-]+)$`, values["remote_mount_options"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_options %q", values["remote_mount_options"])
+	}
+	remoteMountPresent, err := strconv.ParseBool(values["remote_mount_present"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_present %q", values["remote_mount_present"])
 	}
 	if matched, _ := regexp.MatchString(`^(unknown|[0-9]+(?:us|ms|s|min|h|d|w))$`, values["remote_restart_delay"]); !matched {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_restart_delay %q", values["remote_restart_delay"])
@@ -397,7 +446,81 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remotePGPort:       remotePGPort,
 		remoteRedisSource:  values["remote_redis_source"],
 		remoteRedisPort:    remoteRedisPort,
+		remoteMount:        values["remote_mount"],
+		remoteMountPresent: remoteMountPresent,
+		remoteMountState: backupArchiveMountState(
+			values["remote_mount"],
+			remoteMountPresent,
+			values["remote_mount_options"],
+		),
+		remoteMountSource:  values["remote_mount_source"],
+		remoteMountFSType:  values["remote_mount_fstype"],
+		remoteMountOptions: values["remote_mount_options"],
 	}, nil
+}
+
+func backupArchiveMountState(configuredMount string, present bool, options string) string {
+	if configuredMount == "unknown" {
+		return "unknown"
+	}
+	if !present {
+		return "missing"
+	}
+	optionSet := map[string]bool{}
+	for _, option := range strings.Split(options, ",") {
+		optionSet[option] = true
+	}
+	if optionSet["ro"] || optionSet["emergency_ro"] {
+		return "read-only"
+	}
+	if optionSet["rw"] {
+		return "read-write"
+	}
+	return "unknown"
+}
+
+func evaluateBackupArchiveVolume(observation backupArchiveWriterObservation) finding {
+	target := observation.host + "/archive-volume"
+	if observation.remoteMountState == "read-write" {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-volume-unavailable", target,
+		)
+	}
+
+	symptom := fmt.Sprintf("%s archive volume is unavailable", observation.host)
+	mechanism := "The data-backup unit's configured archive mount is absent or cannot be proven writable, so no PostgreSQL or Redis generation can be published safely. A running unit or in-progress metric does not make that destination usable."
+	if observation.remoteMountState == "read-only" {
+		symptom = fmt.Sprintf("%s archive volume is mounted read-only", observation.host)
+		mechanism = "The exact configured archive mount reports read-only or ext4 emergency_ro state. The kernel rejects archive writes after an explicit read-only mount or a protective filesystem remount; the unit's process and in-progress metric can remain present after the destination has stopped accepting data."
+	} else if observation.remoteMountState == "missing" {
+		symptom = fmt.Sprintf("%s archive volume is not mounted", observation.host)
+		mechanism = "The exact mount configured on remote-backup-archive.service is absent. An external device that is offlined and later re-enumerated can leave the old LUKS mapper detached while the same physical volume appears under a new /dev name; an old process or progress gauge does not reconnect that storage."
+	}
+
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: "backup-archive-volume-unavailable", target: target, frame: "unit=remote-backup-archive.service", sustain: 1,
+		symptom:   symptom,
+		mechanism: mechanism,
+		baseline:  "BRINGYOUR_BACKUP_MOUNT names a real mounted filesystem whose direct findmnt options include rw and exclude ro and emergency_ro before any archive writer is treated as active.",
+		observed: fmt.Sprintf(
+			"mount=%s mount_present=%t mount_state=%s source=%s fstype=%s options=%s unit_state=%s unit_substate=%s main_pid=%d",
+			observation.remoteMount,
+			observation.remoteMountPresent,
+			observation.remoteMountState,
+			observation.remoteMountSource,
+			observation.remoteMountFSType,
+			observation.remoteMountOptions,
+			observation.remoteUnitState,
+			observation.remoteUnitSubstate,
+			observation.remoteMainPID,
+		),
+		evidence: "The probe reads the non-secret BRINGYOUR_BACKUP_MOUNT value from the effective systemd environment, verifies that exact path with mountpoint, and classifies its direct findmnt options. It does not infer volume health from free-space metrics or a live rsync PID.",
+		context:  "This class needs operational and potentially hardware repair: software cannot reconnect an external SSD, repair a cable or enclosure, or replace failed media. Do not live-remount an ext4 filesystem read-write after an aborted journal, do not unlock by mutable /dev/sdX name, and do not start another writer against the bare mountpoint directory.",
+		action:   "With explicit operator authorization, stop both archive writer units and verify their rsync/tar/xz children are gone. Identify the reappeared partition by its stable LUKS UUID, inspect bounded kernel USB/UAS and block-I/O evidence plus SMART data when the bridge exposes it, and repair or replace the proven cable, port, enclosure, or SSD fault. Close only the stale unmapped LUKS device after proving it has no mount or holders; unlock the current UUID, run e2fsck offline, then mount it normally. Before resuming one catch-up generation, perform a bounded write/read/delete check on the mounted archive and confirm no new transport, block-I/O, journal, or emergency-read-only event.",
+		verify:   "Require three consecutive one-minute direct observations of the same LUKS-backed mount in read-write state, a clean offline filesystem check, a successful bounded write/read/delete check, no new USB/UAS reset, block-I/O, journal-abort, or read-only-remount event for 30 minutes, and one subsequent single-writer archive generation whose artifact and manifest validate.",
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func backupArchiveRemoteWriterRunning(observation backupArchiveWriterObservation) bool {
@@ -674,6 +797,9 @@ func backupArchiveQueuedBehind(
 	if !backupArchiveRemoteWriterRunning(writer) {
 		return backupArchiveQueueObservation{}
 	}
+	if writer.remoteMountState != "read-write" {
+		return backupArchiveQueueObservation{}
+	}
 	progress, valid := backupArchiveProgress(observation)
 	if !valid || progress != 0 {
 		return backupArchiveQueueObservation{}
@@ -708,6 +834,7 @@ func evaluateBackupArchive(
 	now time.Time,
 	observation *backupArchiveObservation,
 	gateway string,
+	volumeState string,
 	queue backupArchiveQueueObservation,
 ) []finding {
 	target := observation.host + "/" + observation.archive
@@ -778,17 +905,17 @@ func evaluateBackupArchive(
 			findings = append(findings, finding{
 				probeId: "observability/backup-archives", tier: tierPage,
 				class: "backup-archive-missing", target: target, sustain: 2,
-				symptom:   fmt.Sprintf("%s has no completed archive generation", target),
-				mechanism: "No fresh latest-timestamp series exists for this archive. A first backup may still be running, but until its atomic final rename completes there is no recoverable generation for this source.",
-				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation has at least one complete generation on the mounted Planetoid archive.",
+				symptom:   fmt.Sprintf("%s has no observable completed archive generation", target),
+				mechanism: "No fresh latest-timestamp series exists for this archive. This can mean no completed artifact exists, or that a pre-fix writer refreshed its off-volume metric while the archive mount was unavailable and erased the last-known completion row. Metric absence alone cannot distinguish those states.",
+				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation exposes one latest-timestamp row for a complete generation; a writer preserves that last-known row while its archive volume is unavailable.",
 				observed: fmt.Sprintf(
 					"completed_generations=0 in_progress=%s stale_scrape_samples=%d metrics_gateway=%s",
 					progress, observation.staleScrapes, gateway,
 				),
-				evidence: "The latest metric is written only after a complete artifact exists; temporary and partial files never produce it.",
-				context:  "An active first run is operationally pending, not fixed. Software cannot create archive capacity or attach unavailable physical media.",
-				action:   "Inspect the owning systemd unit, mounted archive filesystem, free capacity, and bounded job journal. Restore the mount or failing source and allow one atomic run to finish; do not manufacture a latest timestamp or rename a partial archive.",
-				verify:   "A non-empty completed artifact and its manifest are present, the writer exits successfully, and two fresh Mimir samples expose its real generation timestamp.",
+				evidence: "The raw Mimir query contains no fresh latest-timestamp row. Temporary and partial files never produce one, but this observation does not inspect the root-owned archive contents directly.",
+				context:  "This is UNKNOWN completion state until the mounted media is inspected. An active first run is operationally pending, while a missing last-known metric is a producer defect; neither state can be repaired by inventing a timestamp. Software cannot create archive capacity or attach unavailable physical media.",
+				action:   "First resolve any simultaneous archive-volume alert. Inspect the exact mounted latest tier and manifests through an authorized root-owned path. If a complete generation exists, deploy the writer that preserves last-known completion rows during volume loss and invoke only its bounded metrics refresh; do not hand-edit the .prom file. If none exists, restore the first failed prerequisite and authorize one single-writer catch-up run; never rename a partial artifact.",
+				verify:   "A non-empty completed artifact and its manifest are present, and two fresh Mimir samples expose that real generation timestamp. Then induce the synthetic unavailable-volume boundary and prove a phase reset preserves the same completion row rather than turning it into apparent absence.",
 				playbook: "SIGNALS.md §11.22",
 			})
 		}
@@ -814,7 +941,13 @@ func evaluateBackupArchive(
 		verify := "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation."
 		frame := ""
 		queueObserved := ""
-		if progress == "1" {
+		if progress == "1" && volumeState != "read-write" {
+			frame = "archive-volume"
+			mechanism = fmt.Sprintf("The producer still reports an active %s phase, but the direct archive-volume observation is %s. A stale phase gauge and live unit PID cannot prove that rsync still has a mounted, writable destination, so this is not healthy transfer progress.", observation.archive, volumeState)
+			context = "The volume failure is the first broken prerequisite. Treat the transfer state as unsafe or stale until storage is recovered; do not attribute the unchanged completion time to source backlog or WAN capacity."
+			action = "Follow the simultaneous backup-archive-volume-unavailable alert. With explicit operator authorization, stop the existing writer before closing a stale mapper or repairing the offline filesystem. Do not start a duplicate transfer, manufacture a completed timestamp, or remount an aborted ext4 journal read-write in place."
+			verify = "After offline storage recovery, require the exact volume to remain read-write, then run one single-writer generation to a validated atomic artifact and observe two fresh Mimir reads with the new completion timestamp."
+		} else if progress == "1" {
 			mechanism = "The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the five-day objective when source backlog divided by sustained offsite throughput exceeds the available recovery window."
 			context = "An active single-writer transfer is operationally pending, not fixed and not stalled merely because its final timestamp is unchanged. Software cannot create WAN bandwidth, attach seed media, or shorten the bytes that must cross the recovery boundary."
 			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; verify the effective source route is the dedicated direct SSH path, then compare source backlog with sustained direct-transfer throughput. If the projected completion still misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
@@ -857,8 +990,8 @@ func evaluateBackupArchive(
 			mechanism: mechanism,
 			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
 			observed: fmt.Sprintf(
-				"generation=%s completed_at=%s age=%s in_progress=%s fresh_latest_samples=%d metrics_gateway=%s%s",
-				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, len(observation.latest), gateway, queueObserved,
+				"generation=%s completed_at=%s age=%s in_progress=%s archive_volume_state=%s fresh_latest_samples=%d metrics_gateway=%s%s",
+				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, volumeState, len(observation.latest), gateway, queueObserved,
 			),
 			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
 			context:  context,

@@ -32,6 +32,11 @@ type backupArchiveWriterFixture struct {
 	remotePGPort       int64
 	remoteRedisSource  string
 	remoteRedisPort    int64
+	remoteMount        string
+	remoteMountPresent *bool
+	remoteMountSource  string
+	remoteMountFSType  string
+	remoteMountOptions string
 }
 
 func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
@@ -99,8 +104,13 @@ func TestBackupArchivesSignalSyntheticStaleAndMissingGenerations(t *testing.T) {
 	}
 	missing := requireBackupArchiveAlert(t, alerts, "backup-archive-missing", "backup-1/github-urnetwork")
 	if !strings.Contains(missing.Markdown(), "in_progress=0") ||
-		!strings.Contains(missing.Markdown(), "no recoverable generation") {
+		!strings.Contains(missing.Markdown(), "no observable completed archive generation") ||
+		!strings.Contains(missing.Markdown(), "Metric absence alone cannot distinguish") ||
+		!strings.Contains(missing.Markdown(), "preserves last-known completion rows") {
 		t.Fatalf("missing archive alert lacks completion semantics:\n%s", missing.Markdown())
+	}
+	if strings.Contains(missing.Markdown(), "there is no recoverable generation") {
+		t.Fatalf("missing metric still overclaims physical archive absence:\n%s", missing.Markdown())
 	}
 	if findBackupArchiveAlert(alerts, "backup-archive-stale", "backup-1/redis") != nil {
 		t.Fatalf("fresh Redis archive was marked stale: %+v", alerts)
@@ -179,6 +189,123 @@ func TestBackupArchivesSignalSyntheticStaleArchiveQueuedBehindActiveDataWriter(t
 	}
 }
 
+func TestBackupArchivesSignalSyntheticUnavailableVolumeRejectsFalseProgressAndQueue(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 18, 0, 0, time.UTC)
+	zero := float64(0)
+	one := float64(1)
+	stale := now.Add(-14 * 24 * time.Hour)
+	fresh := now.Add(-24 * time.Hour)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "activating",
+		remoteUnitSubstate: "start",
+		remoteMainPID:      365957,
+		remoteMountPresent: boolPointer(false),
+		remoteMountSource:  "unknown",
+		remoteMountFSType:  "unknown",
+		remoteMountOptions: "unknown",
+	},
+		backupArchiveFixture{archive: "pg", generation: "main-pg-old.sql.xz", createdAt: &stale, progress: &zero},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-old.tar.gpg", createdAt: &stale, progress: &one},
+		backupArchiveFixture{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: &fresh, progress: &zero},
+	)
+
+	volume := requireBackupArchiveAlert(t, alerts, "backup-archive-volume-unavailable", "backup-1/archive-volume")
+	if volume.Sustain != 1 || volume.Severity != SeverityPage {
+		t.Fatalf("volume alert urgency = %s/%d, want page/1: %+v", volume.Severity, volume.Sustain, volume)
+	}
+	for _, want := range []string{
+		"mount_state=missing",
+		"main_pid=365957",
+		"same physical volume appears under a new /dev name",
+		"stable LUKS UUID",
+		"run e2fsck offline",
+		"bounded write/read/delete check",
+		"potentially hardware repair",
+		"Do not live-remount",
+		"SIGNALS.md §11.22",
+	} {
+		if !strings.Contains(volume.Markdown(), want) {
+			t.Fatalf("unavailable-volume alert missing %q:\n%s", want, volume.Markdown())
+		}
+	}
+
+	pg := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/pg")
+	if pg.Frame == "queued-behind=redis" || strings.Contains(pg.Markdown(), "same single-writer data job") {
+		t.Fatalf("missing volume was misclassified as a healthy Redis queue:\n%s", pg.Markdown())
+	}
+	redis := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/redis")
+	for _, want := range []string{
+		"archive_volume_state=missing",
+		"cannot prove that rsync still has a mounted, writable destination",
+		"do not attribute the unchanged completion time to source backlog or WAN capacity",
+	} {
+		if !strings.Contains(redis.Markdown(), want) {
+			t.Fatalf("stale archive did not reject false progress %q:\n%s", want, redis.Markdown())
+		}
+	}
+	if strings.Contains(redis.Action, "Preserve the active writer") {
+		t.Fatalf("unavailable volume retained healthy-transfer action: %+v", redis)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticEmergencyReadOnlyVolume(t *testing.T) {
+	now := time.Date(2026, 9, 3, 13, 18, 12, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteMountPresent: boolPointer(true),
+		remoteMountSource:  "/dev/mapper/luks-synthetic",
+		remoteMountFSType:  "ext4",
+		remoteMountOptions: "rw,nosuid,nodev,errors=remount-ro,emergency_ro",
+	})
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-volume-unavailable", "backup-1/archive-volume")
+	for _, want := range []string{
+		"mounted read-only",
+		"read-only or ext4 emergency_ro",
+		"source=/dev/mapper/luks-synthetic",
+		"fstype=ext4",
+		"aborted journal",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("read-only volume alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T) {
+	tests := []struct {
+		name    string
+		mount   string
+		present bool
+		options string
+		want    string
+	}{
+		{name: "healthy", mount: "/run/media/by/archive1", present: true, options: "rw,nosuid,nodev,errors=remount-ro", want: "read-write"},
+		{name: "ordinary read only", mount: "/run/media/by/archive1", present: true, options: "ro,nosuid,nodev", want: "read-only"},
+		{name: "ext4 emergency overrides rw", mount: "/run/media/by/archive1", present: true, options: "rw,nosuid,nodev,errors=remount-ro,emergency_ro", want: "read-only"},
+		{name: "disconnected", mount: "/run/media/by/archive1", present: false, options: "unknown", want: "missing"},
+		{name: "unit lacks mount contract", mount: "unknown", present: false, options: "unknown", want: "unknown"},
+		{name: "ambiguous options", mount: "/run/media/by/archive1", present: true, options: "relatime", want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := backupArchiveMountState(test.mount, test.present, test.options); got != test.want {
+				t.Fatalf("backupArchiveMountState(%q, %t, %q) = %q, want %q", test.mount, test.present, test.options, got, test.want)
+			}
+		})
+	}
+
+	for _, want := range []string{
+		"BRINGYOUR_BACKUP_MOUNT=",
+		"mountpoint -q --",
+		"findmnt -rn -T",
+		"remote_mount_options",
+	} {
+		if !strings.Contains(backupArchiveWriterCommand, want) {
+			t.Fatalf("writer observation command missing %q", want)
+		}
+	}
+}
+
 func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testing.T) {
 	now := time.Date(2026, 9, 1, 23, 56, 0, 0, time.UTC)
 	zero := float64(0)
@@ -232,10 +359,12 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 13 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 18 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
+		{name: "mount present", output: strings.Replace(valid, "remote_mount_present=true", "remote_mount_present=maybe", 1), want: "invalid remote_mount_present"},
+		{name: "mount options", output: strings.Replace(valid, "remote_mount_options=rw,nosuid,nodev,relatime,errors=remount-ro", "remote_mount_options=rw secret", 1), want: "invalid remote_mount_options"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
@@ -566,6 +695,21 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteRedisPort == 0 {
 		fixture.remoteRedisPort = 8023
 	}
+	if fixture.remoteMount == "" {
+		fixture.remoteMount = "/run/media/by/archive1"
+	}
+	if fixture.remoteMountPresent == nil {
+		fixture.remoteMountPresent = boolPointer(true)
+	}
+	if fixture.remoteMountSource == "" {
+		fixture.remoteMountSource = "/dev/mapper/luks-synthetic"
+	}
+	if fixture.remoteMountFSType == "" {
+		fixture.remoteMountFSType = "ext4"
+	}
+	if fixture.remoteMountOptions == "" {
+		fixture.remoteMountOptions = "rw,nosuid,nodev,relatime,errors=remount-ro"
+	}
 	return fmt.Sprintf(
 		"github_unit_state=%s\n"+
 			"github_main_pid=%d\n"+
@@ -579,7 +723,12 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_pg_source=%s\n"+
 			"remote_pg_port=%d\n"+
 			"remote_redis_source=%s\n"+
-			"remote_redis_port=%d\n",
+			"remote_redis_port=%d\n"+
+			"remote_mount=%s\n"+
+			"remote_mount_present=%t\n"+
+			"remote_mount_source=%s\n"+
+			"remote_mount_fstype=%s\n"+
+			"remote_mount_options=%s\n",
 		fixture.unitState,
 		fixture.mainPID,
 		fixture.remoteUnitState,
@@ -593,8 +742,15 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remotePGPort,
 		fixture.remoteRedisSource,
 		fixture.remoteRedisPort,
+		fixture.remoteMount,
+		*fixture.remoteMountPresent,
+		fixture.remoteMountSource,
+		fixture.remoteMountFSType,
+		fixture.remoteMountOptions,
 	)
 }
+
+func boolPointer(value bool) *bool { return &value }
 
 func backupArchiveFixtureJSON(t testing.TB, now time.Time, fixtures ...backupArchiveFixture) string {
 	t.Helper()
