@@ -4017,14 +4017,40 @@ Probe: `missing-origin`
 `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}`
 is the lossless API-side boundary for a contract request that entered companion
 settlement but could not find a usable reverse origin after the bounded
-server-side race wait. The probe queries only requests whose original wire bit
-was `companion=false`:
+server-side race wait. Server `c8dfe570` also added
+`urnetwork_connect_missing_origin_details_total`, whose labels are the bounded
+request-time resolution, relationship, and source/destination lifecycle
+snapshot already read by `CreateContract`; it performs no identifier-bearing
+diagnostic query. The probe requests the aggregate and detail cohorts in one
+Mimir evaluation, only for requests whose original wire bit was false:
 
 ```promql
-sum(rate(urnetwork_connect_contract_failures_total{
-  env="main",cause="missing_companion_origin",companion="false"
-}[5m])) * 60
+label_replace(
+  sum(rate(urnetwork_connect_contract_failures_total{
+    env="main",cause="missing_companion_origin",companion="false"
+  }[5m])) * 60,
+  "monitor_metric", "aggregate", "__name__", ".*"
+)
+or
+label_replace(
+  sum by (resolution,relationship,source_lifecycle,destination_lifecycle) (
+    rate(urnetwork_connect_missing_origin_details_total{
+      env="main",request_companion="false"
+    }[5m])
+  ) * 60,
+  "monitor_metric", "detail", "__name__", ".*"
+)
 ```
+
+The detail cardinality is fixed by code, not request data. `resolution` is one
+of `requested_companion`, `stream_fallback`, `network_normalized`,
+`relationship`, `rejected`, or `unknown`; `relationship` is `network`,
+`friends_family`, `public`, or `unknown`; and each lifecycle is `missing`,
+`active_top`, `inactive_top`, `active_derived`, `inactive_derived`, `control`,
+or `unknown`. Mimir sums away API process/instance labels before the monitor
+sees the response. No customer, client, network, device, contract, or
+destination identity enters the cohort; the standard bounded monitor gateway
+name remains operational context.
 
 - HEALTHY: the `companion=false` partition stays at or below 500/min for two
   complete five-minute windows. A six-hour control on 2026-09-02 held mostly
@@ -4044,18 +4070,46 @@ sum(rate(urnetwork_connect_contract_failures_total{
   negative, NaN, or malformed. Counter-vector label families are
   traffic-created, so an empty Mimir response cannot be interpreted as zero.
 
+When the aggregate is above threshold, classify its diagnostic coverage before
+using the cohorts:
+
+- `detail_status=absent`: the aggregate is nonzero but no detail cohort exists.
+  This is unavailable instrumentation, not zero detailed failures. Compare the
+  initialized §2.18 partitions and every API artifact with `c8dfe570` to
+  distinguish a pre-rollout generation from ingestion loss.
+- `detail_status=complete`: every cohort has the exact fixed label set and
+  vocabulary, no duplicate, one common aggregate evaluation timestamp, and a
+  nonnegative finite rate. Its sum must reconcile with the aggregate within the
+  larger of 1/min or 2%; that narrow allowance covers a scrape landing between
+  the two adjacent counter increments. Only in this state may the alert export
+  the dominant joint resolution/relationship/lifecycle cohort and its rate.
+- `detail_status=partial`: structurally valid cohorts sum materially below the
+  aggregate. This is a mixed API rollout or incomplete ingestion window; do not
+  assign the incident from the visible subset.
+- `detail_status=ambiguous`: an unknown/extra label, duplicate cohort,
+  stale/skewed/malformed sample, invalid rate, or detail total above the
+  aggregate violates the observation contract. The aggregate alert remains
+  actionable, but only a fixed structural reason is exported; raw labels and
+  samples are discarded.
+
+At or below the calibrated aggregate boundary, the probe reports aggregate
+health without requiring a traffic-created detail child. Thus a quiet current
+fleet does not manufacture detail zeroes or page merely because no missing
+origin failure has created a detail series.
+
 Require §2.8 score freshness, §2.9 active top-level eligibility, §2.15 guarded
 reliability, and §2.16 zero mature orphans. Decode bounded current score-cache
 samples and verify normal entries are active, contractable Public providers,
 but treat that as a control rather than proof about every failing request. Then
 compare the onset with score publications, service rollout/drain boundaries,
 connection churn, successful contract creation, and the client-window lifetime.
-Windows selected before a repaired publication must age out naturally. If the
-rate survives the last known legacy cohort, add or use bounded metric dimensions
-for source lifecycle, destination lifecycle, relationship, and resolution path;
-those categories can distinguish selection from return traffic without raw
-client pairs. Do not log identifiers, edit Redis blobs, weaken provider gates,
-restart clients, or increase the companion wait merely to hide the rate.
+Windows selected before a repaired publication must age out naturally. For a
+complete detail snapshot, use its joint source lifecycle, destination
+lifecycle, relationship, and resolution cohort to distinguish selection from
+return traffic without raw client pairs. An absent, partial, or ambiguous
+snapshot is an observation boundary and must not be used as causal proof. Do
+not log identifiers, edit Redis blobs, weaken provider gates, restart clients,
+or increase the companion wait merely to hide the rate.
 
 2026-09-02 production evidence showed why this must be a first-class monitor
 signal rather than only a dashboard rule. After the eligibility export, the
@@ -4124,6 +4178,19 @@ key must match the channel tail, so a result cannot poison a neighboring exit.
 Older clients safely ignore the new action and retain their existing timeout
 behavior.
 
+The 2026-09-03 current control demonstrates the rollout distinction. The
+coarse `companion=false` rate was 1,738.899/min through a healthy Mimir gateway,
+but the bounded detail query returned an empty vector and both initialized
+§2.18 lifecycle-rejection partitions were absent. The last exact fleet
+inventory placed every running API artifact before `c8dfe570`, and no later
+metric supplied a corrected-generation boundary. The empty detail was therefore
+pre-rollout instrumentation absence, not zero detailed failures and not a Mimir
+transport failure. The contemporaneous success-side cohort remained entirely
+same-network, with 2,517 contracts created after derived destinations had
+already become inactive. This confirms the existing API deployment boundary;
+it does not justify inferring the missing-failure cohort before complete detail
+is observable.
+
 Verification requires the API fix first and a Connect-bearing client build for
 the window reaction. After API convergence, successful contracts to already
 inactive destinations must fall to zero and the missing-origin rate must return
@@ -4139,9 +4206,11 @@ but cannot repair an unbootstrappable selected destination.
 
 Implementation convention: SIGNALS.md §2.17 (`missing-origin`) maps to
 `signal_missing_origin.go` and `signal_missing_origin_test.go`. Synthetic tests
-cover the high-rate frame, healthy boundary, absent and duplicate-series
-visibility, stale samples, invalid rates, query scoping, and detailed Markdown
-rendering without identifiers.
+cover the pre-detail-rollout high-rate frame, complete bounded cohorts, partial
+mixed-rollout coverage, duplicate/skewed/unknown/extra-label ambiguity,
+identifier redaction, the exact healthy boundary, absent and duplicate
+aggregate visibility, stale samples, invalid rates, query scoping, and detailed
+Markdown rendering without identifiers.
 
 ### 2.18 Stale contract destination rejection — dead routes must not authorize
 Probe: `stale-destination`
@@ -5074,7 +5143,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |
-| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band. Require the selection controls, then use bounded relationship and endpoint-lifecycle dimensions if it persists; never infer roles from the Boolean or print raw pairs. The higher `companion=true` band needs separate calibration. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | The request did not reach the public edge. In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path, not the broader auth prefix. If absent, keep diagnosis client-side: inspect `[net]http serial`/`[net]http parallel` route selection and the embedded Connect revision. Require the bounded preferred-route scheduler and cold-route parallel discovery regression tests; do not restart API, increase the UI wait, or add an app-level retry. |
@@ -6623,7 +6692,7 @@ Tier-1 (warn):
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate vs its 128–201/min control band | > 500/min for 5 min; `companion=true` is not covered |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled `missing_origin_details_total` causal cohorts | > 500/min for 5 min; `companion=true` is not covered and missing detail never means zero |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
