@@ -179,15 +179,20 @@ func contractFailureClass(err error) string {
 	}
 }
 
-// contractResultError preserves the one failure class a multi-client can act
-// on safely. A missing companion origin or an inactive destination means the
-// selected route itself is stale, so a current client must retire that exact
-// window entry. Account and legacy failures retain their prior wire result and
-// therefore cannot poison provider selection.
+// contractResultError preserves wire meaning while isolating the one failure
+// class a multi-client can act on safely. A missing companion origin or an
+// inactive destination means the selected route itself is stale, so a current
+// client must retire that exact window entry. A missing or inactive source is
+// the local caller's authorization failure, not evidence against the selected
+// destination, so it receives NoPermission without poisoning provider
+// selection. Account and legacy failures retain their prior wire result.
 func contractResultError(err error) protocol.ContractError {
 	if errors.Is(err, model.ErrMissingCompanionOrigin) ||
 		errors.Is(err, errContractDestinationInactive) {
 		return protocol.ContractError_Reliability
+	}
+	if errors.Is(err, model.ErrActiveClientNotFound) {
+		return protocol.ContractError_NoPermission
 	}
 	return protocol.ContractError_InsufficientBalance
 }
@@ -719,8 +724,9 @@ func CreateContract(
 	if err != nil {
 		// Preserve the cause as a bounded metric. Destination lifecycle and
 		// missing-origin failures are explicit Reliability results so a current
-		// multi-client can replace the stale route; legacy/account failures keep
-		// their previous InsufficientBalance result.
+		// multi-client can replace the stale route. An inactive local source is
+		// NoPermission without condemning that route; legacy/account failures
+		// keep their previous InsufficientBalance result.
 		recordContractFailureResolved(
 			clientId,
 			destinationId,
@@ -951,7 +957,8 @@ func newContract(
 		// simultaneously and the encryption control carrier asks for its
 		// companion contract at session setup, frequently milliseconds before
 		// the peer's origin lands. The client cannot tell this apart from a
-		// real failure (every cause reaches it as InsufficientBalance), so
+		// real failure (at the time this wait was introduced, every cause
+		// reached it as InsufficientBalance), so
 		// answering the race with an error sent the client into its blind
 		// 30s CreateContractTimeout retry loop — a full sequence starve per
 		// occurrence (~12 per test-suite run), the residual behind the

@@ -52,6 +52,11 @@ func TestContractResultErrorSeparatesReliabilityFromAccountFailures(t *testing.T
 			want: protocol.ContractError_Reliability,
 		},
 		{
+			name: "inactive source",
+			err:  fmt.Errorf("write-boundary source: %w", model.ErrActiveClientNotFound),
+			want: protocol.ContractError_NoPermission,
+		},
+		{
 			name: "insufficient balance",
 			err:  fmt.Errorf("Insufficient balance (0)."),
 			want: protocol.ContractError_InsufficientBalance,
@@ -545,8 +550,8 @@ func TestCreateContractRejectsInactiveClient(t *testing.T) {
 		}
 
 		inactiveResult := decodeResult(sourceId, inactiveDestinationId)
-		if inactiveResult.Error == nil || *inactiveResult.Error != protocol.ContractError_NoPermission {
-			t.Fatalf("inactive destination error = %v, want NoPermission", inactiveResult.Error)
+		if inactiveResult.Error == nil || *inactiveResult.Error != protocol.ContractError_Reliability {
+			t.Fatalf("inactive destination error = %v, want Reliability", inactiveResult.Error)
 		}
 		if inactiveResult.Contract != nil {
 			t.Fatal("inactive destination received a contract")
