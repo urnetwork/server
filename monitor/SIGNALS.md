@@ -4863,6 +4863,18 @@ latency/error/eviction regression. After one full 72-hour window, require the
 slot-normalized skew to clear on two consecutive samples with complete cluster
 coverage.
 
+At 21:38Z on 2026-09-03, an operator-authorized maintenance pass used the
+dedicated `--provide-only --master-port=6393` guard. Its dry run selected one
+active master and 2,745,338 `{pm_*}` keys; the apply pass sent idempotent
+`EXPIRE 259200 NX` for 2,745,458 concurrently observed keys and reported zero
+flushes or `UNLINK`s. Port 6393's expiring-key aggregate rose by 591,517 while
+its error-reply counter did not change, and every master retained zero
+evictions/rejections with all 16,384 slots healthy. A subsequent bounded
+3,060-key Redis-side sample found zero persistent provide keys, and an
+independent `redis-nonexpiring` run returned no alert. Keep the normal 72-hour
+decay and two-consecutive-sample checks as the final closure boundary; do not
+replace them with immediate deletion.
+
 ### 3.4 Node process signals (host-level)
 Probe: `redis-process`
 
