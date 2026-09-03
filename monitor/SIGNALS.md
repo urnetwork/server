@@ -4818,6 +4818,51 @@ falls below 50% or every node falls below 85%, provider selections remain
 equivalent, excluded callers still select overrides, and OOM/error counters
 stay flat. Do not delete cache keys or increase maxmemory to hide amplification.
 
+### 3.3c Slot-normalized non-expiring key skew
+Probe: `redis-nonexpiring`
+
+Raw key totals need not match when masters own different numbers of hash slots.
+Every 15 minutes, read each master's aggregate `INFO keyspace` keys/expires and
+count only the slot ranges on that master's `myself` row. Alert on the worst
+master only when its non-expiring keys per owned slot are at least 1.20 times
+the fleet median and the normalized difference represents at least 100,000
+keys. A missing master, malformed aggregate, or unknown slot count is an
+observation failure, never a zero-key healthy result.
+
+After an exact aggregate trip, run two bounded `EVAL_RO` samples: at most 5,000
+keys on the outlier and 5,000 on the master closest to the fleet median.
+Classification and `PTTL` remain inside Redis. The only returned labels are
+fixed allowlisted families (`provide-pms`, `provide-rp`, `provide-sk`,
+`provide-other`, `score`, `client-key`, `connect`, `stream`, and `other`) with
+integer persistent/expiring/missing counters. Raw keys, values, identifiers,
+and unknown labels must never cross into monitor output. An empty, malformed,
+small, or churn-dominated sample is `detail_status=unavailable`, not evidence
+of zero persistent keys; mixed family deltas remain
+`detail_status=ambiguous` and cannot authorize a family-specific cleanup.
+
+At 19:58:57Z on 2026-09-03, before the Redis deployment boundary, port 6393
+owned the same 512 slots as every sibling but held 2,844,893 non-expiring keys,
+589,704 (26.15%) above the fleet median. It was not a memory-pressure outlier:
+its dataset was about 661MB and it had no evictions. Bounded Redis-side samples
+found persistent `{pm_…}` provide-mirror keys on 6393 and none on adjacent
+controls; subtype-only aggregates contained pms, rp, and sk with no malformed
+provide suffix. Startup journals showed the shared restart loaded the excess
+from a recent RDB. Current server writers assign every provide-mirror key a
+72-hour TTL, so this is legacy no-TTL residue, but retained evidence cannot
+distinguish whether a historical cleanup missed/was interrupted on this node
+or an older RDB was restored later.
+
+Routine `run-redis-clusters.sh` and its playbook do not invoke
+`redis-key-cleanup.sh`. The script's `{pm_*}` phase uses idempotent
+`EXPIRE ... 259200 NX`, but its apply mode also owns other namespaces. Require
+a separate maintenance authorization and review the dry-run scope before any
+apply; do not delete keys, reset existing TTLs, or treat an ordinary Ansible
+deployment as remediation. Immediately after an authorized provide phase,
+require zero persistent allowlisted provide keys in a bounded sample and no
+latency/error/eviction regression. After one full 72-hour window, require the
+slot-normalized skew to clear on two consecutive samples with complete cluster
+coverage.
+
 ### 3.4 Node process signals (host-level)
 Probe: `redis-process`
 
