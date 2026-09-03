@@ -5166,11 +5166,23 @@ retry pacing, localizing the wave to one early remote-to-local sync lifecycle.
 The deployed August 31 Web SDK and September 2 Proxy build both predated RPC
 wire version 3, so their advertised releases do not support a v2/v3 mismatch;
 a cached or independently packaged remote still requires direct artifact
-evidence. The current server logs cannot split request decode, response decode,
-client cancellation, or another pre-`SyncReverse` failure. Capture a bounded
-stage/result on both endpoints before assigning that last cause. The old
-taxonomy statement that every such line meant "server closed the conn" was a
-monitor defect.
+evidence. This cohort predates the bounded endpoint markers now in source, so
+their absence in that historical window says nothing about the failed stage.
+After both updated endpoints are deployed, pair the remote's one-per-attempt
+`[drpc-attempt] endpoint=remote
+stage=<dial|sync|sync-reverse|active> result=<bounded>` marker with Proxy's
+one-per-session `[drpc-session] endpoint=proxy
+stage=<transport|request|response> result=<bounded>
+ingress=<absent|present> egress=<absent|present>` marker. Proxy
+`stage=transport ingress=absent` proves its mux read no non-empty binary request
+from the socket; `stage=request egress=absent` proves request bytes were read
+but no non-empty response frame was successfully written; `stage=response`
+plus the remote stage splits response receipt/decode from a later reverse-sync
+failure. Both markers retain
+only fixed enums—no ids, addresses, frame bytes, counts, or raw error text.
+Do not assign the last cause until both sides of the same attempt are available.
+The old taxonomy statement that every such line meant "server closed the conn"
+was a monitor defect.
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
