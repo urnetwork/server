@@ -112,10 +112,14 @@ configured LAN routes. An explicit `-ssh-key` may be repeated when the SSH
 configuration does not already select the identities.
 
 ```sh
+test -n "$BRINGYOUR_HOME"
+install -d -m 700 "$BRINGYOUR_HOME/monitor"
+umask 077
 go test ./monitor
 go test -race ./monitor
 go vet ./monitor
-go build -o /tmp/urnetwork-monitor-preflight ./cli/monitor
+monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
+go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
 ```
 
 Treat a failing preflight as a monitor/repository problem to diagnose, not as a
@@ -145,7 +149,10 @@ Use one-shot mode for an initial inventory, a focused before/after snapshot, or
 manual diagnosis:
 
 ```sh
-monitor_snapshot_dir=$(mktemp -d /tmp/urnetwork-monitor-snapshot.XXXXXX)
+test -n "$BRINGYOUR_HOME"
+install -d -m 700 "$BRINGYOUR_HOME/monitor"
+umask 077
+monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapshot.XXXXXXXX")
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   >"$monitor_snapshot_dir/alerts.md" \
@@ -169,7 +176,10 @@ way to certify overall health.
 Build a unique immutable binary and keep its artifacts together:
 
 ```sh
-monitor_run_dir=$(mktemp -d /tmp/urnetwork-monitor-watch.XXXXXX)
+test -n "$BRINGYOUR_HOME"
+install -d -m 700 "$BRINGYOUR_HOME/monitor"
+umask 077
+monitor_run_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.watch.XXXXXXXX")
 go build -o "$monitor_run_dir/monitor" ./cli/monitor
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
 WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
@@ -229,6 +239,15 @@ requires a newly built watcher. Promote it as a controlled handoff:
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
 the new one is proven creates an observation gap.
+
+Sustain counters and alert gates are process-local. During overlap, compare the
+candidate's raw probe observations and direct source measurements with every
+mature predecessor alert; absence from the candidate before its required number
+of cadences is not recovery. Before stopping the predecessor, record its alert
+path/hash and any still-failing direct observation in the ledger. Keep that
+evidence until the candidate either re-emits the identity or completes the
+documented healthy resolution window. Do not introduce persistent ticket state
+as part of a watcher handoff without a separate design decision.
 
 ## Alert validation loop
 
