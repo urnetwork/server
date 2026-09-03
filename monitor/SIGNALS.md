@@ -9131,6 +9131,18 @@ remaining proof requires UDM WAN-selection/event and conntrack evidence plus
 carrier NAT/session evidence; do not change NetworkManager, rsync, or source
 hosts from this correlation alone.
 
+Authoritative ARIN registration supplies one more negative control for that
+recurrence. The public egress seen by the PostgreSQL source belongs to Mediacom,
+while the egress seen by the immediate Redis sibling belongs to T-Mobile. The
+sessions also terminated against independent source hosts. A single carrier
+failure and a single source daemon therefore cannot be the common cause of the
+two resets within three seconds. The remaining shared stateful boundaries are
+Planetoid's UDM/conntrack path and the Fremont public-forward gateway; the RIR
+result does not choose between them. Preserve the exact timestamps and obtain
+paired WAN-event/config/conntrack evidence from both gateways. Do not infer that
+T-Mobile CGNAT, Mediacom, NetworkManager, or either source host is individually
+at fault merely because one path traverses it.
+
 Systemd started exactly one fourth retry at `06:00:11Z`. Its PostgreSQL source
 again observed the same per-endpoint public egress, and a direct 15-second
 sample retained one stable PID, one `enp65s0` socket, and another 17,773,660
