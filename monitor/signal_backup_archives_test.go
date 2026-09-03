@@ -330,6 +330,12 @@ func TestBackupArchivesSignalSyntheticDetectsFailedPullInRestartBackoff(t *testi
 		"source-observed public egress identity",
 		"Planetoid WAN/NAT evidence",
 		"does not distinguish Planetoid gateway policy from the Fremont public-forward edge",
+		"carrier-private or ECMP hops",
+		"upstream multi-egress NAT a candidate",
+		"does not assign reset ownership",
+		"UDM WAN-event/config and carrier NAT/session evidence",
+		"stable public/no-CGNAT egress",
+		"never the management VPN",
 		"router lifecycle/conntrack evidence",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {

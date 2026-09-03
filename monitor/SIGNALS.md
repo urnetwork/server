@@ -9041,6 +9041,24 @@ moved or evicted, the operational repair is a stable policy route/NAT mapping
 and adequate conntrack capacity for the direct endpoint; it is not a return to
 the management VPN, a duplicate rsync, or a larger software retry loop.
 
+A bounded `2026-09-03T05:00Z` TCP path control refined the offsite side without
+assigning a cause that the evidence cannot prove. Five probes to each direct
+port traversed the same first-hop UDM SE and the same carrier-private/ECMP path
+before reaching the Fremont endpoint, with no final-hop loss in that healthy
+window. Combined with the different public source identities observed by the
+two source ssh daemons, this makes carrier-grade or other upstream multi-egress
+NAT state a concrete candidate; it does not prove that the UDM is doing
+per-port multi-WAN routing, nor does a healthy later trace explain the earlier
+reset. The UDM's current unauthenticated system status reported Internet
+available and carried a last-change timestamp near the independently observed
+`00:28Z` site-only transition, but exposed no history for the `04:09Z`
+recurrence. Obtain UDM WAN-event/config evidence and carrier NAT/session
+evidence before choosing between those remaining owners. If the carrier path
+cannot retain active multi-hour TCP state, the non-software closure is stable
+public/no-CGNAT egress or another approved direct WAN path; retain rsync's
+bounded retry and partial-resume safety, and do not move bulk data onto the
+management VPN.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
