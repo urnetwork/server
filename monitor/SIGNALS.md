@@ -11687,10 +11687,13 @@ empty-generation warp failed, and resetting to v4 solely to erase the log would
 discard useful progress.
 
 Class `subtensor-warp-resume` is therefore distinct from cold
-`subtensor-warp-fallback`. A nonzero `system_syncState.startingBlock` plus the
-startup fallback discriminator opens the resume class immediately; the generic
-cold-bootstrap case retains its 15-cadence noise guard. Preserve an advancing
-resumed generation and measure its lag slope. Xops' full-host playbook must
+`subtensor-warp-fallback`. A nonzero `system_syncState.startingBlock` opens the
+resume class immediately; an explicit startup fallback line corroborates that
+classification but is not required. The process-start block is the stronger
+generation discriminator because a bounded log query can lose an early line,
+while the generic zero-start cold-bootstrap case retains its 15-cadence noise
+guard. Preserve an advancing resumed generation and measure its lag slope.
+Xops' full-host playbook must
 reconcile only the archive, start rather than unconditionally restart the
 aggregate unit, require an existing lightnode image and `/data` path to match,
 and prove its container ID is unchanged. Intentional lightnode replacement
@@ -11760,8 +11763,21 @@ the archive start time remained unchanged. It logged no new permission/database
 error and advanced from 6,447,926 to 6,448,157. Both nodes had nonzero peers
 and advanced again across the final 15-second sample. This closes the latched
 EACCES freeze, not their bootstrap lag: the progressed lightnode necessarily
-reported the existing `subtensor-warp-resume` discriminator and both nodes must
+reports the existing `subtensor-warp-resume` discriminator and both nodes must
 continue converging on their retained data.
+
+The 2026-09-03 post-restart control exposed why the nonzero start block must
+stand on its own. The exact v3 process reported `startingBlock=6,447,926`, the
+same retained block at which its predecessor had frozen, then advanced to
+6,518,461 with 17 peers. The installed helper nevertheless returned
+`startup_fallback=false`, causing the old Go evaluator to emit the generic
+15-cadence cold-bootstrap class. Its Docker query used `--tail 10000` across
+the first 30 minutes, which selects the last lines of that window and can
+discard an early startup discriminator on a verbose node. The helper now reads
+the beginning of a five-minute startup window without a tail cap, while the Go
+probe independently treats the nonzero process-start block as an immediate
+resume. This is a monitor/Xops observability repair only; it does not authorize
+restarting or replacing the advancing v3 database.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

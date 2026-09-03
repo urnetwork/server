@@ -199,6 +199,47 @@ func TestSubtensorSignalDistinguishesProgressedWarpResume(t *testing.T) {
 	}
 }
 
+func TestSubtensorSignalDistinguishesProgressedWarpResumeWithoutRetainedFallbackLine(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.Direct.Sync = subtensorSyncState{
+		StartingBlock: 6_447_926,
+		CurrentBlock:  6_518_461,
+		HighestBlock:  7_922_041,
+	}
+	node.Direct.Health = subtensorHealth{Peers: 17, IsSyncing: true}
+	node.WarpFallback = false
+	node.FirstHead = blockHex(6_518_450)
+	node.SecondHead = blockHex(6_518_461)
+	node.Direct.Head = node.FirstHead
+	node.Gateway.Head = node.SecondHead
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := requireAlertClass(t, alerts, "subtensor-warp-resume")
+	if resume.Sustain != 1 {
+		t.Fatalf("warp resume without retained fallback sustain = %d, want immediate", resume.Sustain)
+	}
+	for _, want := range []string{
+		"same-generation resume rather than a cold warp bootstrap",
+		"nonzero process-start block is authoritative",
+		"startup_fallback=false",
+		"starting_block=6447926",
+		"Do not reset this progressing generation",
+	} {
+		if !strings.Contains(resume.Markdown(), want) {
+			t.Fatalf("warp resume without retained fallback missing %q:\n%s", want, resume.Markdown())
+		}
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-warp-bootstrap" || alert.Class == "subtensor-warp-fallback" {
+			t.Fatalf("progressed resume without retained fallback was misclassified: %+v", alert)
+		}
+	}
+}
+
 func TestSubtensorSignalDetectsHistoricalWarpCheckpointFailure(t *testing.T) {
 	observation := healthySubtensorObservation()
 	node := &observation.Nodes[1]

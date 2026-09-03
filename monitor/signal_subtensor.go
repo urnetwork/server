@@ -534,20 +534,19 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		context := "A cold warp may be behind briefly. Do not reuse or delete a failed data generation, and do not restart the full archive playbook to repair only this lightnode."
 		action := "Keep the lightnode out of cutover and inspect its bounded startup log, live image provenance, /data mount, peers, and head progression before choosing a new generation."
 		verify := "Require the live /data mount to equal the configured new generation, a post-rollout lightnode identity, unchanged archive container ID/start time, no cold-start warp fallback, a near-current head, nonzero peers, current runtime identity, and successful gateway RPC."
-		if node.WarpFallback {
+		if node.Direct.Sync.StartingBlock > 0 {
 			sustain = 1
-			if node.Direct.Sync.StartingBlock > 0 {
-				class = "subtensor-warp-resume"
-				mechanism = "The process started from an already-progressed database, so Subtensor could not re-enter warp and resumed block import in full-sync mode. This proves a container or host lifecycle interruption after the generation had acquired state; it does not prove the original empty-generation warp failed."
-				context = "This is an operational lifecycle defect. An advancing resumed generation retains useful state; replacing it solely to remove the fallback line can discard progress and repeat the same historical checkpoint. The full-host Xops playbook must preserve an existing lightnode, while generation replacement remains isolated."
-				action = "Do not reset this progressing generation solely because the resumed process reports fallback. Use the committed full-host lightnode-preservation guard, keep tracking head and lag slope, and select a new empty generation with run-subtensor-lightnode.sh only if progress stops or a newer proven checkpoint materially improves the recovery boundary."
-				verify = "The same live /data generation and container continue advancing with nonzero peers and shrinking lag; a subsequent full-host configuration run preserves the exact lightnode ID, and any intentional replacement uses the isolated runner without changing the archive identity."
-			} else {
-				class = "subtensor-warp-fallback"
-				mechanism = "The startup discriminator proves Subtensor rejected a partially synced database and falls back to full sync before establishing a retained starting block. The configured command can still say --sync=warp."
-				context = "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state."
-				action = "After explicit operational authorization, select the next empty generation and run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old paths and recreate only subtensor-lightnode. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted."
-			}
+			class = "subtensor-warp-resume"
+			mechanism = "The process started from an already-progressed database, so this is a same-generation resume rather than a cold warp bootstrap. The nonzero process-start block is authoritative even when the bounded startup-log helper no longer retains an early explicit fallback line. This proves a container or host lifecycle interruption after the generation had acquired state; it does not prove the original empty-generation warp failed."
+			context = "This is an operational lifecycle boundary. An advancing resumed generation retains useful state; replacing it solely to remove a fallback line can discard progress and repeat the same historical checkpoint. The full-host Xops playbook must preserve an existing lightnode, while generation replacement remains isolated."
+			action = "Do not reset this progressing generation solely because the process resumed retained state. Use the committed full-host lightnode-preservation guard, keep tracking head and lag slope, and select a new empty generation with run-subtensor-lightnode.sh only if progress stops or a newer proven checkpoint materially improves the recovery boundary."
+			verify = "The same live /data generation and container continue advancing with nonzero peers and shrinking lag; a subsequent full-host configuration run preserves the exact lightnode ID, and any intentional replacement uses the isolated runner without changing the archive identity."
+		} else if node.WarpFallback {
+			sustain = 1
+			class = "subtensor-warp-fallback"
+			mechanism = "The startup discriminator proves Subtensor rejected a partially synced database and falls back to full sync before establishing a retained starting block. The configured command can still say --sync=warp."
+			context = "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state."
+			action = "After explicit operational authorization, select the next empty generation and run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old paths and recreate only subtensor-lightnode. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted."
 		} else if node.WarpProofStarted && secondHead <= 1 {
 			class = "subtensor-warp-checkpoint"
 			mechanism = "The node reached peers and entered GRANDPA finality-proof download without falling back, but remained at genesis. This is the testnet historical-checkpoint failure reproduced with v447, which predates the corrected checkpoint transition and signing sets in v448."
