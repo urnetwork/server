@@ -1667,18 +1667,26 @@ func (self *platformSendRouteController) observeDestinationId(destinationId clie
 	})
 }
 
-// The platform callback only publishes immutable route ownership and returns.
+// Connection publication stays asynchronous so setup callbacks never wait on
+// RouteManager rematching. Disconnection is the physical channel owner's final
+// retirement barrier: it must remove and join every mirrored writer before the
+// PlatformTransport worker performs its last queue drain.
 func (self *platformSendRouteController) observe(
 	transport clientconnect.Transport,
 	route clientconnect.Route,
 	connected bool,
 ) {
-	self.publish(platformSendRouteEvent{
+	event := platformSendRouteEvent{
 		kind:      platformSendRouteEventPlatformRoute,
 		transport: transport,
 		route:     route,
 		connected: connected,
-	})
+	}
+	if connected {
+		self.publish(event)
+	} else {
+		self.publishAndWait(event)
+	}
 }
 
 // P2P callbacks publish only complete send-route identities. The worker keeps
@@ -2620,8 +2628,8 @@ func TestPlatformSendRouteControllerRejectsUnversionedGenerationRegression(t *te
 	}
 }
 
-// Every production callback returns after queue admission even while route
-// application is held at an exact worker barrier.
+// Non-retirement production callbacks return after queue admission even while
+// route application is held at an exact worker barrier.
 func TestPlatformSendRouteControllerCallbacksReturnWhileApplyBlocked(t *testing.T) {
 	controller := newPlatformSendRouteController(clientconnect.NewId())
 	defer closePlatformSendRouteController(t, controller)
@@ -2668,6 +2676,54 @@ func TestPlatformSendRouteControllerCallbacksReturnWhileApplyBlocked(t *testing.
 	close(releaseApply)
 	if !controller.waitForIdle() {
 		t.Fatal("controller closed before callback fence")
+	}
+}
+
+// A disconnected platform callback owns the physical route's last drain. It
+// cannot return while a mirrored RouteManager can still admit another pooled
+// message into that route after the drain.
+func TestPlatformSendRouteControllerDisconnectWaitsForRouteRetirement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	destinationId := clientconnect.NewId()
+	controller := newPlatformSendRouteController(destinationId)
+	defer closePlatformSendRouteController(t, controller)
+	routeManager := clientconnect.NewRouteManager(ctx, "platform disconnect retirement")
+	controller.setRouteManager(routeManager)
+	writer := routeManager.OpenMultiRouteWriter(clientconnect.DestinationId(destinationId))
+	defer routeManager.CloseMultiRouteWriter(writer)
+	transport := clientconnect.NewSendGatewayTransport()
+	route := make(clientconnect.Route, 1)
+	controller.observe(transport, route, true)
+	if !controller.waitForIdle() {
+		t.Fatal("controller closed before connected route fence")
+	}
+
+	applyEntered := make(chan struct{})
+	releaseApply := make(chan struct{})
+	var releaseApplyOnce sync.Once
+	defer releaseApplyOnce.Do(func() { close(releaseApply) })
+	controller.beforeEventApplyForTest = func(event platformSendRouteEvent) {
+		if event.kind == platformSendRouteEventPlatformRoute && !event.connected {
+			close(applyEntered)
+			<-releaseApply
+		}
+	}
+	callbackReturned := make(chan struct{})
+	go func() {
+		controller.observe(transport, route, false)
+		close(callbackReturned)
+	}()
+	waitForPlatformRouteControllerSignal(t, applyEntered, "disconnect did not reach route retirement")
+	select {
+	case <-callbackReturned:
+		t.Fatal("disconnect callback returned before mirrored route retirement")
+	default:
+	}
+	releaseApplyOnce.Do(func() { close(releaseApply) })
+	waitForPlatformRouteControllerSignal(t, callbackReturned, "disconnect did not return after route retirement")
+	if routes := writer.GetActiveRoutes(); len(routes) != 0 {
+		t.Fatalf("active routes after disconnect=%d, want 0", len(routes))
 	}
 }
 
