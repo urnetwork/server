@@ -96,6 +96,7 @@ func NewSignals() []Signal {
 		NewProxyCacheSignal(),
 		NewKeyPublicationSignal(),
 		NewSubtensorSignal(),
+		NewSubtensorConvergenceSignal(),
 		NewEdgeIPv6Signal(),
 		NewGrafanaDatasourcesSignal(),
 		NewGrafanaIngressSignal(),

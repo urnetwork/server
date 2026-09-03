@@ -11968,6 +11968,88 @@ probe independently treats the nonzero process-start block as an immediate
 resume. This is a monitor/Xops observability repair only; it does not authorize
 restarting or replacing the advancing v3 database.
 
+### 17.5 Long-window catch-up convergence
+
+Probe: `subtensor-convergence`
+
+The 15-second progress check in §17.1 answers whether a node is moving. It does
+not answer whether the node is gaining on the live chain quickly enough to
+become usable. Measure each exact configured `host`/container `job` pair over a
+one-hour Mimir window:
+
+```promql
+lag = max by (host, job) (substrate_block_height{status="sync_target"})
+    - max by (host, job) (substrate_block_height{status="best"})
+
+net_rate = max by (host, job) (deriv(substrate_block_height{status="best"}[1h]))
+         - max by (host, job) (deriv(substrate_block_height{status="sync_target"}[1h]))
+
+import_rate = sum by (host, job) (
+  rate(substrate_block_verification_and_import_time_count[1h])
+)
+seconds_per_imported_block = sum by (host, job) (
+  rate(substrate_block_verification_and_import_time_sum[1h])
+) / import_rate
+```
+
+Also read current `substrate_sync_queued_blocks`, the target-head derivative,
+the best-head raw-sample count, and raw-sample age. Select exact inventory
+hosts and jobs with anchored escaped matchers; do not accept an unconfigured
+series, merge the archive and lightnode, or infer health from a dashboard.
+Query through an active services host's loopback Mimir listener. A successful
+instant response is observable only when every configured node supplies the
+complete measure tuple, at least 200 samples in the one-hour range, and a raw
+best-head sample no more than 90 seconds old. Missing, partial, stale,
+non-finite, or inconsistent values are observation loss, not zero lag.
+
+- READY: lag is at most 128 blocks for a full node or the configured
+  `warp_max_lag` for a warp node. No catch-up alert is needed inside that band.
+- HEALTHY BOOTSTRAP: a node outside its readiness band has positive net
+  catch-up and `lag / net_rate <= 14 days`.
+- `subtensor-slow-convergence`: positive net catch-up implies an ETA above 14
+  days for three consecutive one-minute cadences.
+- `subtensor-nonconverging`: the target head grows at least as fast as the
+  local best head, also sustained for three cadences. A rising best height is
+  not recovery when lag is flat or growing.
+- Recovery requires the same generation to enter its readiness band, or two
+  consecutive complete one-hour windows with a positive net rate and an ETA
+  no greater than 14 days. A restart resets the evidence boundary and cannot
+  be counted as recovery by itself.
+
+`import_rate * seconds_per_imported_block` estimates the fraction of one
+block-import worker's wall time spent verifying/importing. When that value is
+at least 80% while at least 128 blocks remain queued, the immediate mechanism
+is a busy serial historical-import stage. Confirm against the exact process
+cgroup's `cpu.stat`, `memory.events`, and `io.stat`, plus bounded host `vmstat`.
+If there is no CPU quota/throttling, OOM, sustained I/O wait, or host-wide CPU
+pressure, more peers and spare host cores do not accelerate that serial stage.
+Do not restart a progressing generation, enlarge a timeout, or replace the
+archive merely because its ETA is long.
+
+This class may require an operational or hardware fix that software alone
+cannot supply. The available closures are a measured node import optimization,
+faster single-core/storage hardware, acceptance of the measured wait, or an
+isolated candidate that proves the exact configured chain specification has a
+materially newer trusted checkpoint. Preserve the other node's identity while
+testing a candidate. A newer runtime or image number is not checkpoint proof:
+RaoFoundation v452 added a newer finney GRANDPA checkpoint, but its v452
+`raw_spec_testfinney.json` still contains no `grandpaWarpSyncCheckpoint`, so
+that finney-only change does not accelerate Snow's testfinney bootstrap.
+
+The 2026-09-03 06:35Z control demonstrated the missing signal. Both retained
+post-permission-repair generations had healthy peers and moving heads. The
+archive was 1,404,141 blocks behind and gained about 0.466 blocks/s; the
+lightnode was 1,398,810 behind and gained about 0.462 blocks/s, implying about
+35 days to convergence. Each held 2,112 queued blocks. Their one-hour import
+rates were about 0.54 blocks/s at about 1.83 seconds per imported block, or
+roughly 99.6% of one import worker's wall time. Direct cgroup and host controls
+showed no CPU quota/throttling, no OOM, ample available memory, negligible swap
+and I/O wait, and mostly idle host CPUs. Matching throughput on two databases
+at the same historical height rules out peer scarcity and a node-specific
+stuck process; it localizes the current ceiling to serial historical block
+verification/import. Keep the existing generations running while this alert
+records their real convergence horizon.
+
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
 ### 18.1 Exact-address HTTPS and upstream identity
