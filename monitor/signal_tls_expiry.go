@@ -191,7 +191,7 @@ func tlsExpiryFinding(hostname string, now time.Time, result tlsExpiryResult) fi
 	if !now.Before(leaf.NotAfter) {
 		base.class = "tls-certificate-expired"
 		base.symptom = fmt.Sprintf("%s serves an expired certificate on %s", hostname, endpoint)
-		base.mechanism = "The exact LB selected a leaf past NotAfter. This commonly occurs when a newly exposed alias was absent from the renewed SAN certificate and Warp fell back to an older wildcard asset, or when a corrected Vault snapshot has not crossed the LB drain boundary."
+		base.mechanism = "The exact LB selected a leaf past NotAfter. This commonly occurs when a newly exposed alias was absent from the renewed SAN certificate and the LB image baked an older wildcard path, or when a corrected image has not crossed the LB drain boundary."
 		return base
 	}
 	if err := leaf.VerifyHostname(hostname); err != nil {
@@ -223,7 +223,7 @@ func tlsExpiryFinding(hostname string, now time.Time, result tlsExpiryResult) fi
 
 func tlsCertificateRepairAction(hostname string) string {
 	return fmt.Sprintf(
-		"Inspect the newest promoted Vault TLS directory for an exact %s asset whose SAN and dates are valid. If it is absent, an authorized operator must run `warpctl certs issue <env>`, review/promote the generated `tls.pending` version, and deploy Vault/LB configuration through the existing edge workflow. If it is already present, let the controlled LB drain finish and compare the replacement container's selected certificate path before considering a targeted retry. Do not bypass client verification, change DNS, or restart unrelated services.",
+		"Inspect the newest promoted Vault TLS directory for an exact %s asset whose SAN and dates are valid. If it is absent, an authorized operator must run `warpctl certs issue <env>` and review/promote the generated `tls.pending` version. The LB image bakes Nginx certificate paths at build time: after promotion, build and deploy the LB service image, then let its controlled LB drain finish. `run-edges.sh` alone only refreshes the mounted Vault and controller; it does not regenerate an already-built LB image's Nginx config. Compare the replacement container's selected certificate path before considering a targeted retry. Do not bypass client verification, change DNS, or restart unrelated services.",
 		hostname,
 	)
 }

@@ -120,6 +120,8 @@ func TestTLSExpirySignalSyntheticExpiredExactEdge(t *testing.T) {
 		"2025-05-17T23:59:59Z",
 		"hostname_covered=true",
 		"warpctl certs issue <env>",
+		"build and deploy the LB service image",
+		"run-edges.sh` alone",
 		"controlled LB drain",
 		"SIGNALS.md §18.2",
 	} {

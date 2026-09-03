@@ -12263,21 +12263,38 @@ bypassed, while every ordinary TLS client rejected the endpoint. Correct Route
 
 Vault TLS version `2026.9.2`, issued at 05:05Z on 2026-09-03, contains an exact
 manager asset, covers `manager.bringyour.com`, and is valid through 2026-12-02.
-It was promoted and copied to edge-4 before the 07:19Z LB-controller handoff,
-but the old container was still inside its intentional one-hour connection
-drain at 07:27Z and continued serving the expired wildcard. The current
-certificate on disk is prerequisite evidence, not runtime recovery; inspect
-the exact leaf again after the replacement container owns the listener.
+It was promoted and copied to the edges before the 07:19Z LB-controller
+handoff. The replacement edge-0 container completed its handoff and its
+controller resumed ordinary 30-second route reconciliation, yet five repeated
+manager handshakes still returned the same expired wildcard while five API
+handshakes to the identical address returned the valid 2026-08-12 API leaf.
+The replacement's emitted Nginx config was decisive: only the manager server
+block named
+`/srv/warp/vault/tls/2024.3.19/star.bringyour.com/star.bringyour.com.pem`.
+
+The reason is an important deployment boundary: `warp/lb/Makefile` runs
+`warpctl lb create-config` while building the LB image, and the Dockerfile
+copies that generated Nginx tree into the image. A later Vault sync changes
+mounted certificate material but cannot rewrite those baked paths. The running
+LB generation was built on 2026-08-31, before the exact manager asset existed;
+restarting its controller via `run-edges.sh` therefore reproduced the stale
+selection in a fresh container. Generating the same block from the current
+checkout and promoted Vault selects
+`tls/2026.9.2/manager.bringyour.com/manager.bringyour.com.pem`. The operational
+closure is a new LB service image built after promotion, followed by its
+controlled deployment and exact IPv4/IPv6 verification.
 
 This class has an operational/deployment closure that monitor software cannot
 perform. When an exposed hostname is absent from the newest promoted SAN set,
 an authorized operator must run `warpctl certs issue <env>`, review and promote
-the generated `all/tls.pending` version, and deploy Vault/LB configuration via
-the existing edge workflow. When correct material is already promoted, let the
-controlled drain finish and inspect the replacement's selected certificate
-path before retrying only the affected handoff. Do not bypass client
-verification, change DNS, restart unrelated services, or turn certificate
-validation into a new build-admission architecture.
+the generated `all/tls.pending` version, and sync Vault through the existing
+edge workflow. Then build and deploy the LB service image so its baked config
+selects that promoted asset. `run-edges.sh` alone refreshes the mounted Vault
+and controller but does not regenerate an already-built image's Nginx config.
+Let the controlled LB drain finish and inspect the replacement's selected path
+before declaring recovery. Do not bypass client verification, change DNS,
+restart unrelated services, or turn certificate validation into a new
+build-admission architecture.
 
 ## 19. Web platform association metadata
 
