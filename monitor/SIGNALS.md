@@ -12830,13 +12830,17 @@ session-present-but-unreachable, to absent again is an active flap of the same
 site path. It is not a completed recovery window and must not clear the
 router/WAN investigation.
 
-The checked-in historical client template still names
+The historical client template named
 `by-us-fmt-0-edge-0.bringyour.com`, which Route 53 authoritatively returns as
 NXDOMAIN, while active clients reach the current
-`by-us-west-1-vpn-0.bringyour.com` endpoint. Treat that as a separate cold-start
-recovery hazard until the installed client configs are read directly and the
-template is corrected; it is not sufficient evidence for the live multi-path
-site outage above.
+`by-us-west-1-vpn-0.bringyour.com` endpoint. XOps `9421fe3` corrects the
+generator and adds an exact single-remote regression. Existing clients run a
+root-only `/etc/openvpn/by-pre.conf`; the ordinary monitor identity can prove
+the unit and config path but cannot read that installed endpoint. Therefore
+installed-client convergence still needs an authorized configuration audit and
+controlled update. Do not restart a healthy client merely to test it. This is
+a separate cold-start recovery hazard, not sufficient evidence for the live
+multi-path site outage above.
 
 This alert is operational/network-owned. Software can improve the redacted
 detector and reconnect diagnostics, but it cannot restore site power, WAN
