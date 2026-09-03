@@ -618,26 +618,43 @@ WHERE function_name LIKE '%UpdateClient%'
   phase. A full anchor, rolling enter, rolling leave, and post-leave cleanup
   have different causes and closure gates. When this family crosses the
   duration guard, run one bounded read-only diagnostic over
-  `pg_stat_activity`, `client_reliability_running_window`, `pg_catalog`, and
+  `pg_stat_activity`, `client_reliability_rollup`,
+  `client_reliability_running_window`, `pg_catalog`, and
   `pg_stat_all_indexes`. Report the recognized phase, SQL elapsed time and
   wait class, active/transaction-blocked statement counts, current-format
-  marker counts and maximum re-anchor distance, old/covering index state, and
-  each index family's last-scan age. Map `client_addr` internally to the
+  marker counts, classification-guard state, and the maximum distance from
+  the current drained target to `last_recompute_block`, including its lookback
+  index, plus old/covering index state and each index family's last-scan age.
+  The current drained target is `max_drained_block + 1`, the same `newMax`
+  used by the writer. Do not substitute the prior committed window head:
+  while a slow checkpoint runs that head is stale and can hide a now-due
+  periodic correction. Map `client_addr` internally to the
   configured host and emit only that host name; an address with no unique
   inventory match becomes `unmapped-service-client`, never a raw IP. Never
   emit query text, PID, task identifier, or customer fields. If this
   diagnostic is unavailable or samples between statements, say the cause is
   unknown: do not fall back to the historical repeated-full-anchor claim.
-  The 2026-09-03 incident proved why this is required. The deployed worker
-  already contained the four-hour cadence and per-lookback checkpoints, all
-  four markers were current-format and only 54–55 blocks past re-anchor, and
-  the active phase was `rolling-leave`, not an anchor. See §5.7 and §8.10 for
-  the legacy-index and reboot-overlap root cause. Server commit `fcb4de54`
-  adds a transaction-local two-hour PostgreSQL statement timeout to every
-  checkpoint, matching the existing task ceiling so a hard worker loss cannot
-  leave a server-side statement unbounded. This is a Taskworker software
-  containment, not a replacement for index finalization or a reason to disturb
-  the already-running transaction.
+  The 2026-09-03 incident proved why both discriminators are required. The
+  deployed worker already contained the four-hour cadence and per-lookback
+  checkpoints. Its first overrun was directly observed in `rolling-leave`; all
+  four markers were current-format and their committed heads were only 54–55
+  blocks past re-anchor. At `04:11:13.779Z` that attempt reached exactly
+  7,200 seconds and emitted the connection-cleanup signature; a same-task,
+  same-arguments successor began about 14 seconds later. That terminal error
+  does not convert the observed rolling predecessor into a full anchor or
+  prove that earlier checkpoint transactions rolled back. The successor later
+  entered `full-anchor-insert` legitimately: lookback 1000's prior committed
+  head was only 54 blocks beyond its last recompute, but the current drained
+  target was block 29,806,818, making the actual decision distance 251 blocks;
+  the other three lookbacks were eight blocks away, and all four version/token
+  markers plus the database guard were current. The correction therefore
+  reports target distance and lookback 1000 rather than prescribing the
+  already-deployed cadence fix. See §5.7 and §8.10 for the legacy-index and
+  reboot-overlap root cause. Server commit `fcb4de54` adds a transaction-local
+  two-hour PostgreSQL statement timeout to every checkpoint, matching the
+  existing task ceiling so a hard worker loss cannot leave a server-side
+  statement unbounded. This is a Taskworker software containment, not a
+  replacement for index finalization or a reason to disturb current work.
 
 ### 1.3 pg idle-in-transaction count — the redis-latency mirror
 Probe: `pg-state`
@@ -2083,6 +2100,35 @@ least 344 inactive artifacts across 27 owners, 277 write-ready, totaling about
 347.9 GiB. Redeploying the same fix cannot delete that residue. The remaining
 closure is the explicitly authorized cleanup-only cycle followed by a
 zero-artifact catalog and a later maintenance cycle that creates no new debris.
+
+The 2026-09-03 `location_group` rebuild supplied a different old-snapshot
+control. It had exactly one blocker: an active, non-waiting
+`client_reliability_running` transaction holding a snapshot. The shared phase
+classifier identified `rolling-leave`, with a 6,172-second transaction and a
+3,180-second current statement, while the sibling UpdateReliabilities
+diagnostic proved current versioned window markers, a ready covering family,
+and a still-eligible legacy non-covering family. This directly falsifies the
+older task-canary wording that called every reliability blocker a re-anchor and
+unconditionally prescribed the already-deployed four-hour cadence/checkpoint
+fix. The maintenance observation now exports only blocker count, structural
+phase, state, bounded ages/waits, and snapshot ownership; it does not render
+backend PIDs or SQL text. Preserve both operations. Deploy server `fcb4de54`
+only to Taskworkers that lack its transaction-local hard-loss timeout, then,
+after the protected work ends and explicit DBA authorization is granted, use
+`bringyourctl model upgrade-client-reliability-index` to remove the legacy
+family. Recovery requires the reindex to advance after snapshot release, not a
+restart or a repeated rebuild.
+
+The same control supplied the bounded terminal sequence. When the rolling
+blocker reached the exact 7,200-second deadline, `location_group` released and
+DbMaintenance immediately advanced to `provide_key`, where its first direct
+sample had scanned 2,804,136 of 2,997,067 blocks. A later sample reached
+2,997,383 of 2,997,587 blocks before waiting for the successor's legitimate
+lookback-1000 `full-anchor-insert`. This is progress plus a new bounded
+snapshot dependency, not a reason to restart or repeat either operation. A
+maintenance alert may classify the structural blocker phase, but it must use
+the sibling target/marker diagnostic to explain why a full anchor exists and
+must never infer the predecessor's phase from a cleanup error.
 
 ### 2.3 Planner-flip detection
 Probe: `planner-flips`
@@ -5061,7 +5107,11 @@ repeating-full-anchor explanation for that attempt. A recognized
 `full-anchor-*` phase still needs its marker reason: missing state,
 classification version/token repair, backward bounds, or the quiet four-hour
 boundary are mandatory/current behaviors, while artifact ancestry is required
-before claiming the obsolete 20-minute cadence is deployed. On 2026-09-03 the
+before claiming the obsolete 20-minute cadence is deployed. Evaluate that
+four-hour boundary against the current rollup target, not the last committed
+window head; report the responsible lookback and classification-guard state.
+A cached-statement cleanup error proves an exact connection/deadline boundary,
+not the interrupted SQL phase or rollback scope. On 2026-09-03 the
 task was running `rolling-leave` for more than 2,600s even though its historical
 rolling-leave maximum was about 30s. PostgreSQL had selected an old
 non-covering partition child and a scheduled edge reboot then disconnected the
@@ -6989,7 +7039,8 @@ Server source `2d6f27c237d7c00d225ea45dab229dad12188e3d`; ancestry checks proved
 that revision already contains the four-hour re-anchor, per-lookback
 checkpoint, classification-v1, and mixed-rollout guard changes. The four
 durable running-window rows all had version 1 plus guarded write tokens and
-were only 54–55 one-minute blocks beyond their last re-anchor. Direct
+their committed heads were only 54–55 one-minute blocks beyond their last
+re-anchor. Direct
 `pg_stat_activity` instead showed an active `rolling-leave` UPDATE from edge-4
 for more than 2,600 seconds and a reclaimed `rolling-enter` attempt from edge-1
 waiting on its transaction ID. Historical statement stats put the rolling-leave

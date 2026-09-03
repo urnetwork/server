@@ -18,7 +18,35 @@ func redactTaskErrorIdentifiers(value string) string {
 	return taskErrorIDPattern.ReplaceAllString(value, "<task-id>")
 }
 
-const reliabilityTaskDiagnosticQuery = `
+const reliabilitySQLPhaseCaseFormat = `CASE
+	WHEN %[1]s ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
+	 AND %[1]s ~* 'ON[[:space:]]+CONFLICT[[:space:]]*\([[:space:]]*client_id[[:space:]]*,[[:space:]]*lookback_index[[:space:]]*\)[[:space:]]+DO[[:space:]]+UPDATE'
+		THEN 'rolling-enter'
+	WHEN %[1]s ~* 'UPDATE[[:space:]]+client_reliability_running[[:space:]]+r[[:space:]]+SET'
+	 AND %[1]s ~* 'independent_sum[[:space:]]*=[[:space:]]*r\.independent_sum[[:space:]]*-[[:space:]]*agg\.ind'
+		THEN 'rolling-leave'
+	WHEN %[1]s ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
+	 AND %[1]s ~* 'independent_sum[[:space:]]*<[[:space:]]*0\.5'
+		THEN 'rolling-cleanup'
+	WHEN %[1]s ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
+		THEN 'full-anchor-insert'
+	WHEN %[1]s ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
+		THEN 'full-anchor-delete'
+	WHEN %[1]s ~* '\mclient_reliability_running\M'
+		THEN 'other-reliability'
+	ELSE 'other'
+END`
+
+func reliabilitySQLPhaseCase(queryColumn string) string {
+	switch queryColumn {
+	case "a.query", "blocked_by.query":
+	default:
+		panic("unsupported reliability SQL query column")
+	}
+	return fmt.Sprintf(reliabilitySQLPhaseCaseFormat, queryColumn)
+}
+
+var reliabilityTaskDiagnosticQuery = `
 	/* monitor_reliability_task_diagnostic */
 	WITH reliability_activity AS MATERIALIZED (
 		SELECT
@@ -27,22 +55,7 @@ const reliabilityTaskDiagnosticQuery = `
 			coalesce(a.wait_event_type, '') AS wait_event_type,
 			coalesce(a.wait_event, '') AS wait_event,
 			coalesce(a.client_addr::text, '') AS client_address,
-			CASE
-				WHEN a.query ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
-				 AND a.query ~* 'ON[[:space:]]+CONFLICT[[:space:]]*\([[:space:]]*client_id[[:space:]]*,[[:space:]]*lookback_index[[:space:]]*\)[[:space:]]+DO[[:space:]]+UPDATE'
-					THEN 'rolling-enter'
-				WHEN a.query ~* 'UPDATE[[:space:]]+client_reliability_running[[:space:]]+r[[:space:]]+SET'
-				 AND a.query ~* 'independent_sum[[:space:]]*=[[:space:]]*r\.independent_sum[[:space:]]*-[[:space:]]*agg\.ind'
-					THEN 'rolling-leave'
-				WHEN a.query ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
-				 AND a.query ~* 'independent_sum[[:space:]]*<[[:space:]]*0\.5'
-					THEN 'rolling-cleanup'
-				WHEN a.query ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
-					THEN 'full-anchor-insert'
-				WHEN a.query ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
-					THEN 'full-anchor-delete'
-				ELSE 'other'
-			END AS phase
+			` + reliabilitySQLPhaseCase("a.query") + ` AS phase
 		FROM pg_stat_activity a
 		WHERE
 			a.pid <> pg_backend_pid() AND
@@ -54,13 +67,40 @@ const reliabilityTaskDiagnosticQuery = `
 		FROM reliability_activity
 		ORDER BY query_start, pid
 		LIMIT 1
+	), rollup_target AS (
+		SELECT max_drained_block + 1 AS max_block_number
+		FROM client_reliability_rollup
+		WHERE singleton_id = 1
+	), target_state AS (
+		SELECT coalesce(
+			(SELECT max_block_number FROM rollup_target),
+			max(max_block_number)
+		) AS max_block_number
+		FROM client_reliability_running_window
 	), window_state AS (
 		SELECT
 			count(*)::int AS window_count,
 			count(*) FILTER (WHERE degraded_classification_version = 1)::int AS version_one_count,
 			count(*) FILTER (WHERE degraded_classification_write_token IS NOT NULL)::int AS token_count,
-			coalesce(max(max_block_number-last_recompute_block), -1)::bigint AS max_reanchor_distance
+			coalesce(max(target.max_block_number-last_recompute_block), -1)::bigint AS max_reanchor_distance,
+			coalesce((array_agg(
+				lookback_index
+				ORDER BY target.max_block_number-last_recompute_block DESC, lookback_index
+			))[1], -1)::int AS max_reanchor_lookback_index
 		FROM client_reliability_running_window
+		CROSS JOIN target_state target
+	), classification_guard AS (
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_trigger t
+			JOIN pg_proc p ON p.oid = t.tgfoid
+			WHERE
+				t.tgrelid = 'client_reliability_running_window'::regclass AND
+				t.tgname = 'client_reliability_running_window_classification_guard' AND
+				p.proname = 'client_reliability_running_window_classification_guard' AND
+				t.tgenabled IN ('O', 'A') AND
+				NOT t.tgisinternal
+		) AS present
 	), table_state AS (
 		SELECT c.oid, c.relkind
 		FROM pg_class c
@@ -130,9 +170,52 @@ const reliabilityTaskDiagnosticQuery = `
 		i.old_exists,
 		i.covering_ready,
 		i.old_scan_age_s,
-		i.covering_scan_age_s
+		i.covering_scan_age_s,
+		w.max_reanchor_lookback_index,
+		g.present
 	FROM window_state w
-	CROSS JOIN index_state i;
+	CROSS JOIN index_state i
+	CROSS JOIN classification_guard g;
+`
+
+// dbMaintenanceProgressQuery keeps the blocker evidence structural. Backend
+// PIDs and SQL text are volatile, can contain identifiers, and are unnecessary
+// once the shared reliability classifier names the causal phase.
+var dbMaintenanceProgressQuery = `
+	SELECT p.relid::regclass::text,
+	       p.index_relid::regclass::text,
+	       p.phase,
+	       round(extract(epoch FROM clock_timestamp()-a.query_start))::int,
+	       coalesce(a.wait_event_type,'-'),
+	       coalesce(a.wait_event,'-'),
+	       cardinality(pg_blocking_pids(p.pid))::int,
+	       coalesce(blocker.reliability_phase,'none'),
+	       coalesce(blocker.state,'-'),
+	       coalesce(blocker.xact_age_s,-1),
+	       coalesce(blocker.query_age_s,-1),
+	       coalesce(blocker.wait_event_type,'-'),
+	       coalesce(blocker.wait_event,'-'),
+	       coalesce(blocker.holds_snapshot,false)::text,
+	       p.blocks_done,
+	       p.blocks_total
+	FROM pg_stat_progress_create_index p
+	JOIN pg_stat_activity a USING (pid)
+	LEFT JOIN LATERAL (
+		SELECT blocked_by.state,
+		       round(extract(epoch FROM clock_timestamp()-blocked_by.xact_start))::int AS xact_age_s,
+		       round(extract(epoch FROM clock_timestamp()-blocked_by.query_start))::int AS query_age_s,
+		       coalesce(blocked_by.wait_event_type,'-') AS wait_event_type,
+		       coalesce(blocked_by.wait_event,'-') AS wait_event,
+		       blocked_by.backend_xmin IS NOT NULL AS holds_snapshot,
+		       ` + reliabilitySQLPhaseCase("blocked_by.query") + ` AS reliability_phase
+		FROM unnest(pg_blocking_pids(p.pid)) AS blocker_pid(pid)
+		JOIN pg_stat_activity blocked_by ON blocked_by.pid = blocker_pid.pid
+		ORDER BY blocked_by.xact_start NULLS LAST
+		LIMIT 1
+	) blocker ON true
+	WHERE p.command = 'REINDEX CONCURRENTLY'
+	ORDER BY a.query_start
+	LIMIT 1;
 `
 
 type reliabilityTaskDiagnostic struct {
@@ -147,6 +230,8 @@ type reliabilityTaskDiagnostic struct {
 	versionOneWindowCount    int
 	tokenWindowCount         int
 	maxReanchorDistance      int
+	maxReanchorLookbackIndex int
+	classificationGuard      bool
 	oldIndexPresent          bool
 	coveringIndexReady       bool
 	oldIndexLastScanAge      int
@@ -154,8 +239,8 @@ type reliabilityTaskDiagnostic struct {
 }
 
 func parseReliabilityTaskDiagnostic(row pgRow, cfg *monitorConfig) (reliabilityTaskDiagnostic, error) {
-	if len(row) != 15 {
-		return reliabilityTaskDiagnostic{}, fmt.Errorf("reliability task diagnostic returned %d columns, want 15", len(row))
+	if len(row) != 17 {
+		return reliabilityTaskDiagnostic{}, fmt.Errorf("reliability task diagnostic returned %d columns, want 17", len(row))
 	}
 	parseInt := func(column int, name string, allowNegative bool) (int, error) {
 		value, err := strconv.Atoi(row.str(column))
@@ -215,6 +300,12 @@ func parseReliabilityTaskDiagnostic(row pgRow, cfg *monitorConfig) (reliabilityT
 	if diagnostic.coveringIndexLastScanAge, err = parseInt(14, "covering-index scan age", true); err != nil {
 		return reliabilityTaskDiagnostic{}, err
 	}
+	if diagnostic.maxReanchorLookbackIndex, err = parseInt(15, "maximum re-anchor lookback index", true); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.classificationGuard, err = parseBool(16, "classification-guard state"); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
 	return diagnostic, nil
 }
 
@@ -270,6 +361,14 @@ func readReliabilityTaskDiagnostic(ctx context.Context, env *probeEnv) (reliabil
 	return parseReliabilityTaskDiagnostic(rows[0], env.cfg)
 }
 
+func isReliabilityRollingPhase(phase string) bool {
+	return phase == "rolling-enter" || phase == "rolling-leave" || phase == "rolling-cleanup"
+}
+
+func isReliabilityFullAnchorPhase(phase string) bool {
+	return phase == "full-anchor-insert" || phase == "full-anchor-delete"
+}
+
 func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDiagnostic, diagnosticErr error) {
 	if diagnosticErr != nil {
 		alert.mechanism = "Task duration alone cannot distinguish a full reliability re-anchor from its rolling enter, leave, or cleanup checkpoints. The bounded PostgreSQL phase diagnostic was unavailable, so the former repeating-full-anchor mechanism is not established by this alert."
@@ -288,9 +387,10 @@ func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDi
 	currentWindows := diagnostic.windowCount > 0 &&
 		diagnostic.versionOneWindowCount == diagnostic.windowCount &&
 		diagnostic.tokenWindowCount == diagnostic.windowCount &&
+		diagnostic.classificationGuard &&
 		0 <= diagnostic.maxReanchorDistance && diagnostic.maxReanchorDistance < 240
 	alert.observed += fmt.Sprintf(
-		" reliability_sql_phase=%s sql_elapsed_s=%d sql_wait=%s sql_source=%s active_reliability_queries=%d transaction_blocked_queries=%d running_windows=%d version_one_windows=%d token_windows=%d max_reanchor_distance_blocks=%d current_windows=%t old_index_present=%t covering_index_ready=%t old_index_last_scan_age_s=%d covering_index_last_scan_age_s=%d",
+		" reliability_sql_phase=%s sql_elapsed_s=%d sql_wait=%s sql_source=%s active_reliability_queries=%d transaction_blocked_queries=%d running_windows=%d version_one_windows=%d token_windows=%d classification_guard_present=%t max_reanchor_distance_blocks=%d max_reanchor_lookback_index=%d current_windows=%t old_index_present=%t covering_index_ready=%t old_index_last_scan_age_s=%d covering_index_last_scan_age_s=%d",
 		diagnostic.phase,
 		diagnostic.elapsedSeconds,
 		wait,
@@ -300,19 +400,18 @@ func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDi
 		diagnostic.windowCount,
 		diagnostic.versionOneWindowCount,
 		diagnostic.tokenWindowCount,
+		diagnostic.classificationGuard,
 		diagnostic.maxReanchorDistance,
+		diagnostic.maxReanchorLookbackIndex,
 		currentWindows,
 		diagnostic.oldIndexPresent,
 		diagnostic.coveringIndexReady,
 		diagnostic.oldIndexLastScanAge,
 		diagnostic.coveringIndexLastScanAge,
 	)
-	alert.evidence = "The bounded pg_stat_activity, running-window, pg_catalog, and pg_stat_all_indexes diagnostic identifies the active phase and physical access-path state without emitting SQL text, client addresses, or task identifiers."
+	alert.evidence = "The bounded pg_stat_activity, running-window, rollup-target, pg_catalog, and pg_stat_all_indexes diagnostic identifies the active phase, computes re-anchor distance against the current drained target rather than the prior committed window head, and reports physical access-path state without emitting SQL text, client addresses, or task identifiers."
 
-	rolling := diagnostic.phase == "rolling-enter" ||
-		diagnostic.phase == "rolling-leave" ||
-		diagnostic.phase == "rolling-cleanup"
-	if rolling {
+	if isReliabilityRollingPhase(diagnostic.phase) {
 		alert.mechanism = fmt.Sprintf("The active PostgreSQL phase is %s, which directly falsifies the old repeated-full-anchor diagnosis for this attempt.", diagnostic.phase)
 		if currentWindows {
 			alert.mechanism += fmt.Sprintf(" All %d running windows have current classification tokens and are only %d blocks beyond their last re-anchor, so this is the intended incremental path.", diagnostic.windowCount, diagnostic.maxReanchorDistance)
@@ -339,16 +438,17 @@ func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDi
 		return
 	}
 
-	fullAnchor := diagnostic.phase == "full-anchor-insert" || diagnostic.phase == "full-anchor-delete"
-	if fullAnchor {
+	if isReliabilityFullAnchorPhase(diagnostic.phase) {
 		anchorReason := "The marker snapshot does not by itself distinguish a backward-window repair from a missing schema guard; inspect the task artifact and bounds before deciding whether this anchor is mandatory."
 		switch {
 		case diagnostic.windowCount == 0:
 			anchorReason = "No running-window marker exists, so bootstrap requires a full anchor."
+		case !diagnostic.classificationGuard:
+			anchorReason = "The database classification guard is absent or disabled, so versioned markers cannot be trusted and a repair anchor is mandatory."
 		case diagnostic.versionOneWindowCount != diagnostic.windowCount || diagnostic.tokenWindowCount != diagnostic.windowCount:
 			anchorReason = "At least one marker lacks the current classification version or guarded write token, so the one-time classification transition requires a full anchor."
 		case 240 <= diagnostic.maxReanchorDistance:
-			anchorReason = "The oldest marker has reached the four-hour (240-block) recompute boundary, so this is the scheduled associativity/classification correction."
+			anchorReason = fmt.Sprintf("Lookback index %d is %d target blocks beyond its last recompute, past the four-hour (240-block) boundary, so this is the scheduled associativity/classification correction.", diagnostic.maxReanchorLookbackIndex, diagnostic.maxReanchorDistance)
 		}
 		alert.mechanism = fmt.Sprintf("The active PostgreSQL phase is %s, directly confirming a full reliability re-anchor. %s", diagnostic.phase, anchorReason)
 		alert.context += " Bootstrap, classification-generation changes, backward windows, and the four-hour correction are intentional full scans; artifact provenance and marker state must distinguish them from a stale 20-minute implementation."
@@ -610,31 +710,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if r.str(0) != "DbMaintenance" {
 			continue
 		}
-		maintenanceRows, maintenanceErr := env.runner.pg(ctx, `
-			SELECT p.relid::regclass::text,
-			       p.index_relid::regclass::text,
-			       p.phase,
-			       round(extract(epoch FROM clock_timestamp()-a.query_start))::int,
-			       coalesce(a.wait_event_type,''),
-			       coalesce(a.wait_event,''),
-			       pg_blocking_pids(p.pid)::text,
-			       coalesce(blocker.pid::text,''),
-			       left(regexp_replace(coalesce(blocker.query,''), E'[\\n\\r\\t]+', ' ', 'g'), 240),
-			       p.blocks_done,
-			       p.blocks_total
-			FROM pg_stat_progress_create_index p
-			JOIN pg_stat_activity a USING (pid)
-			LEFT JOIN LATERAL (
-				SELECT blocked_by.pid, blocked_by.query
-				FROM unnest(pg_blocking_pids(p.pid)) AS blocker_pid(pid)
-				JOIN pg_stat_activity blocked_by ON blocked_by.pid = blocker_pid.pid
-				ORDER BY blocked_by.xact_start NULLS LAST
-				LIMIT 1
-			) blocker ON true
-			WHERE p.command = 'REINDEX CONCURRENTLY'
-			ORDER BY a.query_start
-			LIMIT 1;
-		`)
+		maintenanceRows, maintenanceErr := env.runner.pg(ctx, dbMaintenanceProgressQuery)
 		if maintenanceErr != nil {
 			return findings, maintenanceErr
 		}
@@ -642,6 +718,16 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			dbMaintenanceEvidence = maintenanceRows[0]
 		}
 		break
+	}
+	var reliabilityDiagnostic reliabilityTaskDiagnostic
+	var reliabilityDiagnosticErr error
+	reliabilityDiagnosticRead := false
+	readReliabilityDiagnostic := func() (reliabilityTaskDiagnostic, error) {
+		if !reliabilityDiagnosticRead {
+			reliabilityDiagnostic, reliabilityDiagnosticErr = readReliabilityTaskDiagnostic(ctx, env)
+			reliabilityDiagnosticRead = true
+		}
+		return reliabilityDiagnostic, reliabilityDiagnosticErr
 	}
 	overdueTasks := map[string]bool{}
 	for _, r := range overdueRows {
@@ -745,7 +831,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alert.verify = "A large reaper run returns toward its seconds/minutes band, the five PostgreSQL eligibility probes remain drained, target Redis state is removed, a reassigned forward egress owner is preserved, and co-resident task durations normalize."
 		}
 		if task == "UpdateReliabilities" {
-			diagnostic, diagnosticErr := readReliabilityTaskDiagnostic(ctx, env)
+			diagnostic, diagnosticErr := readReliabilityDiagnostic()
 			applyReliabilityTaskDiagnostic(&alert, diagnostic, diagnosticErr)
 		}
 		if task == "ReconcileNetEscrow" {
@@ -764,22 +850,34 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		if task == "DbMaintenance" && len(dbMaintenanceEvidence) > 0 {
 			alert.evidence = fmt.Sprintf(
-				"relation=%s index=%s phase=%s query_age_s=%s wait=%s:%s blocking_pids=%s blocker_pid=%s blocker_query=%s blocks_done=%s blocks_total=%s",
+				"relation=%s index=%s phase=%s query_age_s=%s wait=%s:%s blocker_count=%s blocker_class=%s blocker_state=%s blocker_xact_age_s=%s blocker_query_age_s=%s blocker_wait=%s:%s blocker_holds_snapshot=%s blocks_done=%s blocks_total=%s",
 				dbMaintenanceEvidence.str(0), dbMaintenanceEvidence.str(1), dbMaintenanceEvidence.str(2),
 				dbMaintenanceEvidence.str(3), dbMaintenanceEvidence.str(4), dbMaintenanceEvidence.str(5),
 				dbMaintenanceEvidence.str(6), dbMaintenanceEvidence.str(7), dbMaintenanceEvidence.str(8),
-				dbMaintenanceEvidence.str(9), dbMaintenanceEvidence.str(10),
+				dbMaintenanceEvidence.str(9), dbMaintenanceEvidence.str(10), dbMaintenanceEvidence.str(11),
+				dbMaintenanceEvidence.str(12), dbMaintenanceEvidence.str(13), dbMaintenanceEvidence.str(14),
+				dbMaintenanceEvidence.str(15),
 			)
 			if strings.EqualFold(dbMaintenanceEvidence.str(0), "transfer_escrow") {
 				alert.mechanism = "The daily table rotation selected transfer_escrow for REINDEX TABLE CONCURRENTLY even though this is a very large, high-churn relation whose full rebuild cannot reliably fit the two-hour per-object policy. Extending the replacement relation and generating its WAL can saturate PostgreSQL long enough for Connect logins and unrelated tasks to time out; repeated interrupted attempts can leave numbered _ccnew debris."
 				alert.context += " The live progress row identifies the current bounded operation; reindex-debris independently identifies residue from earlier attempts. PgBouncer timeout symptoms are downstream queueing, not evidence that the pooler initiated the load."
 				alert.action = "Do not cancel or duplicate the protected in-progress rebuild. Deploy the taskworker maintenance revision that excludes transfer_escrow from full-table reindex and cleans incomplete indexes before and after every selected object. After the protected operation finishes, require explicit maintenance authorization before running the supported cleanup-only cycle."
 				alert.verify = "The current attempt reaches its bounded outcome, transfer_escrow never appears in a later full-table maintenance progress row, reindex-debris reaches zero under an authorized cleanup window, and one complete post-deploy maintenance cycle causes no PostgreSQL or Connect timeout wave."
-			} else if strings.Contains(strings.ToLower(dbMaintenanceEvidence.str(8)), "client_reliability_running") {
-				alert.mechanism = "The concurrent index rebuild is waiting for old snapshots, and PostgreSQL identifies the UpdateReliabilities running-window re-anchor as its virtual-XID blocker. REINDEX CONCURRENTLY cannot complete its index swap while that older transaction remains visible."
-				alert.context += ". The maintenance claim heartbeat is live: this is downstream lock coupling, not an abandoned task lease."
-				alert.action = "Let the configured deadlines arbitrate the current work. Roll out the four-hour cadence, per-lookback reliability checkpoints, and optional-anchor maintenance deferral; do not cancel either progressing task, raise its deadline, or rebuild the same index again."
-				alert.verify = "UpdateReliabilities releases each checkpoint transaction, the reindex advances beyond waiting for old snapshots and completes, and DbMaintenance clears without a maintenance error."
+			} else if isReliabilityRollingPhase(dbMaintenanceEvidence.str(7)) {
+				alert.mechanism = fmt.Sprintf("The concurrent index rebuild is waiting for old snapshots, and PostgreSQL classifies its oldest blocker as the UpdateReliabilities %s checkpoint. That is an incremental phase and directly falsifies the old full-anchor attribution. REINDEX CONCURRENTLY cannot complete its index swap while that older transaction remains visible.", dbMaintenanceEvidence.str(7))
+				alert.context += " The maintenance claim heartbeat is live: this is downstream lock coupling, not an abandoned task lease. Use the sibling UpdateReliabilities diagnostic for the running-window and physical-index state rather than inferring it from SQL text."
+				alert.action = "Preserve both bounded operations. If the sibling UpdateReliabilities alert proves the valid covering family is complete while the old non-covering family remains eligible, wait for the protected work to finish and obtain explicit DBA authorization before running `bringyourctl model upgrade-client-reliability-index`. Compare every Taskworker artifact with server commit fcb4de54 and deploy only where its transaction-local two-hour hard-loss timeout is absent. Do not redeploy the already-present four-hour cadence/checkpoint fix, cancel either query, raise a deadline, or rebuild the same index again."
+				alert.verify = "The reliability checkpoint reaches a bounded terminal outcome, the reindex advances beyond waiting for old snapshots and completes, every Taskworker contains fcb4de54, the old non-covering index is removed through the supported authorized finalizer, and later rolling cycles return below their historical duration band."
+			} else if isReliabilityFullAnchorPhase(dbMaintenanceEvidence.str(7)) {
+				alert.mechanism = fmt.Sprintf("The concurrent index rebuild is waiting for old snapshots, and PostgreSQL classifies its oldest blocker as the UpdateReliabilities %s phase. REINDEX CONCURRENTLY cannot complete its index swap while that full-anchor transaction remains visible.", dbMaintenanceEvidence.str(7))
+				alert.context += " The maintenance claim heartbeat is live: this is downstream lock coupling, not an abandoned task lease. The phase alone does not distinguish mandatory bootstrap, classification transition, backward-window repair, or the quiet four-hour correction from obsolete cadence."
+				alert.action = "Preserve both bounded operations and use the sibling UpdateReliabilities marker/artifact diagnostic to classify why the full anchor ran. Deploy only a demonstrated missing boundary; do not assume the current artifact lacks the cadence fix, cancel either query, raise a deadline, or rebuild the same index again."
+				alert.verify = "The full-anchor reason is established, each completed lookback advances durably, the reindex proceeds after snapshot release, and the next ordinary reliability cycle uses the rolling path."
+			} else if dbMaintenanceEvidence.str(7) == "other-reliability" {
+				alert.mechanism = "The concurrent index rebuild is waiting for old snapshots held by an active client_reliability_running statement, but the bounded classifier does not recognize its exact rolling or full-anchor phase. REINDEX CONCURRENTLY cannot complete its index swap while that transaction remains visible."
+				alert.context += " The maintenance claim heartbeat is live: this is downstream lock coupling, not an abandoned task lease. Unknown phase is not evidence for the historical re-anchor mechanism."
+				alert.action = "Preserve both bounded operations, extend the privacy-safe reliability phase discriminator for the observed statement shape, and correlate the sibling UpdateReliabilities marker/index state before changing code or deployment. Do not print SQL text, cancel either query, or restart a service to erase the evidence."
+				alert.verify = "A bounded phase class replaces unknown attribution, the owning reliability transaction reaches a terminal outcome, and the reindex then advances and completes."
 			} else {
 				alert.mechanism = "The daily maintenance task is actively executing REINDEX CONCURRENTLY. Its overdue task age includes earlier objects and waits; the current PostgreSQL progress row proves this claim is doing bounded per-object work rather than holding an abandoned lease."
 				alert.context += ". Compare query_age_s with the two-hour per-object limit and blocks_done/blocks_total across samples. A phase or block increase is progress even when the overall task remains overdue."
@@ -831,6 +929,8 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		clockBackfillDeadline := task == "BackfillClock" &&
 			strings.Contains(lowerError, "context canceled") &&
 			!strings.Contains(lastError, "Drained:")
+		reliabilityCleanupDeadline := task == "UpdateReliabilities" &&
+			strings.Contains(lowerError, "failed to deallocate cached statement(s): conn closed")
 		alertMechanism, alertAction, alertVerify := "", "", ""
 		alertPlaybook := "SIGNALS.md 5.7"
 		alertContext := "Each task function is grouped before reporting; another noisy function cannot consume a global row limit and hide this failure. Parked and fresh-claim counts are independent predicates and can overlap briefly during reschedule handoff; do not add them together."
@@ -877,12 +977,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertAction = "Deploy the Taskworker clock backfill that consumes only a contiguous, unique daily-rollup prefix, falls back to raw rows at the first missing or duplicate day, and scans the unrolled tail once with the `clock_unrolled_tail` marker. Keep the ten-minute task boundary. Do not add a broad multi-billion-row index, restart PostgreSQL or Redis, pull the fresh retry forward, or enlarge MaxTime."
 			alertVerify = "Every active Taskworker contains the rollup-prefix implementation; pg_stat_activity shows no new unmarked full-retained-history clock aggregate; the marked raw tail begins at the first unrolled UTC day; BackfillClock completes below 600 seconds and clears this row's error; and the public clock remains monotonic while synthetic gap and duplicate-day cases fall back without skipping bytes."
 			alertPlaybook = "SIGNALS.md §1.2 and §5.7"
-		} else if task == "UpdateReliabilities" &&
-			strings.Contains(lowerError, "failed to deallocate cached statement(s): conn closed") {
-			alertMechanism = "A full reliability running-window anchor exhausted the task's configured deadline. pgx surfaced the interrupted connection while deallocating cached statements, after PostgreSQL canceled the work. Without per-lookback commits, the transaction rollback discards every completed lookback and the retry starts the same full anchor sequence again."
-			alertContext += fmt.Sprintf(" Confirm the matching taskworker eval-error duration is exactly the configured %ss and that the successor claim retains the same args before applying this diagnosis.", maxTimeSeconds)
-			alertAction = "Roll out the four-hour re-anchor cadence, checkpoint each lookback in its own transaction, and defer optional anchors while a VACUUM or concurrent index build has already run for five minutes. Do not raise the deadline or manually kick the fresh retry."
-			alertVerify = "A retry preserves completed lookback markers, rolls those windows instead of rescanning them, then clears the task error; the blocked concurrent reindex and vacuum chain advance after each checkpoint releases its snapshot."
+		} else if reliabilityCleanupDeadline {
+			alertMechanism = "The pgx cached-statement cleanup signature establishes that a reliability attempt reached its configured deadline and its client connection closed. That error alone does not identify whether the interrupted statement was a full anchor or a rolling checkpoint, and it does not prove that earlier per-lookback transactions rolled back."
+			alertContext += fmt.Sprintf(" Confirm a matching taskworker eval-error at exactly the configured %ss and a same-task, same-args successor before treating this as deadline retry evidence. The bounded current-state phase diagnostic is attribution for the live successor, not retroactive proof of the predecessor's SQL phase.", maxTimeSeconds)
+			alertAction = "Correlate the exact terminal evaluator line and successor, then use the bounded reliability phase, marker, and index diagnostic to select the active root cause. Do not redeploy a historical cadence/checkpoint fix, raise the deadline, or manually kick the fresh retry from the cleanup error alone."
+			alertVerify = "The terminal evaluator duration and successor identity are correlated, the active phase receives its demonstrated repair boundary, and the retry reaches a bounded successful result without repeating the diagnosed cause."
 		} else if task == "CloseExpiredContracts" && strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertMechanism = "A close checkpoint reached the exact 30-minute task boundary. Its per-contract commits made durable progress, but the scheduler did not checkpoint task success, so the retry must rescan the remaining ordered cohort while old contracts accumulate. The task row does not contain the selected cohort size; use the matching live selection log before distinguishing an older 100,000-contract generation from the current 25,000 cap."
 			alertContext += " A distinct successor attempt after the retry is evidence that per-contract work survived; it does not make that scheduler boundary safe under recurring write/vacuum pressure."
@@ -912,7 +1011,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if localBufferExhaustion {
 			observed += fmt.Sprintf(" pg_server_version=%s effective_io_concurrency=%s temp_buffers=%s", r.str(10), r.str(11), r.str(12))
 		}
-		findings = append(findings, finding{
+		alert := finding{
 			probeId: "pg/task-parked", tier: tierWarn,
 			class: "task-parked", target: target, frame: task, sustain: 1,
 			symptom:   symptom,
@@ -924,7 +1023,16 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			action:    alertAction,
 			verify:    alertVerify,
 			playbook:  alertPlaybook,
-		})
+		}
+		if reliabilityCleanupDeadline {
+			deadlineMechanism := alert.mechanism
+			deadlineEvidence := alert.evidence
+			diagnostic, diagnosticErr := readReliabilityDiagnostic()
+			applyReliabilityTaskDiagnostic(&alert, diagnostic, diagnosticErr)
+			alert.mechanism = deadlineMechanism + " Current-state discriminator: " + alert.mechanism
+			alert.evidence = deadlineEvidence + "\n\nCurrent-state reliability diagnostic:\n" + alert.evidence
+		}
+		findings = append(findings, alert)
 	}
 	if len(failRows) == 0 {
 		findings = append(findings, healthyFinding("pg/task-parked", tierWarn, "task-parked", target))

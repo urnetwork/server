@@ -295,7 +295,7 @@ func TestTaskCanariesSignalDiagnosesReliabilityRollingIndexRegression(t *testing
 				diagnosticQuery = query
 				return []Row{{
 					"rolling-leave", "1515", "", "", "192.0.2.44/32",
-					"2", "1", "4", "4", "4", "55", "true", "true", "3", "1900",
+					"2", "1", "4", "4", "4", "55", "true", "true", "3", "1900", "1000", "true",
 				}}, nil
 			case strings.Contains(query, "WITH failures AS"):
 				return nil, nil
@@ -365,11 +365,18 @@ func TestTaskCanariesSignalDiagnosesReliabilityRollingIndexRegression(t *testing
 		"pg_stat_all_indexes",
 		"last_idx_scan",
 		"client_reliability_running_window",
+		"client_reliability_rollup",
+		"max_drained_block + 1",
+		"target.max_block_number-last_recompute_block",
+		"client_reliability_running_window_classification_guard",
 		"a.pid <> pg_backend_pid()",
 	} {
 		if !strings.Contains(diagnosticQuery, want) {
 			t.Fatalf("reliability diagnostic query missing %q", want)
 		}
+	}
+	if strings.Contains(diagnosticQuery, "max(max_block_number-last_recompute_block)") {
+		t.Fatalf("reliability diagnostic retained stale committed-head denominator: %s", diagnosticQuery)
 	}
 	requireAlertOmits(t, alert, taskID, otherTaskID, "192.0.2.44")
 }
@@ -386,7 +393,7 @@ func TestTaskCanariesSignalDiagnosesIntentionalReliabilityAnchor(t *testing.T) {
 			case strings.Contains(query, "monitor_reliability_task_diagnostic"):
 				return []Row{{
 					"full-anchor-insert", "1515", "IO", "DataFileRead", "2001:db8::3/128",
-					"1", "0", "4", "4", "4", "245", "false", "true", "-1", "12",
+					"1", "0", "4", "4", "4", "245", "false", "true", "-1", "12", "1000", "true",
 				}}, nil
 			case strings.Contains(query, "WITH failures AS"):
 				return nil, nil
@@ -420,9 +427,12 @@ func TestTaskCanariesSignalDiagnosesIntentionalReliabilityAnchor(t *testing.T) {
 		"reliability_sql_phase=full-anchor-insert",
 		"sql_wait=IO:DataFileRead",
 		"sql_source=edge-3",
+		"classification_guard_present=true",
 		"max_reanchor_distance_blocks=245",
+		"max_reanchor_lookback_index=1000",
 		"directly confirming a full reliability re-anchor",
-		"four-hour (240-block) recompute boundary",
+		"Lookback index 1000 is 245 target blocks beyond its last recompute",
+		"past the four-hour (240-block) boundary",
 		"deploy Taskworker from Server commit fcb4de54 or later",
 		"transaction-local two-hour PostgreSQL checkpoint timeout",
 		"next ordinary half-hour cycle uses the rolling path",
@@ -495,7 +505,8 @@ func TestTaskCanariesSignalExplainsMaintenanceBlockedByReliabilityAnchor(t *test
 		case strings.Contains(query, "pg_stat_progress_create_index"):
 			return []Row{{
 				"pending_task", "pending_task_pkey_ccnew", "waiting for old snapshots", "3683",
-				"Lock", "virtualxid", "{774955}", "774955", "INSERT INTO client_reliability_running SELECT ...", "636", "637",
+				"Lock", "virtualxid", "1", "full-anchor-insert", "active", "3700", "3683",
+				"IO", "DataFileRead", "true", "636", "637",
 			}}, nil
 		case strings.Contains(query, "WITH failures AS"):
 			return nil, nil
@@ -514,9 +525,10 @@ func TestTaskCanariesSignalExplainsMaintenanceBlockedByReliabilityAnchor(t *test
 		"2x its fallback 1800s",
 		"comparison_source=fallback",
 		"waiting for old snapshots",
-		"UpdateReliabilities running-window re-anchor",
+		"UpdateReliabilities full-anchor-insert phase",
 		"blocks_done=636 blocks_total=637",
-		"do not cancel either progressing task",
+		"does not distinguish mandatory bootstrap",
+		"do not assume the current artifact lacks the cadence fix",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("maintenance diagnosis missing %q: %s", want, markdown)
@@ -524,6 +536,65 @@ func TestTaskCanariesSignalExplainsMaintenanceBlockedByReliabilityAnchor(t *test
 	}
 	if !strings.Contains(historyQuery, "coalesce(h.p95_s,1800)") {
 		t.Fatalf("missing-history comparison and display do not share the 1800s fallback: %s", historyQuery)
+	}
+}
+
+func TestTaskCanariesSignalClassifiesMaintenanceRollingLeaveWithoutRawBlocker(t *testing.T) {
+	var maintenanceQuery string
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return []Row{{"DbMaintenance", "3748", "1800", "f", "86400"}}, nil
+		case strings.Contains(query, "pg_stat_progress_create_index"):
+			maintenanceQuery = query
+			return []Row{{
+				"location_group", "location_group_location_group_name_key_ccnew",
+				"waiting for old snapshots", "3748", "Lock", "virtualxid", "1",
+				"rolling-leave", "active", "6172", "3180", "-", "-", "true", "1", "2",
+			}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-overdue")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"blocker_count=1 blocker_class=rolling-leave blocker_state=active",
+		"blocker_xact_age_s=6172 blocker_query_age_s=3180",
+		"blocker_holds_snapshot=true blocks_done=1 blocks_total=2",
+		"incremental phase and directly falsifies the old full-anchor attribution",
+		"bringyourctl model upgrade-client-reliability-index",
+		"server commit fcb4de54",
+		"Do not redeploy the already-present four-hour cadence/checkpoint fix",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("rolling maintenance diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"running-window re-anchor",
+		"Roll out the four-hour cadence",
+		"blocking_pids=",
+		"blocker_pid=",
+		"blocker_query=",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("rolling maintenance diagnosis retained %q: %s", stale, markdown)
+		}
+	}
+	for _, rawProjection := range []string{"blocker.pid::text", "left(regexp_replace"} {
+		if strings.Contains(maintenanceQuery, rawProjection) {
+			t.Fatalf("maintenance query still projects raw blocker evidence %q: %s", rawProjection, maintenanceQuery)
+		}
 	}
 }
 
@@ -537,8 +608,8 @@ func TestTaskCanariesSignalExplainsProgressingMaintenanceAfterBlockerRelease(t *
 		case strings.Contains(query, "pg_stat_progress_create_index"):
 			return []Row{{
 				"transfer_contract", "transfer_contract_pair_open_create_time_ccnew",
-				"building index: scanning table", "195", "", "", "{}", "", "",
-				"10114170", "23790366",
+				"building index: scanning table", "195", "-", "-", "0", "none", "-",
+				"-1", "-1", "-", "-", "false", "10114170", "23790366",
 			}}, nil
 		case strings.Contains(query, "WITH failures AS"):
 			return nil, nil
@@ -575,8 +646,8 @@ func TestTaskCanariesSignalAttributesOversizedTransferEscrowReindex(t *testing.T
 		case strings.Contains(query, "pg_stat_progress_create_index"):
 			return []Row{{
 				"transfer_escrow", "transfer_escrow_pkey_ccnew36",
-				"building index: scanning table", "190", "IO", "DataFileExtend", "{}", "", "",
-				"48213", "1081742992",
+				"building index: scanning table", "190", "IO", "DataFileExtend", "0", "none", "-",
+				"-1", "-1", "-", "-", "false", "48213", "1081742992",
 			}}, nil
 		case strings.Contains(query, "WITH failures AS"):
 			return nil, nil
@@ -1018,7 +1089,7 @@ func TestTaskCanariesSignalExplainsLiteralTaskDeadlineTimeout(t *testing.T) {
 	}
 }
 
-func TestTaskCanariesSignalExplainsReliabilityCheckpointRetry(t *testing.T) {
+func TestTaskCanariesSignalDoesNotInferReliabilityPhaseFromCleanupError(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "UpdateClientLocations"):
@@ -1041,14 +1112,76 @@ func TestTaskCanariesSignalExplainsReliabilityCheckpointRetry(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
 	for _, want := range []string{
-		"exhausted the task's configured deadline",
-		"transaction rollback discards every completed lookback",
-		"exactly the configured 7200s",
-		"checkpoint each lookback in its own transaction",
-		"successor claim retains the same args",
+		"establishes that a reliability attempt reached its configured deadline",
+		"error alone does not identify whether the interrupted statement was a full anchor or a rolling checkpoint",
+		"does not prove that earlier per-lookback transactions rolled back",
+		"reliability_diagnostic=unavailable",
+		"matching taskworker eval-error at exactly the configured 7200s",
+		"same-task, same-args successor",
+		"Do not redeploy the already-present cadence fix",
 	} {
 		if !strings.Contains(markdown, want) {
-			t.Fatalf("reliability retry diagnosis missing %q: %s", want, markdown)
+			t.Fatalf("ambiguous reliability retry diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"A full reliability running-window anchor exhausted",
+		"transaction rollback discards every completed lookback",
+		"Roll out the four-hour re-anchor cadence",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("ambiguous reliability retry invented stale cause %q: %s", stale, markdown)
+		}
+	}
+}
+
+func TestTaskCanariesSignalAttributesReliabilityRetryWithCurrentRollingDiagnostic(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"UpdateReliabilities", "1", "0", "1", "1", "-3",
+				"Interrupted: failed to deallocate cached statement(s): conn closed", "7200",
+			}}, nil
+		case strings.Contains(query, "monitor_reliability_task_diagnostic"):
+			return []Row{{
+				"rolling-leave", "120", "", "", "", "1", "0",
+				"4", "4", "4", "55", "true", "true", "42", "11086", "1000", "true",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"error alone does not identify whether the interrupted statement was a full anchor or a rolling checkpoint",
+		"Current-state discriminator: The active PostgreSQL phase is rolling-leave",
+		"directly falsifies the old repeated-full-anchor diagnosis",
+		"old_index_present=true covering_index_ready=true",
+		"bringyourctl model upgrade-client-reliability-index",
+		"Server commit fcb4de54",
+		"Do not redeploy only for the already-present four-hour/checkpoint fix",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("rolling reliability retry diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"A full reliability running-window anchor exhausted",
+		"transaction rollback discards every completed lookback",
+		"Roll out the four-hour re-anchor cadence",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("rolling reliability retry retained stale cause %q: %s", stale, markdown)
 		}
 	}
 }
