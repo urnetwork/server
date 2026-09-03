@@ -748,6 +748,8 @@ func GetStreamEventId(ctx context.Context, clientId server.Id) (eventId int64) {
 	return
 }
 
+// Reads the raw Redis stream snapshot. Client-facing callers use the active
+// filter so cached removed identities cannot become routing instructions.
 func GetStreamHops(ctx context.Context, clientId server.Id) (eventId int64, streamHops map[StreamHop]bool) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
@@ -786,6 +788,108 @@ func GetStreamHops(ctx context.Context, clientId server.Id) (eventId int64, stre
 	return
 }
 
+// Filters out hops whose owner or adjacent clients are inactive. Durable
+// identity activity, rather than transient connection state, authorizes a
+// route.
+func GetActiveStreamHops(ctx context.Context, clientId server.Id) (eventId int64, streamHops map[StreamHop]bool) {
+	return getActiveStreamHops(ctx, clientId, nil)
+}
+
+// Uses an optional post-prune hook to make concurrent cache writes
+// deterministic in regression tests.
+func getActiveStreamHops(ctx context.Context, clientId server.Id, afterPrune func()) (eventId int64, streamHops map[StreamHop]bool) {
+	eventId, streamHops = GetStreamHops(ctx, clientId)
+	if len(streamHops) == 0 {
+		return
+	}
+
+	adjacentClientIds := map[server.Id]bool{clientId: true}
+	for streamHop := range streamHops {
+		if sourceId := streamHop.SourceId(); sourceId != nil {
+			adjacentClientIds[*sourceId] = true
+		}
+		if destinationId := streamHop.DestinationId(); destinationId != nil {
+			adjacentClientIds[*destinationId] = true
+		}
+	}
+
+	activeClientIds := map[server.Id]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		// Db may retry the callback after a transient connection failure.
+		activeClientIds = map[server.Id]bool{}
+		clientIds := slices.Collect(maps.Keys(adjacentClientIds))
+		result, err := conn.Query(
+			ctx,
+			`
+					SELECT client_id
+					FROM network_client
+					WHERE
+						client_id = ANY($1::uuid[]) AND
+						active = true
+				`,
+			idStrings(clientIds),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var activeClientId server.Id
+				server.Raise(result.Scan(&activeClientId))
+				activeClientIds[activeClientId] = true
+			}
+		})
+	})
+
+	staleStreamHops := []StreamHop{}
+	for streamHop := range streamHops {
+		sourceId := streamHop.SourceId()
+		destinationId := streamHop.DestinationId()
+		if !activeClientIds[clientId] ||
+			(sourceId != nil && !activeClientIds[*sourceId]) ||
+			(destinationId != nil && !activeClientIds[*destinationId]) {
+			staleStreamHops = append(staleStreamHops, streamHop)
+			delete(streamHops, streamHop)
+		}
+	}
+	if len(staleStreamHops) == 0 {
+		return
+	}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		arguments := make([]any, 0, len(staleStreamHops)+1)
+		arguments = append(arguments, int64(clientEventIdTtl/time.Second))
+		for _, streamHop := range staleStreamHops {
+			arguments = append(arguments, streamHop.Bytes())
+		}
+		_, err := r.Eval(
+			ctx,
+			`
+					local changed = 0
+					for i = 2, #ARGV do
+						changed = changed + redis.call('SREM', KEYS[1], ARGV[i])
+					end
+					if 0 < changed then
+						redis.call('INCR', KEYS[2])
+						redis.call('EXPIRE', KEYS[2], ARGV[1])
+					end
+					return changed
+				`,
+			[]string{
+				clientStreamHopsKey(clientId),
+				clientEventIdKey(clientId),
+			},
+			arguments...,
+		).Int64()
+		if err != nil {
+			panic(err)
+		}
+	})
+	if afterPrune != nil {
+		afterPrune()
+	}
+	// Keep the pre-prune version. The prune and every concurrent add leave a
+	// newer counter, forcing the listener's next bounded read.
+	return
+}
+
 type StreamHopEventType int
 
 const (
@@ -802,13 +906,14 @@ type StreamHopEvent struct {
 }
 
 type StreamHopListener struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	done          chan struct{}
-	clientId      server.Id
-	callback      func(*StreamHopEvent)
-	pollInterval  time.Duration
-	fullReadEvery int
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+	clientId       server.Id
+	callback       func(*StreamHopEvent)
+	pollInterval   time.Duration
+	fullReadEvery  int
+	readStreamHops func(context.Context, server.Id) (int64, map[StreamHop]bool)
 
 	// key-event inputs (PEERSSTREAMS2.md): `kick` wakes the loop for an
 	// immediate counter check (every hop add/remove bumps the counter, so
@@ -829,17 +934,31 @@ type StreamHopListener struct {
 // full-reads unconditionally as insurance against a missed bump. No
 // subscriptions, no standing connections.
 func NewStreamHopListener(ctx context.Context, clientId server.Id, callback func(*StreamHopEvent), pollInterval time.Duration, fullReadEvery int) *StreamHopListener {
+	return newStreamHopListener(ctx, clientId, callback, pollInterval, fullReadEvery, GetActiveStreamHops)
+}
+
+// Constructs a listener with an injectable snapshot reader for deterministic
+// lifecycle tests.
+func newStreamHopListener(
+	ctx context.Context,
+	clientId server.Id,
+	callback func(*StreamHopEvent),
+	pollInterval time.Duration,
+	fullReadEvery int,
+	readStreamHops func(context.Context, server.Id) (int64, map[StreamHop]bool),
+) *StreamHopListener {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	shl := &StreamHopListener{
-		ctx:           cancelCtx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
-		clientId:      clientId,
-		callback:      callback,
-		pollInterval:  pollInterval,
-		fullReadEvery: fullReadEvery,
-		kick:          make(chan struct{}, 1),
+		ctx:            cancelCtx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+		clientId:       clientId,
+		callback:       callback,
+		pollInterval:   pollInterval,
+		fullReadEvery:  fullReadEvery,
+		readStreamHops: readStreamHops,
+		kick:           make(chan struct{}, 1),
 	}
 	go func() {
 		defer close(shl.done)
@@ -892,7 +1011,7 @@ func (self *StreamHopListener) run() {
 	// without re-delivering on a static hop set. (The v1 `<` comparison could
 	// go permanently stale across a counter reset.)
 	reset := func() {
-		resetEventId, resetStreamHops := GetStreamHops(self.ctx, self.clientId)
+		resetEventId, resetStreamHops := self.readStreamHops(self.ctx, self.clientId)
 		stateChanged := !maps.Equal(streamHopState, resetStreamHops)
 		eventId = resetEventId
 		streamHopState = resetStreamHops

@@ -2934,6 +2934,9 @@ func ForceCloseOpenContractIds(
 	closeCount int64,
 	err error,
 ) {
+	if parallel <= 0 {
+		return 0, fmt.Errorf("force close parallelism must be positive: %d", parallel)
+	}
 
 	/*
 		// force close contracts where there is nothing to do
@@ -3013,11 +3016,20 @@ func ForceCloseOpenContractIds(
 	}
 
 	openContracts := []*OpenContract{}
+	openContractIndexes := map[server.Id]int{}
 	// cooperatively partition contracts across the block tasks
 	appendBlockOpenContract := func(openContract *OpenContract) {
 		if 0 < blockSize && int(openContract.contractId.Hash()%uint64(blockSize)) != blockIndex%blockSize {
 			return
 		}
+		if index, ok := openContractIndexes[openContract.contractId]; ok {
+			// The open and dispute scans are separate. A contract can enter
+			// dispute between them; retain only the newer disputed snapshot so
+			// two workers never race to finalize the same contract.
+			openContracts[index] = openContract
+			return
+		}
+		openContractIndexes[openContract.contractId] = len(openContracts)
 		openContracts = append(openContracts, openContract)
 	}
 
@@ -3221,7 +3233,9 @@ func ForceCloseOpenContractIds(
 			}
 
 		} else if openContract.sourceCloseTime == nil {
-			// source accepts destination
+			// Source accepts destination. A lone destination checkpoint must
+			// also be made final; adding the missing source close alone leaves
+			// one checkpoint row and therefore cannot settle the contract.
 			recordForceCloseContract("source accepts destination", tag)
 
 			err := CloseContract(
@@ -3234,9 +3248,22 @@ func ForceCloseOpenContractIds(
 			if err != nil {
 				return err
 			}
+			if *openContract.destinationCheckpoint {
+				err = CloseContract(
+					ctx,
+					openContract.contractId,
+					openContract.destinationId,
+					ByteCount(0),
+					false,
+				)
+				if err != nil {
+					return err
+				}
+			}
 
 		} else if openContract.destinationCloseTime == nil {
-			// destination accepts source
+			// Destination accepts source. Mirror the checkpoint finalization
+			// above so either one-sided orientation converges in one sweep.
 			recordForceCloseContract("destination accepts source", tag)
 
 			err := CloseContract(
@@ -3248,6 +3275,18 @@ func ForceCloseOpenContractIds(
 			)
 			if err != nil {
 				return err
+			}
+			if *openContract.sourceCheckpoint {
+				err = CloseContract(
+					ctx,
+					openContract.contractId,
+					openContract.sourceId,
+					ByteCount(0),
+					false,
+				)
+				if err != nil {
+					return err
+				}
 			}
 
 		} else if *openContract.sourceCheckpoint || *openContract.destinationCheckpoint {
@@ -3298,6 +3337,52 @@ func ForceCloseOpenContractIds(
 		return nil
 	}
 
+	runForceClose := func(do func() error) (runErr error) {
+		var callErr error
+		recovered := server.HandleError(func() {
+			callErr = do()
+		})
+		if recovered == nil {
+			return callErr
+		}
+		switch value := recovered.(type) {
+		case error:
+			return value
+		default:
+			return fmt.Errorf("%v", value)
+		}
+	}
+
+	removeFinalizedContractFromStream := func(openContract *OpenContract) error {
+		found := false
+		finalized := false
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+                    SELECT outcome IS NOT NULL
+                    FROM transfer_contract
+                    WHERE contract_id = $1
+                `,
+				openContract.contractId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					found = true
+					server.Raise(result.Scan(&finalized))
+				}
+			})
+		})
+		if !found {
+			return fmt.Errorf("contract disappeared before force-close verification")
+		}
+		if !finalized {
+			return fmt.Errorf("contract remained non-final after force-close attempt")
+		}
+		RemoveFromStream(ctx, openContract.contractId)
+		return nil
+	}
+
 	nextIndex := 0
 	var nextIndexLock sync.Mutex
 	getAndIncrNextIndex := func() int {
@@ -3309,35 +3394,67 @@ func ForceCloseOpenContractIds(
 		return i
 	}
 
+	contractErrors := make([]error, len(openContracts))
+	workerErrors := make(chan error, parallel)
 	var wg sync.WaitGroup
 
 	for range parallel {
 		wg.Add(1)
-		go server.HandleError(func() {
+		go func() {
 			defer wg.Done()
-			for j := getAndIncrNextIndex(); j < len(openContracts); j = getAndIncrNextIndex() {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
+			recovered := server.HandleError(func() {
+				for j := getAndIncrNextIndex(); j < len(openContracts); j = getAndIncrNextIndex() {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
 
-				server.HandleError(func() {
 					openContract := openContracts[j]
 					tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
-					err := closeContract(tag, openContracts[j])
-					if err != nil {
-						// glog.Infof("%sforce close contract err = %s\n", tag, err)
-						closeMalformedContract(tag, openContract, err)
+					closeErr := runForceClose(func() error {
+						return closeContract(tag, openContract)
+					})
+					if closeErr != nil {
+						quarantineErr := runForceClose(func() error {
+							closeMalformedContract(tag, openContract, closeErr)
+							return nil
+						})
+						closeErr = errors.Join(closeErr, quarantineErr)
 					}
-				})
+
+					streamErr := runForceClose(func() error {
+						return removeFinalizedContractFromStream(openContract)
+					})
+					contractErrors[j] = errors.Join(closeErr, streamErr)
+				}
+			})
+			if recovered != nil {
+				switch value := recovered.(type) {
+				case error:
+					workerErrors <- value
+				default:
+					workerErrors <- fmt.Errorf("%v", value)
+				}
 			}
-		})
+		}()
 	}
 
 	wg.Wait()
+	close(workerErrors)
 
 	closeCount += int64(len(openContracts))
+	for index, contractErr := range contractErrors {
+		if contractErr != nil {
+			err = errors.Join(err, fmt.Errorf("force close contract %s at index %d: %w", openContracts[index].contractId, index, contractErr))
+		}
+	}
+	for workerErr := range workerErrors {
+		err = errors.Join(err, fmt.Errorf("force close worker: %w", workerErr))
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = errors.Join(err, ctxErr)
+	}
 
 	return
 }

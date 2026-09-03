@@ -568,13 +568,17 @@ type StPoolState struct {
 }
 
 type StFleetBindingState struct {
-	Active     bool
-	FleetId    [32]byte
-	Hotkey     [32]byte
-	Generation uint64
-	ValidFrom  uint64
-	ValidTo    uint64
-	Uid        uint16
+	Active         bool
+	FleetId        [32]byte
+	Hotkey         [32]byte
+	ClientKey      [32]byte
+	CommitmentHash [32]byte
+	Generation     uint64
+	ValidFrom      uint64
+	ValidTo        uint64
+	CleanedAtEpoch uint64
+	Uid            uint16
+	Cleaned        bool
 }
 
 // StClient is the single swappable interface behind which all subtensor
@@ -628,10 +632,10 @@ type StClient interface {
 	// PoolState reads the per-(epoch, noId) settlement state.
 	PoolState(ctx context.Context, epoch uint64, noId uint64) (*StPoolState, error)
 	BindingAt(ctx context.Context, clientId [16]byte, epoch uint64) (*StFleetBindingState, error)
-	// BindingsAt reads every client at one finalized block in bounded JSON-RPC
-	// batches. Settlement uses this surface so provider count does not multiply
-	// physical requests against a rate-limited public endpoint.
-	BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64) ([]*StFleetBindingState, error)
+	// Reads every client at both finalized epoch boundaries in bounded JSON-RPC
+	// batches. A binding active at either boundary is active for payout
+	// exclusion across the complete closed epoch.
+	BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64, startBlock uint64, closeBlock uint64) ([]*StFleetBindingState, error)
 	EpochDeposit(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error)
 	ConvictionBeforeEpoch(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error)
 }
@@ -1892,12 +1896,30 @@ func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 	}, nil
 }
 
+// Reads one binding at the latest finalized head. Release settlement uses the
+// explicit two-boundary batch surface below instead of this convenience path.
 func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoch uint64) (*StFleetBindingState, error) {
-	bindings, err := self.BindingsAt(ctx, [][16]byte{clientId}, epoch)
-	if err != nil {
-		return nil, err
+	if self.coordinator == nil {
+		return &StFleetBindingState{}, nil
 	}
-	return bindings[0], nil
+	finalized, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finalized binding head: %w", err)
+	}
+	var binding *StFleetBindingState
+	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+		bindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, finalized.Number, [][16]byte{clientId}, epoch)
+		if err != nil {
+			return err
+		}
+		merged, err := stMergeBindingBoundaries(bindings, bindings, epoch)
+		if err != nil {
+			return err
+		}
+		binding = merged[0]
+		return nil
+	})
+	return binding, err
 }
 
 // stReadBindingsAt performs bounded eth_call batches against an already
@@ -1952,17 +1974,79 @@ func stReadBindingsAt(
 			}
 			bindings[absolute] = &StFleetBindingState{
 				Active: out.Active, FleetId: out.Record.FleetId, Hotkey: out.Record.Hotkey,
+				ClientKey: out.Record.ClientKey, CommitmentHash: out.Record.CommitmentHash,
 				Generation: out.Record.Generation, ValidFrom: out.Record.ValidFromEpoch,
-				ValidTo: out.Record.ValidToEpoch, Uid: out.Record.Uid,
+				ValidTo: out.Record.ValidToEpoch, CleanedAtEpoch: out.Record.CleanedAtEpoch,
+				Uid: out.Record.Uid, Cleaned: out.Record.Cleaned,
 			}
 		}
 	}
 	return bindings, nil
 }
 
-// BindingsAt selects exactly one finalized head, then reads every requested
-// binding at that block. An empty input is a valid zero-work settlement case.
-func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64) ([]*StFleetBindingState, error) {
+// Keeps an epoch head-excluded when the runtime identity was live at either
+// exact boundary. Two active responses must name the same immutable binding;
+// otherwise the archive evidence is contradictory.
+func stMergeBindingBoundaries(startBindings []*StFleetBindingState, closeBindings []*StFleetBindingState, epoch uint64) ([]*StFleetBindingState, error) {
+	if len(startBindings) != len(closeBindings) {
+		return nil, fmt.Errorf("binding boundary row counts differ: start=%d close=%d", len(startBindings), len(closeBindings))
+	}
+	identityMatches := func(a *StFleetBindingState, b *StFleetBindingState) bool {
+		return a.FleetId == b.FleetId && a.Hotkey == b.Hotkey && a.ClientKey == b.ClientKey &&
+			a.CommitmentHash == b.CommitmentHash && a.Generation == b.Generation &&
+			a.ValidFrom == b.ValidFrom && a.ValidTo == b.ValidTo && a.Uid == b.Uid
+	}
+	validateActive := func(boundary string, index int, binding *StFleetBindingState) error {
+		if !binding.Active {
+			return nil
+		}
+		if binding.FleetId == ([32]byte{}) || binding.Hotkey == ([32]byte{}) || binding.ClientKey == ([32]byte{}) ||
+			binding.CommitmentHash == ([32]byte{}) || binding.Generation == 0 || epoch < binding.ValidFrom || binding.ValidTo < epoch ||
+			(binding.Cleaned && (binding.CleanedAtEpoch == 0 || binding.CleanedAtEpoch <= epoch)) || (!binding.Cleaned && binding.CleanedAtEpoch != 0) {
+			return fmt.Errorf("%s binding boundary row %d is active with an impossible record", boundary, index)
+		}
+		return nil
+	}
+	bindings := make([]*StFleetBindingState, len(startBindings))
+	for index := range startBindings {
+		startBinding, closeBinding := startBindings[index], closeBindings[index]
+		if startBinding == nil || closeBinding == nil {
+			return nil, fmt.Errorf("binding boundary row %d is nil", index)
+		}
+		if err := validateActive("start", index, startBinding); err != nil {
+			return nil, err
+		}
+		if err := validateActive("close", index, closeBinding); err != nil {
+			return nil, err
+		}
+		if startBinding.Active && closeBinding.Active && !identityMatches(startBinding, closeBinding) {
+			return nil, fmt.Errorf("binding boundary row %d has divergent active records", index)
+		}
+		selected := closeBinding
+		if startBinding.Active {
+			selected = startBinding
+		}
+		merged := *selected
+		merged.Active = startBinding.Active || closeBinding.Active
+		bindings[index] = &merged
+	}
+	return bindings, nil
+}
+
+// Selects exactly one finalized head, proves the closed interval is immutable,
+// then reads every requested binding at both boundary blocks. An empty input
+// still performs the finality proof before returning zero rows.
+func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64, startBlock uint64, closeBlock uint64) ([]*StFleetBindingState, error) {
+	if closeBlock < startBlock {
+		return nil, fmt.Errorf("binding block window [%d,%d] is invalid", startBlock, closeBlock)
+	}
+	finalized, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finalized binding head: %w", err)
+	}
+	if finalized.Number < closeBlock {
+		return nil, fmt.Errorf("binding close block %d is ahead of finalized head %d", closeBlock, finalized.Number)
+	}
 	if len(clientIds) == 0 {
 		return []*StFleetBindingState{}, nil
 	}
@@ -1973,17 +2057,24 @@ func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, 
 		}
 		return bindings, nil
 	}
-	finalized, err := self.finalizedBlock(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("finalized binding head: %w", err)
-	}
 	var bindings []*StFleetBindingState
 	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
-		values, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, finalized.Number, clientIds, epoch)
+		startBindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, startBlock, clientIds, epoch)
 		if err != nil {
 			return err
 		}
-		bindings = values
+		if startBlock == closeBlock {
+			bindings, err = stMergeBindingBoundaries(startBindings, startBindings, epoch)
+			return err
+		}
+		closeBindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, closeBlock, clientIds, epoch)
+		if err != nil {
+			return err
+		}
+		bindings, err = stMergeBindingBoundaries(startBindings, closeBindings, epoch)
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 	return bindings, err
@@ -2767,7 +2858,7 @@ func stComputeReleasePayout(
 	for index, usage := range usages {
 		clientIds[index] = stId16(usage.ClientId)
 	}
-	bindings, err := client.BindingsAt(ctx, clientIds, epoch)
+	bindings, err := client.BindingsAt(ctx, clientIds, epoch, startBlock, closeBlock)
 	if err != nil {
 		return [32]byte{}, 0, fmt.Errorf("bindingAt batch: %w", err)
 	}

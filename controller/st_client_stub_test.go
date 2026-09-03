@@ -135,7 +135,7 @@ func (self *stubStClient) BindingAt(context.Context, [16]byte, uint64) (*StFleet
 	return &StFleetBindingState{}, nil
 }
 
-func (self *stubStClient) BindingsAt(_ context.Context, clientIds [][16]byte, _ uint64) ([]*StFleetBindingState, error) {
+func (self *stubStClient) BindingsAt(_ context.Context, clientIds [][16]byte, _ uint64, _ uint64, _ uint64) ([]*StFleetBindingState, error) {
 	bindings := make([]*StFleetBindingState, len(clientIds))
 	for index := range bindings {
 		bindings[index] = &StFleetBindingState{}

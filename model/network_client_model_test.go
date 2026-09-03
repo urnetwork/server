@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	mathrand "math/rand"
 	"testing"
@@ -2165,10 +2166,12 @@ func TestFindActiveClientNetwork(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		_, err = FindActiveClientNetwork(ctx, clientId)
 		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, errors.Is(err, ErrActiveClientNotFound), true)
 
 		// deleted client
 		_, err = FindActiveClientNetwork(ctx, server.NewId())
 		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, errors.Is(err, ErrActiveClientNotFound), true)
 	})
 }
 

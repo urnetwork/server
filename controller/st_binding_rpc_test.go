@@ -29,28 +29,36 @@ type stBindingBatchRPC struct {
 	address     common.Address
 	finalized   uint64
 	epoch       uint64
+	startBlock  uint64
+	closeBlock  uint64
 	malformedID byte
+	malformedAt uint64
 	errorID     byte
+	errorAt     uint64
+	stateAt     func([16]byte, uint64) *StFleetBindingState
 
 	stateLock      sync.Mutex
 	batchSizes     []int
+	batchBlocks    []uint64
 	finalizedCalls int
 }
 
 func stBindingFixtureState(clientId [16]byte) *StFleetBindingState {
-	var fleetId, hotkey [32]byte
+	var fleetId, hotkey, clientKey, commitmentHash [32]byte
 	fleetId[0], hotkey[0] = clientId[0], clientId[0]^0xff
+	clientKey[0], clientKey[1] = clientId[0], 0xaa
+	commitmentHash[0], commitmentHash[1] = clientId[0], 0x55
 	return &StFleetBindingState{
-		Active: clientId[0]%2 == 0, FleetId: fleetId, Hotkey: hotkey,
+		Active: clientId[0]%2 == 0, FleetId: fleetId, Hotkey: hotkey, ClientKey: clientKey, CommitmentHash: commitmentHash,
 		Generation: uint64(clientId[0]) + 100, ValidFrom: 7, ValidTo: 77,
 		Uid: uint16(clientId[0]) + 20,
 	}
 }
 
-func (self *stBindingBatchRPC) snapshot() ([]int, int) {
+func (self *stBindingBatchRPC) snapshot() ([]int, []uint64, int) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return append([]int(nil), self.batchSizes...), self.finalizedCalls
+	return append([]int(nil), self.batchSizes...), append([]uint64(nil), self.batchBlocks...), self.finalizedCalls
 }
 
 // ServeHTTP reverses batch responses to prove that JSON-RPC ids, rather than
@@ -93,9 +101,6 @@ func (self *stBindingBatchRPC) ServeHTTP(writer http.ResponseWriter, request *ht
 		self.t.Errorf("invalid binding RPC batch: %s", body)
 		return
 	}
-	self.stateLock.Lock()
-	self.batchSizes = append(self.batchSizes, len(calls))
-	self.stateLock.Unlock()
 	coordinator := stabi.NewSTCoordinator()
 	selector := coordinator.PackBindingAt([16]byte{}, new(big.Int))[:4]
 	parsed, err := stabi.STCoordinatorMetaData.ParseABI()
@@ -115,9 +120,16 @@ func (self *stBindingBatchRPC) ServeHTTP(writer http.ResponseWriter, request *ht
 			return
 		}
 		calldata, decodeErr := hexutil.Decode(callArgs.Data)
-		if decodeErr != nil || len(calldata) != 68 || !bytes.Equal(calldata[:4], selector) || !strings.EqualFold(callArgs.To, self.address.Hex()) || blockTag != hexutil.EncodeUint64(self.finalized) {
+		block, blockErr := hexutil.DecodeUint64(blockTag)
+		if decodeErr != nil || blockErr != nil || len(calldata) != 68 || !bytes.Equal(calldata[:4], selector) || !strings.EqualFold(callArgs.To, self.address.Hex()) || (block != self.startBlock && block != self.closeBlock) {
 			self.t.Errorf("invalid binding call %d to=%s block=%s data=%s error=%v", index, callArgs.To, blockTag, callArgs.Data, decodeErr)
 			return
+		}
+		if index == 0 {
+			self.stateLock.Lock()
+			self.batchSizes = append(self.batchSizes, len(calls))
+			self.batchBlocks = append(self.batchBlocks, block)
+			self.stateLock.Unlock()
 		}
 		if new(big.Int).SetBytes(calldata[36:68]).Uint64() != self.epoch {
 			self.t.Errorf("binding call %d epoch mismatch", index)
@@ -126,22 +138,23 @@ func (self *stBindingBatchRPC) ServeHTTP(writer http.ResponseWriter, request *ht
 		var clientId [16]byte
 		copy(clientId[:], calldata[4:20])
 		response := map[string]any{"jsonrpc": "2.0", "id": call.ID}
-		switch clientId[0] {
-		case self.errorID:
-			if self.errorID != 0 {
-				response["error"] = map[string]any{"code": -32000, "message": "binding unavailable"}
-				break
-			}
-			fallthrough
-		default:
-			if self.malformedID != 0 && clientId[0] == self.malformedID {
-				response["result"] = "0x01"
-				break
-			}
+		if self.errorID != 0 && clientId[0] == self.errorID && (self.errorAt == 0 || block == self.errorAt) {
+			response["error"] = map[string]any{"code": -32000, "message": "binding unavailable"}
+		} else if self.malformedID != 0 && clientId[0] == self.malformedID && (self.malformedAt == 0 || block == self.malformedAt) {
+			response["result"] = "0x01"
+		} else {
 			state := stBindingFixtureState(clientId)
+			if self.stateAt != nil {
+				state = self.stateAt(clientId, block)
+			}
+			if state == nil {
+				self.t.Errorf("nil binding fixture state for client %x at block %d", clientId, block)
+				return
+			}
 			record := stabi.STCoordinatorBindingRecord{
-				FleetId: state.FleetId, Hotkey: state.Hotkey, Generation: state.Generation,
-				ValidFromEpoch: state.ValidFrom, ValidToEpoch: state.ValidTo, Uid: state.Uid,
+				FleetId: state.FleetId, Hotkey: state.Hotkey, ClientKey: state.ClientKey, CommitmentHash: state.CommitmentHash,
+				Generation: state.Generation, ValidFromEpoch: state.ValidFrom, ValidToEpoch: state.ValidTo,
+				CleanedAtEpoch: state.CleanedAtEpoch, Uid: state.Uid, Cleaned: state.Cleaned,
 			}
 			encoded, packErr := parsed.Methods["bindingAt"].Outputs.Pack(state.Active, record)
 			if packErr != nil {
@@ -166,25 +179,27 @@ func newStBindingBatchClient(t testing.TB, fixture *stBindingBatchRPC) *CoreStCl
 }
 
 // A release-sized operator snapshot must use exactly one finalized-head read
-// and three physical eth_call batches for 120 clients, preserving order even
-// when the endpoint reverses every JSON-RPC response array.
+// and three physical eth_call batches per boundary for 120 clients, preserving
+// order even when the endpoint reverses every JSON-RPC response array.
 func TestCoreStClientBindingsAtUsesOneFinalizedHeadAndBoundedBatches(t *testing.T) {
 	fixture := &stBindingBatchRPC{
 		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
-		finalized: 999, epoch: 41,
+		finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
 	}
 	client := newStBindingBatchClient(t, fixture)
 	clientIds := make([][16]byte, 120)
 	for index := range clientIds {
 		clientIds[index][0] = byte(index + 1)
 	}
-	bindings, err := client.BindingsAt(context.Background(), clientIds, fixture.epoch)
+	bindings, err := client.BindingsAt(context.Background(), clientIds, fixture.epoch, fixture.startBlock, fixture.closeBlock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	batchSizes, finalizedCalls := fixture.snapshot()
-	if !slices.Equal(batchSizes, []int{50, 50, 20}) || finalizedCalls != 1 || len(bindings) != len(clientIds) {
-		t.Fatalf("batch sizes/finalized calls/bindings=%v/%d/%d, want [50 50 20]/1/%d", batchSizes, finalizedCalls, len(bindings), len(clientIds))
+	batchSizes, batchBlocks, finalizedCalls := fixture.snapshot()
+	wantSizes := []int{50, 50, 20, 50, 50, 20}
+	wantBlocks := []uint64{fixture.startBlock, fixture.startBlock, fixture.startBlock, fixture.closeBlock, fixture.closeBlock, fixture.closeBlock}
+	if !slices.Equal(batchSizes, wantSizes) || !slices.Equal(batchBlocks, wantBlocks) || finalizedCalls != 1 || len(bindings) != len(clientIds) {
+		t.Fatalf("batch sizes/blocks/finalized calls/bindings=%v/%v/%d/%d, want %v/%v/1/%d", batchSizes, batchBlocks, finalizedCalls, len(bindings), wantSizes, wantBlocks, len(clientIds))
 	}
 	for index, clientId := range clientIds {
 		if want := stBindingFixtureState(clientId); *bindings[index] != *want {
@@ -193,13 +208,109 @@ func TestCoreStClientBindingsAtUsesOneFinalizedHeadAndBoundedBatches(t *testing.
 	}
 }
 
-// Empty, ABI-malformed, and element-error responses are adjacent public-RPC
-// cases: zero work must consume no endpoint call, while incomplete evidence
-// must fail the entire settlement snapshot rather than silently unexclude a
-// head miner.
-func TestCoreStClientBindingsAtEmptyAndMalformedResponsesFailClosed(t *testing.T) {
-	if bindings, err := (&CoreStClient{}).BindingsAt(context.Background(), nil, 1); err != nil || len(bindings) != 0 {
-		t.Fatalf("empty bindings=%v error=%v", bindings, err)
+// A fleet which loses its runtime UID before close still received head-tier
+// emission earlier in the epoch, so the boundary OR must keep it excluded.
+func TestCoreStClientBindingsAtKeepsActiveStartPrunedCloseExcluded(t *testing.T) {
+	fixture := &stBindingBatchRPC{
+		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+		finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
+	}
+	fixture.stateAt = func(clientId [16]byte, block uint64) *StFleetBindingState {
+		state := stBindingFixtureState(clientId)
+		state.Active = block == fixture.startBlock
+		return state
+	}
+	client := newStBindingBatchClient(t, fixture)
+	bindings, err := client.BindingsAt(context.Background(), [][16]byte{{2}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0] == nil || !bindings[0].Active || bindings[0].Generation != 102 {
+		t.Fatalf("pruned close binding=%+v, want start identity retained and active", bindings)
+	}
+	batchSizes, batchBlocks, finalizedCalls := fixture.snapshot()
+	if !slices.Equal(batchSizes, []int{1, 1}) || !slices.Equal(batchBlocks, []uint64{700, 800}) || finalizedCalls != 1 {
+		t.Fatalf("boundary reads=%v/%v finalized=%d", batchSizes, batchBlocks, finalizedCalls)
+	}
+}
+
+// A client inactive at both boundaries is no longer head-paid and therefore
+// remains available for the following epoch's ordinary pool payout path.
+func TestCoreStClientBindingsAtInactiveThroughoutAllowsNextEpochFallback(t *testing.T) {
+	fixture := &stBindingBatchRPC{
+		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+		finalized: 999, epoch: 42, startBlock: 801, closeBlock: 900,
+		stateAt: func(clientId [16]byte, _ uint64) *StFleetBindingState {
+			state := stBindingFixtureState(clientId)
+			state.Active = false
+			return state
+		},
+	}
+	client := newStBindingBatchClient(t, fixture)
+	bindings, err := client.BindingsAt(context.Background(), [][16]byte{{2}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0] == nil || bindings[0].Active {
+		t.Fatalf("inactive boundary binding=%+v, want pool fallback", bindings)
+	}
+}
+
+// Two active reads for the same client and epoch cannot legitimately identify
+// different signed bindings; accepting either would let an endpoint substitute
+// the payout-exclusion generation.
+func TestCoreStClientBindingsAtRejectsDivergentActiveRecords(t *testing.T) {
+	fixture := &stBindingBatchRPC{
+		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+		finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
+	}
+	fixture.stateAt = func(clientId [16]byte, block uint64) *StFleetBindingState {
+		state := stBindingFixtureState(clientId)
+		state.Active = true
+		if block == fixture.closeBlock {
+			state.CommitmentHash[31]++
+		}
+		return state
+	}
+	client := newStBindingBatchClient(t, fixture)
+	bindings, err := client.BindingsAt(context.Background(), [][16]byte{{2}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+	if err == nil || bindings != nil || !strings.Contains(err.Error(), "divergent active records") {
+		t.Fatalf("divergent active records accepted: bindings=%v error=%v", bindings, err)
+	}
+}
+
+// Active=true with a record outside the queried epoch is an impossible ABI
+// combination and cannot be used as conservative exclusion evidence.
+func TestCoreStClientBindingsAtRejectsImpossibleActiveRecord(t *testing.T) {
+	fixture := &stBindingBatchRPC{
+		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+		finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
+		stateAt: func(clientId [16]byte, _ uint64) *StFleetBindingState {
+			state := stBindingFixtureState(clientId)
+			state.Active = true
+			state.ValidFrom = 42
+			return state
+		},
+	}
+	client := newStBindingBatchClient(t, fixture)
+	bindings, err := client.BindingsAt(context.Background(), [][16]byte{{2}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+	if err == nil || bindings != nil || !strings.Contains(err.Error(), "impossible record") {
+		t.Fatalf("impossible active record accepted: bindings=%v error=%v", bindings, err)
+	}
+}
+
+// Empty input still proves finality, while malformed ABI and element errors
+// fail the complete snapshot rather than silently unexcluding a head miner.
+func TestCoreStClientBindingsAtEmptyMalformedAndErrorFailClosed(t *testing.T) {
+	emptyFixture := &stBindingBatchRPC{
+		t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+		finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
+	}
+	emptyClient := newStBindingBatchClient(t, emptyFixture)
+	bindings, err := emptyClient.BindingsAt(context.Background(), nil, emptyFixture.epoch, emptyFixture.startBlock, emptyFixture.closeBlock)
+	batchSizes, _, finalizedCalls := emptyFixture.snapshot()
+	if err != nil || len(bindings) != 0 || len(batchSizes) != 0 || finalizedCalls != 1 {
+		t.Fatalf("empty bindings=%v error=%v batches=%v finalized=%d", bindings, err, batchSizes, finalizedCalls)
 	}
 	for _, testCase := range []struct {
 		name        string
@@ -209,15 +320,40 @@ func TestCoreStClientBindingsAtEmptyAndMalformedResponsesFailClosed(t *testing.T
 		{name: "malformed ABI", malformedID: 2},
 		{name: "element RPC error", errorID: 2},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			fixture := &stBindingBatchRPC{
-				t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
-				finalized: 999, epoch: 41, malformedID: testCase.malformedID, errorID: testCase.errorID,
-			}
-			client := newStBindingBatchClient(t, fixture)
-			if bindings, err := client.BindingsAt(context.Background(), [][16]byte{{1}, {2}, {3}}, fixture.epoch); err == nil || bindings != nil {
-				t.Fatalf("incomplete binding snapshot accepted: bindings=%v error=%v", bindings, err)
-			}
-		})
+		fixture := &stBindingBatchRPC{
+			t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+			finalized: 999, epoch: 41, startBlock: 700, closeBlock: 800,
+			malformedID: testCase.malformedID, malformedAt: 800, errorID: testCase.errorID, errorAt: 800,
+		}
+		client := newStBindingBatchClient(t, fixture)
+		bindings, err := client.BindingsAt(context.Background(), [][16]byte{{1}, {2}, {3}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+		if err == nil || bindings != nil {
+			t.Fatalf("%s response accepted: bindings=%v error=%v", testCase.name, bindings, err)
+		}
+	}
+}
+
+// Reversed windows fail before any RPC; a close past the finalized head fails
+// after exactly the one proof read and before either boundary batch.
+func TestCoreStClientBindingsAtRejectsInvalidBounds(t *testing.T) {
+	for _, testCase := range []struct {
+		name               string
+		startBlock         uint64
+		closeBlock         uint64
+		wantFinalizedCalls int
+	}{
+		{name: "reversed", startBlock: 801, closeBlock: 800, wantFinalizedCalls: 0},
+		{name: "unfinalized close", startBlock: 800, closeBlock: 1000, wantFinalizedCalls: 1},
+	} {
+		fixture := &stBindingBatchRPC{
+			t: t, address: common.HexToAddress("0x2000000000000000000000000000000000000002"),
+			finalized: 999, epoch: 41, startBlock: testCase.startBlock, closeBlock: testCase.closeBlock,
+		}
+		client := newStBindingBatchClient(t, fixture)
+		bindings, err := client.BindingsAt(context.Background(), [][16]byte{{2}}, fixture.epoch, fixture.startBlock, fixture.closeBlock)
+		batchSizes, _, finalizedCalls := fixture.snapshot()
+		if err == nil || bindings != nil || len(batchSizes) != 0 || finalizedCalls != testCase.wantFinalizedCalls {
+			t.Fatalf("%s bounds accepted: bindings=%v error=%v batches=%v finalized=%d", testCase.name, bindings, err, batchSizes, finalizedCalls)
+		}
 	}
 }

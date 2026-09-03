@@ -72,4 +72,15 @@ jobs:
       # failure that actually happens when a model signature changes.
       - name: Compile tests
         working-directory: server
-        run: go test -run 'XXX_NO_SUCH_TEST' -count=1 ./...
+        run: |
+          set -euo pipefail
+          # The immutable sim-latency baseline contains archived standalone
+          # *_test.go reference sources which deliberately are not packages in
+          # the current server module. Verify that archive through its signed
+          # manifest, then compile every executable package exactly as the
+          # release gate does.
+          ./connect/sim-latency/baseline/verify.sh
+          package_list="$(go list ./... | grep -v '^github\.com/urnetwork/server/connect/sim-latency/baseline/')"
+          [[ -n "$package_list" ]]
+          mapfile -t packages <<<"$package_list"
+          go test -run 'XXX_NO_SUCH_TEST' -count=1 "${packages[@]}"

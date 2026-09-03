@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1699,6 +1700,79 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 	})
 }
 
+// Prevents a no-worker sweep from reporting success without processing any
+// selected contracts.
+func TestForceCloseRequiresPositiveParallelism(t *testing.T) {
+	_, err := ForceCloseOpenContractIds(context.Background(), time.Now(), 10, 0, 0, 0)
+	connect.AssertNotEqual(t, nil, err)
+	connect.AssertEqual(t, true, strings.Contains(err.Error(), "parallelism must be positive"))
+}
+
+// Covers both one-sided checkpoint orientations emitted when a transfer
+// stops before the peer writes any close row. The sweep must preserve the
+// checkpoint usage, synthesize the matching close, finalize the checkpoint,
+// and remove the Redis route in one pass.
+func TestForceCloseOneSidedCheckpointFinalizesBothOrientations(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkIdA := server.NewId()
+		clientIdA := server.NewId()
+		networkIdB := server.NewId()
+		clientIdB := server.NewId()
+		Testing_CreateNetwork(ctx, networkIdA, "a", server.NewId())
+		Testing_CreateNetwork(ctx, networkIdB, "b", server.NewId())
+
+		const initialTransferBalance = ByteCount(30 * 1024 * 1024 * 1024)
+		const usedTransferByteCount = ByteCount(512 * 1024)
+		AddBasicTransferBalance(
+			ctx,
+			networkIdA,
+			initialTransferBalance,
+			server.NowUtc(),
+			server.NowUtc().Add(30*24*time.Hour),
+		)
+
+		checkpointClientIds := []server.Id{clientIdA, clientIdB}
+		contractIds := make([]server.Id, 0, len(checkpointClientIds))
+		for _, checkpointClientId := range checkpointClientIds {
+			contractId, _, err := CreateContract(
+				ctx,
+				networkIdA,
+				clientIdA,
+				networkIdB,
+				clientIdB,
+				ByteCount(1024*1024),
+			)
+			connect.AssertEqual(t, nil, err)
+			connect.AssertEqual(t, nil, CloseContract(ctx, contractId, checkpointClientId, usedTransferByteCount, true))
+			AddToStream(ctx, contractId, clientIdA, clientIdB, nil)
+			contractIds = append(contractIds, contractId)
+		}
+
+		closeCount, err := ForceCloseOpenContractIds(ctx, time.Now().Add(time.Second), 10, 1, 0, 0)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, int64(len(contractIds)), closeCount)
+		for _, contractId := range contractIds {
+			contractClose, closed := GetContractClose(ctx, contractId)
+			connect.AssertEqual(t, true, closed)
+			connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
+			_, _, streamFound := GetStream(ctx, contractId)
+			connect.AssertEqual(t, false, streamFound)
+		}
+
+		transferBalances := GetActiveTransferBalances(ctx, networkIdA)
+		remainingTransferBalance := ByteCount(0)
+		for _, transferBalance := range transferBalances {
+			remainingTransferBalance += transferBalance.BalanceByteCount
+		}
+		connect.AssertEqual(
+			t,
+			initialTransferBalance-ByteCount(len(contractIds))*usedTransferByteCount,
+			remainingTransferBalance,
+		)
+	})
+}
+
 // TestForceCloseDisputedContract verifies the expiry task settles disputed
 // contracts. A dispute (close byte counts diverging beyond
 // `AcceptableTransfersByteDifference`) takes the contract out of the `open`
@@ -1733,6 +1807,9 @@ func TestForceCloseDisputedContract(t *testing.T) {
 			ByteCount(1024*1024*1024),
 		)
 		connect.AssertEqual(t, nil, err)
+		AddToStream(ctx, contractId, clientIdA, clientIdB, nil)
+		_, _, streamFound := GetStream(ctx, contractId)
+		connect.AssertEqual(t, true, streamFound)
 
 		// close with byte counts that diverge beyond the acceptable difference
 		sourceUsed := ByteCount(0)
@@ -1753,6 +1830,8 @@ func TestForceCloseDisputedContract(t *testing.T) {
 		connect.AssertEqual(t, true, closed)
 		connect.AssertEqual(t, false, contractClose.Dispute)
 		connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
+		_, _, streamFound = GetStream(ctx, contractId)
+		connect.AssertEqual(t, false, streamFound)
 
 		// the escrow is settled with the average of the two sides,
 		// and the rest is returned to the payer's balance
@@ -1769,6 +1848,120 @@ func TestForceCloseDisputedContract(t *testing.T) {
 		contractClose, closed = GetContractClose(ctx, contractId)
 		connect.AssertEqual(t, true, closed)
 		connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
+	})
+}
+
+// Covers an open contract whose two final close rows already exist. Direct
+// settlement must still remove the Redis route clients use for discovery.
+func TestForceCloseDirectSettlementRemovesStream(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		contractId, err := CreateContractNoEscrow(
+			ctx,
+			networkIdA,
+			clientIdA,
+			networkIdB,
+			clientIdB,
+			1024,
+		)
+		connect.AssertEqual(t, nil, err)
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, party := range []ContractParty{ContractPartySource, ContractPartyDestination} {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+                        INSERT INTO contract_close (
+                            contract_id,
+                            party,
+                            used_transfer_byte_count,
+                            close_time,
+                            checkpoint
+                        )
+                        VALUES ($1, $2, 0, $3, false)
+                    `,
+					contractId,
+					party,
+					server.NowUtc(),
+				))
+			}
+		}, server.TxReadCommitted)
+
+		AddToStream(ctx, contractId, clientIdA, clientIdB, nil)
+		_, _, streamFound := GetStream(ctx, contractId)
+		connect.AssertEqual(t, true, streamFound)
+
+		closeCount, err := ForceCloseOpenContractIds(ctx, time.Now().Add(time.Second), 10, 1, 0, 0)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, int64(1), closeCount)
+		contractClose, closed := GetContractClose(ctx, contractId)
+		connect.AssertEqual(t, true, closed)
+		connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
+		_, _, streamFound = GetStream(ctx, contractId)
+		connect.AssertEqual(t, false, streamFound)
+	})
+}
+
+// Verifies that a contract which cannot pay its recorded usage is quarantined
+// and removed from Redis, while the settlement failure is still returned.
+// The cleanup process must not certify a campaign that encountered this data.
+func TestForceCloseMalformedContractRemovesStreamAndReturnsError(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		const escrowByteCount = ByteCount(1024)
+		AddBasicTransferBalance(
+			ctx,
+			networkIdA,
+			escrowByteCount,
+			server.NowUtc(),
+			server.NowUtc().Add(24*time.Hour),
+		)
+		contractId, _, err := CreateContract(
+			ctx,
+			networkIdA,
+			clientIdA,
+			networkIdB,
+			clientIdB,
+			escrowByteCount,
+		)
+		connect.AssertEqual(t, nil, err)
+		AddToStream(ctx, contractId, clientIdA, clientIdB, nil)
+
+		const impossibleUsage = ByteCount(2 * escrowByteCount)
+		connect.AssertEqual(t, nil, CloseContract(ctx, contractId, clientIdA, impossibleUsage, false))
+		err = CloseContract(ctx, contractId, clientIdB, impossibleUsage, false)
+		connect.AssertNotEqual(t, nil, err)
+		_, closed := GetContractClose(ctx, contractId)
+		connect.AssertEqual(t, false, closed)
+		_, _, streamFound := GetStream(ctx, contractId)
+		connect.AssertEqual(t, true, streamFound)
+
+		closeCount, err := ForceCloseOpenContractIds(ctx, time.Now().Add(time.Second), 10, 1, 0, 0)
+		connect.AssertNotEqual(t, nil, err)
+		connect.AssertEqual(t, true, strings.Contains(err.Error(), "Escrow does not have enough value"))
+		connect.AssertEqual(t, int64(1), closeCount)
+		contractClose, closed := GetContractClose(ctx, contractId)
+		connect.AssertEqual(t, true, closed)
+		connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
+		_, _, streamFound = GetStream(ctx, contractId)
+		connect.AssertEqual(t, false, streamFound)
 	})
 }
 

@@ -39,6 +39,8 @@ func TestInitTasksReapsVerificationChainsWhileDisabled(t *testing.T) {
 		defer controller.SetVerifySettings(nil)
 		controller.SetStConfig(&controller.StConfig{Enabled: true})
 		defer controller.SetStConfig(nil)
+		controller.SetVerifySettings(model.DefaultVerifySettings())
+		defer controller.SetVerifySettings(model.DefaultVerifySettings())
 		server.Tx(ctx, func(tx server.PgTx) {
 			work.ScheduleSweepVerifyTrails(clientSession, tx)
 			work.ScheduleRollupVerifyProviderStats(clientSession, tx)

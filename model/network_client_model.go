@@ -50,6 +50,10 @@ const MaxClientRoleCount = 32
 const MaxClientRoleLength = 128
 const MaxClientPrincipalLength = 256
 
+// Identifies a missing or deactivated client. Authorization callers use
+// errors.Is to separate this terminal state from infrastructure failures.
+var ErrActiveClientNotFound = errors.New("Client does not exist.")
+
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
 
@@ -120,7 +124,7 @@ func FindActiveClientNetwork(
 			if result.Next() {
 				server.Raise(result.Scan(&networkId))
 			} else {
-				returnErr = fmt.Errorf("Client does not exist.")
+				returnErr = ErrActiveClientNotFound
 			}
 		})
 	})

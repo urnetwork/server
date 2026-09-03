@@ -486,6 +486,120 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 	})
 }
 
+// Ensures Redis-cached provide state cannot authorize a new contract after
+// either party is removed. An active destination with no connection row stays
+// eligible because durable identity activity, not connectivity, authorizes it.
+func TestCreateContractRejectsInactiveClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("inactive-contract-%s", networkId), server.NewId())
+
+		sourceId := server.NewId()
+		inactiveSourceId := server.NewId()
+		inactiveDestinationId := server.NewId()
+		activeDisconnectedId := server.NewId()
+		for _, clientId := range []server.Id{sourceId, inactiveSourceId, inactiveDestinationId, activeDisconnectedId} {
+			model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		}
+		secretKey := []byte("inactive-contract-network-key-00")
+		for _, destinationId := range []server.Id{inactiveDestinationId, activeDisconnectedId} {
+			model.SetProvide(ctx, destinationId, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: secretKey,
+			})
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET active = false WHERE client_id = ANY($1::uuid[])`,
+				[]string{inactiveSourceId.String(), inactiveDestinationId.String()},
+			))
+		})
+
+		decodeResult := func(requestSourceId server.Id, destinationId server.Id) *protocol.CreateContractResult {
+			frames, err := CreateContract(
+				ctx,
+				requestSourceId,
+				&protocol.CreateContract{
+					DestinationId:     destinationId.Bytes(),
+					TransferByteCount: uint64(1024 * 1024),
+				},
+				connect.DefaultContractManagerSettings(),
+			)
+			if err != nil {
+				t.Fatalf("create contract to %s: %v", destinationId, err)
+			}
+			if len(frames) != 1 {
+				t.Fatalf("create contract frame count = %d, want 1", len(frames))
+			}
+			message, err := connect.FromFrame(frames[0])
+			if err != nil {
+				t.Fatalf("decode create contract result: %v", err)
+			}
+			result, ok := message.(*protocol.CreateContractResult)
+			if !ok {
+				t.Fatalf("create contract response type = %T", message)
+			}
+			return result
+		}
+
+		inactiveResult := decodeResult(sourceId, inactiveDestinationId)
+		if inactiveResult.Error == nil || *inactiveResult.Error != protocol.ContractError_NoPermission {
+			t.Fatalf("inactive destination error = %v, want NoPermission", inactiveResult.Error)
+		}
+		if inactiveResult.Contract != nil {
+			t.Fatal("inactive destination received a contract")
+		}
+		inactiveSourceResult := decodeResult(inactiveSourceId, activeDisconnectedId)
+		if inactiveSourceResult.Error == nil || *inactiveSourceResult.Error != protocol.ContractError_NoPermission {
+			t.Fatalf("inactive source error = %v, want NoPermission", inactiveSourceResult.Error)
+		}
+		if inactiveSourceResult.Contract != nil {
+			t.Fatal("inactive source received a contract")
+		}
+
+		var inactiveContractCount int
+		var activeConnectionCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						(SELECT count(*) FROM transfer_contract
+							WHERE (source_id = $1 AND destination_id = $2)
+								OR (source_id = $3 AND destination_id = $4)),
+						(SELECT count(*) FROM network_client_connection WHERE client_id = $4)
+				`,
+				sourceId,
+				inactiveDestinationId,
+				inactiveSourceId,
+				activeDisconnectedId,
+			)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("missing contract and connection counts")
+				}
+				server.Raise(result.Scan(&inactiveContractCount, &activeConnectionCount))
+			})
+		})
+		if inactiveContractCount != 0 {
+			t.Fatalf("inactive destination contract count = %d, want 0", inactiveContractCount)
+		}
+		if activeConnectionCount != 0 {
+			t.Fatalf("active disconnected client has %d connection rows, want 0", activeConnectionCount)
+		}
+
+		activeResult := decodeResult(sourceId, activeDisconnectedId)
+		if activeResult.Error != nil {
+			t.Fatalf("active disconnected destination error = %v, want nil", *activeResult.Error)
+		}
+		if activeResult.Contract == nil {
+			t.Fatal("active disconnected destination did not receive a contract")
+		}
+	})
+}
+
 // TestCreateContractCompanionStreamId verifies that a companion contract is
 // marked with the origin flow's active stream id — the receive sequence on
 // the other side inspects the contract to know the stream is active — even

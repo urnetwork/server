@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -287,10 +286,7 @@ func TestVerifyControllerFullTrailFlow(t *testing.T) {
 // are fenced too, so a filter activation cannot complete one last proof for
 // the withheld fleet and make the boundary transition probabilistic.
 func TestVerifySimulationAssignmentFilterBlocksSeedPendingAndFutureAssignments(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "assignment-filter.json")
-	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
-	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
-	t.Setenv(VerifySimulationModeEnv, "1")
+	filterFixture := newVerifySimulationAssignmentFilterV2TestFixture(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
 		testVerifyInstallServerKey()
@@ -308,7 +304,14 @@ func TestVerifySimulationAssignmentFilterBlocksSeedPendingAndFutureAssignments(t
 		if !ok || server.Id(assign.NextHop) != targetProvider {
 			tb.Fatalf("unfiltered deterministic assignment=%+v, want target %s", result, targetProvider)
 		}
-		writeVerifySimulationAssignmentFilter(t, path, vpk, []server.Id{targetProvider})
+		filter := filterFixture.Filter
+		filter.Rules = []verifySimulationAssignmentFilterRuleV2{{
+			RuleID: "validator-local-head-boundary", ValidatorVPKs: verifySimulationAssignmentFilterTestEncodedVPKs(vpk),
+			ExcludedClientIDs: verifySimulationAssignmentFilterTestEncodedClientIDs(targetProvider),
+		}}
+		if err := writeVerifySimulationAssignmentFilterV2(filterFixture.Path, filter); err != nil {
+			tb.Fatal(err)
+		}
 		if _, err := Verify(testVerifyExtendArgs(tb, validatorID, vpk, vpkKey, assign), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
 			tb.Fatalf("already pending filtered hop was accepted: %v", err)
 		}
@@ -329,10 +332,7 @@ func TestVerifySimulationAssignmentFilterBlocksSeedPendingAndFutureAssignments(t
 }
 
 func TestVerifySimulationAssignmentFilterDoesNotAffectAnotherValidator(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "assignment-filter.json")
-	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
-	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
-	t.Setenv(VerifySimulationModeEnv, "1")
+	filterFixture := newVerifySimulationAssignmentFilterV2TestFixture(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
 		testVerifyInstallServerKey()
@@ -342,7 +342,14 @@ func TestVerifySimulationAssignmentFilterDoesNotAffectAnotherValidator(t *testin
 		target := testVerifyProvider(ctx, netip.MustParseAddr("198.51.100.20"), settings)
 		_, filteredVPK, _ := testVerifyValidator(ctx)
 		validatorID, independentVPK, independentKey := testVerifyValidator(ctx)
-		writeVerifySimulationAssignmentFilter(t, path, filteredVPK, []server.Id{target})
+		filter := filterFixture.Filter
+		filter.Rules = []verifySimulationAssignmentFilterRuleV2{{
+			RuleID: "validator-local-head-boundary", ValidatorVPKs: verifySimulationAssignmentFilterTestEncodedVPKs(filteredVPK),
+			ExcludedClientIDs: verifySimulationAssignmentFilterTestEncodedClientIDs(target),
+		}}
+		if err := writeVerifySimulationAssignmentFilterV2(filterFixture.Path, filter); err != nil {
+			tb.Fatal(err)
+		}
 
 		result, err := Verify(testVerifySeedArgs(tb, validatorID, independentVPK, independentKey, connect.VerifyMMin), testVerifySession(ctx, "198.51.100.10"))
 		if err != nil {
