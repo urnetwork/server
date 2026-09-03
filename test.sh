@@ -56,10 +56,7 @@ if [[ -d $baseline_dir ]]; then
     "$baseline_dir/verify.sh" || exit $?
 fi
 
-for d in `find . \
-    -path './connect/sim-latency/eval-*' -prune -o \
-    -path "$baseline_dir" -prune -o \
-    -iname '*_test.go' -print | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
+for d in `./test-dirs.sh`; do
     if [[ $d == $proxy_dir || $d == $perfvar_dir ]]; then
         # run separately above with each integration package's timing contract
         continue
