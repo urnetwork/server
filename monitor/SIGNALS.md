@@ -4351,23 +4351,28 @@ destination's current inactive bit would falsely include a healthy contract
 whose destination disconnected after creation. The probe also exports only
 aggregate same/cross-network, derived/top-level, active-top-level source,
 distinct endpoint counts, and median/p95 deactivation lead time. For the
-cross-network subset it additionally exports inactive top-level destination,
-derived source, active source-parent, distinct destination, distinct parent,
-and distinct device counts. Those bounded counts distinguish one retained
-client window from a fleet-wide producer without returning identifiers or
-contract content.
+same-network subset it exports distinct network, source-device, destination-
+parent, and destination-device counts; these distinguish one concentrated
+relationship/window boundary from a common failure distributed across several
+networks. For the cross-network subset it additionally exports inactive top-
+level destination, derived source, active source-parent, distinct destination,
+distinct parent, and distinct device counts. Those bounded counts distinguish
+one retained client window from a fleet-wide producer without returning
+identifiers or contract content.
 
 - HEALTHY: zero matching successful contracts on two consecutive five-minute
   cohorts, alongside both observable §2.18 rejection partitions.
 - `stale-contract-success` (PAGE immediately): one or more matching rows. A
   successful row is affirmative contract-correctness failure, not a noisy
   retry or inferred client error. Same-network derived-destination dominance
-  identifies the stale return-path class seen on 2026-09-02. Cross-network
-  rows to inactive top-level destinations from derived sources with active
-  parents can be a retained Public route. Concentration into one destination
-  and one parent/device, paired with bursts from fresh derived sources, is a
-  client-window discriminator; corroborate a bounded current score-cache
-  sample before ruling the cache in or out.
+  identifies the stale return-path class seen on 2026-09-02. Its bounded
+  network and parent/device cardinalities distinguish one retained relationship
+  from a systemic multi-window lifecycle failure. Cross-network rows to
+  inactive top-level destinations from derived sources with active parents can
+  be a retained Public route. Concentration into one destination and one
+  parent/device, paired with bursts from fresh derived sources, is a client-
+  window discriminator; corroborate a bounded current score-cache sample before
+  ruling the cache in or out.
 - UNKNOWN: the aggregate is absent, malformed, negative, internally
   contradictory, or its median exceeds its p95. Preserve that as observation
   failure rather than coercing it to zero.
@@ -4406,12 +4411,25 @@ the `c8dfe570` lifecycle guard first; a Connect-bearing client containing
 `5b33c91` then consumes the Reliability result and retires exactly that route.
 Do not delete the durable Public key or Redis data to hide the cohort.
 
+A `2026-09-03T09:51:50Z` identifier-free five-minute cohort resolved the
+dominant same-network attribution. All 2,536 successful stale contracts came
+from 11 active top-level source identities on 11 source devices across three
+networks. They targeted 117 inactive derived identities belonging to five
+destination parents/devices; median and p95 inactivity lead times were about
+7.96 and 8.07 days. This is not one retained Public route or one poisoned
+device: several same-network relationship windows are retaining old derived
+return paths. The common causal mechanism remains the pre-guard API accepting
+those routes as successes, which withholds the distinct Reliability result the
+fixed clients need to retire them. Preserve the ordered API-then-client repair;
+do not turn the aggregate cardinalities into customer identifiers or clear
+durable history.
+
 Implementation convention: SIGNALS.md §2.20 (`stale-contracts`) maps to
 `signal_stale_contracts.go` and `signal_stale_contracts_test.go`. Synthetic
 tests cover the exact inactive-before-create failure, a healthy zero cohort,
-the concentrated retained-client-route boundary, malformed and contradictory
-aggregates, query scoping, privacy boundaries, and detailed Markdown
-rendering.
+concentrated same-network and retained-Public-route boundaries, malformed and
+contradictory aggregates, query scoping, privacy boundaries, and detailed
+Markdown rendering.
 
 ---
 
