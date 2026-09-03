@@ -99,9 +99,9 @@ func TestComputePointsLeaderboardRanks(t *testing.T) {
 	inputs := []PointsNetworkInput{
 		// a: most points, 2 blocks (3, 4), streak 2
 		{NetworkId: a, TotalNanoPoints: PointsToNanoPoints(100), CreateTime: now.Add(-3 * time.Hour), EpochsWithPoints: set(3, 4)},
-		// b: same points as c, older network -> ahead of c on the tie-break; 4 blocks, streak 4
+		// b: same points as c; 4 blocks, streak 4 -> ahead of c on the streak tie-break
 		{NetworkId: b, TotalNanoPoints: PointsToNanoPoints(50), CreateTime: now.Add(-5 * time.Hour), EpochsWithPoints: set(1, 2, 3, 4)},
-		// c: same points as b, newer; 2 blocks (1, 2), streak 0
+		// c: same points as b; 2 blocks (1, 2), streak 0
 		{NetworkId: c, TotalNanoPoints: PointsToNanoPoints(50), CreateTime: now.Add(-1 * time.Hour), EpochsWithPoints: set(1, 2)},
 		// d: fewest points, 1 block (4), streak 1
 		{NetworkId: d, TotalNanoPoints: PointsToNanoPoints(1), CreateTime: now, EpochsWithPoints: set(4)},
@@ -114,27 +114,30 @@ func TestComputePointsLeaderboardRanks(t *testing.T) {
 
 	ea, eb, ec, ed := pointsTestEntry(entries, a), pointsTestEntry(entries, b), pointsTestEntry(entries, c), pointsTestEntry(entries, d)
 
-	// points: a(100) b(50) c(50) d(1) -> ranks 1, 2, 2, 4; positions 1..4
+	// points order is (points, streak, blocks): a(100) b(50, streak 4) c(50,
+	// streak 0) d(1) -> b and c tie on points but not on streak, so the ranks
+	// are 1, 2, 3, 4 (a rank is shared only when all three values tie)
 	connect.AssertEqual(t, ea.RankPoints, int64(1))
 	connect.AssertEqual(t, eb.RankPoints, int64(2))
-	connect.AssertEqual(t, ec.RankPoints, int64(2))
+	connect.AssertEqual(t, ec.RankPoints, int64(3))
 	connect.AssertEqual(t, ed.RankPoints, int64(4))
 	connect.AssertEqual(t, ea.PosPoints, int64(1))
 	connect.AssertEqual(t, eb.PosPoints, int64(2))
 	connect.AssertEqual(t, ec.PosPoints, int64(3))
 	connect.AssertEqual(t, ed.PosPoints, int64(4))
 
-	// blocks: b(4) a(2) c(2) d(1) -> a ahead of c on total points
+	// blocks order is (blocks, streak, points): b(4) a(2, streak 2) c(2,
+	// streak 0) d(1)
 	connect.AssertEqual(t, eb.RankBlocks, int64(1))
 	connect.AssertEqual(t, ea.RankBlocks, int64(2))
-	connect.AssertEqual(t, ec.RankBlocks, int64(2))
+	connect.AssertEqual(t, ec.RankBlocks, int64(3))
 	connect.AssertEqual(t, ed.RankBlocks, int64(4))
 	connect.AssertEqual(t, eb.PosBlocks, int64(1))
 	connect.AssertEqual(t, ea.PosBlocks, int64(2))
 	connect.AssertEqual(t, ec.PosBlocks, int64(3))
 	connect.AssertEqual(t, ed.PosBlocks, int64(4))
 
-	// streak: b(4) a(2) d(1) c(0)
+	// streak order is (streak, blocks, points): b(4) a(2) d(1) c(0)
 	connect.AssertEqual(t, eb.RankStreak, int64(1))
 	connect.AssertEqual(t, ea.RankStreak, int64(2))
 	connect.AssertEqual(t, ed.RankStreak, int64(3))
@@ -280,4 +283,33 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		connect.AssertEqual(t, rowB4.TotalNanoPoints, PointsToNanoPoints(25))
 		connect.AssertEqual(t, rowB4.RankStreak, int64(1))
 	})
+}
+
+// Two networks that tie on all three values share every rank; the network id
+// (ascending) still gives them distinct positions, so keyset paging never
+// repeats or skips a row.
+func TestComputePointsLeaderboardFullTie(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	windows := pointsTestWindows(now, 2)
+	x, y := server.NewId(), server.NewId()
+	if y.String() < x.String() {
+		x, y = y, x
+	}
+	inputs := []PointsNetworkInput{
+		{NetworkId: y, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now.Add(-time.Hour), EpochsWithPoints: map[uint64]bool{2: true}},
+		{NetworkId: x, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now, EpochsWithPoints: map[uint64]bool{2: true}},
+	}
+	entries, _ := ComputePointsLeaderboard(inputs, windows)
+	ex, ey := pointsTestEntry(entries, x), pointsTestEntry(entries, y)
+	for _, pair := range [][2]int64{{ex.RankPoints, ey.RankPoints}, {ex.RankBlocks, ey.RankBlocks}, {ex.RankStreak, ey.RankStreak}} {
+		connect.AssertEqual(t, pair[0], int64(1))
+		connect.AssertEqual(t, pair[1], int64(1))
+	}
+	// x sorts before y on the id tie-break in every sort
+	connect.AssertEqual(t, ex.PosPoints, int64(1))
+	connect.AssertEqual(t, ey.PosPoints, int64(2))
+	connect.AssertEqual(t, ex.PosBlocks, int64(1))
+	connect.AssertEqual(t, ey.PosBlocks, int64(2))
+	connect.AssertEqual(t, ex.PosStreak, int64(1))
+	connect.AssertEqual(t, ey.PosStreak, int64(2))
 }

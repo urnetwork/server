@@ -193,15 +193,17 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, page.TotalRanked, int64(5))
 		connect.AssertEqual(t, page.LatestEpoch, uint64(5))
 		connect.AssertEqual(t, len(page.Rows), 2)
-		// n2 (90) is ranked 1 but hidden; n1 and n3 tie at 80 -> rank 2 both,
-		// and the blocks tie-break puts n3 (4 blocks) before n1 (2 blocks)
+		// points order is (points, streak, blocks): n2 (90) is ranked 1 but
+		// hidden; n1 and n3 tie at 80 and streak 0, and the blocks tie-break
+		// puts n3 (4 blocks, rank 2) before n1 (2 blocks, rank 3) -- a rank is
+		// shared only when all three values tie
 		connect.AssertEqual(t, page.Rows[0].NetworkId, ids[3])
 		connect.AssertEqual(t, page.Rows[0].RankPoints, int64(2))
 		connect.AssertEqual(t, page.Rows[0].TotalPoints, 80.0)
 		connect.AssertEqual(t, page.Rows[0].Anonymous, true)
 		connect.AssertEqual(t, page.Rows[0].NetworkName, "")
 		connect.AssertEqual(t, page.Rows[1].NetworkId, ids[1])
-		connect.AssertEqual(t, page.Rows[1].RankPoints, int64(2))
+		connect.AssertEqual(t, page.Rows[1].RankPoints, int64(3))
 		connect.AssertEqual(t, page.Rows[1].EmojiTag, "🐬🔥")
 		connect.AssertEqual(t, page.Rows[1].Anonymous, true)
 		connect.AssertNotEqual(t, page.NextCursor, "")
@@ -209,12 +211,12 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		next, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Limit: 2, Cursor: page.NextCursor}, anonymous)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(next.Rows), 2)
-		// n0 and n4 tie at 50 -> rank 4 (competition: 1, 2, 2, 4, 4); n4 has
-		// more blocks so it comes first; n0 made its name public
+		// n0 and n4 tie at 50; n4's streak (5) puts it first at rank 4 and n0
+		// at rank 5; n0 made its name public
 		connect.AssertEqual(t, next.Rows[0].NetworkId, ids[4])
 		connect.AssertEqual(t, next.Rows[0].RankPoints, int64(4))
 		connect.AssertEqual(t, next.Rows[1].NetworkId, ids[0])
-		connect.AssertEqual(t, next.Rows[1].RankPoints, int64(4))
+		connect.AssertEqual(t, next.Rows[1].RankPoints, int64(5))
 		connect.AssertEqual(t, next.Rows[1].Anonymous, false)
 		connect.AssertEqual(t, next.Rows[1].NetworkName, "points_api_a")
 		connect.AssertEqual(t, next.NextCursor, "")
@@ -230,9 +232,10 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, unknownSort.Error, (*PointsLeaderboardError)(nil))
 
-		// streak order: n4 (5) is rank 1; everyone else ties at 0 -> rank 2,
-		// ordered by total points then blocks (n2 90, n3 80/4, n1 80/2, n0 50).
-		// n2 is hidden, so the caller (n2) sees n4, n3, n1, n0 and itself in `me`.
+		// streak order is (streak, blocks, points): n4 (5) is rank 1; everyone
+		// else has streak 0 and is separated by blocks (n3 4, n2 3, n1 2, n0 1)
+		// -> ranks 2, 3, 4, 5. n2 is hidden, so the caller (n2) sees n4, n3,
+		// n1, n0 and itself in `me`.
 		streak, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: "streak"}, sessions[2])
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(streak.Rows), 4)
@@ -242,13 +245,14 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, streak.Rows[1].NetworkId, ids[3])
 		connect.AssertEqual(t, streak.Rows[1].RankStreak, int64(2))
 		connect.AssertEqual(t, streak.Rows[2].NetworkId, ids[1])
-		connect.AssertEqual(t, streak.Rows[2].RankStreak, int64(2))
+		connect.AssertEqual(t, streak.Rows[2].RankStreak, int64(4))
 		connect.AssertEqual(t, streak.Rows[3].NetworkId, ids[0])
-		// the hidden caller still sees itself: rank 2 by streak, rank 1 by points
+		connect.AssertEqual(t, streak.Rows[3].RankStreak, int64(5))
+		// the hidden caller still sees itself: rank 3 by streak, rank 1 by points
 		connect.AssertEqual(t, streak.Me.Ranked, true)
 		connect.AssertEqual(t, streak.Me.NetworkId, ids[2])
 		connect.AssertEqual(t, streak.Me.PointsLeaderboardPublic, false)
-		connect.AssertEqual(t, streak.Me.RankStreak, int64(2))
+		connect.AssertEqual(t, streak.Me.RankStreak, int64(3))
 		connect.AssertEqual(t, streak.Me.RankPoints, int64(1))
 		connect.AssertEqual(t, streak.Me.RankBlocks, int64(3))
 		connect.AssertEqual(t, streak.Me.NetworkName, "points_api_c")
@@ -259,9 +263,9 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, ranking.NetworkRanking.PointsLeaderboardPublic, true)
 		connect.AssertEqual(t, ranking.NetworkRanking.EmojiTag, "🐬🔥")
-		connect.AssertEqual(t, ranking.NetworkRanking.RankPoints, int64(2))
+		connect.AssertEqual(t, ranking.NetworkRanking.RankPoints, int64(3))
 		connect.AssertEqual(t, ranking.NetworkRanking.RankBlocks, int64(4))
-		connect.AssertEqual(t, ranking.NetworkRanking.RankStreak, int64(2))
+		connect.AssertEqual(t, ranking.NetworkRanking.RankStreak, int64(4))
 
 		// a pruned snapshot asks the client to restart
 		firstSnapshotCursor := page.NextCursor

@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"github.com/urnetwork/sdk"
 	"sort"
 	"time"
 
@@ -87,11 +88,13 @@ type PointsNetworkInput struct {
 // ComputePointsLeaderboard ranks the inputs. It is pure so the streak and
 // rank rules are testable without a database.
 //
-// Ordering per dimension is the dimension's value desc, then total points
-// desc, then blocks desc, then streak desc, then the network's create time
-// asc (older first), then the network id -- deterministic, so pages never
-// overlap. The competition rank of an entry is the position of the first
-// entry sharing its value.
+// The order per sort is the sdk's (ComparePointsLeaderboardKeys), the one
+// definition shared with the view controller: points = (points, streak,
+// blocks), blocks = (blocks, streak, points), streak = (streak, blocks,
+// points), every key desc, then the network id asc -- a total order, so pages
+// never overlap and every client renders the same sequence. The competition
+// rank of an entry is the position of the first entry whose three values all
+// tie with it (ComparePointsLeaderboardValues == 0).
 func ComputePointsLeaderboard(
 	inputs []PointsNetworkInput,
 	windows []PointsEpochWindow,
@@ -120,64 +123,49 @@ func ComputePointsLeaderboard(
 		})
 	}
 
-	createTimes := map[server.Id]time.Time{}
-	for _, input := range inputs {
-		createTimes[input.NetworkId] = input.CreateTime
-	}
-	tieBreak := func(a, b *PointsLeaderboardEntry) bool {
-		if a.TotalNanoPoints != b.TotalNanoPoints {
-			return b.TotalNanoPoints < a.TotalNanoPoints
+	keyOf := func(e *PointsLeaderboardEntry) *sdk.PointsLeaderboardKey {
+		return &sdk.PointsLeaderboardKey{
+			NanoPoints: int64(e.TotalNanoPoints),
+			Blocks:     int64(e.BlocksWithPoints),
+			Streak:     int64(e.Streak),
+			NetworkId:  e.NetworkId.String(),
 		}
-		if a.BlocksWithPoints != b.BlocksWithPoints {
-			return b.BlocksWithPoints < a.BlocksWithPoints
-		}
-		if a.Streak != b.Streak {
-			return b.Streak < a.Streak
-		}
-		ta, tb := createTimes[a.NetworkId], createTimes[b.NetworkId]
-		if !ta.Equal(tb) {
-			return ta.Before(tb)
-		}
-		return a.NetworkId.String() < b.NetworkId.String()
 	}
 
 	assign := func(
-		value func(*PointsLeaderboardEntry) int64,
+		sortBy string,
 		set func(*PointsLeaderboardEntry, int64, int64),
 	) {
 		order := make([]*PointsLeaderboardEntry, len(entries))
+		keys := make(map[*PointsLeaderboardEntry]*sdk.PointsLeaderboardKey, len(entries))
 		for i := range entries {
 			order[i] = &entries[i]
+			keys[order[i]] = keyOf(order[i])
 		}
 		sort.SliceStable(order, func(i, j int) bool {
-			vi, vj := value(order[i]), value(order[j])
-			if vi != vj {
-				return vj < vi
-			}
-			return tieBreak(order[i], order[j])
+			return sdk.ComparePointsLeaderboardKeys(sortBy, keys[order[i]], keys[order[j]]) < 0
 		})
 		rank := int64(0)
-		var previous int64
+		var previous *PointsLeaderboardEntry
 		for i, entry := range order {
 			position := int64(i + 1)
-			v := value(entry)
-			if i == 0 || v != previous {
+			if previous == nil || sdk.ComparePointsLeaderboardValues(sortBy, keys[previous], keys[entry]) != 0 {
 				rank = position
-				previous = v
+				previous = entry
 			}
 			set(entry, rank, position)
 		}
 	}
 	assign(
-		func(e *PointsLeaderboardEntry) int64 { return int64(e.TotalNanoPoints) },
+		PointsLeaderboardSortPoints,
 		func(e *PointsLeaderboardEntry, rank int64, pos int64) { e.RankPoints, e.PosPoints = rank, pos },
 	)
 	assign(
-		func(e *PointsLeaderboardEntry) int64 { return int64(e.BlocksWithPoints) },
+		PointsLeaderboardSortBlocks,
 		func(e *PointsLeaderboardEntry, rank int64, pos int64) { e.RankBlocks, e.PosBlocks = rank, pos },
 	)
 	assign(
-		func(e *PointsLeaderboardEntry) int64 { return int64(e.Streak) },
+		PointsLeaderboardSortStreak,
 		func(e *PointsLeaderboardEntry, rank int64, pos int64) { e.RankStreak, e.PosStreak = rank, pos },
 	)
 	return entries, latestEpoch
