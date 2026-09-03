@@ -98,6 +98,7 @@ func NewSignals() []Signal {
 		NewSubtensorSignal(),
 		NewSubtensorConvergenceSignal(),
 		NewEdgeIPv6Signal(),
+		NewTLSExpirySignal(),
 		NewGrafanaDatasourcesSignal(),
 		NewGrafanaIngressSignal(),
 		NewGrafanaNodeSignal(),

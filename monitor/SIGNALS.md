@@ -12213,6 +12213,72 @@ unrelated IPv6 control, and every configured edge. This is an
 operational/network-appliance repair; deploying API, Connect, Proxy, Warpctl,
 or another edge service cannot fix it.
 
+### 18.2 Public TLS certificate expiry and alias coverage
+
+Probe: `tls-expiry`
+
+Take `manager.<domain>` only from the active `services.yml` exposed aliases;
+alternate environments that do not expose it gracefully noop. Take every
+non-transparent public LB interface and both of its configured address families
+from the first active services version, joined to the enabled monitor host
+inventory. Present manager SNI directly to each exact address. This avoids both
+ordinary DNS selection and Route 53 health selection hiding a stale LB
+generation. Operator-disabled hosts remain absent from the denominator.
+
+The bounded connector completes only a TLS handshake and sends no application
+bytes. It deliberately captures the peer chain before verification so an
+expired or mismatched leaf remains diagnosable, then applies ordinary system
+roots. Evidence is limited to public certificate metadata, exact configured
+endpoint, SAN count/coverage, and SHA-256 fingerprint; never emit private key
+material or the Vault resource contents.
+
+Healthy means every exact endpoint:
+
+- returns a parseable peer leaf;
+- is inside its `NotBefore`/`NotAfter` interval;
+- covers the configured manager hostname;
+- passes system-root chain verification; and
+- retains more than 21 days before expiry.
+
+`tls-certificate-expired`, `tls-certificate-not-yet-valid`, hostname mismatch,
+and untrusted-chain findings page on the first cadence because normal clients
+already reject them. `tls-certificate-expiring` warns when 21 days or less
+remain. A transport or empty-chain result is
+`tls-certificate-unobservable` after two cadences: correlate it with §18.1
+routing/ingress evidence and do not call the certificate healthy from a
+sibling. Recovery requires three consecutive five-minute exact-address
+observations with hostname coverage, system trust, and more than 21 days
+remaining after the final LB handoff.
+
+The 2026-09-03 manager incident is the defining synthetic reproduction. The
+alias entered active `services.yml` on 2026-08-21, after the 2026-08-12 SAN
+certificate had been issued; that certificate did not cover
+`manager.bringyour.com` and no exact manager asset existed. Warp's established
+selection order tried the exact host, then selected the newest available
+`star.bringyour.com` asset. That wildcard inventory stopped at version
+`2024.3.19`, whose DigiCert leaf expired on 2025-05-17. Both A and AAAA
+therefore completed TCP and returned HTTP 200 only when verification was
+bypassed, while every ordinary TLS client rejected the endpoint. Correct Route
+53 aliases did not mitigate the invalid leaf.
+
+Vault TLS version `2026.9.2`, issued at 05:05Z on 2026-09-03, contains an exact
+manager asset, covers `manager.bringyour.com`, and is valid through 2026-12-02.
+It was promoted and copied to edge-4 before the 07:19Z LB-controller handoff,
+but the old container was still inside its intentional one-hour connection
+drain at 07:27Z and continued serving the expired wildcard. The current
+certificate on disk is prerequisite evidence, not runtime recovery; inspect
+the exact leaf again after the replacement container owns the listener.
+
+This class has an operational/deployment closure that monitor software cannot
+perform. When an exposed hostname is absent from the newest promoted SAN set,
+an authorized operator must run `warpctl certs issue <env>`, review and promote
+the generated `all/tls.pending` version, and deploy Vault/LB configuration via
+the existing edge workflow. When correct material is already promoted, let the
+controlled drain finish and inspect the replacement's selected certificate
+path before retrying only the affected handoff. Do not bypass client
+verification, change DNS, restart unrelated services, or turn certificate
+validation into a new build-admission architecture.
+
 ## 19. Web platform association metadata
 
 ### 19.1 Android App Links and Apple association files

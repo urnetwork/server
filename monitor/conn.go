@@ -18,6 +18,8 @@ package monitor
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -106,6 +108,7 @@ type host struct {
 	redisExpectedReplicas int
 	proxy                 *ProxyHostSettings
 	edgeIPv6              []EdgeIPv6InterfaceSettings
+	publicLB              []PublicLBInterfaceSettings
 	subtensor             *SubtensorHostSettings
 	backup                *BackupHostSettings
 }
@@ -148,6 +151,7 @@ type monitorConfig struct {
 	env                 string              // WARP_ENV
 	publicDomain        string              // active services.yml domain
 	websiteDomain       string              // canonical managed product website, when present
+	managerHostname     string              // configured manager alias, when exposed
 	logServices         []string            // active services.yml service inventory
 	logServiceBlocks    map[string][]string // active per-service block inventory
 	verificationEnabled bool
@@ -438,6 +442,56 @@ func (self *runner) tcpExchange(ctx context.Context, network, address string, pa
 		return response, err
 	}
 	return response, nil
+}
+
+// tlsCertificates performs a bounded handshake while deliberately deferring
+// peer verification until after the certificate chain is captured. This lets
+// expiry and hostname probes describe an invalid leaf instead of reducing it
+// to an opaque handshake error. No application bytes are sent.
+func (self *runner) tlsCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error) {
+	timeout := self.cfg.commandTimeout
+	if timeout <= 0 || timeout > 5*time.Second {
+		timeout = 5 * time.Second
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	connection, err := (&tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: timeout},
+		Config: &tls.Config{
+			ServerName:         serverName,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true, // verification follows against the captured chain
+		},
+	}).DialContext(commandCtx, network, address)
+	if err != nil {
+		return TLSCertificateObservation{}, err
+	}
+	defer connection.Close()
+
+	tlsConnection, ok := connection.(*tls.Conn)
+	if !ok {
+		return TLSCertificateObservation{}, fmt.Errorf("TLS dial returned %T", connection)
+	}
+	peer := tlsConnection.ConnectionState().PeerCertificates
+	if len(peer) == 0 {
+		return TLSCertificateObservation{}, fmt.Errorf("TLS peer returned no certificate")
+	}
+	observation := TLSCertificateObservation{Certificates: make([][]byte, 0, len(peer))}
+	for _, certificate := range peer {
+		observation.Certificates = append(observation.Certificates, append([]byte(nil), certificate.Raw...))
+	}
+
+	intermediates := x509.NewCertPool()
+	for _, certificate := range peer[1:] {
+		intermediates.AddCert(certificate)
+	}
+	_, observation.VerifyError = peer[0].Verify(x509.VerifyOptions{
+		DNSName:       serverName,
+		Intermediates: intermediates,
+		CurrentTime:   time.Now(),
+	})
+	return observation, nil
 }
 
 // warpctl runs warpctl locally on the monitor machine (assumed present, like

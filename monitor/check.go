@@ -36,6 +36,7 @@ type probeRunner interface {
 	sshTimeout(ctx context.Context, h *host, command string, stdin string, timeout time.Duration) (string, error)
 	local(ctx context.Context, name string, args ...string) (string, error)
 	tcpExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error)
+	tlsCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
 	warpctl(ctx context.Context, args ...string) (string, error)
 	warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error)
 }

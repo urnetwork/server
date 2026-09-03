@@ -41,6 +41,11 @@ type HostSettings struct {
 	// with the same configured identity used by warpctl.
 	EdgeIPv6 []EdgeIPv6InterfaceSettings
 
+	// PublicLB is the complete non-transparent public-interface inventory from
+	// the active services.yml version. Certificate probes use both configured
+	// address families without allowing DNS health selection to hide one edge.
+	PublicLB []PublicLBInterfaceSettings
+
 	// Subtensor arms SIGNALS.md §17.1 for this host. Stable chain identity and
 	// node endpoints live in monitor.yml so the reusable probe does not bake a
 	// testnet/mainnet choice into its implementation.
@@ -95,6 +100,15 @@ type EdgeIPv6InterfaceSettings struct {
 	Interface     string
 	Address       string
 	ProbeHostname string
+}
+
+// PublicLBInterfaceSettings identifies both public addresses owned by one
+// non-transparent load-balancer interface. An address family may be empty when
+// that interface is intentionally single-stack.
+type PublicLBInterfaceSettings struct {
+	Interface   string
+	IPv4Address string
+	IPv6Address string
 }
 
 // ProxyHostSettings contains only stable public/routing identity. Address
@@ -190,6 +204,22 @@ type TCPExchangeSignalSource interface {
 	TCPExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error)
 }
 
+// TLSCertificateObservation is the peer certificate chain from a bounded TLS
+// handshake plus the ordinary system-root verification result. Certificates
+// contain DER bytes in peer order; an expired or mismatched leaf remains
+// available even when VerifyError is non-nil so a signal can classify it.
+type TLSCertificateObservation struct {
+	Certificates [][]byte
+	VerifyError  error
+}
+
+// TLSCertificateSignalSource optionally supplies synthetic or alternate TLS
+// certificate observations. Production uses the monitor's direct connector;
+// tests implement this seam without opening network sockets.
+type TLSCertificateSignalSource interface {
+	TLSCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
+}
+
 // StreamingSignalSource optionally provides long-running local streams. It is
 // used by the standing SIGNALS.md §1.5 log collector.
 type StreamingSignalSource interface {
@@ -209,6 +239,10 @@ type SignalSettings struct {
 	// managed domains. It arms focused static-site contract probes without
 	// hard-coding a production hostname into alternate environments.
 	WebsiteDomain string
+	// ManagerHostname is armed only when the active services.yml exposes the
+	// manager alias. It prevents alternate environments from probing a hostname
+	// they do not own while keeping the source of truth out of monitor.yml.
+	ManagerHostname string
 	// LogServices is the active services.yml service inventory used to start
 	// standing log streams without querying the remote artifact registry.
 	// Alternate callers may leave it empty to use warpctl discovery.
@@ -391,6 +425,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		env:                  settings.Environment,
 		publicDomain:         settings.PublicDomain,
 		websiteDomain:        settings.WebsiteDomain,
+		managerHostname:      settings.ManagerHostname,
 		logServices:          append([]string(nil), settings.LogServices...),
 		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
 		verificationEnabled:  settings.VerificationEnabled,
@@ -425,6 +460,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			redisExpectedReplicas: configured.RedisExpectedReplicas,
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
 			edgeIPv6:              cloneEdgeIPv6Settings(configured.EdgeIPv6),
+			publicLB:              clonePublicLBSettings(configured.PublicLB),
 			subtensor:             cloneSubtensorHostSettings(configured.Subtensor),
 			backup:                cloneBackupHostSettings(configured.Backup),
 		}
@@ -463,6 +499,7 @@ func hostSettingsFromHost(h *host) HostSettings {
 		RedisExpectedReplicas: h.redisExpectedReplicas,
 		Proxy:                 cloneProxyHostSettings(h.proxy),
 		EdgeIPv6:              cloneEdgeIPv6Settings(h.edgeIPv6),
+		PublicLB:              clonePublicLBSettings(h.publicLB),
 		Subtensor:             cloneSubtensorHostSettings(h.subtensor),
 		Backup:                cloneBackupHostSettings(h.backup),
 	}
@@ -479,6 +516,10 @@ func cloneProxyHostSettings(settings *ProxyHostSettings) *ProxyHostSettings {
 
 func cloneEdgeIPv6Settings(settings []EdgeIPv6InterfaceSettings) []EdgeIPv6InterfaceSettings {
 	return append([]EdgeIPv6InterfaceSettings(nil), settings...)
+}
+
+func clonePublicLBSettings(settings []PublicLBInterfaceSettings) []PublicLBInterfaceSettings {
+	return append([]PublicLBInterfaceSettings(nil), settings...)
 }
 
 func cloneSubtensorHostSettings(settings *SubtensorHostSettings) *SubtensorHostSettings {
@@ -551,6 +592,14 @@ func (r *sourceRunner) tcpExchange(ctx context.Context, network, address string,
 		return nil, fmt.Errorf("monitor: SignalSource does not implement TCPExchangeSignalSource")
 	}
 	return source.TCPExchange(ctx, network, address, payload, responseBytes)
+}
+
+func (r *sourceRunner) tlsCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error) {
+	source, ok := r.source.(TLSCertificateSignalSource)
+	if !ok {
+		return TLSCertificateObservation{}, fmt.Errorf("monitor: SignalSource does not implement TLSCertificateSignalSource")
+	}
+	return source.TLSCertificates(ctx, network, address, serverName)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {

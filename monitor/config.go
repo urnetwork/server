@@ -85,9 +85,10 @@ type monitorYaml struct {
 // versions entry is the active warpctl configuration; older entries are
 // intentionally ignored because they retain historical interface identities.
 type servicesYaml struct {
-	Domain   string                `yaml:"domain"`
-	Domains  map[string]string     `yaml:"domains"`
-	Versions []servicesVersionYaml `yaml:"versions"`
+	Domain        string                `yaml:"domain"`
+	Domains       map[string]string     `yaml:"domains"`
+	ExposeAliases []string              `yaml:"expose_aliases"`
+	Versions      []servicesVersionYaml `yaml:"versions"`
 }
 
 type servicesVersionYaml struct {
@@ -97,7 +98,8 @@ type servicesVersionYaml struct {
 }
 
 type servicesServiceYaml struct {
-	Blocks []map[string]int `yaml:"blocks"`
+	Blocks        []map[string]int `yaml:"blocks"`
+	ExposeAliases []string         `yaml:"expose_aliases"`
 }
 
 type servicesLBYaml struct {
@@ -105,6 +107,7 @@ type servicesLBYaml struct {
 }
 
 type servicesLBInterfaceYaml struct {
+	IPv4        string `yaml:"ipv4"`
 	IPv6        string `yaml:"ipv6"`
 	Transparent bool   `yaml:"transparent"`
 }
@@ -189,6 +192,10 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	publicLBByHost, err := activePublicLBFromServices(services)
+	if err != nil {
+		return SignalSettings{}, err
+	}
 	logServices, err := activeLogServicesFromServices(services)
 	if err != nil {
 		return SignalSettings{}, err
@@ -210,6 +217,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 		Environment:         env,
 		PublicDomain:        strings.TrimSpace(services.Domain),
 		WebsiteDomain:       activeWebsiteDomainFromServices(services),
+		ManagerHostname:     activeManagerHostnameFromServices(services),
 		LogServices:         logServices,
 		LogServiceBlocks:    logServiceBlocks,
 		VerificationEnabled: controller.StEnabled(),
@@ -251,6 +259,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 			OverlayAddress: configured.OverlayIp,
 			Roles:          append([]string(nil), configured.Roles...),
 			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
+			PublicLB:       clonePublicLBSettings(publicLBByHost[configured.Name]),
 		}
 		if grafanaHosts[configured.Name] {
 			h.Roles = appendRole(h.Roles, "grafana")
@@ -429,6 +438,27 @@ func activeWebsiteDomainFromServices(services servicesYaml) string {
 	return ""
 }
 
+func activeManagerHostnameFromServices(services servicesYaml) string {
+	domain := strings.TrimSpace(services.Domain)
+	if domain == "" || len(services.Versions) == 0 {
+		return ""
+	}
+	wanted := "manager." + domain
+	for _, alias := range services.ExposeAliases {
+		if strings.TrimSpace(alias) == wanted {
+			return wanted
+		}
+	}
+	for _, service := range services.Versions[0].Services {
+		for _, alias := range service.ExposeAliases {
+			if strings.TrimSpace(alias) == wanted {
+				return wanted
+			}
+		}
+	}
+	return ""
+}
+
 func activeLogServicesFromServices(services servicesYaml) ([]string, error) {
 	if len(services.Versions) == 0 {
 		return nil, fmt.Errorf("services.yml: no active version")
@@ -511,6 +541,45 @@ func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6Int
 				Interface:     interfaceName,
 				Address:       address,
 				ProbeHostname: "api-v6." + domain,
+			})
+		}
+	}
+	for host := range byHost {
+		sort.Slice(byHost[host], func(i, j int) bool {
+			return byHost[host][i].Interface < byHost[host][j].Interface
+		})
+	}
+	return byHost, nil
+}
+
+func activePublicLBFromServices(services servicesYaml) (map[string][]PublicLBInterfaceSettings, error) {
+	if len(services.Versions) == 0 {
+		return nil, fmt.Errorf("services.yml: no active version")
+	}
+	domain := strings.TrimSpace(services.Domain)
+	if domain == "" {
+		return nil, fmt.Errorf("services.yml: domain is required for public LB inventory")
+	}
+
+	byHost := map[string][]PublicLBInterfaceSettings{}
+	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
+		host := strings.TrimSuffix(configuredHost, "."+domain)
+		if !strings.Contains(host, "-edge-") {
+			continue
+		}
+		for interfaceName, configured := range interfaces {
+			if configured.Transparent {
+				continue
+			}
+			ipv4 := strings.TrimSpace(configured.IPv4)
+			ipv6 := strings.TrimSpace(configured.IPv6)
+			if ipv4 == "" && ipv6 == "" {
+				continue
+			}
+			byHost[host] = append(byHost[host], PublicLBInterfaceSettings{
+				Interface:   interfaceName,
+				IPv4Address: ipv4,
+				IPv6Address: ipv6,
 			})
 		}
 	}

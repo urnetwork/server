@@ -15,6 +15,7 @@ type syntheticSource struct {
 	hostTimeoutFn func(HostSettings, string, time.Duration) (string, error)
 	localFn       func(string, ...string) (string, error)
 	tcpFn         func(string, string, []byte, int) ([]byte, error)
+	tlsFn         func(string, string, string) (TLSCertificateObservation, error)
 }
 
 func (s *syntheticSource) PostgreSQL(_ context.Context, query string) ([]Row, error) {
@@ -57,6 +58,13 @@ func (s *syntheticSource) TCPExchange(_ context.Context, network, address string
 		return nil, fmt.Errorf("unexpected TCP exchange %s %s", network, address)
 	}
 	return s.tcpFn(network, address, payload, responseBytes)
+}
+
+func (s *syntheticSource) TLSCertificates(_ context.Context, network, address, serverName string) (TLSCertificateObservation, error) {
+	if s.tlsFn == nil {
+		return TLSCertificateObservation{}, fmt.Errorf("unexpected TLS certificate exchange %s %s SNI=%s", network, address, serverName)
+	}
+	return s.tlsFn(network, address, serverName)
 }
 
 func syntheticSettings(source SignalSource) SignalSettings {
