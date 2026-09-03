@@ -13,7 +13,7 @@ func appleOAuthTestState(platform string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(`{"platform":"` + platform + `","token":"abc123"}`))
 }
 
-func TestAppleOAuthPlatformForState(t *testing.T) {
+func TestOAuthPlatformForState(t *testing.T) {
 	cases := map[string]string{
 		appleOAuthTestState("windows"):                                    "windows",
 		appleOAuthTestState("linux"):                                      "linux",
@@ -27,13 +27,13 @@ func TestAppleOAuthPlatformForState(t *testing.T) {
 		"": "",
 	}
 	for state, platform := range cases {
-		if got := appleOAuthPlatformForState(state); got != platform {
+		if got := oauthPlatformForState(state); got != platform {
 			t.Errorf("state %q: platform %q, want %q", state, got, platform)
 		}
 	}
 }
 
-func TestAppleOAuthSchemeForState(t *testing.T) {
+func TestOAuthSchemeForState(t *testing.T) {
 	cases := map[string]string{
 		appleOAuthTestState("android"): "ur",
 		appleOAuthTestState("windows"): "urnetwork",
@@ -42,7 +42,7 @@ func TestAppleOAuthSchemeForState(t *testing.T) {
 		"opaque":                       "ur",
 	}
 	for state, scheme := range cases {
-		if got := appleOAuthSchemeForState(state); got != scheme {
+		if got := oauthSchemeForState(state); got != scheme {
 			t.Errorf("state %q: scheme %q, want %q", state, got, scheme)
 		}
 	}

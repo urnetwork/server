@@ -29,8 +29,8 @@ import (
 //
 // `state` is opaque to Apple and to this endpoint, except for one optional
 // claim: when it is the base64url encoding of a JSON object with a `platform`
-// key, that key picks the redirect scheme. Without it the android scheme is
-// used.
+// key, that key picks the redirect scheme (oauthSchemeForState, shared with
+// the Google callback). Without it the android scheme is used.
 //
 //	android (default)  ur://oauth/apple
 //	windows, linux     urnetwork://oauth/apple
@@ -39,14 +39,15 @@ const appleOAuthCallbackMaxBodyBytes = 64 * 1024
 
 const appleOAuthReturnPath = "oauth/apple"
 
-// appleOAuthSchemes is the redirect scheme per platform claim.
-var appleOAuthSchemes = map[string]string{
+// oauthSchemes is the app redirect scheme per platform claim, for every
+// provider callback that hands a browser flow back to an app.
+var oauthSchemes = map[string]string{
 	"android": "ur",
 	"windows": "urnetwork",
 	"linux":   "urnetwork",
 }
 
-const appleOAuthDefaultScheme = "ur"
+const oauthDefaultScheme = "ur"
 
 // AppleOAuthCallback is the raw handler for POST and GET /auth/apple/callback.
 func AppleOAuthCallback(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +84,7 @@ func AppleOAuthReturnLocation(params url.Values) (string, bool) {
 	if state == "" {
 		return "", false
 	}
-	scheme := appleOAuthSchemeForState(state)
+	scheme := oauthSchemeForState(state)
 
 	values := url.Values{}
 	values.Set("state", state)
@@ -107,16 +108,20 @@ func AppleOAuthReturnLocation(params url.Values) (string, bool) {
 	return scheme + "://" + appleOAuthReturnPath + "?" + values.Encode(), true
 }
 
-// appleOAuthSchemeForState reads the optional `platform` claim of the state.
-func appleOAuthSchemeForState(state string) string {
-	platform := appleOAuthPlatformForState(state)
-	if scheme, ok := appleOAuthSchemes[platform]; ok {
+// oauthSchemeForState reads the optional `platform` claim of an attempt's
+// state and picks the app scheme to redirect to.
+func oauthSchemeForState(state string) string {
+	platform := oauthPlatformForState(state)
+	if scheme, ok := oauthSchemes[platform]; ok {
 		return scheme
 	}
-	return appleOAuthDefaultScheme
+	return oauthDefaultScheme
 }
 
-func appleOAuthPlatformForState(state string) string {
+// oauthPlatformForState decodes the state as base64url (any padding or
+// alphabet) JSON and returns its lower-cased `platform` claim, "" when the
+// state is opaque.
+func oauthPlatformForState(state string) string {
 	var payload []byte
 	for _, encoding := range []*base64.Encoding{
 		base64.RawURLEncoding,
