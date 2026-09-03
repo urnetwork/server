@@ -96,10 +96,12 @@ func (l *hostCommandLimiter) acquire(ctx context.Context, host string) (func(), 
 
 // host is one monitored host from the inventory (vault/<env>/monitor.yml).
 type host struct {
-	name      string
-	lanIp     string // resolved from config settings.yml routes (lan mode)
-	overlayIp string // from monitor.yml (overlay mode)
-	roles     []string
+	name        string
+	lanIp       string // resolved from config settings.yml routes (lan mode)
+	overlayIp   string // from monitor.yml (overlay mode)
+	roles       []string
+	sshUser     string // optional host-specific override
+	sshKeyPaths []string
 	// redis-cluster hosts only
 	redisEntryPort        int
 	redisPorts            []int
@@ -291,8 +293,16 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	target := fmt.Sprintf("%s@%s", self.cfg.activeSshUser(), addr)
-	sshArgs := self.sshArgs(target, remoteCmd, connectTimeout)
+	sshUser := self.cfg.activeSshUser()
+	sshKeyPaths := self.cfg.sshKeyPaths
+	if strings.TrimSpace(h.sshUser) != "" {
+		sshUser = h.sshUser
+	}
+	if len(h.sshKeyPaths) > 0 {
+		sshKeyPaths = h.sshKeyPaths
+	}
+	target := fmt.Sprintf("%s@%s", sshUser, addr)
+	sshArgs := self.sshArgsWithKeys(target, remoteCmd, connectTimeout, sshKeyPaths)
 	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return out, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
@@ -307,12 +317,16 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 }
 
 func (self *runner) sshArgs(target, remoteCmd string, connectTimeout time.Duration) []string {
+	return self.sshArgsWithKeys(target, remoteCmd, connectTimeout, self.cfg.sshKeyPaths)
+}
+
+func (self *runner) sshArgsWithKeys(target, remoteCmd string, connectTimeout time.Duration, keyPaths []string) []string {
 	sshArgs := []string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(connectTimeout.Seconds())),
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
-	for _, keyPath := range self.cfg.sshKeyPaths {
+	for _, keyPath := range keyPaths {
 		if strings.TrimSpace(keyPath) != "" {
 			sshArgs = append(sshArgs, "-i", keyPath)
 		}

@@ -111,6 +111,7 @@ func NewSignals() []Signal {
 		NewEmailAssetsSignal(),
 		NewPlayCrashesSignal(),
 		NewAppleCrashesSignal(),
+		NewVPNSessionsSignal(),
 	}
 }
 

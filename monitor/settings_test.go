@@ -1,11 +1,23 @@
 package monitor
 
 import (
+	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestMonitorSSHKeyPathsResolveRelativeToWarpHome(t *testing.T) {
+	warpHome := t.TempDir()
+	t.Setenv("WARP_HOME", warpHome)
+	paths := monitorSSHKeyPaths([]string{"root/ssh/vpn", "/keys/absolute", "  "})
+	want := []string{filepath.Join(warpHome, "root/ssh/vpn"), "/keys/absolute"}
+	if !slices.Equal(paths, want) {
+		t.Fatalf("resolved monitor SSH paths=%v, want %v", paths, want)
+	}
+}
 
 func TestSignalSettingsSSHKeyPathsBecomeIdentityArguments(t *testing.T) {
 	settings := syntheticSettings(&syntheticSource{})
@@ -17,6 +29,31 @@ func TestSignalSettingsSSHKeyPathsBecomeIdentityArguments(t *testing.T) {
 		if i < 1 || args[i-1] != "-i" {
 			t.Fatalf("ssh args do not contain -i %s: %v", key, args)
 		}
+	}
+}
+
+func TestHostSSHIdentityOverridesEnvironmentIdentity(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.SSHUser = "monitor"
+	settings.SSHDevUser = "by"
+	settings.SSHKeyPaths = []string{"/keys/service"}
+	settings.AddressMode = AddressModeOverlay
+	settings.Hosts = []HostSettings{{
+		Name: "vpn", OverlayAddress: "192.0.2.1",
+		SSHUser: "ubuntu", SSHKeyPaths: []string{"/keys/vpn"},
+	}}
+	runner := newRunner(configFromSignalSettings(settings))
+	runner.runSSH = func(_ context.Context, args []string, _ string) (string, string, error) {
+		if !slices.Contains(args, "/keys/vpn") || slices.Contains(args, "/keys/service") {
+			t.Fatalf("host-specific SSH keys not isolated: %v", args)
+		}
+		if !slices.Contains(args, "ubuntu@192.0.2.1") {
+			t.Fatalf("host-specific SSH user missing: %v", args)
+		}
+		return "ok", "", nil
+	}
+	if _, err := runner.shell(context.Background(), runner.cfg.hosts[0], "true"); err != nil {
+		t.Fatal(err)
 	}
 }
 

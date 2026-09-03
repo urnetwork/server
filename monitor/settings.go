@@ -25,6 +25,13 @@ type HostSettings struct {
 	OverlayAddress string
 	Roles          []string
 
+	// SSHUser and SSHKeyPaths override the environment-wide SSH identity for
+	// infrastructure hosts whose administrative account is deliberately
+	// separate from service hosts, such as the management VPN server. Empty
+	// values inherit SignalSettings.
+	SSHUser     string
+	SSHKeyPaths []string
+
 	RedisEntryPort int
 	RedisNodePorts []int
 	// RedisExpectedReplicas arms SIGNALS.md §3.6 replica-cover. Zero is a
@@ -456,6 +463,8 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			lanIp:                 configured.LANAddress,
 			overlayIp:             configured.OverlayAddress,
 			roles:                 append([]string(nil), configured.Roles...),
+			sshUser:               configured.SSHUser,
+			sshKeyPaths:           append([]string(nil), configured.SSHKeyPaths...),
 			redisEntryPort:        configured.RedisEntryPort,
 			redisExpectedReplicas: configured.RedisExpectedReplicas,
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
@@ -494,6 +503,8 @@ func hostSettingsFromHost(h *host) HostSettings {
 		LANAddress:            h.lanIp,
 		OverlayAddress:        h.overlayIp,
 		Roles:                 append([]string(nil), h.roles...),
+		SSHUser:               h.sshUser,
+		SSHKeyPaths:           append([]string(nil), h.sshKeyPaths...),
 		RedisEntryPort:        h.redisEntryPort,
 		RedisNodePorts:        h.redisNodePorts(),
 		RedisExpectedReplicas: h.redisExpectedReplicas,

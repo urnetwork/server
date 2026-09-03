@@ -27,11 +27,14 @@ type monitorYaml struct {
 	} `yaml:"ssh"`
 	AddressMode string `yaml:"address_mode"`
 	Hosts       []struct {
-		Name      string   `yaml:"name"`
-		OverlayIp string   `yaml:"overlay_ip"`
-		Roles     []string `yaml:"roles"`
-		Disabled  bool     `yaml:"disabled"`
-		Redis     *struct {
+		Name             string   `yaml:"name"`
+		LANIp            string   `yaml:"lan_ip"`
+		OverlayIp        string   `yaml:"overlay_ip"`
+		Roles            []string `yaml:"roles"`
+		Disabled         bool     `yaml:"disabled"`
+		SSHUser          string   `yaml:"ssh_user"`
+		SSHIdentityFiles []string `yaml:"ssh_identity_files"`
+		Redis            *struct {
 			EntryPort        int   `yaml:"entry_port"`
 			NodePorts        []int `yaml:"node_ports"`
 			ExpectedReplicas int   `yaml:"expected_replicas"`
@@ -253,11 +256,17 @@ func LoadSignalSettings() (SignalSettings, error) {
 		if configured.Disabled {
 			continue
 		}
+		lanAddress := strings.TrimSpace(configured.LANIp)
+		if lanAddress == "" {
+			lanAddress = routes[configured.Name]
+		}
 		h := HostSettings{
 			Name:           configured.Name,
-			LANAddress:     routes[configured.Name],
+			LANAddress:     lanAddress,
 			OverlayAddress: configured.OverlayIp,
 			Roles:          append([]string(nil), configured.Roles...),
+			SSHUser:        strings.TrimSpace(configured.SSHUser),
+			SSHKeyPaths:    monitorSSHKeyPaths(configured.SSHIdentityFiles),
 			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
 			PublicLB:       clonePublicLBSettings(publicLBByHost[configured.Name]),
 		}
@@ -318,6 +327,21 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+func monitorSSHKeyPaths(paths []string) []string {
+	resolved := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(server.WarpHome(), path)
+		}
+		resolved = append(resolved, path)
+	}
+	return resolved
 }
 
 // loadGooglePlayReportingSettings is deliberately fail-soft only when the

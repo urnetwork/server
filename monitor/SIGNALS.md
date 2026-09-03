@@ -12720,3 +12720,127 @@ counts. Verify by shipping the owning fix, observing replacement rather than
 summation for late instances, confirming the affected version stops gaining
 crashes through the five-day completeness window, and retaining a current
 processing date.
+
+## 21. Management VPN session inventory
+
+The management OpenVPN plane is a control and observation path. Losing it can
+make unrelated host probes fail together while their application processes
+continue running. It is not a bulk-data path: Planetoid must continue pulling
+PostgreSQL and Redis archives through the dedicated public SSH forwards in
+§11.22 even when the VPN is unhealthy.
+
+### 21.1 Server-side client-session coverage
+
+Probe: `vpn-sessions`
+
+Configure exactly one enabled monitor host with role `vpn-server` and every
+required client with role `vpn-client`. A VPN server can override the ordinary
+service-host SSH user and identity paths in `monitor.yml`; relative identity
+paths resolve under `WARP_HOME`, so no key material enters the inventory. The
+probe connects only to the server. It reads
+`openvpn-server@server.service`, the mtime and `CLIENT_LIST` records in the
+server-owned status file, a bounded server-originated ICMP check of each
+configured overlay address, and a bounded two-hour reduction of inactivity
+timeouts. Status rows are joined to clients by the exact configured virtual
+IPv4 address, not by a possibly different certificate common name. The ICMP
+check is part of this inventory's established host contract: every enabled
+client currently answers it from the VPN server.
+
+The status and journal reductions compare current and recent-timeout source
+addresses only inside the VPN server. Their output contains transient
+equality-group numbers and configured host names in each group; public
+addresses, source ports, certificates, and unrelated VPN identities never
+leave the host. A missing client with no recent comparable timeout stays
+isolated-or-unknown rather than being assigned to a site from adjacency or
+memory.
+
+HEALTHY: the VPN server is `active/running`; its status file is no more than 90
+seconds old (the live configuration uses OpenVPN's 60-second default status
+interval, plus 30 seconds of scheduler/write tolerance); every enabled
+`vpn-client` virtual address appears in the fresh snapshot; and every address
+answers from the server across the overlay. A `CLIENT_LIST` row alone is not
+healthy forwarding. Require two consecutive one-minute cadences after recovery
+and ten minutes of observable dependent host probes before closure.
+
+BROKEN:
+
+- `vpn-server-unhealthy` is an immediate page when the configured server unit
+  is not active/running. Check the exact process, EC2 instance/system checks,
+  UDP/443 listener, journal, and network boundary before assigning every
+  client independently.
+- `vpn-status-stale` after two cadences means the status writer is more than 90
+  seconds old or in the future. An old row is UNKNOWN, not evidence that its
+  client remains connected.
+- `vpn-client-session-loss` after two cadences is a warning for one absent
+  virtual address whose source is isolated or cannot be compared. Ownership
+  can be the client process, host, WAN, route, or NAT path.
+- `vpn-site-session-loss` after two cadences is a page when at least two
+  currently missing configured clients have recent inactivity timeouts from
+  the same public source. With the central server and unrelated sessions
+  healthy, this localizes the common boundary to that offsite LAN,
+  router/conntrack/NAT, WAN, or site-side OpenVPN path. It does not prove which
+  device failed.
+- `vpn-client-data-path-loss` after two cadences warns when a current session
+  exists but its exact overlay address does not answer the server-originated
+  check. This separates control-session presence from host/tunnel forwarding.
+- `vpn-site-data-path-loss` after two cadences pages when at least two such
+  unreachable current sessions share one public source while another
+  configured client remains reachable. This healthy control rules out a
+  server-wide tunnel failure and the monitor workstation, but the equality
+  still does not distinguish the site client processes, router state, NAT/WAN,
+  or hosts.
+
+For every site-class alert, compare a path that deliberately bypasses OpenVPN.
+If Planetoid's active direct public SSH transfer continues increasing receive
+bytes, keep the fault at the UDP/VPN boundary. If that direct TCP flow also
+disappears, the failure is broader than OpenVPN and belongs to the shared site
+router/WAN path. Preserve one resumable backup writer and advancing Subtensor
+database generations; never restart the databases, start a duplicate transfer,
+or move archive payloads onto the management VPN to make this signal green.
+
+**2026-09-03 incident:** the central `by-us-west-1-vpn-0` process had been
+active since June 20 with zero systemd restarts, both EC2 health checks were
+green, its status file remained fresh, and 19 other clients were still active.
+Snow, Planetoid, Sille, Goofe, and Widget all used one equal public source.
+Goofe, Widget, Snow, and Sille established new sessions within two seconds at
+07:52:24--07:52:26Z, then the server aged out Widget at 08:03:59Z, Planetoid at
+08:06:29Z, Goofe at 08:07:59Z, Sille at 08:08:03Z, and Snow at 08:14:48Z for
+the exact 120-second ping-restart timeout. Snow and Planetoid were absent from
+the fresh server snapshot while enabled Fremont, Fireside, and Crisp controls
+remained reachable. The long-running direct PostgreSQL backup socket that had
+still advanced at 07:56Z was also absent by 08:18Z. This rules out a central
+VPN restart, application-only Subtensor failure, monitor-machine tunnel loss,
+and VPN-only packet loss. The established root boundary is the common offsite
+site/router/WAN path; exact router WAN-event and conntrack evidence is still
+required before naming the failed device or mechanism.
+
+At 08:49Z Snow and Planetoid both reappeared in the fresh `CLIENT_LIST`, but
+the VPN server still could not reach either overlay address and workstation
+SSH to both timed out. The same server-originated check reached the other eight
+enabled clients. Session presence was therefore a false recovery boundary:
+the common offsite data path remained blackholed while its control sessions
+were current. This observation added the two data-path classes above; closure
+starts only after forwarding and dependent probes recover, not when a row
+reappears.
+
+The recovery did not hold: the server recorded new exact ping-restart
+timeouts for Snow at 08:54:10Z and Planetoid at 08:54:31Z, and both rows were
+absent again in the 08:55:53Z focused probe. The transition from absent, to
+session-present-but-unreachable, to absent again is an active flap of the same
+site path. It is not a completed recovery window and must not clear the
+router/WAN investigation.
+
+The checked-in historical client template still names
+`by-us-fmt-0-edge-0.bringyour.com`, which Route 53 authoritatively returns as
+NXDOMAIN, while active clients reach the current
+`by-us-west-1-vpn-0.bringyour.com` endpoint. Treat that as a separate cold-start
+recovery hazard until the installed client configs are read directly and the
+template is corrected; it is not sufficient evidence for the live multi-path
+site outage above.
+
+This alert is operational/network-owned. Software can improve the redacted
+detector and reconnect diagnostics, but it cannot restore site power, WAN
+service, router state, carrier NAT, or physical links. A hardware replacement,
+router configuration repair, or carrier operation may be required. Verify
+recovery from the server-side session inventory, the dedicated direct-path
+control, and dependent host probes rather than from one successful ping.
