@@ -15,6 +15,24 @@ baseline. A PERFVAR campaign may cite a completed compatible sim-latency result
 as supporting evidence, but must not run, wait for, or promote sim-latency as
 part of this protocol.
 
+## Execution model assignment
+
+Use separate model roles for reproducibility and review quality:
+
+- **Terra max** owns test execution: preflight, simulator and Android session
+  blocks, benchmark collection, privacy-safe ledger entries, and validation of
+  record counts, schemas, hashes, and gates. Terra must not tune the candidate
+  or rewrite a frozen campaign after observing results.
+- **Sol max** owns failure diagnosis and repair: inspect Terra's preserved
+  artifacts, establish the causal boundary, add deterministic reproductions,
+  implement the smallest fix, and run focused/race/package verification. Sol
+  must not discard failures or change acceptance thresholds, workloads, or
+  statistics to make a result pass.
+- The coordinating agent reconciles the two reports, reruns the affected
+  cohort and full gates after any Sol fix, and records both the measured result
+  and the model role in the private manifest. A Sol fix is retained only when
+  Terra's repeat measurement is non-regressing under the unchanged contract.
+
 All new campaign records go only to
 [`tests/PERFVAR-MEASUREMENTS.md`](../../../tests/PERFVAR-MEASUREMENTS.md).
 The older measurement sections in the research documents are historical source
@@ -148,6 +166,11 @@ do not rewrite the plan after observing data.
 4. Confirm the local PostgreSQL/Redis fixture and environment documented in
    `PERFVAR.md`. A DB outage is `BLOCKED`; it is not permission to skip the
    DB-backed gate or call a partial run complete.
+   Terra must execute fixture-backed arms in a network-enabled runner. A
+   sandbox-denied or unreachable fixture attempt is preserved as
+   `INVALID_ENVIRONMENT`/`BLOCKED` with zero measurements, then retried with
+   the identical frozen command when the fixture is available; it must never
+   be relabeled as a correctness result.
 5. Require exactly two authorized arm64 Android test devices. Assign opaque
    roles `device-a` and `device-b` in artifacts. Keep serials only in private
    shell variables. Verify both can use validated Wi-Fi and validated cellular,
