@@ -59,6 +59,19 @@ Run launch preflight and retain its passing JSON before the first epoch. Then:
 
 ```sh
 cd /home/by/urnetwork/server/connect/sim-latency
+./run-main.sh staging
+```
+
+The idempotent `staging` command creates the sole epoch-zero API-test round or
+returns the existing one. Share its `round_id` with the Apex staging
+integration. It admits fee-free test patches but never queues evaluator work.
+Starting epoch 1 cancels the staging identity and its unfinished jobs in the
+same transaction that commits the production round.
+
+After the staging admission and polling proof is captured, start the season:
+
+```sh
+cd /home/by/urnetwork/server/connect/sim-latency
 ./run-main.sh run
 ```
 

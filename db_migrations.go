@@ -7071,4 +7071,74 @@ var migrations = []any{
 		`CREATE INDEX IF NOT EXISTS transfer_contract_stream_id
 		 ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`,
 	),
+
+	// Epoch zero is a one-time API integration round. It exercises authenticated
+	// admission and polling without entering the evaluator, ranking, fee, or
+	// winner paths. Committing the first production epoch logically discards it;
+	// retained rows and artifacts remain immutable evidence of the staging test.
+	newSqlMigration(`
+		ALTER TABLE competition_round
+			ADD COLUMN staging boolean NOT NULL DEFAULT false;
+		ALTER TABLE competition_round
+			ALTER COLUMN staging DROP DEFAULT,
+			DROP CONSTRAINT competition_round_epoch_positive,
+			ADD CONSTRAINT competition_round_epoch_kind CHECK (
+				(staging = true AND epoch_number = 0) OR
+				(staging = false AND epoch_number > 0)
+			);
+
+		CREATE FUNCTION competition_round_staging_identity_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_staging_identity_guard$
+		BEGIN
+			IF OLD.staging IS DISTINCT FROM NEW.staging THEN
+				RAISE EXCEPTION 'competition round staging identity changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_staging_identity_guard$;
+
+		CREATE TRIGGER competition_round_staging_identity_immutable
+		BEFORE UPDATE OF staging ON competition_round
+		FOR EACH ROW EXECUTE FUNCTION competition_round_staging_identity_guard();
+
+		CREATE FUNCTION competition_staging_candidate_review_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_staging_candidate_review_guard$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM competition_round
+				WHERE round_id = NEW.round_id AND staging = true
+			) THEN
+				RAISE EXCEPTION 'competition staging round cannot enter candidate review';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_staging_candidate_review_guard$;
+
+		CREATE TRIGGER competition_staging_candidate_review_blocked
+		BEFORE INSERT ON competition_candidate_review
+		FOR EACH ROW EXECUTE FUNCTION competition_staging_candidate_review_guard();
+
+		CREATE FUNCTION competition_staging_finalization_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_staging_finalization_guard$
+		BEGIN
+			IF NEW.staging = true AND (
+				NEW.finalized_at IS DISTINCT FROM OLD.finalized_at OR
+				NEW.winner_job_id IS DISTINCT FROM OLD.winner_job_id
+			) THEN
+				RAISE EXCEPTION 'competition staging round cannot be finalized';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_staging_finalization_guard$;
+
+		CREATE TRIGGER competition_staging_finalization_blocked
+		BEFORE UPDATE OF finalized_at, winner_job_id ON competition_round
+		FOR EACH ROW EXECUTE FUNCTION competition_staging_finalization_guard();
+	`),
 }

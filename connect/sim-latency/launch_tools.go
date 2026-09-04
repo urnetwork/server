@@ -367,6 +367,7 @@ func checkCompetitionApi(
 	return map[string]any{
 		"competition_id":   info.CompetitionId,
 		"active_round":     info.ActiveRound,
+		"staging_round":    info.StagingRound,
 		"readiness":        ready.Checks,
 		"finalized_epochs": len(leaderboards.Epochs),
 	}, info, nil

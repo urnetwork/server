@@ -1639,6 +1639,28 @@ func GenerateRoundHandler(w http.ResponseWriter, r *http.Request) {
 	writeCompetitionJson(w, http.StatusCreated, result)
 }
 
+// GenerateStagingRoundHandler creates the one non-scoring API integration
+// round. It requires the same operator credential as production round
+// generation and accepts no caller-selected timing or workload inputs.
+func GenerateStagingRoundHandler(w http.ResponseWriter, r *http.Request) {
+	service := DefaultService()
+	if _, ok := requirePrincipal(w, r, service, true); !ok {
+		return
+	}
+	result, evalError := service.GenerateStagingRound(r.Context())
+	if evalError != nil {
+		status := http.StatusBadRequest
+		if evalError.Code == "staging_round_exists" || evalError.Code == "season_started" {
+			status = http.StatusConflict
+		} else if evalError.Kind == "infrastructure" {
+			status = http.StatusServiceUnavailable
+		}
+		writeCompetitionJson(w, status, evalError)
+		return
+	}
+	writeCompetitionJson(w, http.StatusCreated, result)
+}
+
 func SubmitScoreHandler(w http.ResponseWriter, r *http.Request) {
 	service := DefaultService()
 	principal, ok := requirePrincipal(w, r, service, false)
@@ -2183,7 +2205,7 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 				       COALESCE(extract(epoch FROM ($2::timestamp - min(job.submitted_at))), 0)
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
-				WHERE round.competition_id = $1
+				WHERE round.competition_id = $1 AND round.staging = false
 				GROUP BY job.state
 			`, settings.CompetitionId, now)
 			server.WithPgResult(rows, queryErr, func() {
@@ -2209,11 +2231,11 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 			server.Raise(conn.QueryRow(ctx, `
 				SELECT EXISTS (
 					SELECT 1 FROM competition_round AS round
-					WHERE round.competition_id = $1 AND round.canceled = false
+					WHERE round.competition_id = $1 AND round.canceled = false AND round.staging = false
 					  AND round.epoch_number = (
 					      SELECT max(latest.epoch_number)
 					      FROM competition_round AS latest
-					      WHERE latest.competition_id = $1 AND latest.canceled = false
+					      WHERE latest.competition_id = $1 AND latest.canceled = false AND latest.staging = false
 					  )
 					  AND round.closes_at <= $2 AND round.finalized_at IS NULL
 					  AND NOT EXISTS (
@@ -2234,7 +2256,7 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 				       job.attempt_count, job.started_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
-				WHERE round.competition_id = $1
+				WHERE round.competition_id = $1 AND round.staging = false
 				  AND job.state = 'running'
 				  AND job.started_at IS NOT NULL
 				ORDER BY job.started_at, job.job_id
@@ -2257,12 +2279,12 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 					SELECT 1
 					FROM competition_job AS job
 					JOIN competition_round AS round ON round.round_id = job.round_id
-					WHERE round.competition_id = $1
+					WHERE round.competition_id = $1 AND round.staging = false
 					  AND round.epoch_number = (
 					      SELECT max(latest.epoch_number)
 					      FROM competition_round AS latest
 					      WHERE latest.competition_id = $1
-					        AND latest.canceled = false
+					        AND latest.canceled = false AND latest.staging = false
 					  )
 					  AND job.state = 'succeeded'
 					  AND job.score_json @> '{"significance":{"statistically_significant":true}}'::jsonb
@@ -2281,7 +2303,7 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 					SELECT extract(epoch FROM (job.completed_at - job.started_at))::double precision AS duration_seconds
 					FROM competition_job AS job
 					JOIN competition_round AS round ON round.round_id = job.round_id
-					WHERE round.competition_id = $1
+					WHERE round.competition_id = $1 AND round.staging = false
 					  AND job.state = 'succeeded'
 					  AND job.started_at IS NOT NULL
 					  AND job.completed_at >= job.started_at
@@ -2814,7 +2836,6 @@ func roundGenerationChecksPass(checks map[string]bool) bool {
 		return false
 	}
 	for name, passed := range checks {
-
 		if name != "host_rebaseline" && !passed {
 			return false
 		}
@@ -2838,6 +2859,26 @@ func (self *Service) requireRoundGenerationInfrastructure(ctx context.Context, s
 	return nil
 }
 
+func (self *Service) requireStagingRoundInfrastructure(ctx context.Context, settings *Settings) *CompetitionError {
+	checks, err := self.readinessChecks(ctx, settings)
+	if err != nil {
+		return infrastructureError("not_ready", "competition staging infrastructure is not ready")
+	}
+	for _, name := range []string{
+		"configuration",
+		"frozen_policy",
+		"retention_window",
+		"database",
+		"artifact_archive",
+		"api_image_identity",
+	} {
+		if !checks[name] {
+			return infrastructureError("not_ready", "competition staging infrastructure is not ready")
+		}
+	}
+	return nil
+}
+
 func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) {
 	settings, err := self.Settings()
 	if err != nil {
@@ -2855,7 +2896,62 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		}
 		result.ActiveRound = view
 	}
+	stagingRound, err := self.store.CurrentStagingRound(ctx, settings)
+	if err != nil {
+		return nil, infrastructureError("storage_unavailable", "competition staging-round storage is unavailable")
+	}
+	if stagingRound != nil {
+		view, revealErr := self.roundView(stagingRound)
+		if revealErr != nil {
+			return nil, revealErr
+		}
+		result.StagingRound = view
+	}
 	return &result, nil
+}
+
+// GenerateStagingRound creates the one epoch-zero integration round used to
+// prove authentication, validation, durable admission, cache identity, and
+// polling before epoch one. Staging jobs never enter the evaluator FIFO.
+func (self *Service) GenerateStagingRound(ctx context.Context) (*RoundResult, *CompetitionError) {
+	settings, err := self.Settings()
+	if err != nil {
+		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
+	}
+	if !server.NowUtc().Before(settings.SeasonEndsAt) {
+		return nil, submissionError("season_complete", "the configured competition season has ended")
+	}
+	productionRound, err := self.store.CurrentRound(ctx, settings)
+	if err != nil {
+		return nil, infrastructureError("storage_unavailable", "competition round storage is unavailable")
+	}
+	if productionRound != nil {
+		return nil, &CompetitionError{Kind: "submission", Code: "season_started", Message: "a staging round cannot be created after epoch one is committed", Retriable: false}
+	}
+	stagingRound, err := self.store.CurrentStagingRound(ctx, settings)
+	if err != nil {
+		return nil, infrastructureError("storage_unavailable", "competition staging-round storage is unavailable")
+	}
+	if stagingRound != nil {
+		return nil, &CompetitionError{Kind: "submission", Code: "staging_round_exists", Message: "the staging round already exists", Retriable: false}
+	}
+	if readyErr := self.requireStagingRoundInfrastructure(ctx, settings); readyErr != nil {
+		return nil, readyErr
+	}
+	round, err := self.store.CreateStagingRound(ctx, settings)
+	if errors.Is(err, ErrConflict) {
+		return nil, &CompetitionError{Kind: "submission", Code: "staging_round_exists", Message: "the staging round already exists", Retriable: false}
+	}
+	if errors.Is(err, ErrSeasonStarted) {
+		return nil, &CompetitionError{Kind: "submission", Code: "season_started", Message: "a staging round cannot be created after epoch one is committed", Retriable: false}
+	}
+	if errors.Is(err, ErrSeasonComplete) {
+		return nil, &CompetitionError{Kind: "submission", Code: "season_complete", Message: "the configured competition season has ended", Retriable: false}
+	}
+	if err != nil {
+		return nil, infrastructureError("staging_round_create_failed", "staging round could not be committed")
+	}
+	return &round.RoundResult, nil
 }
 
 func (self *Service) GenerateRound(ctx context.Context, args GenerateRoundArgs) (*RoundResult, *CompetitionError) {
@@ -2922,8 +3018,18 @@ func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Prin
 		}
 		return nil, status, patchErr
 	}
-	if readyErr := self.requireSecureEvaluator(ctx, settings); readyErr != nil {
-		return nil, 503, readyErr
+	round, err := self.store.GetRound(ctx, settings, args.RoundId)
+	if errors.Is(err, ErrNotFound) {
+		metricOutcome = "rejected"
+		return nil, 404, submissionError("round_not_found", "round does not exist")
+	}
+	if err != nil {
+		return nil, 503, infrastructureError("storage_unavailable", "competition round storage is unavailable")
+	}
+	if !round.Staging {
+		if readyErr := self.requireSecureEvaluator(ctx, settings); readyErr != nil {
+			return nil, 503, readyErr
+		}
 	}
 	job, hit, err := self.store.Enqueue(ctx, settings, args.RoundId, patch, principal.Id, self.apiImageDigest)
 	switch {
@@ -2937,7 +3043,7 @@ func (self *Service) Submit(ctx context.Context, args ScoreArgs, principal *Prin
 		return nil, 503, infrastructureError("enqueue_failed", "submission could not be durably enqueued")
 	}
 	result := &ScoreAcceptedResult{
-		JobId: job.JobId, RoundId: job.RoundId, PatchSha256: job.PatchSha256,
+		JobId: job.JobId, RoundId: job.RoundId, Staging: job.Staging, PatchSha256: job.PatchSha256,
 		State:    scoreJobStateView(job.State, roundPublished(&job.Round, server.NowUtc()), principal),
 		CacheHit: hit, StatusUrl: "/competition/score/" + job.JobId.String(),
 	}
@@ -3014,11 +3120,23 @@ func scoreJobStateView(state string, published bool, principal *Principal) strin
 func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobResult {
 	result := job.ScoreJobResult
 	if principal.Role != "operator" && !roundPublished(&job.Round, now) {
+		stagingDiscarded := isStagingDiscardedJob(result)
 		result.State = scoreJobStateView(result.State, false, principal)
 		result.Score = nil
-		result.EvalError = nil
+		if !stagingDiscarded {
+			result.EvalError = nil
+		}
 	}
 	return result
+}
+
+// A staging cancellation contains no measured outcome or hidden evaluator
+// information. Exposing only this typed terminal reason lets an integration
+// client distinguish successful lifecycle cleanup from an evaluator failure.
+func isStagingDiscardedJob(job ScoreJobResult) bool {
+	return job.Staging && job.State == "canceled" && job.EvalError != nil &&
+		job.EvalError.Kind == "submission" && job.EvalError.Code == "staging_discarded" &&
+		!job.EvalError.Retriable
 }
 
 func validateScore(score *ScoreResult) error {
@@ -3133,14 +3251,17 @@ var (
 	ErrRoundClosed       = errors.New("competition round is not open")
 	ErrLeaseLost         = errors.New("competition worker lease lost")
 	ErrSeasonComplete    = errors.New("competition season is complete")
+	ErrSeasonStarted     = errors.New("competition season already started")
 	ErrPreviousEpochOpen = errors.New("previous competition epoch is not finalized")
 	ErrReviewNotReady    = errors.New("competition epoch is not ready for honesty review")
 	ErrReviewOutOfOrder  = errors.New("competition honesty review candidate is out of order")
 )
 
 type Store interface {
+	CreateStagingRound(context.Context, *Settings) (*roundRecord, error)
 	CreateRound(context.Context, *Settings, GenerateRoundArgs) (*roundRecord, error)
 	CurrentRound(context.Context, *Settings) (*roundRecord, error)
+	CurrentStagingRound(context.Context, *Settings) (*roundRecord, error)
 	GetRound(context.Context, *Settings, server.Id) (*roundRecord, error)
 	PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error)
 	RecordCandidateReview(context.Context, *Settings, int, CandidateReviewDecision) (*CandidateReviewState, error)
@@ -3208,10 +3329,16 @@ func evaluatorImageDigestFromPolicy(stored json.RawMessage) (string, error) {
 	return policy.EvaluatorImageDigest, nil
 }
 
-func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, args GenerateRoundArgs) (*roundRecord, error) {
+func (self PostgresStore) prepareRound(
+	ctx context.Context,
+	settings *Settings,
+	args GenerateRoundArgs,
+	staging bool,
+) (*roundRecord, error) {
 	round := &roundRecord{
 		RoundResult: RoundResult{
 			RoundId:     server.NewId(),
+			Staging:     staging,
 			ScoreSchema: ScoreSchema,
 			OpensAt:     args.OpensAt.UTC(),
 			ClosesAt:    args.ClosesAt.UTC(),
@@ -3248,15 +3375,33 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 		removeRoundWorkload(settings, round)
 		return nil, fmt.Errorf("archive round workload: %w", err)
 	}
+	return round, nil
+}
+
+func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, args GenerateRoundArgs) (*roundRecord, error) {
+	round, err := self.prepareRound(ctx, settings, args, false)
+	if err != nil {
+		return nil, err
+	}
+	discardError, err := json.Marshal(submissionError(
+		"staging_discarded",
+		"staging submission was discarded when epoch one was committed",
+	))
+	if err != nil {
+		removeRoundWorkload(settings, round)
+		return nil, err
+	}
+	discardedAt := self.nowUtc()
 	conflict := false
 	var stateErr error
+	discardedStagingJobs := []server.Id{}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var previousEpoch int
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT COALESCE(max(epoch_number), 0)
-				FROM competition_round WHERE competition_id = $1
+				FROM competition_round WHERE competition_id = $1 AND staging = false
 			`, settings.CompetitionId).Scan(&previousEpoch))
 			if settings.SeasonPolicy.EpochCount <= previousEpoch {
 				stateErr = ErrSeasonComplete
@@ -3266,7 +3411,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				var previousFinalized *time.Time
 				server.Raise(tx.QueryRow(ctx, `
 					SELECT finalized_at FROM competition_round
-					WHERE competition_id = $1 AND epoch_number = $2
+					WHERE competition_id = $1 AND epoch_number = $2 AND staging = false
 				`, settings.CompetitionId, previousEpoch).Scan(&previousFinalized))
 				if previousFinalized == nil {
 					stateErr = ErrPreviousEpochOpen
@@ -3278,7 +3423,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT EXISTS (
 					SELECT 1 FROM competition_round
-					WHERE competition_id = $1 AND canceled = false
+					WHERE competition_id = $1 AND canceled = false AND staging = false
 					  AND opens_at < $3 AND $2 < closes_at
 				)
 			`, settings.CompetitionId, round.OpensAt, round.ClosesAt).Scan(&overlap))
@@ -3287,11 +3432,53 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				return
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE competition_worker_slot AS slot
+				SET worker_id = NULL, job_id = NULL, lease_expires_at = NULL, heartbeat_at = $2
+				WHERE slot.slot_id = 1 AND slot.job_id IN (
+					SELECT job.job_id
+					FROM competition_job AS job
+					JOIN competition_round AS staging_round ON staging_round.round_id = job.round_id
+					WHERE staging_round.competition_id = $1
+					  AND staging_round.staging = true
+					  AND staging_round.canceled = false
+					  AND job.state IN ('queued', 'running')
+				)
+			`, settings.CompetitionId, discardedAt))
+			rows, queryErr := tx.Query(ctx, `
+				UPDATE competition_job AS job
+				SET state = 'canceled', completed_at = $2,
+				    eval_error_json = $3::jsonb,
+				    lease_owner = NULL, lease_expires_at = NULL
+				FROM competition_round AS staging_round
+				WHERE job.round_id = staging_round.round_id
+				  AND staging_round.competition_id = $1
+				  AND staging_round.staging = true
+				  AND staging_round.canceled = false
+				  AND job.state IN ('queued', 'running')
+				RETURNING job.job_id
+			`, settings.CompetitionId, discardedAt, string(discardError))
+			server.WithPgResult(rows, queryErr, func() {
+				for rows.Next() {
+					var jobId server.Id
+					server.Raise(rows.Scan(&jobId))
+					discardedStagingJobs = append(discardedStagingJobs, jobId)
+				}
+			})
+			for _, jobId := range discardedStagingJobs {
+				appendEvent(ctx, tx, jobId, discardedAt, "staging_discarded", "system", map[string]any{
+					"reason": "production_round_committed", "production_round_id": round.RoundId.String(),
+				})
+			}
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE competition_round SET canceled = true
+				WHERE competition_id = $1 AND staging = true AND canceled = false
+			`, settings.CompetitionId))
+			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO competition_round (
-					round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+					round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 					seed_ciphertext, providers_sha256, providers_path, policy_json,
 					opens_at, closes_at, reveal_at, created_at, canceled
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, false)
+				) VALUES ($1, $2, $3, false, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, false)
 			`, round.RoundId, round.CompetitionId, round.Epoch, round.WorkloadCommitment,
 				round.SeedNonce, round.SeedCiphertext, round.ProvidersSha256,
 				round.ProvidersPath, string(round.PolicyJson), round.OpensAt,
@@ -3315,20 +3502,112 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 	return round, nil
 }
 
+// CreateStagingRound commits the sole epoch-zero API-test identity. The
+// production-round transaction is the only path that can cancel it.
+func (self PostgresStore) CreateStagingRound(ctx context.Context, settings *Settings) (*roundRecord, error) {
+	now := self.nowUtc()
+	if !now.Before(settings.SeasonEndsAt) {
+		return nil, ErrSeasonComplete
+	}
+	round, err := self.prepareRound(ctx, settings, GenerateRoundArgs{
+		OpensAt: now, ClosesAt: settings.SeasonEndsAt, RevealAt: settings.SeasonEndsAt,
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	round.Epoch = 0
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
+			var productionExists bool
+			server.Raise(tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM competition_round
+					WHERE competition_id = $1 AND staging = false
+				)
+			`, settings.CompetitionId).Scan(&productionExists))
+			if productionExists {
+				stateErr = ErrSeasonStarted
+				return
+			}
+			var stagingExists bool
+			server.Raise(tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM competition_round
+					WHERE competition_id = $1 AND staging = true
+				)
+			`, settings.CompetitionId).Scan(&stagingExists))
+			if stagingExists {
+				stateErr = ErrConflict
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO competition_round (
+					round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
+					seed_ciphertext, providers_sha256, providers_path, policy_json,
+					opens_at, closes_at, reveal_at, created_at, canceled
+				) VALUES ($1, $2, 0, true, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, false)
+			`, round.RoundId, round.CompetitionId, round.WorkloadCommitment,
+				round.SeedNonce, round.SeedCiphertext, round.ProvidersSha256,
+				round.ProvidersPath, string(round.PolicyJson), round.OpensAt,
+				round.ClosesAt, round.RevealAt, round.CreatedAt))
+		})
+	})
+	if err != nil {
+		removeRoundWorkload(settings, round)
+		return nil, err
+	}
+	if stateErr != nil {
+		removeRoundWorkload(settings, round)
+		return nil, stateErr
+	}
+	setRoundStatus(round, self.nowUtc())
+	competitionRoundEvents.WithLabelValues("staging_created").Inc()
+	return round, nil
+}
+
 func (self PostgresStore) CurrentRound(ctx context.Context, settings *Settings) (round *roundRecord, err error) {
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			row := conn.QueryRow(ctx, `
-				SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
 				       created_at, canceled, finalized_at, winner_job_id
 				FROM competition_round
-				WHERE competition_id = $1 AND canceled = false
+				WHERE competition_id = $1 AND canceled = false AND staging = false
 				ORDER BY epoch_number DESC
 				LIMIT 1
 			`, settings.CompetitionId)
 			round, err = scanRound(row)
+			if errors.Is(err, pgx.ErrNoRows) {
+				round, err = nil, nil
+			} else {
+				server.Raise(err)
+			}
+		})
+	})
+	if err == nil && round != nil {
+		setRoundStatus(round, self.nowUtc())
+	}
+	return round, err
+}
+
+// CurrentStagingRound returns the active epoch-zero integration round without
+// allowing it to masquerade as a production epoch.
+func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Settings) (round *roundRecord, err error) {
+	err = captureDatabaseError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			round, err = scanRound(conn.QueryRow(ctx, `
+				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
+				       seed_ciphertext, providers_sha256, providers_path,
+				       policy_json, opens_at, closes_at, reveal_at,
+				       created_at, canceled, finalized_at, winner_job_id
+				FROM competition_round
+				WHERE competition_id = $1 AND canceled = false AND staging = true
+				LIMIT 1
+			`, settings.CompetitionId))
 			if errors.Is(err, pgx.ErrNoRows) {
 				round, err = nil, nil
 			} else {
@@ -3347,7 +3626,7 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			round, err = scanRound(conn.QueryRow(ctx, `
-				SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
 				       created_at, canceled, finalized_at, winner_job_id
@@ -3477,12 +3756,12 @@ func loadCandidateReviewRound(
 	epoch int,
 ) (*roundRecord, error) {
 	return scanRound(tx.QueryRow(ctx, `
-		SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+		SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 		       seed_ciphertext, providers_sha256, providers_path,
 		       policy_json, opens_at, closes_at, reveal_at,
 		       created_at, canceled, finalized_at, winner_job_id
 		FROM competition_round
-		WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false
+		WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false AND staging = false
 		FOR UPDATE
 	`, settings.CompetitionId, epoch))
 }
@@ -3687,7 +3966,7 @@ func (self PostgresStore) RequirePromotionDecision(
 			scanErr := conn.QueryRow(ctx, `
 				SELECT finalized_at, winner_job_id
 				FROM competition_round
-				WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false
+				WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false AND staging = false
 			`, settings.CompetitionId, epoch).Scan(&finalizedAt, &recordedWinner)
 			if errors.Is(scanErr, pgx.ErrNoRows) {
 				stateErr = ErrNotFound
@@ -3714,7 +3993,7 @@ func (self PostgresStore) RequirePromotionDecision(
 				FROM competition_candidate_review AS review
 				JOIN competition_job AS job ON job.job_id = review.job_id
 				JOIN competition_round AS round ON round.round_id = review.round_id
-				WHERE round.competition_id = $1 AND round.epoch_number = $2
+				WHERE round.competition_id = $1 AND round.epoch_number = $2 AND round.staging = false
 				  AND review.job_id = $3 AND review.decision = 'approved'
 			`, settings.CompetitionId, epoch, *winnerJobId))
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -3737,7 +4016,7 @@ func (self PostgresStore) Leaderboards(ctx context.Context, settings *Settings) 
 			rows, queryErr := conn.Query(ctx, `
 				SELECT round_id, epoch_number, finalized_at, winner_job_id
 				FROM competition_round
-				WHERE competition_id = $1 AND canceled = false AND finalized_at IS NOT NULL
+				WHERE competition_id = $1 AND canceled = false AND staging = false AND finalized_at IS NOT NULL
 				  AND reveal_at <= $2
 				ORDER BY epoch_number
 			`, settings.CompetitionId, self.nowUtc())
@@ -3792,7 +4071,7 @@ func scanRound(row pgx.Row) (*roundRecord, error) {
 	round := &roundRecord{}
 	var policy []byte
 	err := row.Scan(
-		&round.RoundId, &round.CompetitionId, &round.Epoch, &round.WorkloadCommitment,
+		&round.RoundId, &round.CompetitionId, &round.Epoch, &round.Staging, &round.WorkloadCommitment,
 		&round.SeedNonce, &round.SeedCiphertext, &round.ProvidersSha256,
 		&round.ProvidersPath, &policy, &round.OpensAt,
 		&round.ClosesAt, &round.RevealAt, &round.CreatedAt, &round.Canceled,
@@ -3848,7 +4127,7 @@ func (self PostgresStore) Enqueue(
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
 			round, scanErr := scanRound(tx.QueryRow(ctx, `
-				SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
 				       created_at, canceled, finalized_at, winner_job_id
@@ -3903,7 +4182,9 @@ func (self PostgresStore) Enqueue(
 		err = stateErr
 	}
 	if err == nil && job != nil && job.State == "queued" {
-		err = enqueueCompetitionJob(ctx, settings, job.JobId)
+		if !job.Round.Staging {
+			err = enqueueCompetitionJob(ctx, settings, job.JobId)
+		}
 	}
 	return job, cacheHit, err
 }
@@ -3917,7 +4198,7 @@ const jobSelect = `
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
 	       r.reveal_at, r.created_at, r.canceled, r.epoch_number,
-	       r.finalized_at, r.winner_job_id
+	       r.staging, r.finalized_at, r.winner_job_id
 	FROM competition_job j JOIN competition_round r ON r.round_id = j.round_id
 `
 
@@ -3934,13 +4215,14 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 		&job.Round.SeedCiphertext, &job.Round.ProvidersSha256,
 		&job.Round.ProvidersPath, &policyJson, &job.Round.OpensAt,
 		&job.Round.ClosesAt, &job.Round.RevealAt, &job.Round.CreatedAt,
-		&job.Round.Canceled, &job.Round.Epoch, &job.Round.FinalizedAt,
+		&job.Round.Canceled, &job.Round.Epoch, &job.Round.Staging, &job.Round.FinalizedAt,
 		&job.Round.WinnerJobId,
 	)
 	if err != nil {
 		return nil, err
 	}
 	job.Round.RoundId = job.RoundId
+	job.Staging = job.Round.Staging
 	job.Round.ScoreSchema = ScoreSchema
 	job.Round.PolicyJson = policyJson
 	job.EvaluatorImageDigest, err = evaluatorImageDigestFromPolicy(policyJson)
@@ -4015,7 +4297,7 @@ func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (ch
 				WITH current_round AS (
 					SELECT round_id::text AS round_id
 					FROM competition_round
-					WHERE competition_id = $6 AND canceled = false AND $5 < closes_at
+					WHERE competition_id = $6 AND canceled = false AND staging = false AND $5 < closes_at
 					ORDER BY opens_at
 					LIMIT 1
 				)
@@ -4113,6 +4395,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				FROM competition_round AS round
 				WHERE job.round_id = round.round_id
 				  AND round.competition_id = $1
+				  AND round.staging = false
 				  AND job.state = 'queued'
 				  AND (job.submitted_at < round.opens_at OR round.closes_at <= job.submitted_at)
 				RETURNING job.job_id
@@ -4134,8 +4417,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				        (j.state = 'queued' AND j.available_at <= $1) OR
 				        (j.state = 'running' AND j.lease_expires_at <= $1)
 				      )
-				  AND r.canceled = false
-				  AND r.opens_at <= $1
+			  AND r.canceled = false
+			  AND r.staging = false
+			  AND r.opens_at <= $1
 				  AND r.opens_at <= j.submitted_at
 				  AND j.submitted_at < r.closes_at
 				  AND r.finalized_at IS NULL
@@ -4929,9 +5213,10 @@ const (
 
 var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$`)
 
-// ApexAdapterRecord is the durable boundary between one paid Apex admission
-// and the immutable job accepted by the competition API. Public score fields
-// are populated only by a finalized leaderboard reconciliation.
+// ApexAdapterRecord is the durable boundary between one Apex admission and the
+// immutable job accepted by the competition API. Production records are paid;
+// staging records are explicitly fee-free. Public score fields are populated
+// only by a finalized leaderboard reconciliation.
 type ApexAdapterRecord struct {
 	Sequence             uint64       `json:"sequence"`
 	SubmissionId         string       `json:"submission_id"`
@@ -4940,6 +5225,7 @@ type ApexAdapterRecord struct {
 	JobId                server.Id    `json:"job_id,omitempty"`
 	CanonicalPatchSha256 string       `json:"canonical_patch_sha256,omitempty"`
 	StatusUrl            string       `json:"status_url,omitempty"`
+	Staging              bool         `json:"staging"`
 	FeeUsd               int          `json:"fee_usd"`
 	FeeReceipt           string       `json:"fee_receipt,omitempty"`
 	State                string       `json:"state"`
@@ -5046,18 +5332,34 @@ func (self *ApexAdapterFileStore) RecordFee(submissionId string, receipt string,
 	})
 }
 
-// RecordRound freezes the open epoch before money is collected. A retry after
+// RecordRound freezes the open round before money is collected. A retry after
 // close must fail against that round rather than silently buying admission to
-// the next epoch.
-func (self *ApexAdapterFileStore) RecordRound(submissionId string, roundId server.Id, now time.Time) (*ApexAdapterRecord, error) {
+// the next epoch. Epoch-zero staging admissions are explicitly fee-free.
+func (self *ApexAdapterFileStore) RecordRound(
+	submissionId string,
+	roundId server.Id,
+	staging bool,
+	now time.Time,
+) (*ApexAdapterRecord, error) {
 	if roundId == (server.Id{}) {
 		return nil, errors.New("Apex submission round id is required")
 	}
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
-		if record.RoundId != (server.Id{}) && record.RoundId != roundId {
+		if record.RoundId != (server.Id{}) && (record.RoundId != roundId || record.Staging != staging) {
 			return errors.New("Apex submission round id changed")
 		}
+		if staging && record.FeeReceipt != "" {
+			return errors.New("paid Apex submission cannot become a staging admission")
+		}
 		record.RoundId = roundId
+		record.Staging = staging
+		if staging {
+			record.FeeUsd = 0
+			record.State = "pending_admission"
+		} else {
+			record.FeeUsd = apexSubmissionFeeUsd
+			record.State = "pending_fee"
+		}
 		record.UpdatedAt = now.UTC()
 		return nil
 	})
@@ -5070,8 +5372,11 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 		return nil, errors.New("competition API returned a malformed admission identity")
 	}
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
-		if record.FeeReceipt == "" {
+		if !record.Staging && record.FeeReceipt == "" {
 			return errors.New("competition admission cannot precede fee collection")
+		}
+		if accepted.Staging != record.Staging {
+			return errors.New("competition API changed the staging admission identity")
 		}
 		if record.RoundId != (server.Id{}) && record.RoundId != accepted.RoundId {
 			return errors.New("competition API admitted the submission to a different round")
@@ -5090,14 +5395,17 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 	})
 }
 
-// RecordPoll records only outcome-neutral job state. Scores and evaluation
-// errors are deliberately excluded until the finalized leaderboard publishes.
+// RecordPoll records only outcome-neutral job state. Production scores and
+// evaluation errors are excluded until the finalized leaderboard publishes.
+// A staging-discard error is the sole exception because staging is never
+// scored or published and cancellation is its documented terminal outcome.
 func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobResult, now time.Time) (*ApexAdapterRecord, error) {
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
-		if record.JobId != job.JobId || record.RoundId != job.RoundId || record.CanonicalPatchSha256 != job.PatchSha256 {
+		if record.JobId != job.JobId || record.RoundId != job.RoundId || record.Staging != job.Staging || record.CanonicalPatchSha256 != job.PatchSha256 {
 			return errors.New("competition poll changed an immutable job identity")
 		}
-		if job.Score != nil || job.EvalError != nil {
+		stagingDiscard := isStagingDiscardedJob(job)
+		if job.Score != nil || job.EvalError != nil && !stagingDiscard {
 			return errors.New("competition poll disclosed an embargoed outcome")
 		}
 		record.State = job.State
@@ -5173,7 +5481,8 @@ func (self *ApexAdapterFileStore) Pending() ([]ApexAdapterRecord, error) {
 	err := self.read(func(state *apexAdapterState) error {
 		for _, record := range state.Records {
 			if record.JobId == (server.Id{}) || record.Published ||
-				record.State == "completed" || record.State == "failed" || record.State == "invalid" {
+				record.State == "completed" || record.State == "failed" ||
+				record.State == "canceled" || record.State == "invalid" {
 				continue
 			}
 			record.Score = nil
@@ -5314,7 +5623,9 @@ func validateApexAdapterState(state *apexAdapterState) error {
 	for _, record := range state.Records {
 		if !apexSubmissionIdPattern.MatchString(record.SubmissionId) || !sha256Pattern.MatchString(record.InputPatchSha256) ||
 			record.Sequence <= lastSequence || record.Sequence > state.NextSequence || seenSubmissionIds[record.SubmissionId] ||
-			record.FeeUsd != apexSubmissionFeeUsd || record.SubmittedAt.IsZero() || record.UpdatedAt.Before(record.SubmittedAt) {
+			(record.Staging && (record.FeeUsd != 0 || record.FeeReceipt != "")) ||
+			(!record.Staging && record.FeeUsd != apexSubmissionFeeUsd) ||
+			record.SubmittedAt.IsZero() || record.UpdatedAt.Before(record.SubmittedAt) {
 			return errors.New("Apex adapter state contains an invalid submission record")
 		}
 		if record.JobId != (server.Id{}) {
@@ -5347,8 +5658,9 @@ type ApexAdapterOptions struct {
 	Now         func() time.Time
 }
 
-// ApexAdapter maps paid external admissions onto the authenticated async API.
-// It has no evaluator, hidden-seed, MinIO, Docker, or operator privileges.
+// ApexAdapter maps production and fee-free staging admissions onto the
+// authenticated async API. It has no evaluator, hidden-seed, MinIO, Docker, or
+// operator privileges.
 type ApexAdapter struct {
 	baseUrl      *url.URL
 	submitterJwt string
@@ -5418,8 +5730,9 @@ func NewApexAdapter(
 	}, nil
 }
 
-// Submit collects the fee once and retries the same immutable bytes through
-// typed 429 or retriable 5xx responses until the durable API job is known.
+// Submit collects the fee once for production and retries the same immutable
+// bytes through typed 429 or retriable 5xx responses until the durable API job
+// is known. The pre-season staging round is fee-free and never evaluated.
 func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch []byte) (*ApexAdapterRecord, error) {
 	patchDigest := sha256.Sum256(patch)
 	record, err := self.store.BeginSubmission(submissionId, hex.EncodeToString(patchDigest[:]), self.now())
@@ -5434,15 +5747,19 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 		if err := self.requestWithRetry(ctx, http.MethodGet, "/competition/info", nil, false, &info); err != nil {
 			return nil, err
 		}
-		if info.ActiveRound == nil || info.ActiveRound.Status != "open" || info.ActiveRound.RoundId == (server.Id{}) {
+		selectedRound := info.ActiveRound
+		if selectedRound == nil || selectedRound.Status != "open" {
+			selectedRound = info.StagingRound
+		}
+		if selectedRound == nil || selectedRound.Status != "open" || selectedRound.RoundId == (server.Id{}) {
 			return nil, errors.New("competition has no open round for Apex admission")
 		}
-		record, err = self.store.RecordRound(submissionId, info.ActiveRound.RoundId, self.now())
+		record, err = self.store.RecordRound(submissionId, selectedRound.RoundId, selectedRound.Staging, self.now())
 		if err != nil {
 			return nil, err
 		}
 	}
-	if record.FeeReceipt == "" {
+	if !record.Staging && record.FeeReceipt == "" {
 		receipt, err := self.feeCollector.CollectOnce(ctx, submissionId, apexSubmissionFeeUsd)
 		if err != nil {
 			return nil, fmt.Errorf("collect Apex submission fee: %w", err)

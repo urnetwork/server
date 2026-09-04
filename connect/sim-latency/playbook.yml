@@ -1,5 +1,5 @@
 schema: 1
-status_date: 2026-09-03
+status_date: 2026-09-04
 launch_state: local_validation_complete_evaluator_rebuild_and_external_actions_pending
 
 evaluation_host:
@@ -88,9 +88,9 @@ release_record:
   control_plane_branch: main
   control_plane_commits_are_scoring_inputs: false
   exact_runtime_image_digest_persisted_per_evaluation: true
-  openapi_sha256: 17ee49b64f90ec47c20671259ab5f5e73aa2e132c1084ea38d3fe235084be0dc
+  openapi_sha256: 247266b1bff6896326da987c7cf2256f722456a97b301a28c3ebe99aca97e906
   recorded_by: local_finalization
-  recorded_at: 2026-08-28T15:39:21Z
+  recorded_at: 2026-09-04T21:03:03Z
 
 validation:
   completed_at: 2026-08-29T04:37:06Z
@@ -171,6 +171,10 @@ checklist:
   - id: competition_api_and_leaderboard
     status: complete
     evidence: sn/api/competition.yml
+  - id: epoch_zero_api_staging_round
+    status: implementation_complete_live_creation_and_apex_proof_pending
+    evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh
+    lifecycle: fee_free_not_evaluated_not_ranked_atomically_canceled_by_epoch_one
   - id: six_epoch_immediate_fifo_lifecycle
     status: complete
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh
@@ -217,5 +221,5 @@ checklist:
     status: complete
     evidence: server/connect/sim-latency/score_significance.go
   - id: apex_adapter_staging_registry_and_signed_handoff
-    status: design_approved_integration_handoff_pending
+    status: implementation_complete_live_apex_proof_and_signed_handoff_pending
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/launch/APEX-HANDOFF.md

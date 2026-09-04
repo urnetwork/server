@@ -20,8 +20,9 @@ still needed to activate the competition through Apex.
 - Immediate durable FIFO evaluation, unbounded paid submissions, and continued
   grading after the submission window closes until every admitted job is
   terminal.
-- A fixed $20 USD fee for every submitted Apex identity, collected exactly once
-  before the UR submission API is called.
+- A fixed $20 USD fee for every production Apex identity, collected exactly
+  once before the UR submission API is called. Epoch-zero staging identities
+  are explicitly fee-free and never evaluated.
 - Scores, ranks, and evaluation errors remain embargoed through epoch close,
   complete backlog drain, and manual honesty review. Only the atomically
   finalized leaderboard is public.
@@ -88,9 +89,11 @@ still needed to activate the competition through Apex.
   issue, rotation, and revocation exercise. Apex receives only a submitter
   credential—not a hidden seed, MinIO credential, operator token, Docker
   socket, or candidate filesystem.
-- [ ] Complete one end-to-end stage submission and reconcile the Apex
-  submission id, `job_id`, `round_id`, `patch_sha256`, immutable `status_url`,
-  terminal state, and finalized leaderboard row.
+- [ ] Complete one epoch-zero API stage submission and reconcile the Apex
+  submission id, `job_id`, `round_id`, `staging: true`, `patch_sha256`,
+  immutable `status_url`, and the expected `staging_discarded` cancellation
+  when epoch 1 is committed. Staging has no leaderboard row; reconcile the
+  first production result with the finalized leaderboard separately.
 - [ ] Record the stage and production activation identifiers.
 - [ ] Confirm the participant-facing status text for queued work, a long
   post-close drain, no-winner epochs, dishonest-candidate rejection, delayed

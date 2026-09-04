@@ -92,7 +92,10 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	seasonHarness := string(seasonHarnessBytes)
 	for _, required := range []string{
 		"set -euo pipefail",
+		"/competition/generate-staging-round",
+		".staging == true",
 		"/competition/generate-round",
+		".staging == false",
 		"competitionworker",
 		"epoch-review",
 		"pending_review",

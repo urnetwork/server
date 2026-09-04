@@ -14,9 +14,22 @@ limit. Results, hidden workload data, and leaderboard rows remain private until
 the FIFO drains and mandatory honesty review selects a winner or establishes
 that there is no winner.
 
-Apex collects the fixed USD $20 fee once for each unique admitted submission.
-There is no per-epoch submission-count cap. A duplicate canonical patch reuses
-the existing immutable job/cache identity and must not collect a second fee.
+Apex collects the fixed USD $20 fee once for each unique production
+submission. There is no per-epoch submission-count cap. A duplicate canonical
+patch reuses the existing immutable job/cache identity and must not collect a
+second fee.
+
+Before epoch 1, `GET /competition/info` may expose `staging_round` with epoch
+zero. It exists only to test authentication, patch validation, immutable
+admission/cache identity, and polling. A response carrying `staging: true` is
+fee-free, is never evaluated or ranked, remains `queued` during staging, and
+becomes `canceled` when epoch 1 is committed. Apex must prefer an open
+`active_round` whenever one exists and must never present a staging job as a
+competition result.
+
+UR creates or retrieves this identity with `run-main.sh staging`; the operator
+token stays inside UR. Apex receives the public `round_id` and uses its normal
+submitter token for `POST /competition/score` and subsequent status polling.
 
 ## Authentication and API flow
 
@@ -25,7 +38,8 @@ channel. Never put a token in a URL, patch, log, issue, or public artifact.
 The adapter sends it as `Authorization: Bearer TOKEN`.
 
 1. Read `GET /competition/info` and retain the competition, evaluator image,
-   patch policy, scoring policy, epoch window, and workload commitment.
+   patch policy, scoring policy, epoch window, workload commitment, and the
+   selected round's `staging` identity.
 2. Submit the canonical unified diff to `POST /competition/score` with the
    active `round_id`. Only the documented allowed Go paths are accepted;
    `connect/sim-latency/**` and all trusted evaluator/scoring inputs are always

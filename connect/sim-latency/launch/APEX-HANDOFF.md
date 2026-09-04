@@ -20,11 +20,19 @@ for the next same-round rebaseline.
 
 The number of admitted submissions per epoch is unbounded. The Apex adapter
 collects the fixed $20 USD submission fee exactly once before forwarding each
-admission; transport retries of its durable admission record are not recharged.
+production admission; transport retries of its durable admission record are
+not recharged.
 Identical canonical patch bytes share one `(round_id, patch_sha256)` result and
 do not consume another noise draw. One score job has a three-hour hard execution
 limit; the adapter must therefore be asynchronous and tolerate an unbounded
 post-close grading window.
+
+Before epoch 1, the API can expose one epoch-zero `staging_round`. Its
+submissions are fee-free, retained, cached, and pollable but never enter the
+evaluator, ranking, or leaderboard. The first production-round commit
+atomically cancels the staging round and its unfinished jobs. The adapter must
+prefer `active_round`, persist the returned `staging` boolean, and accept
+`staging_discarded` cancellation as the expected terminal integration result.
 
 ## Adapter mapping
 
@@ -37,6 +45,7 @@ returned immutable job id.
 | Apex action | Main API action |
 |---|---|
 | Discover policy and active epoch | `GET /competition/info` |
+| Discover pre-season test identity | Read `staging_round` only when no open `active_round` exists |
 | Submit canonical text patch | `POST /competition/score` |
 | Persist accepted identity | Store `job_id`, `round_id`, `patch_sha256`, and `status_url` atomically |
 | Poll result | `GET /competition/score/{jobId}` using the returned status URL |

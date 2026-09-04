@@ -640,6 +640,7 @@ func competitionRegistry() []specEndpoint {
 		{"GET", "/competition/readyz", nil, rt(controller.ReadinessResult{})},
 		{"GET", "/competition/info", nil, rt(controller.InfoResult{})},
 		{"GET", "/competition/leaderboard", nil, rt(controller.SeasonLeaderboardResult{})},
+		{"POST", "/competition/generate-staging-round", nil, rt(controller.RoundResult{})},
 		{"POST", "/competition/generate-round", rt(controller.GenerateRoundArgs{}), rt(controller.RoundResult{})},
 		{"GET", "/competition/round/{roundId}/providers.yml", nil, nil},
 		{"POST", "/competition/score", rt(controller.ScoreArgs{}), rt(controller.ScoreAcceptedResult{})},

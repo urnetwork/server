@@ -16,6 +16,7 @@ preparation_seconds=${SIM_LATENCY_PREPARATION_SECONDS:-57600}
 usage() {
     cat <<'EOF'
 Usage:
+  run-main.sh staging
   run-main.sh run
   run-main.sh status [--epoch N]
   run-main.sh candidate --epoch N
@@ -155,10 +156,26 @@ create_round() {
         '{opens_at:$opens, closes_at:$closes, reveal_at:$closes}')
     response=$(api_request POST /competition/generate-round "$request")
     jq -e --argjson epoch "$epoch" \
-        '.epoch == $epoch and .opens_at != null and .closes_at != null and .round_id != null' \
+        '.epoch == $epoch and .staging == false and .opens_at != null and .closes_at != null and .round_id != null' \
         <<<"$response" >/dev/null || fail "generate-round returned an invalid epoch $epoch record"
     write_evidence "epoch-$epoch-round.json" "$response"
     printf '%s\n' "$response"
+}
+
+staging_round() {
+    local info response
+    info=$(api_request GET /competition/info)
+    if [[ $(jq -r '.active_round.epoch // 0' <<<"$info") != 0 ]]; then
+        fail "the production season has started; staging is no longer available"
+    fi
+    response=$(jq -c '.staging_round // empty' <<<"$info")
+    if [[ -z $response ]]; then
+        response=$(api_request POST /competition/generate-staging-round)
+    fi
+    jq -e '.epoch == 0 and .staging == true and .status == "open" and .round_id != null' \
+        <<<"$response" >/dev/null || fail "API returned an invalid staging-round record"
+    write_evidence "staging-round.json" "$response"
+    printf '%s\n' "$response" | jq .
 }
 
 review_json() {
@@ -336,6 +353,10 @@ main_environment
 command=${1:-}
 shift || true
 case $command in
+    staging)
+        [[ $# == 0 ]] || fail "staging takes no arguments"
+        staging_round
+        ;;
     run)
         [[ $# == 0 ]] || fail "run takes no arguments"
         [[ -n $reviewer_id ]] || fail "SIM_LATENCY_REVIEWER_ID is required"

@@ -81,6 +81,7 @@ type CompetitionInfoResult struct {
 	EvaluationPolicy     CompetitionEvaluationPolicy `json:"evaluation_policy"`
 	SeasonPolicy         CompetitionSeasonPolicy     `json:"season_policy"`
 	ActiveRound          *CompetitionRoundResult     `json:"active_round,omitempty"`
+	StagingRound         *CompetitionRoundResult     `json:"staging_round,omitempty"`
 }
 
 type CompetitionGenerateRoundArgs struct {
@@ -92,6 +93,7 @@ type CompetitionGenerateRoundArgs struct {
 type CompetitionRoundResult struct {
 	RoundId            server.Id  `json:"round_id"`
 	Epoch              int        `json:"epoch"`
+	Staging            bool       `json:"staging"`
 	Status             string     `json:"status"`
 	WorkloadCommitment string     `json:"workload_commitment"`
 	ProvidersSha256    string     `json:"providers_sha256"`
@@ -177,6 +179,7 @@ type CompetitionScoreArgs struct {
 type CompetitionScoreAcceptedResult struct {
 	JobId       server.Id `json:"job_id"`
 	RoundId     server.Id `json:"round_id"`
+	Staging     bool      `json:"staging"`
 	PatchSha256 string    `json:"patch_sha256"`
 	State       string    `json:"state"`
 	CacheHit    bool      `json:"cache_hit"`
@@ -186,6 +189,7 @@ type CompetitionScoreAcceptedResult struct {
 type CompetitionScoreJobResult struct {
 	JobId                server.Id               `json:"job_id"`
 	RoundId              server.Id               `json:"round_id"`
+	Staging              bool                    `json:"staging"`
 	PatchSha256          string                  `json:"patch_sha256"`
 	State                string                  `json:"state"`
 	SubmittedAt          time.Time               `json:"submitted_at"`

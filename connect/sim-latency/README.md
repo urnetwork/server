@@ -175,6 +175,19 @@ round baseline are built only after the new source epoch is active.
 
 ## Competition lifecycle
 
+Before epoch 1, an operator may create one epoch-zero staging round through
+`POST /competition/generate-staging-round`. Its `round_id` lets Apex exercise
+submitter authentication, structural patch validation, immutable MinIO
+retention, canonical-patch cache identity, and status polling. Staging
+admissions are explicitly fee-free and never enter the evaluator FIFO,
+ranking, or leaderboard. Committing epoch 1 atomically cancels the staging
+round and every unfinished staging job; the canceled records remain retained
+audit evidence.
+
+With the operator-token environment configured as described in `RUN-MAIN.md`,
+`./run-main.sh staging` creates this round idempotently and prints the public
+record that can be shared with the staging submitter.
+
 Submissions are admitted throughout each seven-day window and evaluated as
 soon as possible in exact FIFO order. Closing an epoch stops admission but does
 not stop accepted work: the worker continues until the entire backlog is

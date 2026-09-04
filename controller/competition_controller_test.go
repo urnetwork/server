@@ -529,6 +529,98 @@ func TestRoundGenerationReadinessPrecedesRoundRebaseline(t *testing.T) {
 	}
 }
 
+func TestStagingAdmissionBypassesEvaluatorWithoutEnteringProduction(t *testing.T) {
+	settings := validSettings()
+	roundId := server.NewId()
+	jobId := server.NewId()
+	now := server.NowUtc()
+	stagingRound := &roundRecord{RoundResult: RoundResult{
+		RoundId: roundId, Epoch: 0, Staging: true, Status: "open",
+		OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour),
+	}}
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: jobId, RoundId: roundId, Staging: true, State: "queued",
+		},
+		Round: *stagingRound,
+	}
+	store := &fakeStore{
+		stagingRound: stagingRound,
+		enqueueJob:   job,
+		readiness:    map[string]bool{"host_rebaseline": false},
+	}
+	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+
+	info, evalError := service.Info(context.Background())
+	if evalError != nil || info.ActiveRound != nil || info.StagingRound == nil ||
+		info.StagingRound.RoundId != roundId || !info.StagingRound.Staging || info.StagingRound.Epoch != 0 {
+		t.Fatalf("staging info = %#v, %#v", info, evalError)
+	}
+	accepted, status, evalError := service.Submit(
+		context.Background(),
+		ScoreArgs{RoundId: roundId, Patch: testPatch("staging")},
+		&Principal{Id: "apex-stage", Role: "submitter"},
+	)
+	if evalError != nil || status != http.StatusAccepted || accepted == nil ||
+		accepted.JobId != jobId || !accepted.Staging || accepted.State != "queued" ||
+		store.enqueueCalls != 1 {
+		t.Fatalf("staging admission = %#v, %d, %#v, calls=%d", accepted, status, evalError, store.enqueueCalls)
+	}
+}
+
+func TestGenerateStagingRoundUsesServerOwnedEpochZero(t *testing.T) {
+	settings := validSettings()
+	settings.SeasonEndsAt = server.NowUtc().Add(24 * time.Hour)
+	settings.RetainUntil = settings.SeasonEndsAt.Add(24 * time.Hour)
+	round := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 0, Staging: true, Status: "open",
+	}}
+	store := &fakeStore{
+		createStaging: round,
+		readiness: map[string]bool{
+			"configuration": true, "frozen_policy": true,
+			"retention_window": true, "database": true,
+			"fifo_slot": false, "queue_admission": false,
+			"authoritative_evaluator_host": false, "artifact_storage": false,
+			"host_rebaseline": false,
+		},
+	}
+	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+	result, evalError := service.GenerateStagingRound(context.Background())
+	if evalError != nil || result == nil || result.RoundId != round.RoundId ||
+		result.Epoch != 0 || !result.Staging {
+		t.Fatalf("generated staging round = %#v, %#v", result, evalError)
+	}
+
+	store.stagingRound = round
+	result, evalError = service.GenerateStagingRound(context.Background())
+	if result != nil || evalError == nil || evalError.Code != "staging_round_exists" {
+		t.Fatalf("duplicate staging round = %#v, %#v", result, evalError)
+	}
+}
+
+func TestProductionAdmissionStillFailsClosedWithoutEvaluator(t *testing.T) {
+	settings := validSettings()
+	roundId := server.NewId()
+	store := &fakeStore{
+		round: &roundRecord{RoundResult: RoundResult{RoundId: roundId, Epoch: 1}},
+		readiness: map[string]bool{
+			"configuration":   true,
+			"host_rebaseline": false,
+		},
+	}
+	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+	accepted, status, evalError := service.Submit(
+		context.Background(),
+		ScoreArgs{RoundId: roundId, Patch: testPatch("production")},
+		&Principal{Id: "apex", Role: "submitter"},
+	)
+	if accepted != nil || status != http.StatusServiceUnavailable || evalError == nil ||
+		evalError.Code != "not_ready" || store.enqueueCalls != 0 {
+		t.Fatalf("production admission = %#v, %d, %#v, calls=%d", accepted, status, evalError, store.enqueueCalls)
+	}
+}
+
 func TestPatchValidationAndCanonicalIdentity(t *testing.T) {
 	policy := validSettings().PatchPolicy
 	valid := "diff --git a/connect/example.go b/connect/example.go\n" +
@@ -694,14 +786,25 @@ type fakeStore struct {
 	readiness       map[string]bool
 	readyErr        error
 	round           *roundRecord
+	stagingRound    *roundRecord
 	reviewState     *CandidateReviewState
 	reviewErr       error
 	reviewCalls     int
 	createRound     *roundRecord
 	createErr       error
 	createRoundArgs []GenerateRoundArgs
+	createStaging   *roundRecord
+	createStageErr  error
+	enqueueJob      *queuedJob
+	enqueueHit      bool
+	enqueueErr      error
+	enqueueCalls    int
 	getJob          *queuedJob
 	getJobErr       error
+}
+
+func (f *fakeStore) CreateStagingRound(context.Context, *Settings) (*roundRecord, error) {
+	return f.createStaging, f.createStageErr
 }
 
 func (f *fakeStore) CreateRound(_ context.Context, _ *Settings, args GenerateRoundArgs) (*roundRecord, error) {
@@ -713,11 +816,17 @@ func (f *fakeStore) CurrentRound(context.Context, *Settings) (*roundRecord, erro
 	return f.round, nil
 }
 
+func (f *fakeStore) CurrentStagingRound(context.Context, *Settings) (*roundRecord, error) {
+	return f.stagingRound, nil
+}
+
 func (f *fakeStore) GetRound(_ context.Context, _ *Settings, roundId server.Id) (*roundRecord, error) {
-	if f.round == nil || f.round.RoundId != roundId {
-		return nil, ErrNotFound
+	for _, round := range []*roundRecord{f.round, f.stagingRound} {
+		if round != nil && round.RoundId == roundId {
+			return round, nil
+		}
 	}
-	return f.round, nil
+	return nil, ErrNotFound
 }
 
 func (f *fakeStore) PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error) {
@@ -734,7 +843,11 @@ func (f *fakeStore) Leaderboards(context.Context, *Settings) (*SeasonLeaderboard
 }
 
 func (f *fakeStore) Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string, string) (*queuedJob, bool, error) {
-	return nil, false, errors.New("unused")
+	f.enqueueCalls++
+	if f.enqueueJob == nil && f.enqueueErr == nil {
+		return nil, false, errors.New("unused")
+	}
+	return f.enqueueJob, f.enqueueHit, f.enqueueErr
 }
 
 func (f *fakeStore) GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error) {
@@ -906,6 +1019,33 @@ func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
 	result, status, evalError = service.GetScore(context.Background(), job.JobId, submitter)
 	if evalError != nil || status != 200 || result.State != "failed" || result.EvalError == nil {
 		t.Fatalf("published failure = %#v, %d, %#v", result, status, evalError)
+	}
+}
+
+func TestStagingDiscardReasonIsVisibleWithoutDisclosingOtherErrors(t *testing.T) {
+	settings := validSettings()
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), Staging: true,
+			State: "canceled", EvalError: submissionError(
+				"staging_discarded",
+				"staging submission was discarded when epoch one was committed",
+			),
+		},
+		Round: roundRecord{RoundResult: RoundResult{Staging: true}},
+	}
+	service := newServiceWithImageDigest(settings, &fakeStore{getJob: job}, testApiImageDigest(), nil)
+	submitter := &Principal{Id: "apex-stage", Role: "submitter"}
+	result, status, evalError := service.GetScore(context.Background(), job.JobId, submitter)
+	if evalError != nil || status != http.StatusOK || result.State != "canceled" ||
+		result.EvalError == nil || result.EvalError.Code != "staging_discarded" {
+		t.Fatalf("staging discard view = %#v, %d, %#v", result, status, evalError)
+	}
+
+	job.EvalError = submissionError("candidate_build_failed", "must remain embargoed")
+	result, _, _ = service.GetScore(context.Background(), job.JobId, submitter)
+	if result.EvalError != nil {
+		t.Fatalf("non-staging error escaped embargo = %#v", result)
 	}
 }
 
@@ -3185,6 +3325,225 @@ func TestApexAdapterRejectsHttpRedirects(t *testing.T) {
 	if redirectFollowed {
 		t.Fatal("Apex adapter followed a credential-bearing redirect")
 	}
+}
+
+func TestApexAdapterUsesFeeFreeStagingRound(t *testing.T) {
+	roundId := server.NewId()
+	jobId := server.NewId()
+	patch := []byte(testPatch("staging-adapter"))
+	patchDigest := sha256.Sum256(patch)
+	patchSha256 := hex.EncodeToString(patchDigest[:])
+	apiServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		encode := func(value any) {
+			if err := json.NewEncoder(response).Encode(value); err != nil {
+				t.Errorf("encode staging API response: %v", err)
+			}
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/competition/info":
+			if request.Header.Get("Authorization") != "" {
+				t.Error("public staging info received bearer token")
+			}
+			encode(InfoResult{StagingRound: &RoundResult{
+				RoundId: roundId, Epoch: 0, Staging: true, Status: "open",
+			}})
+		case request.Method == http.MethodPost && request.URL.Path == "/competition/score":
+			if request.Header.Get("Authorization") != "Bearer submitter-secret" {
+				t.Error("staging admission omitted submitter token")
+			}
+			encode(ScoreAcceptedResult{
+				JobId: jobId, RoundId: roundId, Staging: true,
+				PatchSha256: patchSha256, State: "queued",
+				StatusUrl: "/competition/score/" + jobId.String(),
+			})
+		case request.Method == http.MethodGet && request.URL.Path == "/competition/score/"+jobId.String():
+			if request.Header.Get("Authorization") != "Bearer submitter-secret" {
+				t.Error("staging poll omitted submitter token")
+			}
+			encode(ScoreJobResult{
+				JobId: jobId, RoundId: roundId, Staging: true,
+				PatchSha256: patchSha256, State: "canceled",
+				EvalError: submissionError(
+					"staging_discarded",
+					"staging submission was discarded when epoch one was committed",
+				),
+			})
+		default:
+			response.WriteHeader(http.StatusNotFound)
+			encode(CompetitionError{Code: "not_found"})
+		}
+	}))
+	defer apiServer.Close()
+
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feeCollector := &apexConformanceFeeCollector{receipts: map[string]string{}}
+	adapter, err := NewApexAdapter(
+		apiServer.URL,
+		"submitter-secret",
+		store,
+		feeCollector,
+		ApexAdapterOptions{HttpClient: apiServer.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := adapter.Submit(context.Background(), "macrocosmos-stage-1", patch)
+	if err != nil || record == nil || record.JobId != jobId || !record.Staging ||
+		record.FeeUsd != 0 || record.FeeReceipt != "" || feeCollector.calls != 0 {
+		t.Fatalf("staging adapter admission = %#v, err=%v, fee calls=%d", record, err, feeCollector.calls)
+	}
+	record, err = adapter.PollNext(context.Background())
+	if err != nil || record == nil || record.State != "canceled" || !record.Staging {
+		t.Fatalf("staging adapter poll = %#v, %v", record, err)
+	}
+	if pending, err := store.Pending(); err != nil || len(pending) != 0 {
+		t.Fatalf("terminal staging admissions = %#v, %v", pending, err)
+	}
+}
+
+func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-staging-discard"
+		currentTime := server.NowUtc()
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		fifoListKey, fifoMemberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, fifoListKey, fifoMemberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), fifoListKey, fifoMemberKey).Err()
+			})
+		})
+
+		stagingRound, err := store.CreateStagingRound(ctx, settings)
+		if err != nil {
+			t.Fatalf("CreateStagingRound: %v", err)
+		}
+		if stagingRound.Epoch != 0 || !stagingRound.Staging || stagingRound.Status != "open" {
+			t.Fatalf("staging round = %#v", stagingRound)
+		}
+		if production, err := store.CurrentRound(ctx, settings); err != nil || production != nil {
+			t.Fatalf("production round before epoch one = %#v, %v", production, err)
+		}
+		currentStaging, err := store.CurrentStagingRound(ctx, settings)
+		if err != nil || currentStaging == nil || currentStaging.RoundId != stagingRound.RoundId {
+			t.Fatalf("current staging round = %#v, %v", currentStaging, err)
+		}
+		assertRoundUpdateRejected := func(query string, expected string, args ...any) {
+			t.Helper()
+			updateErr := captureDatabaseError(func() {
+				server.Db(ctx, func(conn server.PgConn) {
+					server.RaisePgResult(conn.Exec(ctx, query, args...))
+				}, server.OptReadWrite())
+			})
+			if updateErr == nil || !strings.Contains(updateErr.Error(), expected) {
+				t.Fatalf("staging invariant error = %v, want %q", updateErr, expected)
+			}
+		}
+		assertRoundUpdateRejected(
+			`UPDATE competition_round SET staging = false WHERE round_id = $1`,
+			"staging identity changed",
+			stagingRound.RoundId,
+		)
+		assertRoundUpdateRejected(
+			`UPDATE competition_round SET finalized_at = $2 WHERE round_id = $1`,
+			"staging round cannot be finalized",
+			stagingRound.RoundId,
+			settings.SeasonEndsAt,
+		)
+
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("staging-api"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		job, hit, err := store.Enqueue(
+			ctx,
+			settings,
+			stagingRound.RoundId,
+			patch,
+			"macrocosmos-stage",
+			testApiImageDigest(),
+		)
+		if err != nil || hit || job == nil || !job.Staging || job.State != "queued" {
+			t.Fatalf("staging enqueue = %#v, hit=%t, err=%v", job, hit, err)
+		}
+		cached, hit, err := store.Enqueue(
+			ctx,
+			settings,
+			stagingRound.RoundId,
+			patch,
+			"macrocosmos-stage-retry",
+			testApiImageDigest(),
+		)
+		if err != nil || !hit || cached.JobId != job.JobId || !cached.Staging {
+			t.Fatalf("staging cache identity = %#v, hit=%t, err=%v", cached, hit, err)
+		}
+		var queuedSignals int64
+		server.Redis(ctx, func(client server.RedisClient) {
+			queuedSignals, err = client.LLen(ctx, fifoListKey).Result()
+			server.Raise(err)
+		})
+		if queuedSignals != 0 {
+			t.Fatalf("staging admission emitted %d evaluator FIFO signals", queuedSignals)
+		}
+		claimed, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || claimed != nil {
+			t.Fatalf("worker claimed staging job = %#v, %v", claimed, err)
+		}
+
+		productionRound, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		})
+		if err != nil || productionRound == nil || productionRound.Epoch != 1 || productionRound.Staging {
+			t.Fatalf("epoch one = %#v, %v", productionRound, err)
+		}
+		if currentStaging, err := store.CurrentStagingRound(ctx, settings); err != nil || currentStaging != nil {
+			t.Fatalf("staging round after epoch one = %#v, %v", currentStaging, err)
+		}
+		discarded, err := store.GetJob(
+			ctx,
+			settings,
+			job.JobId,
+			&Principal{Id: "macrocosmos-stage", Role: "submitter"},
+		)
+		if err != nil || discarded.State != "canceled" || !discarded.Staging ||
+			discarded.CompletedAt == nil || discarded.EvalError == nil ||
+			discarded.EvalError.Code != "staging_discarded" {
+			t.Fatalf("discarded staging job = %#v, %v", discarded, err)
+		}
+		service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+		visible, status, evalError := service.GetScore(
+			ctx,
+			job.JobId,
+			&Principal{Id: "macrocosmos-stage", Role: "submitter"},
+		)
+		if evalError != nil || status != http.StatusOK || visible.EvalError == nil ||
+			visible.EvalError.Code != "staging_discarded" {
+			t.Fatalf("visible staging discard = %#v, %d, %#v", visible, status, evalError)
+		}
+		storedStaging, err := store.GetRound(ctx, settings, stagingRound.RoundId)
+		if err != nil || !storedStaging.Canceled || storedStaging.Status != "canceled" {
+			t.Fatalf("retained staging audit round = %#v, %v", storedStaging, err)
+		}
+		if _, err := store.CreateStagingRound(ctx, settings); !errors.Is(err, ErrSeasonStarted) {
+			t.Fatalf("post-start staging round error = %v", err)
+		}
+	})
 }
 
 func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testing.T) {
