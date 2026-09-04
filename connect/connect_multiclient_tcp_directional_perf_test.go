@@ -132,7 +132,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 	specs := []*connect.ProviderSpec{
 		{ClientId: &providerClientIdConnect},
 	}
-	generator := connect.NewApiMultiClientGeneratorWithDefaults(
+	generator := connect.NewApiMultiClientGenerator(
 		ctx,
 		specs,
 		deviceStrategy,
@@ -144,6 +144,8 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 		"mctcpdir",
 		"0.0.0",
 		&deviceClientIdConnect,
+		newLocalPerformanceClientSettings,
+		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
 	// received packets inject through the receive-dispatch batch: the

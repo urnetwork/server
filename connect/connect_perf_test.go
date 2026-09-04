@@ -346,7 +346,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 		clientStrategy := connect.NewClientStrategy(ctx, strategySettings)
 
 		oob := connect.NewApiOutOfBandControl(ctx, clientStrategy, p.byJwt, apiUrl)
-		client := connect.NewClient(ctx, connect.Id(p.clientId), oob, connect.DefaultClientSettings())
+		client := connect.NewClient(ctx, connect.Id(p.clientId), oob, newLocalPerformanceClientSettings())
 
 		auth := &connect.ClientAuth{
 			ByJwt:      p.byJwt,

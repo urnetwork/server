@@ -102,6 +102,27 @@ const (
 	mcPerfExtraRunCount = 2
 )
 
+// Keeps the in-process performance topology on loopback instead of gathering
+// every host interface or querying public STUN servers.
+func newLocalPerformanceClientSettings() *connect.ClientSettings {
+	clientSettings := connect.DefaultClientSettings()
+	clientSettings.WebRtcSettings.IceServerUrls = nil
+	clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
+	return clientSettings
+}
+
+// Pins the fixture boundary that prevents host interface count and WAN state
+// from changing the cost of a same-process performance run.
+func TestLocalPerformanceClientSettingsConstrainIceToLoopback(t *testing.T) {
+	clientSettings := newLocalPerformanceClientSettings()
+	if iceServerUrls := clientSettings.WebRtcSettings.IceServerUrls; len(iceServerUrls) != 0 {
+		t.Errorf("local performance fixture has external ICE servers: %v", iceServerUrls)
+	}
+	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
+		t.Error("local performance fixture can gather non-loopback ICE candidates")
+	}
+}
+
 func TestConnectMultiClientPerformance(t *testing.T) {
 	perfTestEnv().Run(t, func(t testing.TB) {
 		testConnectMultiClientPerformance(t)
@@ -175,7 +196,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	specs := []*connect.ProviderSpec{
 		{ClientId: &providerClientIdConnect},
 	}
-	generator := connect.NewApiMultiClientGeneratorWithDefaults(
+	generator := connect.NewApiMultiClientGenerator(
 		ctx,
 		specs,
 		deviceStrategy,
@@ -187,6 +208,8 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 		"mctcp",
 		"0.0.0",
 		&deviceClientIdConnect,
+		newLocalPerformanceClientSettings,
+		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
 	// received packets are injected synchronously: the inline tun.Write is
@@ -621,7 +644,12 @@ func setupMcStack(ctx context.Context, label string) (*mcStack, func()) {
 	providerStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
 
 	providerOob := connect.NewApiOutOfBandControl(ctx, providerStrategy, providerByJwt, apiUrl)
-	providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
+	providerClient := connect.NewClient(
+		ctx,
+		connect.Id(providerClientId),
+		providerOob,
+		newLocalPerformanceClientSettings(),
+	)
 
 	providerAuth := &connect.ClientAuth{
 		ByJwt:      providerByJwt,
@@ -786,7 +814,7 @@ func testConnectMultiClientPerformance(t testing.TB) {
 	specs := []*connect.ProviderSpec{
 		{ClientId: &providerClientIdConnect},
 	}
-	generator := connect.NewApiMultiClientGeneratorWithDefaults(
+	generator := connect.NewApiMultiClientGenerator(
 		ctx,
 		specs,
 		deviceStrategy,
@@ -798,6 +826,8 @@ func testConnectMultiClientPerformance(t testing.TB) {
 		"mcperf",
 		"0.0.0",
 		&deviceClientIdConnect,
+		newLocalPerformanceClientSettings,
+		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
 	var echoCount int64
