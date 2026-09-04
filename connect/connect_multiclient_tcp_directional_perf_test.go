@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/pprof"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,14 +275,16 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 	profileDir := "profile"
 	os.MkdirAll(profileDir, 0755)
 	downloadCpuPath := filepath.Join(profileDir, "mctcpdir_download_cpu.pprof")
-	downloadCpuFile, _ := os.Create(downloadCpuPath)
-	downloadCpuActive := pprof.StartCPUProfile(downloadCpuFile) == nil
+	stopDownloadCpuProfile, downloadCpuProfileErr := startLocalPerformanceCpuProfile(downloadCpuPath)
+	if downloadCpuProfileErr != nil {
+		fmt.Printf("[mctcpdir]download cpu profile unavailable (%s)\n", downloadCpuProfileErr)
+	}
+	defer stopDownloadCpuProfile()
 
 	downloadGoodput := measure("download", runDownload)
 
-	if downloadCpuActive {
-		pprof.StopCPUProfile()
-		downloadCpuFile.Close()
+	stopDownloadCpuProfile()
+	if downloadCpuProfileErr == nil {
 		fmt.Printf("[mctcpdir]download cpu profile %s\n", downloadCpuPath)
 	}
 

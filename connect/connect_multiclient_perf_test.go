@@ -46,6 +46,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,6 +121,89 @@ func TestLocalPerformanceClientSettingsConstrainIceToLoopback(t *testing.T) {
 	}
 	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
 		t.Error("local performance fixture can gather non-loopback ICE candidates")
+	}
+}
+
+// Starts an optional measurement profile while keeping file ownership local to
+// the fixture even when another package-level profile is already active.
+func startLocalPerformanceCpuProfile(path string) (func(), error) {
+	cpuProfileFile, err := os.Create(path)
+	if err != nil {
+		return func() {}, err
+	}
+	return startLocalPerformanceCpuProfileFile(
+		cpuProfileFile,
+		pprof.StartCPUProfile,
+		pprof.StopCPUProfile,
+	)
+}
+
+// Separates profiler admission from file ownership so both outcomes can be
+// proved without starting the process-global profiler in a unit test.
+func startLocalPerformanceCpuProfileFile(
+	cpuProfileFile io.WriteCloser,
+	startCpuProfile func(io.Writer) error,
+	stopCpuProfile func(),
+) (func(), error) {
+	if err := startCpuProfile(cpuProfileFile); err != nil {
+		cpuProfileFile.Close()
+		return func() {}, err
+	}
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			stopCpuProfile()
+			cpuProfileFile.Close()
+		})
+	}, nil
+}
+
+// A refused process-global profile still releases the file opened for it.
+func TestLocalPerformanceCpuProfileClosesFileWhenStartFails(t *testing.T) {
+	readFile, writeFile, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readFile.Close()
+
+	stopCpuProfile, startErr := startLocalPerformanceCpuProfileFile(
+		writeFile,
+		func(io.Writer) error { return fmt.Errorf("profile already active") },
+		func() { t.Error("refused profile was stopped") },
+	)
+	if startErr == nil {
+		t.Fatal("expected profile start failure")
+	}
+	stopCpuProfile()
+	if _, err := writeFile.Write([]byte{0}); err == nil {
+		t.Error("profile file remained open after start failure")
+	}
+}
+
+// An admitted profile stops once and releases its file when its owner ends it.
+func TestLocalPerformanceCpuProfileStopsAndClosesFile(t *testing.T) {
+	readFile, writeFile, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readFile.Close()
+
+	stopCount := 0
+	stopCpuProfile, startErr := startLocalPerformanceCpuProfileFile(
+		writeFile,
+		func(io.Writer) error { return nil },
+		func() { stopCount += 1 },
+	)
+	if startErr != nil {
+		t.Fatalf("start profile: %v", startErr)
+	}
+	stopCpuProfile()
+	stopCpuProfile()
+	if stopCount != 1 {
+		t.Errorf("profile stop count = %d, expected 1", stopCount)
+	}
+	if _, err := writeFile.Write([]byte{0}); err == nil {
+		t.Error("profile file remained open after stop")
 	}
 }
 
@@ -301,8 +385,11 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	}
 
 	cpuProfilePath := filepath.Join(profileDir, "mctcp_stream_cpu.pprof")
-	cpuProfileFile, _ := os.Create(cpuProfilePath)
-	cpuProfileActive := pprof.StartCPUProfile(cpuProfileFile) == nil
+	stopCpuProfile, cpuProfileErr := startLocalPerformanceCpuProfile(cpuProfilePath)
+	if cpuProfileErr != nil {
+		fmt.Printf("[mctcp]cpu profile unavailable (%s)\n", cpuProfileErr)
+	}
+	defer stopCpuProfile()
 
 	// tcpStackStats prints the delta of the tun's gvisor TCP counters across a
 	// run, so a slow or stalled run is diagnosable from the log: retransmit/rto
@@ -440,10 +527,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 		tcpStackStats(fmt.Sprintf("run %d", runs))
 	}
 
-	if cpuProfileActive {
-		pprof.StopCPUProfile()
-		cpuProfileFile.Close()
-	}
+	stopCpuProfile()
 	if writeProfile := pprof.Lookup("allocs"); writeProfile != nil {
 		if f, ferr := os.Create(filepath.Join(profileDir, "mctcp_stream_allocs.pprof")); ferr == nil {
 			writeProfile.WriteTo(f, 0)
@@ -977,11 +1061,11 @@ func testConnectMultiClientPerformance(t testing.TB) {
 	profileDir := "profile"
 	os.MkdirAll(profileDir, 0755)
 	cpuProfilePath := filepath.Join(profileDir, "mcperf_tput_cpu.pprof")
-	cpuProfileFile, err := os.Create(cpuProfilePath)
-	if err != nil {
-		panic(err)
+	stopCpuProfile, cpuProfileErr := startLocalPerformanceCpuProfile(cpuProfilePath)
+	if cpuProfileErr != nil {
+		fmt.Printf("[mcperf]cpu profile unavailable (%s)\n", cpuProfileErr)
 	}
-	cpuProfileActive := pprof.StartCPUProfile(cpuProfileFile) == nil
+	defer stopCpuProfile()
 	runtime.SetBlockProfileRate(10 * 1000) // sample blocking >= 10us
 	runtime.SetMutexProfileFraction(5)
 
@@ -1091,10 +1175,7 @@ func testConnectMultiClientPerformance(t testing.TB) {
 		}
 	}
 
-	if cpuProfileActive {
-		pprof.StopCPUProfile()
-		cpuProfileFile.Close()
-	}
+	stopCpuProfile()
 	for _, name := range []string{"allocs", "mutex", "block"} {
 		if writeProfile := pprof.Lookup(name); writeProfile != nil {
 			if f, ferr := os.Create(filepath.Join(profileDir, fmt.Sprintf("mcperf_tput_%s.pprof", name))); ferr == nil {
