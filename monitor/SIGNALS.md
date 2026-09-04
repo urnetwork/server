@@ -4270,12 +4270,21 @@ The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
 Unlike §2.17, this is not an inferred role or fallback: the contract boundary
 itself found the requested destination missing or inactive and refused to
-create the route. Query both original companion partitions over five minutes:
+create the route. Query both initialized original-companion partitions and the
+traffic-created joint diagnostic family over five minutes:
 
 ```promql
-sum by (companion) (rate(urnetwork_connect_contract_failures_total{
-  env="main",cause="inactive_destination"
-}[5m])) * 60
+label_replace((sum by (companion) (rate(
+  urnetwork_connect_contract_failures_total{
+    env="main",cause="inactive_destination"
+  }[5m])) * 60),"monitor_metric","aggregate","__name__",".*")
+or
+label_replace((sum by (
+  request_companion,sender_role,resolution,relationship,
+  source_lifecycle,destination_lifecycle
+) (rate(urnetwork_connect_inactive_destination_details_total{
+  env="main"
+}[5m])) * 60),"monitor_metric","detail","__name__",".*")
 ```
 
 The current API initializes both `companion=false` and `companion=true` label
@@ -4288,9 +4297,11 @@ or time-skewed partition is UNKNOWN and must not be converted to zero.
   destination was already inactive at create time remain exactly zero.
 - LIFECYCLE REJECTION: the total exceeds 50/min. The guard is preventing a
   correctness violation, but the selection/window path is still offering dead
-  identities often enough to affect users. Preserve the `companion` split as
-  bounded context; it is the original request bit and does not establish an
-  endpoint role.
+  identities often enough to affect users. The aggregate remains actionable
+  independently of diagnostic coverage. Attribute it only when the detail
+  family is structurally valid, fresh, same-timestamp, duplicate-free, and its
+  sum reconciles to the aggregate within `max(1/min, 2%)`. A deficit is partial
+  rollout or ingestion, not a zero and not evidence for its largest cohort.
 - UNKNOWN: either initialized partition is absent, duplicated, stale, negative,
   NaN, infinite, labeled outside the fixed Boolean vocabulary, or evaluated at
   a different timestamp. During rollout, absence means the API generation or
@@ -4302,6 +4313,19 @@ or time-skewed partition is UNKNOWN and must not be converted to zero.
   remote-write acceptance, and label retention. Never convert the missing rate
   to zero.
 
+The detail labels are finite: Boolean `request_companion`;
+`sender_role=client|server|absent|unknown`; the existing bounded resolution and
+relationship classes; and the existing source/destination lifecycle classes.
+The Connect producer in `f8b1b60` stamps the optional role from the requesting
+ContractKey, and the API consumer records it at the exact inactive-destination
+failure boundary. `client` or `server` proves only that reported sequence lane
+and capability presence. It is not an application, device, provider, or
+artifact identity. `absent` means the wire field was absent and must not be
+called an old client; `unknown` means an explicitly unknown/future value.
+Absent, partial, or ambiguous detail stays unattributed while the independent
+aggregate alert remains live. No customer or route identifier enters either
+family.
+
 The durable repair is ordered. First deploy every API instance from server
 commit `c8dfe570` or a descendant so an inactive destination cannot pass mode
 selection or the final active-only write check and receives the additive
@@ -4311,7 +4335,10 @@ status to the exact emitting channel, excludes it from new-flow selection,
 records a terminal route error, and wakes the normal resize/refill path. An old
 client remains wire-compatible but can keep retrying its stale exit, so an API
 rollout alone protects contract correctness without necessarily removing the
-retry load.
+retry load. Causal use of the new joint cohorts additionally requires an API
+artifact containing the detail consumer and every relevant Connect-bearing
+requester to contain `f8b1b60`; otherwise the family must remain absent or its
+`sender_role=absent` cohort remains explicitly unattributed.
 
 The 2026-09-02 main API, Connect, Proxy, and Taskworker artifacts were built at
 14:56–15:12Z from modified base `2d6f27c`, while the two repair commits were
@@ -4320,9 +4347,23 @@ the incident fixed, prove exact running API and affected client artifacts carry
 the commits, let two full rate windows elapse, and require the inactive-success
 cohort to remain zero. If rejection remains high after the deployed client
 window lifetime, use §2.8, §2.9, §2.15, §2.16, and bounded lifecycle/relationship
-cohorts to locate the stale producer. Do not delete Redis provide keys, weaken
+cohorts joined to the sender sequence lane to distinguish a client/default
+request lane from a server/reply lane. Do not infer a product caller from that
+lane. Do not delete Redis provide keys, weaken
 lifecycle checks, lengthen contract timeouts, or restart clients merely to
 clear the graph.
+
+The 2026-09-04 post-rollout census found every active API block on server source
+`e5ca178` with server gitlink `9031fd7e`, a descendant of `c8dfe570`, and every
+active Connect service block on the same source with Connect gitlink `f860da1d`,
+a descendant of `5b33c91`. Successful stale contracts were zero while the
+rejection rate remained about 4,487/min. Thus the guard and route-retirement
+ancestry protect correctness, but the rate is persistent prevented work. The
+deployed `f860da1d` predates `f8b1b60`, so this observation cannot distinguish a
+field-client retry lane from a service/provider return lane. The first
+measurable nonzero frame was 2026-09-04T03:15:56Z; earlier frames lacked the
+counter rather than proving a healthy rate. Deploy the consumer and
+Connect-bearing producer before using the new cohort as that discriminator.
 
 The first live §2.18 monitor run at 18:51Z reached Mimir successfully but
 returned neither initialized partition. The contemporaneous process-start
@@ -4340,8 +4381,11 @@ inactive destination contractible.
 Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 `signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
 tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
-unknown partitions, stale/invalid/skewed samples, query scoping, rollout-aware
-missing-instrumentation guidance, and detailed identifier-free Markdown.
+unknown partitions, stale/invalid/skewed samples, query scoping, absent and
+partially rolled detail, every fixed-label vocabulary, duplicate/stale/skewed
+detail, reconciliation tolerance, nil-versus-future sender roles, and detailed
+identifier-free Markdown. Partial or ambiguous detail never renders a dominant
+cohort.
 
 ### 2.19 Provider egress probe coverage — every durable shard must advance
 Probe: `egress-coverage`

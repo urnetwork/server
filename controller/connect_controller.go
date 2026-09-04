@@ -80,6 +80,16 @@ var missingOriginDetailsCounter = prometheus.NewCounterVec(
 	[]string{"request_companion", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
+var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "inactive_destination_details_total",
+		Help:      "Inactive contract destination failures partitioned by bounded sender lane, request resolution, and endpoint lifecycle classes",
+	},
+	[]string{"request_companion", "sender_role", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+)
+
 var controlFrameFailureCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -97,7 +107,13 @@ func init() {
 	for _, companion := range []string{"false", "true"} {
 		contractFailureCounter.WithLabelValues("inactive_destination", companion)
 	}
-	prometheus.MustRegister(transferByteCounter, contractFailureCounter, missingOriginDetailsCounter, controlFrameFailureCounter)
+	prometheus.MustRegister(
+		transferByteCounter,
+		contractFailureCounter,
+		missingOriginDetailsCounter,
+		inactiveDestinationDetailsCounter,
+		controlFrameFailureCounter,
+	)
 }
 
 // controlFrameMessageLabel maps a control message to a bounded metric label.
@@ -228,6 +244,16 @@ func recordContractFailureResolved(
 	if cause == "missing_companion_origin" {
 		missingOriginDetailsCounter.WithLabelValues(
 			companionLabel,
+			contractResolutionLabel(resolution.path),
+			provideRelationshipLabel(resolution.relationship),
+			clientLifecycleLabel(resolution.sourceLifecycle),
+			clientLifecycleLabel(resolution.destinationLifecycle),
+		).Inc()
+	}
+	if cause == "inactive_destination" {
+		inactiveDestinationDetailsCounter.WithLabelValues(
+			companionLabel,
+			contractSenderRoleLabel(resolution.senderRole),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),
@@ -476,6 +502,7 @@ type contractResolution struct {
 	relationship         model.ProvideMode
 	sourceLifecycle      model.NetworkClientLifecycle
 	destinationLifecycle model.NetworkClientLifecycle
+	senderRole           *protocol.SequenceRole
 }
 
 const (
@@ -522,6 +549,24 @@ func clientLifecycleLabel(lifecycle model.NetworkClientLifecycle) string {
 		return string(lifecycle)
 	case model.NetworkClientLifecycle("control"):
 		return "control"
+	default:
+		return "unknown"
+	}
+}
+
+// contractSenderRoleLabel reduces the optional wire field to a fixed metric
+// vocabulary. An absent field identifies a sender that did not report the
+// capability; an explicitly unknown or future value remains distinct so a
+// malformed value cannot be mistaken for a legacy sender.
+func contractSenderRoleLabel(senderRole *protocol.SequenceRole) string {
+	if senderRole == nil {
+		return "absent"
+	}
+	switch *senderRole {
+	case protocol.SequenceRole_SequenceRoleClient:
+		return "client"
+	case protocol.SequenceRole_SequenceRoleServer:
+		return "server"
 	default:
 		return "unknown"
 	}
@@ -591,6 +636,7 @@ func CreateContract(
 		relationship:         relationshipDetails.Mode,
 		sourceLifecycle:      relationshipDetails.SourceLifecycle,
 		destinationLifecycle: relationshipDetails.DestinationLifecycle,
+		senderRole:           createContract.SenderRole,
 	}
 
 	// A provide-mode key can outlive the derived identity that published it.

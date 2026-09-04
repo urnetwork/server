@@ -239,6 +239,83 @@ func TestRecordMissingOriginDetailsAreBounded(t *testing.T) {
 	}
 }
 
+func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
+	count := func(
+		requestCompanion bool,
+		senderRole string,
+		resolution string,
+		relationship string,
+		sourceLifecycle string,
+		destinationLifecycle string,
+	) float64 {
+		return testutil.ToFloat64(inactiveDestinationDetailsCounter.WithLabelValues(
+			fmt.Sprintf("%t", requestCompanion),
+			senderRole,
+			resolution,
+			relationship,
+			sourceLifecycle,
+			destinationLifecycle,
+		))
+	}
+
+	serverRole := protocol.SequenceRole_SequenceRoleServer
+	resolution := contractResolution{
+		path:                 contractResolutionRequestedCompanion,
+		relationship:         model.ProvideModePublic,
+		sourceLifecycle:      model.NetworkClientLifecycleActiveTop,
+		destinationLifecycle: model.NetworkClientLifecycleInactiveDerived,
+		senderRole:           &serverRole,
+	}
+	before := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived")
+	recordContractFailureResolved(
+		server.NewId(),
+		server.NewId(),
+		true,
+		16384,
+		errContractDestinationInactive,
+		resolution,
+	)
+	if after := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived"); after != before+1 {
+		t.Fatalf("inactive-destination detail counter = %v, want %v", after, before+1)
+	}
+
+	// Absence proves only that the sender did not report the additive field;
+	// explicitly unknown and future values stay in a separate bounded bucket.
+	absentBefore := count(false, "absent", "unknown", "unknown", "unknown", "unknown")
+	recordContractFailureResolved(
+		server.NewId(), server.NewId(), false, 16384, errContractDestinationInactive,
+		contractResolution{},
+	)
+	if after := count(false, "absent", "unknown", "unknown", "unknown", "unknown"); after != absentBefore+1 {
+		t.Fatalf("absent-role detail counter = %v, want %v", after, absentBefore+1)
+	}
+
+	futureRole := protocol.SequenceRole(999)
+	unknownBefore := count(false, "unknown", "unknown", "unknown", "unknown", "unknown")
+	recordContractFailureResolved(
+		server.NewId(), server.NewId(), false, 16384, errContractDestinationInactive,
+		contractResolution{
+			path:                 "client-controlled-value",
+			relationship:         999,
+			sourceLifecycle:      model.NetworkClientLifecycle("unbounded-source"),
+			destinationLifecycle: model.NetworkClientLifecycle("unbounded-destination"),
+			senderRole:           &futureRole,
+		},
+	)
+	if after := count(false, "unknown", "unknown", "unknown", "unknown", "unknown"); after != unknownBefore+1 {
+		t.Fatalf("unknown-role detail counter = %v, want %v", after, unknownBefore+1)
+	}
+
+	// Other causes must not enter the inactive-destination diagnostic family.
+	before = count(true, "server", "requested_companion", "public", "active_top", "inactive_derived")
+	recordContractFailureResolved(
+		server.NewId(), server.NewId(), true, 16384, fmt.Errorf("postgres unavailable"), resolution,
+	)
+	if after := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived"); after != before {
+		t.Fatalf("other failure moved inactive-destination detail counter: %v -> %v", before, after)
+	}
+}
+
 // TestResolveNonCompanionProvideMode covers the provide-mode selection for
 // non-companion contract requests, in particular the backward-compatibility
 // fallback: when the destination does not advertise the ideal relationship mode
