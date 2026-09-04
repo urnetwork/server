@@ -348,7 +348,7 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"affirmative internal live-tail loss",
 		"pushTailResponseFromIngester",
 		"Warp 5927527, contained by 35453fd",
-		"does not enlarge either queue",
+		"without enlarging either queue",
 		"Grafana is the observation service",
 		"All six active Grafana nodes were healthy",
 		"removes missing LAN identity as the current prerequisite",
@@ -432,6 +432,7 @@ func TestLokiShortBurstHandoffDocumentationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalogText := strings.Join(strings.Fields(string(catalog)), " ")
 	for _, want := range []string{
 		"Warp commit `35453fd` is the subsequent correctness boundary",
 		"100-stream processing queue",
@@ -443,7 +444,7 @@ func TestLokiShortBurstHandoffDocumentationContract(t *testing.T) {
 		"Deploy a Grafana image containing `35453fd`",
 		"zero raw reset, service-attributed dropped-entry, plus EOF classes for ten minutes",
 	} {
-		if !strings.Contains(string(catalog), want) {
+		if !strings.Contains(catalogText, want) {
 			t.Errorf("Loki short-burst catalog missing %q", want)
 		}
 	}

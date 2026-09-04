@@ -486,6 +486,7 @@ func TestContainerRuntimeStagingBindSourceDocumentationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalogText := strings.Join(strings.Fields(string(catalog)), " ")
 	for _, want := range []string{
 		"container-runtime-staging-bind-source",
 		`invalid mount config for type "bind": bind source path does not exist`,
@@ -495,7 +496,7 @@ func TestContainerRuntimeStagingBindSourceDocumentationContract(t *testing.T) {
 		"zero bind-source-missing failures for ten minutes",
 		"not authority to restart Docker or the host",
 	} {
-		if !strings.Contains(string(catalog), want) {
+		if !strings.Contains(catalogText, want) {
 			t.Errorf("container-runtime staging catalog missing %q", want)
 		}
 	}
