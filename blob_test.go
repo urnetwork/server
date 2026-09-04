@@ -129,6 +129,134 @@ func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalBlobStoreListPageBoundsAndContinues(t *testing.T) {
+	root := t.TempDir()
+	store := NewLocalBlobStore(root, "blob")
+	pagedStore := store.(PagedBlobStore)
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keys := []string{
+		"blob/history/run-a/01.json",
+		"blob/history/run-a/02.json",
+		"blob/history/run-a/03.json",
+		"blob/history/run-b/01.json",
+	}
+	for _, key := range keys {
+		if err := store.Put(ctx, key, source, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix := "blob/history/run-a/"
+	first, more, err := pagedStore.ListPage(ctx, prefix, "", 2)
+	if err != nil || !more || len(first) != 2 || first[0].Key != keys[0] || first[1].Key != keys[1] {
+		t.Fatalf("first page = %+v more=%v err=%v", first, more, err)
+	}
+	second, more, err := pagedStore.ListPage(ctx, prefix, first[len(first)-1].Key, 2)
+	if err != nil || more || len(second) != 1 || second[0].Key != keys[2] {
+		t.Fatalf("second page = %+v more=%v err=%v", second, more, err)
+	}
+	if _, _, err := pagedStore.ListPage(ctx, prefix, "", 0); err == nil {
+		t.Fatal("zero page limit accepted")
+	}
+	if _, _, err := pagedStore.ListPage(ctx, prefix, "", MaximumBlobListPageObjects+1); err == nil {
+		t.Fatal("oversized page limit accepted")
+	}
+}
+
+func TestLocalBlobStoreListPageHonorsCancellation(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "blob").(PagedBlobStore)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := store.ListPage(ctx, "blob/", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled page error = %v, want context canceled", err)
+	}
+}
+
+func TestLocalBlobStoreListPageBoundsFilesystemScan(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "blob").(*localBlobStore)
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"blob/history/01.json", "blob/history/02.json", "blob/history/03.json"} {
+		if err := store.Put(context.Background(), key, source, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := store.listPage(context.Background(), "blob/history/", "", 1, 2); !errors.Is(err, errLocalBlobListScanLimitExceeded) {
+		t.Fatalf("bounded filesystem scan error = %v, want %v", err, errLocalBlobListScanLimitExceeded)
+	}
+}
+
+func TestLocalBlobStoreListPageCancelsDuringFilesystemScan(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "blob").(*localBlobStore)
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), "blob/history/01.json", source, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	store.afterListScanEntryForTest = func() {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := store.ListPage(ctx, "blob/history/", "", 1)
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("filesystem scan did not reach cancellation barrier")
+	}
+	cancel()
+	close(release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("in-flight cancellation error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("filesystem scan did not stop after cancellation")
+	}
+}
+
+func TestLocalBlobStoreListPageUsesGlobalLexicalOrder(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "blob")
+	pagedStore := store.(PagedBlobStore)
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{
+		"blob/history/a-z/aa.json",
+		"blob/history/a/zz.json",
+	}
+	for _, key := range keys {
+		if err := store.Put(context.Background(), key, source, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, more, err := pagedStore.ListPage(context.Background(), "blob/history/", "", 1)
+	if err != nil || !more || len(first) != 1 || first[0].Key != keys[0] {
+		t.Fatalf("first lexical page = %+v more=%v err=%v", first, more, err)
+	}
+	second, more, err := pagedStore.ListPage(context.Background(), "blob/history/", first[0].Key, 1)
+	if err != nil || more || len(second) != 1 || second[0].Key != keys[1] {
+		t.Fatalf("second lexical page = %+v more=%v err=%v", second, more, err)
+	}
+}
+
 func TestLocalBlobStorePutIfAbsentIsAtomicAcrossInstances(t *testing.T) {
 	root := t.TempDir()
 	stores := []*localBlobStore{
@@ -467,6 +595,67 @@ func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
 		if !bytes.Equal(decodedBody, expectedBody) {
 			t.Errorf("request %d decoded body = %q, want %q", i, decodedBody, expectedBody)
 		}
+	}
+}
+
+func TestMinIOBlobStoreListPageBoundsBackendRequest(t *testing.T) {
+	type requestRecord struct {
+		prefix            string
+		startAfter        string
+		maxKeys           string
+		listType          string
+		continuationToken string
+	}
+	var stateLock sync.Mutex
+	requests := []requestRecord{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stateLock.Lock()
+		requests = append(requests, requestRecord{
+			prefix:            r.URL.Query().Get("prefix"),
+			startAfter:        r.URL.Query().Get("start-after"),
+			maxKeys:           r.URL.Query().Get("max-keys"),
+			listType:          r.URL.Query().Get("list-type"),
+			continuationToken: r.URL.Query().Get("continuation-token"),
+		})
+		stateLock.Unlock()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>evidence</Name><Prefix>history/run/</Prefix><KeyCount>3</KeyCount><MaxKeys>3</MaxKeys><IsTruncated>true</IsTruncated><NextContinuationToken>next-page</NextContinuationToken>
+  <Contents><Key>history/run/01.json</Key><Size>1</Size></Contents>
+  <Contents><Key>history/run/02.json</Key><Size>2</Size></Contents>
+  <Contents><Key>history/run/03.json</Key><Size>3</Size></Contents>
+</ListBucketResult>`)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := minio.New(endpoint.Host, &minio.Options{
+		Creds:        credentials.NewStaticV4("access", "secret", ""),
+		Secure:       false,
+		Region:       "us-east-1",
+		BucketLookup: minio.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &minioBlobStore{client: client, bucket: "evidence", prefix: "blob", authority: endpoint.Host}
+	objects, more, err := store.ListPage(context.Background(), "history/run/", "history/run/00.json", 2)
+	if err != nil || !more || len(objects) != 2 || objects[0].Key != "history/run/01.json" || objects[1].Key != "history/run/02.json" {
+		t.Fatalf("page = %+v more=%v err=%v", objects, more, err)
+	}
+	stateLock.Lock()
+	actualRequests := append([]requestRecord(nil), requests...)
+	stateLock.Unlock()
+	if len(actualRequests) != 1 {
+		t.Fatalf("MinIO made %d requests after page was proven: %+v", len(actualRequests), actualRequests)
+	}
+	request := actualRequests[0]
+	if request.prefix != "history/run/" || request.startAfter != "history/run/00.json" || request.maxKeys != "3" || request.listType != "2" || request.continuationToken != "" {
+		t.Fatalf("list request = %+v", request)
 	}
 }
 

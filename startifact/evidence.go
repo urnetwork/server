@@ -18,7 +18,17 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const EvidenceSchema = "urnetwork-release-evidence-v1"
+const (
+	EvidenceSchema = "urnetwork-release-evidence-v1"
+	// EvidenceDeploymentHistoryRunID is reserved for envelopes whose signed run
+	// id is empty. Its leading underscore is path-safe but outside the signed
+	// run grammar, so no named run can alias this namespace.
+	EvidenceDeploymentHistoryRunID = "_deployment"
+	// EvidenceLegacyDeploymentHistoryRunID is the pre-v1 empty-run directory,
+	// which may also contain a formerly legal named run. It is read by exact
+	// content hash only and is never used for new empty-run publication.
+	EvidenceLegacyDeploymentHistoryRunID = "deployment"
+)
 
 var evidenceSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
@@ -52,7 +62,8 @@ func validateEvidenceIdentity(e *EvidenceEnvelope) error {
 	if e == nil || e.Schema != EvidenceSchema || e.ChainID == 0 || e.Netuid == 0 || e.Signer == (common.Address{}) {
 		return errors.New("incomplete evidence identity")
 	}
-	if !evidenceSegment.MatchString(e.DeploymentID) || !evidenceSegment.MatchString(e.Kind) || (e.RunID != "" && !evidenceSegment.MatchString(e.RunID)) {
+	if !evidenceSegment.MatchString(e.DeploymentID) || !evidenceSegment.MatchString(e.Kind) ||
+		(e.RunID != "" && !evidenceSegment.MatchString(e.RunID)) {
 		return errors.New("invalid evidence history segment")
 	}
 	if len(e.Payload) == 0 || !json.Valid(e.Payload) || strings.TrimSpace(e.CreatedAt) == "" {
@@ -144,6 +155,34 @@ func EvidenceHistoryPrefix(store server.BlobStore, deploymentID string, netuid u
 	return filepath.ToSlash(filepath.Join(parts...)) + "/", nil
 }
 
+// EvidenceHistoryRunPrefix scopes an immutable history listing to exactly one
+// kind and run. Run ids use the signed-envelope grammar, which deliberately
+// permits dots even though several older artifact path helpers do not.
+func EvidenceHistoryRunPrefix(store server.BlobStore, deploymentID string, netuid uint16, kind string, runID string) (string, error) {
+	if (runID != EvidenceDeploymentHistoryRunID && !evidenceSegment.MatchString(runID)) || kind == "" {
+		return "", errors.New("invalid evidence history run identity")
+	}
+	prefix, err := EvidenceHistoryPrefix(store, deploymentID, netuid, kind)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Join(prefix, runID)) + "/", nil
+}
+
+// EvidenceHistoryKey derives the one immutable history object from signed
+// identity fields and a validated content hash without enumerating its run.
+func EvidenceHistoryKey(store server.BlobStore, deploymentID string, netuid uint16, kind string, runID string, contentHash string) (string, error) {
+	prefix, err := EvidenceHistoryRunPrefix(store, deploymentID, netuid, kind, runID)
+	if err != nil {
+		return "", err
+	}
+	contentKey, err := EvidenceContentKey(store, contentHash)
+	if err != nil {
+		return "", err
+	}
+	return prefix + filepath.Base(contentKey), nil
+}
+
 func PublishEvidence(ctx context.Context, store server.BlobStore, e *EvidenceEnvelope) (*Published, error) {
 	if store == nil {
 		return nil, errors.New("server/blob store is unavailable")
@@ -156,12 +195,14 @@ func PublishEvidence(ctx context.Context, store server.BlobStore, e *EvidenceEnv
 	if err != nil {
 		return nil, err
 	}
-	hashHex := strings.TrimPrefix(e.ContentHash, "sha256:")
 	run := e.RunID
 	if run == "" {
-		run = "deployment"
+		run = EvidenceDeploymentHistoryRunID
 	}
-	historyKey := filepath.ToSlash(filepath.Join(store.Prefix(), "st", "v1", "evidence", "history", e.DeploymentID, fmt.Sprint(e.Netuid), e.Kind, run, hashHex+".json"))
+	historyKey, err := EvidenceHistoryKey(store, e.DeploymentID, e.Netuid, e.Kind, run, e.ContentHash)
+	if err != nil {
+		return nil, err
+	}
 	if err := putImmutable(ctx, store, contentKey, b); err != nil {
 		return nil, err
 	}

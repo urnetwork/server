@@ -16,6 +16,7 @@ package server
 // ansible are unaffected; only the Go surface is abstracted.
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -108,6 +109,19 @@ const localReapInterval = 1 * time.Hour
 // cap; this bounds the successful-copy destination as well.
 const DefaultLocalBlobMaxBytes int64 = 8 * 1024 * 1024 * 1024
 
+// MaximumBlobListPageObjects bounds every paged backend allocation and remote
+// listing request. Callers needing an unbounded administrative scan use List.
+const MaximumBlobListPageObjects = 4096
+
+// A local public listing fails closed before an attacker-controlled tree can
+// turn one request into unbounded filesystem work. Production uses MinIO's
+// cursor; the local backend is intentionally capped for test/dev safety.
+const maximumLocalBlobListScanEntries = 64 * 1024
+
+// Shared identity lets tests and callers distinguish a fail-closed work bound
+// from cancellation or an underlying filesystem error.
+var errLocalBlobListScanLimitExceeded = errors.New("local blob list scan limit exceeded")
+
 // BlobStore is object storage keyed by string, safe for concurrent use. Keys
 // are full object keys; callers compose any namespace under Prefix. Retention
 // is the backing store's job (a MinIO ILM lifecycle rule; the local backend
@@ -136,6 +150,15 @@ type BlobStore interface {
 	Prefix() string
 	// Authority is the backing endpoint (for logging).
 	Authority() string
+}
+
+// PagedBlobStore is the optional bounded-list capability used by public APIs.
+// Keeping it separate preserves BlobStore compatibility for private/test
+// implementations; a public handler fails closed when the capability is absent.
+type PagedBlobStore interface {
+	// ListPage returns keys in global lexical order, strictly after startAfter,
+	// and retains at most limit+1 candidates while discovering whether more exist.
+	ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) (objects []BlobObject, more bool, err error)
 }
 
 // RetainedBlobStore is the optional immutable-evidence capability. Keeping it
@@ -450,6 +473,60 @@ func (self *minioBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobO
 	return objects, nil
 }
 
+// ListPage uses a separately cancelable MinIO iterator so discovery stops as
+// soon as one object beyond the requested page proves that another page exists.
+func (self *minioBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]BlobObject, bool, error) {
+	if limit <= 0 || MaximumBlobListPageObjects < limit {
+		return nil, false, fmt.Errorf("blob list page limit must be between 1 and %d", MaximumBlobListPageObjects)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	listCtx, listCancel := context.WithCancel(ctx)
+	defer listCancel()
+	objects := make([]BlobObject, 0, limit)
+	more := false
+	objectCh := self.client.ListObjects(listCtx, self.bucket, minio.ListObjectsOptions{
+		Prefix:     keyPrefix,
+		Recursive:  true,
+		MaxKeys:    min(limit+1, 1000),
+		StartAfter: startAfter,
+	})
+	for object := range objectCh {
+		if object.Err != nil {
+			if more && errors.Is(object.Err, context.Canceled) {
+				continue
+			}
+			return nil, false, object.Err
+		}
+		if len(objects) == limit {
+			more = true
+			listCancel()
+			continue
+		}
+		objects = append(objects, BlobObject{Key: object.Key, Size: object.Size})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return objects, more, nil
+}
+
+// blobObjectMaxHeap retains the lexically largest selected candidate at its
+// root so a streaming local scan can keep only the smallest requested keys.
+type blobObjectMaxHeap []BlobObject
+
+func (self blobObjectMaxHeap) Len() int           { return len(self) }
+func (self blobObjectMaxHeap) Less(i, j int) bool { return self[j].Key < self[i].Key }
+func (self blobObjectMaxHeap) Swap(i, j int)      { self[i], self[j] = self[j], self[i] }
+func (self *blobObjectMaxHeap) Push(value any)    { *self = append(*self, value.(BlobObject)) }
+func (self *blobObjectMaxHeap) Pop() any {
+	old := *self
+	last := old[len(old)-1]
+	*self = old[:len(old)-1]
+	return last
+}
+
 // resolveBlobAuthority resolves the configured authority to a dialable
 // host:port: `{{ env:... }}` values interpolate per the vault convention
 // (e.g. BRINGYOUR_MINIO_HOSTNAME, threaded from config settings.yml
@@ -675,6 +752,7 @@ type localBlobStore struct {
 	rules                     []BlobLifecycleRule
 	reapOnce                  sync.Once
 	beforeCreateCommitForTest func()
+	afterListScanEntryForTest func()
 }
 
 func (self *localBlobStore) pathFor(key string) string {
@@ -873,6 +951,118 @@ func (self *localBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobO
 		return nil, err
 	}
 	return objects, nil
+}
+
+// ListPage streams local directory entries in fixed batches and retains only
+// the globally smallest limit+1 matching keys, independent of filesystem walk
+// order. A separate entry cap bounds work even for zero-byte object trees.
+func (self *localBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]BlobObject, bool, error) {
+	return self.listPage(ctx, keyPrefix, startAfter, limit, maximumLocalBlobListScanEntries)
+}
+
+// listPage carries an explicit scan limit so tests can pin fail-closed work
+// bounds without manufacturing tens of thousands of filesystem entries.
+func (self *localBlobStore) listPage(ctx context.Context, keyPrefix string, startAfter string, limit int, maximumScanEntries int) ([]BlobObject, bool, error) {
+	if limit <= 0 || MaximumBlobListPageObjects < limit {
+		return nil, false, fmt.Errorf("blob list page limit must be between 1 and %d", MaximumBlobListPageObjects)
+	}
+	if maximumScanEntries <= 0 {
+		return nil, false, errors.New("local blob list scan limit must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	scanRoot := self.root
+	if strings.HasSuffix(keyPrefix, "/") {
+		candidate := self.pathFor(strings.TrimSuffix(keyPrefix, "/"))
+		if rel, err := filepath.Rel(self.root, candidate); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			scanRoot = candidate
+		}
+	}
+	if _, err := os.Stat(scanRoot); err != nil {
+		if os.IsNotExist(err) {
+			return []BlobObject{}, false, nil
+		}
+		return nil, false, err
+	}
+	targetCount := limit + 1
+	candidates := &blobObjectMaxHeap{}
+	heap.Init(candidates)
+	directories := []string{scanRoot}
+	scannedEntries := 0
+	for 0 < len(directories) {
+		directory := directories[len(directories)-1]
+		directories = directories[:len(directories)-1]
+		err := func() error {
+			reader, err := os.Open(directory)
+			if err != nil {
+				return err
+			}
+			defer reader.Close()
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				entries, readErr := reader.ReadDir(128)
+				for _, entry := range entries {
+					scannedEntries++
+					if maximumScanEntries < scannedEntries {
+						return errLocalBlobListScanLimitExceeded
+					}
+					if self.afterListScanEntryForTest != nil {
+						self.afterListScanEntryForTest()
+					}
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					path := filepath.Join(directory, entry.Name())
+					if entry.IsDir() {
+						directories = append(directories, path)
+						continue
+					}
+					if strings.HasSuffix(path, blobPartialSuffix) {
+						continue
+					}
+					info, err := entry.Info()
+					if err != nil {
+						return err
+					}
+					rel, err := filepath.Rel(self.root, path)
+					if err != nil {
+						return err
+					}
+					key := filepath.ToSlash(rel)
+					if !strings.HasPrefix(key, keyPrefix) || key <= startAfter {
+						continue
+					}
+					object := BlobObject{Key: key, Size: info.Size()}
+					if candidates.Len() < targetCount {
+						heap.Push(candidates, object)
+					} else if key < (*candidates)[0].Key {
+						heap.Pop(candidates)
+						heap.Push(candidates, object)
+					}
+				}
+				if readErr == io.EOF {
+					return nil
+				}
+				if readErr != nil {
+					return readErr
+				}
+			}
+		}()
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	objects := make([]BlobObject, candidates.Len())
+	copy(objects, *candidates)
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	more := limit < len(objects)
+	if more {
+		objects = objects[:limit]
+	}
+	return objects, more, nil
 }
 
 // SetLifecycle records the rules and starts (once) a background reaper bound to

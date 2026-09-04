@@ -3,11 +3,11 @@ package handlers
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -19,6 +19,8 @@ import (
 )
 
 const maximumSnEvidenceBytes = 64 * 1024 * 1024
+
+const defaultSnHistoryPageObjects = 256
 
 // Swappable boundaries let handler tests force exact storage interleavings
 // while production uses the configured controller and blob store.
@@ -96,23 +98,38 @@ func SnArtifactHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
 	}
+	epochRaw := r.URL.Query().Get("epoch")
+	noIDRaw := r.URL.Query().Get("no_id")
 	prefix, err := payoutArtifactHistoryPrefix(
 		store.Prefix(),
 		r.URL.Query().Get("deployment_id"),
 		r.URL.Query().Get("netuid"),
-		r.URL.Query().Get("epoch"),
-		r.URL.Query().Get("no_id"),
+		epochRaw,
+		noIDRaw,
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	objects, err := store.List(r.Context(), prefix)
+	limit, startAfter, err := snHistoryPageQuery(r, prefix)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	pagedStore, ok := store.(server.PagedBlobStore)
+	if !ok {
+		http.Error(w, "Artifact history unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	objects, more, err := pagedStore.ListPage(r.Context(), prefix, startAfter, limit)
 	if err != nil {
 		http.Error(w, "Artifact history unavailable.", http.StatusBadGateway)
 		return
 	}
-	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	if err := validateSnArtifactHistoryPage(objects, more, prefix, startAfter, limit, epochRaw, noIDRaw); err != nil {
+		http.Error(w, "Artifact history integrity failure.", http.StatusBadGateway)
+		return
+	}
 	type historyObject struct {
 		Key         string `json:"key"`
 		Size        int64  `json:"size"`
@@ -120,20 +137,26 @@ func SnArtifactHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	publicObjects := make([]historyObject, len(objects))
 	for i, object := range objects {
-		if object.Size < 0 || !strings.HasPrefix(object.Key, prefix) {
-			http.Error(w, "Artifact history integrity failure.", http.StatusBadGateway)
-			return
-		}
 		hash := strings.TrimSuffix(filepath.Base(object.Key), filepath.Ext(object.Key))
 		decoded, decodeErr := hex.DecodeString(hash)
-		if decodeErr != nil || len(decoded) != 32 || filepath.Ext(object.Key) != ".json" {
+		if decodeErr != nil || len(decoded) != 32 || hash != strings.ToLower(hash) || filepath.Ext(object.Key) != ".json" {
 			http.Error(w, "Artifact history integrity failure.", http.StatusBadGateway)
 			return
 		}
 		publicObjects[i] = historyObject{Key: object.Key, Size: object.Size, ContentHash: "sha256:" + strings.ToLower(hash)}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"schema": "urnetwork-payout-artifact-history-v1", "objects": publicObjects})
+	w.Header().Set("Cache-Control", "no-store")
+	nextAfter := ""
+	if more && 0 < len(objects) {
+		nextAfter = objects[len(objects)-1].Key
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema":     "urnetwork-payout-artifact-history-v1",
+		"objects":    publicObjects,
+		"more":       more,
+		"next_after": nextAfter,
+	})
 }
 
 func payoutArtifactHistoryPrefix(blobPrefix, deploymentRaw, netuidRaw, epochRaw, noIDRaw string) (string, error) {
@@ -172,7 +195,7 @@ func payoutArtifactHistoryPrefix(blobPrefix, deploymentRaw, netuidRaw, epochRaw,
 // together with chain/deployment/netuid by the controller.
 func SnEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maximumSnEvidenceBytes))
+		body, err := readSnEvidenceBytes(r.Body, maximumSnEvidenceBytes)
 		if err != nil || len(body) == 0 {
 			http.Error(w, "Evidence body is required.", http.StatusBadRequest)
 			return
@@ -203,7 +226,7 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
-	b, err := io.ReadAll(io.LimitReader(reader, maximumSnEvidenceBytes))
+	b, err := readSnEvidenceBytes(reader, maximumSnEvidenceBytes)
 	if err != nil {
 		http.Error(w, "Evidence read failed.", http.StatusBadGateway)
 		return
@@ -219,38 +242,219 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// readSnEvidenceBytes reads one byte beyond the accepted boundary so neither
+// an HTTP request nor a corrupt object can be silently accepted after truncation.
+func readSnEvidenceBytes(reader io.Reader, maximumBytes int64) ([]byte, error) {
+	if maximumBytes <= 0 {
+		return nil, errors.New("evidence byte limit must be positive")
+	}
+	b, err := io.ReadAll(io.LimitReader(reader, maximumBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if maximumBytes < int64(len(b)) {
+		return nil, errors.New("evidence exceeds byte limit")
+	}
+	return b, nil
+}
+
+// SnEvidenceHistory exposes one signed run's bounded, lexically paged history.
+// Both kind and run id are mandatory so public callers cannot enumerate other
+// campaigns or turn a small verifier query into an unbounded deployment scan.
 func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
 	store, ok := loadSnEvidenceBlobStore()
 	if !ok {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
 	}
-	deployment := cleanArtifactSegment(r.URL.Query().Get("deployment_id"))
+	deployment := r.URL.Query().Get("deployment_id")
 	netuidValue, err := strconv.ParseUint(r.URL.Query().Get("netuid"), 10, 16)
 	if err != nil || netuidValue == 0 {
 		http.Error(w, "deployment_id and numeric netuid are required.", http.StatusBadRequest)
 		return
 	}
-	kind := ""
-	if raw := r.URL.Query().Get("kind"); raw != "" {
-		kind = cleanArtifactSegment(raw)
-		if kind == "" {
-			http.Error(w, "Bad evidence kind.", http.StatusBadRequest)
-			return
-		}
+	kind := r.URL.Query().Get("kind")
+	runID := r.URL.Query().Get("run_id")
+	if kind == "" || runID == "" {
+		http.Error(w, "kind and run_id are required.", http.StatusBadRequest)
+		return
 	}
-	prefix, err := startifact.EvidenceHistoryPrefix(store, deployment, uint16(netuidValue), kind)
+	prefix, err := startifact.EvidenceHistoryRunPrefix(store, deployment, uint16(netuidValue), kind, runID)
 	if err != nil {
 		http.Error(w, "Bad evidence history identity.", http.StatusBadRequest)
 		return
 	}
-	objects, err := store.List(r.Context(), prefix)
+	limit, startAfter, err := snHistoryPageQuery(r, prefix)
 	if err != nil {
-		http.Error(w, "Evidence history unavailable.", http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	var objects []server.BlobObject
+	more := false
+	contentHash := r.URL.Query().Get("hash")
+	if runID == startifact.EvidenceLegacyDeploymentHistoryRunID && contentHash == "" {
+		http.Error(w, "legacy deployment history requires an exact evidence hash.", http.StatusBadRequest)
+		return
+	}
+	if contentHash != "" {
+		if startAfter != "" {
+			http.Error(w, "after is not valid with an exact evidence hash.", http.StatusBadRequest)
+			return
+		}
+		historyKey, keyErr := startifact.EvidenceHistoryKey(store, deployment, uint16(netuidValue), kind, runID, contentHash)
+		if keyErr != nil {
+			http.Error(w, "Bad evidence content hash.", http.StatusBadRequest)
+			return
+		}
+		reader, getErr := store.Get(r.Context(), historyKey)
+		if getErr != nil {
+			http.Error(w, "Evidence history object not found.", http.StatusNotFound)
+			return
+		}
+		b, readErr := readSnEvidenceBytes(reader, maximumSnEvidenceBytes)
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil {
+			http.Error(w, "Evidence history object unavailable.", http.StatusBadGateway)
+			return
+		}
+		var envelope startifact.EvidenceEnvelope
+		expectedContentHash := "sha256:" + strings.TrimSuffix(filepath.Base(historyKey), ".json")
+		if json.Unmarshal(b, &envelope) != nil || startifact.VerifyEvidence(&envelope) != nil ||
+			envelope.DeploymentID != deployment || envelope.Netuid != uint16(netuidValue) || envelope.Kind != kind ||
+			envelope.ContentHash != expectedContentHash || !evidenceHistoryRunMatches(envelope.RunID, runID) {
+			http.Error(w, "Evidence history object failed integrity.", http.StatusBadGateway)
+			return
+		}
+		objects = []server.BlobObject{{Key: historyKey, Size: int64(len(b))}}
+	} else {
+		pagedStore, paged := store.(server.PagedBlobStore)
+		if !paged {
+			http.Error(w, "Evidence history unavailable.", http.StatusServiceUnavailable)
+			return
+		}
+		objects, more, err = pagedStore.ListPage(r.Context(), prefix, startAfter, limit)
+		if err != nil {
+			http.Error(w, "Evidence history unavailable.", http.StatusBadGateway)
+			return
+		}
+		if err := validateSnEvidenceHistoryPage(objects, more, prefix, startAfter, limit); err != nil {
+			http.Error(w, "Evidence history integrity failure.", http.StatusBadGateway)
+			return
+		}
+	}
+	nextAfter := ""
+	if more && 0 < len(objects) {
+		nextAfter = objects[len(objects)-1].Key
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"schema": "urnetwork-release-evidence-history-v1", "objects": objects})
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema":     "urnetwork-release-evidence-history-v1",
+		"objects":    objects,
+		"more":       more,
+		"next_after": nextAfter,
+	})
+}
+
+// evidenceHistoryRunMatches maps the collision-free empty-run namespace back
+// to the signed envelope. The legacy word remains readable only by exact hash;
+// new empty-run publications use the underscore sentinel.
+func evidenceHistoryRunMatches(envelopeRunID string, historyRunID string) bool {
+	if historyRunID == startifact.EvidenceDeploymentHistoryRunID {
+		return envelopeRunID == ""
+	}
+	return envelopeRunID == historyRunID || (historyRunID == startifact.EvidenceLegacyDeploymentHistoryRunID && envelopeRunID == "")
+}
+
+// validateSnHistoryPage treats the paged store as an integrity boundary for
+// ordering and scope. Namespace-specific validators then enforce key grammar.
+func validateSnHistoryPage(objects []server.BlobObject, more bool, prefix string, startAfter string, limit int) error {
+	if limit < len(objects) || (more && len(objects) != limit) {
+		return errors.New("invalid history page cardinality")
+	}
+	previousKey := startAfter
+	for _, object := range objects {
+		if object.Size < 0 || object.Key <= previousKey || !strings.HasPrefix(object.Key, prefix) ||
+			filepath.ToSlash(filepath.Clean(object.Key)) != object.Key || strings.ContainsAny(object.Key, "\\\r\n\x00") {
+			return errors.New("invalid history page object")
+		}
+		previousKey = object.Key
+	}
+	return nil
+}
+
+// validateSnEvidenceHistoryPage permits exactly one canonical hash filename
+// below the already exact deployment/netuid/kind/run prefix.
+func validateSnEvidenceHistoryPage(objects []server.BlobObject, more bool, prefix string, startAfter string, limit int) error {
+	if err := validateSnHistoryPage(objects, more, prefix, startAfter, limit); err != nil {
+		return err
+	}
+	for _, object := range objects {
+		if err := validateSnHistoryHashFilename(strings.TrimPrefix(object.Key, prefix)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSnArtifactHistoryPage permits the exact numeric suffix implied by
+// optional epoch/no-id selectors before the canonical content hash filename.
+func validateSnArtifactHistoryPage(objects []server.BlobObject, more bool, prefix string, startAfter string, limit int, epochRaw string, noIDRaw string) error {
+	if err := validateSnHistoryPage(objects, more, prefix, startAfter, limit); err != nil {
+		return err
+	}
+	numericSegmentCount := 2
+	if strings.TrimSpace(epochRaw) != "" {
+		numericSegmentCount--
+	}
+	if strings.TrimSpace(noIDRaw) != "" {
+		numericSegmentCount--
+	}
+	for _, object := range objects {
+		segments := strings.Split(strings.TrimPrefix(object.Key, prefix), "/")
+		if len(segments) != numericSegmentCount+1 {
+			return errors.New("invalid artifact history path depth")
+		}
+		for i := 0; i < numericSegmentCount; i++ {
+			value, err := strconv.ParseUint(segments[i], 10, 64)
+			if err != nil || segments[i] != strconv.FormatUint(value, 10) || (i == numericSegmentCount-1 && value == 0) {
+				return errors.New("invalid artifact history numeric segment")
+			}
+		}
+		if err := validateSnHistoryHashFilename(segments[len(segments)-1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSnHistoryHashFilename accepts the one canonical filename emitted by
+// immutable content-addressed evidence and payout artifact publishers.
+func validateSnHistoryHashFilename(filename string) error {
+	hash := strings.TrimSuffix(filename, ".json")
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != 32 || hash != strings.ToLower(hash) || filename != hash+".json" {
+		return errors.New("invalid history page content key")
+	}
+	return nil
+}
+
+// snHistoryPageQuery validates the common bounded-list cursor before either
+// public history handler reaches its backing store.
+func snHistoryPageQuery(r *http.Request, prefix string) (int, string, error) {
+	limit := defaultSnHistoryPageObjects
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || server.MaximumBlobListPageObjects < parsed {
+			return 0, "", errors.New("bad artifact history limit")
+		}
+		limit = parsed
+	}
+	startAfter := r.URL.Query().Get("after")
+	if startAfter != "" && (!strings.HasPrefix(startAfter, prefix) || filepath.ToSlash(filepath.Clean(startAfter)) != startAfter || strings.ContainsAny(startAfter, "\\\r\n\x00")) {
+		return 0, "", errors.New("bad artifact history cursor")
+	}
+	return limit, startAfter, nil
 }
 
 func cleanArtifactSegment(v string) string {
