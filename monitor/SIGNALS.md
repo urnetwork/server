@@ -7408,6 +7408,22 @@ This is the version-to-artifact contract checked by the probe:
 | 611 | `network_points_leaderboard_pos_points` |
 | 612 | `network_points_leaderboard_pos_blocks` |
 | 613 | `network_points_leaderboard_pos_streak` |
+| 614 | exact `deployment_key` columns, primary/unique keys, and secondary-index order across the ST mirror tables |
+| 615 | `st_transaction_intent` deployment/logical/generation identity and nonnegative-generation constraint |
+| 616 | unique `st_transaction_intent_chain_account_nonce` (required through version 620) |
+| 617 | unique `st_transaction_intent_logical_generation` |
+| 618 | partial `st_transaction_intent_account_reconcile` (required through version 621) |
+| 619 | required, no-default `st_transaction_intent.genesis_hash` |
+| 620 | unique `st_transaction_intent_genesis_account_nonce` |
+| 621 | obsolete `st_transaction_intent_chain_account_nonce` absent |
+| 622 | obsolete `st_transaction_intent_account_reconcile` absent |
+| 623 | genesis-scoped partial `st_transaction_intent_account_reconcile_v2` |
+| 624 | intent and attempt terminal-status constraints include reverted, invalid, canceled, and superseded |
+| 625 | required, no-default `st_transaction_attempt.kind` and its execution/cancellation constraint |
+| 626 | obsolete profile/deployment nonce constraint absent |
+| 627 | deployment-scoped ST fleet-signature/epoch-notification keys and network-time index |
+| 628 | `transfer_contract.stream_id` plus `contract_participant` and its stream/client primary key |
+| 629 | partial `transfer_contract_stream_id` |
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
@@ -7418,6 +7434,19 @@ require the current head and all version-gated artifact checks, and only then
 activate dependent APIs or taskworkers. Never edit `migration_audit` or create
 objects by hand merely to silence the probe; repair the append-only migration
 stream and let its normal runner advance the database.
+
+Superseding migrations are part of that exact contract. The version-616 nonce
+index remains required only until version 621 removes it, and the version-618
+reconcile index remains required only until version 622 replaces it; the
+removal itself becomes the persistent artifact at those later heads. On
+2026-09-04, the successful production audit head was 627 while this source
+required 629. That is still a valid `migration-behind` warning when every
+published artifact through 627 is coherent. The prior probe stopped at version
+613, however, so its lack of `migration-schema-drift` did not prove the ST
+deployment-key, transaction-intent, terminal-status, or notification/signature
+changes at 614--627. The expanded query and one-missing-at-head fixtures now
+cover every version through 629; apply 628--629 normally before activating code
+that persists stream participants.
 
 At `2026-09-03T06:09Z`, production remained coherently at version 606 when
 server commit `c42a4a4e` appended the all-time points-leaderboard schema through

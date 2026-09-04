@@ -28,6 +28,17 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"network_points_leaderboard_pos_points",
 			"network_points_leaderboard_pos_blocks",
 			"network_points_leaderboard_pos_streak",
+			"st_transaction_intent_chain_account_nonce",
+			"st_transaction_intent_logical_generation",
+			"st_transaction_intent_account_reconcile_v2",
+			"st_transaction_intent_genesis_account_nonce",
+			"st_transaction_intent_status_check",
+			"st_transaction_attempt_status_check",
+			"st_transaction_attempt_kind_check",
+			"st_transaction_intent_profile_deployment_id_chain_id_from_a_key",
+			"st_fleet_binding_signature_network",
+			"contract_participant",
+			"transfer_contract_stream_id",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -266,6 +277,103 @@ func TestMigrationsSignalDoesNotRequireFutureLeaderboardArtifactsAtVersion606(t 
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("version-gated migration alert missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+func TestMigrationsSignalReportsMissingPublishedArtifacts614Through629(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 629 {
+		t.Fatalf("test requires migration head 629 or newer, got %d", head)
+	}
+	tested := 0
+	for _, artifact := range migrationArtifacts {
+		if artifact.requiredVersion < 614 || 629 < artifact.requiredVersion {
+			continue
+		}
+		tested++
+		t.Run(artifact.name, func(t *testing.T) {
+			dbVersion := head
+			if artifact.removedVersion != 0 {
+				dbVersion = artifact.removedVersion - 1
+			}
+			row := syntheticMigrationArtifactRow(dbVersion)
+			row[artifact.rowColumn] = "f"
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(dbVersion), nil
+				}
+				return []Row{row}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown := requireAlertClass(t, alerts, "migration-schema-drift").Markdown()
+			want := fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)
+			if !strings.Contains(markdown, want) {
+				t.Fatalf("missing published artifact alert lacks %q:\n%s", want, markdown)
+			}
+		})
+	}
+	if tested != 16 {
+		t.Fatalf("tested %d artifacts for versions 614-629, want 16", tested)
+	}
+}
+
+func TestMigrationArtifactCatalogCoversEveryVersion614Through629(t *testing.T) {
+	byVersion := map[int][]migrationArtifact{}
+	for _, artifact := range migrationArtifacts {
+		byVersion[artifact.requiredVersion] = append(byVersion[artifact.requiredVersion], artifact)
+	}
+	for version := 614; version <= 629; version++ {
+		artifacts := byVersion[version]
+		if len(artifacts) != 1 {
+			t.Fatalf("version %d has %d artifact contracts, want 1: %+v", version, len(artifacts), artifacts)
+		}
+		if wantColumn := version - 589; artifacts[0].rowColumn != wantColumn {
+			t.Fatalf("version %d row column = %d, want %d", version, artifacts[0].rowColumn, wantColumn)
+		}
+	}
+	if byVersion[616][0].removedVersion != 621 || byVersion[618][0].removedVersion != 622 {
+		t.Fatalf("superseded index lifetimes are not pinned: v616=%+v v618=%+v", byVersion[616][0], byVersion[618][0])
+	}
+}
+
+func TestMigrationsSignalPreservesBehindGateAtCoherentVersion627(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 629 {
+		t.Fatalf("test requires migration head 629 or newer, got %d", head)
+	}
+	const dbVersion = 627
+	row := syntheticMigrationArtifactRow(dbVersion)
+	for _, artifact := range migrationArtifacts {
+		if dbVersion < artifact.requiredVersion ||
+			(artifact.removedVersion != 0 && artifact.removedVersion <= dbVersion) {
+			row[artifact.rowColumn] = "f"
+		}
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(dbVersion), nil
+		}
+		return []Row{row}, nil
+	}}
+	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Class != "migration-behind" {
+		t.Fatalf("coherent version 627 produced alerts %+v, want only migration-behind", alerts)
+	}
+	markdown := alerts[0].Markdown()
+	for _, want := range []string{
+		"database migration head 627",
+		fmt.Sprintf("code-required head %d", head),
+		fmt.Sprintf("lag=%d", head-dbVersion),
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("version-627 deployment gate missing %q:\n%s", want, markdown)
 		}
 	}
 }

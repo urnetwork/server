@@ -30,7 +30,11 @@ func (migrationsProbe) cadence() time.Duration { return time.Minute }
 type migrationArtifact struct {
 	name            string
 	requiredVersion int
-	rowColumn       int
+	// removedVersion is the first head where a later published migration
+	// intentionally supersedes this artifact. That removal has its own
+	// persistent entry below, so both sides of the transition are checked.
+	removedVersion int
+	rowColumn      int
 }
 
 var migrationArtifacts = []migrationArtifact{
@@ -58,6 +62,22 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_points_leaderboard_pos_points", requiredVersion: 611, rowColumn: 22},
 	{name: "network_points_leaderboard_pos_blocks", requiredVersion: 612, rowColumn: 23},
 	{name: "network_points_leaderboard_pos_streak", requiredVersion: 613, rowColumn: 24},
+	{name: "ST mirror deployment identity", requiredVersion: 614, rowColumn: 25},
+	{name: "st_transaction_intent deployment/logical generation identity", requiredVersion: 615, rowColumn: 26},
+	{name: "st_transaction_intent_chain_account_nonce", requiredVersion: 616, removedVersion: 621, rowColumn: 27},
+	{name: "st_transaction_intent_logical_generation", requiredVersion: 617, rowColumn: 28},
+	{name: "st_transaction_intent_account_reconcile", requiredVersion: 618, removedVersion: 622, rowColumn: 29},
+	{name: "st_transaction_intent.genesis_hash", requiredVersion: 619, rowColumn: 30},
+	{name: "st_transaction_intent_genesis_account_nonce", requiredVersion: 620, rowColumn: 31},
+	{name: "st_transaction_intent_chain_account_nonce removed", requiredVersion: 621, rowColumn: 32},
+	{name: "st_transaction_intent_account_reconcile removed", requiredVersion: 622, rowColumn: 33},
+	{name: "st_transaction_intent_account_reconcile_v2", requiredVersion: 623, rowColumn: 34},
+	{name: "ST transaction terminal status constraints", requiredVersion: 624, rowColumn: 35},
+	{name: "st_transaction_attempt.kind", requiredVersion: 625, rowColumn: 36},
+	{name: "legacy profile/deployment nonce constraint removed", requiredVersion: 626, rowColumn: 37},
+	{name: "ST signature/notification deployment identity", requiredVersion: 627, rowColumn: 38},
+	{name: "transfer_contract.stream_id+contract_participant", requiredVersion: 628, rowColumn: 39},
+	{name: "transfer_contract_stream_id", requiredVersion: 629, rowColumn: 40},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -66,6 +86,25 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			SELECT coalesce(max(end_version_number), 0)::int AS value
 			FROM migration_audit
 			WHERE status = 'success'
+		), index_artifact AS (
+			SELECT tablename::text AS table_name,
+			       indexname::text AS index_name,
+			       regexp_replace(indexdef, '[[:space:]]+', ' ', 'g') AS definition
+			FROM pg_indexes
+			WHERE schemaname = 'public'
+		), constraint_artifact AS (
+			SELECT relation.relname::text AS table_name,
+			       constraint_record.conname::text AS constraint_name,
+			       constraint_record.contype::text AS constraint_type,
+			       regexp_replace(
+			           pg_get_constraintdef(constraint_record.oid),
+			           '[[:space:]]+', ' ', 'g'
+			       ) AS definition,
+			       constraint_record.convalidated AS validated
+			FROM pg_constraint AS constraint_record
+			JOIN pg_class AS relation ON relation.oid = constraint_record.conrelid
+			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'public'
 		)
 		SELECT version.value,
 		       to_regclass('public.competition_round') IS NOT NULL,
@@ -149,7 +188,246 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       to_regclass('public.network_points_leaderboard') IS NOT NULL,
 		       to_regclass('public.network_points_leaderboard_pos_points') IS NOT NULL,
 		       to_regclass('public.network_points_leaderboard_pos_blocks') IS NOT NULL,
-		       to_regclass('public.network_points_leaderboard_pos_streak') IS NOT NULL
+		       to_regclass('public.network_points_leaderboard_pos_streak') IS NOT NULL,
+		       (
+		           (
+		               SELECT count(*) = 7
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name IN (
+		                     'st_epoch', 'st_payout_leaf', 'st_publish', 'st_event',
+		                     'st_chain_sync', 'st_head_binding', 'st_payout_artifact'
+		                 )
+		                 AND column_name = 'deployment_key'
+		                 AND is_nullable = 'NO'
+		                 AND column_default IS NULL
+		           )
+		           AND (
+		               SELECT count(*) = 7
+		               FROM (
+		                   VALUES
+		                       ('st_epoch', 'p', 'PRIMARY KEY (deployment_key, epoch)'),
+		                       ('st_payout_leaf', 'p', 'PRIMARY KEY (deployment_key, epoch, no_id, leaf_index)'),
+		                       ('st_payout_leaf', 'u', 'UNIQUE (deployment_key, epoch, no_id, coldkey)'),
+		                       ('st_event', 'p', 'PRIMARY KEY (deployment_key, block_number, log_index)'),
+		                       ('st_chain_sync', 'p', 'PRIMARY KEY (deployment_key, singleton_id)'),
+		                       ('st_head_binding', 'p', 'PRIMARY KEY (deployment_key, ckey)'),
+		                       ('st_payout_artifact', 'p', 'PRIMARY KEY (deployment_key, epoch, no_id)')
+		               ) AS expected(table_name, constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = expected.table_name
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 4
+		               FROM (
+		                   VALUES
+		                       ('st_epoch', 'st_epoch_status', '(deployment_key, status, epoch)'),
+		                       ('st_publish', 'st_publish_epoch_kind', '(deployment_key, epoch, kind, create_time)'),
+		                       ('st_event', 'st_event_kind_block', '(deployment_key, kind, block_number, log_index)'),
+		                       ('st_payout_leaf', 'st_payout_leaf_client_epoch', '(deployment_key, client_id, epoch, no_id)')
+		               ) AS expected(table_name, index_name, key_shape)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM index_artifact AS actual
+		                   WHERE actual.table_name = expected.table_name
+		                     AND actual.index_name = expected.index_name
+		                     AND actual.definition LIKE '%' || expected.key_shape || '%'
+		               )
+		           )
+		       ),
+		       (
+		           (
+		               SELECT count(*) = 3
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'st_transaction_intent'
+		                 AND column_name IN ('deployment_key', 'logical_key', 'generation')
+		                 AND is_nullable = 'NO'
+		                 AND column_default IS NULL
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'st_transaction_intent'
+		                 AND constraint_name = 'st_transaction_intent_generation_check'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%generation >= 0%'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND index_name = 'st_transaction_intent_chain_account_nonce'
+		             AND definition LIKE 'CREATE UNIQUE INDEX %'
+		             AND definition LIKE '%(chain_id, from_address, nonce)%'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND index_name = 'st_transaction_intent_logical_generation'
+		             AND definition LIKE 'CREATE UNIQUE INDEX %'
+		             AND definition LIKE '%(logical_key, generation)%'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND index_name = 'st_transaction_intent_account_reconcile'
+		             AND definition LIKE '%(chain_id, from_address, nonce)%'
+		             AND definition LIKE '%WHERE%'
+		             AND definition LIKE '%prepared%'
+		             AND definition LIKE '%signed%'
+		             AND definition LIKE '%broadcast%'
+		             AND definition LIKE '%mined%'
+		             AND definition LIKE '%uncertain%'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public'
+		             AND table_name = 'st_transaction_intent'
+		             AND column_name = 'genesis_hash'
+		             AND data_type = 'character varying'
+		             AND character_maximum_length = 66
+		             AND is_nullable = 'NO'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND index_name = 'st_transaction_intent_genesis_account_nonce'
+		             AND definition LIKE 'CREATE UNIQUE INDEX %'
+		             AND definition LIKE '%(chain_id, genesis_hash, from_address, nonce)%'
+		       ),
+		       NOT EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE index_name = 'st_transaction_intent_chain_account_nonce'
+		       ),
+		       NOT EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE index_name = 'st_transaction_intent_account_reconcile'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND index_name = 'st_transaction_intent_account_reconcile_v2'
+		             AND definition LIKE '%(chain_id, genesis_hash, from_address, nonce)%'
+		             AND definition LIKE '%WHERE%'
+		             AND definition LIKE '%prepared%'
+		             AND definition LIKE '%signed%'
+		             AND definition LIKE '%broadcast%'
+		             AND definition LIKE '%mined%'
+		             AND definition LIKE '%uncertain%'
+		       ),
+		       (
+		           SELECT count(*) = 2
+		           FROM constraint_artifact
+		           WHERE (
+		               (table_name = 'st_transaction_intent'
+		                AND constraint_name = 'st_transaction_intent_status_check')
+		               OR (table_name = 'st_transaction_attempt'
+		                   AND constraint_name = 'st_transaction_attempt_status_check')
+		           )
+		             AND constraint_type = 'c'
+		             AND definition LIKE '%reverted%'
+		             AND definition LIKE '%invalid%'
+		             AND definition LIKE '%canceled%'
+		             AND definition LIKE '%superseded%'
+		             AND validated
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'st_transaction_attempt'
+		                 AND column_name = 'kind'
+		                 AND data_type = 'character varying'
+		                 AND character_maximum_length = 16
+		                 AND is_nullable = 'NO'
+		                 AND column_default IS NULL
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'st_transaction_attempt'
+		                 AND constraint_name = 'st_transaction_attempt_kind_check'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%execution%'
+		                 AND definition LIKE '%cancellation%'
+		                 AND validated
+		           )
+		       ),
+		       NOT EXISTS (
+		           SELECT 1 FROM constraint_artifact
+		           WHERE table_name = 'st_transaction_intent'
+		             AND constraint_name = 'st_transaction_intent_profile_deployment_id_chain_id_from_a_key'
+		       ),
+		       (
+		           (
+		               SELECT count(*) = 2
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name IN ('st_fleet_binding_signature', 'st_epoch_notification')
+		                 AND column_name = 'deployment_key'
+		                 AND is_nullable = 'NO'
+		                 AND column_default IS NULL
+		           )
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (
+		                   VALUES
+		                       ('st_fleet_binding_signature', 'PRIMARY KEY (deployment_key, client_id, generation)'),
+		                       ('st_epoch_notification', 'PRIMARY KEY (deployment_key, epoch)')
+		               ) AS expected(table_name, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = expected.table_name
+		                     AND actual.constraint_type = 'p'
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'st_fleet_binding_signature'
+		                 AND index_name = 'st_fleet_binding_signature_network'
+		                 AND definition LIKE '%(deployment_key, network_id, create_time DESC)%'
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'transfer_contract'
+		                 AND column_name = 'stream_id'
+		                 AND data_type = 'uuid'
+		           )
+		           AND to_regclass('public.contract_participant') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 3
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'contract_participant'
+		                 AND column_name IN ('stream_id', 'client_id', 'network_id')
+		                 AND data_type = 'uuid'
+		                 AND is_nullable = 'NO'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'contract_participant'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (stream_id, client_id)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_stream_id'
+		             AND definition LIKE '%(stream_id)%'
+		             AND definition LIKE '%stream_id IS NOT NULL%'
+		       )
 		FROM version;
 	`)
 	if err != nil {
@@ -164,7 +442,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	requiredHead := server.MigrationCount()
 	missing := make([]string, 0)
 	for _, artifact := range migrationArtifacts {
-		if artifact.requiredVersion <= dbVersion && !migrationBool(rows[0].str(artifact.rowColumn)) {
+		isPublished := artifact.requiredVersion <= dbVersion
+		isStillRequired := artifact.removedVersion == 0 || dbVersion < artifact.removedVersion
+		if isPublished && isStillRequired && !migrationBool(rows[0].str(artifact.rowColumn)) {
 			missing = append(missing, fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion))
 		}
 	}
