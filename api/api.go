@@ -121,6 +121,7 @@ func Routes() []*router.Route {
 		// forward -- see model.ProviderClientVerdictQuorumMet.
 		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+		router.NewRoute("GET", "/network/proxies", handlers.NetworkProxies),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),

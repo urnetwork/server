@@ -1210,9 +1210,55 @@ func newNetworkClientsResult(clientInfos map[server.Id]*NetworkClientInfo) *Netw
 	return &NetworkClientsResult{Clients: clients}
 }
 
+// networkClientListKind selects which of a network's clients a list returns.
+type networkClientListKind int
+
+const (
+	// the network's devices: top-level clients (no `source_client_id`) that
+	// are not hosted proxy devices
+	networkClientListDevices networkClientListKind = 0
+	// the network's hosted proxy devices: clients with a `proxy_device_config`
+	// row (the "resident proxy" DeviceLocals the proxy host runs), each with
+	// its `proxy_client` credentials
+	networkClientListProxies networkClientListKind = 1
+)
+
+// GetNetworkClients lists the network's devices: every top-level client (no
+// `source_client_id`) that is not a hosted proxy device, with no provide-mode
+// qualification. Child clients never appear, and neither do the "resident
+// proxy" devices the proxy host runs for the network's proxies; those are
+// listed by GetNetworkProxies. This is what the apps' device lists show.
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
+	return getNetworkClientList(session, networkClientListDevices)
+}
+
+// GetNetworkProxies lists the network's hosted proxy devices (clients with a
+// `proxy_device_config` row) with their `proxy_client` credentials. Everything
+// else about a row (resident, connections, roles, provide mode) reads the same
+// as GetNetworkClients.
+func GetNetworkProxies(session *session.ClientSession) (*NetworkClientsResult, error) {
+	return getNetworkClientList(session, networkClientListProxies)
+}
+
+func getNetworkClientList(session *session.ClientSession, kind networkClientListKind) (*NetworkClientsResult, error) {
 	var clientsResult *NetworkClientsResult
 	var clientsErr error
+
+	// a hosted proxy device is a client with a `proxy_device_config` row, the
+	// same test the peer registry uses to keep proxies out of the peer list
+	kindFilter := `
+					network_client.source_client_id IS NULL AND
+					NOT EXISTS (
+						SELECT 1 FROM proxy_device_config
+						WHERE proxy_device_config.client_id = network_client.client_id
+					)`
+	if kind == networkClientListProxies {
+		kindFilter = `
+					EXISTS (
+						SELECT 1 FROM proxy_device_config
+						WHERE proxy_device_config.client_id = network_client.client_id
+					)`
+	}
 
 	server.Db(session.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1240,7 +1286,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					proxy_client.client_id = network_client.client_id
 				WHERE
 					network_client.network_id = $1 AND
-					network_client.active = true
+					network_client.active = true AND`+kindFilter+`
 			`,
 			session.ByJwt.NetworkId,
 			ProvideModePublic,
@@ -1272,7 +1318,8 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				if deviceSpec_ != nil {
 					clientInfo.DeviceSpec = *deviceSpec_
 				}
-				if proxyClientJson != nil {
+				// the credentials belong to the proxies list only
+				if kind == networkClientListProxies && proxyClientJson != nil {
 					var proxyClient ProxyClient
 					err := json.Unmarshal([]byte(*proxyClientJson), &proxyClient)
 					if err == nil {

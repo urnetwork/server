@@ -51,6 +51,12 @@ func NetworkClients(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(model.GetNetworkClients, w, r)
 }
 
+// NetworkProxies lists the network's hosted proxy devices with their credentials;
+// NetworkClients lists only the network's devices.
+func NetworkProxies(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(model.GetNetworkProxies, w, r)
+}
+
 func NetworkPeers(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(model.GetNetworkPeersForSession, w, r)
 }

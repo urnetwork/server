@@ -2467,3 +2467,73 @@ func TestRemoveDisconnectedChildReapBumpsConnected(t *testing.T) {
 		connect.AssertEqual(t, exists, true)
 	})
 }
+
+// The device list holds only top-level devices: a child client (one with a
+// source client) and a hosted proxy device (a client with a
+// proxy_device_config row) are left out, and the proxy device is what the
+// proxies list returns instead. Nothing here depends on provide mode.
+func TestNetworkClientsListTopLevelDevicesOnly(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+
+		// a plain device
+		deviceResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "phone",
+				DeviceSpec:  "test spec",
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, deviceResult.Error, nil)
+		deviceClientId := *deviceResult.ClientId
+
+		// a child of that device
+		childResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				SourceClientId: &deviceClientId,
+				Description:    "child",
+				DeviceSpec:     "test spec",
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, childResult.Error, nil)
+
+		// a hosted proxy device: a client that carries a proxy device config
+		proxyResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "resident proxy",
+				DeviceSpec:  "resident proxy",
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, proxyResult.Error, nil)
+		proxyClientId := *proxyResult.ClientId
+		proxyDeviceConfig := &ProxyDeviceConfig{}
+		proxyDeviceConfig.ClientId = proxyClientId
+		err = CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+		connect.AssertEqual(t, err, nil)
+
+		clientsResult, err := GetNetworkClients(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 1, len(clientsResult.Clients))
+		connect.AssertEqual(t, deviceClientId, clientsResult.Clients[0].ClientId)
+		connect.AssertEqual(t, true, clientsResult.Clients[0].ProxyClient == nil)
+
+		proxiesResult, err := GetNetworkProxies(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 1, len(proxiesResult.Clients))
+		connect.AssertEqual(t, proxyClientId, proxiesResult.Clients[0].ClientId)
+	})
+}
