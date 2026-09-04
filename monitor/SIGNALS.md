@@ -7046,6 +7046,17 @@ exceed that 10,000-row suffix on every server edge. Filtering in journald to
 only `Start container failed:` or `Deploy success version=` before a 2,000-row
 cap completed in 0.34--3.67 seconds and preserved the actual lifecycle signal.
 
+On systemd 249, a supported and readable `journalctl --grep` query returns
+status 1 with empty stdout and stderr when no entry matches. That is a complete
+empty outcome window, not a remote-command failure. Each bounded journal read
+therefore first runs the identical selectors and output options with `-n 0` to
+prove option support and journal access and requires status 0 with no combined
+output. The real query accepts status 1 only with empty combined output; status
+0 is accepted only when every nonempty line has the expected MESSAGE-bearing
+JSON framing. A failed or noisy preflight, malformed/partial combined output,
+or any other status remains `cannot-observe`. This in-memory reduction creates
+no remote file, and raw journal errors are not copied into alert evidence.
+
 Every probe journal read is hard-capped at one sentinel entry beyond those
 limits. Reaching a cap emits `cannot-observe`; any TTRPC or Warp start failure
 already present in the returned suffix still emits its concrete PAGE. When

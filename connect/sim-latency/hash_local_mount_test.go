@@ -63,6 +63,68 @@ func TestHashLocalMountScriptIsDeterministicAndFilenameSafe(t *testing.T) {
 	}
 }
 
+// macOS realpath does not implement GNU's -e option. The helper's security
+// boundary must rely on Bash's physical-directory resolution, so it behaves
+// identically even when the first realpath on PATH rejects every invocation.
+func TestHashLocalMountScriptDoesNotRequireGNURealpath(t *testing.T) {
+	root := canonicalTemporaryDirectory(t)
+	if err := os.WriteFile(filepath.Join(root, "config.yml"), []byte("safe: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	normalOutput, err := exec.Command(
+		"./evaluator/container/hash-local-mount.sh",
+		root,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("hash local mount with normal PATH: %v: %s", err, normalOutput)
+	}
+
+	binDirectory := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(binDirectory, "realpath"),
+		[]byte("#!/bin/sh\nprintf 'realpath: illegal option -- e\\n' >&2\nexit 1\n"),
+		0700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("./evaluator/container/hash-local-mount.sh", root)
+	command.Env = []string{
+		"PATH=" + binDirectory + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	portableOutput, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("hash local mount with BSD-like realpath: %v: %s", err, portableOutput)
+	}
+	if string(portableOutput) != string(normalOutput) {
+		t.Fatalf("realpath implementation changed digest: normal=%q portable=%q", normalOutput, portableOutput)
+	}
+}
+
+// Physical resolution must not make a non-canonical or linked root acceptable:
+// only an already-canonical absolute directory may cross the trust boundary.
+func TestHashLocalMountScriptRejectsNonCanonicalRoots(t *testing.T) {
+	parent := canonicalTemporaryDirectory(t)
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(parent, "linked-root")
+	if err := os.Symlink(root, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []string{
+		root + string(os.PathSeparator) + ".",
+		linkedRoot,
+	} {
+		if output, err := exec.Command(
+			"./evaluator/container/hash-local-mount.sh",
+			candidate,
+		).CombinedOutput(); err == nil {
+			t.Fatalf("non-canonical local mount root %q was accepted: %q", candidate, output)
+		}
+	}
+}
+
 // A link can redirect an authenticated path after validation and must make the
 // shell helper fail closed.
 func TestHashLocalMountScriptRejectsSymbolicLinks(t *testing.T) {

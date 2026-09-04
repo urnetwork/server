@@ -272,7 +272,16 @@ func TestContainerRuntimeSignalSyntheticVacuumedStartupIsOptionalButTruncationIs
 }
 
 func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *testing.T) {
-	for _, forbidden := range []string{"/proc/", "docker ps", "sudo", "docker version", "-n 10001"} {
+	for _, forbidden := range []string{
+		"/proc/",
+		"docker ps",
+		"sudo",
+		"docker version",
+		"-n 10001",
+		"mktemp",
+		"journal_stdout",
+		"journal_stderr",
+	} {
 		if strings.Contains(containerRuntimeCommand, forbidden) {
 			t.Errorf("container runtime command contains privileged boundary %q", forbidden)
 		}
@@ -281,10 +290,13 @@ func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *tes
 		"docker --version",
 		"containerd --version",
 		"systemctl list-units",
-		"SYSLOG_IDENTIFIER=dockerd -n 2001",
-		"SYSLOG_IDENTIFIER=containerd -n 2001",
+		"read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=dockerd",
+		"read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=containerd",
+		"-n 0 --no-pager --quiet",
+		"[ \"$journal_status\" -eq 1 ] && [ -z \"$journal_output\" ]",
+		"$0 !~ /\"MESSAGE\"[[:space:]]*:/",
 		"_COMM=warpctl",
-		"--grep='Start container failed:|Deploy success version=' -n 2001",
+		"--grep='Start container failed:|Deploy success version=') || exit 24",
 		"runtime_window_complete",
 		"warp_window_complete",
 		"Deploy success version=",
@@ -299,6 +311,61 @@ func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *tes
 }
 
 func TestContainerRuntimeCommandParsesProductionShapedUnprivilegedSources(t *testing.T) {
+	output, err := runContainerRuntimeCommandFixture(t, "positive")
+	if err != nil {
+		t.Fatalf("container runtime command: %v\n%s", err, output)
+	}
+	sample, err := parseContainerRuntimeSample(string(output))
+	if err != nil {
+		t.Fatalf("parse production-shaped command output: %v\n%s", err, output)
+	}
+	if sample.dockerClient != "29.8.0" || sample.dockerServer != "29.8.0" ||
+		sample.containerdClient != "v2.3.4" || sample.containerdServer != "v2.3.4" ||
+		sample.runningWarpUnits != 1 || sample.warpDeploySuccesses != 1 ||
+		sample.warpStartFailures != 0 || sample.runtimeProtocolErrors != 0 {
+		t.Fatalf("unexpected production-shaped sample: %+v\n%s", sample, output)
+	}
+}
+
+func TestContainerRuntimeCommandDistinguishesSystemd249NoMatchFromJournalFailure(t *testing.T) {
+	output, err := runContainerRuntimeCommandFixture(t, "no-match")
+	if err != nil {
+		t.Fatalf("systemd 249 no-match result failed: %v\n%s", err, output)
+	}
+	sample, err := parseContainerRuntimeSample(string(output))
+	if err != nil {
+		t.Fatalf("parse no-match command output: %v\n%s", err, output)
+	}
+	if sample.warpDeploySuccesses != 0 || sample.warpStartFailures != 0 ||
+		sample.warpExit125Failures != 0 || !sample.warpWindowComplete {
+		t.Fatalf("systemd 249 no-match result was not an observed empty window: %+v", sample)
+	}
+
+	for _, mode := range []string{
+		"preflight-failure",
+		"preflight-stderr",
+		"query-failure",
+		"query-stderr",
+		"malformed-output",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			output, err := runContainerRuntimeCommandFixture(t, mode)
+			if err == nil {
+				t.Fatalf("journal %s was treated as an empty observation:\n%s", mode, output)
+			}
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 24 {
+				t.Fatalf("journal %s error = %v, want command exit 24\n%s", mode, err, output)
+			}
+			if strings.Contains(string(output), "synthetic-private-journal-error") {
+				t.Fatalf("journal %s leaked raw stderr: %s", mode, output)
+			}
+		})
+	}
+}
+
+func runContainerRuntimeCommandFixture(t *testing.T, journalMode string) ([]byte, error) {
+	t.Helper()
 	binDir := t.TempDir()
 	commands := map[string]string{
 		"systemctl": `#!/bin/sh
@@ -327,25 +394,43 @@ exec "$@"
 `,
 		"journalctl": `#!/bin/sh
 case " $* " in
-  *' _COMM=warpctl '*)
-    case " $* " in
-      *' --grep=Start container failed:|Deploy success version= -n 2001 '*)
-        echo 'Deploy success version=synthetic, configVersion=synthetic'
+  *' -n 0 '*)
+    case "${CONTAINER_RUNTIME_JOURNAL_MODE}: $* " in
+      preflight-failure:*'_COMM=warpctl '*)
+        echo 'synthetic-private-journal-error' >&2
+        exit 1
         ;;
-      *)
-        # Production's high-volume Warp stream can exceed 10,000 ordinary
-        # application lines in ten minutes. A missing server-side message
-        # filter deterministically recreates that visibility saturation.
-        i=0
-        while [ "$i" -lt 10001 ]; do
-          echo 'ordinary high-volume application log'
-          i=$((i + 1))
-        done
+      preflight-stderr:*'_COMM=warpctl '*)
+        echo 'synthetic-private-journal-error' >&2
+        exit 0
         ;;
     esac
+    exit 0
     ;;
-  *' SYSLOG_IDENTIFIER=dockerd '*) echo 'time="synthetic" level=info msg="Docker daemon" version=29.8.0' ;;
-  *' SYSLOG_IDENTIFIER=containerd '*) echo 'time="synthetic" level=info msg="starting containerd" version=v2.3.4' ;;
+  *' _COMM=warpctl '*)
+    case "${CONTAINER_RUNTIME_JOURNAL_MODE}" in
+      positive)
+        echo '{"MESSAGE":"Deploy success version=synthetic, configVersion=synthetic"}'
+        ;;
+      no-match) exit 1 ;;
+      query-failure)
+        echo 'synthetic-private-journal-error' >&2
+        exit 1
+        ;;
+      query-stderr)
+        echo '{"MESSAGE":"Deploy success version=partial, configVersion=partial"}'
+        echo 'synthetic-private-journal-error' >&2
+        exit 0
+        ;;
+      malformed-output)
+        echo '{"MESSAGE":"truncated"'
+        exit 0
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  *' SYSLOG_IDENTIFIER=dockerd '*) echo '{"MESSAGE":"time=synthetic level=info msg=Docker daemon version=29.8.0"}' ;;
+  *' SYSLOG_IDENTIFIER=containerd '*) echo '{"MESSAGE":"time=synthetic level=info msg=starting containerd version=v2.3.4"}' ;;
   *) exit 2 ;;
 esac
 `,
@@ -358,19 +443,10 @@ esac
 	}
 
 	command := exec.Command("sh", "-c", containerRuntimeCommand)
-	command.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("container runtime command: %v\n%s", err, output)
-	}
-	sample, err := parseContainerRuntimeSample(string(output))
-	if err != nil {
-		t.Fatalf("parse production-shaped command output: %v\n%s", err, output)
-	}
-	if sample.dockerClient != "29.8.0" || sample.dockerServer != "29.8.0" ||
-		sample.containerdClient != "v2.3.4" || sample.containerdServer != "v2.3.4" ||
-		sample.runningWarpUnits != 1 || sample.warpDeploySuccesses != 1 ||
-		sample.warpStartFailures != 0 || sample.runtimeProtocolErrors != 0 {
-		t.Fatalf("unexpected production-shaped sample: %+v\n%s", sample, output)
-	}
+	command.Env = append(
+		os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"CONTAINER_RUNTIME_JOURNAL_MODE="+journalMode,
+	)
+	return command.CombinedOutput()
 }

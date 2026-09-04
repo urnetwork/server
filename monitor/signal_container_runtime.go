@@ -47,8 +47,32 @@ containerd_client=$(timeout 10 containerd --version 2>/dev/null | awk '
   { for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+[.][0-9]+[.][0-9]+/) { print $i; exit } }
 ')
 
-docker_history=$(journalctl -b SYSLOG_IDENTIFIER=dockerd -n 2001 --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 21
-containerd_history=$(journalctl -b SYSLOG_IDENTIFIER=containerd -n 2001 --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 22
+read_bounded_journal() {
+	journal_limit=$1
+	shift
+	journal_output=$(journalctl "$@" -n 0 --no-pager --quiet --output-fields=MESSAGE -o json 2>&1)
+	journal_status=$?
+	if [ "$journal_status" -ne 0 ] || [ -n "$journal_output" ]; then
+		return 2
+	fi
+	journal_output=$(journalctl "$@" -n "$journal_limit" --no-pager --quiet --output-fields=MESSAGE -o json 2>&1)
+	journal_status=$?
+	if [ "$journal_status" -eq 1 ] && [ -z "$journal_output" ]; then
+		# systemd 249 returns one for a valid --grep query with no matches.
+		return 0
+	fi
+	[ "$journal_status" -eq 0 ] || return 2
+	if [ -n "$journal_output" ] && ! printf '%s\n' "$journal_output" | awk '
+		NF && ($0 !~ /^[[:space:]]*[{].*[}][[:space:]]*$/ || $0 !~ /"MESSAGE"[[:space:]]*:/) { invalid=1 }
+		END { exit invalid }
+	'; then
+		return 2
+	fi
+	printf '%s\n' "$journal_output"
+}
+
+docker_history=$(read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=dockerd) || exit 21
+containerd_history=$(read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=containerd) || exit 22
 docker_history_rows=$(printf '%s\n' "$docker_history" | awk 'NF { count++ } END { print count+0 }')
 containerd_history_rows=$(printf '%s\n' "$containerd_history" | awk 'NF { count++ } END { print count+0 }')
 docker_history_complete=1
@@ -68,7 +92,7 @@ containerd_server=$(printf '%s\n' "$containerd_history" | awk '
   END { print latest }
 ')
 
-runtime_recent=$(journalctl -b --since '10 minutes ago' SYSLOG_IDENTIFIER=dockerd SYSLOG_IDENTIFIER=containerd -n 2001 --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 25
+runtime_recent=$(read_bounded_journal 2001 -b --since '10 minutes ago' SYSLOG_IDENTIFIER=dockerd SYSLOG_IDENTIFIER=containerd) || exit 25
 runtime_recent_rows=$(printf '%s\n' "$runtime_recent" | awk 'NF { count++ } END { print count+0 }')
 runtime_window_complete=1
 [ "$runtime_recent_rows" -lt 2001 ] || runtime_window_complete=0
@@ -79,9 +103,8 @@ runtime_protocol_errors=$(printf '%s\n' "$runtime_recent" | awk '
 
 warp_units=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain 'warp-main-*.service' 2>/dev/null) || exit 23
 running_warp_units=$(printf '%s\n' "$warp_units" | awk '$1 ~ /[.]service$/ { count++ } END { print count+0 }')
-warp_journal=$(journalctl -b --since '10 minutes ago' _COMM=warpctl \
-  --grep='Start container failed:|Deploy success version=' -n 2001 \
-  --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 24
+warp_journal=$(read_bounded_journal 2001 -b --since '10 minutes ago' _COMM=warpctl \
+	--grep='Start container failed:|Deploy success version=') || exit 24
 warp_journal_rows=$(printf '%s\n' "$warp_journal" | awk 'NF { count++ } END { print count+0 }')
 warp_window_complete=1
 [ "$warp_journal_rows" -lt 2001 ] || warp_window_complete=0

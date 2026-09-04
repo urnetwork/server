@@ -787,6 +787,10 @@ func TestLogErrorsSignalDiscriminatesGrafanaPluginRequestFailure(t *testing.T) {
 		"same generation",
 		"pinned native plugin and catalog SHA-256",
 		"If both controls succeed",
+		"discard or reload the stale originating browser/dashboard state",
+		"queries[].datasource.type",
+		"queries[].datasource.uid",
+		"do not add central request-body logging",
 		"Do not recreate a healthy datasource",
 		"count_over_time query through warp-loki via Grafana /api/ds/query",
 		"var-ds=warp-loki",
@@ -794,6 +798,7 @@ func TestLogErrorsSignalDiscriminatesGrafanaPluginRequestFailure(t *testing.T) {
 		"method=POST path=/api/ds/query status=404",
 		"urnetwork-connect",
 		"errorMessageID=plugin.notRegistered",
+		"zero new grafana-plugin-unregistered lines for 10 minutes",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Grafana plugin alert missing %q:\n%s", detail, markdown)

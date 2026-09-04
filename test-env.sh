@@ -40,14 +40,25 @@ test_env_read_scalar() {
     local key="$2"
     local line
     local value
+    local double_quoted_scalar='^"(.*)"([[:space:]]+#.*)?$'
+    local single_quoted_scalar="^'(.*)'([[:space:]]+#.*)?$"
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*:[[:space:]]*(.*)$ ]]; then
             value="${BASH_REMATCH[1]}"
-            value="${value%%[[:space:]]#*}"
             test_env_trim "$value"
             value="$TEST_ENV_SCALAR"
-            if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-                value="${value:1:${#value}-2}"
+
+            # A YAML comment starts outside a quoted scalar. Unwrap either YAML
+            # quote style only as a complete scalar; partial quotes fail closed
+            # later as an invalid authority instead of being guessed at.
+            if [[ "$value" =~ $double_quoted_scalar ]]; then
+                value="${BASH_REMATCH[1]}"
+            elif [[ "$value" =~ $single_quoted_scalar ]]; then
+                value="${BASH_REMATCH[1]}"
+            else
+                value="${value%%[[:space:]]#*}"
+                test_env_trim "$value"
+                value="$TEST_ENV_SCALAR"
             fi
             TEST_ENV_SCALAR="$value"
             return 0
@@ -62,6 +73,8 @@ test_env_expand_scalar() {
     local variable_name
     local replacement
     local template
+    local prefix
+    local suffix
     while [[ "$value" =~ \{\{[[:space:]]*env:([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*\}\} ]]; do
         variable_name="${BASH_REMATCH[1]}"
         template="${BASH_REMATCH[0]}"
@@ -70,7 +83,12 @@ test_env_expand_scalar() {
             test_env_error "resource requires environment variable $variable_name"
             return 1
         fi
-        value="${value/"$template"/"$replacement"}"
+        # Quoting the replacement operand inside Bash's ${value/a/b} syntax
+        # inserts those quote characters into the result. Split around the
+        # already-matched literal template and concatenate instead.
+        prefix="${value%%"$template"*}"
+        suffix="${value#*"$template"}"
+        value="${prefix}${replacement}${suffix}"
     done
     TEST_ENV_SCALAR="$value"
 }

@@ -12,7 +12,10 @@ if [ "$#" -ne 1 ]; then
 fi
 
 root="$1"
-[[ "$root" = /* ]] && [ "$root" = "$(realpath -e "$root")" ] &&
+canonical_root="$(
+    builtin cd -P -- "$root" 2>/dev/null && builtin pwd -P
+)" || canonical_root=""
+[[ "$root" = /* ]] && [ "$root" = "$canonical_root" ] &&
     [ -d "$root" ] && [ ! -L "$root" ] || {
         printf 'local mount root must be an absolute canonical directory\n' >&2
         exit 1

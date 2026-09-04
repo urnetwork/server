@@ -31,7 +31,7 @@ Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
   `CREATE DATABASE ... LOCALE='en_US.UTF-8'` succeeds.
 - While the script runs it adds a **dedicated loopback alias** (`LOCAL_HOST_IP`,
   default `10.213.0.1`) to the loopback interface, publishes the DB ports on it,
-  and maps the hostnames to it in `/etc/hosts`:
+  and maps the hostnames to it exactly once in `/etc/hosts`:
 
   ```
   10.213.0.1  local-pg.bringyour.com
@@ -45,7 +45,10 @@ database commonly listens on `127.0.0.1:5432`, so if the local hostnames ever
 resolved to `127.0.0.1`, a test run could wipe prod. This setup therefore never
 uses `127.0.0.1`: it binds to a distinct dedicated address instead, so the worst
 case when the stack is down is "connection refused" — never a real database.
-The script refuses to run if `LOCAL_HOST_IP` is set to `127.0.0.1`.
+The script refuses to run if `LOCAL_HOST_IP` is set to `127.0.0.1`, either
+hostname already has any unmanaged mapping, a legacy managed block remains, or
+another launcher owns `/tmp/urnetwork-server-run-local.lock`. It never tries a
+second resolved address and never silently rewrites an operator-owned entry.
 
 On Docker Desktop / macOS the container IPs on the docker network are not
 routable from the host, so host access (where `go test` runs) goes through the
@@ -78,6 +81,15 @@ and the tests run as you.
   sibling vault checkout also exists.
 - If you change the selected `pg.yml`, re-run with `--fresh` so the postgres
   init script re-provisions the role.
+- A refused hosts/lock preflight happens before `--fresh`, loopback, kernel, or
+  Docker mutation. Do not delete a marker or lock merely because its recorded
+  PID looks old. First verify that no `run-local.sh` process and no child
+  `docker compose ... logs -f` process from any checkout still owns the stack;
+  stop and join every owner normally. Then back up `/etc/hosts`, remove the
+  complete legacy managed block and any active `local-pg.bringyour.com` or
+  `local-redis.bringyour.com` aliases, flush the resolver cache, and remove a
+  stale lock only after that ownership check. Preserve unrelated aliases on a
+  shared hosts line.
 - The postgres data volume (`pgdata`) persists across runs; the init script only
   runs on a fresh volume.
 - The postgres image must be the glibc (debian) build, not alpine: the test

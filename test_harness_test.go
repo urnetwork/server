@@ -156,6 +156,105 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	}
 }
 
+// The shell preflight reads the same authority shapes as the YAML resource
+// loader without acquiring a Python/yq dependency. Exercise that observable
+// boundary through both services and keep config resources from being mistaken
+// for their same-named vault peers.
+func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
+	tests := []struct {
+		name             string
+		postgresScalar   string
+		redisScalar      string
+		postgresHostname string
+		redisHostname    string
+		postgresPort     string
+		redisPort        string
+	}{
+		{
+			name:             "plain values with comments",
+			postgresScalar:   "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432 # postgres comment",
+			redisScalar:      "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379 # redis comment",
+			postgresHostname: "pg-shell-test.example",
+			redisHostname:    "redis-shell-test.example",
+			postgresPort:     "15432",
+			redisPort:        "16379",
+		},
+		{
+			name:             "single and double quoted values with comments",
+			postgresScalar:   "'{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:25432' # postgres comment",
+			redisScalar:      "\"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:26379\" # redis comment",
+			postgresHostname: "pg-quoted-test.example",
+			redisHostname:    "redis-quoted-test.example",
+			postgresPort:     "25432",
+			redisPort:        "26379",
+		},
+		{
+			name:             "bracketed IPv6 values",
+			postgresScalar:   "\"[{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}]:35432\" # postgres comment",
+			redisScalar:      "'[{{ env:BRINGYOUR_REDIS_HOSTNAME }}]:36379' # redis comment",
+			postgresHostname: "2001:db8:1::10",
+			redisHostname:    "2001:db8:2::20",
+			postgresPort:     "35432",
+			redisPort:        "36379",
+		},
+	}
+
+	for _, test := range tests {
+		vaultDir := t.TempDir()
+		configDir := t.TempDir()
+		for path, content := range map[string]string{
+			filepath.Join(vaultDir, "pg.yml"):     "authority: " + test.postgresScalar + "\n",
+			filepath.Join(vaultDir, "redis.yml"):  "authority: " + test.redisScalar + "\n",
+			filepath.Join(configDir, "db.yml"):    "authority: decoy-pg.example:1\n",
+			filepath.Join(configDir, "redis.yml"): "authority: decoy-redis.example:2\n",
+		} {
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("%s: write %s: %v", test.name, filepath.Base(path), err)
+			}
+		}
+
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(
+			probePath,
+			[]byte("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+			0o700,
+		); err != nil {
+			t.Fatalf("%s: write probe: %v", test.name, err)
+		}
+
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"WARP_ENV":                    "local",
+				"WARP_VAULT_HOME":             vaultDir,
+				"WARP_CONFIG_HOME":            configDir,
+				"WARP_TEST_ENV_PROBE_RECORD":  probeRecordPath,
+				"WARP_TEST_ENV_TCP_PROBE":     probePath,
+				"BRINGYOUR_POSTGRES_HOSTNAME": test.postgresHostname,
+				"BRINGYOUR_REDIS_HOSTNAME":    test.redisHostname,
+			},
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("%s: test environment preflight: %v\n%s", test.name, err, output)
+			continue
+		}
+
+		probeRecord, err := os.ReadFile(probeRecordPath)
+		if err != nil {
+			t.Errorf("%s: read probe record: %v", test.name, err)
+			continue
+		}
+		expectedProbeRecord := "postgres " + test.postgresHostname + " " + test.postgresPort + "\n" +
+			"redis " + test.redisHostname + " " + test.redisPort + "\n"
+		if string(probeRecord) != expectedProbeRecord {
+			t.Errorf("%s: service probes = %q; want %q", test.name, probeRecord, expectedProbeRecord)
+		}
+	}
+}
+
 // Explicit resource roots remain fail-closed: a typo is reported rather than
 // being replaced with a fixture from some other checkout.
 func TestTestEnvironmentScriptReportsMissingFixture(t *testing.T) {
