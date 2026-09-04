@@ -7038,7 +7038,11 @@ blocks and `/connect/control`; other server edges were also refilling the cap
 at about 169--552/s, versus 26--30/s on Fireside/Crisp. An unindexed unit plus
 message grep therefore exceeded the signal's 60-second command bound, while
 the same runtime journals capped at 2,000 entries returned in about one second
-and `_COMM=warpctl` capped at 10,000 returned in two to three seconds.
+and `_COMM=warpctl` capped at 10,000 returned in two to three seconds. A second
+2026-09-04 control showed that ordinary Warp application output can itself
+exceed that 10,000-row suffix on every server edge. Filtering in journald to
+only `Start container failed:` or `Deploy success version=` before a 2,000-row
+cap completed in 0.34--3.67 seconds and preserved the actual lifecycle signal.
 
 Every probe journal read is hard-capped at one sentinel entry beyond those
 limits. Reaching a cap emits `cannot-observe`; any TTRPC or Warp start failure
@@ -7050,13 +7054,14 @@ one-hour buffer, its absence alone is not a permanent visibility alert; exact
 recent bootstrap/start outcomes remain required, and Xops' privileged
 maintenance probe owns the definitive client/server comparison during package
 transitions and recovery. The host journal is intentionally only a one-hour recovery/debug
-buffer: Fluent Bit owns durable Warp-log delivery to Loki. Xops sets
-`MaxRetentionSec=1hour`, a 100 GiB safety cap for at least four times the
-expected one-hour burst envelope, 256 MiB files, and 1,024 files so journald's
-default 100-file ceiling cannot silently undercut the byte cap. The old
-seven-day setting stated an unnecessary target at current throughput and
-caused the size cap to decide an implicit, host-dependent window instead. This
-retention change does not alter LB logging or the durable Loki history.
+buffer: Fluent Bit owns durable Warp-log delivery to Loki. Xops sets persistent
+storage, `MaxRetentionSec=1hour`, `MaxFileSec=5min`, a 100 GiB safety cap for at
+least four times the expected one-hour burst envelope, 256 MiB files, and 1,024
+files so journald's default 100-file ceiling cannot silently undercut the byte
+cap. The old seven-day setting stated an unnecessary target at current
+throughput and caused the size cap to decide an implicit, host-dependent window
+instead. This retention change does not alter LB logging or the durable Loki
+history.
 
 Any observed containerd client/live-daemon split, native TTRPC rejection,
 concrete Warp replacement-start failure, or runtime service loss is PAGE. Docker
@@ -7090,9 +7095,11 @@ one hour regardless of host uptime. The effective contract is:
 
 ```ini
 [Journal]
+Storage=persistent
 SystemMaxUse=100G
 SystemMaxFileSize=256M
 SystemMaxFiles=1024
+MaxFileSec=5min
 MaxRetentionSec=1hour
 ```
 
@@ -7102,23 +7109,37 @@ leaving journald's default 100-file limit in effect can discard data before a
 100 GiB `SystemMaxUse` is reachable. The age limit normally wins, so the cap
 does not reserve or consume 100 GiB during ordinary operation.
 
-`journal-buffer-config` WARNs when the effective merged configuration differs
-from any of those four values. `journal-buffer-short` WARNs only after 70
-minutes of host uptime when a bounded one-entry query finds no record between
-50 and 55 minutes ago. That tolerance admits whole-file rotation while still
-proving a useful near-hour window. `journal-buffer-unavailable` PAGEs when
-`systemd-journald` itself is inactive. Missing or malformed command output is
-`cannot-observe`; an empty target-boundary query is never interpreted as a
-healthy quiet host.
+File age is also part of the retention contract. On the first 2026-09-04
+one-hour-policy activation, the four high-volume server edges retained a
+50-to-55-minute boundary, but Fireside and Crisp retained only 16 and 5 minutes
+after journald restarted. Their persistent journals had only two files, while
+the server edges had 14--44. The installed journald documentation explains
+that vacuuming can delete only whole archived files and recommends a shorter
+`MaxFileSec` when too much data would otherwise be lost at once; its default is
+one month. `MaxFileSec=5min` bounds that low-volume deletion granularity, and
+explicit `Storage=persistent` plus `journalctl --flush` makes the intended
+restart behavior independent of pre-existing host state.
 
-Every query is bounded by both a narrow time interval and `-n 1`; this signal
-must remain cheap even if the size cap fills. A short local window is not proof
-of Loki loss. Correlate it with §11.14 `log-shipper` before assigning durable
-data loss. Fix configuration drift with `xops/main/ansible/run-edges.sh`
+`journal-buffer-config` WARNs when the effective merged configuration differs
+from any of those six values. `journal-buffer-short` WARNs only after both the
+host and the current journald activation have been live for 70 minutes, when
+the current boot's oldest retained journal entry is less than 50 minutes old.
+The service-age gate allows an intentional configuration restart to refill its
+buffer, while current-boot metadata avoids treating a genuinely quiet
+five-minute interval as lost data. `journal-buffer-unavailable` PAGEs when
+`systemd-journald` itself is inactive. Missing or malformed command output is
+`cannot-observe`; missing current-boot metadata after the maturity gate is
+never interpreted as a healthy quiet host.
+
+The metadata query is machine-readable and bounded to one boot row with `-n 1`;
+this signal must remain cheap even if the size cap fills. A short local window
+is not proof of Loki loss. Correlate it with §11.14 `log-shipper` before
+assigning durable data loss. Fix configuration drift with
+`xops/main/ansible/run-edges.sh`
 without rebooting. If the exact policy is present but the boundary is absent,
 measure a bounded producer suffix and repair pathological amplification or
 resize only from measured throughput. Closure requires two consecutive
-boundary observations and fresh per-host data through Loki.
+coverage observations and fresh per-host data through Loki.
 
 ### 8.6 Config-generation restart wave — binary version alone is incomplete
 

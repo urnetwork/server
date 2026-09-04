@@ -8,15 +8,17 @@ import (
 
 func journalBufferFixture(overrides map[string]string) string {
 	keys := []string{
-		"observation_schema", "journald_active", "max_use", "max_file_size", "max_files",
-		"max_retention", "uptime_seconds", "boundary_checked", "boundary_present",
-		"boundary_oldest_seconds", "boundary_newest_seconds",
+		"observation_schema", "journald_active", "journald_active_seconds", "storage",
+		"max_use", "max_file_size", "max_files", "max_file_sec", "max_retention",
+		"uptime_seconds", "coverage_checked", "coverage_present",
+		"oldest_entry_age_seconds", "coverage_target_seconds",
 	}
 	values := map[string]string{
-		"observation_schema": "1", "journald_active": "active", "max_use": "100G",
-		"max_file_size": "256M", "max_files": "1024", "max_retention": "1hour", "uptime_seconds": "7200",
-		"boundary_checked": "1", "boundary_present": "1",
-		"boundary_oldest_seconds": "3300", "boundary_newest_seconds": "3000",
+		"observation_schema": "2", "journald_active": "active", "journald_active_seconds": "7200",
+		"storage": "persistent", "max_use": "100G", "max_file_size": "256M", "max_files": "1024",
+		"max_file_sec": "5min", "max_retention": "1hour", "uptime_seconds": "7200",
+		"coverage_checked": "1", "coverage_present": "1",
+		"oldest_entry_age_seconds": "3300", "coverage_target_seconds": "3000",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -32,12 +34,19 @@ func journalBufferFixture(overrides map[string]string) string {
 
 func TestJournalBufferSignalSyntheticProblemClasses(t *testing.T) {
 	observations := map[string]string{
-		"healthy":  journalBufferFixture(nil),
-		"drift":    journalBufferFixture(map[string]string{"max_retention": "7day"}),
-		"short":    journalBufferFixture(map[string]string{"boundary_present": "0"}),
+		"healthy": journalBufferFixture(nil),
+		"drift":   journalBufferFixture(map[string]string{"max_retention": "7day"}),
+		"short": journalBufferFixture(map[string]string{
+			"coverage_present": "0", "oldest_entry_age_seconds": "1200",
+		}),
 		"inactive": journalBufferFixture(map[string]string{"journald_active": "failed"}),
 		"young": journalBufferFixture(map[string]string{
-			"uptime_seconds": "1200", "boundary_checked": "0", "boundary_present": "0",
+			"uptime_seconds": "1200", "journald_active_seconds": "1200",
+			"coverage_checked": "0", "coverage_present": "0", "oldest_entry_age_seconds": "1200",
+		}),
+		"recent-journal-restart": journalBufferFixture(map[string]string{
+			"journald_active_seconds": "600", "coverage_checked": "0",
+			"coverage_present": "0", "oldest_entry_age_seconds": "600",
 		}),
 	}
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
@@ -53,6 +62,7 @@ func TestJournalBufferSignalSyntheticProblemClasses(t *testing.T) {
 		{Name: "short", Roles: []string{"services"}},
 		{Name: "inactive", Roles: []string{"services"}},
 		{Name: "young", Roles: []string{"services"}},
+		{Name: "recent-journal-restart", Roles: []string{"services"}},
 		{Name: "not-an-edge", Roles: []string{"pg-primary"}},
 	}
 	alerts, err := NewJournalBufferSignal().Run(context.Background(), settings)
@@ -79,7 +89,7 @@ func TestJournalBufferSignalSyntheticProblemClasses(t *testing.T) {
 
 func TestJournalBufferSignalSyntheticMalformedIsVisibility(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-		return journalBufferFixture(map[string]string{"boundary_present": "secret\nunknown=value"}), nil
+		return journalBufferFixture(map[string]string{"coverage_present": "secret\nunknown=value"}), nil
 	}}
 	settings := syntheticSettings(source)
 	settings.Hosts = []HostSettings{{Name: "edge", Roles: []string{"services"}}}
@@ -93,17 +103,43 @@ func TestJournalBufferSignalSyntheticMalformedIsVisibility(t *testing.T) {
 	}
 }
 
+func TestJournalBufferSignalSyntheticLowVolumeWholeFileLoss(t *testing.T) {
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return journalBufferFixture(map[string]string{
+			"storage": "auto", "max_file_sec": "1month",
+			"coverage_present": "0", "oldest_entry_age_seconds": "900",
+		}), nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "low-volume-proxy", Roles: []string{"services"}}}
+	alerts, err := NewJournalBufferSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := requireAlertClass(t, alerts, "journal-buffer-config")
+	if !strings.Contains(config.Markdown(), "whole-file rotation") ||
+		!strings.Contains(config.Evidence, "storage=auto") ||
+		!strings.Contains(config.Evidence, "max_file_sec=1month") {
+		t.Fatalf("configuration alert does not explain low-volume loss: %s", config.Markdown())
+	}
+	short := requireAlertClass(t, alerts, "journal-buffer-short")
+	if !strings.Contains(short.Evidence, "age=900s, required=3000s") {
+		t.Fatalf("coverage evidence=%q", short.Evidence)
+	}
+}
+
 func TestJournalBufferCommandIsBoundedAndUsesEffectiveConfig(t *testing.T) {
 	for _, want := range []string{
 		"systemd-analyze cat-config systemd/journald.conf",
-		"--since '55 minutes ago' --until '50 minutes ago' -n 1",
-		"SystemMaxUse", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+		"journalctl -q --list-boots -n 1 -o json",
+		"ActiveEnterTimestampMonotonic",
+		"Storage", "SystemMaxUse", "SystemMaxFileSize", "SystemMaxFiles", "MaxFileSec", "MaxRetentionSec",
 	} {
 		if !strings.Contains(journalBufferCommand, want) {
 			t.Errorf("command lacks %q", want)
 		}
 	}
-	for _, forbidden := range []string{"sudo", "journalctl -b", "--since '7 days ago'"} {
+	for _, forbidden := range []string{"sudo", "journalctl -b", "--since", "--until"} {
 		if strings.Contains(journalBufferCommand, forbidden) {
 			t.Errorf("command contains unsafe/unbounded boundary %q", forbidden)
 		}

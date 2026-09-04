@@ -79,10 +79,12 @@ runtime_protocol_errors=$(printf '%s\n' "$runtime_recent" | awk '
 
 warp_units=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain 'warp-main-*.service' 2>/dev/null) || exit 23
 running_warp_units=$(printf '%s\n' "$warp_units" | awk '$1 ~ /[.]service$/ { count++ } END { print count+0 }')
-warp_journal=$(journalctl -b --since '10 minutes ago' _COMM=warpctl -n 10001 --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 24
+warp_journal=$(journalctl -b --since '10 minutes ago' _COMM=warpctl \
+  --grep='Start container failed:|Deploy success version=' -n 2001 \
+  --no-pager --quiet --output-fields=MESSAGE -o json 2>/dev/null) || exit 24
 warp_journal_rows=$(printf '%s\n' "$warp_journal" | awk 'NF { count++ } END { print count+0 }')
 warp_window_complete=1
-[ "$warp_journal_rows" -lt 10001 ] || warp_window_complete=0
+[ "$warp_journal_rows" -lt 2001 ] || warp_window_complete=0
 warp_deploy_successes=$(printf '%s\n' "$warp_journal" | awk '/Deploy success version=/ { count++ } END { print count+0 }')
 warp_start_failures=$(printf '%s\n' "$warp_journal" | awk '/Start container failed:/ { count++ } END { print count+0 }')
 warp_exit125_failures=$(printf '%s\n' "$warp_journal" | awk '/Start container failed:.*exit status 125/ { count++ } END { print count+0 }')
@@ -364,7 +366,7 @@ func evaluateContainerRuntime(target string, sample containerRuntimeSample) []fi
 	if !sample.warpWindowComplete {
 		visibility = append(visibility, cannotObserveFinding(
 			target+"/container-runtime-warp-window",
-			fmt.Errorf("bounded Warp journal reached its 10000-entry limit"),
+			fmt.Errorf("bounded failure/outcome journal reached its 2000-entry limit"),
 		))
 	}
 

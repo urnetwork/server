@@ -272,7 +272,7 @@ func TestContainerRuntimeSignalSyntheticVacuumedStartupIsOptionalButTruncationIs
 }
 
 func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *testing.T) {
-	for _, forbidden := range []string{"/proc/", "docker ps", "sudo", "docker version", " -g "} {
+	for _, forbidden := range []string{"/proc/", "docker ps", "sudo", "docker version", "-n 10001"} {
 		if strings.Contains(containerRuntimeCommand, forbidden) {
 			t.Errorf("container runtime command contains privileged boundary %q", forbidden)
 		}
@@ -283,7 +283,8 @@ func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *tes
 		"systemctl list-units",
 		"SYSLOG_IDENTIFIER=dockerd -n 2001",
 		"SYSLOG_IDENTIFIER=containerd -n 2001",
-		"_COMM=warpctl -n 10001",
+		"_COMM=warpctl",
+		"--grep='Start container failed:|Deploy success version=' -n 2001",
 		"runtime_window_complete",
 		"warp_window_complete",
 		"Deploy success version=",
@@ -326,7 +327,23 @@ exec "$@"
 `,
 		"journalctl": `#!/bin/sh
 case " $* " in
-  *' _COMM=warpctl '*) echo 'Deploy success version=synthetic, configVersion=synthetic' ;;
+  *' _COMM=warpctl '*)
+    case " $* " in
+      *' --grep=Start container failed:|Deploy success version= -n 2001 '*)
+        echo 'Deploy success version=synthetic, configVersion=synthetic'
+        ;;
+      *)
+        # Production's high-volume Warp stream can exceed 10,000 ordinary
+        # application lines in ten minutes. A missing server-side message
+        # filter deterministically recreates that visibility saturation.
+        i=0
+        while [ "$i" -lt 10001 ]; do
+          echo 'ordinary high-volume application log'
+          i=$((i + 1))
+        done
+        ;;
+    esac
+    ;;
   *' SYSLOG_IDENTIFIER=dockerd '*) echo 'time="synthetic" level=info msg="Docker daemon" version=29.8.0' ;;
   *' SYSLOG_IDENTIFIER=containerd '*) echo 'time="synthetic" level=info msg="starting containerd" version=v2.3.4' ;;
   *) exit 2 ;;
