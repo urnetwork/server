@@ -475,12 +475,21 @@ func loadTestEnvironmentConfiguration() (
 	return configuration, nil
 }
 
-// Authenticates and checks the exact read-only capabilities setup needs before
-// it can safely enter longer Redis operation retries or create a database.
-func probeTestEnvironmentService(
+// Uses the files-first Go resolver for local service probes. On Darwin the
+// native resolver sends even /etc/hosts lookups through mDNSResponder, so an
+// unrelated DNS reconfiguration can otherwise consume the short probe budget.
+func newTestEnvironmentProbeResolver() *net.Resolver {
+	return &net.Resolver{PreferGo: true}
+}
+
+// Accepts injected network boundaries so the resolver behavior can be tested
+// without depending on live services or the host resolver.
+func probeTestEnvironmentServiceWithNetwork(
 	ctx context.Context,
 	serviceName string,
 	configuration testEnvironmentConfiguration,
+	lookupHost func(context.Context, string) ([]string, error),
+	dialContext func(context.Context, string, string) (net.Conn, error),
 ) error {
 	switch serviceName {
 	case "postgres":
@@ -495,6 +504,7 @@ func probeTestEnvironmentService(
 		if err != nil {
 			return fmt.Errorf("parse PostgreSQL test configuration: %w", err)
 		}
+		connectionConfig.LookupFunc = lookupHost
 		connection, err := pgx.ConnectConfig(ctx, connectionConfig)
 		if err != nil {
 			return fmt.Errorf("authenticate PostgreSQL test connection: %w", err)
@@ -517,6 +527,7 @@ func probeTestEnvironmentService(
 			Password:              configuration.redisPassword,
 			DB:                    testRedisLeaseCoordinatorDb,
 			ContextTimeoutEnabled: true,
+			Dialer:                dialContext,
 		})
 		defer client.Close()
 		redisConfig, err := client.ConfigGet(ctx, "databases").Result()
@@ -538,6 +549,24 @@ func probeTestEnvironmentService(
 	default:
 		return fmt.Errorf("unknown test environment service %q", serviceName)
 	}
+}
+
+// Authenticates and checks the exact read-only capabilities setup needs before
+// it can safely enter longer Redis operation retries or create a database.
+func probeTestEnvironmentService(
+	ctx context.Context,
+	serviceName string,
+	configuration testEnvironmentConfiguration,
+) error {
+	resolver := newTestEnvironmentProbeResolver()
+	dialer := &net.Dialer{Resolver: resolver}
+	return probeTestEnvironmentServiceWithNetwork(
+		ctx,
+		serviceName,
+		configuration,
+		resolver.LookupHost,
+		dialer.DialContext,
+	)
 }
 
 // Returns the address used in diagnostics without exposing credentials.

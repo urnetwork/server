@@ -316,6 +316,107 @@ func TestTestEnvironmentPreflightReportsUnavailableService(t *testing.T) {
 	connect.AssertEqual(t, authorities, []string{"postgres.test:5432", "redis.test:6379"})
 }
 
+// A hosts-file alias must not fall through to DNS when the native resolver is
+// unavailable. The injected dial fails deterministically if files-first lookup
+// does not answer localhost itself.
+func TestTestEnvironmentProbeResolverReadsHostsBeforeDns(t *testing.T) {
+	resolver := newTestEnvironmentProbeResolver()
+	if !resolver.PreferGo {
+		t.Fatal("test environment probe resolver does not prefer the Go resolver")
+	}
+	dnsDialed := false
+	resolver.Dial = func(context.Context, string, string) (net.Conn, error) {
+		dnsDialed = true
+		return nil, errors.New("unexpected DNS lookup")
+	}
+	addresses, err := resolver.LookupHost(context.Background(), "localhost")
+	if err != nil {
+		t.Fatalf("resolve hosts-file localhost: %v", err)
+	}
+	if dnsDialed {
+		t.Fatal("hosts-file localhost fell through to DNS")
+	}
+	if len(addresses) == 0 {
+		t.Fatal("hosts-file localhost resolved without an address")
+	}
+}
+
+// Both dependency clients must use the injected resolver path. Returning a
+// marker error at each boundary reproduces a resolver outage without timing or
+// host-network state.
+func TestTestEnvironmentServiceProbeUsesInjectedNetwork(t *testing.T) {
+	configuration := testEnvironmentConfiguration{
+		postgresAuthority: "postgres-resolver.test:5432",
+		postgresUser:      "test",
+		postgresPassword:  "not-a-secret",
+		postgresDatabase:  "test",
+		redisAuthority:    "redis-resolver.test:6379",
+	}
+	tests := []struct {
+		serviceName       string
+		expectedHost      string
+		expectedAuthority string
+	}{
+		{
+			serviceName:       "postgres",
+			expectedHost:      "postgres-resolver.test",
+			expectedAuthority: "",
+		},
+		{
+			serviceName:       "redis",
+			expectedHost:      "",
+			expectedAuthority: "redis-resolver.test:6379",
+		},
+	}
+	for _, test := range tests {
+		marker := "injected " + test.serviceName + " resolver outage"
+		lookupHosts := []string{}
+		dialAuthorities := []string{}
+		err := probeTestEnvironmentServiceWithNetwork(
+			context.Background(),
+			test.serviceName,
+			configuration,
+			func(ctx context.Context, host string) ([]string, error) {
+				lookupHosts = append(lookupHosts, host)
+				return nil, errors.New(marker)
+			},
+			func(ctx context.Context, network string, authority string) (net.Conn, error) {
+				dialAuthorities = append(dialAuthorities, authority)
+				return nil, errors.New(marker)
+			},
+		)
+		if err == nil || !strings.Contains(err.Error(), marker) {
+			t.Errorf("%s probe error = %v; want injected resolver error", test.serviceName, err)
+		}
+		if test.expectedHost == "" {
+			if len(lookupHosts) != 0 {
+				t.Errorf("%s probe unexpectedly used PostgreSQL lookup: %v", test.serviceName, lookupHosts)
+			}
+		} else {
+			connect.AssertEqual(t, lookupHosts, []string{test.expectedHost})
+		}
+		if test.expectedAuthority == "" {
+			if len(dialAuthorities) != 0 {
+				t.Errorf("%s probe unexpectedly reached dial: %v", test.serviceName, dialAuthorities)
+			}
+		} else {
+			if len(dialAuthorities) == 0 {
+				t.Errorf("%s probe did not use the injected dialer", test.serviceName)
+			}
+			for _, authority := range dialAuthorities {
+				if authority != test.expectedAuthority {
+					t.Errorf(
+						"%s dial authority = %q; want %q",
+						test.serviceName,
+						authority,
+						test.expectedAuthority,
+					)
+				}
+			}
+		}
+	}
+}
+
 // Redis-only integration tests diagnose their exact missing fixture without
 // depending on the PostgreSQL or pool configuration resources.
 func TestLoadTestRedisLeaseConfigurationReportsMissingFixture(t *testing.T) {
