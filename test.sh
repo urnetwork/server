@@ -21,7 +21,7 @@ proxy_dir="./proxy"
 if [[ -d $proxy_dir ]]; then
     pushd $proxy_dir
     match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
-    go test -timeout 30m -v "$@" | grep --color=always -e "^" -e "$match"
+    go test -timeout 30m -v "$@" | grep --line-buffered --color=always -e "^" -e "$match"
     test_status=${PIPESTATUS[0]}
     if [[ $test_status != 0 ]]; then
         exit "$test_status"
@@ -38,12 +38,12 @@ perfvar_dir="./connect/perfvar"
 if [[ -d $perfvar_dir ]]; then
     pushd $perfvar_dir
     match="/${PWD##*/}/\S*\.go\|^\S*_test.go"
-    go test -timeout 0 -p=1 -parallel=1 -v "$@" | grep --color=always -e "^" -e "$match"
+    go test -timeout 0 -p=1 -parallel=1 -v "$@" | grep --line-buffered --color=always -e "^" -e "$match"
     test_status=${PIPESTATUS[0]}
     if [[ $test_status != 0 ]]; then
         exit "$test_status"
     fi
-    GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 30m -p=1 -parallel=1 -short -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --color=always -e "^" -e "$match"
+    GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 30m -p=1 -parallel=1 -short -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --line-buffered --color=always -e "^" -e "$match"
     test_status=${PIPESTATUS[0]}
     if [[ $test_status != 0 ]]; then
         exit "$test_status"
@@ -72,7 +72,7 @@ while IFS= read -r d; do
         # highlight source files in this dir
         match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
         # go test -v "$@" | grep --color=always -e "^" -e "$match"
-        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --color=always -e "^" -e "$match"
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --line-buffered --color=always -e "^" -e "$match"
         test_status=${PIPESTATUS[0]}
         if [[ $test_status != 0 ]]; then
             exit "$test_status"
