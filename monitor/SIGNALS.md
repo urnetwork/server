@@ -12975,12 +12975,27 @@ changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
 excluded; this is how an operator-declared offline edge such as edge-5 stays out
 of both the health denominator and remote diagnostics.
 
-A curl exit 7 in less than one second is the immediate-reset signature. Inspect
-DNAT rules in order and compare every pool target with live listening sockets.
-During a duplicate-to-single rolling transition, an old first rule can point at
-a listener that closed after the overlap scan while shadowing a later live
-rule. Remove only the proven dead target and deploy Warp's final
-socket-authoritative reconciliation on that transition.
+A curl exit 7 in less than one second is the immediate-reset signature only
+after a bounded monitor-local IPv6 route lookup proves the observer has a
+route. Inspect DNAT rules in order and compare every pool target with live
+listening sockets. During a duplicate-to-single rolling transition, an old
+first rule can point at a listener that closed after the overlap scan while
+shadowing a later live rule. Remove only the proven dead target and deploy
+Warp's final socket-authoritative reconciliation on that transition.
+
+Run the monitor-local route lookup before the exact probes and again after an
+all-target immediate failure. When either lookup proves no route and every
+configured target has curl exit 7, no remote address, and a sub-second result,
+collapse the cohort into one WARN
+`monitor/visibility|ipv6-observer-route-unavailable|monitor-host/edge-ipv6|`.
+Do not emit a per-edge reset from that sample. Continue collecting each host's
+identity, self-SNI HTTPS, source route, and bound-egress controls: those retain
+known host-local state, but do not prove externally routed ingress. If the
+route command is unavailable or ambiguous rather than affirmatively route-less,
+keep each immediate target as `cannot-observe`; do not guess reset causality.
+Any successful exact IPv6 request disproves an all-target observer outage for
+that sample, and ordinary per-edge refusal, timeout, policy-route, upstream,
+and HTTP classifications remain active.
 
 A timeout is different. If the host owns the exact address, serves HTTP 200 when
 the same SNI request is pinned locally to it, and a request bound to that source
@@ -13101,9 +13116,14 @@ expirations at 11:52:24.621Z, 11:53:35.584Z, and 11:59:40.537Z each removed
 `en0` IPv6 before the standing tails reported route loss at 11:52:32Z,
 11:53:44Z, and 11:59:49Z, respectively; IPv6 returned after 7.1, 16.9, and 7.4
 seconds. Thus all four observed route-loss waves belong to the monitor's first
-hop. The collector queries and correlates 15 seconds on either side of the
-transport timestamp so the proven 7–9-second diagnostic lag cannot hide the
-cause.
+hop. A later 2026-09-04 tail error arrived 27 seconds after the corresponding
+lifetime expiry, disproving the former fixed 15-second lookback. The collector
+now reads a bounded ten-minute state history before the transport timestamp
+and correlates only a lifetime-zero plus IPv6-absent interval with no IPv6
+restoration before the first tail error. It retains 15 seconds after the tail
+event for timestamp precision and a near-simultaneous restoration. This
+captures a still-active loss without attaching an already-restored historical
+event to a later edge failure.
 
 The software signal now queries only that narrow recent local record after a
 tail route event and attaches the affirmative discriminator without copying
@@ -13117,6 +13137,31 @@ repair RA cadence or delivery if refreshes are absent or late. Verify at least
 unrelated IPv6 control, and every configured edge. This is an
 operational/network-appliance repair; deploying API, Connect, Proxy, Warpctl,
 or another edge service cannot fix it.
+
+The 2026-09-04 periodic-probe incident is the deterministic common-mode
+reproduction. The monitor recorded `RTADV en0: router lifetime became zero` at
+15:17:46Z, 15:18:09Z, 15:18:25Z, 15:21:25Z, 15:22:16Z, 15:25:23Z, and
+15:25:39Z; its IPv6 network state remained absent until 15:30:54Z. The 15:24Z
+and 15:29Z probe cadences fell inside that interval. All eight exact edge
+requests returned curl exit 7 with no remote address in about 0.0001 seconds,
+while every edge retained its configured/up interface, active LB unit, local
+SNI HTTP 200, exact source route, and exact bound-source egress. The paired Go
+TLS dials reported `no route to host` for all eight IPv6 tuples. Those facts
+prove the old per-edge reset and certificate attribution was false; they do
+not prove public ingress or certificates healthy during the lost observation
+window. A later bounded enabled-host cross-control found a valid source route
+for all eight pairs but completed API and manager TLS on only two, so local
+observer recovery and host self-probes still cannot replace an independent
+externally routed closure check.
+
+Restore the observer's IPv6/default-router path without changing an edge, then
+require an unrelated IPv6 prefix and every exact edge from a genuinely routed
+external observer for three consecutive five-minute samples. The scoped
+edge-ipv6 visibility identity stays distinct from the TLS identity because the
+signals run independently and a healthy tick from one must not resolve the
+other. With the ticket manager's five-healthy-tick resolution window, automatic
+ticket closure takes five successful signal cadences (25 minutes); the
+three-sample protocol check is the minimum functional recovery proof.
 
 ### 18.2 Public TLS certificate expiry and alias coverage
 
@@ -13154,6 +13199,21 @@ routing/ingress evidence and do not call the certificate healthy from a
 sibling. Recovery requires three consecutive five-minute exact-address
 observations with hostname coverage, system trust, and more than 21 days
 remaining after the final LB handoff.
+
+Treat exact IPv6 `no route to host` / `network is unreachable` results as a
+common observer candidate, not as eight independent certificate failures.
+Sample the same bounded monitor-local route before and after the TLS cohort.
+Only when every configured IPv6 TLS target has the no-route result and either
+route lookup affirmatively has no route, emit the one WARN
+`monitor/visibility|ipv6-observer-route-unavailable|monitor-host/tls-expiry|`;
+retire the superseded per-endpoint transport identities while leaving
+certificate state UNKNOWN. A missing, unsupported, or ambiguous route lookup
+does not prove the common mode: preserve per-endpoint
+`tls-certificate-unobservable` findings. IPv4, a successful IPv6 handshake,
+and all parse, date, SAN, and trust findings continue independently. Never
+infer certificate validity from host-local HTTPS or from repairing the
+observer route; require the exact externally routed handshakes and the closure
+window in §18.1.
 
 The 2026-09-03 manager incident is the defining synthetic reproduction. The
 alias entered active `services.yml` on 2026-08-21, after the 2026-08-12 SAN

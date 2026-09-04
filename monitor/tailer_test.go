@@ -308,16 +308,53 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	if !preceding.matches(event) {
 		t.Fatal("proven nine-second router-expiry precursor did not match")
 	}
+	activeInterval := base
+	activeInterval.routerLifetimeExpiredAt = expiredAt.Add(-27 * time.Second)
+	activeInterval.ipv6AbsentAt = activeInterval.routerLifetimeExpiredAt.Add(33 * time.Millisecond)
+	if !activeInterval.matches(event) {
+		t.Fatal("active 27-second IPv6-loss interval did not match the later tail error")
+	}
+	restoredBeforeTail := activeInterval
+	restoredBeforeTail.ipv6RestoredAt = expiredAt.Add(-time.Second)
+	if restoredBeforeTail.matches(event) {
+		t.Fatal("IPv6 loss restored before the tail error was treated as causal")
+	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
 	if withoutLoss.matches(event) {
 		t.Fatal("router-lifetime log without local IPv6 loss was treated as causal")
 	}
 	distant := base
-	distant.routerLifetimeExpiredAt = expiredAt.Add(-monitorIPv6RouteCorrelationWindow - time.Second)
+	distant.routerLifetimeExpiredAt = expiredAt.Add(-monitorIPv6RouteStateLookback - time.Second)
 	distant.ipv6AbsentAt = distant.routerLifetimeExpiredAt.Add(time.Second)
 	if distant.matches(event) {
 		t.Fatal("distant router expiry was correlated to this transport event")
+	}
+}
+
+func TestParseTailTransportMonitorRouteEvidenceUsesLatestActiveLossInterval(t *testing.T) {
+	out := strings.Join([]string{
+		"2026-09-04 10:17:46.534 Df configd[1:2] RTADV en0: router lifetime became zero",
+		"2026-09-04 10:17:46.565 Df configd[1:2] network changed: v4(en0)",
+		"2026-09-04 10:17:54.000 Df configd[1:2] network changed: v4(en0) v6(en0:ready)",
+		"2026-09-04 10:18:25.000 Df configd[1:2] RTADV en0: router lifetime became zero",
+		"2026-09-04 10:18:25.033 Df configd[1:2] network changed: v4(en0)",
+		"2026-09-04 10:18:26.000 Df configd[1:2] AUTOMATIC-V6 en0: all autoconf addresses detached/deprecated",
+	}, "\n")
+
+	evidence := parseTailTransportMonitorRouteEvidence(out)
+	event := &tailTransportRouteAggregate{
+		first: "2026/09/04 10:18:52",
+		last:  "2026/09/04 10:18:52",
+	}
+	if !evidence.matches(event) {
+		t.Fatalf("latest active loss interval did not match 27-second-later tail error: %+v", evidence)
+	}
+	if got := evidence.routerLifetimeExpiredAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-04 10:18:25.000" {
+		t.Fatalf("latest router expiry = %q", got)
+	}
+	if evidence.routerLifetimeExpiredCount != 1 || evidence.autoconfDetachCount != 1 || !evidence.ipv6RestoredAt.IsZero() {
+		t.Fatalf("latest loss interval retained prior restored state: %+v", evidence)
 	}
 }
 
@@ -351,7 +388,7 @@ func TestCollectTailTransportMonitorRouteEvidenceCoversProvenDiagnosticLag(t *te
 	}
 	joined := strings.Join(commandArgs, " ")
 	for _, want := range []string{
-		"--start 2026-09-01 06:59:34",
+		"--start 2026-09-01 06:49:49",
 		"--end 2026-09-01 07:00:05",
 		`process == "configd"`,
 	} {

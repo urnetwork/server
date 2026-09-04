@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -65,6 +67,17 @@ func (tlsExpiryProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("manager TLS is configured for %s but no enabled public LB interface is available", hostname)
 	}
+	hasIPv6Target := false
+	for _, target := range targets {
+		if target.family == "ipv6" {
+			hasIPv6Target = true
+			break
+		}
+	}
+	observerRoute := ipv6ObserverRouteObservation{state: ipv6ObserverRouteUnobservable}
+	if hasIPv6Target {
+		observerRoute = observeIPv6ObserverRoute(ctx, env.runner)
+	}
 
 	results := make(chan tlsExpiryResult, len(targets))
 	semaphore := make(chan struct{}, 8)
@@ -113,11 +126,82 @@ func (tlsExpiryProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		return ordered[i].target.family < ordered[j].target.family
 	})
 
-	findings := make([]finding, 0, len(ordered))
+	allIPv6NoRoute, ipv6NoRouteCount := tlsIPv6ObserverCommonMode(ordered)
+	if allIPv6NoRoute {
+		observerRoute = mergeIPv6ObserverRouteObservations(
+			observerRoute,
+			observeIPv6ObserverRoute(ctx, env.runner),
+		)
+	}
+	observerCommonMode := allIPv6NoRoute && observerRoute.state == ipv6ObserverRouteAbsent
+	findings := make([]finding, 0, len(ordered)+1)
 	for _, result := range ordered {
+		if observerCommonMode && result.target.family == "ipv6" {
+			// The common observer finding retains UNKNOWN certificate coverage.
+			// Retire endpoint-specific transport tickets whose per-edge causal
+			// attribution has been disproved by the all-target no-route cohort.
+			findings = append(findings, healthyFinding(
+				"synthetic/tls-expiry",
+				tierWarn,
+				"tls-certificate-unobservable",
+				result.target.identityTarget(),
+			))
+			continue
+		}
 		findings = append(findings, tlsExpiryFinding(hostname, env.now(), result))
 	}
+	if hasIPv6Target {
+		if observerCommonMode {
+			findings = append(findings, ipv6ObserverRouteFinding(
+				"tls-expiry",
+				fmt.Sprintf(
+					"observer_route=%s configured_ipv6_targets=%d no_route_failures=%d",
+					observerRoute.state,
+					ipv6NoRouteCount,
+					ipv6NoRouteCount,
+				),
+			))
+		} else if observerRoute.state == ipv6ObserverRouteAvailable || tlsIPv6RouteProven(ordered) {
+			findings = append(findings, healthyIPv6ObserverRouteFinding("tls-expiry"))
+		}
+	}
 	return findings, nil
+}
+
+func tlsIPv6RouteProven(results []tlsExpiryResult) bool {
+	for _, result := range results {
+		if result.target.family == "ipv6" && len(result.observation.Certificates) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func tlsIPv6ObserverCommonMode(results []tlsExpiryResult) (bool, int) {
+	ipv6Targets := 0
+	noRouteFailures := 0
+	for _, result := range results {
+		if result.target.family != "ipv6" {
+			continue
+		}
+		ipv6Targets++
+		if ipv6ObserverNoRouteError(result.err) {
+			noRouteFailures++
+		}
+	}
+	return ipv6Targets > 0 && noRouteFailures == ipv6Targets, noRouteFailures
+}
+
+func ipv6ObserverNoRouteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "no route to host") ||
+		strings.Contains(lower, "network is unreachable")
 }
 
 func tlsExpiryTargets(env *probeEnv) []tlsExpiryTarget {

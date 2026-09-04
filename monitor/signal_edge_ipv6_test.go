@@ -154,6 +154,190 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	}
 }
 
+func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T) {
+	addresses := []string{
+		"2001:db8:1::10",
+		"2001:db8:1::11",
+		"2001:db8:2::20",
+		"2001:db8:2::21",
+	}
+	routeCalls := 0
+	source := &syntheticSource{
+		localFn: func(name string, args ...string) (string, error) {
+			if name == "/sbin/route" {
+				routeCalls++
+				if strings.Join(args, " ") != "-n get -inet6 "+ipv6ObserverRouteProbeAddress {
+					t.Fatalf("route arguments = %q", strings.Join(args, " "))
+				}
+				return "route: writing to routing socket: not in table\n", errors.New("exit status 1")
+			}
+			if name != "curl" {
+				return "", errors.New("unexpected local command")
+			}
+			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
+				edgeHTTPFixture("000", "7", "", "0.000106"), errors.New("exit status 7")
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			switch {
+			case strings.Contains(command, edgeIPv6IdentityMarker):
+				return "operstate=up\nconfigured_present=1\nunit_active=active\n", nil
+			case strings.Contains(command, edgeIPv6EgressMarker):
+				for index, address := range addresses {
+					if strings.Contains(command, address) {
+						return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\n" +
+							"route_device=public" + string(rune('0'+index%2)) + "\n" +
+							"route_source=" + address + "\nroute_status=0\n" +
+							"source_egress=" + address + "\nsource_egress_status=0\n", nil
+					}
+				}
+			}
+			return "", errors.New("unexpected synthetic host command")
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{
+		{Name: "edge-a", EdgeIPv6: []EdgeIPv6InterfaceSettings{
+			{Interface: "public0", Address: addresses[0], ProbeHostname: "api-v6.example"},
+			{Interface: "public1", Address: addresses[1], ProbeHostname: "api-v6.example"},
+		}},
+		{Name: "edge-b", EdgeIPv6: []EdgeIPv6InterfaceSettings{
+			{Interface: "public0", Address: addresses[2], ProbeHostname: "api-v6.example"},
+			{Interface: "public1", Address: addresses[3], ProbeHostname: "api-v6.example"},
+		}},
+	}
+
+	env, err := newProbeEnv(settings.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := (edgeIPv6Probe{}).check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routeCalls != 2 {
+		t.Fatalf("route calls = %d, want fleet-level before/after lookups", routeCalls)
+	}
+	observer := findingByClass(t, findings, "ipv6-observer-route-unavailable")
+	if observer.healthy || observer.tier != tierWarn || observer.target != "monitor-host/edge-ipv6" {
+		t.Fatalf("observer finding = %+v", observer)
+	}
+	for _, want := range []string{
+		"observer_route=absent",
+		"configured_targets=4",
+		"immediate_connect_failures=4",
+		"identity_healthy=4",
+		"local_self_https_healthy=4",
+		"source_route_exact=4",
+		"source_egress_exact=4",
+		"externally routed coverage",
+	} {
+		if !strings.Contains(observer.observed+" "+observer.mechanism, want) {
+			t.Fatalf("observer finding missing %q: %+v", want, observer)
+		}
+	}
+	for _, forbidden := range append(addresses, "not in table", "Couldn't connect to server") {
+		if strings.Contains(observer.evidence+observer.observed+observer.mechanism, forbidden) {
+			t.Fatalf("observer finding leaked %q: %+v", forbidden, observer)
+		}
+	}
+	resolved := map[string]int{}
+	for _, finding := range findings {
+		if finding.class == "edge-ipv6-reset" {
+			if !finding.healthy {
+				t.Fatalf("observer route loss emitted per-edge reset: %+v", finding)
+			}
+			resolved[finding.target]++
+		}
+	}
+	if resolved["edge-a"] != 1 || resolved["edge-b"] != 1 {
+		t.Fatalf("reset resolution findings = %+v, want one per target", resolved)
+	}
+}
+
+func TestEdgeIPv6SignalSyntheticObserverRoutePreservesRealReset(t *testing.T) {
+	address := "2001:db8:3::30"
+	source := &syntheticSource{
+		localFn: func(name string, _ ...string) (string, error) {
+			if name == "/sbin/route" {
+				return "route to: 2606:4700:4700::1111\ninterface: en0\n", nil
+			}
+			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
+				edgeHTTPFixture("000", "7", "", "0.000072"), errors.New("exit status 7")
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, edgeIPv6IdentityMarker) {
+				return "operstate=up\nconfigured_present=1\nunit_active=active\n", nil
+			}
+			if strings.Contains(command, edgeIPv6EgressMarker) {
+				return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\n" +
+					"route_device=public0\nroute_source=" + address + "\nroute_status=0\n" +
+					"source_egress=" + address + "\nsource_egress_status=0\n", nil
+			}
+			return "", errors.New("unexpected host command")
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "edge-a", EdgeIPv6: []EdgeIPv6InterfaceSettings{{
+		Interface: "public0", Address: address, ProbeHostname: "api-v6.example",
+	}}}}
+
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Class != "edge-ipv6-reset" {
+		t.Fatalf("routed refusal alerts = %+v, want the genuine reset", alerts)
+	}
+}
+
+func TestEdgeIPv6SignalSyntheticUnobservableRouteStaysPerTargetUnknown(t *testing.T) {
+	addresses := []string{"2001:db8:4::40", "2001:db8:4::41"}
+	source := &syntheticSource{
+		localFn: func(name string, _ ...string) (string, error) {
+			if name == "/sbin/route" {
+				return "synthetic private route diagnostic", errors.New("synthetic route command failure")
+			}
+			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
+				edgeHTTPFixture("000", "7", "", "0.000081"), errors.New("exit status 7")
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, edgeIPv6IdentityMarker) {
+				return "operstate=up\nconfigured_present=1\nunit_active=active\n", nil
+			}
+			if strings.Contains(command, edgeIPv6EgressMarker) {
+				for index, address := range addresses {
+					if strings.Contains(command, address) {
+						return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\n" +
+							"route_device=public" + string(rune('0'+index)) + "\n" +
+							"route_source=" + address + "\nroute_status=0\n" +
+							"source_egress=" + address + "\nsource_egress_status=0\n", nil
+					}
+				}
+			}
+			return "", errors.New("unexpected host command")
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "edge-a", EdgeIPv6: []EdgeIPv6InterfaceSettings{
+		{Interface: "public0", Address: addresses[0], ProbeHostname: "api-v6.example"},
+		{Interface: "public1", Address: addresses[1], ProbeHostname: "api-v6.example"},
+	}}}
+
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %d, want one unknown per target: %+v", len(alerts), alerts)
+	}
+	for _, alert := range alerts {
+		if alert.Class != "cannot-observe" || alert.Severity != SeverityWarn {
+			t.Fatalf("unobservable route alert = %+v", alert)
+		}
+		requireAlertOmits(t, alert, "synthetic private route diagnostic", "synthetic route command failure")
+	}
+}
+
 func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 	base := edgeIPv6Result{
 		configured: EdgeIPv6InterfaceSettings{Interface: "public0", Address: "2001:db8::1"},

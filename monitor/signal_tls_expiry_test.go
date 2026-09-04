@@ -190,6 +190,149 @@ func TestTLSExpirySignalSyntheticFailureClasses(t *testing.T) {
 	}
 }
 
+func TestTLSExpirySignalSyntheticObserverNoRouteAggregatesIPv6AndKeepsIPv4(t *testing.T) {
+	now := time.Date(2026, 9, 4, 15, 24, 0, 0, time.UTC)
+	hostname := "manager.bringyour.com"
+	expired := syntheticTLSCertificate(
+		t,
+		[]string{hostname},
+		now.Add(-90*24*time.Hour),
+		now.Add(-time.Hour),
+	)
+	ipv6Addresses := []string{"[2001:db8:1::10]:443", "[2001:db8:2::20]:443"}
+	routeCalls := 0
+	source := &syntheticSource{
+		localFn: func(name string, args ...string) (string, error) {
+			if name != "/sbin/route" || strings.Join(args, " ") != "-n get -inet6 "+ipv6ObserverRouteProbeAddress {
+				return "", fmt.Errorf("unexpected local command %s %s", name, strings.Join(args, " "))
+			}
+			routeCalls++
+			return "route: writing to routing socket: not in table\n", errors.New("exit status 1")
+		},
+		tlsFn: func(network, address, _ string) (TLSCertificateObservation, error) {
+			if network == "tcp4" {
+				return TLSCertificateObservation{Certificates: [][]byte{expired}}, nil
+			}
+			return TLSCertificateObservation{}, fmt.Errorf(
+				"dial tcp6 %s: connect: no route to host",
+				address,
+			)
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Now = func() time.Time { return now }
+	settings.ManagerHostname = hostname
+	settings.Hosts = []HostSettings{
+		{Name: "edge-a", PublicLB: []PublicLBInterfaceSettings{{
+			Interface: "public0", IPv4Address: "192.0.2.10", IPv6Address: "2001:db8:1::10",
+		}}},
+		{Name: "edge-b", PublicLB: []PublicLBInterfaceSettings{{
+			Interface: "public0", IPv6Address: "2001:db8:2::20",
+		}}},
+	}
+
+	env, err := newProbeEnv(settings.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := (tlsExpiryProbe{}).check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routeCalls != 2 {
+		t.Fatalf("route calls = %d, want before/after lookups", routeCalls)
+	}
+	observer := findingByClass(t, findings, "ipv6-observer-route-unavailable")
+	if observer.healthy || observer.target != "monitor-host/tls-expiry" {
+		t.Fatalf("observer finding = %+v", observer)
+	}
+	for _, want := range []string{
+		"observer_route=absent",
+		"configured_ipv6_targets=2",
+		"no_route_failures=2",
+	} {
+		if !strings.Contains(observer.observed, want) {
+			t.Fatalf("observer finding missing %q: %+v", want, observer)
+		}
+	}
+	for _, forbidden := range append(ipv6Addresses, "not in table", "no route to host") {
+		if strings.Contains(observer.observed+observer.evidence+observer.mechanism, forbidden) {
+			t.Fatalf("observer finding leaked %q: %+v", forbidden, observer)
+		}
+	}
+	resolved := 0
+	expiry := 0
+	for _, finding := range findings {
+		switch finding.class {
+		case "tls-certificate-unobservable":
+			if !finding.healthy {
+				t.Fatalf("common route loss emitted per-edge TLS unknown: %+v", finding)
+			}
+			resolved++
+		case "tls-certificate-expired":
+			if finding.healthy || finding.frame != "ipv4" {
+				t.Fatalf("IPv4 expiry changed during IPv6 observer loss: %+v", finding)
+			}
+			expiry++
+		}
+	}
+	if resolved != 2 || expiry != 1 {
+		t.Fatalf("resolved=%d expiry=%d findings=%+v", resolved, expiry, findings)
+	}
+}
+
+func TestTLSExpirySignalSyntheticNoRouteNeedsObserverRouteProof(t *testing.T) {
+	tests := []struct {
+		name        string
+		routeOutput string
+		routeErr    error
+	}{
+		{
+			name:        "route available",
+			routeOutput: "route to: 2606:4700:4700::1111\ninterface: en0\n",
+		},
+		{
+			name:        "route unobservable",
+			routeOutput: "synthetic private route diagnostic",
+			routeErr:    errors.New("synthetic route command failure"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{
+				localFn: func(string, ...string) (string, error) {
+					return test.routeOutput, test.routeErr
+				},
+				tlsFn: func(_ string, address string, _ string) (TLSCertificateObservation, error) {
+					return TLSCertificateObservation{}, fmt.Errorf(
+						"dial tcp6 %s: connect: no route to host",
+						address,
+					)
+				},
+			}
+			settings := syntheticSettings(source)
+			settings.ManagerHostname = "manager.bringyour.com"
+			settings.Hosts = []HostSettings{{Name: "edge-a", PublicLB: []PublicLBInterfaceSettings{
+				{Interface: "public0", IPv6Address: "2001:db8:3::30"},
+				{Interface: "public1", IPv6Address: "2001:db8:3::31"},
+			}}}
+
+			alerts, err := NewTLSExpirySignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 2 {
+				t.Fatalf("alerts = %d, want per-target unknown without observer proof: %+v", len(alerts), alerts)
+			}
+			for _, alert := range alerts {
+				if alert.Class != "tls-certificate-unobservable" || !strings.HasPrefix(alert.Target, "edge-a/") {
+					t.Fatalf("TLS alert = %+v", alert)
+				}
+			}
+		})
+	}
+}
+
 func TestTLSExpirySignalSyntheticHealthyAndGracefulNoop(t *testing.T) {
 	now := time.Date(2026, 9, 3, 7, 20, 0, 0, time.UTC)
 	hostname := "manager.bringyour.com"

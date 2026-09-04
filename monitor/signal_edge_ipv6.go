@@ -58,6 +58,7 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	observerRouteBefore := observeIPv6ObserverRoute(ctx, env.runner)
 
 	results := make(chan edgeIPv6Result, len(tasks))
 	semaphore := make(chan struct{}, 8)
@@ -92,9 +93,47 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 		return ordered[i].configured.Interface < ordered[j].configured.Interface
 	})
 
+	allImmediateConnectFailures := edgeIPv6AllImmediateConnectFailures(ordered)
+	observerRoute := observerRouteBefore
+	if allImmediateConnectFailures {
+		observerRoute = mergeIPv6ObserverRouteObservations(
+			observerRouteBefore,
+			observeIPv6ObserverRoute(ctx, env.runner),
+		)
+	}
+	observerCommonMode := observerRoute.state == ipv6ObserverRouteAbsent &&
+		allImmediateConnectFailures
+	observerRouteUnknown := observerRoute.state == ipv6ObserverRouteUnobservable &&
+		allImmediateConnectFailures
 	findings := []finding{}
 	for _, result := range ordered {
-		findings = append(findings, edgeIPv6Findings(result)...)
+		findings = append(findings, edgeIPv6Findings(
+			result,
+			observerCommonMode,
+			observerRouteUnknown,
+		)...)
+	}
+	if observerCommonMode {
+		resolvedTargets := map[string]bool{}
+		for _, result := range ordered {
+			target := result.host.name
+			if resolvedTargets[target] {
+				continue
+			}
+			resolvedTargets[target] = true
+			findings = append(findings, healthyFinding(
+				"lb/edge-ipv6",
+				tierPage,
+				"edge-ipv6-reset",
+				target,
+			))
+		}
+		findings = append(findings, ipv6ObserverRouteFinding(
+			"edge-ipv6",
+			edgeIPv6ObserverRouteSummary(ordered, observerRoute),
+		))
+	} else if observerRoute.state == ipv6ObserverRouteAvailable || edgeIPv6AnyPublicHealthy(ordered) {
+		findings = append(findings, healthyIPv6ObserverRouteFinding("edge-ipv6"))
 	}
 	return findings, nil
 }
@@ -160,7 +199,11 @@ printf '%%s\nself_probe_status=%%s\nroute_device=%%s\nroute_source=%%s\nroute_st
 		edgeIPv6EgressMarker, address, probeHostname)
 }
 
-func edgeIPv6Findings(result edgeIPv6Result) []finding {
+func edgeIPv6Findings(
+	result edgeIPv6Result,
+	observerCommonMode bool,
+	observerRouteUnknown bool,
+) []finding {
 	target := result.host.name
 	frame := result.configured.Interface + "/" + result.configured.Address
 	findings := []finding{}
@@ -188,6 +231,13 @@ func edgeIPv6Findings(result edgeIPv6Result) []finding {
 	}
 	if result.egressErr != nil {
 		findings = append(findings, cannotObserveFinding(target+"/"+result.configured.Interface+"/source-egress", result.egressErr))
+	}
+	if observerCommonMode {
+		return findings
+	}
+	if observerRouteUnknown {
+		findings = append(findings, edgeIPv6RouteUnobservableFinding(result))
+		return findings
 	}
 
 	class, mechanism, action := classifyEdgeIPv6Failure(result)
@@ -229,6 +279,95 @@ func edgeIPv6Findings(result edgeIPv6Result) []finding {
 		playbook:  "SIGNALS.md §18.1",
 	})
 	return findings
+}
+
+func edgeIPv6RouteUnobservableFinding(result edgeIPv6Result) finding {
+	target := result.host.name + "/" + result.configured.Interface + "/public-ipv6"
+	return finding{
+		probeId: "monitor/visibility", tier: tierWarn,
+		class: "cannot-observe", target: target, sustain: 2,
+		symptom:   "The monitor could not distinguish an observer IPv6 route loss from an immediate exact-edge connection failure for " + target,
+		mechanism: "Every configured exact-edge request failed immediately without a remote address, but the bounded monitor-local route lookup was itself unavailable or ambiguous. Assigning reset, DNAT, or certificate causality would be unsafe until that observer control works.",
+		baseline:  "The monitor-local IPv6 route lookup is parseable before and after an all-edge failure, or another exact IPv6 target proves the observer route while this target fails.",
+		observed:  "observer_route=unobservable curl_exit=7 remote_ip=none total_seconds=under_1",
+		evidence:  "The finding retains only the allowlisted route state and curl result shape; raw command errors and configured addresses are omitted.",
+		action:    "Restore the monitor-local route observation and rerun this signal. Do not remove DNAT targets, change edge routes, or restart an LB from this unknown result.",
+		verify:    "Prove the monitor route and an unrelated IPv6 control, then repeat the exact edge request; classify the edge only from that routed observation.",
+		playbook:  "SIGNALS.md §18.1",
+	}
+}
+
+func edgeIPv6AllImmediateConnectFailures(results []edgeIPv6Result) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, result := range results {
+		total, err := strconv.ParseFloat(result.http["monitor_time_total"], 64)
+		if err != nil || total >= 1 ||
+			result.http["monitor_exitcode"] != "7" ||
+			result.http["monitor_remote_ip"] != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func edgeIPv6AnyPublicHealthy(results []edgeIPv6Result) bool {
+	for _, result := range results {
+		if exactHTTPSHealthy(exactHTTPSResult{
+			values: result.http,
+			output: result.httpOutput,
+			err:    result.httpErr,
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeIPv6ObserverRouteSummary(
+	results []edgeIPv6Result,
+	observerRoute ipv6ObserverRouteObservation,
+) string {
+	identityHealthy := 0
+	selfHTTPSHealthy := 0
+	sourceRouteExact := 0
+	sourceEgressExact := 0
+	for _, result := range results {
+		if result.identityErr == nil &&
+			result.identity["configured_present"] == "1" &&
+			result.identity["operstate"] == "up" &&
+			result.identity["unit_active"] == "active" {
+			identityHealthy++
+		}
+		if result.egressErr == nil &&
+			result.egress["self_probe_status"] == "0" &&
+			result.egress["self_exitcode"] == "0" &&
+			result.egress["self_http_code"] == "200" {
+			selfHTTPSHealthy++
+		}
+		if result.egressErr == nil &&
+			result.egress["route_status"] == "0" &&
+			result.egress["route_device"] == result.configured.Interface &&
+			result.egress["route_source"] == result.configured.Address {
+			sourceRouteExact++
+		}
+		if result.egressErr == nil &&
+			result.egress["source_egress_status"] == "0" &&
+			result.egress["source_egress"] == result.configured.Address {
+			sourceEgressExact++
+		}
+	}
+	return fmt.Sprintf(
+		"observer_route=%s configured_targets=%d immediate_connect_failures=%d identity_healthy=%d local_self_https_healthy=%d source_route_exact=%d source_egress_exact=%d",
+		observerRoute.state,
+		len(results),
+		len(results),
+		identityHealthy,
+		selfHTTPSHealthy,
+		sourceRouteExact,
+		sourceEgressExact,
+	)
 }
 
 func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action string) {

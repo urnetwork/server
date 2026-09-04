@@ -1756,6 +1756,7 @@ type tailTransportMonitorRouteEvidenceCollector func(
 const (
 	monitorIPv6LogTimeLayout          = "2006-01-02 15:04:05.000"
 	monitorIPv6RouteCorrelationWindow = 15 * time.Second
+	monitorIPv6RouteStateLookback     = 10 * time.Minute
 )
 
 var (
@@ -1797,7 +1798,7 @@ func collectTailTransportMonitorRouteEvidenceFromRunner(
 		"/usr/bin/log",
 		"show",
 		"--style", "compact",
-		"--start", first.Add(-monitorIPv6RouteCorrelationWindow).Format("2006-01-02 15:04:05"),
+		"--start", first.Add(-monitorIPv6RouteStateLookback).Format("2006-01-02 15:04:05"),
 		"--end", last.Add(monitorIPv6RouteCorrelationWindow).Format("2006-01-02 15:04:05"),
 		"--predicate", `process == "configd" AND (eventMessage CONTAINS "RTADV " OR eventMessage CONTAINS "AUTOMATIC-V6 " OR eventMessage CONTAINS "network changed:")`,
 	)
@@ -1846,8 +1847,19 @@ func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRout
 				evidence.interfaceName = match[1]
 			}
 			if match[1] == evidence.interfaceName {
-				evidence.routerLifetimeExpiredCount++
-				if evidence.routerLifetimeExpiredAt.IsZero() || observedAt.Before(evidence.routerLifetimeExpiredAt) {
+				if !evidence.ipv6RestoredAt.IsZero() && evidence.ipv6RestoredAt.Before(observedAt) {
+					// A later lifetime expiry starts a new loss interval. Keep
+					// only the newest interval in this bounded query so a
+					// restoration from the prior one cannot mask it.
+					evidence.routerLifetimeExpiredAt = observedAt
+					evidence.routerLifetimeExpiredCount = 1
+					evidence.autoconfDetachCount = 0
+					evidence.ipv6AbsentAt = time.Time{}
+					evidence.ipv6RestoredAt = time.Time{}
+				} else {
+					evidence.routerLifetimeExpiredCount++
+				}
+				if evidence.routerLifetimeExpiredAt.IsZero() {
 					evidence.routerLifetimeExpiredAt = observedAt
 				}
 			}
@@ -1890,9 +1902,12 @@ func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggr
 	if !ok {
 		return false
 	}
-	return !e.routerLifetimeExpiredAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
+	if !e.ipv6RestoredAt.IsZero() && !first.Before(e.ipv6RestoredAt) {
+		return false
+	}
+	return !e.routerLifetimeExpiredAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeExpiredAt) &&
-		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
+		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.ipv6AbsentAt)
 }
 
