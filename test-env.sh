@@ -106,12 +106,9 @@ test_env_probe_service() {
         return 0
     fi
 
-    if command -v timeout >/dev/null 2>&1; then
-        if ! timeout 3 "$BASH" -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null; then
-            test_env_error "$service_name is unreachable at $host:$port; start ./local/run-local.sh"
-            return 1
-        fi
-    elif ! (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+    # Bash's /dev/tcp is not portable and can violate guarded-descriptor rules
+    # after a successful connect. Zero-I/O mode checks only a bounded connect.
+    if ! nc -z -w 3 -- "$host" "$port" </dev/null >/dev/null 2>&1; then
         test_env_error "$service_name is unreachable at $host:$port; start ./local/run-local.sh"
         return 1
     fi
@@ -195,6 +192,10 @@ test_env_preflight() {
             return 1
         fi
     done
+    if [[ -z "${WARP_TEST_ENV_TCP_PROBE:-}" ]] && ! command -v nc >/dev/null 2>&1; then
+        test_env_error "missing prerequisite: nc (required for bounded TCP service probes)"
+        return 1
+    fi
 
     test_env_find_resource "$WARP_VAULT_HOME" pg.yml || return $?
     pg_resource_path="$TEST_ENV_RESOURCE_PATH"

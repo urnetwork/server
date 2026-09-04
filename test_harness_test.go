@@ -223,3 +223,128 @@ func TestTestEnvironmentScriptReportsMissingGo(t *testing.T) {
 		t.Fatalf("tool failure did not identify go:\n%s", output)
 	}
 }
+
+// The default service probe must make bounded zero-I/O connections to both
+// configured stores without relying on Bash's non-portable /dev/tcp handling.
+func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	binDir := t.TempDir()
+	vaultDir := t.TempDir()
+	configDir := t.TempDir()
+	for path, content := range map[string]string{
+		filepath.Join(vaultDir, "pg.yml"):     "authority: pg-probe.example:15432\n",
+		filepath.Join(vaultDir, "redis.yml"):  "authority: redis-probe.example:16379\n",
+		filepath.Join(configDir, "db.yml"):    "",
+		filepath.Join(configDir, "redis.yml"): "",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(binDir, "nc"),
+		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"WARP_VAULT_HOME":             vaultDir,
+			"WARP_CONFIG_HOME":            configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":  probeRecordPath,
+			"BRINGYOUR_POSTGRES_HOSTNAME": "pg-probe.example",
+			"BRINGYOUR_REDIS_HOSTNAME":    "redis-probe.example",
+		},
+		"WARP_ENV",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+		"WARP_TEST_ENV_TCP_PROBE",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("default TCP service preflight: %v\n%s", err, output)
+	}
+	probeRecord, err := os.ReadFile(probeRecordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedProbeRecord := "-z -w 3 -- pg-probe.example 15432\n" +
+		"-z -w 3 -- redis-probe.example 16379\n"
+	if string(probeRecord) != expectedProbeRecord {
+		t.Fatalf("default service probes = %q; want %q", probeRecord, expectedProbeRecord)
+	}
+}
+
+// A host without the default TCP probe gets an actionable prerequisite error
+// before the harness can misreport a configured service as unreachable.
+func TestTestEnvironmentScriptReportsMissingDefaultTcpProbe(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	for _, commandName := range []string{"dirname", "find", "go", "grep", "sort"} {
+		commandPath, err := exec.LookPath(commandName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(commandPath, filepath.Join(binDir, commandName)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(bashPath, "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                 binDir,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+		"WARP_TEST_ENV_TCP_PROBE",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("preflight without nc unexpectedly passed:\n%s", output)
+	}
+	if !strings.Contains(string(output), "missing prerequisite: nc") {
+		t.Fatalf("TCP probe failure did not identify nc:\n%s", output)
+	}
+}
+
+// The local service launcher diagnoses its bounded-probe dependency before it
+// asks for privileges or makes any host, kernel, or Docker mutation.
+func TestRunLocalReportsMissingTcpProbe(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	for _, commandName := range []string{"dirname", "head", "sed", "uname"} {
+		commandPath, err := exec.LookPath(commandName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(commandPath, filepath.Join(binDir, commandName)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(bashPath, "./local/run-local.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                 binDir,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("local launcher without nc unexpectedly passed:\n%s", output)
+	}
+	if !strings.Contains(string(output), "nc not found on PATH") {
+		t.Fatalf("local launcher failure did not identify nc:\n%s", output)
+	}
+}

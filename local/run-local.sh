@@ -143,6 +143,7 @@ export POSTGRES_SUPERUSER_PASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-postgres}"
 
 # --- docker / compose plumbing ----------------------------------------------
 
+command -v nc >/dev/null 2>&1 || die "nc not found on PATH (required for bounded service probes)"
 command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
 DOCKER=(docker)
 COMPOSE_ENV_VARS="APP_DB_USER,APP_DB_PASSWORD,APP_DB_NAME,POSTGRES_PORT,REDIS_PORT,LOCAL_BIND_IP,LOCAL_DOCKER_SUBNET,POSTGRES_SUPERUSER_PASSWORD"
@@ -185,11 +186,7 @@ wait_healthy() { # wait_healthy CONTAINER TIMEOUT_SECONDS
 }
 
 port_open() { # port_open HOST PORT
-  if command -v nc >/dev/null 2>&1; then
-    nc -z -w2 "$1" "$2" >/dev/null 2>&1
-  else
-    (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null && { exec 3>&-; return 0; } || return 1
-  fi
+  nc -z -w 2 -- "$1" "$2" </dev/null >/dev/null 2>&1
 }
 
 verify_reachable() { # confirm the dedicated address actually serves the DBs
