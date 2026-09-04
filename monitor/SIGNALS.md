@@ -5171,7 +5171,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[c]h3 handshake no response mode=... sent_packets=N pto=M ...` | The client emitted QUIC packets but received zero packets before handshake failure. This is the Initial-blackhole signal that `PacketLost` misses; PTOs are counted separately. | Pin the resolved public tuple, then split public DNAT/conntrack, LB backend socket, and return path with §16.5/§16.6. Do not interpret `q_lost=0` as health. |
 | `[c]h3 connect err = ... context deadline exceeded` | No valid QUIC response reached the client. This is below auth but otherwise ambiguous: direct UDP/443, DNS-envelope creation, public UDP/53 delivery, LB/PP/DNS decode, and the return tuple can all cause it. | Record the mode and resolved IP. For direct H3, split public ingress from backend-listener loss with §16.5. For `h3dns`/`h3dnspump`, prove raw envelopes were sent and compare the exact port-53 DNAT delta: zero is upstream delivery, no rule is LB activation, and a rise without a 4053 (or migration 8053) accept is LB/PP/decode (§16.6). |
 | `panic: Missing host port for service port <port>` (LB startup) | The image's nginx config contains a logical listener absent from runtime `WARP_PORTS`; usually services.yml/image generation is newer than the systemd unit's baked `--portblocks`/`--forwardports`. The desired LB version may look deployed while the new container is Exited(2) and the old LB keeps serving. | Compare `systemctl cat`, container `WARP_PORTS`, and baked nginx listeners; regenerate and deploy units (§11.8), then require the new LB to stay `Up` before evaluating its behavior. |
-| `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125`) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. | Compare `ctr version` client/server and check whether `/proc/<containerd-pid>/exe` is `(deleted)`. Stop retrying/restarting Warp units; restart/reboot the container runtime one host at a time, then require client/server versions to match and a replacement container to reach `Up`. See §8.5a. |
+| `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125` in its `warp-main-*` unit) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. A replaced executable or Docker version drift is only transition evidence: compatible releases can keep creating containers normally. | The monitor reads bounded daemon-identifier and Warp-supervisor suffixes; its startup-version context is optional after the one-hour buffer ages out. PAGE on an observed containerd split, native TTRPC rejection, or concrete `Start container failed`. Use Xops' privileged maintenance probe for definitive client/server comparison during package transitions and recovery. Recover only with explicit one-host-at-a-time authorization and require a replacement container at `Up`; never reboot merely because a package changed. See §8.5a. |
+| `journal-buffer-config`, `journal-buffer-short`, or `journal-buffer-unavailable` | The effective edge journal policy drifted from the one-hour/100 GiB/1024-file contract, measured history no longer reaches the near-hour boundary, or journald is down. This affects local recovery evidence and may interrupt Fluent Bit input, but it does not prove Loki data loss. | Apply the reviewed journald drop-in without rebooting, measure bounded producer volume if the boundary stays short, and correlate §11.14. Require two boundary observations plus fresh Loki data. See §8.5b. |
+| `log-shipper-down`, `log-shipper-fd-budget`, or `log-shipper-churn` | The host Fluent Bit unit is stopped, its soft/hard fd budget regressed below 65,536, or systemd has restarted it. Warp workload health does not cover this independent host unit. | Repair the first bounded Fluent Bit startup/output error and restart only the shipper. Require active/running state, both fd limits, fresh per-host Mimir metrics, and a fresh labeled Loki record. See §11.14. |
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
@@ -6711,6 +6713,8 @@ Tier-0 (page):
 | node-mem-critical | redis | used/maxmemory | > 92% for 2 min | dataset vs clients split; top families |
 | oom-writes | pg+logs | OOM class in task errors or logs | any sustained 2 min | node attribution from error text |
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
+| journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
+| log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
 
 Tier-1 (warn):
 | id | source | check | threshold |
@@ -6738,6 +6742,8 @@ Tier-1 (warn):
 | open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
+| journal-buffer-config / journal-buffer-short | host | §8.5b effective policy plus a bounded near-hour entry | any policy drift for 2 probes; no 50-to-55-minute record after 70 minutes uptime for 2 probes |
+| log-shipper-fd-budget / log-shipper-churn | host | §11.14 Fluent Bit soft/hard fd limits and automatic restart count | either limit < 65,536 or NRestarts > 0 for 2 probes |
 | stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
@@ -6956,6 +6962,7 @@ Observed 2026-07-19 22:53–22:55: edges 0/1/4 all logged
   except known standing ones.
 
 ### 8.5a Controlled APT left Docker/containerd split across versions
+Probe: `container-runtime`
 
 `policy_rc_d: 101` deliberately suppresses package-triggered service restarts.
 That is unsafe if a controlled APT pass upgrades `containerd.io` but the
@@ -6980,9 +6987,10 @@ is therefore expected and misleading. Read the Docker daemon journal for the
 real error. Pre-fix Warp builds retain only exit 125; the corrected `outAndLog`
 adds a bounded, escaped stderr excerpt to the same journal record.
 
-Recovery is a controlled rolling restart/reboot of the container runtime, one
-host at a time. Restarting Warp units alone cannot repair the daemon/shim
-pairing and increases retry churn. Before advancing to the next host require:
+When the client/server protocols are actually split, recovery is an explicitly
+authorized, one-host-at-a-time restart/reboot of the container runtime.
+Restarting Warp units alone cannot repair that daemon/shim pairing and
+increases retry churn. Before advancing to the next host require:
 
 1. Docker and containerd client/server versions match;
 2. neither daemon executable is `(deleted)`;
@@ -7001,13 +7009,116 @@ edge-5 was already known offline and was not part of the recovery. Strict
 public probes also made five IPv6 requests to `api-v6.bringyour.com/my-ip-info`
 and received the exact bound source address every time.
 
-The edge APT playbook now snapshots all Docker/containerd/runc packages around
-the controlled upgrade, probes daemon liveness, executable paths, and
-client/server versions, and performs a throttled reboot when either package
-state changes or the probe detects an inconsistent runtime. It then refuses to
-continue unless the strict probe passes and Warp launches a main-environment
-container. A `/var/run/reboot-required` check alone is not sufficient: this
-userspace package transition does not have to create that file.
+The 2026-09-04 control disproved package replacement as a sufficient reboot
+predicate. A controlled APT pass upgraded `docker-ce` 29.7.2 to 29.8.0 and
+`containerd.io` packaging revision 2.3.4-1 to 2.3.4-2 on Fireside and Crisp.
+Both unrebooted daemon executables then appeared as `(deleted)`, but Docker
+client/server remained 29.8.0/29.8.0, containerd remained 2.3.4/2.3.4, and all
+ten Proxy blocks on each host were created successfully after the upgrade.
+There was no TTRPC/bootstrap error. The automatic playbook reboots of edge-0,
+edge-1, and edge-4 were therefore caused by the package-diff predicate rather
+than a demonstrated runtime failure.
+
+The `container-runtime` monitor probe deliberately uses no Docker socket,
+`sudo`, or `/proc/<root-pid>/exe`. It reads daemon activity and running Warp
+units from systemd, installed client versions from `docker --version` and
+`containerd --version`, live daemon versions from current-boot startup
+journals, native TTRPC failures from the runtime journals, and `Deploy success`
+or `Start container failed` from the actual `warp-main-*` journals. Installed
+client versions, service state, recent outcome windows, and their completeness
+markers are required; a missing, duplicate, malformed, or inaccessible
+required field is `cannot-observe`, not runtime incompatibility or health.
+
+The 2026-09-04 edge-3 control exposed both real journal-retention loss and an
+unbounded-query defect, not a daemon failure. The host booted on September 2,
+but its 4.0 GiB journal cap had already vacuumed every entry before September 4
+09:11; 93 files occupied about 5.0 GB nominal and journald `MemoryCurrent` was
+about 4.45 GB. The last-50,000-entry rate was about 406/s, dominated by two LB
+blocks and `/connect/control`; other server edges were also refilling the cap
+at about 169--552/s, versus 26--30/s on Fireside/Crisp. An unindexed unit plus
+message grep therefore exceeded the signal's 60-second command bound, while
+the same runtime journals capped at 2,000 entries returned in about one second
+and `_COMM=warpctl` capped at 10,000 returned in two to three seconds.
+
+Every probe journal read is hard-capped at one sentinel entry beyond those
+limits. Reaching a cap emits `cannot-observe`; any TTRPC or Warp start failure
+already present in the returned suffix still emits its concrete PAGE. When
+vacuuming removed a current daemon invocation's startup record, its live
+version is explicitly unavailable and cannot be called either a match or a
+split. Because that startup record is expected to age out of the intentional
+one-hour buffer, its absence alone is not a permanent visibility alert; exact
+recent bootstrap/start outcomes remain required, and Xops' privileged
+maintenance probe owns the definitive client/server comparison during package
+transitions and recovery. The host journal is intentionally only a one-hour recovery/debug
+buffer: Fluent Bit owns durable Warp-log delivery to Loki. Xops sets
+`MaxRetentionSec=1hour`, a 100 GiB safety cap for at least four times the
+expected one-hour burst envelope, 256 MiB files, and 1,024 files so journald's
+default 100-file ceiling cannot silently undercut the byte cap. The old
+seven-day setting stated an unnecessary target at current throughput and
+caused the size cap to decide an implicit, host-dependent window instead. This
+retention change does not alter LB logging or the durable Loki history.
+
+Any observed containerd client/live-daemon split, native TTRPC rejection,
+concrete Warp replacement-start failure, or runtime service loss is PAGE. Docker
+client/live-daemon drift alone is a pending-refresh WARN: API compatibility
+can span Docker releases, so it is not a failure proof and grants no reboot
+authority. A running unit or a
+bounded `Deploy success` count may predate the package transition, so closure
+still requires one successful replacement start timestamped after that exact
+transition. Absence of an attempt leaves that create capability unknown; it
+does not turn surviving containers into proof.
+
+The edge APT playbook snapshots all Docker/containerd/runc packages around the
+controlled upgrade and reports changed package state, but never reboots a
+host. Its privileged maintenance probe may retain `(deleted)` as a diagnostic,
+but fails closed on containerd splits, native TTRPC errors, or Warp start
+failures from the correct unit journal. It calls Docker version drift pending
+rather than fatal unless a concrete failure accompanies it. Scheduled
+host restart timers remain the separate, previously authorized reboot owner.
+The `/var/run/reboot-required` check is advisory and requires separate operator
+authorization before `restart-edges.sh` or restart-policy changes; it commonly
+names a pending kernel while a userspace runtime transition may create no
+marker at all.
+
+### 8.5b Local journal buffer shorter than the Loki handoff window
+
+Probe: `journal-buffer`
+
+The edge journal is a short recovery buffer, not the durable log store. Fluent
+Bit continuously moves Warp logs to Loki, and local retention is intentionally
+one hour regardless of host uptime. The effective contract is:
+
+```ini
+[Journal]
+SystemMaxUse=100G
+SystemMaxFileSize=256M
+SystemMaxFiles=1024
+MaxRetentionSec=1hour
+```
+
+The byte cap is a safety ceiling with at least four times the expected
+one-hour burst envelope. `SystemMaxFiles` is part of the capacity contract:
+leaving journald's default 100-file limit in effect can discard data before a
+100 GiB `SystemMaxUse` is reachable. The age limit normally wins, so the cap
+does not reserve or consume 100 GiB during ordinary operation.
+
+`journal-buffer-config` WARNs when the effective merged configuration differs
+from any of those four values. `journal-buffer-short` WARNs only after 70
+minutes of host uptime when a bounded one-entry query finds no record between
+50 and 55 minutes ago. That tolerance admits whole-file rotation while still
+proving a useful near-hour window. `journal-buffer-unavailable` PAGEs when
+`systemd-journald` itself is inactive. Missing or malformed command output is
+`cannot-observe`; an empty target-boundary query is never interpreted as a
+healthy quiet host.
+
+Every query is bounded by both a narrow time interval and `-n 1`; this signal
+must remain cheap even if the size cap fills. A short local window is not proof
+of Loki loss. Correlate it with §11.14 `log-shipper` before assigning durable
+data loss. Fix configuration drift with `xops/main/ansible/run-edges.sh`
+without rebooting. If the exact policy is present but the boundary is absent,
+measure a bounded producer suffix and repair pathological amplification or
+resize only from measured throughput. Closure requires two consecutive
+boundary observations and fresh per-host data through Loki.
 
 ### 8.6 Config-generation restart wave — binary version alone is incomplete
 
@@ -7613,6 +7724,122 @@ retired hostname is a local executable-provenance failure, not evidence of a
 bad API block or load-balancer destination. `TestServicesConfigLookups`
 retains the source-level domain-selection contract; the launcher tests retain
 the operational path-selection contract.
+
+A later 2026-09-03 sample proves a distinct, real LB-side failure shape. At
+`23:17:52Z`, the canonical tracked executable reached one selected IPv6 LB
+destination: API g2 returned 13 HTTP 429s among 20 requests and g3 returned 11
+among 20, while beta, g1, and g4 passed 20/20 and every successful response
+carried the same older API version. `error http status 429 -> <address>:443`
+comes from Warpctl only after an HTTP response and a captured peer address, so
+it is not DNS failure and did not originate in API's `router.WarpStatus`, which
+has no 429 path. The LB generated `limit_req` at HTTP scope with status 429,
+450 requests/minute, burst 150, and a key derived from the source
+`$binary_remote_addr`; hidden LB-own, service-status, and block-status paths
+inherited the same bucket as public application traffic. `--sample`
+deliberately opens 20 fresh connections per block to observe a mixed rollout,
+so repeated fleet samples can fill whichever LB allocation DNS selects. Two
+partially failing block labels on one destination describe that shared bucket;
+they do not identify two unhealthy API blocks. The 50-connection limit cannot
+explain the sequential sampler.
+
+Do not use the LB destination address as an exclusion argument. The canonical
+`server/ip_ratelimit.go` limiter is a separate Redis-backed route boundary and
+is not called by `/status`; nginx `geo` evaluates the observer source, not the
+destination. Adding the selected LB address to `exclude_subnets`, changing API,
+or suppressing Warpctl's 429 would leave the fault in place. Until every LB has
+the corrected generated config, stop repeated status sampling, allow the
+source bucket to drain, and use one bounded sample plus direct host-local
+status evidence when needed. A 429 remains a fail-closed Warpctl sample error.
+Pre-fix, the synthetic no-version response also produced a second `error status
+bad version` for that same request; current sampling counts the primary HTTP
+failure once. A parsed application readiness error still retains its real
+version alongside the error.
+
+The corrected generator maps both the exact LB hostname and the exact
+generated status URI to an empty `$limit_key`, which disables nginx request
+and connection accounting only for that control-plane intersection. Service
+host `/status`, trailing-slash near misses, and sibling application paths keep
+the ordinary public limit. This requires a Warp-built LB config rollout on
+every enabled interface; no API deployment is involved. Verify the live
+`nginx -T` contains the exact host/URI maps, all old LB generations have
+drained, one canonical five-block sample returns 20/20 with zero 429s, and an
+ordinary non-status route still uses `$binary_remote_addr`. The deterministic
+boundaries are `TestNginxConfigExemptsRootLbStatusRoutesWithoutHiddenPrefix`,
+`TestNginxConfigExemptsOnlyExactLbStatusRoutesFromRateLimits`, and
+`TestVersionSamplingPreservesHttpRateLimitFailure`, with the adjacent
+parsed-error contract pinned by
+`TestVersionSamplingRetainsVersionFromErrorStatusPayload`, in Warp.
+
+The 2026-09-03 Docker Hub inventory incident is a separate release-visibility
+boundary. `warpctl ls versions main` reads DynamoDB deployment records and is
+the rollout-intent view; a bounded current run returned its complete map in
+4.17 seconds. `service-blocks` and `--repo` instead read Docker Hub repository
+and tag pages. An 18:48 UTC `service-blocks` result omitted six known services,
+but the response status was not retained. The disappearance is compatible
+with either a non-2xx JSON page decoded as an empty result or a transient tag
+and digest inconsistency; it does not prove which one occurred. A later
+45-second wrapper alarm was also shorter than the previously observed
+52-to-60-second Docker Hub command runtime and is timeout evidence, not an
+absence result.
+
+The corrected Docker Hub client fails closed before decoding a non-2xx login
+response or any first or later repository/tag page. Any page error returns no
+`ServiceMeta`, so results accumulated before a later-page failure cannot
+escape as a partial deployment map. An observed `*-latest` block whose digest
+resolves to zero or more than one semantic version tag is likewise an error;
+the error omits the digest. An active repository with no tags and no observed
+latest block remains valid because it may legitimately be new or empty.
+
+Treat every failed or incomplete Docker Hub map as a visibility failure, not
+deployment convergence. The caller must abort that polling iteration and back
+off before one new bounded full inventory; it must retain the last complete
+view and never reinterpret an omitted service as undeployed. Do not promote,
+remove, or relabel a service from a partial registry view. Use the default
+DynamoDB command for rollout intent, then verify convergence independently
+against exact running artifacts. Closure requires every Docker Hub page to
+succeed, every observed latest block to resolve uniquely, and a complete map;
+there is no client-side retry or deployment-architecture change. Warp tests
+`TestDockerHubLoginRejectsNonSuccessStatus`,
+`TestDockerHubServiceMetaRejectsRepositoryPageStatus`,
+`TestDockerHubServiceMetaRejectsTagPageStatus`, and
+`TestDockerHubServiceMetaRejectsIncompleteLatestDigest` pin these boundaries.
+
+The 2026-09-04 UTC `1036806790` rollout proves a fourth release-observation
+boundary: an available repository artifact and a later "deployed" message do
+not prove that Warpctl selected or mutated a block. Config-updater stayed on
+`2026.9.1`, every LB stayed on `2026.8.31`, and Proxy remained at zero of ten
+target blocks while Grafana g1, Taskworker g1, and later API waves selected the
+target. This alternating shape followed status-observation capability, not
+percentage math: Warpctl sorts blocks and selects
+`ceil(block_count * percent / 100)`, so a positive percentage of a nonempty
+service cannot legitimately select zero blocks.
+
+Warp commit `2e13328` made `deploy --only-older` fail closed when it cannot
+observe every selected live block. That is the correct Warpctl behavior, but
+the old `build/all/run.sh` passed `--only-older` to `config-updater`, `lb`, and
+transparent `proxy`: config-updater is not exposed through the LB, per-block
+LB status sampling is unsupported, and §8.1a explains why Proxy has no LB
+status route. Each command therefore returned
+`--only-older cannot verify running versions` before image retagging or the
+DynamoDB desired-version update. The release script had no immediate error
+check; its next successful `builder_message` overwrote `$?`, announced a false
+success, and allowed the next service to deploy.
+
+Classify this exact split as a release-runner failure, not slow convergence or
+a missing artifact. Preserve the first rejected command and exit status; do
+not trust the success message after it or advance another wave. The corrected
+`build/all/deploy-rollout.zsh` uses one checked deploy wrapper, omits
+`--only-older` only for config-updater, LB, and Proxy, retains it for the
+observable services, and propagates every deploy and rollout-sample failure
+before a success message or subsequent command. Recovery does not require
+rebuilding an already-proven target artifact: rerun those three services
+without `--only-older`, retain staged percentages, and independently require
+DynamoDB intent plus exact running-version convergence before acceptance.
+The deterministic Build contracts are
+`TestRolloutUsesOnlyOlderOnlyForSampleableServicesAcrossEveryWave`,
+`TestRolloutDeployFailureStopsImmediately`,
+`TestRolloutStatusSampleFailureStopsBeforeNextWave`, and
+`TestRunUsesCanonicalRolloutContract`.
 
 The 2026-09-01 production discriminator joined all three boundaries. Running
 Taskworker image digest
@@ -8384,6 +8611,8 @@ systemctl restart warp-main-grafana-<block>
   unhealthy while peers cycle. Do not shorten it without checking that.
 
 ### 11.14 fluent-bit is a HOST unit, and a failed one is permanent (2026-08-15)
+Probe: `log-shipper`
+
 alloy is gone; **host-managed fluent-bit ships every log line and every metric**,
 on every warp host — including edge-6 (redis + minio) and edge-2 (postgres),
 which run no grafana bundle at all and so appear in NO §11.1 reading. §11 had no
@@ -8429,7 +8658,18 @@ grep -cE '^ *name +prometheus_scrape' /etc/fluent-bit/fluent-bit.conf
   `xops/main/ansible/tests/test_fluent_bit_shipper.py` asserts the limit leads
   `redis_count`, so the next time that number grows the test fails first.
 
-### 11.15 Grafana 13 datasource rows without native plugins (2026-08-29, 2026-09-01, 2026-09-02)
+The `log-shipper` probe reads the host unit directly on services, PostgreSQL,
+Redis/MinIO, backup, and Subtensor hosts. `log-shipper-down` PAGEs when the
+unit is not active/running; `log-shipper-fd-budget` WARNs when either the soft
+or hard limit is below 65,536; and `log-shipper-churn` WARNs when systemd has
+automatically restarted the current activation. A VPN-only host is outside
+this signal. These are process and startup-capacity signals, not an
+end-to-end delivery claim: closure additionally requires fresh per-host host
+metrics through Mimir and a fresh labeled Warp record through Loki. Never
+clear a restart counter or reboot merely to hide evidence; repair the first
+bounded Fluent Bit error and restart only the shipper.
+
+### 11.15 Grafana 13 datasource rows without native plugins (2026-08-29, 2026-09-01, 2026-09-02, 2026-09-03)
 
 Probe: `grafana-datasources`
 
@@ -8468,6 +8708,25 @@ and referer. The `grafana-datasources` probe owns the packaging diagnosis; when
 both controls are healthy, inspect stale browser/dashboard payload state or a
 different unsupported request type instead of rebuilding the image or
 recreating a datasource.
+
+A bounded 2026-09-03 follow-up reconciled 68 genuine
+`POST /api/ds/query` HTTP 404 `plugin.notRegistered` records between
+22:42:30Z and 00:14:30Z. All had the same authenticated-admin organization
+context, the same full `urnetwork-connect` referer with a 30-second refresh,
+and came through only edge-0/g1 or edge-1/g1. The saved dashboard fetched
+separately through enabled edge-0, edge-1, and edge-3 was structurally
+identical to the tracked dashboard after stripping Grafana's top-level
+revision fields and contained exactly 15 `prometheus/warp-mimir` references.
+Both native plugin processes and both authenticated datasource controls stayed
+healthy. This makes a stale or unsaved browser query the high-confidence
+caller boundary; it does not reveal the exact rejected type. Grafana's request
+log and registered-plugin counter omit that type because the lookup fails
+before the counter, while the retained context intentionally omits POST
+bodies. Do not add central body logging. Discard or reload the originating
+browser state; if the request persists, use that browser's developer tools to
+capture only `queries[].datasource.type` and `queries[].datasource.uid`, then
+require ten minutes with zero strict 404s while both datasource controls remain
+healthy.
 
 The decisive check is an authenticated query through Grafana itself, not a
 direct storage read:
@@ -12138,20 +12397,22 @@ On 2026-09-03, the public testfinney endpoint retained chain `Bittensor`,
 genesis `0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105`,
 runtime name `node-subtensor`, transaction version 1, and EVM chain ID `0x3b1`,
 but advanced from configured spec 452 to 453 exactly between blocks 7,925,774
-and 7,925,775. Repeated direct calls at and around that boundary supplied the
-on-chain discriminator. RaoFoundation's official v453 release was published
-at 16:12:43Z with commit `823bdcbc58a29f60b243be4737a7c72b34ac7d93`
+(`0x3eda62a2f24251fb01fb57056f248cf4bda43e740d5efab9a69f9066c5e81d04`,
+runtime 452/transaction 1) and 7,925,775
+(`0x23e9b160e0e56ae2449a259a89c9b735925568cad3cffd417816173d8b3e4f2e`,
+runtime 453/transaction 1). Repeated direct calls at and around that boundary
+supplied the on-chain discriminator. RaoFoundation's official v453 release
+target is commit `823bdcbc58a29f60b243be4737a7c72b34ac7d93`
 and Wasm SHA-256
 `9e51859faf28a69365005e7dd7f152f239a305c468869b2f54303aba938d840e`.
-Xops commit `67c1c03` already pinned its Subtensor host variables to 453, while
-Vault `main/monitor.yml` still supplied 452 to the watcher. Preserve the
-already-current Xops owner: the remaining deployment boundary is an authorized
-Vault inventory update followed by watcher rebuild and promotion; this server
-change does not alter either. The archive and lightnode were still about 1.39
-million historical blocks behind and correctly retained historical runtimes.
-After the Vault update and watcher promotion, require the runtime-ahead page to
-clear while both lag/progress alerts remain truthful; at eventual convergence,
-direct and gateway RPC must both report spec 453.
+Xops already pins its Subtensor host variables to 453, and Vault
+`main/monitor.yml` now supplies 453 to the watcher. Preserve both current
+owners; a watcher built before the Vault correction still requires rebuild and
+promotion. The archive and lightnode were still about 1.39 million historical
+blocks behind and correctly retained historical runtimes. After watcher
+promotion, require the runtime-ahead page to clear while both lag/progress
+alerts remain truthful; at eventual convergence, direct and gateway RPC must
+both report spec 453.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
