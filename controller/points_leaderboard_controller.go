@@ -262,11 +262,12 @@ func pointsLeaderboardMe(
 	networkId := clientSession.ByJwt.NetworkId
 	settings := model.GetNetworkPointsLeaderboardSettings(ctx, networkId)
 	// the network always sees its own name, ranked or not; Anonymous says
-	// how everyone else sees it
+	// how everyone else sees it. The token can predate a rename, so the
+	// settings read supplies the current database name.
 	me := &PointsLeaderboardMe{
 		PointsLeaderboardRow: PointsLeaderboardRow{
 			NetworkId:   networkId,
-			NetworkName: clientSession.ByJwt.NetworkName,
+			NetworkName: settings.NetworkName,
 			EmojiTag:    settings.EmojiTag,
 			Anonymous:   !settings.PointsLeaderboardPublic,
 		},

@@ -116,10 +116,13 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		for i := 0; i < 5; i += 1 {
 			networkId := server.NewId()
 			userId := server.NewId()
-			name := string(rune('a' + i))
-			model.Testing_CreateNetwork(ctx, networkId, "points_api_"+name, userId)
+			tokenName := string(rune('a' + i))
+			networkName := "points_api_" + tokenName
+			model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 			ids = append(ids, networkId)
-			sessions = append(sessions, session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, name, false, false)))
+			// The token name is intentionally stale: own-row identity comes from
+			// the current network row, as it must after a rename.
+			sessions = append(sessions, session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, tokenName, false, false)))
 			// network i earns 10*(5-i) points in every epoch up to i+1
 			for epoch := uint64(1); epoch <= uint64(i+1); epoch += 1 {
 				model.Testing_InsertAccountPoint(ctx, networkId, model.PointsToNanoPoints(float64(10*(5-i))), inWindow(epoch))

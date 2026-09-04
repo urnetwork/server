@@ -216,6 +216,7 @@ func TestPointsLeaderboardDb(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network SET leaderboard_public = true WHERE network_id = $1`, c))
 		})
 		settings := GetNetworkPointsLeaderboardSettings(ctx, a)
+		connect.AssertEqual(t, settings.NetworkName, "points_a")
 		connect.AssertEqual(t, settings.PointsLeaderboardPublic, true)
 		connect.AssertEqual(t, settings.EmojiTag, "🐬🔥")
 

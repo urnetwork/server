@@ -647,6 +647,7 @@ func GetPointsLeaderboardNetworkRow(
 
 // NetworkPointsLeaderboardSettings are the network's own display settings.
 type NetworkPointsLeaderboardSettings struct {
+	NetworkName             string
 	PointsLeaderboardPublic bool
 	EmojiTag                string
 }
@@ -656,7 +657,7 @@ func GetNetworkPointsLeaderboardSettings(ctx context.Context, networkId server.I
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT points_leaderboard_public, COALESCE(emoji_tag, '')
+				SELECT network_name, points_leaderboard_public, COALESCE(emoji_tag, '')
 				FROM network
 				WHERE network_id = $1
 			`,
@@ -665,6 +666,7 @@ func GetNetworkPointsLeaderboardSettings(ctx context.Context, networkId server.I
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(
+					&settings.NetworkName,
 					&settings.PointsLeaderboardPublic,
 					&settings.EmojiTag,
 				))
