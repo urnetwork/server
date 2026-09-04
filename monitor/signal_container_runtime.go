@@ -110,16 +110,24 @@ runtime_protocol_errors=$(printf '%s\n' "$runtime_recent" | awk '
 warp_units=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain 'warp-main-*.service' 2>/dev/null) || exit 23
 running_warp_units=$(printf '%s\n' "$warp_units" | awk '$1 ~ /[.]service$/ { count++ } END { print count+0 }')
 warp_journal=$(read_bounded_journal 2001 -b --since '10 minutes ago' _COMM=warpctl \
-	--grep='Start container failed:|Deploy success version=') || exit 24
+	--grep='Start container failed:|Deploy fail version=|Deploy success version=|[(]exited 125[)]') || exit 24
 warp_journal_rows=$(printf '%s\n' "$warp_journal" | awk 'NF { count++ } END { print count+0 }')
 warp_window_complete=1
 [ "$warp_journal_rows" -lt 2001 ] || warp_window_complete=0
 warp_deploy_successes=$(printf '%s\n' "$warp_journal" | awk '/Deploy success version=/ { count++ } END { print count+0 }')
 warp_start_failures=$(printf '%s\n' "$warp_journal" | awk '/Start container failed:/ { count++ } END { print count+0 }')
 warp_exit125_failures=$(printf '%s\n' "$warp_journal" | awk '/Start container failed:.*exit status 125/ { count++ } END { print count+0 }')
+warp_staging_exit125_failures=$(printf '%s\n' "$warp_journal" | awk '
+  /Deploy fail version=.*configVersion=[^",[:space:]]*[.]tmp: exit status 125/ { count++ }
+  END { print count+0 }
+')
+warp_bind_source_missing_failures=$(printf '%s\n' "$warp_journal" | awk '
+  /[(]exited 125[)]/ && /invalid mount config for type/ && /bind source path does not exist/ { count++ }
+  END { print count+0 }
+')
 
 printf '%s\n' \
-  'observation_schema=1' \
+  'observation_schema=2' \
   "docker_active=${docker_active}" \
   "containerd_active=${containerd_active}" \
   "docker_client=${docker_client:--}" \
@@ -134,6 +142,8 @@ printf '%s\n' \
   "warp_deploy_successes=${warp_deploy_successes}" \
   "warp_start_failures=${warp_start_failures}" \
   "warp_exit125_failures=${warp_exit125_failures}" \
+  "warp_staging_exit125_failures=${warp_staging_exit125_failures}" \
+  "warp_bind_source_missing_failures=${warp_bind_source_missing_failures}" \
   "runtime_protocol_errors=${runtime_protocol_errors}" \
   'journal_window_seconds=600'
 `
@@ -145,22 +155,24 @@ type containerRuntimeResult struct {
 }
 
 type containerRuntimeSample struct {
-	dockerActive              string
-	containerdActive          string
-	dockerClient              string
-	dockerServer              string
-	containerdClient          string
-	containerdServer          string
-	dockerHistoryComplete     bool
-	containerdHistoryComplete bool
-	runtimeWindowComplete     bool
-	warpWindowComplete        bool
-	runningWarpUnits          int
-	warpDeploySuccesses       int
-	warpStartFailures         int
-	warpExit125Failures       int
-	runtimeProtocolErrors     int
-	journalWindowSeconds      int
+	dockerActive                  string
+	containerdActive              string
+	dockerClient                  string
+	dockerServer                  string
+	containerdClient              string
+	containerdServer              string
+	dockerHistoryComplete         bool
+	containerdHistoryComplete     bool
+	runtimeWindowComplete         bool
+	warpWindowComplete            bool
+	runningWarpUnits              int
+	warpDeploySuccesses           int
+	warpStartFailures             int
+	warpExit125Failures           int
+	warpStagingExit125Failures    int
+	warpBindSourceMissingFailures int
+	runtimeProtocolErrors         int
+	journalWindowSeconds          int
 }
 
 func (containerRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -210,23 +222,25 @@ var containerRuntimeVersionPattern = regexp.MustCompile(`^v?[0-9]+[.][0-9]+[.][0
 
 func parseContainerRuntimeSample(raw string) (containerRuntimeSample, error) {
 	required := map[string]bool{
-		"observation_schema":          false,
-		"docker_active":               false,
-		"containerd_active":           false,
-		"docker_client":               false,
-		"docker_server":               false,
-		"containerd_client":           false,
-		"containerd_server":           false,
-		"docker_history_complete":     false,
-		"containerd_history_complete": false,
-		"runtime_window_complete":     false,
-		"warp_window_complete":        false,
-		"running_warp_units":          false,
-		"warp_deploy_successes":       false,
-		"warp_start_failures":         false,
-		"warp_exit125_failures":       false,
-		"runtime_protocol_errors":     false,
-		"journal_window_seconds":      false,
+		"observation_schema":                false,
+		"docker_active":                     false,
+		"containerd_active":                 false,
+		"docker_client":                     false,
+		"docker_server":                     false,
+		"containerd_client":                 false,
+		"containerd_server":                 false,
+		"docker_history_complete":           false,
+		"containerd_history_complete":       false,
+		"runtime_window_complete":           false,
+		"warp_window_complete":              false,
+		"running_warp_units":                false,
+		"warp_deploy_successes":             false,
+		"warp_start_failures":               false,
+		"warp_exit125_failures":             false,
+		"warp_staging_exit125_failures":     false,
+		"warp_bind_source_missing_failures": false,
+		"runtime_protocol_errors":           false,
+		"journal_window_seconds":            false,
 	}
 	values := map[string]string{}
 	for _, line := range strings.Split(raw, "\n") {
@@ -255,7 +269,7 @@ func parseContainerRuntimeSample(raw string) (containerRuntimeSample, error) {
 			return containerRuntimeSample{}, fmt.Errorf("container runtime: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "1" {
+	if values["observation_schema"] != "2" {
 		return containerRuntimeSample{}, fmt.Errorf("container runtime: unsupported observation schema")
 	}
 	for _, key := range []string{"docker_active", "containerd_active"} {
@@ -294,12 +308,14 @@ func parseContainerRuntimeSample(raw string) (containerRuntimeSample, error) {
 		}
 	}
 	integers := map[string]*int{
-		"running_warp_units":      &sample.runningWarpUnits,
-		"warp_deploy_successes":   &sample.warpDeploySuccesses,
-		"warp_start_failures":     &sample.warpStartFailures,
-		"warp_exit125_failures":   &sample.warpExit125Failures,
-		"runtime_protocol_errors": &sample.runtimeProtocolErrors,
-		"journal_window_seconds":  &sample.journalWindowSeconds,
+		"running_warp_units":                &sample.runningWarpUnits,
+		"warp_deploy_successes":             &sample.warpDeploySuccesses,
+		"warp_start_failures":               &sample.warpStartFailures,
+		"warp_exit125_failures":             &sample.warpExit125Failures,
+		"warp_staging_exit125_failures":     &sample.warpStagingExit125Failures,
+		"warp_bind_source_missing_failures": &sample.warpBindSourceMissingFailures,
+		"runtime_protocol_errors":           &sample.runtimeProtocolErrors,
+		"journal_window_seconds":            &sample.journalWindowSeconds,
 	}
 	for key, destination := range integers {
 		value, err := strconv.Atoi(values[key])
@@ -332,12 +348,13 @@ func containerRuntimeVersion(value string) string {
 
 func (sample containerRuntimeSample) observed() string {
 	return fmt.Sprintf(
-		"docker_active=%s docker_client=%s docker_server=%s docker_history_complete=%t containerd_active=%s containerd_client=%s containerd_server=%s containerd_history_complete=%t running_warp_units=%d window=%ds runtime_window_complete=%t warp_window_complete=%t deploy_successes=%d start_failures=%d exit125_failures=%d protocol_errors=%d",
+		"docker_active=%s docker_client=%s docker_server=%s docker_history_complete=%t containerd_active=%s containerd_client=%s containerd_server=%s containerd_history_complete=%t running_warp_units=%d window=%ds runtime_window_complete=%t warp_window_complete=%t deploy_successes=%d start_failures=%d exit125_failures=%d staging_exit125_failures=%d bind_source_missing_failures=%d protocol_errors=%d",
 		sample.dockerActive, sample.dockerClient, sample.dockerServer,
 		sample.dockerHistoryComplete, sample.containerdActive, sample.containerdClient,
 		sample.containerdServer, sample.containerdHistoryComplete, sample.runningWarpUnits,
 		sample.journalWindowSeconds, sample.runtimeWindowComplete, sample.warpWindowComplete, sample.warpDeploySuccesses,
-		sample.warpStartFailures, sample.warpExit125Failures, sample.runtimeProtocolErrors,
+		sample.warpStartFailures, sample.warpExit125Failures, sample.warpStagingExit125Failures,
+		sample.warpBindSourceMissingFailures, sample.runtimeProtocolErrors,
 	)
 }
 
@@ -386,6 +403,16 @@ func evaluateContainerRuntime(target string, sample containerRuntimeSample) []fi
 	if sample.warpStartFailures > 0 {
 		issues = append(issues, fmt.Sprintf("recent replacement start failures=%d", sample.warpStartFailures))
 	}
+	if sample.warpStagingExit125Failures > 0 {
+		issues = append(issues, fmt.Sprintf(
+			"recent .tmp config exit-125 selections=%d", sample.warpStagingExit125Failures,
+		))
+	}
+	if sample.warpBindSourceMissingFailures > 0 {
+		issues = append(issues, fmt.Sprintf(
+			"recent bind-source-missing exit-125 failures=%d", sample.warpBindSourceMissingFailures,
+		))
+	}
 	if !sample.runtimeWindowComplete {
 		visibility = append(visibility, cannotObserveFinding(
 			target+"/container-runtime-journal-window",
@@ -402,21 +429,36 @@ func evaluateContainerRuntime(target string, sample containerRuntimeSample) []fi
 	observed := sample.observed()
 	findings := []finding{}
 	if len(issues) > 0 {
+		class := "container-runtime-incompatible"
+		mechanism := "Containerd's installed client and live daemon protocols differ, a runtime service is unavailable, or Warp recorded a concrete replacement-container failure. The historical 2.3 shim against a 2.2 daemon rejected every new container even while existing containers and Warp units appeared active."
+		context := "Docker client/server drift alone is diagnostic because API compatibility can span Docker releases. A concrete Warp start failure, native TTRPC rejection, service loss, or any containerd split remains page-worthy."
+		action := "Stop new deployments to this host and prove the exact runtime split or failed start. Do not reboot automatically. With explicit operator authorization, recover one host at a time by restarting or rebooting its runtime, then wait for its replacement containers before touching another host."
+		verify := "Use the privileged maintenance probe to require matching containerd client/server versions, then require active runtime services, running Warp units, one successful replacement start after the affected transition, and zero new start or bootstrap-protocol failures."
+		stagingBindReconciled := sample.warpExit125Failures > 0 &&
+			sample.warpStagingExit125Failures == sample.warpExit125Failures &&
+			sample.warpBindSourceMissingFailures == sample.warpExit125Failures
+		if stagingBindReconciled {
+			class = "container-runtime-staging-bind-source"
+			mechanism = "The bounded host-window aggregates reconcile exactly: every Warp start exit 125 has one .tmp config deploy failure and one exact invalid-bind-source exit 125. This is the production signature of Warpctl selecting an otherwise valid config version whose directory name ended .tmp while config-updater was still staging it."
+			context = "Config-updater copies into <version>.tmp and atomically renames it. Before Warpctl f1503d6, semver ranking admitted that staging suffix as build metadata and could select it above the completed directory. Exact nonzero three-way count equality is required because these are co-occurring window aggregates, not joined events. A mixed window retains container-runtime-incompatible. The bounded observation does not expose the bind path or command."
+			action = "Stop further config publication to the affected host until every config-consuming Warpctl artifact contains f1503d6, which excludes the exact <valid-semver>.tmp staging namespace before ranking. Do not recreate the vanished path, restart Docker, or reboot the host for this selection defect. Resolve any separately listed runtime issue independently."
+			verify = "Exercise a later config publication after every config-consuming unit contains Warpctl f1503d6. Require the completed config directory to be selected, a terminal deploy success on every enabled host, and zero .tmp exit-125 selections or bind-source-missing failures for 10 minutes after publication. Absence without a later publication is not exercised proof."
+		}
 		evidence := "incompatible: " + strings.Join(issues, ", ")
 		if len(diagnostics) > 0 {
 			evidence += "; diagnostic: " + strings.Join(diagnostics, ", ")
 		}
 		findings = append(findings, finding{
 			probeId: "host/container-runtime", tier: tierPage,
-			class: "container-runtime-incompatible", target: target, sustain: 1,
+			class: class, target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s cannot safely launch or supervise replacement containers", target),
-			mechanism: "Containerd's installed client and live daemon protocols differ, a runtime service is unavailable, or Warp recorded a concrete replacement-container failure. The historical 2.3 shim against a 2.2 daemon rejected every new container even while existing containers and Warp units appeared active.",
+			mechanism: mechanism,
 			baseline:  "Docker and containerd services are active, any still-retained containerd client/server versions match, at least one main Warp unit is running, and the bounded runtime and Warp journals contain no bootstrap or replacement-start failure.",
 			observed:  observed,
 			evidence:  evidence,
-			context:   "Docker client/server drift alone is diagnostic because API compatibility can span Docker releases. A concrete Warp start failure, native TTRPC rejection, service loss, or any containerd split remains page-worthy.",
-			action:    "Stop new deployments to this host and prove the exact runtime split or failed start. Do not reboot automatically. With explicit operator authorization, recover one host at a time by restarting or rebooting its runtime, then wait for its replacement containers before touching another host.",
-			verify:    "Use the privileged maintenance probe to require matching containerd client/server versions, then require active runtime services, running Warp units, one successful replacement start after the affected transition, and zero new start or bootstrap-protocol failures.",
+			context:   context,
+			action:    action,
+			verify:    verify,
 			playbook:  "SIGNALS.md §8.5a",
 		})
 	}

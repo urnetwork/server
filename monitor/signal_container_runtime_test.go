@@ -26,29 +26,33 @@ var containerRuntimeFixtureKeys = []string{
 	"warp_deploy_successes",
 	"warp_start_failures",
 	"warp_exit125_failures",
+	"warp_staging_exit125_failures",
+	"warp_bind_source_missing_failures",
 	"runtime_protocol_errors",
 	"journal_window_seconds",
 }
 
 func containerRuntimeFixture(overrides map[string]string) string {
 	values := map[string]string{
-		"observation_schema":          "1",
-		"docker_active":               "active",
-		"containerd_active":           "active",
-		"docker_client":               "29.8.0",
-		"docker_server":               "29.8.0",
-		"containerd_client":           "v2.3.4",
-		"containerd_server":           "v2.3.4",
-		"docker_history_complete":     "1",
-		"containerd_history_complete": "1",
-		"runtime_window_complete":     "1",
-		"warp_window_complete":        "1",
-		"running_warp_units":          "24",
-		"warp_deploy_successes":       "2",
-		"warp_start_failures":         "0",
-		"warp_exit125_failures":       "0",
-		"runtime_protocol_errors":     "0",
-		"journal_window_seconds":      "600",
+		"observation_schema":                "2",
+		"docker_active":                     "active",
+		"containerd_active":                 "active",
+		"docker_client":                     "29.8.0",
+		"docker_server":                     "29.8.0",
+		"containerd_client":                 "v2.3.4",
+		"containerd_server":                 "v2.3.4",
+		"docker_history_complete":           "1",
+		"containerd_history_complete":       "1",
+		"runtime_window_complete":           "1",
+		"warp_window_complete":              "1",
+		"running_warp_units":                "24",
+		"warp_deploy_successes":             "2",
+		"warp_start_failures":               "0",
+		"warp_exit125_failures":             "0",
+		"warp_staging_exit125_failures":     "0",
+		"warp_bind_source_missing_failures": "0",
+		"runtime_protocol_errors":           "0",
+		"journal_window_seconds":            "600",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -82,6 +86,12 @@ func TestContainerRuntimeSignalSyntheticCompatibilityClasses(t *testing.T) {
 		"native-ttrpc": containerRuntimeFixture(map[string]string{
 			"runtime_protocol_errors": "4",
 		}),
+		"staging-bind-source": containerRuntimeFixture(map[string]string{
+			"warp_start_failures":               "2",
+			"warp_exit125_failures":             "2",
+			"warp_staging_exit125_failures":     "2",
+			"warp_bind_source_missing_failures": "2",
+		}),
 	}
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if !strings.Contains(command, containerRuntimeMarker) {
@@ -97,14 +107,15 @@ func TestContainerRuntimeSignalSyntheticCompatibilityClasses(t *testing.T) {
 		{Name: "containerd-split", Roles: []string{"services"}},
 		{Name: "failed-start", Roles: []string{"services"}},
 		{Name: "native-ttrpc", Roles: []string{"services"}},
+		{Name: "staging-bind-source", Roles: []string{"services"}},
 	}
 
 	alerts, err := NewContainerRuntimeSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 5 {
-		t.Fatalf("alerts = %d, want two diagnostics and three incompatible: %+v", len(alerts), alerts)
+	if len(alerts) != 6 {
+		t.Fatalf("alerts = %d, want two diagnostics, three generic incompatible, and one staging failure: %+v", len(alerts), alerts)
 	}
 	diagnostics := map[string]Alert{}
 	for _, alert := range alerts {
@@ -152,6 +163,62 @@ func TestContainerRuntimeSignalSyntheticCompatibilityClasses(t *testing.T) {
 	}
 	if !strings.Contains(pageTargets["native-ttrpc"].Evidence, "recent runtime protocol errors=4") {
 		t.Errorf("TTRPC evidence = %q", pageTargets["native-ttrpc"].Evidence)
+	}
+	staging := requireAlertClass(t, alerts, "container-runtime-staging-bind-source")
+	if staging.Target != "staging-bind-source" {
+		t.Fatalf("staging target = %q", staging.Target)
+	}
+	for _, want := range []string{
+		"directory name ended .tmp",
+		"invalid-bind-source exit 125",
+		"aggregates reconcile exactly",
+		"Exact nonzero three-way count equality is required",
+		"Before Warpctl f1503d6",
+		"excludes the exact <valid-semver>.tmp staging namespace",
+		"Do not recreate the vanished path, restart Docker, or reboot",
+		"zero .tmp exit-125 selections or bind-source-missing failures for 10 minutes",
+		"staging_exit125_failures=2",
+		"bind_source_missing_failures=2",
+	} {
+		if !strings.Contains(staging.Markdown(), want) {
+			t.Errorf("staging bind-source alert lacks %q: %s", want, staging.Markdown())
+		}
+	}
+}
+
+func TestContainerRuntimeStagingBindClassificationRequiresBothDiscriminators(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "staging-only", overrides: map[string]string{
+			"warp_start_failures":           "1",
+			"warp_exit125_failures":         "1",
+			"warp_staging_exit125_failures": "1",
+		}},
+		{name: "bind-source-only", overrides: map[string]string{
+			"warp_start_failures":               "1",
+			"warp_exit125_failures":             "1",
+			"warp_bind_source_missing_failures": "1",
+		}},
+		{name: "mixed-window", overrides: map[string]string{
+			"warp_start_failures":               "2",
+			"warp_exit125_failures":             "2",
+			"warp_staging_exit125_failures":     "1",
+			"warp_bind_source_missing_failures": "1",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sample, err := parseContainerRuntimeSample(containerRuntimeFixture(test.overrides))
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := evaluateContainerRuntime("synthetic-edge", sample)
+			if len(findings) != 1 || findings[0].class != "container-runtime-incompatible" {
+				t.Fatalf("non-reconciled window must retain generic exit-125 handling: %+v", findings)
+			}
+		})
 	}
 }
 
@@ -299,12 +366,18 @@ func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *tes
 		"[ \"$journal_status\" -eq 1 ] && [ -z \"$journal_output\" ]",
 		"$0 !~ /\"MESSAGE\"[[:space:]]*:/",
 		"_COMM=warpctl",
-		"--grep='Start container failed:|Deploy success version=') || exit 24",
+		"--grep='Start container failed:|Deploy fail version=|Deploy success version=|[(]exited 125[)]') || exit 24",
 		"runtime_window_complete",
 		"warp_window_complete",
 		"Deploy success version=",
 		"Start container failed:",
+		"Deploy fail version=",
 		"exit status 125",
+		"configVersion=[^\",[:space:]]*[.]tmp: exit status 125",
+		"invalid mount config for type",
+		"bind source path does not exist",
+		"warp_staging_exit125_failures",
+		"warp_bind_source_missing_failures",
 		"failed to create TTRPC connection: unsupported protocol",
 	} {
 		if !strings.Contains(containerRuntimeCommand, required) {
@@ -373,6 +446,61 @@ func TestContainerRuntimeCommandDistinguishesSystemd249NoMatchFromJournalFailure
 	}
 }
 
+func TestContainerRuntimeCommandClassifiesUpdaterStagingBindFailure(t *testing.T) {
+	output, err := runContainerRuntimeCommandFixture(t, "staging-bind")
+	if err != nil {
+		t.Fatalf("staging bind-source fixture failed: %v\n%s", err, output)
+	}
+	sample, err := parseContainerRuntimeSample(string(output))
+	if err != nil {
+		t.Fatalf("parse staging bind-source fixture: %v\n%s", err, output)
+	}
+	if sample.warpStartFailures != 1 || sample.warpExit125Failures != 1 ||
+		sample.warpStagingExit125Failures != 1 || sample.warpBindSourceMissingFailures != 1 {
+		t.Fatalf("staging bind-source counts = %+v\n%s", sample, output)
+	}
+	findings := evaluateContainerRuntime("synthetic-edge", sample)
+	if len(findings) != 1 || findings[0].class != "container-runtime-staging-bind-source" {
+		t.Fatalf("staging bind-source findings = %+v", findings)
+	}
+	reduced := strings.Join([]string{
+		findings[0].observed,
+		findings[0].evidence,
+		findings[0].mechanism,
+		findings[0].context,
+		findings[0].action,
+		findings[0].verify,
+	}, "\n")
+	for _, want := range []string{
+		"2026.9.4-outerwerld+1037444830.tmp",
+		`invalid mount config for type \"bind\": bind source path does not exist`,
+	} {
+		if strings.Contains(reduced, want) {
+			t.Fatalf("raw fixture detail %q escaped aggregate reduction: %s", want, reduced)
+		}
+	}
+}
+
+func TestContainerRuntimeStagingBindSourceDocumentationContract(t *testing.T) {
+	catalog, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"container-runtime-staging-bind-source",
+		`invalid mount config for type "bind": bind source path does not exist`,
+		"2026.9.4-outerwerld+1037444830.tmp",
+		"Warpctl `f1503d6`",
+		"Non-`.tmp` metadata remains deployable",
+		"zero bind-source-missing failures for ten minutes",
+		"not authority to restart Docker or the host",
+	} {
+		if !strings.Contains(string(catalog), want) {
+			t.Errorf("container-runtime staging catalog missing %q", want)
+		}
+	}
+}
+
 func runContainerRuntimeCommandFixture(t *testing.T, journalMode string) ([]byte, error) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -437,6 +565,11 @@ case " $* " in
     case "${CONTAINER_RUNTIME_JOURNAL_MODE}" in
       positive)
         echo '{"MESSAGE":"Deploy success version=synthetic, configVersion=synthetic"}'
+        ;;
+      staging-bind)
+        echo '{"MESSAGE":"docker run [redacted] (exited 125): stderr=\"docker: Error response from daemon: invalid mount config for type \\\"bind\\\": bind source path does not exist: [redacted]\""}'
+        echo '{"MESSAGE":"Start container failed: exit status 125"}'
+        echo '{"MESSAGE":"Deploy fail version=2026.9.3+1036806790, configVersion=2026.9.4-outerwerld+1037444830.tmp: exit status 125"}'
         ;;
       no-match) exit 1 ;;
       query-failure)

@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -336,26 +337,17 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"ingester-side Loki live tail",
 		"100-stream processing queue",
 		"five-stream send queue",
+		"nonblocking send",
+		"even while the 100-slot input queue had capacity",
+		"blocking cancellation-aware select",
+		"larger than five but smaller than the processing bound drains without loss",
 		"omitted records before they reached the querier",
-		"more traffic arrives over 15 seconds after blockedAt",
+		"Sustained blockage beyond the existing 100-slot bound",
+		"still drops streams",
 		"five-second ticker",
-		"35,909 Grafana records",
-		"11,583 resets",
-		"5,511 Mimir query-frontend statistics",
-		"5,511 evaluator statistics",
-		"4,596 Loki `get or create table` records",
-		"182 exact backend EOFs",
-		"Warp 42168fe removed only the query-frontend stream",
-		"2,825 unconditional evaluator records",
-		"1,084 table lookup records",
-		"942 bucket-index warnings",
-		"1,229 resets",
-		"22 attributed EOFs across all six backends",
-		"not a proven sole cause",
 		"affirmative internal live-tail loss",
 		"pushTailResponseFromIngester",
-		"discard resp.DroppedStreams",
-		"Warp 5927527 closes that observability defect",
+		"Warp 5927527, contained by 35453fd",
 		"does not enlarge either queue",
 		"Grafana is the observation service",
 		"All six active Grafana nodes were healthy",
@@ -365,16 +357,18 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"do not redeploy already-current blocks",
 		"Warp commit 1e95aef",
 		"server Proxy commit e055c98c",
-		"Warp commit 5927527",
-		"includes 13fcd05's producer reductions",
-		"forwards ingester drop descriptors",
+		"Warp 35453fd",
+		"contains 13fcd05's producer reductions",
+		"5927527's descriptor forwarding",
+		"cancellation-aware five-slot handoff fix",
 		"service-attributed loki-tail-dropped-entries",
-		"Warp bca37cf already preserves the backend address",
 		"Do not raise Loki's fixed queues",
+		"suppress genuine sustained-backpressure evidence",
 		"one aggregate summary per reconciling instance",
 		"Mimir query-frontend/evaluator statistics and Loki table lookup info records remain zero",
 		"bucket-index version gaps converge below two minutes",
 		"loki-tail-dropped-streams, service-attributed loki-tail-dropped-entries, plus loki-tail-backend-eof remain zero for 10 minutes",
+		"greater-than-100 sustained burst may still produce bounded descriptors",
 		"residual EOF is framed by backend address",
 	} {
 		if !strings.Contains(markdown, detail) {
@@ -419,12 +413,38 @@ func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
 		"privacy-safe",
 		"does not distinguish the two stages",
 		"same-window ingester reset identifies the earlier path",
-		"Verify the running Grafana and Warpctl artifacts contain Warp 5927527",
+		"Warp 35453fd contains that forwarding",
+		"prevents sub-processing-bound bursts",
+		"genuine sustained blockage still produces bounded descriptors",
+		"running Grafana artifact contains Warp 35453fd",
+		"Warpctl artifact contains 26089b2",
 		"two consecutive overlap reconciliations complete",
 		"no service-attributed loki-tail-dropped-entries summary",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("direct Loki dropped-entry alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestLokiShortBurstHandoffDocumentationContract(t *testing.T) {
+	catalog, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Warp commit `35453fd` is the subsequent correctness boundary",
+		"100-stream processing queue",
+		"five-stream channel",
+		"more than five but fewer than 100",
+		"pressure beyond 100 remains bounded and emits drop metadata",
+		"all 8,118 source journal rows matched durable Loki",
+		"1,099 ingester reset markers and 28 backend EOFs",
+		"Deploy a Grafana image containing `35453fd`",
+		"zero raw reset, service-attributed dropped-entry, plus EOF classes for ten minutes",
+	} {
+		if !strings.Contains(string(catalog), want) {
+			t.Errorf("Loki short-burst catalog missing %q", want)
 		}
 	}
 }
@@ -490,10 +510,10 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		"Warp commit 1e95aef",
 		"only to older Grafana blocks",
 		"Warp commits 1e95aef and bca37cf",
-		"Warp commit 5927527",
-		"includes 13fcd05's bounded self-telemetry reduction",
-		"forwards the ingester's bounded drop descriptors",
-		"Do not claim producer reduction or attribution itself fixes loss",
+		"Warp commit 35453fd",
+		"contains 5927527's producer reduction and bounded descriptor forwarding",
+		"five-slot ingester handoff",
+		"existing 100-slot processing queue can absorb a short burst",
 		"residual service-attributed drop",
 		"named backend's tailer, process, ring, and network state",
 		"Do not raise Loki's fixed queues",
@@ -504,6 +524,7 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		"22 attributed EOFs split across every one of the six backend addresses",
 		"every configured active ring member owns its LAN identity",
 		"loki-tail-dropped-streams, service-attributed loki-tail-dropped-entries, plus loki-tail-backend-eof remain zero for 10 minutes",
+		"Genuine sustained blockage remains bounded and observable",
 		"residual EOF must carry a backend frame",
 	} {
 		if !strings.Contains(markdown, detail) {
