@@ -218,9 +218,10 @@ func (self *monitorConfig) hostByRole(role string) *host {
 
 // runner executes commands on hosts over ssh, and warpctl locally.
 type runner struct {
-	cfg            *monitorConfig
-	remoteCommands *hostCommandLimiter
-	runSSH         sshCommandRunner
+	cfg                 *monitorConfig
+	remoteCommands      *hostCommandLimiter
+	runSSH              sshCommandRunner
+	operatorDiagnostics io.Writer
 }
 
 func newRunner(cfg *monitorConfig) *runner {
@@ -229,9 +230,10 @@ func newRunner(cfg *monitorConfig) *runner {
 		remoteCommands = newHostCommandLimiter(maxConcurrentRemoteCommandsPerHost)
 	}
 	return &runner{
-		cfg:            cfg,
-		remoteCommands: remoteCommands,
-		runSSH:         runSSHCommand,
+		cfg:                 cfg,
+		remoteCommands:      remoteCommands,
+		runSSH:              runSSHCommand,
+		operatorDiagnostics: os.Stderr,
 	}
 }
 
@@ -528,12 +530,12 @@ func (self *runner) warpctlStream(ctx context.Context, diagnostics io.Writer, ar
 		return nil, nil, err
 	}
 	cmd.Stdout = pw
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = self.operatorDiagnostics
 	if diagnostics != nil {
 		// Preserve local operator diagnostics while giving the standing monitor
 		// a separate, explicitly parsed self-health channel. They must never be
 		// folded into the requested service's stdout log stream.
-		cmd.Stderr = io.MultiWriter(os.Stderr, diagnostics)
+		cmd.Stderr = io.MultiWriter(self.operatorDiagnostics, diagnostics)
 	}
 	if err := cmd.Start(); err != nil {
 		pr.Close()

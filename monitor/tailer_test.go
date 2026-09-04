@@ -53,14 +53,22 @@ printf '%s\n' 'panic: Loki query error (502): Bad Gateway' >&2
 	}
 	t.Setenv("PATH", binDir)
 
+	cfg := &monitorConfig{env: "main"}
+	streamRunner := newRunner(cfg)
+	var operatorDiagnostics strings.Builder
+	streamRunner.operatorDiagnostics = &operatorDiagnostics
 	tailer := newLogTailer("taskworker", &probeEnv{
-		cfg:    &monitorConfig{env: "main"},
-		runner: newRunner(&monitorConfig{env: "main"}),
+		cfg:    cfg,
+		runner: streamRunner,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := tailer.tailOnce(ctx); err != nil {
 		t.Fatalf("tailOnce: %v", err)
+	}
+	const expectedOperatorDiagnostic = "panic: Loki query error (502): Bad Gateway\n"
+	if operatorDiagnostics.String() != expectedOperatorDiagnostic {
+		t.Fatalf("operator diagnostics = %q; want %q", operatorDiagnostics.String(), expectedOperatorDiagnostic)
 	}
 
 	if finding := findingByClass(t, tailer.drainWindow(), "panic"); !finding.healthy {
@@ -90,12 +98,19 @@ printf '%s\n' '2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [200
 			}},
 		}},
 	}
-	env := &probeEnv{cfg: cfg, runner: newRunner(cfg)}
+	streamRunner := newRunner(cfg)
+	var operatorDiagnostics strings.Builder
+	streamRunner.operatorDiagnostics = &operatorDiagnostics
+	env := &probeEnv{cfg: cfg, runner: streamRunner}
 	tailer := newLogTailer("api", env)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := tailer.tailOnce(ctx); err != nil {
 		t.Fatalf("tailOnce: %v", err)
+	}
+	const expectedOperatorDiagnostic = "2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.\n"
+	if operatorDiagnostics.String() != expectedOperatorDiagnostic {
+		t.Fatalf("operator diagnostics = %q; want %q", operatorDiagnostics.String(), expectedOperatorDiagnostic)
 	}
 
 	probe := &logTailProbe{tailers: []*logTailer{tailer}}
