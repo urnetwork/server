@@ -32,7 +32,11 @@ func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	// A recovered in-test retry is still a route-establishment failure. Keep
+	// this regression single-attempt so the first broken ICE setup is visible.
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

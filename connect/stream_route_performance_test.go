@@ -418,10 +418,7 @@ func newStreamRoutePerformanceClient(
 	clientId server.Id,
 	dataPlaneMode clientconnect.P2pDataPlaneMode,
 ) (*clientconnect.Client, *clientconnect.P2pDataPlaneStats) {
-	settings := clientconnect.DefaultClientSettings()
-	settings.ControlPingTimeout = time.Second
-	settings.WebRtcSettings.IceServerUrls = nil
-	settings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
+	settings := newPeerDiscoveryClientSettings()
 	stats := &clientconnect.P2pDataPlaneStats{}
 	p2pSettings := settings.StreamManagerSettings.
 		StreamBufferSettings.

@@ -200,18 +200,40 @@ func (self *peerDiscoveryEnv) authClient(args *model.AuthNetworkClientArgs) (ser
 	return *result.ClientId, *result.ByClientJwt
 }
 
+// Keeps same-process clients on the fixture's actual loopback topology. The
+// production defaults intentionally gather every interface and query live STUN
+// servers, which makes a local P2P test depend on host networking and the WAN.
+func newPeerDiscoveryClientSettings() *connect.ClientSettings {
+	clientSettings := connect.DefaultClientSettings()
+	clientSettings.ControlPingTimeout = time.Second
+	clientSettings.WebRtcSettings.IceServerUrls = nil
+	clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
+	return clientSettings
+}
+
 // newClient creates a connect client with the test controller out-of-band
 // control, and control pings that keep its resident alive through the quiet
 // phases of a test (an idle resident is canceled after `ExchangeResidentTtl`)
 func (self *peerDiscoveryEnv) newClient(clientId server.Id) *connect.Client {
-	clientSettings := connect.DefaultClientSettings()
-	clientSettings.ControlPingTimeout = 1 * time.Second
+	clientSettings := newPeerDiscoveryClientSettings()
 	return connect.NewClient(
 		self.ctx,
 		connect.Id(clientId),
 		Testing_NewControllerOutOfBandControl(self.ctx, clientId, clientSettings.ContractManagerSettings),
 		clientSettings,
 	)
+}
+
+// Pins the fixture boundary that keeps local P2P establishment independent of
+// live STUN service and the host's changing tunnel, bridge, and VM interfaces.
+func TestPeerDiscoveryClientSettingsConstrainIceToLoopback(t *testing.T) {
+	clientSettings := newPeerDiscoveryClientSettings()
+	if iceServerUrls := clientSettings.WebRtcSettings.IceServerUrls; len(iceServerUrls) != 0 {
+		t.Errorf("peer discovery client has external ICE servers: %v", iceServerUrls)
+	}
+	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
+		t.Error("peer discovery client can gather non-loopback ICE candidates")
+	}
 }
 
 func (self *peerDiscoveryEnv) newTransport(byClientJwt string, instanceId server.Id, routeManager *connect.RouteManager) *connect.PlatformTransport {
