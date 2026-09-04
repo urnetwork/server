@@ -1,0 +1,248 @@
+package api
+
+import (
+	"github.com/urnetwork/server/v2026/api/handlers"
+	"github.com/urnetwork/server/v2026/oauth"
+	"github.com/urnetwork/server/v2026/router"
+)
+
+// Routes returns the full set of api routes.
+//
+// It is shared by the apicli command and by integration tests that serve the
+// api in-process (e.g. the proxy integration test), so both exercise the exact
+// same handler set.
+//
+// The oauth authorization server routes (IDP.md) are served here too. Their
+// issuer is a separate hostname, which the load balancer routes to this
+// service; the routes themselves are path-matched, so they answer on either
+// host. The issuer published in the discovery documents is what clients use.
+func Routes() []*router.Route {
+	routes := []*router.Route{
+		router.NewRoute("GET", "/privacy.txt", router.Txt),
+		router.NewRoute("GET", "/terms.txt", router.Txt),
+		router.NewRoute("GET", "/vdp.txt", router.Txt),
+		router.NewRoute("GET", "/status", router.WarpStatus),
+		router.NewRoute("GET", "/clock", handlers.Clock),
+		// The sim-latency competition is a separate, fail-closed security
+		// domain served by this API process. Its health and published policy
+		// are public; round control and scoring use role-scoped opaque tokens.
+		router.NewRoute("GET", "/competition/healthz", handlers.CompetitionHealth),
+		router.NewRoute("GET", "/competition/readyz", handlers.CompetitionReady),
+		router.NewRoute("GET", "/competition/info", handlers.CompetitionInfo),
+		router.NewRoute("GET", "/competition/leaderboard", handlers.CompetitionLeaderboard),
+		router.NewRoute("GET", "/competition/round/([^/]+)/providers.yml", handlers.CompetitionGetRoundWorkload),
+		router.NewRoute("POST", "/competition/generate-round", handlers.CompetitionGenerateRound),
+		router.NewRoute("POST", "/competition/score", handlers.CompetitionSubmitScore),
+		router.NewRoute("GET", "/competition/score/([^/]+)", handlers.CompetitionGetScore),
+		// /stats/last-90 stays up: it serves a redis-exported blob and does not
+		// touch the db.
+		router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
+		// /stats/providers-map likewise serves a redis-exported blob (provider
+		// counts by country/region + centroids), refreshed by ExportProvidersMap.
+		router.NewRoute("GET", "/stats/providers-map", handlers.StatsProvidersMap),
+		// The statistics apis below (plus /network/ranking and /transfer/stats
+		// further down) run live aggregates tagged with server.ReplicaDb, so
+		// they offload to a db replica when one is attached.
+		router.NewRoute("GET", "/stats/providers", handlers.StatsProviders),
+		router.NewRoute("POST", "/stats/providers-last-n", handlers.StatsProvidersLastN),
+		router.NewRoute("POST", "/stats/provider-last-n", handlers.StatsProvider),
+		router.NewRoute("POST", "/stats/providers-overview-last-n", handlers.StatsProvidersOverview),
+		// legacy aliases (kept for existing callers during migration)
+		router.NewRoute("GET", "/stats/providers-overview-last-90", handlers.StatsProvidersOverviewLast90),
+		router.NewRoute("POST", "/stats/provider-last-90", handlers.StatsProviderLast90),
+		router.NewRoute("POST", "/stats/leaderboard", handlers.GetLeaderboard),
+		// all-time points leaderboard: reads a snapshot table (no live aggregate)
+		router.NewRoute("POST", "/stats/points-leaderboard", handlers.GetPointsLeaderboard),
+		router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
+		router.NewRoute("POST", "/auth/wallet-nonce", handlers.AuthWalletNonce),
+		router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
+		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
+		router.NewRoute("POST", "/auth/wallet-challenge", handlers.AuthWalletChallenge),
+		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),
+		router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
+		router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
+		router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
+		router.NewRoute("POST", "/auth/network-check", handlers.NetworkCheck),
+		router.NewRoute("POST", "/auth/network-create", handlers.NetworkCreate),
+		router.NewRoute("POST", "/auth/network-delete", handlers.RemoveNetwork),
+		router.NewRoute("POST", "/auth/code-create", handlers.AuthCodeCreate),
+		router.NewRoute("POST", "/auth/code-login", handlers.AuthCodeLogin),
+		router.NewRoute("POST", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
+		router.NewRoute("GET", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
+		router.NewRoute("GET", "/auth/google/callback", handlers.AuthGoogleOAuthCallback),
+		router.NewRoute("POST", "/auth/add-auth", handlers.AuthAdd),
+		router.NewRoute("POST", "/auth/remove-auth", handlers.AuthRemove),
+		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),
+		router.NewRoute("POST", "/auth/generate-seedphrase", handlers.AuthGenerateSeedphrase),
+		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
+		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
+		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
+		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
+		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
+		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
+		router.NewRoute("POST", "/network/provider-blackhole-checks", handlers.SubmitProviderBlackholeChecks),
+		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
+		// operator-to-server, same operator secret as the egress routes above:
+		// the prober fetching the network client jwt that the bootstrap task
+		// minted for it. This is what makes the credential arrive without a
+		// human -- until it existed the task stored a jwt nothing ever read, and
+		// an operator still had to hand-carry one into the prober's environment.
+		// Returns the jwt and the client id it names, and nothing else -- but do
+		// NOT read that narrowness as containment. The jwt itself carries
+		// network_id, user_id and network_name as readable claims, and holding
+		// it is enough to regenerate this account's seedphrase. The operator
+		// secret checked in the handler is the actual gate. See
+		// ProberCredentialResult, which spells this out.
+		router.NewRoute("GET", "/network/prober-credential", handlers.ProberCredential),
+		// operator-to-server, same operator secret: the certificate pins this
+		// server observed DIRECTLY for the geolocation source hosts. The
+		// prober fetches them here instead of carrying a compile-time
+		// constant, and refuses to probe at all if it cannot get a complete
+		// set -- probing unpinned would let the provider under test forge its
+		// own location, which is the thing the probe exists to catch.
+		router.NewRoute("GET", "/network/geolocation-source-pins", handlers.GeolocationSourcePins),
+		// operator-to-server, gated by the same operator secret as the egress
+		// location ingest above: the active bandwidth probe's download target,
+		// its result submission, and the byte-budget reservation the prober
+		// takes before spending any probe bytes
+		router.NewRoute("GET", "/network/provider-bandwidth-test", handlers.ProviderBandwidthTest),
+		router.NewRoute("POST", "/network/provider-bandwidth-result", handlers.ProviderBandwidthResult),
+		router.NewRoute("POST", "/network/provider-bandwidth-reserve", handlers.ProviderBandwidthReserve),
+		// operator-to-server, same operator secret again: the egress-health
+		// run the prober takes over the tunnel the geolocation probe already
+		// opened. Until this existed the result was a log line and nothing
+		// else.
+		router.NewRoute("POST", "/network/provider-egress-health", handlers.ProviderEgressHealthResult),
+		// client-to-server, and the only route in this group that is NOT
+		// operator-secret authed: a real client network reporting that a
+		// provider carried nothing. The reporting network is taken from the
+		// session jwt, never from the body, because the quorum counts distinct
+		// networks. A met quorum only brings the provider's next probe
+		// forward -- see model.ProviderClientVerdictQuorumMet.
+		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
+		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
+		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
+		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),
+		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2), router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
+		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
+		router.NewRoute("GET", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
+		router.NewRoute("POST", "/network/ranking-visibility", handlers.SetNetworkLeaderboardPublic),
+		router.NewRoute("POST", "/network/points-ranking-visibility", handlers.SetNetworkPointsLeaderboardPublic),
+		router.NewRoute("POST", "/network/emoji", handlers.SetNetworkEmojiTag),
+
+		// block locations
+		router.NewRoute("POST", "/network/block-location", handlers.NetworkBlockLocation),
+		router.NewRoute("POST", "/network/unblock-location", handlers.NetworkUnblockLocation),
+		router.NewRoute("GET", "/network/blocked-locations", handlers.GetNetworkBlockedLocations),
+
+		// reliability
+		router.NewRoute("GET", "/network/reliability", handlers.GetNetworkReliability),
+
+		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
+		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
+		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
+		router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
+		router.NewRoute("POST", "/pay/coinbase", handlers.CoinbaseWebhook),
+		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
+		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
+		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
+		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
+		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
+		router.NewRoute("POST", "/stripe/customer-portal", handlers.StripeCreateCustomerPortal),
+		router.NewRoute("POST", "/stripe/create-checkout-session", handlers.StripeCreateCheckoutSession),
+		router.NewRoute("POST", "/pay/data/checkout", handlers.PayDataCheckout),
+		router.NewRoute("POST", "/pay/data/network-lookup", handlers.PayDataNetworkLookup),
+		router.NewRoute("POST", "/pay/data/solana-intent", handlers.PayDataSolanaIntent),
+		router.NewRoute("POST", "/pay/data/solana-status", handlers.PayDataSolanaStatus),
+		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
+		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
+		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
+		router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
+		router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+		// the "Manage subscription" screen: every store billing the network with
+		// its paid-through date and auto-renew state; cancel/resume act on
+		// Stripe, the other stores are cancelled on the store itself
+		router.NewRoute("GET", "/subscription/details", handlers.SubscriptionDetails),
+		router.NewRoute("POST", "/subscription/cancel", handlers.SubscriptionCancel),
+		router.NewRoute("POST", "/subscription/resume", handlers.SubscriptionResume),
+		router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
+		router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
+		router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
+		// client purchase reporting (UPGRADE.md §4 item 2): verify proof of
+		// purchase with the store and credit through the same idempotency
+		// gates as the webhooks and the payment reconciler
+		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
+		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
+		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
+		// not configured/enabled -- see vault/<env>/x402.yml.
+		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),
+		router.NewRoute("POST", "/x402/purchase", handlers.X402Purchase),
+		router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
+		router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
+		router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),
+		router.NewRoute("POST", "/device/share-status", handlers.DeviceShareStatus),
+		router.NewRoute("POST", "/device/confirm-share", handlers.DeviceConfirmShare),
+		router.NewRoute("POST", "/device/create-adopt-code", handlers.DeviceCreateAdoptCode),
+		router.NewRoute("GET", "/device/adopt-code/([^/]+)/qr.png", handlers.DeviceAdoptCodeQR),
+		router.NewRoute("POST", "/device/adopt-status", handlers.DeviceAdoptStatus),
+		router.NewRoute("POST", "/device/confirm-adopt", handlers.DeviceConfirmAdopt),
+		router.NewRoute("POST", "/device/remove-adopt-code", handlers.DeviceRemoveAdoptCode),
+		router.NewRoute("GET", "/device/associations", handlers.DeviceAssociations),
+		router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
+		router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
+		router.NewRoute("POST", "/device/set-name", handlers.DeviceSetName), router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
+		// Unauthenticated public-key lookup; see handlers.GetClientKey.
+		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
+		// routing verification (sn/VALIDATOR.md); auth is the protocol's own
+		// Ed25519 signatures, not a JWT — see handlers.Verify
+		router.NewRoute("POST", "/verify", handlers.Verify),
+		router.NewRoute("GET", "/verify/keys", handlers.GetVerifyKeys),
+		router.NewRoute("GET", "/verify/stats", handlers.GetVerifyStats),
+		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
+		// subnet control plane (sn/PLAN.md §5, D-13)
+		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
+		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
+		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
+		router.NewRoute("GET", "/sn/head", handlers.SnHead),
+		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
+		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
+		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
+		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
+		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
+		router.NewRoute("GET", "/sn/evidence", handlers.SnEvidence),
+		router.NewRoute("POST", "/sn/evidence", handlers.SnEvidence),
+		router.NewRoute("GET", "/sn/evidence/history", handlers.SnEvidenceHistory),
+		router.NewRoute("GET", "/hello", handlers.Hello),
+		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
+		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),
+		router.NewRoute("GET", "/account/api-keys", handlers.GetApiKeys),
+		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
+		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
+		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),
+		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
+		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
+		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
+		router.NewRoute("POST", "/account/wallets/verify-seeker", handlers.VerifyHoldingSeekerToken),
+		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
+		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
+		router.NewRoute("GET", "/account/referral-network", handlers.GetReferralNetwork),
+		router.NewRoute("GET", "/account/unlink-referral-network", handlers.UnlinkReferralNetwork),
+		router.NewRoute("POST", "/account/set-referral", handlers.SetNetworkReferral),
+		router.NewRoute("POST", "/account/change-name", handlers.ChangeNetworkName),
+		router.NewRoute("POST", "/account/claim-name", handlers.ClaimNetworkName),
+		router.NewRoute("GET", "/account/points", handlers.GetAccountPoints),
+		router.NewRoute("GET", "/account/epochs", handlers.GetAccountEpochs),
+		router.NewRoute("GET", "/account/balance-codes", handlers.GetNetworkRedeemedBalanceCodes),
+		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),
+		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
+		router.NewRoute("GET", "/connect", handlers.AuthConnect),
+		router.NewRoute("POST", "/connect", handlers.AuthConnect),
+		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
+		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
+		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
+		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
+	}
+
+	return append(routes, oauth.Routes()...)
+}
