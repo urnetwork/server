@@ -371,6 +371,11 @@ func isConnectionError(err error) bool {
 	if errors.As(err, &pgErr) {
 		return pgerrcode.IsConnectionException(pgErr.Code)
 	}
+	// pgx wraps this sentinel while cleaning its statement cache after a
+	// connection dies; retain the connection retry through those wrappers.
+	if errors.Is(err, pgconn.ErrConnClosed) {
+		return true
+	}
 	// pgx protocol errors wrap the underlying socket failure. In particular,
 	// pgproto3.writeError wraps net.OpError, so inspect the complete chain before
 	// deciding whether the current pooled connection can be reused.
@@ -378,8 +383,7 @@ func isConnectionError(err error) bool {
 	if errors.As(err, &netErr) {
 		return true
 	}
-	// pgconn.connLockError does not expose its concrete type.
-	// https://github.com/jackc/pgx/blob/master/pgconn/errors.go
+	// Retain compatibility with adapters that return only the legacy status.
 	return err.Error() == "conn closed"
 }
 

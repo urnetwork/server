@@ -36,6 +36,15 @@ func TestDbClassifiesWrappedConnectionWriteTimeout(t *testing.T) {
 	}
 }
 
+// Pgx wraps a closed-connection sentinel when statement-cache cleanup fails.
+// The wrapper must still take dbWithPool's bounded fresh-connection retry.
+func TestDbClassifiesWrappedClosedConnection(t *testing.T) {
+	err := fmt.Errorf("failed to deallocate cached statement(s): %w", pgconn.ErrConnClosed)
+	if !isConnectionError(err) {
+		t.Fatal("wrapped closed connection was not classified as a connection error")
+	}
+}
+
 // SQL errors outside the connection-exception class must stay on the normal
 // failure path even when an adapter wraps them with additional context.
 func TestDbRejectsWrappedNonConnectionError(t *testing.T) {
