@@ -902,6 +902,16 @@ func newContract(
 		returnErr = fmt.Errorf("%w: %v", errContractDestinationInactive, err)
 		return
 	}
+	// Participant persistence happens after Redis assigns/reuses the stream id.
+	// Resolve every intermediary before reserving the payer's balance so a
+	// malformed or stale path cannot leave an unreturnable contract behind if
+	// its participant row cannot be recorded.
+	for _, intermediaryId := range intermediaryIds {
+		if _, err := model.FindActiveClientNetwork(ctx, intermediaryId); err != nil {
+			returnErr = fmt.Errorf("Contract intermediary is inactive: %s: %w", intermediaryId.String(), err)
+			return
+		}
+	}
 
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
@@ -929,6 +939,10 @@ func newContract(
 		default:
 			if 0 < len(intermediaryIds) {
 				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+				if err := model.SetContractStream(ctx, contractId, streamId_, intermediaryIds); err != nil {
+					returnErr = err
+					return
+				}
 				streamId = &streamId_
 			} else {
 				// When the pair has an active stream, every network contract
@@ -944,9 +958,17 @@ func newContract(
 					destinationId,
 				)
 				if ok {
+					if err := model.SetContractStream(ctx, contractId, streamId_, nil); err != nil {
+						returnErr = err
+						return
+					}
 					streamId = &streamId_
 				} else if forceStream {
 					streamId_ = model.AddToStream(ctx, contractId, sourceId, destinationId, nil)
+					if err := model.SetContractStream(ctx, contractId, streamId_, nil); err != nil {
+						returnErr = err
+						return
+					}
 					streamId = &streamId_
 				}
 			}
@@ -1019,13 +1041,14 @@ func newContract(
 				destinationId,
 			)
 			if ok {
+				if err := model.SetContractStream(ctx, contractId, streamId_, nil); err != nil {
+					returnErr = err
+					return
+				}
 				streamId = &streamId_
 			}
 		}
 	} else {
-		// TODO store the intermediary ids on the contract so they can be rewarded in the payout
-		// TODO the transfer should be equally divided amongst all the hops
-
 		escrow, err := model.CreateTransferEscrow(
 			ctx,
 			sourceNetworkId,
@@ -1047,6 +1070,10 @@ func newContract(
 		default:
 			if forceStream || 0 < len(intermediaryIds) {
 				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+				if err := model.SetContractStream(ctx, contractId, streamId_, intermediaryIds); err != nil {
+					returnErr = err
+					return
+				}
 				streamId = &streamId_
 			}
 		}

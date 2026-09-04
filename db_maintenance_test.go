@@ -9,6 +9,7 @@ import (
 
 func TestDbMaintenanceSkipsWholeReindexForLargeHighChurnTables(t *testing.T) {
 	for _, tableName := range []string{
+		"contract_participant",
 		"contract_close",
 		"transfer_contract",
 		"transfer_escrow",

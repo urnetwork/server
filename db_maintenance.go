@@ -46,6 +46,7 @@ func priorityReindexIndexesForEpoch(epoch uint64) []string {
 // explicitly scheduled one-time pg_repack instead.
 var dbMaintenanceSkipReindexTables = map[string]bool{
 	"client_reliability":                  true,
+	"contract_participant":                true,
 	"contract_close":                      true,
 	"network_client_location_reliability": true,
 	"network_client_connection":           true,

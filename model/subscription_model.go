@@ -1225,6 +1225,122 @@ type TransferEscrowBalance struct {
 	BalanceByteCount ByteCount
 }
 
+// ContractParticipant is one service client whose hop carries a contract's
+// traffic. The payer/origin endpoint is not a participant; the opposite
+// endpoint (egress) is, along with every intermediary attached to the
+// contract's stream.
+type ContractParticipant struct {
+	ClientId  server.Id
+	NetworkId server.Id
+}
+
+// SetContractStream durably associates a contract with its Redis stream and
+// records the stream's intermediary contract participants. Participants are
+// keyed by stream id rather than contract id so companion contracts, which do
+// not repeat the intermediary list, settle against the same participant set.
+func SetContractStream(
+	ctx context.Context,
+	contractId server.Id,
+	streamId server.Id,
+	intermediaryIds []server.Id,
+) (returnErr error) {
+	// Join callers do not carry the original path. Recover it from the Redis
+	// contract marking while it is present, both to populate a newly joined
+	// contract and to backfill streams created before participant persistence
+	// was deployed. Once recorded below, settlement no longer depends on Redis.
+	if intermediaryIds == nil {
+		markedStreamId, streamKey, ok := GetStream(ctx, contractId)
+		if ok {
+			if markedStreamId != streamId {
+				return fmt.Errorf(
+					"Contract Redis stream %s does not match requested stream %s: %s",
+					markedStreamId.String(),
+					streamId.String(),
+					contractId.String(),
+				)
+			}
+			intermediaryIds = streamKey.IntermediaryIds()
+		}
+	}
+	intermediaryIds = slices.Clone(intermediaryIds)
+	slices.SortFunc(intermediaryIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	intermediaryIds = slices.Compact(intermediaryIds)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		participantNetworks := map[server.Id]server.Id{}
+		if 0 < len(intermediaryIds) {
+			result, err := tx.Query(
+				ctx,
+				`
+					SELECT client_id, network_id
+					FROM network_client
+					WHERE client_id = ANY($1)
+				`,
+				intermediaryIds,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					var networkId server.Id
+					server.Raise(result.Scan(&clientId, &networkId))
+					participantNetworks[clientId] = networkId
+				}
+			})
+			if len(participantNetworks) != len(intermediaryIds) {
+				missingIds := []string{}
+				for _, clientId := range intermediaryIds {
+					if _, ok := participantNetworks[clientId]; !ok {
+						missingIds = append(missingIds, clientId.String())
+					}
+				}
+				returnErr = fmt.Errorf("Contract intermediary clients do not exist: %s", strings.Join(missingIds, ", "))
+				return
+			}
+		}
+
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE transfer_contract
+				SET stream_id = $2
+				WHERE
+					contract_id = $1 AND
+					(stream_id IS NULL OR stream_id = $2)
+			`,
+			contractId,
+			streamId,
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = fmt.Errorf("Contract not found or already belongs to another stream: %s", contractId.String())
+			return
+		}
+
+		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+			for _, clientId := range intermediaryIds {
+				batch.Queue(
+					`
+						INSERT INTO contract_participant (
+							stream_id,
+							client_id,
+							network_id
+						)
+						VALUES ($1, $2, $3)
+						ON CONFLICT (stream_id, client_id) DO UPDATE
+						SET network_id = EXCLUDED.network_id
+					`,
+					streamId,
+					clientId,
+					participantNetworks[clientId],
+				)
+			}
+		})
+	})
+
+	return
+}
+
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2170,6 +2286,245 @@ func claimContractOutcomeInTx(
 	return tag.RowsAffected() == 1
 }
 
+// contractParticipantsInTx returns the service side of a contract: the
+// non-payer endpoint (the egress hop) plus the intermediary clients persisted
+// for its stream. The participant set deliberately still contains clients on
+// the origin network; settlement uses the full set as the even-split
+// denominator, then suppresses those ineligible shares.
+func contractParticipantsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	contractId server.Id,
+) (
+	participants []ContractParticipant,
+	originNetworkId server.Id,
+	returnErr error,
+) {
+	var sourceNetworkId server.Id
+	var sourceId server.Id
+	var destinationNetworkId server.Id
+	var destinationId server.Id
+	var payerNetworkId *server.Id
+	var companionContractId *server.Id
+	var streamId *server.Id
+	found := false
+
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT
+				source_network_id,
+				source_id,
+				destination_network_id,
+				destination_id,
+				payer_network_id,
+				companion_contract_id,
+				stream_id
+			FROM transfer_contract
+			WHERE contract_id = $1
+		`,
+		contractId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			found = true
+			server.Raise(result.Scan(
+				&sourceNetworkId,
+				&sourceId,
+				&destinationNetworkId,
+				&destinationId,
+				&payerNetworkId,
+				&companionContractId,
+				&streamId,
+			))
+		}
+	})
+	if !found {
+		returnErr = fmt.Errorf("Contract not found while loading participants: %s", contractId.String())
+		return
+	}
+
+	// Plain contracts originate at source; companion contracts reverse the
+	// payer and originate at destination. payer_network_id is authoritative for
+	// eligibility and also disambiguates direction whenever the endpoints are
+	// in different networks. companion_contract_id handles the same-network
+	// case, where comparing endpoint network ids cannot identify the payer.
+	originIsSource := companionContractId == nil
+	originNetworkId = sourceNetworkId
+	if payerNetworkId != nil {
+		originNetworkId = *payerNetworkId
+		if sourceNetworkId != destinationNetworkId {
+			switch *payerNetworkId {
+			case sourceNetworkId:
+				originIsSource = true
+			case destinationNetworkId:
+				originIsSource = false
+			default:
+				returnErr = fmt.Errorf(
+					"Contract payer network %s is not an endpoint network: %s",
+					payerNetworkId.String(),
+					contractId.String(),
+				)
+				return
+			}
+		}
+	} else if !originIsSource {
+		originNetworkId = destinationNetworkId
+	}
+
+	originId := sourceId
+	egress := ContractParticipant{ClientId: destinationId, NetworkId: destinationNetworkId}
+	if !originIsSource {
+		originId = destinationId
+		egress = ContractParticipant{ClientId: sourceId, NetworkId: sourceNetworkId}
+	}
+
+	participantsByClientId := map[server.Id]ContractParticipant{}
+	if egress.ClientId != originId {
+		participantsByClientId[egress.ClientId] = egress
+	}
+	if streamId != nil {
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT
+					contract_participant.client_id,
+					contract_participant.network_id
+				FROM transfer_contract
+				INNER JOIN contract_participant ON
+					contract_participant.stream_id = transfer_contract.stream_id
+				WHERE transfer_contract.contract_id = $1
+			`,
+			contractId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var participant ContractParticipant
+				server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
+				if _, exists := participantsByClientId[participant.ClientId]; participant.ClientId != originId && !exists {
+					participantsByClientId[participant.ClientId] = participant
+				}
+			}
+		})
+	}
+
+	for _, participant := range participantsByClientId {
+		participants = append(participants, participant)
+	}
+	slices.SortFunc(participants, func(a ContractParticipant, b ContractParticipant) int {
+		return a.ClientId.Cmp(b.ClientId)
+	})
+	return
+}
+
+// evenContractPayoutShare partitions a non-negative integer exactly. Stable
+// participant ordering makes the at-most-one-unit remainder deterministic.
+func evenContractPayoutShare(total int64, participantIndex int, participantCount int) int64 {
+	if total <= 0 || participantCount <= 0 {
+		return 0
+	}
+	share := total / int64(participantCount)
+	if int64(participantIndex) < total%int64(participantCount) {
+		share += 1
+	}
+	return share
+}
+
+func allocateContractParticipantPayouts(
+	contractParticipants []ContractParticipant,
+	originNetworkId server.Id,
+	sweepPayouts map[server.Id]sweepPayout,
+) (
+	participantSweepPayouts map[participantSweepKey]*participantSweepPayout,
+	accountPayouts map[server.Id]*contractPayout,
+) {
+	participantSweepPayouts = map[participantSweepKey]*participantSweepPayout{}
+	accountPayouts = map[server.Id]*contractPayout{}
+	balanceIds := make([]server.Id, 0, len(sweepPayouts))
+	for balanceId := range sweepPayouts {
+		balanceIds = append(balanceIds, balanceId)
+	}
+	slices.SortFunc(balanceIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+
+	// Allocate the delta between cumulative even shares, rather than splitting
+	// each funding balance from zero. Otherwise every small per-balance
+	// remainder would go to the same first participant and the contract total
+	// would not be even. UUID ordering makes the balance traversal stable while
+	// the full (pre-eligibility) allocation for every balance still reconciles to
+	// that balance's exact byte and revenue totals.
+	var cumulativeByteCount ByteCount
+	var cumulativePayout NanoCents
+	for _, balanceId := range balanceIds {
+		sweepPayout := sweepPayouts[balanceId]
+		previousCumulativeByteCount := cumulativeByteCount
+		previousCumulativePayout := cumulativePayout
+		cumulativeByteCount += sweepPayout.payoutByteCount
+		cumulativePayout += sweepPayout.payout
+		for participantIndex, participant := range contractParticipants {
+			participantByteCount := ByteCount(
+				evenContractPayoutShare(
+					int64(cumulativeByteCount),
+					participantIndex,
+					len(contractParticipants),
+				) - evenContractPayoutShare(
+					int64(previousCumulativeByteCount),
+					participantIndex,
+					len(contractParticipants),
+				),
+			)
+			participantPayout := NanoCents(
+				evenContractPayoutShare(
+					int64(cumulativePayout),
+					participantIndex,
+					len(contractParticipants),
+				) - evenContractPayoutShare(
+					int64(previousCumulativePayout),
+					participantIndex,
+					len(contractParticipants),
+				),
+			)
+
+			// A service hop on the payer/origin network represents
+			// same-network traffic. Its precomputed even share is omitted, not
+			// transferred to the remaining participants.
+			if participant.NetworkId == originNetworkId ||
+				(participantByteCount <= 0 && participantPayout <= 0) {
+				continue
+			}
+
+			key := participantSweepKey{
+				balanceId: balanceId,
+				networkId: participant.NetworkId,
+			}
+			participantSweep := participantSweepPayouts[key]
+			if participantSweep == nil {
+				participantSweep = &participantSweepPayout{
+					destinationId: participant.ClientId,
+				}
+				participantSweepPayouts[key] = participantSweep
+			} else if participant.ClientId.Cmp(participantSweep.destinationId) < 0 {
+				// Payout wallets are network-scoped and the sweep primary key is
+				// per network. If two hops belong to one eligible network, combine
+				// their shares and use a stable client id for provider attribution.
+				participantSweep.destinationId = participant.ClientId
+			}
+			participantSweep.payoutByteCount += participantByteCount
+			participantSweep.payout += participantPayout
+
+			accountPayout := accountPayouts[participant.NetworkId]
+			if accountPayout == nil {
+				accountPayout = &contractPayout{}
+				accountPayouts[participant.NetworkId] = accountPayout
+			}
+			accountPayout.payoutByteCount += participantByteCount
+			accountPayout.payout += participantPayout
+		}
+	}
+	return
+}
+
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2283,6 +2638,12 @@ func settleEscrowInTx(
 		return
 	}
 
+	contractParticipants, originNetworkId, err := contractParticipantsInTx(ctx, tx, contractId)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
 	// order balances by end date, ascending
 	// take from the earlier before the later
 	result, err := tx.Query(
@@ -2306,10 +2667,11 @@ func settleEscrowInTx(
 		contractId,
 	)
 
-	// balance id -> payout byte count, return byte count, payout
+	// balance id -> settled byte count, return byte count, gross payout. The
+	// settled count is what the payer consumed; it remains independent of how
+	// many participant shares are eligible for payout.
 	sweepPayouts := map[server.Id]sweepPayout{}
-	netPayoutByteCount := ByteCount(0)
-	netPayout := NanoCents(0)
+	netSettledByteCount := ByteCount(0)
 
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -2324,14 +2686,13 @@ func settleEscrowInTx(
 				&netRevenue,
 			))
 
-			payoutByteCount := min(usedTransferByteCount-netPayoutByteCount, escrowBalanceByteCount)
+			payoutByteCount := min(usedTransferByteCount-netSettledByteCount, escrowBalanceByteCount)
 			returnByteCount := escrowBalanceByteCount - payoutByteCount
-			netPayoutByteCount += payoutByteCount
+			netSettledByteCount += payoutByteCount
 			payout := NanoCents(math.Round(
 				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
 			))
 
-			netPayout += payout
 			sweepPayouts[balanceId] = sweepPayout{
 				escrowBalanceByteCount: escrowBalanceByteCount,
 				payoutByteCount:        payoutByteCount,
@@ -2347,62 +2708,16 @@ func settleEscrowInTx(
 	// 	return
 	// }
 
-	if netPayoutByteCount < usedTransferByteCount {
+	if netSettledByteCount < usedTransferByteCount {
 		returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
 		return
 	}
 
-	var payoutNetworkId *server.Id
-	var destinationId server.Id
-	result, err = tx.Query(
-		ctx,
-		`
-            SELECT
-                source_network_id,
-                destination_network_id,
-                destination_id,
-                payer_network_id,
-                companion_contract_id
-            FROM transfer_contract
-            WHERE
-                contract_id = $1
-        `,
-		contractId,
+	participantSweepPayouts, accountPayouts := allocateContractParticipantPayouts(
+		contractParticipants,
+		originNetworkId,
+		sweepPayouts,
 	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			var sourceNetworkId server.Id
-			var destinationNetworkId server.Id
-			var payerNetworkId *server.Id
-			var companionContractId *server.Id
-			server.Raise(result.Scan(
-				&sourceNetworkId,
-				&destinationNetworkId,
-				&destinationId,
-				&payerNetworkId,
-				&companionContractId,
-			))
-			if payerNetworkId != nil {
-				if *payerNetworkId == sourceNetworkId {
-					payoutNetworkId = &destinationNetworkId
-				} else {
-					payoutNetworkId = &sourceNetworkId
-				}
-			} else {
-				// migration, infer for older contracts
-				if companionContractId == nil {
-					payoutNetworkId = &destinationNetworkId
-				} else {
-					payoutNetworkId = &sourceNetworkId
-				}
-			}
-		}
-	})
-
-	if payoutNetworkId == nil {
-		returnErr = fmt.Errorf("Destination client does not exist.")
-		return
-	}
 
 	if !claimContractOutcomeInTx(ctx, tx, contractId, outcome) {
 		return
@@ -2442,43 +2757,41 @@ func settleEscrowInTx(
 			return nil
 		})
 
-		posts = append(posts, func() any {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-					for balanceId, sweepPayout := range sweepPayouts {
-
-						if 0 < sweepPayout.payoutByteCount {
+		if 0 < len(participantSweepPayouts) {
+			posts = append(posts, func() any {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+						for key, payout := range participantSweepPayouts {
 							batch.Queue(
 								`
-						            INSERT INTO transfer_escrow_sweep (
-						                contract_id,
-						                balance_id,
-						                network_id,
-						                payout_byte_count,
-						                payout_net_revenue_nano_cents,
-						                destination_id
-						            )
-						            VALUES ($1, $2, $3, $4, $5, $6)
-						            ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
-						            SET
-						            	payout_byte_count = $4,
-						            	payout_net_revenue_nano_cents = $5,
-						            	destination_id = $6
-						        `,
+									INSERT INTO transfer_escrow_sweep (
+										contract_id,
+										balance_id,
+										network_id,
+										payout_byte_count,
+										payout_net_revenue_nano_cents,
+										destination_id
+									)
+									VALUES ($1, $2, $3, $4, $5, $6)
+									ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
+									SET
+										payout_byte_count = $4,
+										payout_net_revenue_nano_cents = $5,
+										destination_id = $6
+								`,
 								contractId,
-								balanceId,
-								payoutNetworkId,
-								sweepPayout.payoutByteCount,
-								sweepPayout.payout,
-								destinationId,
+								key.balanceId,
+								key.networkId,
+								payout.payoutByteCount,
+								payout.payout,
+								payout.destinationId,
 							)
-
 						}
-					}
-				})
-			}, server.TxReadCommitted)
-			return nil
-		})
+					})
+				}, server.TxReadCommitted)
+				return nil
+			})
+		}
 
 		posts = append(posts, func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -2532,16 +2845,23 @@ func settleEscrowInTx(
 		})
 	}
 
-	posts = append(posts, func() any {
-		server.Redis(ctx, func(r server.RedisClient) {
-			r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				pipe.IncrBy(ctx, accountBalanceNetPayoutByteCountKey(*payoutNetworkId), netPayoutByteCount)
-				pipe.IncrBy(ctx, accountBalanceNetPayout(*payoutNetworkId), netPayout)
-				return nil
+	if 0 < len(accountPayouts) {
+		posts = append(posts, func() any {
+			server.Redis(ctx, func(r server.RedisClient) {
+				// Participant networks occupy independent Redis hash slots. Keep
+				// each network's byte/revenue pair atomic in its own transaction.
+				for networkId, payout := range accountPayouts {
+					_, pipelineErr := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+						pipe.IncrBy(ctx, accountBalanceNetPayoutByteCountKey(networkId), payout.payoutByteCount)
+						pipe.IncrBy(ctx, accountBalanceNetPayout(networkId), payout.payout)
+						return nil
+					})
+					server.Raise(pipelineErr)
+				}
 			})
+			return nil
 		})
-		return nil
-	})
+	}
 
 	return
 }
@@ -2551,6 +2871,22 @@ type sweepPayout struct {
 	payoutByteCount        ByteCount
 	returnByteCount        ByteCount
 	payout                 NanoCents
+}
+
+type participantSweepKey struct {
+	balanceId server.Id
+	networkId server.Id
+}
+
+type participantSweepPayout struct {
+	destinationId   server.Id
+	payoutByteCount ByteCount
+	payout          NanoCents
+}
+
+type contractPayout struct {
+	payoutByteCount ByteCount
+	payout          NanoCents
 }
 
 // `server.ComplexValue`
@@ -4454,10 +4790,12 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 }
 
 // SweepOrphanContractData removes contract_close/transfer_escrow/
-// transfer_escrow_sweep rows whose transfer_contract no longer exists.
-// RemoveCompletedContracts cascades these atomically with the contract delete,
-// so this is a low-cadence safety net for orphans left by older releases or
-// interrupted statements, not the primary cleanup mechanism. Each table is
+// transfer_escrow_sweep rows whose transfer_contract no longer exists, plus
+// contract_participant rows whose stream is no longer referenced by any
+// retained contract.
+// RemoveCompletedContracts cascades the per-contract rows atomically with the
+// contract delete. Stream participants are shared by all contracts on a stream,
+// so this sweep removes them after the last reference disappears. Each table is
 // paged by its primary key in bounded sliceSize slices (see sweepOrphanCursor),
 // so a call never full-scans a child table even when there are no orphans.
 //
@@ -4599,6 +4937,44 @@ func sweepOrphanContractSteps() []sweepOrphanStep {
 			(SELECT count(*) FROM slice),
 			(SELECT count(*) FROM del),
 			bound.contract_id, bound.balance_id, bound.network_id
+		FROM bound
+			`,
+		},
+
+		// contract_participant, keyed by (stream_id, client_id)
+		{
+			table: "contract_participant",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(server.Id)}
+			},
+			sql: `
+		WITH slice AS (
+			SELECT stream_id, client_id
+			FROM contract_participant
+			WHERE ($1 OR (stream_id, client_id) > ($2, $3))
+			ORDER BY stream_id, client_id
+			LIMIT $4
+		), del AS (
+			DELETE FROM contract_participant
+			USING slice
+			WHERE
+				contract_participant.stream_id = slice.stream_id AND
+				contract_participant.client_id = slice.client_id AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.stream_id = contract_participant.stream_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT stream_id, client_id
+			FROM slice
+			ORDER BY stream_id DESC, client_id DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.stream_id, bound.client_id
 		FROM bound
 		`,
 		},

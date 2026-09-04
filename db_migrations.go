@@ -7043,4 +7043,32 @@ var migrations = []any{
 		ALTER TABLE st_fleet_binding_signature ALTER COLUMN deployment_key DROP DEFAULT;
 		ALTER TABLE st_epoch_notification ALTER COLUMN deployment_key DROP DEFAULT;
 	`),
+
+	// A transfer contract stores only its two endpoints, while a streamed path
+	// can contain intermediary providers. Persist the stream association on the
+	// contract and the intermediary client/network set by stream id so every
+	// contract on that stream (including reverse companion contracts) settles
+	// against the same durable participant set. Endpoint participants continue
+	// to come from transfer_contract itself.
+	newSqlMigration(`
+		ALTER TABLE transfer_contract ADD COLUMN stream_id uuid NULL;
+
+		CREATE TABLE contract_participant (
+			stream_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+
+			PRIMARY KEY (stream_id, client_id)
+		)
+	`),
+
+	// The orphan-participant sweep probes whether any retained contract still
+	// references a stream. Existing rows are all NULL at migration time, making
+	// this partial index cheap to introduce on the large contract table.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_stream_id
+		 ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_stream_id
+		 ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`,
+	),
 }

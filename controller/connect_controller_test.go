@@ -686,7 +686,7 @@ func TestCreateContractCompanionStreamId(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		streamedOriginContractId, err := model.CreateContractNoEscrow(ctx, networkId, consumer, networkId, provider, model.ByteCount(1024*1024))
 		connect.AssertEqual(t, err, nil)
-		intermediaryId := server.NewId()
+		intermediaryId := newClient(networkId)
 		streamId := model.AddToStream(ctx, streamedOriginContractId, consumer, provider, []server.Id{intermediaryId})
 
 		result := createCompanionContract(provider, consumer, &streamVersion1)
