@@ -290,9 +290,12 @@ func TestContainerRuntimeCommandUsesOnlyUnprivilegedObservationBoundaries(t *tes
 		"docker --version",
 		"containerd --version",
 		"systemctl list-units",
+		"journalctl -b -n 0 --no-pager --quiet --output-fields=MESSAGE -o json",
+		"[ \"$journal_baseline_status\" -ne 0 ] || [ -n \"$journal_baseline\" ]",
 		"read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=dockerd",
 		"read_bounded_journal 2001 -b SYSLOG_IDENTIFIER=containerd",
 		"-n 0 --no-pager --quiet",
+		"[ \"$journal_status\" -ne 0 ] && [ \"$journal_status\" -ne 1 ]",
 		"[ \"$journal_status\" -eq 1 ] && [ -z \"$journal_output\" ]",
 		"$0 !~ /\"MESSAGE\"[[:space:]]*:/",
 		"_COMM=warpctl",
@@ -342,6 +345,8 @@ func TestContainerRuntimeCommandDistinguishesSystemd249NoMatchFromJournalFailure
 	}
 
 	for _, mode := range []string{
+		"baseline-failure",
+		"baseline-stderr",
 		"preflight-failure",
 		"preflight-stderr",
 		"query-failure",
@@ -354,8 +359,12 @@ func TestContainerRuntimeCommandDistinguishesSystemd249NoMatchFromJournalFailure
 				t.Fatalf("journal %s was treated as an empty observation:\n%s", mode, output)
 			}
 			var exitError *exec.ExitError
-			if !errors.As(err, &exitError) || exitError.ExitCode() != 24 {
-				t.Fatalf("journal %s error = %v, want command exit 24\n%s", mode, err, output)
+			expectedExitCode := 24
+			if strings.HasPrefix(mode, "baseline-") {
+				expectedExitCode = 20
+			}
+			if !errors.As(err, &exitError) || exitError.ExitCode() != expectedExitCode {
+				t.Fatalf("journal %s error = %v, want command exit %d\n%s", mode, err, expectedExitCode, output)
 			}
 			if strings.Contains(string(output), "synthetic-private-journal-error") {
 				t.Fatalf("journal %s leaked raw stderr: %s", mode, output)
@@ -395,14 +404,31 @@ exec "$@"
 		"journalctl": `#!/bin/sh
 case " $* " in
   *' -n 0 '*)
-    case "${CONTAINER_RUNTIME_JOURNAL_MODE}: $* " in
-      preflight-failure:*'_COMM=warpctl '*)
-        echo 'synthetic-private-journal-error' >&2
-        exit 1
+    case " $* " in
+      *' SYSLOG_IDENTIFIER='*|*' _COMM='*)
+        case "${CONTAINER_RUNTIME_JOURNAL_MODE}: $* " in
+          no-match:*'_COMM=warpctl '*) exit 1 ;;
+          preflight-failure:*'_COMM=warpctl '*)
+            echo 'synthetic-private-journal-error' >&2
+            exit 1
+            ;;
+          preflight-stderr:*'_COMM=warpctl '*)
+            echo 'synthetic-private-journal-error' >&2
+            exit 0
+            ;;
+        esac
         ;;
-      preflight-stderr:*'_COMM=warpctl '*)
-        echo 'synthetic-private-journal-error' >&2
-        exit 0
+      *)
+        case "${CONTAINER_RUNTIME_JOURNAL_MODE}" in
+          baseline-failure)
+            echo 'synthetic-private-journal-error' >&2
+            exit 2
+            ;;
+          baseline-stderr)
+            echo 'synthetic-private-journal-error' >&2
+            exit 0
+            ;;
+        esac
         ;;
     esac
     exit 0

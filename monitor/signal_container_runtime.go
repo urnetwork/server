@@ -47,12 +47,18 @@ containerd_client=$(timeout 10 containerd --version 2>/dev/null | awk '
   { for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+[.][0-9]+[.][0-9]+/) { print $i; exit } }
 ')
 
+journal_baseline=$(journalctl -b -n 0 --no-pager --quiet --output-fields=MESSAGE -o json 2>&1)
+journal_baseline_status=$?
+if [ "$journal_baseline_status" -ne 0 ] || [ -n "$journal_baseline" ]; then
+	exit 20
+fi
+
 read_bounded_journal() {
 	journal_limit=$1
 	shift
 	journal_output=$(journalctl "$@" -n 0 --no-pager --quiet --output-fields=MESSAGE -o json 2>&1)
 	journal_status=$?
-	if [ "$journal_status" -ne 0 ] || [ -n "$journal_output" ]; then
+	if [ -n "$journal_output" ] || { [ "$journal_status" -ne 0 ] && [ "$journal_status" -ne 1 ]; }; then
 		return 2
 	fi
 	journal_output=$(journalctl "$@" -n "$journal_limit" --no-pager --quiet --output-fields=MESSAGE -o json 2>&1)
