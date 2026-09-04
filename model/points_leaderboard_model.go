@@ -17,9 +17,11 @@ import (
 // rebuild task rewrites whenever points can have changed. Reads page the
 // newest snapshot with a keyset cursor and join `network` for the name, the
 // emoji tag and the two public flags, so a toggle shows on the next request
-// rather than the next rebuild. The opt-in (`points_leaderboard_public`) only
-// controls display: ranks are over everyone, so the visible list has gaps and
-// a toggle never shifts anyone else's rank.
+// rather than the next rebuild. Every ranked network is listed, so the list
+// is one continuous sequence with no gaps; `points_leaderboard_public` only
+// reveals the network's name (the row is otherwise anonymous), and the emoji
+// tag shows on every row that set one. A toggle therefore never moves a row,
+// it only names it.
 
 const (
 	PointsLeaderboardSortPoints = "points"
@@ -66,6 +68,9 @@ type PointsLeaderboardEntry struct {
 }
 
 // PointsLeaderboardRow is an entry joined with the network's display fields.
+// `PointsLeaderboardPublic` is the switch that reveals the name on this
+// board; `LeaderboardPublic` is the data leaderboard's own name switch and
+// does not affect the points list.
 type PointsLeaderboardRow struct {
 	PointsLeaderboardEntry
 	NetworkName             string
@@ -572,8 +577,10 @@ func (self *PointsLeaderboardEntry) Position(sortBy string) int64 {
 	}
 }
 
-// GetPointsLeaderboardPage lists the opted-in networks of a snapshot after
+// GetPointsLeaderboardPage lists every ranked network of a snapshot after
 // `afterPosition` in the given sort (0 = from the top), at most `limit` rows.
+// Whether a row's name may be shown is the caller's to read from
+// `PointsLeaderboardPublic`; nothing is filtered here.
 // `sortBy` must be one of the PointsLeaderboardSort* constants.
 func GetPointsLeaderboardPage(
 	ctx context.Context,
@@ -594,7 +601,6 @@ func GetPointsLeaderboardPage(
 			pointsLeaderboardRowSelect+`
 				WHERE
 					network_points_leaderboard.snapshot_id = $1 AND
-					network.points_leaderboard_public = true AND
 					$2 < network_points_leaderboard.`+column+`
 				ORDER BY network_points_leaderboard.`+column+` ASC
 				LIMIT $3
@@ -612,8 +618,8 @@ func GetPointsLeaderboardPage(
 	return
 }
 
-// GetPointsLeaderboardNetworkRow is the network's own row in the snapshot,
-// opted in or not; nil when the network has no points.
+// GetPointsLeaderboardNetworkRow is the network's own row in the snapshot;
+// nil when the network has no points.
 func GetPointsLeaderboardNetworkRow(
 	ctx context.Context,
 	snapshotId server.Id,

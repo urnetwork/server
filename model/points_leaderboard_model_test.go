@@ -192,8 +192,13 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		latest := GetLatestPointsLeaderboardSnapshot(ctx)
 		connect.AssertEqual(t, latest.SnapshotId, snapshot.SnapshotId)
 
-		// nobody opted in: the page is empty, but every network with points has a row
-		connect.AssertEqual(t, len(GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortPoints, 0, 10)), 0)
+		// every network with points is listed from the start, names off
+		initial := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortPoints, 0, 10)
+		connect.AssertEqual(t, len(initial), 3)
+		connect.AssertEqual(t, initial[0].NetworkId, a)
+		connect.AssertEqual(t, initial[1].NetworkId, b)
+		connect.AssertEqual(t, initial[2].NetworkId, c)
+		connect.AssertEqual(t, initial[1].PointsLeaderboardPublic, false)
 		rowA := GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, a)
 		connect.AssertEqual(t, rowA.TotalNanoPoints, PointsToNanoPoints(30))
 		connect.AssertEqual(t, rowA.BlocksWithPoints, 2)
@@ -202,7 +207,8 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		connect.AssertEqual(t, rowA.PointsLeaderboardPublic, false)
 		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, d), (*PointsLeaderboardRow)(nil))
 
-		// opt in a and c; set a's emoji and make c's name public
+		// a and c reveal their names; set a's emoji; c also turns on the DATA
+		// leaderboard's name switch, which the points row reports separately
 		SetNetworkPointsLeaderboardPublic(ctx, a, true)
 		SetNetworkPointsLeaderboardPublic(ctx, c, true)
 		SetNetworkEmojiTag(ctx, a, "🐬🔥")
@@ -213,36 +219,46 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		connect.AssertEqual(t, settings.PointsLeaderboardPublic, true)
 		connect.AssertEqual(t, settings.EmojiTag, "🐬🔥")
 
-		// the join reads the flags live: no rebuild needed. Points order: a, c
-		// (b is ranked 2 but not listed -> the visible list has a gap)
+		// the join reads the flags live: no rebuild needed. Points order: a, b,
+		// c, all listed; the name switches ride along per row
 		page := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortPoints, 0, 10)
-		connect.AssertEqual(t, len(page), 2)
+		connect.AssertEqual(t, len(page), 3)
 		connect.AssertEqual(t, page[0].NetworkId, a)
 		connect.AssertEqual(t, page[0].EmojiTag, "🐬🔥")
+		connect.AssertEqual(t, page[0].PointsLeaderboardPublic, true)
 		connect.AssertEqual(t, page[0].LeaderboardPublic, false)
-		connect.AssertEqual(t, page[1].NetworkId, c)
-		connect.AssertEqual(t, page[1].RankPoints, int64(3))
-		connect.AssertEqual(t, page[1].LeaderboardPublic, true)
-		connect.AssertEqual(t, page[1].NetworkName, "points_c")
+		connect.AssertEqual(t, page[1].NetworkId, b)
+		connect.AssertEqual(t, page[1].RankPoints, int64(2))
+		connect.AssertEqual(t, page[1].PointsLeaderboardPublic, false)
+		connect.AssertEqual(t, page[2].NetworkId, c)
+		connect.AssertEqual(t, page[2].RankPoints, int64(3))
+		connect.AssertEqual(t, page[2].PointsLeaderboardPublic, true)
+		connect.AssertEqual(t, page[2].LeaderboardPublic, true)
+		connect.AssertEqual(t, page[2].NetworkName, "points_c")
 
-		// keyset paging: one row at a time in blocks order (a: 2 blocks, c: 1)
+		// keyset paging: one row at a time in blocks order (blocks, streak,
+		// points): a (2 blocks), b (1 block, streak 1), c (1 block, streak 0)
 		first := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortBlocks, 0, 1)
 		connect.AssertEqual(t, len(first), 1)
 		connect.AssertEqual(t, first[0].NetworkId, a)
 		second := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortBlocks, first[0].Position(PointsLeaderboardSortBlocks), 1)
 		connect.AssertEqual(t, len(second), 1)
-		connect.AssertEqual(t, second[0].NetworkId, c)
+		connect.AssertEqual(t, second[0].NetworkId, b)
 		third := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortBlocks, second[0].Position(PointsLeaderboardSortBlocks), 1)
-		connect.AssertEqual(t, len(third), 0)
+		connect.AssertEqual(t, len(third), 1)
+		connect.AssertEqual(t, third[0].NetworkId, c)
+		fourth := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortBlocks, third[0].Position(PointsLeaderboardSortBlocks), 1)
+		connect.AssertEqual(t, len(fourth), 0)
 
-		// streak order: a (2), b (1, in the latest epoch), c (0); b is not
-		// listed, so the page shows a then c with c's rank 3 and position 3
+		// streak order: a (2), b (1, in the latest epoch), c (0), all listed
+		// with rank = position
 		streakPage := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortStreak, 0, 10)
-		connect.AssertEqual(t, len(streakPage), 2)
+		connect.AssertEqual(t, len(streakPage), 3)
 		connect.AssertEqual(t, streakPage[0].NetworkId, a)
-		connect.AssertEqual(t, streakPage[1].NetworkId, c)
-		connect.AssertEqual(t, streakPage[1].RankStreak, int64(3))
-		connect.AssertEqual(t, streakPage[1].PosStreak, int64(3))
+		connect.AssertEqual(t, streakPage[1].NetworkId, b)
+		connect.AssertEqual(t, streakPage[2].NetworkId, c)
+		connect.AssertEqual(t, streakPage[2].RankStreak, int64(3))
+		connect.AssertEqual(t, streakPage[2].PosStreak, int64(3))
 
 		// an unknown sort lists nothing rather than everything
 		connect.AssertEqual(t, len(GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, "bogus", 0, 10)), 0)

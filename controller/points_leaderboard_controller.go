@@ -20,6 +20,11 @@ import (
 // All-time points leaderboard api + rebuild task (android/POINTSLEADERBOARD.md).
 // The model owns the ranking rules and the snapshot table; this file owns the
 // wire shapes, the keyset cursor, the epoch windows and the scheduling.
+//
+// Every ranked network is listed, as one continuous list paged in chunks. A
+// network's name appears only when it turned on `points_leaderboard_public`
+// (the Points tab's "show my network name" switch); every other row is
+// anonymous. The emoji tag shows on every row that set one.
 
 const (
 	pointsLeaderboardDefaultLimit = 50
@@ -48,11 +53,13 @@ type PointsLeaderboardArgs struct {
 
 type PointsLeaderboardRow struct {
 	NetworkId server.Id `json:"network_id"`
-	// NetworkName is present only when the network's name is public
-	// (leaderboard_public); otherwise Anonymous is true.
+	// NetworkName is present only when the network turned on
+	// points_leaderboard_public; otherwise Anonymous is true and the row is
+	// still listed.
 	NetworkName string `json:"network_name,omitempty"`
-	EmojiTag    string `json:"emoji_tag,omitempty"`
-	Anonymous   bool   `json:"anonymous"`
+	// EmojiTag is shown whether or not the name is.
+	EmojiTag  string `json:"emoji_tag,omitempty"`
+	Anonymous bool   `json:"anonymous"`
 	// ContainsProfanity flags a public name the apps may mask.
 	ContainsProfanity bool    `json:"contains_profanity,omitempty"`
 	TotalPoints       float64 `json:"total_points"`
@@ -64,7 +71,7 @@ type PointsLeaderboardRow struct {
 	RankStreak        int64   `json:"rank_streak"`
 }
 
-// PointsLeaderboardMe is the caller's own row, opted in or not.
+// PointsLeaderboardMe is the caller's own row, named or not.
 type PointsLeaderboardMe struct {
 	PointsLeaderboardRow
 	PointsLeaderboardPublic bool `json:"points_leaderboard_public"`
@@ -148,7 +155,7 @@ func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow) PointsLeader
 	out := PointsLeaderboardRow{
 		NetworkId:        row.NetworkId,
 		EmojiTag:         row.EmojiTag,
-		Anonymous:        !row.LeaderboardPublic,
+		Anonymous:        !row.PointsLeaderboardPublic,
 		TotalPoints:      float64(row.TotalNanoPoints) / snNanoPointsPerPoint,
 		BlocksWithPoints: row.BlocksWithPoints,
 		Streak:           row.Streak,
@@ -157,7 +164,7 @@ func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow) PointsLeader
 		RankBlocks:       row.RankBlocks,
 		RankStreak:       row.RankStreak,
 	}
-	if row.LeaderboardPublic {
+	if row.PointsLeaderboardPublic {
 		out.NetworkName = row.NetworkName
 		out.ContainsProfanity = row.ContainsProfanity
 	}
@@ -171,9 +178,10 @@ func pointsLeaderboardError(message string) *PointsLeaderboardResult {
 	}
 }
 
-// GetPointsLeaderboard pages the newest snapshot. Signed-out callers get the
-// public rows; a signed-in caller also gets `me`, its own row whether or not
-// it opted in.
+// GetPointsLeaderboard pages the newest snapshot: every ranked network, in
+// the sort's order, named only where the network turned on
+// points_leaderboard_public. A signed-in caller also gets `me`, its own row
+// with its own name whether or not that switch is on.
 func GetPointsLeaderboard(
 	args *PointsLeaderboardArgs,
 	clientSession *session.ClientSession,
@@ -253,19 +261,22 @@ func pointsLeaderboardMe(
 	}
 	networkId := clientSession.ByJwt.NetworkId
 	settings := model.GetNetworkPointsLeaderboardSettings(ctx, networkId)
+	// the network always sees its own name, ranked or not; Anonymous says
+	// how everyone else sees it
 	me := &PointsLeaderboardMe{
 		PointsLeaderboardRow: PointsLeaderboardRow{
-			NetworkId: networkId,
-			EmojiTag:  settings.EmojiTag,
+			NetworkId:   networkId,
+			NetworkName: clientSession.ByJwt.NetworkName,
+			EmojiTag:    settings.EmojiTag,
+			Anonymous:   !settings.PointsLeaderboardPublic,
 		},
 		PointsLeaderboardPublic: settings.PointsLeaderboardPublic,
 	}
 	if snapshot != nil {
 		if row := model.GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, networkId); row != nil {
 			me.PointsLeaderboardRow = pointsLeaderboardRowFromModel(row)
-			// the network always sees its own name
 			me.NetworkName = row.NetworkName
-			me.Anonymous = !row.LeaderboardPublic
+			me.Anonymous = !row.PointsLeaderboardPublic
 			me.Ranked = true
 		}
 	}
@@ -289,7 +300,8 @@ type SetNetworkPointsRankingPublicError struct {
 	Message string `json:"message"`
 }
 
-// SetNetworkPointsLeaderboardPublic is the points leaderboard opt-in.
+// SetNetworkPointsLeaderboardPublic reveals (or hides) the network's name on
+// the points leaderboard; the row is listed either way.
 func SetNetworkPointsLeaderboardPublic(
 	args *SetNetworkPointsRankingPublicArgs,
 	clientSession *session.ClientSession,
