@@ -7261,24 +7261,41 @@ restart behavior independent of pre-existing host state.
 
 `journal-buffer-config` WARNs when the effective merged configuration differs
 from any of those six values. `journal-buffer-short` WARNs only after both the
-host and the current journald activation have been live for 70 minutes, when
-the current boot's oldest retained journal entry is less than 50 minutes old.
-The service-age gate allows an intentional configuration restart to refill its
-buffer, while current-boot metadata avoids treating a genuinely quiet
-five-minute interval as lost data. `journal-buffer-unavailable` PAGEs when
-`systemd-journald` itself is inactive. Missing or malformed command output is
-`cannot-observe`; missing current-boot metadata after the maturity gate is
-never interpreted as a healthy quiet host.
+host and the current journald activation have been live for 70 minutes, when a
+bounded current-boot query finds no retained entry at or before the 50-minute
+cutoff. The service-age gate allows an intentional configuration restart to
+refill its buffer. The query asks for the newest entry at or before the cutoff,
+so a quiet five-minute interval does not look like lost data.
+`journal-buffer-unavailable` PAGEs when `systemd-journald` itself is inactive.
+Missing or malformed latest-entry metadata, malformed cutoff metadata, an
+unsupported option, or unreadable journal output is `cannot-observe`; none is
+converted to a zero-age short-retention claim.
 
-The metadata query is machine-readable and bounded to one boot row with `-n 1`;
-this signal must remain cheap even if the size cap fills. A short local window
-is not proof of Loki loss. Correlate it with §11.14 `log-shipper` before
+Both metadata reads are machine-readable, current-boot-only, reverse ordered,
+hard-time-bounded, and capped at one row; this signal must remain cheap even if
+the size cap fills. A latest-entry read first proves that the monitor can read
+and parse the journal. The cutoff read may then return zero rows as affirmative
+short-buffer evidence. A short local window is not proof of Loki loss.
+Correlate it with §11.14 `log-shipper` before
 assigning durable data loss. Fix configuration drift with
 `xops/main/ansible/run-edges.sh`
 without rebooting. If the exact policy is present but the boundary is absent,
 measure a bounded producer suffix and repair pathological amplification or
 resize only from measured throughput. Closure requires two consecutive
 coverage observations and fresh per-host data through Loki.
+
+**2026-09-04 systemd-version discriminator.** Enabled edges 0, 1, and 4
+reported `journal-buffer-short` with age zero even though bounded direct
+queries found current-boot entries in the 50-to-55-minute interval. Those
+hosts run systemd 249, where `journalctl --list-boots -o json` returns a plain
+text row and ignores the requested JSON output mode. The old reducer silently
+treated the absent `first_entry` field as age zero. Healthy edge-3, Fireside,
+and Crisp run systemd 255, which returns a JSON array with `first_entry`, so
+only the older hosts false-alerted. The probe now avoids `--list-boots`, uses
+ordinary entry JSON supported by both versions, and treats malformed or
+missing timestamp fields as visibility loss. At the same observation, every
+affected host had a valid boundary witness; their actual local coverage was
+not short. High recent volume remains a capacity input, not proof of loss.
 
 ### 8.6 Config-generation restart wave — binary version alone is incomplete
 

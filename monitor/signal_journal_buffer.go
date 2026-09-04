@@ -28,10 +28,11 @@ func (journalBufferProbe) cadence() time.Duration { return 5 * time.Minute }
 
 const journalBufferMarker = "monitor-signal-8.5b-journal-buffer"
 
-// The journal metadata query is output-bounded to the current boot. Comparing
-// its first retained entry with the host clock proves coverage without treating
-// a genuinely quiet five-minute interval as lost data. The service-age gate
-// lets the buffer refill after a deliberate journald restart.
+// The journal entry queries are time- and output-bounded to the current boot.
+// A latest-entry query first proves readable machine output; a reverse query at
+// the 50-minute cutoff then proves coverage without requiring activity in one
+// narrow interval. The service-age gate lets the buffer refill after a
+// deliberate journald restart.
 const journalBufferCommand = `# ` + journalBufferMarker + `
 set -u
 
@@ -72,30 +73,45 @@ if [ "$journald_active" = active ]; then
   [ "$journald_active_seconds" -ge 0 ] || exit 33
 fi
 
-boot_metadata=$(journalctl -q --list-boots -n 1 -o json --no-pager 2>/dev/null) || exit 34
-first_entry_us=$(printf '%s\n' "$boot_metadata" |
-  sed -n 's/.*"first_entry":\([0-9][0-9]*\).*/\1/p' | head -n 1)
-oldest_entry_age_seconds=0
-case "$first_entry_us" in
-  ''|*[!0-9]*) ;;
-  *)
-    now_seconds=$(date +%s) || exit 35
-    oldest_entry_age_seconds=$(( now_seconds - first_entry_us / 1000000 ))
-    [ "$oldest_entry_age_seconds" -ge 0 ] || exit 35
-    ;;
-esac
+parse_journal_timestamp() {
+  record=$1
+  [ -n "$record" ] || return 1
+  [ "$(printf '%s\n' "$record" | awk 'NF {count++} END {print count+0}')" -eq 1 ] || return 1
+  case "$record" in \{*\}) ;; *) return 1 ;; esac
+  [ "$(printf '%s\n' "$record" | awk -F'"__REALTIME_TIMESTAMP"' '{print NF-1}')" -eq 1 ] || return 1
+  journal_timestamp_us=$(printf '%s\n' "$record" |
+    sed -n 's/.*"__REALTIME_TIMESTAMP"[[:space:]]*:[[:space:]]*"\{0,1\}\([0-9][0-9]*\)"\{0,1\}.*/\1/p')
+  case "$journal_timestamp_us" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+now_seconds=$(date +%s) || exit 34
+latest_record=$(timeout 10s journalctl -q -b 0 --reverse -n 1 --no-pager \
+  --output-fields=__REALTIME_TIMESTAMP -o json 2>&1) || exit 34
+parse_journal_timestamp "$latest_record" || exit 35
+latest_entry_seconds=$(( journal_timestamp_us / 1000000 ))
+[ "$latest_entry_seconds" -le "$now_seconds" ] || exit 35
+
+boundary_record=$(timeout 10s journalctl -q -b 0 --reverse \
+  --until '50 minutes ago' -n 1 --no-pager \
+  --output-fields=__REALTIME_TIMESTAMP -o json 2>&1) || exit 34
+boundary_entry_age_seconds=0
+if [ -n "$boundary_record" ]; then
+  parse_journal_timestamp "$boundary_record" || exit 35
+  boundary_entry_age_seconds=$(( now_seconds - journal_timestamp_us / 1000000 ))
+  [ "$boundary_entry_age_seconds" -ge 3000 ] || exit 35
+fi
 
 coverage_checked=0
 coverage_present=0
 if [ "${uptime_seconds:-0}" -ge 4200 ] && [ "$journald_active_seconds" -ge 4200 ]; then
   coverage_checked=1
-  if [ "$oldest_entry_age_seconds" -ge 3000 ]; then
+  if [ "$boundary_entry_age_seconds" -ge 3000 ]; then
     coverage_present=1
   fi
 fi
 
 printf '%s\n' \
-  'observation_schema=2' \
+  'observation_schema=3' \
   "journald_active=${journald_active}" \
   "journald_active_seconds=${journald_active_seconds}" \
   "storage=${storage:--}" \
@@ -107,24 +123,24 @@ printf '%s\n' \
   "uptime_seconds=${uptime_seconds:--}" \
   "coverage_checked=${coverage_checked}" \
   "coverage_present=${coverage_present}" \
-  "oldest_entry_age_seconds=${oldest_entry_age_seconds}" \
+  "boundary_entry_age_seconds=${boundary_entry_age_seconds}" \
   'coverage_target_seconds=3000'
 `
 
 type journalBufferSample struct {
-	journaldActive        string
-	journaldActiveSeconds int
-	storage               string
-	maxUse                string
-	maxFileSize           string
-	maxFiles              string
-	maxFileSec            string
-	maxRetention          string
-	uptimeSeconds         int
-	coverageChecked       bool
-	coveragePresent       bool
-	oldestEntryAgeSeconds int
-	coverageTargetSeconds int
+	journaldActive          string
+	journaldActiveSeconds   int
+	storage                 string
+	maxUse                  string
+	maxFileSize             string
+	maxFiles                string
+	maxFileSec              string
+	maxRetention            string
+	uptimeSeconds           int
+	coverageChecked         bool
+	coveragePresent         bool
+	boundaryEntryAgeSeconds int
+	coverageTargetSeconds   int
 }
 
 type journalBufferResult struct {
@@ -189,7 +205,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		"observation_schema", "journald_active", "journald_active_seconds", "storage",
 		"max_use", "max_file_size", "max_files", "max_file_sec", "max_retention",
 		"uptime_seconds", "coverage_checked", "coverage_present",
-		"oldest_entry_age_seconds", "coverage_target_seconds",
+		"boundary_entry_age_seconds", "coverage_target_seconds",
 	}
 	values := map[string]string{}
 	allowed := map[string]bool{}
@@ -215,7 +231,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 			return journalBufferSample{}, fmt.Errorf("journal buffer: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "2" {
+	if values["observation_schema"] != "3" {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: unsupported observation schema")
 	}
 
@@ -234,7 +250,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 	if err != nil {
 		return journalBufferSample{}, err
 	}
-	oldestEntryAge, err := parseNonnegative("oldest_entry_age_seconds")
+	boundaryEntryAge, err := parseNonnegative("boundary_entry_age_seconds")
 	if err != nil {
 		return journalBufferSample{}, err
 	}
@@ -266,7 +282,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 	if coverageTarget != 3000 {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: invalid coverage target")
 	}
-	if checked && present != (oldestEntryAge >= coverageTarget) {
+	if checked && present != (boundaryEntryAge >= coverageTarget) {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent coverage result")
 	}
 	return journalBufferSample{
@@ -274,16 +290,16 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		storage: values["storage"], maxUse: values["max_use"], maxFileSize: values["max_file_size"],
 		maxFiles: values["max_files"], maxFileSec: values["max_file_sec"], maxRetention: values["max_retention"],
 		uptimeSeconds: uptime, coverageChecked: checked, coveragePresent: present,
-		oldestEntryAgeSeconds: oldestEntryAge, coverageTargetSeconds: coverageTarget,
+		boundaryEntryAgeSeconds: boundaryEntryAge, coverageTargetSeconds: coverageTarget,
 	}, nil
 }
 
 func evaluateJournalBuffer(target string, sample journalBufferSample) []finding {
 	observed := fmt.Sprintf(
-		"journald_active=%s journald_active_seconds=%d storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s uptime_seconds=%d coverage_checked=%t coverage_present=%t oldest_entry_age_seconds=%d coverage_target_seconds=%d",
+		"journald_active=%s journald_active_seconds=%d storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s uptime_seconds=%d coverage_checked=%t coverage_present=%t boundary_entry_age_seconds=%d coverage_target_seconds=%d",
 		sample.journaldActive, sample.journaldActiveSeconds, sample.storage, sample.maxUse, sample.maxFileSize,
 		sample.maxFiles, sample.maxFileSec, sample.maxRetention, sample.uptimeSeconds,
-		sample.coverageChecked, sample.coveragePresent, sample.oldestEntryAgeSeconds, sample.coverageTargetSeconds,
+		sample.coverageChecked, sample.coveragePresent, sample.boundaryEntryAgeSeconds, sample.coverageTargetSeconds,
 	)
 	findings := []finding{}
 	if sample.journaldActive != "active" {
@@ -327,9 +343,9 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 			probeId: "host/journal-buffer", tier: tierWarn,
 			class: "journal-buffer-short", target: target, sustain: 2,
 			symptom:   fmt.Sprintf("%s retained less than 50 minutes of current-boot journal evidence", target),
-			mechanism: "The oldest retained current-boot record is younger than the recovery boundary even though both the host and journald have been active long enough to refill it. Size pressure, coarse whole-file rotation, or a journal failure removed the usable window.",
-			baseline:  "After both host and journald have been active for 70 minutes, the oldest retained current-boot record is at least 50 minutes old while older records age into Loki.", observed: observed,
-			evidence: fmt.Sprintf("oldest retained current-boot record age=%ds, required=%ds", sample.oldestEntryAgeSeconds, sample.coverageTargetSeconds),
+			mechanism: "No readable current-boot record exists at or before the recovery cutoff even though both the host and journald have been active long enough to refill it. Size pressure, coarse whole-file rotation, or a journal failure removed the usable window.",
+			baseline:  "After both host and journald have been active for 70 minutes, a readable current-boot record exists at or before the 50-minute cutoff while older records age into Loki.", observed: observed,
+			evidence: fmt.Sprintf("boundary witness age=%ds, required=%ds", sample.boundaryEntryAgeSeconds, sample.coverageTargetSeconds),
 			context:  "This is local evidence loss, not proof that Loki also lost the records. Compare end-to-end shipper freshness before assigning data loss.",
 			action:   "Measure journal bytes and top producers over a bounded suffix, confirm the effective cap, and verify Fluent Bit/Loki freshness. Reduce pathological log amplification or resize the buffer only from measured throughput.",
 			verify:   "Require at least 50 minutes of current-boot coverage on two consecutive probes and independently query fresh host data in Loki.",
