@@ -1475,3 +1475,109 @@ func TestNovelDiverseOneOffShapesDoNotAlert(t *testing.T) {
 		t.Fatalf("unrelated one-off web probes produced a novel alert: %+v", novel)
 	}
 }
+
+// A minute may contain several unmatched failure shapes. The representative
+// sample must belong to the selected top shape; retaining the first global
+// sample falsely paired production's provider-tunnel top shape with unrelated
+// reliability and evaluation failures.
+func TestNovelSampleBelongsToTopShapeAndRedactsID(t *testing.T) {
+	const firstID = "11111111-1111-1111-1111-111111111111"
+	const topID = "22222222-2222-2222-2222-222222222222"
+	const correlationID = "raw-customer-correlation"
+	const customerID = "raw-customer-id"
+	const providerID = "raw-provider-id"
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify("widget error: alpha session " + firstID)
+	for i := 0; i < novelRateThreshold; i += 1 {
+		tailer.classify(fmt.Sprintf(
+			`[edge-private][taskworker][g2][cid:%s] gadget failure: beta session %s customer_id=%s {"provider_id":"%s"} attempt %d`,
+			correlationID,
+			topID,
+			customerID,
+			providerID,
+			i,
+		))
+	}
+
+	novel := findingByClass(t, tailer.drainWindow(), "novel")
+	if novel.healthy {
+		t.Fatal("top novel shape at threshold did not alert")
+	}
+	for _, want := range []string{
+		`top shape: [edge-private][taskworker][g2][cid:<id>] gadget failure: beta session # <redacted-id> {<redacted-id>} attempt #`,
+		`sample from top shape: gadget failure: beta session <id> <redacted-id> {<redacted-id>} attempt 0`,
+	} {
+		if !strings.Contains(novel.evidence, want) {
+			t.Fatalf("novel evidence lacks %q: %q", want, novel.evidence)
+		}
+	}
+	for _, unwanted := range []string{
+		"widget error",
+		firstID,
+		topID,
+		correlationID,
+		customerID,
+		providerID,
+	} {
+		if strings.Contains(novel.evidence, unwanted) {
+			t.Fatalf("novel evidence retained unrelated or private value %q: %q", unwanted, novel.evidence)
+		}
+	}
+}
+
+func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
+	const entityID = "raw-customer-correlation"
+	line := "[edge-private][taskworker][g2][cid:" + entityID + "] providertunnel: tun read error: Done"
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i += 1 {
+		tailer.classify(line)
+	}
+
+	findings := tailer.drainWindow()
+	readDone := findingByClass(t, findings, "provider-tunnel-read-done")
+	if readDone.healthy {
+		t.Fatal("provider-tunnel terminal Done rate did not alert")
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", readDone,
+	).Markdown()
+	for _, want := range []string{
+		"providertunnel: tun read error: Done",
+		"v2026.9.3-1036806790",
+		"4ba0dd88",
+		"20e289bd",
+		"active Taskworker artifact",
+		"does not encode the outer context state",
+		"If it contains 20e289bd",
+		"zero for 10 minutes",
+		"live-context TUN read failure is still logged",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("provider-tunnel finding lacks %q: %+v", want, readDone)
+		}
+	}
+	for _, private := range []string{"edge-private", entityID} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("provider-tunnel alert retained private value %q", private)
+		}
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified provider-tunnel Done also became novel: %+v", novel)
+	}
+
+	// The product fix intentionally preserves errors while the tunnel context
+	// is live. Only the exact terminal Done text belongs to this neutral class;
+	// no other read error may be suppressed or reinterpreted.
+	live := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i += 1 {
+		live.classify("providertunnel: tun read error: synthetic live read failure")
+	}
+	liveFindings := live.drainWindow()
+	if finding := findingByClass(t, liveFindings, "provider-tunnel-read-done"); !finding.healthy {
+		t.Fatalf("live-context read failure was mislabeled terminal Done: %+v", finding)
+	}
+	if finding := findingByClass(t, liveFindings, "novel"); finding.healthy {
+		t.Fatal("live-context read failure disappeared from the novel safety net")
+	}
+}

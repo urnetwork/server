@@ -935,7 +935,32 @@ the sample line. Apply the novelty threshold to the most frequent normalized
 shape, not the sum of unrelated shapes. Public web endpoints routinely receive
 scanner bursts across dozens of nonexistent paths; nginx logs those misses at
 error level, but many one-off paths do not constitute one recurring server
-failure. Keep the total and distinct-shape counts as diagnostic context.
+failure. Keep the total and distinct-shape counts as diagnostic context. Select
+the representative sample from that same top normalized shape, rather than the
+first unmatched line in the whole minute. Redact the Warp correlation value in
+the shape, omit the whole Warp identity prefix from the sample, and redact
+UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
+two unrelated failures in one window can render a correct top shape beside
+misleading or private evidence from another shape.
+
+The 2026-09-04 Taskworker tail exposed both sides of that invariant. Its top
+unmatched shape was exact `providertunnel: tun read error: Done` at about
+65/min, while several alert samples came from unrelated `[rel]`, evaluation,
+or window-enumeration shapes because the monitor retained one global first
+sample. The line itself proves only that `Tun.Read` returned terminal `Done`;
+it does not encode the outer context state or active artifact ancestry. The
+local release tag `v2026.9.3-1036806790` dereferences to operator-proxy snapshot
+commit `4ba0dd88`, whose versioned source logs every TUN read return, and does
+not contain `20e289bd`. That tag inspection does not prove the active
+Taskworker runs it. Current operator-proxy main contains `20e289bd`, which
+suppresses the read error only after that tunnel's context is canceled and
+preserves live-context read errors. Class only the exact terminal `Done` form
+as `provider-tunnel-read-done`, then prove runtime ancestry. On a proven
+pre-`20e289bd` artifact, the line is consistent with ordinary teardown through
+the unconditional legacy logger; deploy a containing Taskworker. On a proven
+descendant, recurrence is an affirmative unexpected Tun/context close-order
+fault. Require zero exact lines for 10 minutes through comparable
+ProviderEgress churn and never suppress other TUN read errors.
 
 Connect's former TLS-loader fallback is a dedicated page class, not a generic
 panic. Exact line `[c]Could not initialize tls config. Disabling transport. =`
@@ -5196,6 +5221,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `connection reset by peer` or WebSocket `close 1006 ... unexpected EOF` (`conn-reset`) | The receiver observed an abrupt transport termination, not an orderly close. `connection reset by peer` is peer-relative, and WebSocket 1006 means no close frame arrived; neither identifies which endpoint or network hop caused it. The peer can be a device or service depending on connection direction, while a NAT, load balancer, firewall, or other intermediary can also discard state or inject a reset. | Preserve the emitting host/block/protocol/process generation, identify connection direction, and correlate the exact minute with peer lifecycle, restarts, LB/NAT/conntrack, carrier, OOM/cgroup, socket, and service-specific resource controls. Do not call it a server close, restart a healthy process, increase buffers, or claim memory pressure from this line alone. Require the rate below 50/min for ten minutes under equivalent traffic and the independently identified causal control healthy. See §13. |
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
+| `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |

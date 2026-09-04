@@ -374,6 +374,15 @@ var logClasses = []logClass{
 	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
 		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
+	{name: "provider-tunnel-read-done", re: regexp.MustCompile(`providertunnel: tun read error: Done[[:space:]]*$`),
+		sample:        providerTunnelReadDoneLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,
+		meaning:   "the Taskworker's embedded operator-proxy returned terminal Done from Tun.Read; the line does not encode the outer context state or the active artifact ancestry",
+		mechanism: "Release tag v2026.9.3-1036806790 dereferences to operator-proxy snapshot 4ba0dd88, which contains an unconditional providertunnel TUN-read logger and does not contain commit 20e289bd. On an active artifact proven to predate 20e289bd, the exact line is consistent with that legacy logger observing ordinary canceled teardown. On a proven descendant, 20e289bd suppresses a read error only after the tunnel context is canceled, so recurrence is an affirmative unexpected Tun/context close-order fault.",
+		context:   "The 2026-09-04 authoritative Taskworker tail reported this exact normalized shape at about 65/min, but the line and the locally inspected release tag do not prove which artifact emitted it. A separate monitor defect could pair a novel alert's top shape with the first sample from another shape; this dedicated class and the shape-keyed novel samples prevent that misleading evidence. Do not generalize this classification to any other TUN read error.",
+		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
+		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
+	},
 	{name: "db-maintenance-legacy-reindex", re: dbMaintenanceLegacyReindexRe,
 		groupBy:       dbMaintenanceLegacyReindexLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.2a",
@@ -414,6 +423,12 @@ var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
 var logIDRe = regexp.MustCompile(`[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`)
+
+var (
+	novelWarpCorrelationRe = regexp.MustCompile(`\[cid:[^\]]+\]`)
+	novelNamedIDRe         = regexp.MustCompile(`(?i)\b(customer|client|provider|network|account|device|contract|payment|wallet|task)[_-]?id[=:]("[^"]*"|[^[:space:],}]+)`)
+	novelNamedJSONIDRe     = regexp.MustCompile(`(?i)"(customer|client|provider|network|account|device|contract|payment|wallet|task)[_-]?id"[[:space:]]*:[[:space:]]*("[^"]*"|[^[:space:],}]+)`)
+)
 
 var novelNormalizeRes = []*regexp.Regexp{
 	logIDRe,
@@ -603,6 +618,34 @@ func grafanaPluginUnregisteredLogSample(line string) string {
 
 var mimirBucketIndexLagSampleRe = regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*?\bours=[^[:space:]]+[[:space:]]+requested=[^[:space:]]+[[:space:]]+diff=-[0-9]+[[:space:]]+msg="bucket index version \(updated_at\) is older than requested"`)
 
+// providerTunnelReadDoneLogSample deliberately drops the Warp identity and
+// correlation prefix. The exact terminal phrase is the complete diagnostic;
+// retaining a host, container id, or provider id would add no discriminator.
+func providerTunnelReadDoneLogSample(string) string {
+	return "providertunnel: tun read error: Done"
+}
+
+// redactNovelNamedIDs removes explicit customer/entity identifier fields
+// without retaining their values. UUIDs and the Warp correlation prefix are
+// handled separately so both the normalized shape and its sample can use the
+// same fixed-cardinality privacy boundary.
+func redactNovelNamedIDs(line string) string {
+	line = novelNamedJSONIDRe.ReplaceAllString(line, "<redacted-id>")
+	return novelNamedIDRe.ReplaceAllString(line, "<redacted-id>")
+}
+
+// novelLogSample removes the Warp identity prefix (including its arbitrary
+// cid), then redacts UUIDs and named identifier fields before bounding the
+// retained evidence. The normalized top shape is stored separately.
+func novelLogSample(line string) string {
+	if bounds := warpLogIdentityRe.FindStringIndex(line); len(bounds) == 2 && bounds[0] == 0 {
+		line = strings.TrimSpace(line[bounds[1]:])
+	}
+	line = redactNovelNamedIDs(line)
+	line = logIDRe.ReplaceAllString(line, "<id>")
+	return truncateLine(line)
+}
+
 // mimirBucketIndexLagLogGroup retains the exact replica identity whose local
 // cache lagged. The raw tenant remains deliberately absent; this deployment
 // uses anonymous today, but the alert identity must stay privacy-safe if that
@@ -710,9 +753,11 @@ type logTailer struct {
 	// alert-relevant records long enough to make the two transports and
 	// successive overlap queries idempotent without retaining ordinary logs.
 	standingSeen map[[sha256.Size]byte]time.Time
-	// normalized novel shape -> count
-	novelCounts map[string]int
-	novelSample string
+	// normalized novel shape -> count/sample. The sample must come from the
+	// selected top shape; retaining one global first sample can pair unrelated
+	// evidence with that shape when several novel classes share a minute.
+	novelCounts  map[string]int
+	novelSamples map[string]string
 	// tailer self-health (§3.7), read by the logTailProbe health findings
 	lastLineTime   time.Time
 	restartCount   int
@@ -765,6 +810,7 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		canonicalSeenPrevious:   map[[sha256.Size]byte]struct{}{},
 		standingSeen:            map[[sha256.Size]byte]time.Time{},
 		novelCounts:             map[string]int{},
+		novelSamples:            map[string]string{},
 		transportRouteEvents:    map[string]tailTransportRouteEvent{},
 		// silence is measured from tailer start until the first line arrives
 		lastLineTime: startedAt,
@@ -1308,7 +1354,8 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 		if !count {
 			return
 		}
-		shape := line
+		shape := novelWarpCorrelationRe.ReplaceAllString(line, "[cid:<id>]")
+		shape = redactNovelNamedIDs(shape)
 		for _, re := range novelNormalizeRes {
 			shape = re.ReplaceAllString(shape, "#")
 		}
@@ -1316,8 +1363,8 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			shape = shape[:160]
 		}
 		self.novelCounts[shape] += 1
-		if self.novelSample == "" {
-			self.novelSample = truncateLine(line)
+		if _, ok := self.novelSamples[shape]; !ok {
+			self.novelSamples[shape] = novelLogSample(line)
 		}
 	}
 }
@@ -1549,8 +1596,14 @@ func (self *logTailer) drainWindow() []finding {
 	novelTotal := 0
 	topShape := ""
 	topCount := 0
+	shapes := make([]string, 0, len(self.novelCounts))
 	for shape, count := range self.novelCounts {
 		novelTotal += count
+		shapes = append(shapes, shape)
+	}
+	sort.Strings(shapes)
+	for _, shape := range shapes {
+		count := self.novelCounts[shape]
 		if count > topCount {
 			topShape, topCount = shape, count
 		}
@@ -1570,7 +1623,7 @@ func (self *logTailer) drainWindow() []finding {
 			symptom:  fmt.Sprintf("service %s: %d/min error-shaped lines matching no known class (top shape %d/min)", self.service, novelTotal, topCount),
 			baseline: "each unmatched normalized error shape < 20/min; one new signature at rate = new failure mode (1.5)",
 			observed: fmt.Sprintf("rate=%d/min distinct_shapes=%d", novelTotal, len(self.novelCounts)),
-			evidence: "top shape: " + topShape + "\nsample: " + self.novelSample,
+			evidence: "top shape: " + topShape + "\nsample from top shape: " + self.novelSamples[topShape],
 			playbook: "SIGNALS.md §4",
 		})
 	} else {
@@ -1593,7 +1646,7 @@ func (self *logTailer) drainWindow() []finding {
 	self.canonicalSeenPrevious = self.canonicalSeen
 	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
-	self.novelSample = ""
+	self.novelSamples = map[string]string{}
 	now := self.clock()
 	self.pruneStandingSeenLocked(now)
 	for secondKey, seenAt := range self.burstRecentSecondSeen {
