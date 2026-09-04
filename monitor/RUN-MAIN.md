@@ -330,7 +330,7 @@ Useful source-of-truth pairings are:
 | host or edge address | live interface and policy-routing state | active `services.yml`, host config, router path, and exact-origin probes |
 | log loss | standing tail health and privacy-safe drop summaries | bounded absolute-window reconciliation per service/block and direct host journal |
 | metrics identity | fresh process-emitted series with host/block/instance labels | live process start, listener, ring membership, and scrape age |
-| metrics restart durability | exact loopback Mimir `/config` value reduced remotely to the non-secret shutdown-flush Boolean | controlled replacement followed by no new bounded §11.20 build-info gap through a block-upload window |
+| metrics restart durability | exact loopback Mimir `/config`, reduced remotely to `flush_blocks_on_shutdown`, `query_store_after`, `query_ingesters_within`, blocks-storage `ignore_blocks_within`, bucket-store `sync_interval`, and compactor `cleanup_interval` | separate exact-process lifecycle proof plus a controlled replacement with no new bounded §11.20 gap through the complete handoff and discovery window; config and sustain state are process-local |
 
 Use the existing SSH and Warpctl transports and the commands documented in
 `SIGNALS.md`; do not improvise a less safe secret path. Never contact a disabled
