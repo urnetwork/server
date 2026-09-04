@@ -226,3 +226,30 @@ func TestSubscriptionDetailsDbNoCustomerNoPortal(t *testing.T) {
 		}
 	})
 }
+
+// A details build that read the stores before a cancel landed must not
+// overwrite the cache after it: the counter it read is stale, so the write
+// is refused, and the next build (which reads the new counter) is accepted.
+func TestSubscriptionDetailsDbStaleBuildCannotOverwriteAnInvalidation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		stale := &SubscriptionDetailsResult{Subscriptions: []*SubscriptionDetail{}, UpdateTime: server.NowUtc()}
+
+		generation := getSubscriptionDetailsGeneration(ctx, networkId)
+		// the cancel lands while the build is away at the stores
+		clearSubscriptionDetailsCached(ctx, networkId)
+		setSubscriptionDetailsCachedIfCurrent(ctx, networkId, generation, stale)
+		if cached := getSubscriptionDetailsCached(ctx, networkId); cached != nil {
+			t.Fatalf("a build from before the invalidation wrote the cache: %+v", cached)
+		}
+
+		// a build that saw the invalidation writes normally
+		generation = getSubscriptionDetailsGeneration(ctx, networkId)
+		setSubscriptionDetailsCachedIfCurrent(ctx, networkId, generation, stale)
+		if cached := getSubscriptionDetailsCached(ctx, networkId); cached == nil {
+			t.Fatal("a current build did not write the cache")
+		}
+		clearSubscriptionDetailsCached(ctx, networkId)
+	})
+}

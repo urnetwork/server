@@ -119,7 +119,7 @@ const (
 // secret).
 type payDataIpLimiter struct {
 	limitPerMinute int
-	lock           sync.Mutex
+	stateLock      sync.Mutex
 	window         time.Time
 	counts         map[[32]byte]int
 }
@@ -144,8 +144,8 @@ func (self *payDataIpLimiter) allow(clientSession *session.ClientSession) (allow
 }
 
 func (self *payDataIpLimiter) allowHash(clientAddressHash [32]byte, now time.Time) bool {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	if self.window.IsZero() || time.Minute <= now.Sub(self.window) {
 		self.window = now
 		self.counts = map[[32]byte]int{}

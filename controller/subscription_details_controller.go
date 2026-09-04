@@ -35,6 +35,10 @@ import (
 
 const subscriptionDetailsCacheTtl = 60 * time.Second
 
+// how long the per-network invalidation counter lives; only its identity
+// across one build matters, so anything longer than a build is enough
+const subscriptionDetailsGenerationTtl = 24 * time.Hour
+
 // per-store lookup budget; the screen waits on the slowest store
 const subscriptionStoreLookupTimeout = 5 * time.Second
 
@@ -129,18 +133,54 @@ func getSubscriptionDetailsCached(ctx context.Context, networkId server.Id) *Sub
 	return result
 }
 
-func setSubscriptionDetailsCached(ctx context.Context, networkId server.Id, result *SubscriptionDetailsResult) {
+func subscriptionDetailsGenerationKey(networkId server.Id) string {
+	return fmt.Sprintf("subscription_details_generation:%s", networkId)
+}
+
+// The invalidation counter as it stands right now; a network that was never
+// invalidated reads "0", the same value the write script assumes for a
+// missing key.
+func getSubscriptionDetailsGeneration(ctx context.Context, networkId server.Id) string {
+	generation := "0"
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.Get(ctx, subscriptionDetailsGenerationKey(networkId)).Result()
+		if err == nil && value != "" {
+			generation = value
+		}
+	})
+	return generation
+}
+
+// Writes the cache only if no invalidation landed since `generation` was
+// read. A build spends up to a store lookup budget per store away from redis;
+// a cancel or resume that commits in that window bumps the counter, and the
+// stale result must not overwrite it (it would show "renews" for a whole ttl
+// after the customer cancelled). The compare and the write are one script,
+// so there is no gap for a bump to slip into.
+func setSubscriptionDetailsCachedIfCurrent(ctx context.Context, networkId server.Id, generation string, result *SubscriptionDetailsResult) {
 	value, err := json.Marshal(result)
 	if err != nil {
 		return
 	}
+	script := `local g = redis.call('GET', KEYS[2]) if not g then g = '0' end if g == ARGV[2] then redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3]) return 1 else return 0 end`
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.Set(ctx, subscriptionDetailsCacheKey(networkId), value, subscriptionDetailsCacheTtl)
+		r.Eval(
+			ctx,
+			script,
+			[]string{subscriptionDetailsCacheKey(networkId), subscriptionDetailsGenerationKey(networkId)},
+			value,
+			generation,
+			int64(subscriptionDetailsCacheTtl/time.Second),
+		)
 	})
 }
 
+// Drops the cached details and bumps the invalidation counter, so a build
+// that read the stores before this point cannot write its result afterwards.
 func clearSubscriptionDetailsCached(ctx context.Context, networkId server.Id) {
 	server.Redis(ctx, func(r server.RedisClient) {
+		r.Incr(ctx, subscriptionDetailsGenerationKey(networkId))
+		r.Expire(ctx, subscriptionDetailsGenerationKey(networkId), subscriptionDetailsGenerationTtl)
 		r.Del(ctx, subscriptionDetailsCacheKey(networkId))
 	})
 }
@@ -151,6 +191,8 @@ func SubscriptionDetails(clientSession *session.ClientSession) (*SubscriptionDet
 	if cached := getSubscriptionDetailsCached(clientSession.Ctx, networkId); cached != nil {
 		return cached, nil
 	}
+	// read before the store lookups: a cancel that lands during them bumps it
+	generation := getSubscriptionDetailsGeneration(clientSession.Ctx, networkId)
 
 	stripeCustomerId := ""
 	if customerId, err := model.GetStripeCustomer(clientSession); err == nil && customerId != nil {
@@ -162,7 +204,7 @@ func SubscriptionDetails(clientSession *session.ClientSession) (*SubscriptionDet
 		model.SubscriptionTypeSupporter,
 	)
 	result := buildSubscriptionDetails(clientSession.Ctx, renewals, stripeCustomerId, &subscriptionStoreLookups)
-	setSubscriptionDetailsCached(clientSession.Ctx, networkId, result)
+	setSubscriptionDetailsCachedIfCurrent(clientSession.Ctx, networkId, generation, result)
 	return result, nil
 }
 
