@@ -43,6 +43,7 @@ type backupArchiveWriterFixture struct {
 	remoteMountFSType  string
 	remoteMountOptions string
 	remoteMountLineage string
+	clearanceState     string
 	storageReadable    *bool
 	storageEvents      []backupArchiveStorageEventFixture
 }
@@ -411,6 +412,92 @@ func TestBackupArchivesSignalSyntheticUnrelatedDeviceFaultDoesNotTaintArchiveVol
 	}
 }
 
+func TestBackupArchivesSignalSyntheticActiveWriterDuringUnverifiedRecovery(t *testing.T) {
+	now := time.Date(2026, 9, 4, 13, 20, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name             string
+		githubState      string
+		githubPID        int64
+		remoteState      string
+		remoteSubstate   string
+		remotePID        int64
+		clearanceState   string
+		wantActiveWriter string
+	}{
+		{name: "data-missing", githubState: "inactive", remoteState: "activating", remoteSubstate: "start", remotePID: 153799, clearanceState: "missing", wantActiveWriter: "active_writers=data"},
+		{name: "github-invalid", githubState: "active", githubPID: 168693, remoteState: "inactive", remoteSubstate: "dead", clearanceState: "invalid", wantActiveWriter: "active_writers=github"},
+		{name: "both-unobservable", githubState: "active", githubPID: 168693, remoteState: "activating", remoteSubstate: "start", remotePID: 153799, clearanceState: "unobservable", wantActiveWriter: "active_writers=data,github"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+				unitState:          test.githubState,
+				mainPID:            test.githubPID,
+				remoteUnitState:    test.remoteState,
+				remoteUnitSubstate: test.remoteSubstate,
+				remoteMainPID:      test.remotePID,
+				clearanceState:     test.clearanceState,
+				storageEvents: []backupArchiveStorageEventFixture{
+					{epoch: now.Add(-time.Hour).Unix(), kind: "journal", device: "dm-2"},
+				},
+			})
+			alert := requireBackupArchiveAlert(t, alerts, "backup-archive-writer-active-during-recovery", "backup-1/archive-volume")
+			if alert.Severity != SeverityPage || alert.Sustain != 1 {
+				t.Fatalf("unsafe writer urgency = %s/%d, want page/1: %+v", alert.Severity, alert.Sustain, alert)
+			}
+			for _, want := range []string{
+				test.wantActiveWriter,
+				"clearance_state=" + test.clearanceState,
+				"data_main_pid_present=",
+				"github_main_pid_present=",
+				"fault_latest=2026-09-04T12:20:00Z",
+				"explicit current-writer operator decision",
+				"does not protect an already-running shell",
+				"does not return process arguments",
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("unsafe writer alert missing %q:\n%s", want, alert.Markdown())
+				}
+			}
+			for _, rawPID := range []string{"153799", "168693"} {
+				if strings.Contains(alert.Markdown(), rawPID) {
+					t.Fatalf("unsafe writer alert leaked raw PID %s:\n%s", rawPID, alert.Markdown())
+				}
+			}
+			requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+		})
+	}
+}
+
+func TestBackupArchivesSignalSyntheticClearedActiveWriterIsNotUnsafe(t *testing.T) {
+	now := time.Date(2026, 9, 4, 13, 20, 30, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState: "active", mainPID: 168693,
+		remoteUnitState: "activating", remoteUnitSubstate: "start", remoteMainPID: 153799,
+		clearanceState: "valid",
+		storageEvents: []backupArchiveStorageEventFixture{
+			{epoch: now.Add(-time.Hour).Unix(), kind: "journal", device: "dm-2"},
+		},
+	})
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-writer-active-during-recovery", "backup-1/archive-volume"); alert != nil {
+		t.Fatalf("valid stable-identity clearance was still marked unsafe: %+v", *alert)
+	}
+	requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+}
+
+func TestBackupArchivesSignalSyntheticStoppedWritersAreSafeDuringRecoveryGate(t *testing.T) {
+	now := time.Date(2026, 9, 4, 13, 21, 0, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState: "inactive", remoteUnitState: "inactive", remoteUnitSubstate: "dead",
+		storageEvents: []backupArchiveStorageEventFixture{
+			{epoch: now.Add(-time.Hour).Unix(), kind: "transport", device: "sda"},
+		},
+	})
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-writer-active-during-recovery", "backup-1/archive-volume"); alert != nil {
+		t.Fatalf("stopped writers were marked active during recovery: %+v", *alert)
+	}
+	requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+}
+
 func TestBackupArchivesSignalSyntheticSuccessfulIdleWithRecentRowsIsNotRecoveryIdle(t *testing.T) {
 	now := time.Date(2026, 9, 3, 17, 7, 0, 0, time.UTC)
 	zero := float64(0)
@@ -552,7 +639,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 25 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 26 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
@@ -561,6 +648,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		{name: "mount present", output: strings.Replace(valid, "remote_mount_present=true", "remote_mount_present=maybe", 1), want: "invalid remote_mount_present"},
 		{name: "mount options", output: strings.Replace(valid, "remote_mount_options=rw,nosuid,nodev,relatime,errors=remount-ro", "remote_mount_options=rw secret", 1), want: "invalid remote_mount_options"},
 		{name: "mount lineage", output: strings.Replace(valid, "remote_mount_lineage=dm-2,sda1,sda", "remote_mount_lineage=dm-2,sda1,sda;bad", 1), want: "invalid remote_mount_lineage"},
+		{name: "clearance state", output: strings.Replace(valid, "remote_clearance_state=unobservable", "remote_clearance_state=raw helper error", 1), want: "invalid remote_clearance_state"},
 		{name: "journal readable", output: strings.Replace(valid, "remote_storage_journal_readable=true", "remote_storage_journal_readable=maybe", 1), want: "invalid remote_storage_journal_readable"},
 		{name: "event kind", output: valid + "remote_storage_event=1788450000,other,sda\n", want: "invalid remote_storage_event kind"},
 		{name: "event device", output: valid + "remote_storage_event=1788450000,transport,sda;bad\n", want: "invalid remote_storage_event device"},
@@ -927,6 +1015,9 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteMountLineage == "" {
 		fixture.remoteMountLineage = "dm-2,sda1,sda"
 	}
+	if fixture.clearanceState == "" {
+		fixture.clearanceState = "unobservable"
+	}
 	if fixture.storageReadable == nil {
 		fixture.storageReadable = boolPointer(true)
 	}
@@ -955,6 +1046,7 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_mount_fstype=%s\n"+
 			"remote_mount_options=%s\n"+
 			"remote_mount_lineage=%s\n"+
+			"remote_clearance_state=%s\n"+
 			"remote_storage_journal_readable=%t\n",
 		fixture.unitState,
 		fixture.mainPID,
@@ -980,6 +1072,7 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteMountFSType,
 		fixture.remoteMountOptions,
 		fixture.remoteMountLineage,
+		fixture.clearanceState,
 		*fixture.storageReadable,
 	)
 	for _, event := range fixture.storageEvents {

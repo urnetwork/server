@@ -9402,7 +9402,13 @@ The configured archive path is a real mountpoint whose direct options contain
 `rw` and contain neither `ro` nor `emergency_ro`. Serial queue and active-phase
 attribution are valid only while this volume contract is healthy. A current
 read-write flag alone does not clear a recent lineage-bound transport,
-block-I/O, journal-abort, or read-only-remount event. When either data recovery
+block-I/O, journal-abort, or read-only-remount event. Neither writer has a
+MainPID while that recovery boundary is unverified. A future writer must pass
+the Xops stable-identity clearance interlock, whose root-owned off-volume marker
+can be recorded only by its offline-e2fsck workflow and subsequent bounded
+mounted write/read/delete test; it also enforces the 30-minute probation and
+rejects a later exact-lineage fault. Metric refresh remains read-only and does
+not require write clearance. When either data recovery
 point is missing or stale, an inactive/dead unit with no InvocationID or start
 time and a non-imminent next timer is idle recovery, not a successful run.
 BROKEN:
@@ -9463,6 +9469,23 @@ BROKEN:
   is only the minimum probation before the authorized catch-up gate, not an
   automated clear condition; eventual lookback expiry is not a repair
   certificate.
+- `backup-archive-writer-active-during-recovery` is immediate when either the
+  data or GitHub unit has a MainPID while the same exact lineage still has a
+  retained recovery-unverified fault and the installed Xops helper reports its
+  current stable-identity clearance as missing or invalid, or the privacy-
+  reduced status cannot be observed. The monitor's narrowly allowlisted sudo
+  command returns only `valid`, `missing`, or `invalid`; invocation/access or
+  output failure becomes `unobservable`. It returns only that state, unit
+  states, PID presence, and the normalized latest fault boundary. A valid
+  clearance suppresses this writer-safety page while the independently retained
+  30-day recovery page remains active. Do not auto-stop an in-flight transfer or infer that
+  installing the interlock retroactively protects it. Require an explicit
+  current-writer operator decision. The safest repair sequence stops both
+  writers before hardware isolation and offline `e2fsck`, then records the
+  exact stable identity, performs the helper-owned bounded write/read/delete
+  test, observes the 30-minute fault-free probation, and authorizes one writer.
+  A missing, mismatched, stale/vacuumed, malformed, or post-fault clearance
+  fails closed. Reboot, journal replay, and a fresh `rw` mount never create it.
 - `backup-archive-recovery-idle` is immediate when PostgreSQL or Redis
   completion is missing/stale, the archive is mounted read-write, the data unit
   is inactive/dead with no MainPID, InvocationID, or current-boot start time,

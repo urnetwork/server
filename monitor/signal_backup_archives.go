@@ -49,6 +49,7 @@ remote_mount_source=unknown
 remote_mount_fstype=unknown
 remote_mount_options=unknown
 remote_mount_lineage=unknown
+remote_clearance_state=$(sudo -n /var/bringyour/backup/archive-write-clearance.sh --status 2>/dev/null || true)
 if test -n "${remote_mount}" && mountpoint -q -- "${remote_mount}"; then
 	remote_mount_present=1
 	remote_mount_source=$(findmnt -rn -T "${remote_mount}" -o SOURCE 2>/dev/null | head -n 1)
@@ -80,6 +81,7 @@ case "${remote_mount_source}" in '') remote_mount_source=unknown ;; esac
 case "${remote_mount_fstype}" in '') remote_mount_fstype=unknown ;; esac
 case "${remote_mount_options}" in '') remote_mount_options=unknown ;; esac
 case "${remote_mount_lineage}" in '') remote_mount_lineage=unknown ;; esac
+case "${remote_clearance_state}" in valid|missing|invalid) ;; *) remote_clearance_state=unobservable ;; esac
 remote_storage_journal_source=unavailable
 remote_storage_journal_probe=$(sudo -n journalctl --since '30 days ago' --no-pager -n 1 -o short-unix _TRANSPORT=kernel 2>/dev/null || true)
 if test -n "${remote_storage_journal_probe}"; then
@@ -116,6 +118,7 @@ printf 'remote_mount_source=%s\n' "${remote_mount_source}"
 printf 'remote_mount_fstype=%s\n' "${remote_mount_fstype}"
 printf 'remote_mount_options=%s\n' "${remote_mount_options}"
 printf 'remote_mount_lineage=%s\n' "${remote_mount_lineage}"
+printf 'remote_clearance_state=%s\n' "${remote_clearance_state}"
 printf 'remote_storage_journal_readable=%s\n' "${remote_storage_journal_readable}"
 read_archive_kernel_journal() {
 	case "${remote_storage_journal_source}" in
@@ -247,6 +250,7 @@ type backupArchiveWriterObservation struct {
 	remoteMountFSType  string
 	remoteMountOptions string
 	remoteMountLineage []string
+	clearanceState     string
 	storageReadable    bool
 	storageEvents      []backupArchiveStorageEvent
 }
@@ -418,6 +422,7 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveVolume(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveVolumeRecovery(now, writers[host.name])...)
+		findings = append(findings, evaluateBackupArchiveUnsafeActiveWriter(now, writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRecoveryIdle(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveRun(writers[host.name]))
@@ -428,6 +433,73 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		))
 	}
 	return findings, nil
+}
+
+func evaluateBackupArchiveUnsafeActiveWriter(
+	now time.Time,
+	observation backupArchiveWriterObservation,
+) finding {
+	const class = "backup-archive-writer-active-during-recovery"
+	target := observation.host + "/archive-volume"
+	lineage := make(map[string]bool, len(observation.remoteMountLineage))
+	for _, device := range observation.remoteMountLineage {
+		lineage[device] = true
+	}
+	latestFault := time.Time{}
+	windowStart := now.Add(-backupArchiveStorageLookback)
+	for _, event := range observation.storageEvents {
+		if !lineage[event.device] || event.occurredAt.Before(windowStart) ||
+			event.occurredAt.After(now.Add(backupArchiveFutureTolerance)) {
+			continue
+		}
+		if latestFault.IsZero() || event.occurredAt.After(latestFault) {
+			latestFault = event.occurredAt
+		}
+	}
+	dataActive := backupArchiveRemoteWriterRunning(observation)
+	githubActive := false
+	switch observation.unitState {
+	case "active", "activating", "reloading":
+		githubActive = observation.mainPID > 0
+	}
+	if observation.remoteMountState != "read-write" || !observation.storageReadable ||
+		latestFault.IsZero() || (!dataActive && !githubActive) || observation.clearanceState == "valid" {
+		return healthyFinding("observability/backup-archives", tierPage, class, target)
+	}
+
+	active := []string{}
+	if dataActive {
+		active = append(active, "data")
+	}
+	if githubActive {
+		active = append(active, "github")
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: class, target: target, frame: "unsafe-active-writer", sustain: 1,
+		symptom: fmt.Sprintf(
+			"%s has an active archive writer despite an unverified storage recovery boundary",
+			observation.host,
+		),
+		mechanism: "The currently mounted archive lineage has a retained transport, block-I/O, or journal/remount fault, while systemd reports one or both archive writer processes active. Read-write state after reboot and journal replay does not prove an offline filesystem check, and a process started before a write-clearance interlock was deployed does not acquire that protection retroactively.",
+		baseline:  "No data or GitHub archive writer has a MainPID while backup-archive-volume-recovery-unverified is active. A future writer starts only after an operator-recorded offline filesystem check, bounded mounted write/read/delete test, and fault-free probation match the exact stable archive identity.",
+		observed: fmt.Sprintf(
+			"active_writers=%s data_unit_state=%s data_main_pid_present=%t github_unit_state=%s github_main_pid_present=%t clearance_state=%s fault_latest=%s mount_state=%s",
+			strings.Join(active, ","),
+			observation.remoteUnitState,
+			observation.remoteMainPID > 0,
+			observation.unitState,
+			observation.mainPID > 0,
+			observation.clearanceState,
+			latestFault.Format(time.RFC3339),
+			observation.remoteMountState,
+		),
+		evidence: "The probe joins only systemd unit state and MainPID presence with the already-normalized latest fault time for exact devices in the current archive lineage and the installed helper's allowlisted valid, missing, invalid, or unobservable clearance result. It does not return process arguments, helper errors, backup contents, raw kernel text, or physical identifiers.",
+		context:  "This finding makes the unsafe concurrency visible without deciding whether interrupting a large in-flight transfer is less risky than allowing it to finish. The underlying recovery-unverified page remains independently active and retains the hardware/filesystem closure gate.",
+		action:   "Do not start another writer and do not auto-stop the observed process. Require an explicit current-writer operator decision. The safest storage-repair sequence is to stop both writers, verify their children are gone, repair the proven physical boundary, and complete offline e2fsck plus the stable-identity write-clearance workflow before one catch-up run. Installing the interlock blocks future starts but does not protect an already-running shell.",
+		verify:   "First observe both units without a MainPID. Then complete the recovery-unverified hardware, offline-filesystem, bounded write/read/delete, 30-minute probation, and stable-identity clearance gates. Start exactly one writer and require one validated atomic generation plus two matching direct Mimir reads; the retained 30-day recovery page clears only by its documented independent policy.",
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func validateBackupArchiveSourceSettings(settings *BackupHostSettings) error {
@@ -505,6 +577,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_mount_fstype",
 		"remote_mount_options",
 		"remote_mount_lineage",
+		"remote_clearance_state",
 		"remote_storage_journal_readable",
 	}
 	if len(values) != len(required) {
@@ -535,6 +608,9 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	remoteMountLineage, err := parseBackupArchiveMountLineage(values["remote_mount_lineage"])
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
+	}
+	if matched, _ := regexp.MatchString(`^(valid|missing|invalid|unobservable)$`, values["remote_clearance_state"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_clearance_state %q", values["remote_clearance_state"])
 	}
 	remoteMountPresent, err := strconv.ParseBool(values["remote_mount_present"])
 	if err != nil {
@@ -618,6 +694,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteMountFSType:  values["remote_mount_fstype"],
 		remoteMountOptions: values["remote_mount_options"],
 		remoteMountLineage: remoteMountLineage,
+		clearanceState:     values["remote_clearance_state"],
 		storageReadable:    storageReadable,
 		storageEvents:      storageEvents,
 	}, nil
