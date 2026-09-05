@@ -14,9 +14,9 @@ if [[ ! -x "$network_test_gate" ]]; then
     exit 127
 fi
 if [[ "${URNETWORK_NETWORK_TEST_LOCK_HELD:-}" != 1 ]]; then
-    exec "$network_test_gate" run-all-server -- "$script_dir/test.sh" "$@"
+    exec "$network_test_gate" run-all run-all-server -- "$script_dir/test.sh" "$@"
 fi
-if ! "$network_test_gate" --verify-held; then
+if ! "$network_test_gate" --verify-held run-all; then
     echo "server test suite inherited an invalid network-intensive lock" >&2
     exit 70
 fi

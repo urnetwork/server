@@ -264,8 +264,8 @@ func writeTestEnvironmentLauncherState(
 }
 
 // Test directory discovery must retain local unit and integration packages
-// while leaving every acceptance-owned subtree to its separate harness.
-func TestLocalTestDirectoryDiscoveryExcludesAcceptance(t *testing.T) {
+// while leaving every acceptance-owned subtree and inert external fixture out.
+func TestLocalTestDirectoryDiscoveryPreservesPackageBoundaries(t *testing.T) {
 	output, err := exec.Command("./test-dirs.sh").CombinedOutput()
 	if err != nil {
 		t.Fatalf("discover local test directories: %v\n%s", err, output)
@@ -276,7 +276,16 @@ func TestLocalTestDirectoryDiscoveryExcludesAcceptance(t *testing.T) {
 			t.Errorf("local test discovery included acceptance-owned directory %q", directory)
 		}
 	}
-	for _, requiredDirectory := range []string{".", "./connect/perfvar", "./grafana", "./proxy"} {
+	if slices.Contains(directories, "./monitor/testdata") {
+		t.Error("local test discovery included the inert external PromQL engine fixture")
+	}
+	for _, requiredDirectory := range []string{
+		".",
+		"./connect/perfvar",
+		"./connect/sim-latency/evaluator/container/testdata/resource-bomb",
+		"./grafana",
+		"./proxy",
+	} {
 		if !slices.Contains(directories, requiredDirectory) {
 			t.Errorf("local test discovery omitted %q", requiredDirectory)
 		}
@@ -362,7 +371,7 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 	files := map[string]string{
 		filepath.Join(serverDir, "test-env.sh"):                                  "#!/usr/bin/env bash\nreturn 0\n",
 		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
-		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ]\n",
+		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ] && [ \"$2\" = run-all ]\n",
 		filepath.Join(binDir, "go"): `#!/bin/sh
 "$TEST_SERVER_RUNNER_BINARY" -test.run="^${TEST_SERVER_RUNNER_TEST_NAME}$" -test.count=1
 test_status=$?

@@ -11377,12 +11377,19 @@ locally rebuilt acceptance runner and requires no Proxy, Connect, or API
 deployment.
 
 Do not retry, lengthen the timeout, or convert either signature to PASS. Stop
-cooperative overlap at its source: canonical acceptance and tracked full-suite
-launchers share `tests/network-intensive-suite-lock.sh`, and agent-owned direct
-network-heavy tests must use it too. The gate cannot control arbitrary user or
-WLAN load, so retain external process ancestry when present. After correcting
-the local cause, rerun the failed sustained and three-transport campaigns; the
-original failure remains valid evidence.
+same-campaign cooperative overlap at its source: canonical acceptance and its
+direct launchers use the `main-acceptance` domain of
+`tests/network-intensive-suite-lock.sh`; tracked local suites and their direct
+launchers use its independent `run-all` domain. One owner in each domain may
+run concurrently because their runtime resources are disjoint, but two owners
+in either domain must fail fast. RUN-ALL retains the historical unsuffixed lock
+path so an updated launcher still contends with a draining legacy unit suite;
+main acceptance uses the scoped suffix. Agent-owned network-heavy tests must
+select the domain whose resources they exercise and cannot reinterpret an
+inherited domain. The gate cannot control arbitrary user or WLAN load, so
+retain external process ancestry when present. After correcting the local
+cause, rerun the failed sustained and three-transport campaigns; the original
+failure remains valid evidence.
 
 The proxy service intentionally has no normal public 443 status endpoint;
 `warpctl ls versions main proxy --sample` can therefore return a uniform 404.
@@ -14003,7 +14010,7 @@ The regression gate must execute raw-series fixtures against the pinned
 Mimir 3.1.1 vendored Prometheus engine, not only compare query strings or
 precomputed slopes. From Server, run
 `MONITOR_PROMQL_ENGINE_SOURCE=<pinned-mimir-source> go test ./monitor -run '^TestSubtensorConvergencePromQLEngine$' -count=1`.
-`monitor/testdata/subtensor_promql_engine_test.go` runs in that source module
+`monitor/testdata/subtensor_promql_engine_test.go.txt` is materialized and runs in that source module
 with `-mod=vendor`; production Server dependencies remain unchanged. The
 script is generated from the actual probe query and bound to the authored
 Grafana expressions. It covers one/alternating/simultaneous fallbacks, current

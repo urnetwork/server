@@ -68,9 +68,9 @@ if [[ ! -x "$network_test_gate" ]]; then
   exit 127
 fi
 if [[ "${URNETWORK_NETWORK_TEST_LOCK_HELD:-}" != 1 ]]; then
-  exec "$network_test_gate" proxy-acceptance-main -- "$here/test-main.sh" "$@"
+  exec "$network_test_gate" main-acceptance proxy-acceptance-main -- "$here/test-main.sh" "$@"
 fi
-if ! "$network_test_gate" --verify-held; then
+if ! "$network_test_gate" --verify-held main-acceptance; then
   echo "proxy acceptance suite inherited an invalid network-intensive lock" >&2
   exit 70
 fi

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"testing"
 	"time"
 )
+
+const subtensorPromQLEngineFixture = "testdata/subtensor_promql_engine_test.go.txt"
 
 // Uses the exact production queries and authored dashboard expressions. The
 // engine is optional for ordinary package builds but required as a release
@@ -26,12 +30,13 @@ func TestSubtensorConvergencePromQLEngine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engineTest, err := filepath.Abs("testdata/subtensor_promql_engine_test.go")
+	testDirectory := t.TempDir()
+	engineTest, err := materializeSubtensorPromQLEngineTest(testDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := subtensorConvergencePromQLScript(t)
-	scriptPath := filepath.Join(t.TempDir(), "subtensor.test")
+	scriptPath := filepath.Join(testDirectory, "subtensor.test")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +50,45 @@ func TestSubtensorConvergencePromQLEngine(t *testing.T) {
 		t.Fatalf("pinned PromQL engine regression: %v\n%s", err, output)
 	}
 	t.Logf("pinned PromQL engine: %s", strings.TrimSpace(string(output)))
+}
+
+// Copies inert fixture source into the named-file test consumed from the
+// external engine module.
+func materializeSubtensorPromQLEngineTest(directory string) (string, error) {
+	source, err := os.ReadFile(subtensorPromQLEngineFixture)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(directory, "subtensor_promql_engine_test.go")
+	if err := os.WriteFile(path, source, 0600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// Ensures external engine source remains data to the Server module while
+// materializing as a syntactically valid Go test for the pinned Mimir module.
+func TestSubtensorConvergencePromQLEngineFixtureIsInertServerData(t *testing.T) {
+	entries, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			t.Fatalf("external engine fixture %q is discoverable as Server Go source", entry.Name())
+		}
+	}
+	engineTest, err := materializeSubtensorPromQLEngineTest(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), engineTest, nil, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse materialized engine test: %v", err)
+	}
+	if file.Name.Name != "subtensor_test" || file.Scope.Lookup("TestSubtensorPromQL") == nil {
+		t.Fatal("materialized engine fixture does not define subtensor_test.TestSubtensorPromQL")
+	}
 }
 
 // Ensures the optional engine gate cannot silently test a stale copy of the
