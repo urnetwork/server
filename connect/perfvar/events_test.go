@@ -1125,12 +1125,16 @@ func TestFullTunExchangeH3MtuCorrectness(t *testing.T) {
 }
 
 // One exact fast-P2P MTU fixture requires both inner TCP delivery and direct
-// carrier evidence that no submitted datagram exceeded the selected path.
+// carrier evidence that no submitted datagram exceeded the selected path. The
+// serial tier owns this DB-backed, wall-clock-sensitive full-route check.
 func testFullTunP2pFastMtuCorrectness(
 	t *testing.T,
 	profileName string,
 	seed int64,
 ) {
+	if testing.Short() {
+		return
+	}
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(

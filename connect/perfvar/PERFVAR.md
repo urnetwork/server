@@ -683,6 +683,11 @@ go test -race -p=1 ./connect/perfvar -short -parallel=1 \
   -count=1 -timeout=30m
 ```
 
+The DB-backed end-to-end fast-P2P MTU fixtures remain in the complete serial
+correctness tier. The short race tier retains their deterministic timeout,
+geometry, and ownership kernels without turning simulated-network wall time
+under race instrumentation into a transport result.
+
 Run the canonical production destination/stream-alias gate from the server
 repository before a schema-13 campaign:
 
