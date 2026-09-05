@@ -141,13 +141,23 @@ boundary is:
   `password.yml`, `pg.yml`, `proxy.yml`, `redis.yml`, `services.yml`, `st.yml`,
   `stripe.yml`, `wireguard.yml`, and `x402.yml`, plus `tls` certificate/key
   pairs for `ur.network`, `bringyour.com`, `main-connect.ur.network`, and
-  `main-connect.bringyour.com`; each pair must be colocated in the direct tree
-  or one versioned directory;
+  `main-connect.bringyour.com`; each pair must be colocated at one direct or
+  recursively versioned resolver location;
 - config: `apple_roots.pem`, `brevo.yml`, `city-list.yml`, `db.yml`,
   `email.yml`, `iso-country-list.yml`, `pro.yml`, `redis.yml`, `settings.yml`,
   `subsidy.yml`, and `tls.yml`.
 
 An incomplete explicit resource checkout is rejected fail closed.
+The underlying resolver orders certificate and key paths independently,
+checking direct root/local/all files before recursively descending
+semantic-version directories. Transport TLS selects the first common directory
+from those ordered results and never combines generations. Suite preflight is
+intentionally stricter: every resolver-visible location containing either half
+of a required pair must contain both readable files. It therefore rejects
+partial rotations even when runtime could fall back to another complete pair.
+It also checks all parseable version directory aliases, including aliases that
+normalize to the same resolver version, instead of relying on map collision
+order.
 If a private temporary vault root overrides only `pg.yml`, it must preserve both
 the source vault's `local` and `all` resolver scopes; linking only `local` hides
 the versioned TLS tree from `WARP_VAULT_HOME` and is rejected by preflight.

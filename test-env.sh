@@ -31,57 +31,133 @@ test_env_find_resource() {
     return 1
 }
 
-test_env_tls_directory_has_pair() {
-    local directory="$1"
-    local host_name="$2"
+test_env_int64_decimal() {
+    local value="$1"
+    local LC_ALL=C
 
-    [[ -f "$directory/$host_name/$host_name.crt" &&
-       -r "$directory/$host_name/$host_name.crt" &&
-       -f "$directory/$host_name/$host_name.key" &&
-       -r "$directory/$host_name/$host_name.key" ]]
+    while [[ "${#value}" -gt 1 && "$value" == 0* ]]; do
+        value="${value#0}"
+    done
+    if [[ "${#value}" -lt 19 ]]; then
+        return 0
+    fi
+    if [[ "${#value}" -gt 19 ]]; then
+        return 1
+    fi
+    [[ "$value" < 9223372036854775807 || "$value" == 9223372036854775807 ]]
 }
 
-test_env_tls_tree_has_pair() {
-    local tree_root="$1"
+test_env_is_semver_name() {
+    local name="$1"
+    local pattern='^([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?)?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?)?$'
+    local major
+    local minor
+    local patch
+
+    [[ "$name" =~ $pattern ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[3]}"
+    test_env_int64_decimal "$major" &&
+        test_env_int64_decimal "$minor" &&
+        test_env_int64_decimal "$patch"
+}
+
+test_env_tls_validate_pair_location() {
+    local directory="$1"
     local host_name="$2"
+    local cert_path="$directory/$host_name.crt"
+    local key_path="$directory/$host_name.key"
+    local cert_present=0
+    local key_present=0
+
+    if [[ -f "$cert_path" ]]; then
+        [[ -r "$cert_path" ]] || {
+            test_env_error "TLS certificate is not readable: $cert_path"
+            return 1
+        }
+        cert_present=1
+    fi
+    if [[ -f "$key_path" ]]; then
+        [[ -r "$key_path" ]] || {
+            test_env_error "TLS key is not readable: $key_path"
+            return 1
+        }
+        key_present=1
+    fi
+    if [[ "$cert_present" != "$key_present" ]]; then
+        test_env_error "TLS certificate/key pair is incomplete: $directory/$host_name.{crt,key}"
+        return 1
+    fi
+    if [[ "$cert_present" == 1 ]]; then
+        TEST_ENV_TLS_PAIR_FOUND=1
+    fi
+}
+
+test_env_tls_validate_version_locations() {
+    local root="$1"
+    local host_name="$2"
+    local component_index="$3"
+    local literal_component
     local version_path
     local version_name
 
-    if test_env_tls_directory_has_pair "$tree_root" "$host_name"; then
-        return 0
+    if [[ "$component_index" == 0 ]]; then
+        literal_component=tls
+    elif [[ "$component_index" == 1 ]]; then
+        literal_component="$host_name"
+    else
+        test_env_tls_validate_pair_location "$root" "$host_name" || return $?
     fi
+
+    if [[ "$component_index" -lt 2 && -d "$root/$literal_component" ]]; then
+        test_env_tls_validate_version_locations \
+            "$root/$literal_component" \
+            "$host_name" \
+            "$((component_index + 1))" || return $?
+    fi
+
+    # The Go resolver permits a semantic-version directory at every path
+    # level. Visit all of them; complete pairs at every visible location make
+    # its independently ordered certificate/key candidate lists identical.
     while IFS= read -r version_path; do
         version_name="${version_path##*/}"
-        if [[ "$version_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][a-zA-Z0-9.-]+)?$ ]] &&
-            test_env_tls_directory_has_pair "$version_path" "$host_name"; then
-            return 0
+        if test_env_is_semver_name "$version_name"; then
+            test_env_tls_validate_version_locations \
+                "$version_path" \
+                "$host_name" \
+                "$component_index" || return $?
         fi
-    done < <(find "$tree_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | LC_ALL=C sort)
-    return 1
+    done < <(find -H "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | LC_ALL=C sort)
 }
 
 test_env_tls_tree_complete() {
-    local tree_root="$1"
+    local vault_root="$1"
     local host_name
+    local TEST_ENV_TLS_PAIR_FOUND=0
+
     for host_name in ur.network bringyour.com main-connect.ur.network main-connect.bringyour.com; do
-        test_env_tls_tree_has_pair "$tree_root" "$host_name" || return $?
+        TEST_ENV_TLS_PAIR_FOUND=0
+        test_env_tls_validate_version_locations "$vault_root" "$host_name" 0 || return $?
+        if [[ -d "$vault_root/local" ]]; then
+            test_env_tls_validate_version_locations "$vault_root/local" "$host_name" 0 || return $?
+        fi
+        if [[ -d "$vault_root/all" ]]; then
+            test_env_tls_validate_version_locations "$vault_root/all" "$host_name" 0 || return $?
+        fi
+        if [[ "$TEST_ENV_TLS_PAIR_FOUND" != 1 ]]; then
+            return 1
+        fi
     done
 }
 
 test_env_find_resource_tree() {
     local root="$1"
     local resource_name="$2"
-    local candidate
-    for candidate in \
-        "$root/$resource_name" \
-        "$root/local/$resource_name" \
-        "$root/all/$resource_name"; do
-        if [[ -d "$candidate" && -r "$candidate" && -x "$candidate" ]] &&
-            test_env_tls_tree_complete "$candidate"; then
-            TEST_ENV_RESOURCE_PATH="$candidate"
-            return 0
-        fi
-    done
+    if [[ "$resource_name" == tls ]] && test_env_tls_tree_complete "$root"; then
+        TEST_ENV_RESOURCE_PATH="$root"
+        return 0
+    fi
     test_env_error "required complete resource tree is missing: $root/{,local/,all/}$resource_name"
     return 1
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,34 @@ func NewTransportTls(allowedHosts map[string]bool, settings *TransportTlsSetting
 	}
 }
 
+// Resolves both leaves independently, then intersects their ordered results by
+// directory so a partial rotation cannot combine two generations. Common
+// directories have the same relative resolver order, so certificate order
+// selects the highest-precedence complete pair.
+func tlsResourcePairPaths(resourceName string) (certPath string, keyPath string, ok bool) {
+	certPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.crt", resourceName, resourceName))
+	if err != nil {
+		return
+	}
+	keyPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.key", resourceName, resourceName))
+	if err != nil {
+		return
+	}
+	directoryKeyPaths := map[string]string{}
+	for _, candidateKeyPath := range keyPaths {
+		directory := filepath.Dir(candidateKeyPath)
+		if _, exists := directoryKeyPaths[directory]; !exists {
+			directoryKeyPaths[directory] = candidateKeyPath
+		}
+	}
+	for _, candidateCertPath := range certPaths {
+		if candidateKeyPath, exists := directoryKeyPaths[filepath.Dir(candidateCertPath)]; exists {
+			return candidateCertPath, candidateKeyPath, true
+		}
+	}
+	return
+}
+
 func (self *TransportTls) GetTlsConfigForClient(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	hostName := clientHello.ServerName
 	if hostName == "" {
@@ -150,43 +179,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 		}
 	}
 
-	findExplicit := func() (certPath string, keyPath string, ok bool) {
-		certPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.crt", hostName, hostName))
-		if err != nil {
-			return
-		}
-		keyPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.key", hostName, hostName))
-		if err != nil {
-			return
-		}
-		certPath = certPaths[0]
-		keyPath = keyPaths[0]
-		ok = true
-		return
-	}
-
-	findWildcard := func(baseName string) (certPath string, keyPath string, ok bool) {
-		// baseName := strings.SplitN(hostName, ".", 2)[1]
-
-		certPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.crt", baseName, baseName))
-		if err != nil {
-			return
-		}
-		keyPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.key", baseName, baseName))
-		if err != nil {
-			return
-		}
-		certPath = certPaths[0]
-		keyPath = keyPaths[0]
-		ok = true
-		return
-	}
-
-	certPath, keyPath, ok := findExplicit()
+	certPath, keyPath, ok := tlsResourcePairPaths(hostName)
 	if !ok {
 		baseName, ok := baseName(hostName)
 		if ok {
-			certPath, keyPath, ok = findWildcard(baseName)
+			certPath, keyPath, ok = tlsResourcePairPaths(fmt.Sprintf("star.%s", baseName))
 		}
 		if !ok {
 			if self.settings.EnableSelfSign {
