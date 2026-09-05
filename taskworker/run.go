@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -73,6 +74,16 @@ func (self RunOptions) Validate() error {
 // the command and integration harness on the same readiness, claim, and final
 // handback implementation.
 func Run(ctx context.Context, options RunOptions) error {
+	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher, server.HttpListenAndServeWithReusePort)
+}
+
+func runWithDependencies(
+	ctx context.Context,
+	options RunOptions,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+) error {
 	if ctx == nil {
 		return errors.New("taskworker run context is nil")
 	}
@@ -83,14 +94,13 @@ func Run(ctx context.Context, options RunOptions) error {
 	defer cancel()
 
 	glog.Infof("[taskworker]starting %s %s %d task workers with batch size %d\n", server.RequireEnv(), server.RequireVersion(), options.Count, options.BatchSize)
-	server.StartStatsPusher(runCtx)
-	controller.StartStatsCollector(runCtx)
 
 	var worker *task.TaskWorker
-	if err := router.StartupReadiness(runCtx); err != nil {
+	if err := readiness(runCtx); err != nil {
 		glog.Infof("[taskworker]not ready (%s)\n", err)
 		readyGauge.Set(0)
 	} else {
+		controller.StartStatsCollector(runCtx)
 		InitTasks(runCtx)
 		settings := task.DefaultTaskWorkerSettings()
 		settings.BatchSize = options.BatchSize
@@ -109,6 +119,9 @@ func Run(ctx context.Context, options RunOptions) error {
 			})
 		}
 		readyGauge.Set(1)
+		// Failed readiness keeps /status visible without publishing a new
+		// process cohort or starting the DB/chain stats collector.
+		startStatsPusher(runCtx)
 	}
 
 	draining := make(chan struct{})
@@ -137,7 +150,7 @@ func Run(ctx context.Context, options RunOptions) error {
 
 	glog.Infof("[taskworker]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
-	err := server.HttpListenAndServeWithReusePort(
+	err := listenAndServe(
 		runCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
 		router.NewRouter(runCtx, []*router.Route{router.NewRoute("GET", "/status", router.WarpStatus)}),

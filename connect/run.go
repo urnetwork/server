@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
@@ -73,6 +74,16 @@ func validateRunListenIPv4(options RunOptions, listenIPv4 string) error {
 // Run serves the production connect module until ctx is canceled. The CLI and
 // simulator use the same exchange, router, readiness latch, and drain path.
 func Run(ctx context.Context, options RunOptions) error {
+	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher, server.HttpListenAndServeWithReusePort)
+}
+
+func runWithDependencies(
+	ctx context.Context,
+	options RunOptions,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+) error {
 	if ctx == nil {
 		return errors.New("connect run context is nil")
 	}
@@ -90,7 +101,7 @@ func Run(ctx context.Context, options RunOptions) error {
 	routes := []*router.Route{}
 	statusHandler := router.WarpStatus
 	var exchange *Exchange
-	if err := router.StartupReadiness(runCtx); err != nil {
+	if err := readiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
 	} else {
 		exchange = NewExchangeFromEnv(runCtx, exchangeSettingsForRun(options))
@@ -102,6 +113,8 @@ func Run(ctx context.Context, options RunOptions) error {
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
 		server.Warmup(connectWarmupTargets()...)
+		// Only admitted candidates publish a process-identity metrics cohort.
+		startStatsPusher(runCtx)
 	}
 	routes = append([]*router.Route{router.NewRoute("GET", "/status", statusHandler)}, routes...)
 
@@ -132,9 +145,8 @@ func Run(ctx context.Context, options RunOptions) error {
 		}
 	})
 
-	server.StartStatsPusher(runCtx)
 	glog.Infof("[connect]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
-	err := server.HttpListenAndServeWithReusePort(
+	err := listenAndServe(
 		runCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
 		router.NewRouter(runCtx, routes),

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"runtime"
 	"strconv"
 	"time"
@@ -74,6 +75,18 @@ func (self RunOptions) Validate() error {
 // commands and integration harnesses share this runner so route construction,
 // readiness, warmup, metrics, and drain behavior cannot diverge.
 func Run(ctx context.Context, options RunOptions) error {
+	return runWithDependencies(ctx, options, ReadinessCheck, server.StartStatsPusher, server.HttpListenAndServeWithReusePort)
+}
+
+// The command and tests exercise the same startup and drain wiring. Only the
+// external readiness, metrics transport, and HTTP listener are replaceable.
+func runWithDependencies(
+	ctx context.Context,
+	options RunOptions,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+) error {
 	if ctx == nil {
 		return errors.New("api run context is nil")
 	}
@@ -112,7 +125,8 @@ func Run(ctx context.Context, options RunOptions) error {
 	})
 
 	var statsHandle *stats.Stats
-	if err := activateAfterReadiness(ctx, ReadinessCheck, func() {
+	flushStats := func() {}
+	if err := activateAfterReadiness(ctx, readiness, func() {
 		server.Warmup(apiWarmupTargets()...)
 		controller.StartMetrics(processCtx)
 		statsHandle = stats.Enable(processCtx, nil)
@@ -127,6 +141,9 @@ func Run(ctx context.Context, options RunOptions) error {
 	} else if ctx.Err() == nil {
 		router.SetWarpStatusReady()
 		readyGauge.Set(1)
+		// Rejected candidates keep /status and logs, but must not allocate a
+		// fresh process cohort in the remote metrics store on every retry.
+		flushStats = startStatsPusher(processCtx)
 		if ctx.Err() != nil {
 			router.SetWarpStatusDrainingIfReady()
 			readyGauge.Set(0)
@@ -139,11 +156,10 @@ func Run(ctx context.Context, options RunOptions) error {
 		defer statsHandle.Close()
 	}
 
-	flushStats := server.StartStatsPusher(processCtx)
 	glog.Infof("[api]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
 	apiRouter := router.NewRouter(processCtx, Routes())
-	err := server.HttpListenAndServeWithReusePort(
+	err := listenAndServe(
 		serveCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
 		apiRouter,

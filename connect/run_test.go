@@ -3,7 +3,11 @@ package connect
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
@@ -11,6 +15,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/router"
 )
 
 func TestConnectWarmupTargetsOnlyIPDatabase(t *testing.T) {
@@ -41,6 +46,49 @@ func TestRunRejectsInvalidInputsBeforeEnvironmentAccess(t *testing.T) {
 	}
 	if err := Run(context.Background(), RunOptions{Port: 1, TLSDefaultHostName: "192.0.2.1", DirectH3LoopbackMode: true}); err == nil {
 		t.Fatal("direct H3 mode with a non-loopback TLS fallback hostname was accepted")
+	}
+}
+
+func TestRunRejectedConnectPreservesStatusWithoutPublishingMetrics(t *testing.T) {
+	for key, value := range map[string]string{
+		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
+		"WARP_HOST": "synthetic-host", "WARP_SERVICE": "connect", "WARP_BLOCK": "g1",
+		"WARP_HOST_IPV4": "127.0.0.1", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Cleanup(router.SetWarpStatusReady)
+	readinessErr := errors.New("database migration head 627 is below binary-required head 630")
+	checks, starts, flushes, serves := 0, 0, 0, 0
+	err := runWithDependencies(context.Background(), RunOptions{Port: 8080},
+		func(context.Context) error {
+			checks++
+			router.SetWarpStatusNotReady(readinessErr)
+			return readinessErr
+		},
+		func(context.Context) func() {
+			starts++
+			return func() { flushes++ }
+		},
+		func(_ context.Context, _ string, handler http.Handler, _ bool, _ server.HttpServerOptions) error {
+			serves++
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
+			var status router.WarpStatusResult
+			if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+				t.Fatalf("decode rejected candidate status: %v", err)
+			}
+			if response.Code != http.StatusOK || status.Status != "error not ready: "+readinessErr.Error() {
+				t.Fatalf("rejected candidate lost its readiness failure: code=%d status=%q", response.Code, status.Status)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 || serves != 1 || starts != 0 || flushes != 0 {
+		t.Fatalf("checks/serves/metrics starts/flushes = %d/%d/%d/%d, want 1/1/0/0", checks, serves, starts, flushes)
 	}
 }
 
