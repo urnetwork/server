@@ -10483,6 +10483,21 @@ The following correctness boundaries require deterministic regressions:
   affected helper or actual callback, separately from failures of proposed
   repairs. An obsolete fixture that expected the client refresh to overwrite
   the admin slot cannot qualify the corrected role contract.
+- Provider-token selection must preserve the server's supported compatibility
+  contract. The current provider/refresh paths require client and device
+  identity, but Server can recover an omitted or zero `network_id` from durable
+  identity. Do not reject that recoverable omission, fill it from admin auth,
+  or rewrite the supplied JWT. Present null, malformed, or compact network
+  encodings are distinct from omission and fail the server's JSON ID contract.
+  Compare client/device throughout and compare network whenever both tokens
+  know it. Unknown-network compatibility is not transitive: compare every known
+  pair among the original supplied, durable, and already-published API clients,
+  not just a selected unknown token against the API. Force the API-ahead-of-disk
+  boundary in both Local and Remote constructor tests; reject a known-network
+  conflict without speculative writes or stealing the serving owner's next
+  refresh. Retain omitted-to-known refresh, stale-profile restart, and fully
+  specified healthy controls. Local claim inspection is not server signature
+  verification or proof of network membership.
 - Preparing a replacement constructor is not committed auth ownership. While
   R1 prepares from client B, the still-serving R0 must retain authority to save
   a legitimate B-to-C refresh. R1 must neither reinstall B over C nor strand
@@ -10532,11 +10547,28 @@ The following correctness boundaries require deterministic regressions:
   a join timeout is unresolved ownership, never permission to continue as if
   cleanup finished. Also verify successful and failed startup paths release
   their `NetworkSpaceManager`, not only the device handle.
+- A keyed-constructor failure is not evidence that the keys are corrupt.
+  Authentication parsing, storage reads, superseded publication, and address
+  allocation can fail through the same native error channel. Do not erase
+  saved identity or retry with fresh keys merely because that constructor
+  failed. Keeping old files while activating a temporary identity is also a
+  continuity failure. Test the production-used construction/adoption boundary,
+  including exact error propagation, no fallback/persistence on failure, a
+  later deliberate retry with the original keys, and healthy first install.
+  Separately check the loader: SDK key material has optional seed and TLS PEM
+  parts, so a valid seed-only store is not necessarily incomplete or corrupt.
+  Preserve supplied optional bytes and distinguish genuine absence from a
+  read/type/decoding failure before authorizing fresh construction or writes.
+  Do not invent a stricter all-readable-empty policy than the existing SDK
+  `IsEmpty` contract. Real disposable filesystem tests must supplement
+  synthetic factory exceptions; neither those tests nor portable helper tests
+  prove the native daemon's outer cleanup or the installed app's behavior.
 - A native UI queue is a separate callback boundary. Carry the originating
   authenticated owner through the queued task and recheck it when the task
   executes; joining the Go callback cannot drain work already posted to a
-  native dispatcher. Reviewed Android, Windows, and Linux auth-invalid handlers
-  post logout against the current application state without that owner check.
+  native dispatcher. Reviewed Android, Apple (iOS/macOS), Windows, and Linux
+  auth-invalid handlers post logout against the current application state
+  without that owner check.
   Force the ordering in a test: queue the old rejection, install a replacement,
   run the queued task, and prove the replacement credentials and route survive.
   A current-owner rejection must still log out correctly. Also test that retiring
