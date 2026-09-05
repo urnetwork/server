@@ -561,3 +561,839 @@ local_run_lock_release() {
     return 1
   fi
 }
+
+# Accepts only an ordinary unicast IPv4 address. The suite proxy deliberately
+# does not create a loopback alias, so 127/8 and unspecified/multicast ranges
+# cannot be selected as its direct host endpoint.
+suite_proxy_host_ip_validate_format() {
+  local host_ip="$1"
+  local first
+  local second
+  local third
+  local fourth
+  local rest
+  local octet
+
+  if [[ -z "$host_ip" || "$host_ip" == *[!0-9.]* ]]; then
+    local_state_error "suite proxy host IP is not a valid IPv4 address: $host_ip"
+    return 1
+  fi
+  IFS=. read -r first second third fourth rest <<< "$host_ip"
+  if [[ -n "$rest" || -z "$first" || -z "$second" || -z "$third" || -z "$fourth" ]]; then
+    local_state_error "suite proxy host IP is not a valid IPv4 address: $host_ip"
+    return 1
+  fi
+  for octet in "$first" "$second" "$third" "$fourth"; do
+    if [[ "${#octet}" -gt 3 || "$octet" == *[!0-9]* ||
+          ( "${#octet}" -gt 1 && "$octet" == 0* ) ]] ||
+        (( octet < 0 || 255 < octet )); then
+      local_state_error "suite proxy host IP is not a valid IPv4 address: $host_ip"
+      return 1
+    fi
+  done
+  if (( first == 0 || first == 127 || 224 <= first )); then
+    local_state_error "suite proxy host IP must be a non-loopback unicast address: $host_ip"
+    return 1
+  fi
+}
+
+# Requires the selected address on a non-loopback host interface. Routing to an
+# address is insufficient: a tunnel or remote route must never satisfy this
+# ownership boundary.
+suite_proxy_host_ip_validate_assigned() {
+  local host_ip="$1"
+  suite_proxy_host_ip_validate_format "$host_ip" || return $?
+
+  if command -v ip >/dev/null 2>&1; then
+    if ip -o -4 addr show 2>/dev/null | awk -v host_ip="$host_ip" '
+      $3 == "inet" && $2 !~ /^lo[0-9]*(:|$)/ {
+        split($4, address, "/")
+        if (address[1] == host_ip) {
+          found = 1
+        }
+      }
+      END { exit found == 1 ? 0 : 1 }
+    '; then
+      return 0
+    fi
+  fi
+  if command -v ifconfig >/dev/null 2>&1; then
+    if ifconfig 2>/dev/null | awk -v host_ip="$host_ip" '
+      /^[^[:space:]]/ {
+        interface_name = $1
+        sub(/:$/, "", interface_name)
+      }
+      $1 == "inet" && $2 == host_ip && interface_name !~ /^lo[0-9]*$/ {
+        found = 1
+      }
+      END { exit found == 1 ? 0 : 1 }
+    '; then
+      return 0
+    fi
+  else
+    local_state_error "suite proxy cannot inspect assigned host addresses (need ip or ifconfig)"
+    return 1
+  fi
+
+  local_state_error "suite proxy host IP is not assigned to a non-loopback interface: $host_ip"
+  return 1
+}
+
+# Validates one whitespace-free ownership field before it can enter a fixed
+# state record or Docker label.
+suite_proxy_value_validate() {
+  local field_name="$1"
+  local value="$2"
+  if [[ -z "$value" || "${#value}" -gt 256 || "$value" == *[[:space:]]* ]]; then
+    local_state_error "suite proxy $field_name is malformed"
+    return 1
+  fi
+}
+
+# Tokens also become owner-specific tombstone path suffixes, so restrict them
+# to a portable filename and Docker-label alphabet.
+suite_proxy_token_validate() {
+  local field_name="$1"
+  local value="$2"
+  if [[ "${#value}" -gt 128 || ! "$value" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+    local_state_error "suite proxy $field_name is malformed"
+    return 1
+  fi
+}
+
+# Validates the decimal fields whose shell arithmetic is safe only after a
+# strict spelling check.
+suite_proxy_positive_integer_validate() {
+  local field_name="$1"
+  local value="$2"
+  if [[ "${#value}" -gt 10 || ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    local_state_error "suite proxy $field_name is malformed"
+    return 1
+  fi
+}
+
+# Binds a pid to the process instance rather than trusting the reusable number
+# alone. `ps lstart` is available on both Darwin and Linux; normalizing its
+# fixed fields yields a whitespace-free stable identity.
+suite_proxy_process_start_identity() {
+  local owner_pid="$1"
+  local start_identity
+  suite_proxy_positive_integer_validate "owner pid" "$owner_pid" || return $?
+  start_identity="$(LC_ALL=C ps -o lstart= -p "$owner_pid" 2>/dev/null | LC_ALL=C awk '
+    NF == 5 {
+      printf "%s-%s-%s-%s-%s", $1, $2, $3, $4, $5
+      found = 1
+    }
+    END { if (found != 1) exit 1 }
+  ')" || {
+    local_state_error "suite proxy owner process is not live: $owner_pid"
+    return 1
+  }
+  suite_proxy_value_validate "owner start identity" "$start_identity" || return $?
+  SUITE_PROXY_PROCESS_START_IDENTITY="$start_identity"
+}
+
+# The unguessable owner token is also an exact argv field on the long-running
+# foreground helper. This live challenge closes same-second pid-reuse ambiguity
+# left by the portable, second-resolution process start time.
+suite_proxy_process_challenge_validate() {
+  local owner_pid="$1"
+  local owner_token="$2"
+  local expected_argument="--urnetwork-suite-proxy-owner-token=$owner_token"
+
+  suite_proxy_positive_integer_validate "owner pid" "$owner_pid" || return $?
+  suite_proxy_token_validate "owner token" "$owner_token" || return $?
+  if ! LC_ALL=C ps -ww -o command= -p "$owner_pid" 2>/dev/null | LC_ALL=C awk \
+      -v expected_argument="$expected_argument" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == expected_argument) {
+          found = 1
+        }
+      }
+    }
+    END { exit found == 1 ? 0 : 1 }
+  '; then
+    local_state_error "suite proxy owner process challenge is not live: $owner_pid"
+    return 1
+  fi
+}
+
+suite_proxy_current_process_matches() {
+  local owner_pid="$1"
+  local owner_start_identity="$2"
+  local owner_token="$3"
+
+  if [[ "$owner_pid" != "$$" ]]; then
+    local_state_error "suite proxy state mutation requires its owning process"
+    return 1
+  fi
+  suite_proxy_process_start_identity "$owner_pid" || return $?
+  if [[ "$SUITE_PROXY_PROCESS_START_IDENTITY" != "$owner_start_identity" ]]; then
+    local_state_error "suite proxy owner process instance changed: $owner_pid"
+    return 1
+  fi
+  suite_proxy_process_challenge_validate "$owner_pid" "$owner_token"
+}
+
+# Container ids are recorded in their complete Docker spelling so cleanup can
+# address an immutable object rather than a reusable name.
+suite_proxy_container_id_validate() {
+  local field_name="$1"
+  local container_id="$2"
+  if [[ ! "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    local_state_error "suite proxy $field_name is malformed"
+    return 1
+  fi
+}
+
+# Docker image ids include their content-address algorithm prefix.
+suite_proxy_image_id_validate() {
+  local image_id="$1"
+  if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    local_state_error "suite proxy image id is malformed"
+    return 1
+  fi
+}
+
+# Atomically claims a private state directory and publishes its immutable
+# process/token/generation owner record before any Docker mutation is allowed.
+suite_proxy_state_acquire() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_token="$3"
+  local generation="$4"
+  local owner_path="$state_dir/owner"
+  local owner_start_identity
+
+  suite_proxy_positive_integer_validate "owner pid" "$owner_pid" || return $?
+  if [[ "$owner_pid" != "$$" ]]; then
+    local_state_error "suite proxy ownership can only be acquired by the current process"
+    return 1
+  fi
+  suite_proxy_process_start_identity "$owner_pid" || return $?
+  owner_start_identity="$SUITE_PROXY_PROCESS_START_IDENTITY"
+  suite_proxy_token_validate "owner token" "$owner_token" || return $?
+  suite_proxy_token_validate "generation" "$generation" || return $?
+  suite_proxy_process_challenge_validate "$owner_pid" "$owner_token" || return $?
+  if [[ -z "$state_dir" || "$state_dir" != /* ]]; then
+    local_state_error "suite proxy state directory must be an absolute path"
+    return 1
+  fi
+  if ! (umask 077 && mkdir "$state_dir") 2>/dev/null; then
+    local_state_error "suite proxy state directory is already owned: $state_dir"
+    return 1
+  fi
+  if ! (umask 077 && set -o noclobber && {
+    printf '%s\n' "format=urnetwork-server-suite-proxy-owner-v1"
+    printf 'owner_pid=%s\n' "$owner_pid"
+    printf 'owner_start_identity=%s\n' "$owner_start_identity"
+    printf 'owner_token=%s\n' "$owner_token"
+    printf 'generation=%s\n' "$generation"
+  } > "$owner_path"); then
+    # An exclusive-create failure is ambiguous: another same-uid actor may
+    # have installed the path. Never unlink it; the directory remains a
+    # fail-closed tombstone unless it is still empty.
+    rmdir "$state_dir" 2>/dev/null || true
+    return 1
+  fi
+  SUITE_PROXY_ACQUIRED_START_IDENTITY="$owner_start_identity"
+}
+
+# Parses the non-executable, fixed-line owner record.
+suite_proxy_state_read_owner_path() {
+  local owner_path="$1"
+  local line
+  local lines=()
+
+  if [[ ! -f "$owner_path" || -L "$owner_path" || ! -r "$owner_path" ]]; then
+    local_state_error "suite proxy state has no readable regular owner: $owner_path"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines+=("$line")
+  done < "$owner_path"
+  if [[ "${#lines[@]}" != 5 ]] ||
+      [[ "${lines[0]}" != "format=urnetwork-server-suite-proxy-owner-v1" ]] ||
+      [[ "${lines[1]}" != owner_pid=* ]] ||
+      [[ "${lines[2]}" != owner_start_identity=* ]] ||
+      [[ "${lines[3]}" != owner_token=* ]] ||
+      [[ "${lines[4]}" != generation=* ]]; then
+    local_state_error "suite proxy owner record is malformed: $owner_path"
+    return 1
+  fi
+
+  SUITE_PROXY_OWNER_PID="${lines[1]#owner_pid=}"
+  SUITE_PROXY_OWNER_START_IDENTITY="${lines[2]#owner_start_identity=}"
+  SUITE_PROXY_OWNER_TOKEN="${lines[3]#owner_token=}"
+  SUITE_PROXY_OWNER_GENERATION="${lines[4]#generation=}"
+  suite_proxy_positive_integer_validate "owner pid" "$SUITE_PROXY_OWNER_PID" || return $?
+  suite_proxy_value_validate "owner start identity" "$SUITE_PROXY_OWNER_START_IDENTITY" || return $?
+  suite_proxy_token_validate "owner token" "$SUITE_PROXY_OWNER_TOKEN" || return $?
+  suite_proxy_token_validate "generation" "$SUITE_PROXY_OWNER_GENERATION" || return $?
+}
+
+suite_proxy_state_read_owner() {
+  suite_proxy_state_read_owner_path "$1/owner"
+}
+
+suite_proxy_owner_file_matches() {
+  local owner_path="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+
+  suite_proxy_state_read_owner_path "$owner_path" || return $?
+  if [[ "$SUITE_PROXY_OWNER_PID" != "$owner_pid" ||
+        "$SUITE_PROXY_OWNER_START_IDENTITY" != "$owner_start_identity" ||
+        "$SUITE_PROXY_OWNER_TOKEN" != "$owner_token" ||
+        "$SUITE_PROXY_OWNER_GENERATION" != "$generation" ]]; then
+    local_state_error "suite proxy owner tombstone does not match its immutable snapshot"
+    return 1
+  fi
+}
+
+# Mutation rechecks include both immutable state and the actual current owner
+# process; consumers use the read-only require helper above.
+suite_proxy_state_require_current_owner() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+
+  suite_proxy_state_require_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  suite_proxy_current_process_matches "$owner_pid" "$owner_start_identity" "$owner_token" || return $?
+  suite_proxy_state_require_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation"
+}
+
+# GNU and BSD spell "rename this exact path without following or replacing the
+# destination" differently. Verify postconditions because both -n variants
+# intentionally report success when the destination already exists.
+suite_proxy_move_no_replace() {
+  local source_path="$1"
+  local destination_path="$2"
+  local move_status=0
+
+  if [[ ! -e "$source_path" && ! -L "$source_path" ]]; then
+    local_state_error "suite proxy move source is missing: $source_path"
+    return 1
+  fi
+  if mv --version >/dev/null 2>&1; then
+    mv -n -T -- "$source_path" "$destination_path" || move_status=$?
+  else
+    mv -n -h "$source_path" "$destination_path" || move_status=$?
+  fi
+  if [[ "$move_status" != 0 || -e "$source_path" || -L "$source_path" ||
+        ( ! -e "$destination_path" && ! -L "$destination_path" ) ]]; then
+    local_state_error "suite proxy could not claim an owner-specific tombstone"
+    return 1
+  fi
+}
+
+# Confirms all immutable owner fields immediately before state mutation.
+suite_proxy_state_require_owner() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  if [[ ! -d "$state_dir" || -L "$state_dir" ]]; then
+    local_state_error "suite proxy state directory is missing or not regular: $state_dir"
+    return 1
+  fi
+  suite_proxy_state_read_owner "$state_dir" || return $?
+  if [[ "$SUITE_PROXY_OWNER_PID" != "$owner_pid" ||
+        "$SUITE_PROXY_OWNER_START_IDENTITY" != "$owner_start_identity" ||
+        "$SUITE_PROXY_OWNER_TOKEN" != "$owner_token" ||
+        "$SUITE_PROXY_OWNER_GENERATION" != "$generation" ]]; then
+    local_state_error "suite proxy state ownership changed: $state_dir"
+    return 1
+  fi
+}
+
+# Parses the complete direct-endpoint and immutable-container readiness record.
+# No record is ever sourced or evaluated.
+suite_proxy_attestation_read() {
+  local attestation_path="$1"
+  local line
+  local lines=()
+
+  if [[ ! -f "$attestation_path" || -L "$attestation_path" || ! -r "$attestation_path" ]]; then
+    local_state_error "suite proxy readiness attestation is missing or not regular: $attestation_path"
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines+=("$line")
+  done < "$attestation_path"
+  if [[ "${#lines[@]}" != 17 ]] ||
+      [[ "${lines[0]}" != "format=urnetwork-server-suite-proxy-ready-v1" ]] ||
+      [[ "${lines[1]}" != owner_pid=* ]] ||
+      [[ "${lines[2]}" != owner_start_identity=* ]] ||
+      [[ "${lines[3]}" != owner_token=* ]] ||
+      [[ "${lines[4]}" != generation=* ]] ||
+      [[ "${lines[5]}" != host_ip=* ]] ||
+      [[ "${lines[6]}" != postgres_host=* ]] ||
+      [[ "${lines[7]}" != postgres_port=* ]] ||
+      [[ "${lines[8]}" != redis_host=* ]] ||
+      [[ "${lines[9]}" != redis_port=* ]] ||
+      [[ "${lines[10]}" != postgres_upstream_id=* ]] ||
+      [[ "${lines[11]}" != redis_upstream_id=* ]] ||
+      [[ "${lines[12]}" != proxy_image_id=* ]] ||
+      [[ "${lines[13]}" != postgres_proxy_name=* ]] ||
+      [[ "${lines[14]}" != postgres_proxy_id=* ]] ||
+      [[ "${lines[15]}" != redis_proxy_name=* ]] ||
+      [[ "${lines[16]}" != redis_proxy_id=* ]]; then
+    local_state_error "suite proxy readiness attestation is malformed: $attestation_path"
+    return 1
+  fi
+
+  SUITE_PROXY_READY_OWNER_PID="${lines[1]#owner_pid=}"
+  SUITE_PROXY_READY_OWNER_START_IDENTITY="${lines[2]#owner_start_identity=}"
+  SUITE_PROXY_READY_OWNER_TOKEN="${lines[3]#owner_token=}"
+  SUITE_PROXY_READY_GENERATION="${lines[4]#generation=}"
+  SUITE_PROXY_READY_HOST_IP="${lines[5]#host_ip=}"
+  SUITE_PROXY_READY_POSTGRES_HOST="${lines[6]#postgres_host=}"
+  SUITE_PROXY_READY_POSTGRES_PORT="${lines[7]#postgres_port=}"
+  SUITE_PROXY_READY_REDIS_HOST="${lines[8]#redis_host=}"
+  SUITE_PROXY_READY_REDIS_PORT="${lines[9]#redis_port=}"
+  SUITE_PROXY_READY_POSTGRES_UPSTREAM_ID="${lines[10]#postgres_upstream_id=}"
+  SUITE_PROXY_READY_REDIS_UPSTREAM_ID="${lines[11]#redis_upstream_id=}"
+  SUITE_PROXY_READY_IMAGE_ID="${lines[12]#proxy_image_id=}"
+  SUITE_PROXY_READY_POSTGRES_PROXY_NAME="${lines[13]#postgres_proxy_name=}"
+  SUITE_PROXY_READY_POSTGRES_PROXY_ID="${lines[14]#postgres_proxy_id=}"
+  SUITE_PROXY_READY_REDIS_PROXY_NAME="${lines[15]#redis_proxy_name=}"
+  SUITE_PROXY_READY_REDIS_PROXY_ID="${lines[16]#redis_proxy_id=}"
+
+  suite_proxy_positive_integer_validate "readiness owner pid" "$SUITE_PROXY_READY_OWNER_PID" || return $?
+  suite_proxy_value_validate "readiness owner start identity" "$SUITE_PROXY_READY_OWNER_START_IDENTITY" || return $?
+  suite_proxy_token_validate "readiness owner token" "$SUITE_PROXY_READY_OWNER_TOKEN" || return $?
+  suite_proxy_token_validate "readiness generation" "$SUITE_PROXY_READY_GENERATION" || return $?
+  suite_proxy_host_ip_validate_format "$SUITE_PROXY_READY_HOST_IP" || return $?
+  suite_proxy_value_validate "PostgreSQL host" "$SUITE_PROXY_READY_POSTGRES_HOST" || return $?
+  suite_proxy_positive_integer_validate "PostgreSQL port" "$SUITE_PROXY_READY_POSTGRES_PORT" || return $?
+  suite_proxy_value_validate "Redis host" "$SUITE_PROXY_READY_REDIS_HOST" || return $?
+  suite_proxy_positive_integer_validate "Redis port" "$SUITE_PROXY_READY_REDIS_PORT" || return $?
+  if [[ "${#SUITE_PROXY_READY_POSTGRES_PORT}" -gt 5 ||
+        "${#SUITE_PROXY_READY_REDIS_PORT}" -gt 5 ]] ||
+      (( 65535 < SUITE_PROXY_READY_POSTGRES_PORT || 65535 < SUITE_PROXY_READY_REDIS_PORT )); then
+    local_state_error "suite proxy readiness attestation has an invalid port: $attestation_path"
+    return 1
+  fi
+  suite_proxy_container_id_validate "PostgreSQL upstream id" "$SUITE_PROXY_READY_POSTGRES_UPSTREAM_ID" || return $?
+  suite_proxy_container_id_validate "Redis upstream id" "$SUITE_PROXY_READY_REDIS_UPSTREAM_ID" || return $?
+  suite_proxy_image_id_validate "$SUITE_PROXY_READY_IMAGE_ID" || return $?
+  suite_proxy_value_validate "PostgreSQL proxy name" "$SUITE_PROXY_READY_POSTGRES_PROXY_NAME" || return $?
+  suite_proxy_container_id_validate "PostgreSQL proxy id" "$SUITE_PROXY_READY_POSTGRES_PROXY_ID" || return $?
+  suite_proxy_value_validate "Redis proxy name" "$SUITE_PROXY_READY_REDIS_PROXY_NAME" || return $?
+  suite_proxy_container_id_validate "Redis proxy id" "$SUITE_PROXY_READY_REDIS_PROXY_ID" || return $?
+  if [[ "$SUITE_PROXY_READY_POSTGRES_PROXY_NAME" != urnetwork-suite-proxy-pg ||
+        "$SUITE_PROXY_READY_REDIS_PROXY_NAME" != urnetwork-suite-proxy-redis ]]; then
+    local_state_error "suite proxy readiness has non-canonical proxy names"
+    return 1
+  fi
+}
+
+# Compares one owner/readiness read to a caller's immutable snapshot.
+# Compares one parsed readiness record to the caller's immutable values.
+suite_proxy_attestation_file_matches() {
+  local attestation_path="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local host_ip="$6"
+  local postgres_host="$7"
+  local postgres_port="$8"
+  local redis_host="$9"
+  shift 9
+  local redis_port="$1"
+  local postgres_upstream_id="$2"
+  local redis_upstream_id="$3"
+  local image_id="$4"
+  local postgres_proxy_name="$5"
+  local postgres_proxy_id="$6"
+  local redis_proxy_name="$7"
+  local redis_proxy_id="$8"
+
+  suite_proxy_attestation_read "$attestation_path" || return $?
+  if [[ "$SUITE_PROXY_READY_OWNER_PID" != "$owner_pid" ||
+        "$SUITE_PROXY_READY_OWNER_START_IDENTITY" != "$owner_start_identity" ||
+        "$SUITE_PROXY_READY_OWNER_TOKEN" != "$owner_token" ||
+        "$SUITE_PROXY_READY_GENERATION" != "$generation" ||
+        "$SUITE_PROXY_READY_HOST_IP" != "$host_ip" ||
+        "$SUITE_PROXY_READY_POSTGRES_HOST" != "$postgres_host" ||
+        "$SUITE_PROXY_READY_POSTGRES_PORT" != "$postgres_port" ||
+        "$SUITE_PROXY_READY_REDIS_HOST" != "$redis_host" ||
+        "$SUITE_PROXY_READY_REDIS_PORT" != "$redis_port" ||
+        "$SUITE_PROXY_READY_POSTGRES_UPSTREAM_ID" != "$postgres_upstream_id" ||
+        "$SUITE_PROXY_READY_REDIS_UPSTREAM_ID" != "$redis_upstream_id" ||
+        "$SUITE_PROXY_READY_IMAGE_ID" != "$image_id" ||
+        "$SUITE_PROXY_READY_POSTGRES_PROXY_NAME" != "$postgres_proxy_name" ||
+        "$SUITE_PROXY_READY_POSTGRES_PROXY_ID" != "$postgres_proxy_id" ||
+        "$SUITE_PROXY_READY_REDIS_PROXY_NAME" != "$redis_proxy_name" ||
+        "$SUITE_PROXY_READY_REDIS_PROXY_ID" != "$redis_proxy_id" ]]; then
+    local_state_error "suite proxy readiness does not match its immutable snapshot: $attestation_path"
+    return 1
+  fi
+}
+
+# Compares one owner/readiness read to a caller's immutable snapshot.
+suite_proxy_attestation_snapshot_matches() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local ready_dir="$state_dir/ready"
+  local unexpected
+  local published_unexpected
+  shift 5
+
+  suite_proxy_state_require_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  if [[ ! -d "$ready_dir" || -L "$ready_dir" ||
+        ! -d "$ready_dir/published" || -L "$ready_dir/published" ]]; then
+    local_state_error "suite proxy readiness sentinel is missing or not regular: $ready_dir"
+    return 1
+  fi
+  unexpected="$(find "$ready_dir" -mindepth 1 -maxdepth 1 \
+    ! -name record ! -name published -print -quit 2>/dev/null)" || return $?
+  published_unexpected="$(find "$ready_dir/published" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return $?
+  if [[ -n "$unexpected" || -n "$published_unexpected" ]]; then
+    local_state_error "suite proxy readiness directory contains unexpected state: $ready_dir"
+    return 1
+  fi
+  suite_proxy_attestation_file_matches \
+    "$ready_dir/record" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" "$@"
+}
+
+# Validates the same owner/readiness snapshot on both sides of process-instance
+# and assigned-address checks, closing pid-reuse and state replacement windows.
+suite_proxy_attestation_validate_snapshot() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local host_ip="$6"
+  shift 6
+
+  suite_proxy_attestation_snapshot_matches \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+    "$host_ip" "$@" || return $?
+  suite_proxy_process_start_identity "$owner_pid" || return $?
+  if [[ "$SUITE_PROXY_PROCESS_START_IDENTITY" != "$owner_start_identity" ]]; then
+    local_state_error "suite proxy owner process instance changed: $owner_pid"
+    return 1
+  fi
+  suite_proxy_process_challenge_validate "$owner_pid" "$owner_token" || return $?
+  suite_proxy_host_ip_validate_assigned "$host_ip" || return $?
+  suite_proxy_attestation_snapshot_matches \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+    "$host_ip" "$@" || return $?
+  suite_proxy_process_start_identity "$owner_pid" || return $?
+  if [[ "$SUITE_PROXY_PROCESS_START_IDENTITY" != "$owner_start_identity" ]]; then
+    local_state_error "suite proxy owner process instance changed: $owner_pid"
+    return 1
+  fi
+  suite_proxy_process_challenge_validate "$owner_pid" "$owner_token"
+}
+
+# Reads and returns a stable complete readiness snapshot for a harness.
+suite_proxy_attestation_validate() {
+  local state_dir="$1"
+  local owner_pid
+  local owner_start_identity
+  local owner_token
+  local generation
+  local host_ip
+  local postgres_host
+  local postgres_port
+  local redis_host
+  local redis_port
+  local postgres_upstream_id
+  local redis_upstream_id
+  local image_id
+  local postgres_proxy_name
+  local postgres_proxy_id
+  local redis_proxy_name
+  local redis_proxy_id
+
+  if [[ ! -d "$state_dir" || -L "$state_dir" ]]; then
+    local_state_error "suite proxy state directory is missing or not regular: $state_dir"
+    return 1
+  fi
+  suite_proxy_state_read_owner "$state_dir" || return $?
+  owner_pid="$SUITE_PROXY_OWNER_PID"
+  owner_start_identity="$SUITE_PROXY_OWNER_START_IDENTITY"
+  owner_token="$SUITE_PROXY_OWNER_TOKEN"
+  generation="$SUITE_PROXY_OWNER_GENERATION"
+  suite_proxy_attestation_read "$state_dir/ready/record" || return $?
+  host_ip="$SUITE_PROXY_READY_HOST_IP"
+  postgres_host="$SUITE_PROXY_READY_POSTGRES_HOST"
+  postgres_port="$SUITE_PROXY_READY_POSTGRES_PORT"
+  redis_host="$SUITE_PROXY_READY_REDIS_HOST"
+  redis_port="$SUITE_PROXY_READY_REDIS_PORT"
+  postgres_upstream_id="$SUITE_PROXY_READY_POSTGRES_UPSTREAM_ID"
+  redis_upstream_id="$SUITE_PROXY_READY_REDIS_UPSTREAM_ID"
+  image_id="$SUITE_PROXY_READY_IMAGE_ID"
+  postgres_proxy_name="$SUITE_PROXY_READY_POSTGRES_PROXY_NAME"
+  postgres_proxy_id="$SUITE_PROXY_READY_POSTGRES_PROXY_ID"
+  redis_proxy_name="$SUITE_PROXY_READY_REDIS_PROXY_NAME"
+  redis_proxy_id="$SUITE_PROXY_READY_REDIS_PROXY_ID"
+  if [[ "$postgres_host" != "$host_ip" || "$redis_host" != "$host_ip" ]]; then
+    local_state_error "suite proxy readiness endpoints are not direct host-IP endpoints"
+    return 1
+  fi
+
+  suite_proxy_attestation_validate_snapshot \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+    "$host_ip" "$postgres_host" "$postgres_port" "$redis_host" "$redis_port" \
+    "$postgres_upstream_id" "$redis_upstream_id" "$image_id" \
+    "$postgres_proxy_name" "$postgres_proxy_id" \
+    "$redis_proxy_name" "$redis_proxy_id" || return $?
+
+  # Export the original values, not globals from the confirming re-read.
+  SUITE_PROXY_SNAPSHOT_OWNER_PID="$owner_pid"
+  SUITE_PROXY_SNAPSHOT_OWNER_START_IDENTITY="$owner_start_identity"
+  SUITE_PROXY_SNAPSHOT_OWNER_TOKEN="$owner_token"
+  SUITE_PROXY_SNAPSHOT_GENERATION="$generation"
+  SUITE_PROXY_SNAPSHOT_HOST_IP="$host_ip"
+  SUITE_PROXY_SNAPSHOT_POSTGRES_HOST="$postgres_host"
+  SUITE_PROXY_SNAPSHOT_POSTGRES_PORT="$postgres_port"
+  SUITE_PROXY_SNAPSHOT_REDIS_HOST="$redis_host"
+  SUITE_PROXY_SNAPSHOT_REDIS_PORT="$redis_port"
+  SUITE_PROXY_SNAPSHOT_POSTGRES_UPSTREAM_ID="$postgres_upstream_id"
+  SUITE_PROXY_SNAPSHOT_REDIS_UPSTREAM_ID="$redis_upstream_id"
+  SUITE_PROXY_SNAPSHOT_IMAGE_ID="$image_id"
+  SUITE_PROXY_SNAPSHOT_POSTGRES_PROXY_NAME="$postgres_proxy_name"
+  SUITE_PROXY_SNAPSHOT_POSTGRES_PROXY_ID="$postgres_proxy_id"
+  SUITE_PROXY_SNAPSHOT_REDIS_PROXY_NAME="$redis_proxy_name"
+  SUITE_PROXY_SNAPSHOT_REDIS_PROXY_ID="$redis_proxy_id"
+}
+
+# Creates an exclusive private readiness directory, validates its record, and
+# publishes it by atomically creating an empty `published` directory. A reader
+# never accepts the pre-publication directory, and mkdir cannot dereference a
+# raced destination symlink the way two-operand ln/mv can.
+suite_proxy_attestation_publish() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local host_ip="$6"
+  local postgres_host="$7"
+  local postgres_port="$8"
+  local redis_host="$9"
+  shift 9
+  local redis_port="$1"
+  local postgres_upstream_id="$2"
+  local redis_upstream_id="$3"
+  local image_id="$4"
+  local postgres_proxy_name="$5"
+  local postgres_proxy_id="$6"
+  local redis_proxy_name="$7"
+  local redis_proxy_id="$8"
+  local ready_dir="$state_dir/ready"
+  local record_path="$ready_dir/record"
+  local published_path="$ready_dir/published"
+  local unexpected
+
+  suite_proxy_state_require_current_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  suite_proxy_host_ip_validate_assigned "$host_ip" || return $?
+  if [[ "$postgres_host" != "$host_ip" || "$redis_host" != "$host_ip" ]]; then
+    local_state_error "suite proxy readiness endpoints must use the assigned host IP"
+    return 1
+  fi
+  suite_proxy_container_id_validate "PostgreSQL upstream id" "$postgres_upstream_id" || return $?
+  suite_proxy_container_id_validate "Redis upstream id" "$redis_upstream_id" || return $?
+  suite_proxy_image_id_validate "$image_id" || return $?
+  suite_proxy_container_id_validate "PostgreSQL proxy id" "$postgres_proxy_id" || return $?
+  suite_proxy_container_id_validate "Redis proxy id" "$redis_proxy_id" || return $?
+  if [[ "$postgres_proxy_name" != urnetwork-suite-proxy-pg ||
+        "$redis_proxy_name" != urnetwork-suite-proxy-redis ]]; then
+    local_state_error "suite proxy readiness requires canonical proxy names"
+    return 1
+  fi
+  if [[ -e "$ready_dir" || -L "$ready_dir" ]]; then
+    local_state_error "suite proxy readiness state already exists: $state_dir"
+    return 1
+  fi
+  if ! (umask 077 && mkdir "$ready_dir"); then
+    local_state_error "could not exclusively create suite proxy readiness directory"
+    return 1
+  fi
+  if ! (umask 077 && set -o noclobber && {
+    printf '%s\n' "format=urnetwork-server-suite-proxy-ready-v1"
+    printf 'owner_pid=%s\n' "$owner_pid"
+    printf 'owner_start_identity=%s\n' "$owner_start_identity"
+    printf 'owner_token=%s\n' "$owner_token"
+    printf 'generation=%s\n' "$generation"
+    printf 'host_ip=%s\n' "$host_ip"
+    printf 'postgres_host=%s\n' "$postgres_host"
+    printf 'postgres_port=%s\n' "$postgres_port"
+    printf 'redis_host=%s\n' "$redis_host"
+    printf 'redis_port=%s\n' "$redis_port"
+    printf 'postgres_upstream_id=%s\n' "$postgres_upstream_id"
+    printf 'redis_upstream_id=%s\n' "$redis_upstream_id"
+    printf 'proxy_image_id=%s\n' "$image_id"
+    printf 'postgres_proxy_name=%s\n' "$postgres_proxy_name"
+    printf 'postgres_proxy_id=%s\n' "$postgres_proxy_id"
+    printf 'redis_proxy_name=%s\n' "$redis_proxy_name"
+    printf 'redis_proxy_id=%s\n' "$redis_proxy_id"
+  } > "$record_path"); then
+    local_state_error "could not exclusively create suite proxy readiness record"
+    return 1
+  fi
+  if ! suite_proxy_attestation_file_matches \
+      "$record_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+      "$host_ip" "$postgres_host" "$postgres_port" "$redis_host" "$redis_port" \
+      "$postgres_upstream_id" "$redis_upstream_id" "$image_id" \
+      "$postgres_proxy_name" "$postgres_proxy_id" "$redis_proxy_name" "$redis_proxy_id"; then
+    local_state_error "refusing to publish invalid suite proxy readiness"
+    return 1
+  fi
+  unexpected="$(find "$ready_dir" -mindepth 1 -maxdepth 1 ! -name record -print -quit 2>/dev/null)" || {
+    local_state_error "could not inspect unpublished suite proxy readiness"
+    return 1
+  }
+  if [[ -n "$unexpected" ]]; then
+    local_state_error "unpublished suite proxy readiness contains unexpected state"
+    return 1
+  fi
+  suite_proxy_state_require_current_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  suite_proxy_attestation_file_matches \
+    "$record_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+    "$host_ip" "$postgres_host" "$postgres_port" "$redis_host" "$redis_port" \
+    "$postgres_upstream_id" "$redis_upstream_id" "$image_id" \
+    "$postgres_proxy_name" "$postgres_proxy_id" "$redis_proxy_name" "$redis_proxy_id" || return $?
+  if ! (umask 077 && mkdir "$published_path"); then
+    local_state_error "could not atomically publish suite proxy readiness"
+    return 1
+  fi
+  suite_proxy_attestation_validate_snapshot \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" \
+    "$host_ip" "$postgres_host" "$postgres_port" "$redis_host" "$redis_port" \
+    "$postgres_upstream_id" "$redis_upstream_id" "$image_id" \
+    "$postgres_proxy_name" "$postgres_proxy_id" "$redis_proxy_name" "$redis_proxy_id"
+}
+
+# Withdraws readiness with one no-replace rename before inspecting or removing
+# its contents. Any swapped or malformed object remains in the owner-specific
+# tombstone rather than being unlinked through the canonical path.
+suite_proxy_attestation_remove() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local ready_path="$state_dir/ready"
+  local tombstone_path="$state_dir/ready.removing.$owner_token.$generation"
+  local record_path="$tombstone_path/record"
+  local record_tombstone_path="$tombstone_path/record.removing"
+  local published_path="$tombstone_path/published"
+  local published_tombstone_path="$tombstone_path/published.removing"
+  local unexpected
+  local published_unexpected
+  shift 5
+
+  suite_proxy_state_require_current_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  if [[ -e "$ready_path" || -L "$ready_path" ]]; then
+    suite_proxy_move_no_replace "$ready_path" "$tombstone_path" || return $?
+    if [[ ! -d "$tombstone_path" || -L "$tombstone_path" ]]; then
+      local_state_error "suite proxy readiness tombstone is not an owned directory"
+      return 1
+    fi
+    unexpected="$(find "$tombstone_path" -mindepth 1 -maxdepth 1 \
+      ! -name record ! -name published -print -quit 2>/dev/null)" || return $?
+    if [[ -n "$unexpected" || ! -f "$record_path" || -L "$record_path" ]]; then
+      local_state_error "suite proxy readiness tombstone contains unexpected state"
+      return 1
+    fi
+    if [[ -e "$published_path" || -L "$published_path" ]]; then
+      if [[ ! -d "$published_path" || -L "$published_path" ]]; then
+        local_state_error "suite proxy published sentinel is not an empty owned directory"
+        return 1
+      fi
+      published_unexpected="$(find "$published_path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return $?
+      if [[ -n "$published_unexpected" ]]; then
+        local_state_error "suite proxy published sentinel is not an empty owned directory"
+        return 1
+      fi
+    fi
+    suite_proxy_attestation_file_matches \
+      "$record_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" "$@" || return $?
+    suite_proxy_state_require_current_owner \
+      "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+    if [[ -d "$published_path" && ! -L "$published_path" ]]; then
+      suite_proxy_move_no_replace "$published_path" "$published_tombstone_path" || return $?
+      published_unexpected="$(find "$published_tombstone_path" \
+        -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return $?
+      if [[ ! -d "$published_tombstone_path" || -L "$published_tombstone_path" ||
+            -n "$published_unexpected" ]]; then
+        local_state_error "suite proxy published tombstone is not an empty owned directory"
+        return 1
+      fi
+      rmdir "$published_tombstone_path" || return $?
+    fi
+    suite_proxy_move_no_replace "$record_path" "$record_tombstone_path" || return $?
+    suite_proxy_attestation_file_matches \
+      "$record_tombstone_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" "$@" || return $?
+    suite_proxy_state_require_current_owner \
+      "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+    rm -- "$record_tombstone_path" || return $?
+    rmdir "$tombstone_path" || return $?
+  fi
+}
+
+# Releases only an otherwise-empty directory with the same live owner. The
+# owner record itself is first moved without replacement, then re-parsed from
+# its owner-specific tombstone before deletion. Any mismatch stays fail closed.
+suite_proxy_state_release() {
+  local state_dir="$1"
+  local owner_pid="$2"
+  local owner_start_identity="$3"
+  local owner_token="$4"
+  local generation="$5"
+  local owner_path="$state_dir/owner"
+  local tombstone_path="$state_dir/owner.releasing.$owner_token.$generation"
+  local unexpected
+
+  suite_proxy_state_require_current_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  unexpected="$(find "$state_dir" -mindepth 1 -maxdepth 1 ! -name owner -print -quit 2>/dev/null)" || {
+    local_state_error "could not inspect suite proxy state before release: $state_dir"
+    return 1
+  }
+  if [[ -n "$unexpected" ]]; then
+    local_state_error "suite proxy state contains unexpected files: $state_dir"
+    return 1
+  fi
+  suite_proxy_state_require_current_owner \
+    "$state_dir" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  suite_proxy_move_no_replace "$owner_path" "$tombstone_path" || return $?
+  suite_proxy_owner_file_matches \
+    "$tombstone_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  suite_proxy_current_process_matches "$owner_pid" "$owner_start_identity" "$owner_token" || return $?
+  unexpected="$(find "$state_dir" -mindepth 1 -maxdepth 1 \
+    ! -name "owner.releasing.$owner_token.$generation" -print -quit 2>/dev/null)" || return $?
+  if [[ -n "$unexpected" ]]; then
+    local_state_error "suite proxy state changed during release: $state_dir"
+    return 1
+  fi
+  suite_proxy_owner_file_matches \
+    "$tombstone_path" "$owner_pid" "$owner_start_identity" "$owner_token" "$generation" || return $?
+  rm -- "$tombstone_path" || return $?
+  if ! rmdir "$state_dir"; then
+    local_state_error "suite proxy state release left a fail-closed tombstone: $state_dir"
+    return 1
+  fi
+}

@@ -18,14 +18,78 @@ test_env_find_resource() {
     local root="$1"
     local resource_name="$2"
     local candidate
-    for candidate in "$root/$resource_name" "$root/local/$resource_name"; do
+    for candidate in \
+        "$root/$resource_name" \
+        "$root/local/$resource_name" \
+        "$root/all/$resource_name"; do
         if [[ -f "$candidate" ]]; then
             TEST_ENV_RESOURCE_PATH="$candidate"
             return 0
         fi
     done
-    test_env_error "required resource is missing: $root/{,local/}$resource_name"
+    test_env_error "required resource is missing: $root/{,local/,all/}$resource_name"
     return 1
+}
+
+# Reads the checked-in, non-executable resource boundary for a complete local
+# server suite. Resource names are constrained to one path element before the
+# normal root/local/all resolver is used.
+test_env_validate_suite_resource_manifest() {
+    local manifest_path="$1"
+    local vault_root="$2"
+    local config_root="$3"
+    local line
+    local resource_kind
+    local resource_name
+    local resource_key
+    local seen_resource_keys="|"
+    local line_number=0
+    local vault_resource_count=0
+    local config_resource_count=0
+
+    if [[ ! -f "$manifest_path" || -L "$manifest_path" || ! -r "$manifest_path" ]]; then
+        test_env_error "suite resource manifest is not a readable regular file: $manifest_path"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
+        if [[ "$line_number" == 1 ]]; then
+            if [[ "$line" != format=urnetwork-server-suite-resources-v1 ]]; then
+                test_env_error "suite resource manifest has an invalid format: $manifest_path"
+                return 1
+            fi
+            continue
+        fi
+        if [[ "${#line}" -gt 256 ]]; then
+            test_env_error "suite resource manifest has an invalid entry: $manifest_path"
+            return 1
+        fi
+        if [[ "$line" =~ ^(vault|config)=([a-zA-Z0-9][a-zA-Z0-9._-]*)$ ]]; then
+            resource_kind="${BASH_REMATCH[1]}"
+            resource_name="${BASH_REMATCH[2]}"
+        else
+            test_env_error "suite resource manifest has an invalid entry: $manifest_path"
+            return 1
+        fi
+        resource_key="$resource_kind:$resource_name"
+        if [[ "$seen_resource_keys" == *"|$resource_key|"* ]]; then
+            test_env_error "suite resource manifest has a duplicate entry: $resource_key"
+            return 1
+        fi
+        seen_resource_keys="${seen_resource_keys}${resource_key}|"
+        if [[ "$resource_kind" == vault ]]; then
+            vault_resource_count=$((vault_resource_count + 1))
+            test_env_find_resource "$vault_root" "$resource_name" || return $?
+        else
+            config_resource_count=$((config_resource_count + 1))
+            test_env_find_resource "$config_root" "$resource_name" || return $?
+        fi
+    done < "$manifest_path"
+    if [[ "$line_number" == 0 || "$vault_resource_count" == 0 ||
+          "$config_resource_count" == 0 ]]; then
+        test_env_error "suite resource manifest is incomplete: $manifest_path"
+        return 1
+    fi
 }
 
 test_env_trim() {
@@ -156,6 +220,27 @@ test_env_validate_launcher() {
     fi
 }
 
+test_env_validate_suite_proxy_snapshot() {
+    suite_proxy_attestation_validate_snapshot \
+        "$TEST_ENV_SUITE_PROXY_STATE_DIR" \
+        "$SUITE_PROXY_SNAPSHOT_OWNER_PID" \
+        "$SUITE_PROXY_SNAPSHOT_OWNER_START_IDENTITY" \
+        "$SUITE_PROXY_SNAPSHOT_OWNER_TOKEN" \
+        "$SUITE_PROXY_SNAPSHOT_GENERATION" \
+        "$SUITE_PROXY_SNAPSHOT_HOST_IP" \
+        "$SUITE_PROXY_SNAPSHOT_POSTGRES_HOST" \
+        "$SUITE_PROXY_SNAPSHOT_POSTGRES_PORT" \
+        "$SUITE_PROXY_SNAPSHOT_REDIS_HOST" \
+        "$SUITE_PROXY_SNAPSHOT_REDIS_PORT" \
+        "$SUITE_PROXY_SNAPSHOT_POSTGRES_UPSTREAM_ID" \
+        "$SUITE_PROXY_SNAPSHOT_REDIS_UPSTREAM_ID" \
+        "$SUITE_PROXY_SNAPSHOT_IMAGE_ID" \
+        "$SUITE_PROXY_SNAPSHOT_POSTGRES_PROXY_NAME" \
+        "$SUITE_PROXY_SNAPSHOT_POSTGRES_PROXY_ID" \
+        "$SUITE_PROXY_SNAPSHOT_REDIS_PROXY_NAME" \
+        "$SUITE_PROXY_SNAPSHOT_REDIS_PROXY_ID"
+}
+
 test_env_configure() {
     local source_path="${BASH_SOURCE[0]}"
     local source_dir
@@ -163,6 +248,7 @@ test_env_configure() {
     local urnetwork_home
     local portable_root
     local local_state_file
+    local suite_proxy_state_dir="${WARP_TEST_ENV_SUITE_PROXY_STATE_DIR:-}"
 
     if [[ "$source_path" == */* ]]; then
         source_dir="${source_path%/*}"
@@ -176,6 +262,7 @@ test_env_configure() {
     urnetwork_home="${server_dir%/*}"
     portable_root="$server_dir/local/testdata"
     local_state_file="$server_dir/local/run-local-state.sh"
+    TEST_ENV_SUITE_RESOURCE_MANIFEST="$server_dir/local/suite-resource-manifest.txt"
 
     if [[ ! -f "$local_state_file" ]]; then
         test_env_error "local launcher state helper is missing: $local_state_file"
@@ -186,8 +273,22 @@ test_env_configure() {
         return 1
     }
 
+    TEST_ENV_SUITE_PROXY_MODE=0
+    if [[ -n "$suite_proxy_state_dir" ]]; then
+        TEST_ENV_SUITE_PROXY_MODE=1
+        TEST_ENV_SUITE_PROXY_STATE_DIR="$suite_proxy_state_dir"
+        if [[ "$suite_proxy_state_dir" != /* ]]; then
+            test_env_error "WARP_TEST_ENV_SUITE_PROXY_STATE_DIR must be an absolute path"
+            return 1
+        fi
+    fi
+
     if [[ -n "${WARP_TEST_ENV_TEST_HOSTS_FILE:-}" ||
           -n "${WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR:-}" ]]; then
+        if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+            test_env_error "suite-proxy mode is mutually exclusive with managed-local state paths"
+            return 1
+        fi
         if [[ -z "${WARP_TEST_ENV_TCP_PROBE:-}" ||
               -z "${WARP_TEST_ENV_TEST_HOSTS_FILE:-}" ||
               -z "${WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR:-}" ]]; then
@@ -212,8 +313,14 @@ test_env_configure() {
     export WARP_DOMAIN="bringyour.com"
     export WARP_BLOCK="test"
     export WARP_VERSION="0.0.0"
-    export BRINGYOUR_POSTGRES_HOSTNAME="${BRINGYOUR_POSTGRES_HOSTNAME:-local-pg.bringyour.com}"
-    export BRINGYOUR_REDIS_HOSTNAME="${BRINGYOUR_REDIS_HOSTNAME:-local-redis.bringyour.com}"
+
+    case "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" in
+        0 | 1) ;;
+        *)
+            test_env_error "WARP_TEST_ENV_USE_PORTABLE_RESOURCES must be 0 or 1"
+            return 1
+            ;;
+    esac
 
     case "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" in
         0) ;;
@@ -230,6 +337,26 @@ test_env_configure() {
             return 1
             ;;
     esac
+
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" != 0 ||
+              "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" != 0 ]]; then
+            test_env_error "suite-proxy mode is mutually exclusive with portable or unmanaged services"
+            return 1
+        fi
+        if [[ -z "${WARP_VAULT_HOME:-}" || -z "${WARP_CONFIG_HOME:-}" ]]; then
+            test_env_error "suite-proxy mode requires explicit WARP_VAULT_HOME and WARP_CONFIG_HOME"
+            return 1
+        fi
+        if [[ "$WARP_VAULT_HOME" != /* || "$WARP_CONFIG_HOME" != /* ]]; then
+            test_env_error "suite-proxy resource roots must be absolute paths"
+            return 1
+        fi
+        export WARP_VAULT_HOME WARP_CONFIG_HOME
+    else
+        export BRINGYOUR_POSTGRES_HOSTNAME="${BRINGYOUR_POSTGRES_HOSTNAME:-local-pg.bringyour.com}"
+        export BRINGYOUR_REDIS_HOSTNAME="${BRINGYOUR_REDIS_HOSTNAME:-local-redis.bringyour.com}"
+    fi
 
     if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" == "1" ]]; then
         export WARP_VAULT_HOME="$portable_root/vault"
@@ -282,6 +409,33 @@ test_env_preflight() {
         test_env_error "missing prerequisite: nc (required for bounded TCP service probes)"
         return 1
     fi
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]] && ! command -v ps >/dev/null 2>&1; then
+        test_env_error "missing prerequisite: ps (required for suite-proxy owner validation)"
+        return 1
+    fi
+
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        if ! suite_proxy_attestation_validate "$TEST_ENV_SUITE_PROXY_STATE_DIR"; then
+            test_env_error "repository-owned suite proxy is not ready"
+            return 1
+        fi
+        if [[ -n "${BRINGYOUR_POSTGRES_HOSTNAME:-}" &&
+              "$BRINGYOUR_POSTGRES_HOSTNAME" != "$SUITE_PROXY_SNAPSHOT_POSTGRES_HOST" ]]; then
+            test_env_error "BRINGYOUR_POSTGRES_HOSTNAME conflicts with the attested suite proxy"
+            return 1
+        fi
+        if [[ -n "${BRINGYOUR_REDIS_HOSTNAME:-}" &&
+              "$BRINGYOUR_REDIS_HOSTNAME" != "$SUITE_PROXY_SNAPSHOT_REDIS_HOST" ]]; then
+            test_env_error "BRINGYOUR_REDIS_HOSTNAME conflicts with the attested suite proxy"
+            return 1
+        fi
+        export BRINGYOUR_POSTGRES_HOSTNAME="$SUITE_PROXY_SNAPSHOT_POSTGRES_HOST"
+        export BRINGYOUR_REDIS_HOSTNAME="$SUITE_PROXY_SNAPSHOT_REDIS_HOST"
+        test_env_validate_suite_resource_manifest \
+            "$TEST_ENV_SUITE_RESOURCE_MANIFEST" \
+            "$WARP_VAULT_HOME" \
+            "$WARP_CONFIG_HOME" || return $?
+    fi
 
     test_env_find_resource "$WARP_VAULT_HOME" pg.yml || return $?
     pg_resource_path="$TEST_ENV_RESOURCE_PATH"
@@ -296,7 +450,13 @@ test_env_preflight() {
     test_env_split_authority "$pg_authority" || return $?
     pg_host="$TEST_ENV_HOST"
     pg_port="$TEST_ENV_PORT"
-    if [[ "$pg_host" != "$BRINGYOUR_POSTGRES_HOSTNAME" ]]; then
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        if [[ "$pg_host" != "$SUITE_PROXY_SNAPSHOT_POSTGRES_HOST" ||
+              "$pg_port" != "$SUITE_PROXY_SNAPSHOT_POSTGRES_PORT" ]]; then
+            test_env_error "PostgreSQL resource authority does not match the attested suite proxy endpoint"
+            return 1
+        fi
+    elif [[ "$pg_host" != "$BRINGYOUR_POSTGRES_HOSTNAME" ]]; then
         test_env_error "PostgreSQL authority host $pg_host does not match BRINGYOUR_POSTGRES_HOSTNAME"
         return 1
     fi
@@ -307,14 +467,33 @@ test_env_preflight() {
     test_env_split_authority "$redis_authority" || return $?
     redis_host="$TEST_ENV_HOST"
     redis_port="$TEST_ENV_PORT"
-    if [[ "$redis_host" != "$BRINGYOUR_REDIS_HOSTNAME" ]]; then
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        if [[ "$redis_host" != "$SUITE_PROXY_SNAPSHOT_REDIS_HOST" ||
+              "$redis_port" != "$SUITE_PROXY_SNAPSHOT_REDIS_PORT" ]]; then
+            test_env_error "Redis resource authority does not match the attested suite proxy endpoint"
+            return 1
+        fi
+    elif [[ "$redis_host" != "$BRINGYOUR_REDIS_HOSTNAME" ]]; then
         test_env_error "Redis authority host $redis_host does not match BRINGYOUR_REDIS_HOSTNAME"
         return 1
     fi
 
-    test_env_validate_launcher "$pg_host" "$pg_port" "$redis_host" "$redis_port" || return $?
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        test_env_validate_suite_proxy_snapshot || {
+            test_env_error "suite proxy state changed before service probes"
+            return 1
+        }
+    else
+        test_env_validate_launcher "$pg_host" "$pg_port" "$redis_host" "$redis_port" || return $?
+    fi
     test_env_probe_service postgres "$pg_host" "$pg_port" || return $?
     test_env_probe_service redis "$redis_host" "$redis_port" || return $?
+    if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
+        test_env_validate_suite_proxy_snapshot || {
+            test_env_error "suite proxy state changed during service probes"
+            return 1
+        }
+    fi
 }
 
 test_env_main() {

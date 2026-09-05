@@ -100,6 +100,80 @@ The escape skips only the launcher attestation and managed-mapping checks; the
 resource-authority checks and first-attempt service probes still run. Do not use
 it to bless developer-machine aliases or a legacy local VM route.
 
+### Repository-owned suite proxy
+
+When the exact `urnetwork-local-pg` and `urnetwork-local-redis` Compose services
+are already healthy but the interactive launcher cannot be restarted, the
+suite harness can use short-lived direct proxies without sharing that
+launcher's resolver or loopback ownership. Select an IPv4 address already
+assigned to a non-loopback host interface and an absolute, nonexistent private
+state path:
+
+```sh
+cd server
+export SUITE_PROXY_HOST_IP=192.0.2.44 # replace with an address assigned to this host
+export WARP_TEST_ENV_SUITE_PROXY_STATE_DIR=/tmp/urnetwork-server-suite-proxy.$USER
+./local/run-suite-proxy.sh
+```
+
+Keep that Bash process in the foreground. In a second terminal, select the same
+state directory and explicit complete resource repositories before running the
+suite:
+
+```sh
+cd server
+export WARP_TEST_ENV_SUITE_PROXY_STATE_DIR=/tmp/urnetwork-server-suite-proxy.$USER
+export WARP_VAULT_HOME=/absolute/path/to/vault
+export WARP_CONFIG_HOME=/absolute/path/to/config
+./test.sh -run TestName
+```
+
+`test-env.sh` derives both `BRINGYOUR_*_HOSTNAME` values from the attested
+direct IP (and rejects conflicting pre-set values), expands the vault resource
+authorities, and requires their host and port to exactly match the attestation.
+Before any service probe or database test starts, it validates the checked-in
+`suite-resource-manifest.txt`, resolving every entry from the explicit root,
+then its `local` directory, then its `all` directory. The exact local full-suite
+boundary is:
+
+- vault: `auth.yml`, `brevo.yml`, `circle.yml`, `client.yml`, `coinbase.yml`,
+  `helius.yml`, `ipinfo.yml`, `jwt.yml`, `jwt-local-evaluator.pem`,
+  `password.yml`, `pg.yml`, `proxy.yml`, `redis.yml`, `services.yml`, `st.yml`,
+  `stripe.yml`, `wireguard.yml`, and `x402.yml`;
+- config: `apple_roots.pem`, `brevo.yml`, `city-list.yml`, `db.yml`,
+  `email.yml`, `iso-country-list.yml`, `pro.yml`, `redis.yml`, `settings.yml`,
+  `subsidy.yml`, and `tls.yml`.
+
+An incomplete explicit resource checkout is rejected fail closed.
+Suite-proxy mode is mutually exclusive with managed-local test paths,
+`WARP_TEST_ENV_USE_PORTABLE_RESOURCES`, and
+`WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES`. It never guesses a vault or
+config root.
+
+The foreground helper verifies the upstream containers' immutable IDs,
+canonical names, health, Compose project/service labels, and the exact
+`urnetwork-local` network. It resolves `alpine:3.22` to a content-addressed
+image ID, then creates only `urnetwork-suite-proxy-pg` and
+`urnetwork-suite-proxy-redis`, with labels binding their owner process instance,
+challenge token, generation, image, network, service, and upstream. Each runs a
+forking `socat` listener, so concurrent test connections are not serialized.
+Only after PostgreSQL answers a bounded SSLRequest and Redis answers a bounded
+PING does it publish its fixed-format, non-executable readiness record. The
+helper continuously rechecks every identity, attachment, binding, and protocol
+endpoint.
+
+On exit, readiness is withdrawn before containers are touched. A proxy is
+removed only by immutable ID after all ownership labels still match; a missing,
+replaced, or malformed object, a Docker transport error, and any foreign state
+are retained fail closed for inspection. Absence requires a successful daemon
+query for the full immutable ID. The helper never edits `/etc/hosts`, adds an address, changes
+the upstream containers/network, or signals another launcher. It may pull the
+pinned Alpine tag into the local Docker image cache. Do not synthesize or edit
+the private owner/readiness files.
+
+These shell helpers require Bash 3.2 or newer. Invoke their shebang entrypoints
+from zsh; do not source `run-local-state.sh` directly into stock zsh.
+
 ## Notes
 
 - Unless the portable-resource override below is set, an explicit

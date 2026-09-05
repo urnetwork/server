@@ -6,8 +6,49 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+)
+
+// These lists pin the checked-in manifest to the resources used by the local
+// full-suite environment rather than deriving the fixture from its subject.
+var (
+	suiteProxyTestVaultResourceNames = []string{
+		"auth.yml",
+		"brevo.yml",
+		"circle.yml",
+		"client.yml",
+		"coinbase.yml",
+		"helius.yml",
+		"ipinfo.yml",
+		"jwt.yml",
+		"jwt-local-evaluator.pem",
+		"password.yml",
+		"pg.yml",
+		"proxy.yml",
+		"redis.yml",
+		"services.yml",
+		"st.yml",
+		"stripe.yml",
+		"wireguard.yml",
+		"x402.yml",
+	}
+	suiteProxyTestLocalConfigResourceNames = []string{
+		"brevo.yml",
+		"db.yml",
+		"email.yml",
+		"redis.yml",
+		"settings.yml",
+		"subsidy.yml",
+		"tls.yml",
+	}
+	suiteProxyTestAllConfigResourceNames = []string{
+		"apple_roots.pem",
+		"city-list.yml",
+		"iso-country-list.yml",
+		"pro.yml",
+	}
 )
 
 // Builds a child environment without leaking stale test-environment selectors
@@ -16,6 +57,7 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 	blockedNames := map[string]bool{}
 	for _, name := range []string{
 		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR",
 		"WARP_TEST_ENV_TEST_HOSTS_FILE",
 		"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR",
 	} {
@@ -38,6 +80,122 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 		environment = append(environment, name+"="+value)
 	}
 	return environment
+}
+
+// Writes the fixed owner/readiness layout consumed by suite-mode preflight.
+func writeTestEnvironmentSuiteProxyState(
+	t *testing.T,
+	host string,
+	postgresPort string,
+	redisPort string,
+) string {
+	t.Helper()
+	stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+	readyDir := filepath.Join(stateDir, "ready")
+	if err := os.MkdirAll(filepath.Join(readyDir, "published"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerPid := os.Getpid()
+	owner := "format=urnetwork-server-suite-proxy-owner-v1\n" +
+		"owner_pid=" + strconv.Itoa(ownerPid) + "\n" +
+		"owner_start_identity=" + suiteProxyTestStart + "\n" +
+		"owner_token=" + suiteProxyTestToken + "\n" +
+		"generation=" + suiteProxyTestGeneration + "\n"
+	if err := os.WriteFile(filepath.Join(stateDir, "owner"), []byte(owner), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attestation := "format=urnetwork-server-suite-proxy-ready-v1\n" +
+		"owner_pid=" + strconv.Itoa(ownerPid) + "\n" +
+		"owner_start_identity=" + suiteProxyTestStart + "\n" +
+		"owner_token=" + suiteProxyTestToken + "\n" +
+		"generation=" + suiteProxyTestGeneration + "\n" +
+		"host_ip=" + host + "\n" +
+		"postgres_host=" + host + "\n" +
+		"postgres_port=" + postgresPort + "\n" +
+		"redis_host=" + host + "\n" +
+		"redis_port=" + redisPort + "\n" +
+		"postgres_upstream_id=" + strings.Repeat("a", 64) + "\n" +
+		"redis_upstream_id=" + strings.Repeat("b", 64) + "\n" +
+		"proxy_image_id=sha256:" + strings.Repeat("c", 64) + "\n" +
+		"postgres_proxy_name=urnetwork-suite-proxy-pg\n" +
+		"postgres_proxy_id=" + strings.Repeat("d", 64) + "\n" +
+		"redis_proxy_name=urnetwork-suite-proxy-redis\n" +
+		"redis_proxy_id=" + strings.Repeat("e", 64) + "\n"
+	if err := os.WriteFile(filepath.Join(readyDir, "record"), []byte(attestation), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return stateDir
+}
+
+// Writes the explicit root/local/all resource boundary required before
+// destructive full-suite database tests begin.
+func writeTestEnvironmentSuiteProxyResources(
+	t *testing.T,
+	postgresAuthority string,
+	redisAuthority string,
+) (string, string) {
+	t.Helper()
+	vaultDir := t.TempDir()
+	configDir := t.TempDir()
+	vaultLocalDir := filepath.Join(vaultDir, "local")
+	configLocalDir := filepath.Join(configDir, "local")
+	configAllDir := filepath.Join(configDir, "all")
+	for _, path := range []string{vaultLocalDir, configLocalDir, configAllDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, resourceName := range suiteProxyTestVaultResourceNames {
+		content := "{}\n"
+		resourceDir := vaultLocalDir
+		switch resourceName {
+		case "auth.yml":
+			resourceDir = vaultDir
+		case "password.yml":
+			content = "password:\n  pepper: test-suite-pepper\n"
+		case "pg.yml":
+			content = "authority: " + postgresAuthority + "\n"
+		case "redis.yml":
+			content = "authority: " + redisAuthority + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(resourceDir, resourceName), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, resourceName := range suiteProxyTestLocalConfigResourceNames {
+		if err := os.WriteFile(filepath.Join(configLocalDir, resourceName), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, resourceName := range suiteProxyTestAllConfigResourceNames {
+		if err := os.WriteFile(filepath.Join(configAllDir, resourceName), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return vaultDir, configDir
+}
+
+// Provides deterministic, read-only process and assigned-address observations.
+func writeTestEnvironmentSuiteProxyTools(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	tools := map[string]string{
+		"ip":       "#!/bin/sh\nexit 1\n",
+		"ifconfig": "#!/bin/sh\nprintf 'en0: flags=8863<UP>\\n\\tinet %s netmask 0xffffff00\\n' \"$SUITE_TEST_HOST_IP\"\n",
+		"ps": `#!/bin/sh
+case " $* " in
+  *" lstart= "*) printf 'Fri Sep 4 12:34:56 2026\n' ;;
+  *" command= "*) printf 'bash suite-owner --urnetwork-suite-proxy-owner-token=%s\n' "$SUITE_TEST_OWNER_TOKEN" ;;
+  *) exit 1 ;;
+esac
+`,
+	}
+	for name, content := range tools {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return binDir
 }
 
 // Writes a complete launcher state under temporary paths so shell-preflight
@@ -127,6 +285,8 @@ func TestLocalTestRunnersUseBash(t *testing.T) {
 		"test-env.sh",
 		"test-dirs.sh",
 		"test.sh",
+		"local/run-local-state.sh",
+		"local/run-suite-proxy.sh",
 		"connect/test.sh",
 		"proxy/test.sh",
 		"task/test.sh",
@@ -142,6 +302,29 @@ func TestLocalTestRunnersUseBash(t *testing.T) {
 		if firstLine != "#!/usr/bin/env bash" {
 			t.Errorf("%s interpreter = %q; want bash", scriptPath, firstLine)
 		}
+	}
+}
+
+// The manifest is an independently pinned description of the exact local
+// vault/config boundary, including resources resolved from config/all.
+func TestSuiteProxyResourceManifestMatchesFullLocalSuiteBoundary(t *testing.T) {
+	manifestBytes, err := os.ReadFile(filepath.Join("local", "suite-resource-manifest.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedLines := []string{"format=urnetwork-server-suite-resources-v1"}
+	for _, resourceName := range suiteProxyTestVaultResourceNames {
+		expectedLines = append(expectedLines, "vault="+resourceName)
+	}
+	configResourceNames := append([]string{}, suiteProxyTestLocalConfigResourceNames...)
+	configResourceNames = append(configResourceNames, suiteProxyTestAllConfigResourceNames...)
+	slices.Sort(configResourceNames)
+	for _, resourceName := range configResourceNames {
+		expectedLines = append(expectedLines, "config="+resourceName)
+	}
+	expectedManifest := strings.Join(expectedLines, "\n") + "\n"
+	if string(manifestBytes) != expectedManifest {
+		t.Fatalf("suite resource manifest = %q; want %q", manifestBytes, expectedManifest)
 	}
 }
 
@@ -200,6 +383,464 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	expectedProbeRecord := "postgres local-pg.bringyour.com 5432\nredis local-redis.bringyour.com 6379\n"
 	if string(probeRecord) != expectedProbeRecord {
 		t.Fatalf("service probes = %q; want %q", probeRecord, expectedProbeRecord)
+	}
+}
+
+// Suite-proxy mode consumes only the repository owner's stable direct-endpoint
+// attestation and explicit resource roots, then retains the bounded probes.
+func TestTestEnvironmentScriptAcceptsSuiteProxyState(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(
+		probePath,
+		[]byte("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		`source ./test-env.sh && printf '%s\n%s\n%s\n' "$BRINGYOUR_POSTGRES_HOSTNAME" "$BRINGYOUR_REDIS_HOSTNAME" "$TEST_ENV_SUITE_PROXY_MODE"`,
+	)
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("suite proxy test environment: %v\n%s", err, output)
+	}
+	expectedOutput := suiteProxyTestAddress + "\n" + suiteProxyTestAddress + "\n1\n"
+	if string(output) != expectedOutput {
+		t.Fatalf("suite proxy exports = %q; want %q", output, expectedOutput)
+	}
+	probeRecord, err := os.ReadFile(probeRecordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedProbes := "postgres " + suiteProxyTestAddress + " 15432\n" +
+		"redis " + suiteProxyTestAddress + " 16379\n"
+	if string(probeRecord) != expectedProbes {
+		t.Fatalf("suite proxy probes = %q; want %q", probeRecord, expectedProbes)
+	}
+}
+
+// Managed-local test state and both portable escape selectors cannot be mixed
+// with the separately owned suite proxy topology.
+func TestTestEnvironmentScriptKeepsSuiteProxyModeExclusive(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		errorText string
+	}{
+		{
+			name: "portable resources",
+			overrides: map[string]string{
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
+			},
+			errorText: "mutually exclusive with portable or unmanaged services",
+		},
+		{
+			name: "unmanaged services",
+			overrides: map[string]string{
+				"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+			},
+			errorText: "mutually exclusive with portable or unmanaged services",
+		},
+		{
+			name: "managed local state",
+			overrides: map[string]string{
+				"WARP_TEST_ENV_TCP_PROBE":               filepath.Join(t.TempDir(), "probe"),
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         filepath.Join(t.TempDir(), "hosts"),
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": filepath.Join(t.TempDir(), "lock"),
+			},
+			errorText: "mutually exclusive with managed-local state paths",
+		},
+	}
+
+	for _, test := range tests {
+		overrides := map[string]string{
+			"WARP_CONFIG_HOME":                    t.TempDir(),
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": filepath.Join(t.TempDir(), "state"),
+			"WARP_VAULT_HOME":                     t.TempDir(),
+		}
+		for name, value := range test.overrides {
+			overrides[name] = value
+		}
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(overrides, "WARP_ENV")
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Fatalf("%s mixed suite proxy mode = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+	}
+}
+
+// Suite mode never guesses resource repositories: both absolute roots must be
+// explicit and contain the complete vault/config resource set.
+func TestTestEnvironmentScriptRequiresExplicitSuiteProxyResources(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		errorText string
+	}{
+		{
+			name: "missing config root",
+			overrides: map[string]string{
+				"WARP_VAULT_HOME": t.TempDir(),
+			},
+			errorText: "requires explicit WARP_VAULT_HOME and WARP_CONFIG_HOME",
+		},
+		{
+			name: "relative root",
+			overrides: map[string]string{
+				"WARP_CONFIG_HOME": "relative/config",
+				"WARP_VAULT_HOME":  t.TempDir(),
+			},
+			errorText: "resource roots must be absolute paths",
+		},
+	}
+	for _, test := range tests {
+		test.overrides["WARP_TEST_ENV_SUITE_PROXY_STATE_DIR"] = stateDir
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			test.overrides,
+			"WARP_CONFIG_HOME",
+			"WARP_ENV",
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+			"WARP_VAULT_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Fatalf("%s suite resource roots = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+	}
+}
+
+// Password hashing is part of the ordinary full suite, so an otherwise valid
+// explicit suite vault missing password.yml fails before its first DB probe.
+func TestTestEnvironmentScriptRejectsSuiteProxyVaultWithoutPassword(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	if err := os.Remove(filepath.Join(vaultDir, "local", "password.yml")); err != nil {
+		t.Fatal(err)
+	}
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "password.yml") ||
+		!strings.Contains(string(output), "required resource is missing") {
+		t.Fatalf("missing suite password resource = %v, %q", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing password resource reached probe: %v", err)
+	}
+}
+
+// Config/all data is part of the same checked-in boundary as credentials; a
+// missing non-secret manifest entry also stops before the first service probe.
+func TestTestEnvironmentScriptRejectsSuiteProxyConfigManifestGap(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	if err := os.Remove(filepath.Join(configDir, "all", "apple_roots.pem")); err != nil {
+		t.Fatal(err)
+	}
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "apple_roots.pem") ||
+		!strings.Contains(string(output), "required resource is missing") {
+		t.Fatalf("missing suite config resource = %v, %q", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing config resource reached probe: %v", err)
+	}
+}
+
+// Resource authorities are expanded first and then compared to both direct
+// attested endpoints; reachability cannot mask a root or port mismatch.
+func TestTestEnvironmentScriptRejectsSuiteProxyAuthorityMismatch(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15433",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "PostgreSQL resource authority does not match") {
+		t.Fatalf("suite authority mismatch = %v, %q", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("authority mismatch reached service probes: %v", err)
+	}
+}
+
+// Malformed ids, owner/readiness disagreement, an unpublished sentinel, a
+// stale argv challenge, and loopback endpoints all stop before reachability.
+func TestTestEnvironmentScriptRejectsInvalidSuiteProxyState(t *testing.T) {
+	tests := []struct {
+		name          string
+		host          string
+		challenge     string
+		mutate        func(t *testing.T, stateDir string)
+		expectedError string
+	}{
+		{
+			name:          "owner token mismatch",
+			host:          suiteProxyTestAddress,
+			challenge:     suiteProxyTestToken,
+			expectedError: "immutable snapshot",
+			mutate: func(t *testing.T, stateDir string) {
+				t.Helper()
+				ownerPath := filepath.Join(stateDir, "owner")
+				contents, err := os.ReadFile(ownerPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed := strings.Replace(string(contents), suiteProxyTestToken, "other-owner-token", 1)
+				if err := os.WriteFile(ownerPath, []byte(changed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:          "malformed proxy id",
+			host:          suiteProxyTestAddress,
+			challenge:     suiteProxyTestToken,
+			expectedError: "PostgreSQL proxy id is malformed",
+			mutate: func(t *testing.T, stateDir string) {
+				t.Helper()
+				recordPath := filepath.Join(stateDir, "ready", "record")
+				contents, err := os.ReadFile(recordPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed := strings.Replace(string(contents), strings.Repeat("d", 64), "short", 1)
+				if err := os.WriteFile(recordPath, []byte(changed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:          "not published",
+			host:          suiteProxyTestAddress,
+			challenge:     suiteProxyTestToken,
+			expectedError: "readiness sentinel is missing",
+			mutate: func(t *testing.T, stateDir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(stateDir, "ready", "published")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:          "stale owner challenge",
+			host:          suiteProxyTestAddress,
+			challenge:     "other-owner-token",
+			expectedError: "owner process challenge is not live",
+		},
+		{
+			name:          "loopback endpoint",
+			host:          "127.0.0.1",
+			challenge:     suiteProxyTestToken,
+			expectedError: "must be a non-loopback unicast address",
+		},
+	}
+
+	for _, test := range tests {
+		stateDir := writeTestEnvironmentSuiteProxyState(t, test.host, "15432", "16379")
+		if test.mutate != nil {
+			test.mutate(t, stateDir)
+		}
+		vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+			t,
+			"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+			"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+		)
+		binDir := writeTestEnvironmentSuiteProxyTools(t)
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"SUITE_TEST_HOST_IP":                  test.host,
+				"SUITE_TEST_OWNER_TOKEN":              test.challenge,
+				"WARP_CONFIG_HOME":                    configDir,
+				"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+				"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+				"WARP_TEST_ENV_TCP_PROBE":             probePath,
+				"WARP_VAULT_HOME":                     vaultDir,
+			},
+			"BRINGYOUR_POSTGRES_HOSTNAME",
+			"BRINGYOUR_REDIS_HOSTNAME",
+			"WARP_ENV",
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.expectedError) {
+			t.Fatalf("%s invalid suite proxy state = %v, %q; want %q", test.name, err, output, test.expectedError)
+		}
+		if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s invalid state reached probe: %v", test.name, err)
+		}
+	}
+}
+
+// The saved token/generation snapshot is checked after both probes, catching a
+// readiness replacement that occurs while services are being contacted.
+func TestTestEnvironmentScriptRejectsSuiteProxyStateChangedDuringProbes(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	probe := `#!/bin/sh
+printf '%s %s %s\n' "$1" "$2" "$3" >> "$WARP_TEST_ENV_PROBE_RECORD"
+if [ "$1" = redis ]; then
+  sed 's/generation=test-generation/generation=replaced-generation/' \
+    "$WARP_TEST_ENV_SUITE_PROXY_STATE_DIR/ready/record" > \
+    "$WARP_TEST_ENV_SUITE_PROXY_STATE_DIR/ready/record.changed"
+  /bin/mv "$WARP_TEST_ENV_SUITE_PROXY_STATE_DIR/ready/record.changed" \
+    "$WARP_TEST_ENV_SUITE_PROXY_STATE_DIR/ready/record"
+fi
+`
+	if err := os.WriteFile(probePath, []byte(probe), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "suite proxy state changed during service probes") {
+		t.Fatalf("suite proxy TOCTOU = %v, %q", err, output)
+	}
+	probeRecord, readErr := os.ReadFile(probeRecordPath)
+	if readErr != nil || strings.Count(string(probeRecord), "\n") != 2 {
+		t.Fatalf("bounded probes before stable-snapshot rejection = %q, %v", probeRecord, readErr)
 	}
 }
 

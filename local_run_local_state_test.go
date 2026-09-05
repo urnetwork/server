@@ -14,11 +14,15 @@ import (
 )
 
 const (
-	localHostsMarkerBegin = "# >>> urnetwork local-env (server/local/run-local.sh) >>>"
-	localHostsMarkerEnd   = "# <<< urnetwork local-env (server/local/run-local.sh) <<<"
-	localPostgresHost     = "local-pg.bringyour.com"
-	localRedisHost        = "local-redis.bringyour.com"
-	localDedicatedAddress = "10.213.0.1"
+	localHostsMarkerBegin    = "# >>> urnetwork local-env (server/local/run-local.sh) >>>"
+	localHostsMarkerEnd      = "# <<< urnetwork local-env (server/local/run-local.sh) <<<"
+	localPostgresHost        = "local-pg.bringyour.com"
+	localRedisHost           = "local-redis.bringyour.com"
+	localDedicatedAddress    = "10.213.0.1"
+	suiteProxyTestAddress    = "192.0.2.44"
+	suiteProxyTestStart      = "Fri-Sep-4-12:34:56-2026"
+	suiteProxyTestToken      = "test-owner-token"
+	suiteProxyTestGeneration = "test-generation"
 )
 
 // Runs the state helper with an isolated temporary directory for every scratch
@@ -29,6 +33,46 @@ func runLocalStateHelper(t *testing.T, script string, arguments ...string) ([]by
 	commandArguments = append(commandArguments, arguments...)
 	cmd := exec.Command("bash", commandArguments...)
 	cmd.Env = testCommandEnvironment(map[string]string{"TMPDIR": t.TempDir()})
+	return cmd.CombinedOutput()
+}
+
+// Supplies deterministic process-instance and interface observations without
+// changing a live host address or depending on the test runner's pid spelling.
+func runSuiteProxyStateHelper(t *testing.T, script string, arguments ...string) ([]byte, error) {
+	t.Helper()
+	binDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(binDir, "ps"),
+		[]byte(`#!/bin/sh
+case " $* " in
+  *" lstart= "*) printf 'Fri Sep 4 12:34:56 2026\n' ;;
+  *" command= "*) printf 'bash suite-owner --urnetwork-suite-proxy-owner-token=%s\n' "$SUITE_TEST_OWNER_TOKEN" ;;
+  *) exit 1 ;;
+esac
+`),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "ip"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(binDir, "ifconfig"),
+		[]byte("#!/bin/sh\nprintf 'en0: flags=8863<UP>\\n\\tinet %s netmask 0xffffff00\\n' \"$SUITE_TEST_HOST_IP\"\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	commandArguments := []string{"-c", script, "suite-state-test", filepath.Join("local", "run-local-state.sh")}
+	commandArguments = append(commandArguments, arguments...)
+	cmd := exec.Command("bash", commandArguments...)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"SUITE_TEST_HOST_IP":     suiteProxyTestAddress,
+		"SUITE_TEST_OWNER_TOKEN": suiteProxyTestToken,
+		"TMPDIR":                 t.TempDir(),
+	})
 	return cmd.CombinedOutput()
 }
 
@@ -687,5 +731,447 @@ func TestRunLocalUsesTransactionalHostsOwnership(t *testing.T) {
 	restoreAt := strings.Index(content, `if [[ "$HOSTS_INSTALLED" == 1 ]]; then`)
 	if cleanupAt < 0 || restoreAt < cleanupAt {
 		t.Error("local launcher does not withdraw readiness before teardown starts")
+	}
+}
+
+// A suite-proxy owner publishes one fixed, non-executable snapshot only after
+// its assigned address is accepted, and tears it down in readiness-first order.
+func TestSuiteProxyStatePublishValidateAndRelease(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+	postgresUpstreamId := strings.Repeat("a", 64)
+	redisUpstreamId := strings.Repeat("b", 64)
+	imageId := "sha256:" + strings.Repeat("c", 64)
+	postgresProxyId := strings.Repeat("d", 64)
+	redisProxyId := strings.Repeat("e", 64)
+	script := `set -euo pipefail
+source "$1"
+suite_proxy_state_acquire "$2" "$$" "$3" "$4"
+owner_start="$SUITE_PROXY_ACQUIRED_START_IDENTITY"
+suite_proxy_attestation_publish \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"
+[[ -f "$2/ready/record" ]]
+[[ -d "$2/ready/published" ]]
+suite_proxy_attestation_validate "$2"
+printf '%s\n' \
+  "$SUITE_PROXY_SNAPSHOT_OWNER_TOKEN" \
+  "$SUITE_PROXY_SNAPSHOT_GENERATION" \
+  "$SUITE_PROXY_SNAPSHOT_POSTGRES_HOST:$SUITE_PROXY_SNAPSHOT_POSTGRES_PORT" \
+  "$SUITE_PROXY_SNAPSHOT_REDIS_HOST:$SUITE_PROXY_SNAPSHOT_REDIS_PORT" \
+  "$SUITE_PROXY_SNAPSHOT_IMAGE_ID"
+suite_proxy_attestation_remove \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"
+[[ ! -e "$2/ready" && ! -L "$2/ready" ]]
+suite_proxy_state_release "$2" "$$" "$owner_start" "$3" "$4"`
+	output, err := runSuiteProxyStateHelper(
+		t,
+		script,
+		stateDir,
+		suiteProxyTestToken,
+		suiteProxyTestGeneration,
+		suiteProxyTestAddress,
+		postgresUpstreamId,
+		redisUpstreamId,
+		imageId,
+		postgresProxyId,
+		redisProxyId,
+	)
+	if err != nil {
+		t.Fatalf("suite proxy state lifecycle: %v\n%s", err, output)
+	}
+	expected := suiteProxyTestToken + "\n" + suiteProxyTestGeneration + "\n" +
+		suiteProxyTestAddress + ":15432\n" + suiteProxyTestAddress + ":16379\n" + imageId + "\n"
+	if string(output) != expected {
+		t.Fatalf("suite proxy snapshot = %q; want %q", output, expected)
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released suite proxy state remains: %v", err)
+	}
+}
+
+// Fixed-record parsing rejects stale process identity, forged container/name
+// identity, extra data, and oversized numeric input before shell arithmetic.
+func TestSuiteProxyStateRejectsMalformedOrForgedReadiness(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutation  string
+		errorText string
+	}{
+		{
+			name:      "stale process instance",
+			mutation:  `sed 's/owner_start_identity=[^[:space:]]*/owner_start_identity=Mon-Jan-1-00:00:00-2001/' "$2/owner" > "$2/owner.changed" && mv "$2/owner.changed" "$2/owner"; sed 's/owner_start_identity=[^[:space:]]*/owner_start_identity=Mon-Jan-1-00:00:00-2001/' "$2/ready/record" > "$2/ready/record.changed" && mv "$2/ready/record.changed" "$2/ready/record"; owner_start=Mon-Jan-1-00:00:00-2001`,
+			errorText: "owner process instance changed",
+		},
+		{
+			name:      "forged proxy id",
+			mutation:  `sed 's/postgres_proxy_id=[0-9a-f]*/postgres_proxy_id=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$2/ready/record" > "$2/ready/record.changed" && mv "$2/ready/record.changed" "$2/ready/record"`,
+			errorText: "immutable snapshot",
+		},
+		{
+			name:      "noncanonical proxy name",
+			mutation:  `sed 's/postgres_proxy_name=urnetwork-suite-proxy-pg/postgres_proxy_name=foreign-proxy/' "$2/ready/record" > "$2/ready/record.changed" && mv "$2/ready/record.changed" "$2/ready/record"`,
+			errorText: "non-canonical proxy names",
+		},
+		{
+			name:      "oversized port",
+			mutation:  `sed 's/postgres_port=15432/postgres_port=999999999999999999999999999999/' "$2/ready/record" > "$2/ready/record.changed" && mv "$2/ready/record.changed" "$2/ready/record"`,
+			errorText: "PostgreSQL port is malformed",
+		},
+		{
+			name:      "extra field",
+			mutation:  `printf 'foreign=value\n' >> "$2/ready/record"`,
+			errorText: "readiness attestation is malformed",
+		},
+	}
+
+	for _, test := range tests {
+		stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+		script := `set -euo pipefail
+source "$1"
+suite_proxy_state_acquire "$2" "$$" "$3" "$4"
+owner_start="$SUITE_PROXY_ACQUIRED_START_IDENTITY"
+suite_proxy_attestation_publish \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"
+` + test.mutation + `
+suite_proxy_attestation_validate_snapshot \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"`
+		output, err := runSuiteProxyStateHelper(
+			t,
+			script,
+			stateDir,
+			suiteProxyTestToken,
+			suiteProxyTestGeneration,
+			suiteProxyTestAddress,
+			strings.Repeat("a", 64),
+			strings.Repeat("b", 64),
+			"sha256:"+strings.Repeat("c", 64),
+			strings.Repeat("d", 64),
+			strings.Repeat("e", 64),
+		)
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Fatalf("%s forged readiness validation = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+		if _, statErr := os.Stat(filepath.Join(stateDir, "ready", "record")); statErr != nil {
+			t.Fatalf("%s rejected readiness was removed: %v", test.name, statErr)
+		}
+	}
+}
+
+// Address ownership rejects overflow and loopback spellings, while an `ip`
+// utility failure still falls through to the portable ifconfig observation.
+func TestSuiteProxyStateValidatesAssignedNonLoopbackAddress(t *testing.T) {
+	script := `set -euo pipefail
+source "$1"
+if suite_proxy_host_ip_validate_format 999999999999999999999.2.3.4; then exit 91; fi
+if suite_proxy_host_ip_validate_format 127.0.0.1; then exit 92; fi
+suite_proxy_host_ip_validate_assigned "$2"`
+	output, err := runSuiteProxyStateHelper(t, script, suiteProxyTestAddress)
+	if err != nil {
+		t.Fatalf("assigned address fallback: %v\n%s", err, output)
+	}
+}
+
+// Raced symlinks and swapped ownership records are moved aside or rejected,
+// never dereferenced or unlinked through a foreign target.
+func TestSuiteProxyStateCleanupFailsClosedOnForeignPaths(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+	foreignDir := t.TempDir()
+	foreignKeep := filepath.Join(foreignDir, "keep")
+	if err := os.WriteFile(foreignKeep, []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `set -euo pipefail
+source "$1"
+suite_proxy_state_acquire "$2" "$$" "$3" "$4"
+owner_start="$SUITE_PROXY_ACQUIRED_START_IDENTITY"
+suite_proxy_attestation_publish \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"
+mv "$2/ready" "$2/owned-ready"
+ln -s "${11}" "$2/ready"
+if suite_proxy_attestation_remove \
+  "$2" "$$" "$owner_start" "$3" "$4" \
+  "$5" "$5" 15432 "$5" 16379 \
+  "$6" "$7" "$8" \
+  urnetwork-suite-proxy-pg "$9" urnetwork-suite-proxy-redis "${10}"; then
+  exit 93
+fi
+[[ -f "${11}/keep" ]]
+[[ -L "$2/ready.removing.$3.$4" ]]
+mv "$2/owner" "$2/owner.real"
+ln -s "${11}/keep" "$2/owner"
+if suite_proxy_state_release "$2" "$$" "$owner_start" "$3" "$4"; then exit 94; fi
+[[ "$(cat "${11}/keep")" == foreign ]]`
+	output, err := runSuiteProxyStateHelper(
+		t,
+		script,
+		stateDir,
+		suiteProxyTestToken,
+		suiteProxyTestGeneration,
+		suiteProxyTestAddress,
+		strings.Repeat("a", 64),
+		strings.Repeat("b", 64),
+		"sha256:"+strings.Repeat("c", 64),
+		strings.Repeat("d", 64),
+		strings.Repeat("e", 64),
+		foreignDir,
+	)
+	if err != nil {
+		t.Fatalf("fail-closed foreign path checks: %v\n%s", err, output)
+	}
+	contents, err := os.ReadFile(foreignKeep)
+	if err != nil || string(contents) != "foreign\n" {
+		t.Fatalf("foreign target changed to %q: %v", contents, err)
+	}
+}
+
+// Rename flags follow the actual PATH executable, not the host OS. This pins
+// Darwin hosts whose PATH selects GNU coreutils as well as the BSD branch.
+func TestSuiteProxyMoveDetectsPathExecutableSemantics(t *testing.T) {
+	for _, mode := range []string{"gnu", "bsd"} {
+		binDir := t.TempDir()
+		recordPath := filepath.Join(t.TempDir(), "mv-record")
+		fakeMove := `#!/bin/sh
+if [ "$1" = --version ]; then
+  [ "$SUITE_TEST_MV_MODE" = gnu ]
+  exit $?
+fi
+printf '%s\n' "$*" > "$SUITE_TEST_MV_RECORD"
+if [ "$SUITE_TEST_MV_MODE" = gnu ]; then
+  [ "$1" = -n ] && [ "$2" = -T ] && [ "$3" = -- ] || exit 81
+  shift 3
+else
+  [ "$1" = -n ] && [ "$2" = -h ] || exit 82
+  shift 2
+fi
+exec /bin/mv "$@"
+`
+		if err := os.WriteFile(filepath.Join(binDir, "mv"), []byte(fakeMove), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		tempDir := t.TempDir()
+		sourcePath := filepath.Join(tempDir, "source")
+		destinationPath := filepath.Join(tempDir, "destination")
+		if err := os.WriteFile(sourcePath, []byte("owned\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(
+			"bash",
+			"-c",
+			`source "$1"; suite_proxy_move_no_replace "$2" "$3"`,
+			"suite-move-test",
+			filepath.Join("local", "run-local-state.sh"),
+			sourcePath,
+			destinationPath,
+		)
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"PATH":                 binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_MV_MODE":   mode,
+			"SUITE_TEST_MV_RECORD": recordPath,
+		})
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s move selection: %v\n%s", mode, err, output)
+		}
+		contents, err := os.ReadFile(destinationPath)
+		if err != nil || string(contents) != "owned\n" {
+			t.Fatalf("%s destination = %q, %v", mode, contents, err)
+		}
+	}
+}
+
+// Docker transport ambiguity is never treated as absence, while a successful
+// daemon-backed empty query and canonical-name recovery remain deterministic.
+func TestSuiteProxyHelperProvesContainerAbsenceAndRecoversName(t *testing.T) {
+	proxyId := strings.Repeat("d", 64)
+	script := `source "$1"
+source "$2"
+proxy_id="$3"
+suite_proxy_inspect_value() { return 1; }
+suite_proxy_docker() { return 1; }
+status=0
+suite_proxy_proxy_ownership_matches "$proxy_id" urnetwork-suite-proxy-pg postgres upstream || status=$?
+[[ "$status" == 1 ]]
+suite_proxy_docker() {
+  [[ "$1" == container && "$2" == ls ]]
+}
+status=0
+suite_proxy_proxy_ownership_matches "$proxy_id" urnetwork-suite-proxy-pg postgres upstream || status=$?
+[[ "$status" == 2 ]]
+suite_proxy_proxy_ownership_matches() { return 0; }
+suite_proxy_docker() {
+  if [[ "$1" == container && "$2" == ls ]]; then
+    printf '%s\n' "$proxy_id"
+    return 0
+  fi
+  return 1
+}
+suite_proxy_recover_proxy_id "" "$4" urnetwork-suite-proxy-pg postgres upstream
+[[ "$SUITE_PROXY_RECOVERED_PROXY_ID" == "$proxy_id" ]]
+suite_proxy_proxy_ownership_matches() { return 0; }
+suite_proxy_docker() {
+  if [[ "$1" == rm ]]; then return 1; fi
+  if [[ "$1" == container && "$2" == ls ]]; then return 0; fi
+  return 1
+}
+suite_proxy_remove_owned_proxy "$proxy_id" urnetwork-suite-proxy-pg postgres upstream
+suite_proxy_docker() { return 1; }
+if suite_proxy_remove_owned_proxy "$proxy_id" urnetwork-suite-proxy-pg postgres upstream; then
+  exit 95
+fi`
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"suite-proxy-docker-test",
+		filepath.Join("local", "run-local-state.sh"),
+		filepath.Join("local", "run-suite-proxy.sh"),
+		proxyId,
+		filepath.Join(t.TempDir(), "missing.cid"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("suite proxy Docker ambiguity: %v\n%s", err, output)
+	}
+}
+
+// The Docker double pins the logical Compose network label independently of
+// the user-visible network name and rejects the former default-label guess.
+func TestSuiteProxyHelperRequiresRepositoryComposeNetworkLabel(t *testing.T) {
+	networkId := strings.Repeat("a", 64)
+	script := `source "$1"
+source "$2"
+expected_network_id="$3"
+network_label=urnetwork-local
+suite_proxy_docker() {
+  [[ "$1" == network && "$2" == inspect ]] || return 1
+  case "$4" in
+    '{{.Id}}') printf '%s\n' "$expected_network_id" ;;
+    '{{.Name}}') printf '%s\n' urnetwork-local ;;
+    *com.docker.compose.project*) printf '%s\n' urnetwork-local ;;
+    *com.docker.compose.network*) printf '%s\n' "$network_label" ;;
+    *) return 1 ;;
+  esac
+}
+suite_proxy_verify_network "$expected_network_id"
+[[ "$SUITE_PROXY_INSPECTED_NETWORK_ID" == "$expected_network_id" ]]
+network_label=default
+if suite_proxy_verify_network "$expected_network_id" 2>/dev/null; then exit 98; fi`
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"suite-proxy-network-test",
+		filepath.Join("local", "run-local-state.sh"),
+		filepath.Join("local", "run-suite-proxy.sh"),
+		networkId,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("suite proxy Compose network identity: %v\n%s", err, output)
+	}
+}
+
+// Teardown makes readiness unobservable before any Docker-backed recovery,
+// including the interrupted-start path where an id may need reconstruction.
+func TestSuiteProxyHelperWithdrawsReadinessBeforeRecovery(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+	if err := os.MkdirAll(filepath.Join(stateDir, "ready", "published"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orderPath := filepath.Join(t.TempDir(), "cleanup-order")
+	script := `source "$1"
+source "$2"
+order_path="$4"
+SUITE_PROXY_CLEANED=0
+SUITE_PROXY_STATE_OWNED=1
+SUITE_PROXY_STATE_DIR="$3"
+SUITE_PROXY_OWNER_PID="$$"
+SUITE_PROXY_OWNER_START_IDENTITY=start
+SUITE_PROXY_OWNER_TOKEN=token
+SUITE_PROXY_GENERATION=generation
+SUITE_PROXY_HOST_IP=192.0.2.44
+SUITE_PROXY_POSTGRES_PORT=15432
+SUITE_PROXY_REDIS_PORT=16379
+SUITE_PROXY_POSTGRES_UPSTREAM_ID=postgres-upstream
+SUITE_PROXY_REDIS_UPSTREAM_ID=redis-upstream
+SUITE_PROXY_IMAGE_ID=image
+SUITE_PROXY_POSTGRES_PROXY_NAME=urnetwork-suite-proxy-pg
+SUITE_PROXY_REDIS_PROXY_NAME=urnetwork-suite-proxy-redis
+SUITE_PROXY_POSTGRES_PROXY_ID=""
+SUITE_PROXY_REDIS_PROXY_ID=""
+SUITE_PROXY_POSTGRES_CIDFILE="$3/postgres.cid"
+SUITE_PROXY_REDIS_CIDFILE="$3/redis.cid"
+suite_proxy_attestation_remove() {
+  [[ -d "$SUITE_PROXY_STATE_DIR/ready/published" ]] || return 1
+  rmdir "$SUITE_PROXY_STATE_DIR/ready/published" || return 1
+  rmdir "$SUITE_PROXY_STATE_DIR/ready" || return 1
+  printf 'withdraw\n' >> "$order_path"
+}
+suite_proxy_recover_proxy_ids() {
+  [[ ! -e "$SUITE_PROXY_STATE_DIR/ready" ]] || return 1
+  [[ "$(cat "$order_path")" == withdraw ]] || return 1
+  printf 'recover\n' >> "$order_path"
+}
+suite_proxy_remove_owned_cidfile() { return 0; }
+suite_proxy_state_release() { printf 'release\n' >> "$order_path"; }
+suite_proxy_cleanup
+[[ "$(cat "$order_path")" == $'withdraw\nrecover\nrelease' ]]`
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"suite-proxy-cleanup-test",
+		filepath.Join("local", "run-local-state.sh"),
+		filepath.Join("local", "run-suite-proxy.sh"),
+		stateDir,
+		orderPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("suite proxy readiness-first cleanup: %v\n%s", err, output)
+	}
+}
+
+// Readiness requires service-level replies, not merely a host-side TCP accept.
+func TestSuiteProxyHelperRequiresProtocolResponses(t *testing.T) {
+	script := `source "$1"
+source "$2"
+SUITE_PROXY_PROBE_TIMEOUT_SECONDS=1
+nc() {
+  case "$*" in
+    *" 15432") printf 'S' ;;
+    *" 16379") printf '+PONG\r\n' ;;
+  esac
+}
+suite_proxy_postgres_responds 192.0.2.44 15432
+suite_proxy_redis_responds 192.0.2.44 16379
+nc() { return 0; }
+if suite_proxy_postgres_responds 192.0.2.44 15432; then exit 96; fi
+if suite_proxy_redis_responds 192.0.2.44 16379; then exit 97; fi`
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"suite-proxy-protocol-test",
+		filepath.Join("local", "run-local-state.sh"),
+		filepath.Join("local", "run-suite-proxy.sh"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("suite proxy protocol probes: %v\n%s", err, output)
 	}
 }
