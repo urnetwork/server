@@ -10805,6 +10805,16 @@ then assert actual consumer/probe progress without another external trigger.
 This source-confirmed adjacent gap is under repair, not an observed incident
 branch or a qualified native fix.
 
+Android Always-on has the same distinction: an unsettled credential observation
+must not be classified as a terminal saved-location read failure, bypassing its
+existing 30-second retry. Retry only the exact unsettled-auth outcome for the
+same native device, auth owner, service generation and request. A later timer
+must reread the saved choice, and an old timer must not clear a newer request.
+Real storage/decoding failures still must not select best-available or gain an
+automatic retry; QuickConnect consent and explicit disconnect stay unchanged.
+Test fresh saved-location commands after settlement, real read failures, and
+retired owners/timers separately from any claim about Android OS delivery.
+
 A delayed startup also needs current-generation publication, not merely a
 thread-safe pointer or a last-moment Boolean check. Hold an old constructor or
 Load continuation, start/stop a newer session, then release the old work: it
