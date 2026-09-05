@@ -383,6 +383,78 @@ func TestSubtensorSignalRejectsRuntimeAheadClassificationOnWrongGenesis(t *testi
 	}
 }
 
+// Updating only the verified runtime expectation clears that configuration
+// fault, not the independently observed historical-node lag or its identity.
+func TestSubtensorSignalRuntimePinUpdateKeepsHistoricalNodeLag(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Head = blockHex(7_938_093)
+	observation.Public.Runtime.SpecVersion = 454
+	for i := range observation.Nodes {
+		node := &observation.Nodes[i]
+		first := int64(6_650_000 + i*25_000)
+		second := first + 12
+		node.FirstHead = blockHex(first)
+		node.SecondHead = blockHex(second)
+		node.Direct.Head = node.FirstHead
+		node.Gateway.Head = node.SecondHead
+		node.Direct.Health.IsSyncing = true
+		node.Direct.Runtime.SpecVersion = 449
+		node.Gateway.Runtime = node.Direct.Runtime
+		node.Direct.Sync = subtensorSyncState{
+			StartingBlock: 6_400_000, CurrentBlock: second, HighestBlock: 7_938_093,
+		}
+	}
+	priorLagObservations := map[string]string{}
+	for _, expectedSpecVersion := range []int64{453, 454} {
+		alerts, err := runSyntheticSubtensorAtRuntime(t, observation, expectedSpecVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if expectedSpecVersion == 453 {
+			requireAlertClass(t, alerts, "subtensor-runtime-ahead")
+		}
+		for _, class := range []string{"subtensor-sync-lag", "subtensor-warp-resume"} {
+			alert := requireAlertClass(t, alerts, class)
+			if expectedSpecVersion == 453 {
+				priorLagObservations[class] = alert.Observed
+			} else if alert.Observed != priorLagObservations[class] {
+				t.Errorf("runtime-only pin update changed the %s observation", class)
+			}
+		}
+		for _, alert := range alerts {
+			switch alert.Class {
+			case "subtensor-sync-lag", "subtensor-warp-resume":
+			case "subtensor-runtime-ahead":
+				if expectedSpecVersion == 454 {
+					t.Error("matching runtime pin retained its stale-configuration page")
+				}
+			default:
+				t.Errorf("runtime-only update misclassified historical nodes: %s/%s", alert.Class, alert.Frame)
+			}
+		}
+	}
+}
+
+// Advancing the expectation must not convert an older public reference into
+// a healthy one. Historical local runtimes and the current reference differ.
+func TestSubtensorSignalCurrentPinRejectsOlderPublicRuntime(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Runtime.SpecVersion = 453
+	alerts, err := runSyntheticSubtensorAtRuntime(t, observation, 454)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := requireAlertClass(t, alerts, "subtensor-identity")
+	if identity.Frame != "public-reference" {
+		t.Fatalf("older reference did not retain its identity failure: %s", identity.Frame)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-runtime-ahead" {
+			t.Error("older public runtime was classified as a forward upgrade")
+		}
+	}
+}
+
 func TestSubtensorSignalTurnsMalformedObservationIntoVisibilityAlert(t *testing.T) {
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
 		if !strings.Contains(command, subtensorMarker) {
@@ -410,6 +482,13 @@ func TestSubtensorSignalRequiresExplicitHostConfiguration(t *testing.T) {
 
 func runSyntheticSubtensor(t *testing.T, observation subtensorObservation) (Alerts, error) {
 	t.Helper()
+	return runSyntheticSubtensorAtRuntime(t, observation, 452)
+}
+
+// The expected runtime is configuration, independent of the observed local
+// historical runtime. Existing fixtures keep their original 452 expectation.
+func runSyntheticSubtensorAtRuntime(t *testing.T, observation subtensorObservation, expectedSpecVersion int64) (Alerts, error) {
+	t.Helper()
 	encoded, err := json.Marshal(observation)
 	if err != nil {
 		t.Fatal(err)
@@ -423,7 +502,13 @@ func runSyntheticSubtensor(t *testing.T, observation subtensorObservation) (Aler
 		}
 		return string(encoded), nil
 	}}
-	return NewSubtensorSignal().Run(context.Background(), subtensorSyntheticSettings(source))
+	settings := subtensorSyntheticSettings(source)
+	for i := range settings.Hosts {
+		if settings.Hosts[i].Subtensor != nil {
+			settings.Hosts[i].Subtensor.ExpectedSpecVersion = expectedSpecVersion
+		}
+	}
+	return NewSubtensorSignal().Run(context.Background(), settings)
 }
 
 func subtensorSyntheticSettings(source SignalSource) SignalSettings {

@@ -10479,6 +10479,32 @@ The following correctness boundaries require deterministic regressions:
   client-refresh notifications all use C.
   An equal-token fixture cannot validate this contract. A provider must not
   fall back to the admin JWT when the client JWT is absent.
+  Preserve a distinct-token old-behavior reproduction against the unchanged
+  affected helper or actual callback, separately from failures of proposed
+  repairs. An obsolete fixture that expected the client refresh to overwrite
+  the admin slot cannot qualify the corrected role contract.
+- Preparing a replacement constructor is not committed auth ownership. While
+  R1 prepares from client B, the still-serving R0 must retain authority to save
+  a legitimate B-to-C refresh. R1 must neither reinstall B over C nor strand
+  R0's later refresh if construction fails. This does not undo a login already
+  accepted by an explicit login setter. Cover refresh before preparation
+  with its persistence callback parked, refresh after preparation, and failure
+  after selecting a newer proposed token or instance. An API-generation check
+  alone misses a refresh already committed before that generation was read;
+  delaying only the owner flag misses speculative writes to durable auth.
+  A successful replacement must publish one coherent client/instance to the
+  API, durable store, device and its consumers. An overtaken or failed attempt
+  must clean up only its own resources, retaining the accepted serving session
+  or explicit newer login/logout. Test the next real refresh after failure,
+  not merely unchanged token bytes at the failure return. Do not solve this
+  with an arbitrary retry, stale-callback replay, or rollback whose own failure
+  can leave the prior owner unable to persist.
+  Read-only preselection is not the result of construction: a constructor may
+  accept a newer client C than its caller's preliminary B. Subsequent shared
+  restart storage and configuration must use the accepted device's own client,
+  not republish B or sample a shared API slot that an admin relogin can own.
+  Check both Local and Remote callers and distinguish a post-construction write
+  from an earlier daemon-control request to another process.
 - A Linux/Windows daemon can receive valid client auth through its control
   request while its own storage has no auth envelope. That legitimate startup
   must remain usable without copying the client JWT into the admin field or
@@ -10489,6 +10515,15 @@ The following correctness boundaries require deterministic regressions:
   work; do not make every later empty store eligible for reseeding, because an
   empty store can also mean an intentional logout. Preserve negative controls
   for logout, a newer credential/session, and a retired publisher.
+  Older Apple extensions also persisted only a client-valued `ByJwt` marker and
+  stable instance, with `ByClientJwt` absent until refresh. A compatibility repair
+  may seed only an independently supplied, valid client token that exactly
+  matches that marker for the same nonempty instance, at successful constructor
+  publication. Keep the marker opaque; neither token dates nor matching logical
+  claims alone establish an ambiguous rotated marker's ownership. A lost admin
+  JWT cannot be reconstructed from a client JWT. Negative legacy fixtures must
+  assert their instance/client preconditions: `SetByJwt` intentionally clears
+  the paired client and instance when the admin value changes.
 - Cancellation is not completed teardown. Reject new callback admissions,
   cancel the owned graph, and join already admitted callbacks before a
   replacement reads/seeds the same storage or native callback owners are freed.
@@ -10508,6 +10543,21 @@ The following correctness boundaries require deterministic regressions:
   an old `DeviceRemote` cannot clear a replacement's shared API credential or
   HTTP hooks, and that a relogin's temporary admin API credential cannot be
   copied into an old provider's configuration during an asynchronous reconcile.
+- The original login request, accepted authenticated session, and serving device
+  are distinct owners. A pending login must not retire a still-serving session;
+  a late outer login response must not manufacture current ownership when it
+  enters client registration. Check the original request before admin install
+  or teardown, preserve both request and accepted-session identity through
+  nested API results and UI queues, and reject rebinding a result to another
+  request. Equal JWT bytes do not make a later explicit login the same request:
+  hold an actual refresh HTTP response across that login and require both old
+  success and rejection results to be discarded, while current-owner controls
+  retain ordinary refresh/logout behavior.
+  Existing SSO state/nonce can identify its originating browser attempt; raw
+  same-provider wallet signatures and generic browser errors without an attempt
+  identifier cannot be attributed by reading a current pending slot. Keep that
+  boundary unverified rather than inventing identity or changing redirect/wire
+  contracts without an operator design decision.
 - A DNS address advertised to the OS must have a live handler for the selected
   routing mode. Test both UDP and TCP DNS with no destination, local routing,
   reconnect, and replacement; an advertised synthetic mask without its owning
@@ -10547,6 +10597,26 @@ not evidence that the apps omit client derivation at login, nor proof of the
 exact SDK embedded in each installed app. Cross-platform closure requires the
 relevant runtime controls and explicit source-backed not-applicable
 classifications; unavailable tests must remain unverified.
+
+**2026-09-05 repair qualification:** deterministic tests of a rejected SDK
+candidate reproduced token rollback through both actual Local and Remote
+constructors when an automatic API refresh completed after an early storage
+claim. A third test forced the supported non-default address-allocation failure
+and showed that the still-serving Local device could no longer persist its
+next refresh. All three failed in three normal and three race repetitions;
+the held-constructor controls without a refresh passed in both modes. These
+are qualification failures of the proposed repair, not proof that the exact
+race occurred in the iPhone incident or that the allocation failure occurs with
+the normal experimental-address default. Keep that candidate unqualified
+until constructor preparation, durable commit, API publication and failure
+cleanup satisfy the controls above. Four additional tests independently
+reproduced speculative token/instance persistence on constructor failure and
+Local/Remote rollback of a refresh committed before constructor preparation,
+with its persistence callback parked. Each failed three normal and three
+race repetitions, while the original no-refresh controls remained healthy.
+Keep the pre-preparation and post-preparation cases distinct: a generation
+increment alone cannot fix a refresh already reflected in the initial API
+snapshot, and an ownership-only change cannot prevent speculative disk writes.
 
 The software fix and its release gates belong to the SDK and affected client
 applications; no server rollout can repair erased on-device routing state.
@@ -12985,14 +13055,32 @@ supplied the on-chain discriminator. RaoFoundation's official v453 release
 target is commit `823bdcbc58a29f60b243be4737a7c72b34ac7d93`
 and Wasm SHA-256
 `9e51859faf28a69365005e7dd7f152f239a305c468869b2f54303aba938d840e`.
-Xops already pins its Subtensor host variables to 453, and Vault
-`main/monitor.yml` now supplies 453 to the watcher. Preserve both current
-owners; a watcher built before the Vault correction still requires rebuild and
-promotion. The archive and lightnode were still about 1.39 million historical
-blocks behind and correctly retained historical runtimes. After watcher
-promotion, require the runtime-ahead page to clear while both lag/progress
-alerts remain truthful; at eventual convergence, direct and gateway RPC must
-both report spec 453.
+At that observation, Xops and Vault `main/monitor.yml` were reconciled to 453;
+this is historical configuration evidence, not a permanent current-runtime
+expectation. The archive and lightnode were still about 1.39 million historical
+blocks behind and correctly retained historical runtimes. A verified pin-only
+update must clear the runtime-ahead page while leaving lag/progress alerts
+truthful. At eventual convergence, direct and gateway RPC must both report the
+then-current independently verified runtime.
+
+On 2026-09-05, the same testfinney chain retained the exact genesis, runtime
+name, transaction version 1 and EVM identity above while advancing to spec 454
+between blocks 7,934,386
+(`0xe98acd786b5bedba7dc0eeeeafe04943ec10d2ae624d958933f4a14699efab31`,
+spec 453) and 7,934,387
+(`0x5b3f3455125d78812299002a1926792a6876b03ac636ae53e93e4115f15a392b`,
+spec 454). Repeated direct reads reproduced both adjacent hashes and versions.
+The new block's `:code` was byte-for-byte equal to the 2,515,968-byte
+[official v454 Wasm artifact](https://github.com/RaoFoundation/subtensor/releases/tag/v454),
+SHA-256 `a55e76b4f4620bcdb4c787e499c87a35abb9913ba4cde001b08a00d1945ac4db`,
+from commit `14cde6410fe8ec81a940e290c56f94a632a0988d`.
+The release page still called the mainnet proposal a pre-release awaiting
+approval; that headline did not mean testfinney was still awaiting execution.
+Distinguish the configured chain's observed execution from release-page status.
+Updating an expected on-chain runtime does not itself require a new node image,
+new data generation, or a node restart. Synthetic pin-update controls must
+preserve the progressing archive/lightnode lag findings, and an older public
+runtime or wrong genesis must still fail identity verification.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a

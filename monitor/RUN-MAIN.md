@@ -483,6 +483,16 @@ status message must never turn a failed preflight or test into a passing gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 
+When recording test-source diff hashes, use a consistent explicit Git executable
+and `git diff --binary --full-index`; record the executable/version and include
+the participating untracked files separately. Different Git versions can render
+different abbreviated `index` lines for identical source, so a changed patch-text
+hash alone does not establish a source mutation. Compare complete full-index
+diffs and participating file bytes before classifying a mismatch. Preserve the
+original metadata and corrective evidence; a stable, fully attested test need
+not be rerun merely because its diff rendering differed. This is a test-evidence
+rule, not a clean-checkout or build-admission requirement.
+
 ## Deployment and production verification
 
 Report the exact service(s) and repository commit(s) that must be built. Do not
