@@ -10464,6 +10464,24 @@ The following correctness boundaries require deterministic regressions:
   reset/seed before constructing a device whose background work starts
   immediately. Failed or partial identity reads cannot authorize a destructive
   reset. New-login and different-instance behavior need separate controls.
+- A coherent read is not a conditional reset. Android startup separately reads
+  the client token, admin token, and admin parse result; a failed client read
+  followed by a healthy admin read can manufacture a partial-login diagnosis.
+  A later parse rereads storage and can fail after a healthy client read.
+  Neither ordering proves the saved login is invalid, even if storage recovers
+  before cleanup. Derive that decision from one error-bearing snapshot, then
+  revalidate its original local/API ownership at the actual reset and API-clear
+  boundary. Include equal-byte explicit login, logout/relogin, and an API
+  refresh already committed before its persistence callback. Checking only
+  the current token bytes or taking a new snapshot at cleanup can admit stale
+  work. Preserve key material within the same in-process cleanup ownership;
+  a read before the wipe and a restore after unlocking leave another race.
+  An accepted client-registration request may also temporarily have only admin
+  auth, so coherent partial state alone does not authorize its removal. Keep a
+  positive control in which genuinely stale, still-current state is cleaned
+  and its original keys survive; unconditional refusal is not a repair.
+  Apple's checked-read-then-unconditional-reset path needs the same ordering
+  audit. These are in-process guarantees, not cross-process storage atomicity.
 - The login/user/network JWT is the **admin credential** (`LocalState.ByJwt`).
   Every platform must derive a separate provider client JWT after login, store
   it in `LocalState.ByClientJwt`, and use only that client credential with the
@@ -10483,6 +10501,19 @@ The following correctness boundaries require deterministic regressions:
   affected helper or actual callback, separately from failures of proposed
   repairs. An obsolete fixture that expected the client refresh to overwrite
   the admin slot cannot qualify the corrected role contract.
+- Preserving the admin JWT does not renew it. Current Server minting gives
+  both roles a 30-day expiration, but `/auth/refresh` and the SDK automatic
+  scheduler require a client/device identity. Admin renewal is therefore a
+  separate, currently unimplemented lifecycle contract, not a reason to feed
+  an admin JWT into the provider timer or mint admin authority from a client.
+  Any approved admin-renewal path must preserve its account and role, the
+  existing provider JWT, and stable instance; ordinary `SetByJwt` is a login
+  transition and clears paired client/instance state when its value changes.
+  Cover renewal, expired/invalid auth, restart/resume, and superseded responses
+  independently of provider refresh. An expiry-rejection compatibility flag
+  does not prove renewal works, and local Vault values do not prove the exact
+  running process loaded them. Do not enable enforcement or add renewal policy
+  as an incidental monitor repair without operator direction.
 - Provider-token selection must preserve the server's supported compatibility
   contract. The current provider/refresh paths require client and device
   identity, but Server can recover an omitted or zero `network_id` from durable
@@ -10575,6 +10606,20 @@ The following correctness boundaries require deterministic regressions:
   an old `DeviceRemote` cannot clear a replacement's shared API credential or
   HTTP hooks, and that a relogin's temporary admin API credential cannot be
   copied into an old provider's configuration during an asynchronous reconcile.
+  Check every delayed producer, not only the final registration function:
+  reviewed Android shared password/welcome helpers wait after admin acceptance
+  before entering a function that captures the then-current request. That
+  delivery-time capture can give old UI work authority over a newer login.
+  Retain the originating request and exact API/store through the whole queue.
+  A selected-space callback must validate that origin before stopping a device,
+  changing the selected space, cleaning storage, or navigating. A duplicate
+  current-space notification must not retire a legitimate pending registration.
+  The inspected Android `NetworkSpace` binding's `equals` compares no exported
+  fields and treats any two such wrappers as equal; Kotlin `==` is not a Go
+  object-identity check. Neither hostname equality nor unverified Java-wrapper
+  identity proves the exact active owner, especially after same-key replacement.
+  Test actual binding identity and native callback admission separately; an
+  SDK snapshot or lifecycle-helper test cannot qualify that native wiring.
 - The original login request, accepted authenticated session, and serving device
   are distinct owners. A pending login must not retire a still-serving session;
   a late outer login response must not manufacture current ownership when it
@@ -10629,6 +10674,294 @@ not evidence that the apps omit client derivation at login, nor proof of the
 exact SDK embedded in each installed app. Cross-platform closure requires the
 relevant runtime controls and explicit source-backed not-applicable
 classifications; unavailable tests must remain unverified.
+
+**2026-09-05 second iPhone incident: classify the missing layer before retrying.**
+The startup-spanning extension log for app/SDK version `2026.9.4+1037600680`
+records initialization at 09:22 UTC and successful client-token refresh seconds
+later, but its first consumer MultiClient constructor banner only at 16:09 UTC,
+immediately after the app's first accepted RPC connection. A subsequent heartbeat
+reports a 60-second client uptime. The banner is unconditional Info logging,
+not suppressed by the exported verbosity 0. The same extension process then
+reports a connected window about 1.4 seconds after app foregrounding; the user
+confirms yellow providers becoming green and internet access returning. This
+is positive evidence of consumer initialization at foreground, not merely a
+quiet existing window inferred from memory or goroutine counts.
+
+The user confirms that VPN internet worked before the phone was left charging
+and locked overnight. The prior extension's final heartbeat at 09:22:04 UTC
+still reports five exits and five proven providers; its last retained sample
+is at 09:22:26, followed by replacement-process initialization at 09:22:53.
+The preceding twelve heartbeats report four or five exits, not an empty window.
+This separates failure to restore after process replacement from a window
+gradually losing all peers during sleep. Failure of autonomous connection
+restoration is the root cause of the persistent outage; the exact missing
+location/settings branch and the reason for process replacement remain open.
+Provider counts do not independently prove end-to-end forwarding, and the
+retained log can miss a killed process's final buffered records. Do not make
+fixing or identifying the OS replacement trigger a prerequisite for correcting
+restoration: cold startup with the app closed must restore the authenticated
+intended destination and required settings before relying on app RPC.
+
+Eight transport-recovery events occurred before that construction. In the
+matching SDK source, `DeviceLocal.NetworkChanged` notifies existing transports,
+MultiClient, and mux; it neither restores a destination nor constructs a missing
+consumer. Apple already implements sleep/wake and physical-path recovery. Its
+wake health check treats a nil connect location as healthy local-only operation.
+Another lower-level wake/retry signal alone therefore cannot repair missing
+desired consumer state. Discovery API timeouts and initial candidate health
+failures are downstream gates, not an explanation for an unconstructed window.
+
+The reason startup had no destination is still unproven. The raw-token/instance
+stale-state branch can erase `.connect_location`; `GetConnectLocation` also
+conflates missing, unreadable, and malformed state with nil. The shared-intent
+fallback rejects app-origin intent, while app startup can replay its separately
+saved location over RPC. Successful cleanup and those selection inputs were
+not logged. Do not turn a source-supported wipe hypothesis into an observed
+file operation, blame successful token refresh for an earlier computed stale
+flag, or infer a device mutation from local archive-copy times. A failed device
+container query is unavailable evidence, not an empty container or a healthy
+state read. The previous extension's replacement cause is a separate question.
+
+The later full-capture audit confirms this limit: the two unified archives
+cover 13:47–14:47 and 13:40–15:13 UTC, not the 09:22 replacement. The sole
+downloaded Jetsam report is at 08:53 and lists the old VPN process, which
+continues logging for another 29 minutes; its row has no killed/reason field.
+Later apparent termination and Jetsam-priority messages concern the widget,
+not the VPN. All supplied SDK files and retrospective records in both complete
+archives add no termination reason or saved-state decision. The collection
+was Jetsam-only, not a general crash-report inventory. Do not turn these
+coverage gaps, process-table membership, or another component's termination
+into a cause for this extension's exit.
+
+The matching installed source has another concrete missed-save mechanism:
+PacketTunnelProvider opens RPC before its destination-persistence listener,
+and one startup fallback also applies a location before that listener. The SDK
+listener registration does not replay the current value. An early first RPC
+Sync or fallback can therefore construct a working consumer without saving
+the selection in the extension's separate store; an equal later selection
+need not emit another change event. The next extension can find no saved
+destination while the app still has one to replay. This is source-confirmed
+ordering, not proof that either early-selection branch ran in the old process.
+Keep it separate from reset, read failure, and the OS termination trigger.
+
+The primary SDK regression must hold credentials and instance unchanged, use
+separate app and extension stores, and choose an exact non-best-available
+destination. Apply the first preference before any external saving listener,
+then close/join the old device and explicitly load a fresh device from the
+extension store. Assert the real durable value and consumer construction, not
+just a mocked callback or manually restored location. Include late-listener
+and equal-value controls, interrupted commits, failed writes, intentional
+disconnect, and ordinary teardown that must preserve the intended selection.
+
+**User-approved shared preference ownership (2026-09-05):** `DeviceLocal.Load()`
+is explicit, and save-on-mutation is independently opt-in and default off.
+Neither operation implicitly invokes the other. SDK-owned preference mutations
+must commit under the accepted storage/auth owner before live adoption, even
+for an explicit equal-value retry; equal saves must not rebuild a healthy
+consumer. Checked errors and bounded secret-free status must make save failure
+visible. Read required settings before routing adoption, distinguish absent
+from failed optional default state, and do not let an unused malformed default
+deny a valid saved current destination or intentional disconnect. Native
+current-owner disconnect admission precedes Load so it cannot briefly restore
+a superseded route. Enable saving before first RPC/mutation and remove only
+duplicated writers to the same owned store. Credentials, native connection
+intent/OS policy, transient provider state and shutdown are not preference
+autosave. Adoption and deterministic qualification are in progress; these
+requirements are not evidence of an installed fix.
+
+Generated bindings must retain the ownership and getters of auth snapshots,
+conditional-reset results, and immutable load/save results. In the C/C++
+generator, treating these private-state objects as JSON erases their values
+and can reconstruct an unowned empty snapshot. Qualify the actual generator's
+opaque handles, nullable errors, save-callback result ownership and existing
+signatures, with an old-classification semantic failure and healthy controls.
+Header generation or a host smoke test alone is not native-app qualification.
+
+The proposed startup path also needs an actual credential-settlement event,
+not merely a small immediate retry count. API refresh installs its new client
+JWT before the device callback finishes durable publication; all three immediate
+Load attempts can therefore observe the same unsettled pair. Subscribe before
+the checked observation, resume only from the current device's successful
+refresh-publication event, and bound startup waiting with cancellation and a
+deadline. Keep owner rejection strict. A deterministic control must hold the
+real installed callback between API and storage, then verify that its successful
+device event follows persistence and allows the exact saved consumer to load.
+This is an adjacent source-confirmed startup liveness gap in the proposed fix,
+not evidence that refresh caused the captured old process to exit.
+
+A delayed startup also needs current-generation publication, not merely a
+thread-safe pointer or a last-moment Boolean check. Hold an old constructor or
+Load continuation, start/stop a newer session, then release the old work: it
+must not publish RPC, reset the newer packet/settings/recovery generations, or
+close the newer device. Retire captured resources outside short ownership
+locks. Test the composed startup bookkeeping, not only the individual ticket
+holder. The same rule applies to shared SDK effects: an old preference Load
+must not overwrite process-global control-IP or verbosity policy after a new
+auth owner has published its policy. Use an actual reset/new-owner barrier and
+assert the shared value, with no auth lock spanning transport construction or
+external callbacks.
+
+Prepared native routing work needs the same admission boundary: build a
+settings plan from one captured device and recheck its provider ticket when
+enqueuing it, so an old plan cannot enter a replacement's active settings
+generation. Both packet directions must retain their origin and reject retired
+callbacks before delivery; do not fetch the new current device from an old
+callback. Keep synchronous packet writes outside ownership locks and distinguish
+already-admitted work from future admissions. Explicit logout must also retire
+an empty startup reservation and clear shared intent even before a device is
+published. Test overlapping logout completions and a held constructor; rejecting
+late native publication alone is not proof of cross-manager storage exclusion.
+
+Native stop must also cover the pending-to-ready handoff: if stop observes a
+pending startup and readiness wins before cancellation is delivered, stop must
+still retire that exact published device. An already-failed pending operation
+must remain promptly cancellable without waiting for blocked SDK work. Force
+both orderings through the actual native publication/retirement boundary and
+retain a newer-device healthy control. Do not hold native ownership locks
+across SDK getters, persistence callbacks or resource close operations.
+
+Key/secret callbacks have the same check-then-write hazard even though they
+are outside preference autosave. A native current-device check does not guard
+a later unqualified LocalState write against reset or replacement. Collect
+the current device's key state outside auth locks, then conditionally commit
+under its existing SDK owner; enqueue from callbacks without holding native
+locks. Preserve each platform's existing key-versus-secret persistence policy.
+Unreadable retained secrets are not absence or permission to regenerate them.
+Test a held stale save against reset/new ownership, a save admitted before
+reset, partial write failures and ordinary disabled-providing/local-only use.
+
+An initially empty auth envelope does not establish ownership of orphan
+preferences. Constructor seeding alone must not authorize importing their
+location, default, security or transport policy. Preserve those files and keep
+the skipped-unowned outcome distinct from a successful empty load; a newly
+admitted explicit connect may save its own preference. Likewise, a stored raw
+provide mode must not briefly override an effective `Never` control mode during
+Load. Test transient effects and current-owner startup admission, not only the
+final field values.
+
+Use a layered regression and recovery contract:
+
+- **Desired state and startup:** distinguish an intentional disconnect/local
+  mode from an authenticated connect request whose destination is missing or
+  unreadable. Restore current intent without app RPC, preserve same-instance
+  routing state across credential renewal, and surface persistence failures.
+  Never choose an arbitrary destination or revive a superseded login/logout.
+  Cover cold extension launch with the UI closed, app-origin connect intent,
+  explicit disconnect, missing/read-error/malformed state, and token rotation.
+  Include process replacement between location persistence and restoration:
+  interrupted writes must leave the previous complete value or the new complete
+  value, never a truncated location interpreted as a disconnect. Delayed
+  callbacks from a retired account/instance must not rewrite the next owner's
+  destination. Scope the existing shared intent to its authenticated owner;
+  a current disconnect must override stale saved routing, while a legacy
+  unscoped connect cannot authorize an arbitrary best-available destination.
+- **Consumer orchestration:** assert whether a MultiClient actually exists
+  before examining its window. Initial `connected=false` with zero providers
+  must still reconcile readiness; relying only on a Boolean transition can
+  leave initial reasserting and routing state unreconciled. Exercise zero exits
+  on wake as well as stale existing exits; a probe of existing exits cannot
+  create a missing client. Preserve explicit local-only behavior as a control.
+- **Discovery and transport:** separately exercise lookup/auth timeouts,
+  rate limits, return-secret acknowledgement, first-ping admission, scheduler
+  pauses, and path restoration. Measure end-to-end progress, not just a resize
+  timer: abandoning a contextless generator call does not cancel that work.
+  Later DNS/TCP qualification is distinct from initial `ProviderStateAdded`.
+- **Routing and visibility:** a VPN-active indicator is not forwarding proof.
+  Validate both DNS protocols and ordinary traffic with the UI closed, and
+  ensure every advertised resolver has an owner in the effective mode. Record
+  secret-free desired-connect/source, state-read outcome, cleanup reason,
+  consumer existence, connection generation, window stage/counts, and recovery
+  result. A missing snapshot must remain distinct from zero providers. These
+  are required controls, not a claim that new tests or a deployed fix passed.
+  For infrequent overnight failures, preserve sparse transition breadcrumbs
+  in the existing exported extension log as well as unified logging; unified
+  retention or a later privileged collection may miss the startup interval.
+  Record the pre-recovery state before app foreground/RPC can replace it.
+  Use fixed secret-free fields and bounded duplicate/rate behavior, not
+  verbose per-packet logging that adds memory or disk pressure. Simulate the
+  relevant interruption/ordering boundaries deterministically; a test that
+  merely sleeps is not proof of recovery after OS suspension or replacement.
+  Distinguish ordinary screen locking from first unlock after a reboot and
+  from extension process replacement. Apple's default third-party file class
+  remains accessible after the first unlock even when the screen locks again;
+  the reviewed Apple keychain entries also use after-first-unlock accessibility.
+  That is not an observation of the incident device's actual file attributes.
+  Preserve a checked storage-failure outcome and collect protection/OS evidence
+  if available; do not weaken file protection or blame screen locking merely
+  because the failure was discovered in the morning. See Apple's
+  [Data Protection classes](https://support.apple.com/en-ca/guide/security/secb010e978a/web).
+
+The shared Connect source review also found a distinct downstream cancellation
+gap: the API generator exposes context-aware discovery and authentication, but
+window enumeration still invokes its contextless methods. The outer timeout
+can return while the request remains owned by the longer-lived API context.
+Exercise the actual enumerator through a held local HTTP request, cancel only
+the window, and require that request to be canceled while its API owner remains
+alive. Keep legacy contextless generators and destination-specific identity
+restoration as healthy controls. Local teardown must not be classified as an
+empty provider pool. A correction and deterministic tests are being qualified;
+this does not explain the earlier absence of the iPhone consumer constructor.
+
+The cross-platform location audit found a source-level Android analogue, not
+an Android incident reproduction: `DeviceManager` loads the legacy nullable
+connect/default locations, and `MainApplication.ensureAlwaysOnConnected` can
+select best-available when the resulting live location is nil. An unreadable
+saved destination can therefore be mistaken for a genuinely absent first
+selection. Qualify checked native reads, current-owner conditional writes and
+the actual Always-on recovery boundary; keep an intentional first connection
+and explicit quick-connect as healthy controls. Atomic SDK writes alone do
+not close callers that still turn observation failures into null/default.
+The reviewed Windows and Linux service startup paths do not contain that same
+automatic nil-to-best-available branch; neither currently restores the saved
+connect/default location autonomously in the daemon. Their UI and shared
+`ConnectViewController` still include legacy location accessors or setters
+whose errors are discarded. These are caller-contract gaps, not proof of a
+desktop outage or of cross-platform closure. Preserve each platform's explicit
+connect/disconnect policy when adopting Load/autosave; the approved preference
+mode does not authorize new daemon boot autoconnect.
+
+The expanded source audit also found separate adjacent boundaries, which need
+their own deterministic controls before closure:
+
+- Linux starts pinned RPC before subscribing/arming pairing persistence; its
+  already-connected watchdog does not repair that missed save. Windows already
+  subscribes before pinning and checks the connected level with a generation
+  guard. Pairing durability is not proof of destination restoration. Linux's
+  opt-in GUI launch also needs a held-first-Sync control: a new remote's nil
+  live selection must not bypass a saved specific/private app selection.
+  The pairing regression must force the real subscription/pinning boundary,
+  assert that its first successful sync commits a rereadable session without
+  another edge, and retain an already-connected initial-level control. Arm
+  pending ownership before that observation and consume it once, including on
+  a healthy watchdog observation; a declined keyring save must not repeatedly
+  prompt on reconnect. A pure orchestration/storage pass does not qualify GTK
+  lifecycle callbacks, delayed watchdog ownership or native service startup.
+- `mmm/ur.io` and `extension` use DeviceRemote with browser/session storage,
+  not a browser-local DeviceLocal store. Reviewed web preference code suppresses
+  storage-read/write errors; reviewed extension proxy enable/disable applies
+  live state and does not await its durable storage write before returning
+  success. Extension session renewal/restore also needs controls for a failed
+  read, a delayed old selection, and storage failure after live proxy change.
+  These are source findings, not reproductions of the iPhone incident.
+  A specific restore defect writes `proxy_enabled=false` after a malformed
+  Firefox multi-IP record, failed Firefox listener installation, or Chromium
+  settings failure. That converts an error into durable disconnect and disables
+  Firefox's existing saved-intent-gated health retry. Preserve the original
+  records, report the failed stage without raw record contents, and require an
+  explicit disconnect to clear intent. Tests must exercise the actual restore
+  method, failed browser operation, unchanged saved selection, later successful
+  retry, and an intentionally disconnected control. This narrow correction
+  does not itself fix unawaited commits or overlapping stale commands.
+- The hosted DeviceLocal uses a storage-less shared NetworkSpace. Do not turn
+  on filesystem autosave for unrelated tenants in that shared owner, or count
+  local SDK tests as hosted persistence qualification. Preserve explicit
+  unsupported/no-owned-store behavior until a tenant-safe integration is
+  approved and tested; browser session/PAC state remains a separate authority.
+
+Record Android, Windows, Linux, macOS, `mmm/ur.io`, and `extension` separately
+for every iOS/Apple root cause and adjacent correction. Source applicability,
+deterministic reproduction, native compilation, and installed behavior are
+different evidence levels; unavailable gates must remain unverified.
 
 **2026-09-05 repair qualification:** deterministic tests of a rejected SDK
 candidate reproduced token rollback through both actual Local and Remote
@@ -10960,16 +11293,53 @@ container, and host networking remained healthy. The hosted-device
 never reached `GotConn`; do not infer a provider/window failure from timeline
 proximity alone.
 
-The acceptance runner queries a two-second-padded request interval from the
-Darwin unified kernel log only after a request becomes a terminal campaign
-failure. Its fixed-schema `local_host{...}` suffix reports executable/PID,
-request interval, counts, and one of
-`local-kernel-buffer-pressure`, `local-wifi-stall`, their combined value,
-`no-local-kernel-signal`, or `query-unavailable`. It never includes raw kernel
-lines. A target HTTP response skips the query because the tunnel already
+A later Fireside g8 overlap reproduced the broader common-path form. HTTP and
+SOCKS IPv4 and IPv6 sockets remained in `SYN_SENT`, emitted nine SYNs and
+received none before their 30-second timeouts. WireGuard then emitted repeated
+inner SYNs without a SYN-ACK and reported `StallScore:50`. During the shared
+interval, unrelated non-runner processes also had repeated unanswered SYNs,
+while `configd` recorded `RTADV en0: router lifetime became zero` at
+18:37:48Z, 18:38:11Z, and 18:38:34Z and IPMonitor recorded the corresponding
+network changes. Wi-Fi remained associated and primary, with no roam, link
+transition, Skywalk slab failure, or GSO allocation failure. This demonstrates
+acceptance-host first-hop/network-path churn rather than protocol overlap in
+Proxy. As in §18.1, the lifetime-zero record does not distinguish an explicit
+zero-lifetime advertisement from missed or late refresh advertisements.
+
+Fireside's g8 listener, DNAT, source route, container, and UDP error queues
+remained healthy, with no restart, OOM, deploy, Redis event, or matching
+Connect/API refusal. No retained server capture can prove whether each public
+SYN reached Fireside, so do not invent that observation. The hosted-device
+RPC detach/read timeout aligned with the same path loss but cannot affect the
+public proxy listeners; it is downstream evidence. A subsequent exact
+same-configuration overlap passed after cleanup. That proves intermittency,
+not that the retained failure was a flake.
+
+The acceptance runner queries a two-second-padded request interval from a
+bounded Darwin unified-log predicate only after a request becomes a terminal
+campaign failure. It includes the exact kernel allocation/DPS/TCP-summary
+records and configd RTADV/IPMonitor records. Darwin splits one TCP close into
+separate detailed and SYN-counter records, so the collector joins them by
+socket generation and PID without carrying partial fields across unified-log
+record boundaries, deduplicates by opaque flow, excludes its own PID, and
+counts a peer stall only after zero inbound and at least two outbound SYNs.
+`local-peer-tcp-stall` requires at least two distinct non-runner PIDs; one peer
+or a one-SYN Happy Eyeballs loser remains aggregate evidence, not attribution.
+An exact router-lifetime-zero record independently yields
+`local-network-path-churn`; an IPMonitor change alone does not.
+
+The fixed-schema `local_host{...}` suffix reports executable/PID, request
+interval, allocation/DPS counts, router-lifetime-zero and IPMonitor counts,
+and aggregate peer-flow/process counts. It never includes raw log lines,
+process names, endpoints, router addresses, or flow identifiers. Existing
+`local-kernel-buffer-pressure`, `local-wifi-stall`, `no-local-kernel-signal`,
+and `query-unavailable` classifications remain, and affirmative causes can be
+combined. A target HTTP response skips the query because the tunnel already
 reached a server. `no-local-kernel-signal` and `query-unavailable` do not prove
 the remote block failed; continue with packet-level public handshake, host
-listener/DNAT, and server-log evidence.
+listener/DNAT, and server-log evidence. This collector change is part of the
+locally rebuilt acceptance runner and requires no Proxy, Connect, or API
+deployment.
 
 Do not retry, lengthen the timeout, or convert either signature to PASS. Stop
 cooperative overlap at its source: canonical acceptance and tracked full-suite

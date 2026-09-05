@@ -366,10 +366,10 @@ that fails for the reproduced mechanism and passes for the fix. Keep a monitor
 probe as the production guard; do not move application behavior into
 `server/monitor`.
 
-For every iOS issue, cross-validate the same failure mechanism on Android,
-Windows, Linux, and macOS before closing the finding. This applies to the
-initial cause, adjacent defects, and the proposed fix. Trace shared Go/SDK
-implementation and each platform's actual caller, startup, callback, persistence,
+For every iOS/Apple issue, cross-validate the same failure mechanism on Android,
+Windows, Linux, macOS, `mmm/ur.io`, and `extension` before closing the finding.
+This applies to the initial cause, adjacent defects, and the proposed fix.
+Trace shared Go/SDK implementation and each platform's actual caller, startup, callback, persistence,
 and teardown boundaries; a platform-specific entry point does not make the
 underlying bug platform-specific. Run deterministic regressions through the
 relevant shared and platform-specific paths, with an old-behavior reproduction
@@ -381,6 +381,33 @@ Preserve these cross-platform findings in `SIGNALS.md` and the incident handoff,
 including each affected release artifact and any remaining verification gates.
 Device installation, VPN-profile changes, and other privileged actions still
 require the operator authority described above.
+
+For device incidents, verify actual capture coverage before interpreting a
+missing record. Compare full archive bounds and original collection arguments
+with the incident time, and identify the exact PID and bundle/component of a
+termination message. Membership in a Jetsam process table is not proof that
+the process was killed. A Jetsam-only download is not a complete crash-report
+inventory; a later one-hour unified-log capture may exclude overnight startup.
+Preserve those evidence gaps explicitly. Broader or new device collection still
+requires the operator's authority; a source-supported mechanism is not proof
+that its branch executed in the captured incident.
+
+For connection/preference durability, identify the actual writer and store in
+each process; an app's saved location does not prove the extension or daemon
+saved it. Exercise first mutation before listener registration, early RPC Sync,
+equal-value replay, checked read/write failures, and replacement with the UI
+closed. A listener without initial replay cannot be the only persistence owner.
+The user explicitly approved `DeviceLocal.Load()` and separately opt-in,
+default-off save-on-mutation on 2026-09-05. Load must not implicitly enable
+saving; enabling saving must not load or save constructor defaults. Adopt the
+mode before exposing RPC or accepting new preferences, with checked durable
+commit before live mutation. Keep shutdown/transient state separate from an
+explicit disconnect, and preserve each platform's existing startup policy.
+Remove native preference writers only when the SDK actually owns that same
+store and preference. DeviceRemote app mirrors and browser/OS session state
+are not automatically duplicates. A hosted DeviceLocal without an owned store
+needs an explicitly reviewed tenant-safe integration, not writes to a shared
+NetworkSpace directory or an incidental new schema or storage framework.
 
 For client authentication fixes, preserve the existing credential roles on
 every platform: the login JWT is the admin credential, and a separately

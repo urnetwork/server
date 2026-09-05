@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,25 @@ import (
 	"testing"
 	"time"
 )
+
+func darwinPeerTCPSummary(socketGeneration int, processName string, processPID int, flowID string, synCounts string, endpoint string) string {
+	return fmt.Sprintf(`2026-09-05 13:37:39.000000-0500 kernel[0:0] tcp_connection_summary (tcp_close:0)[%s] interface: en0 (skipped: 0)
+so_gencnt: %d t_state: SYN_SENT process: %s:%d Duration: 30.000 sec Conn_Time: 0.000 sec bytes in/out: 0/0 pkts in/out: 0/0 pkt rxmit: 0 ooo pkts: 0 dup bytes in: 0 ACKs delayed: 0 delayed ACKs sent: 0
+rtt: 0.000 ms rttvar: 0.000 ms base rtt: 0 ms so_error: 0 svc/tc: 0 flow: %s
+2026-09-05 13:37:39.000001-0500 kernel[0:0] tcp_connection_summary [%s] interface: en0 (skipped: 0)
+so_gencnt: %d t_state: SYN_SENT process: %s:%d flowctl: 0us (0x0) SYN in/out: %s FIN in/out: 0/0 RST in/out: 0/0 AccECN (client/server): Disabled/Disabled`,
+		endpoint,
+		socketGeneration,
+		processName,
+		processPID,
+		flowID,
+		endpoint,
+		socketGeneration,
+		processName,
+		processPID,
+		synCounts,
+	)
+}
 
 func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 	const (
@@ -722,7 +742,7 @@ func TestParseLocalNetworkSignalsSeparatesExactFailureSignatures(t *testing.T) {
 		`kernel: DPS Symptoms StallScore:7 StallScore:12`,
 	}, "\n"))
 
-	signals := parseLocalNetworkSignals(output)
+	signals := parseLocalNetworkSignals(output, 78800)
 	if signals.skywalkSlabFailures != 1 {
 		t.Errorf("Skywalk slab failures = %d, want 1", signals.skywalkSlabFailures)
 	}
@@ -731,6 +751,56 @@ func TestParseLocalNetworkSignalsSeparatesExactFailureSignatures(t *testing.T) {
 	}
 	if signals.wifiStalls != 3 || signals.maxWifiStallScore != 50 {
 		t.Errorf("Wi-Fi stalls = %d max %d, want 3 max 50", signals.wifiStalls, signals.maxWifiStallScore)
+	}
+	if signals.ipv6RouterLifetimeZeros != 0 || signals.ipMonitorNetworkChanges != 0 || signals.peerTCPStallFlows != 0 || signals.peerTCPStallProcesses != 0 {
+		t.Errorf("unrelated signals = %#v, want zero route and peer TCP counts", signals)
+	}
+}
+
+// Darwin can repeat a TCP summary for one socket. Count its opaque flow once,
+// require at least two unanswered outbound SYNs, and exclude the acceptance
+// runner itself before aggregating distinct peer processes.
+func TestParseLocalNetworkSignalsAggregatesOnlyRepeatedPeerTCPStalls(t *testing.T) {
+	const runnerPID = 78800
+	peerFlowOne := darwinPeerTCPSummary(47037777, "browser-helper", 41001, "0xaaa1", "0/2", "IPv4-redacted:0<->IPv4-redacted:0")
+	output := []byte(strings.Join([]string{
+		`configd: RTADV en0: router lifetime became zero router=fe80::private`,
+		`configd: RTADV en0: router lifetime refreshed`,
+		`configd[123:456] [com.apple.SystemConfiguration:IPMonitor] network changed: IPv6 absent address=2001:db8::private`,
+		peerFlowOne,
+		peerFlowOne,
+		darwinPeerTCPSummary(47037778, "sync-agent", 41002, "0xbbb2", "0/9", "IPv6-redacted:0<->IPv6-redacted:0"),
+		darwinPeerTCPSummary(47037779, "proxy-main", runnerPID, "0xccc3", "0/9", "IPv4-redacted:0<->IPv4-redacted:0"),
+		darwinPeerTCPSummary(47037780, "one-shot", 41003, "0xddd4", "0/1", "IPv4-redacted:0<->IPv4-redacted:0"),
+		darwinPeerTCPSummary(47037781, "answered", 41004, "0xeee5", "1/9", "IPv4-redacted:0<->IPv4-redacted:0"),
+	}, "\n"))
+
+	signals := parseLocalNetworkSignals(output, runnerPID)
+	if signals.ipv6RouterLifetimeZeros != 1 || signals.ipMonitorNetworkChanges != 1 {
+		t.Errorf("route signals = %d/%d, want 1/1", signals.ipv6RouterLifetimeZeros, signals.ipMonitorNetworkChanges)
+	}
+	if signals.peerTCPStallFlows != 2 || signals.peerTCPStallProcesses != 2 {
+		t.Errorf("peer TCP stalls = %d flows/%d processes, want 2/2", signals.peerTCPStallFlows, signals.peerTCPStallProcesses)
+	}
+	if classification := signals.classification(); classification != "local-network-path-churn+peer-tcp-stall" {
+		t.Errorf("classification = %q, want local-network-path-churn+peer-tcp-stall", classification)
+	}
+}
+
+// The socket join key is record-scoped. An incomplete counter record followed
+// by an unrelated record containing a flow field must not fabricate a stalled
+// peer flow by joining across the compact-log timestamp boundary.
+func TestParseLocalNetworkSignalsDoesNotJoinPeerTCPFieldsAcrossRecords(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		`2026-09-05 13:37:39.000000-0500 kernel[0:0] tcp_connection_summary [redacted] interface: en0 (skipped: 0)`,
+		`so_gencnt: 88037777 t_state: SYN_SENT process: orphan-peer:50001 flowctl: 0us (0x0) SYN in/out: 0/9 FIN in/out: 0/0`,
+		`2026-09-05 13:37:40.000000-0500 kernel[0:0] unrelated network record`,
+		`metadata flow: 0xfabricated`,
+	}, "\n"))
+
+	signals := parseLocalNetworkSignals(output, 78800)
+	if signals.peerTCPStallFlows != 0 || signals.peerTCPStallProcesses != 0 {
+		t.Fatalf("cross-record TCP fields produced stalls: %#v", signals)
 	}
 }
 
@@ -771,6 +841,11 @@ func TestCollectLocalNetworkFailureDiagnosticClassifiesDarwinSignals(t *testing.
 		"--start\x00" + started.Add(-2*time.Second).Truncate(time.Second).Local().Format("2006-01-02 15:04:05"),
 		"--end\x00" + finished.Add(2*time.Second).Truncate(time.Second).Add(time.Second).Local().Format("2006-01-02 15:04:05"),
 		`process == "kernel"`,
+		`process == "configd"`,
+		`eventMessage CONTAINS "tcp_connection_summary"`,
+		`eventMessage CONTAINS "router lifetime became zero"`,
+		`category == "IPMonitor"`,
+		`eventMessage CONTAINS "network changed:"`,
 	} {
 		if !strings.Contains(joinedArgs, expected) {
 			t.Errorf("log arguments %q do not contain %q", joinedArgs, expected)
@@ -784,6 +859,10 @@ func TestCollectLocalNetworkFailureDiagnosticClassifiesDarwinSignals(t *testing.
 		"gso_allocation_failures=1",
 		"wifi_stalls=1",
 		"max_wifi_stall_score=50",
+		"ipv6_router_lifetime_zeros=0",
+		"ip_monitor_network_changes=0",
+		"peer_tcp_stall_flows=0",
+		"peer_tcp_stall_processes=0",
 	} {
 		if !strings.Contains(diagnostic, expected) {
 			t.Errorf("diagnostic %q does not contain %q", diagnostic, expected)
@@ -791,6 +870,54 @@ func TestCollectLocalNetworkFailureDiagnosticClassifiesDarwinSignals(t *testing.
 	}
 	if strings.Contains(diagnostic, "AppleBCMWLANSkywalkPool") {
 		t.Fatalf("diagnostic retained raw kernel output: %q", diagnostic)
+	}
+}
+
+// The fixed-schema diagnostic may retain only aggregate route and peer-flow
+// counts. Process names, endpoints, router addresses, and opaque flow IDs from
+// unified logging are private raw evidence and must not be emitted.
+func TestCollectLocalNetworkFailureDiagnosticRedactsRouteAndPeerTCPDetails(t *testing.T) {
+	started := time.Date(2026, time.September, 5, 18, 37, 39, 0, time.UTC)
+	output := strings.Join([]string{
+		`configd: RTADV en0: router lifetime became zero router=fe80::private-router`,
+		`configd[123:456] [com.apple.SystemConfiguration:IPMonitor] network changed: IPv6 absent address=2001:db8::private-address`,
+		darwinPeerTCPSummary(57037777, "private-browser", 51001, "0xface01", "0/9", "198.51.100.70:443<->192.0.2.1:52000"),
+		darwinPeerTCPSummary(57037778, "private-sync", 51002, "0xface02", "0/7", "203.0.113.71:443<->192.0.2.1:52001"),
+	}, "\n")
+	diagnostic := collectLocalNetworkFailureDiagnosticWith(
+		started,
+		started.Add(30*time.Second),
+		"darwin",
+		"proxy-main",
+		78800,
+		func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(output), nil
+		},
+	)
+	for _, expected := range []string{
+		"classification=local-network-path-churn+peer-tcp-stall",
+		"ipv6_router_lifetime_zeros=1",
+		"ip_monitor_network_changes=1",
+		"peer_tcp_stall_flows=2",
+		"peer_tcp_stall_processes=2",
+	} {
+		if !strings.Contains(diagnostic, expected) {
+			t.Errorf("diagnostic %q does not contain %q", diagnostic, expected)
+		}
+	}
+	for _, privateValue := range []string{
+		"private-browser",
+		"private-sync",
+		"private-router",
+		"private-address",
+		"198.51.100.70",
+		"203.0.113.71",
+		"0xface01",
+		"0xface02",
+	} {
+		if strings.Contains(diagnostic, privateValue) {
+			t.Errorf("diagnostic %q retained private raw value %q", diagnostic, privateValue)
+		}
 	}
 }
 
@@ -803,6 +930,7 @@ func TestCollectLocalNetworkFailureDiagnosticSeparatesAdjacentClassifications(t 
 		commandErr         error
 		wantClassification string
 		wantQueryStatus    string
+		wantAggregate      string
 	}{
 		{
 			output:             `kernel: DPS Symptoms StallScore:50 NetScore:50`,
@@ -811,6 +939,33 @@ func TestCollectLocalNetworkFailureDiagnosticSeparatesAdjacentClassifications(t 
 		{
 			output:             `kernel: ordinary Wi-Fi telemetry StallScore:0`,
 			wantClassification: "no-local-kernel-signal",
+		},
+		{
+			output:             `configd[123:456] [com.apple.SystemConfiguration:IPMonitor] network changed: IPv6 present`,
+			wantClassification: "no-local-kernel-signal",
+			wantAggregate:      "ip_monitor_network_changes=1",
+		},
+		{
+			output:             `configd: RTADV en0: router lifetime became zero`,
+			wantClassification: "local-network-path-churn",
+			wantAggregate:      "ipv6_router_lifetime_zeros=1",
+		},
+		{
+			output: strings.Join([]string{
+				darwinPeerTCPSummary(67037777, "one-peer", 50001, "0xaaa1", "0/2", "IPv4-redacted:0<->IPv4-redacted:0"),
+				darwinPeerTCPSummary(67037778, "one-peer", 50001, "0xaaa2", "0/8", "IPv4-redacted:0<->IPv4-redacted:0"),
+				darwinPeerTCPSummary(67037779, "second-peer", 50002, "0xaaa3", "0/1", "IPv4-redacted:0<->IPv4-redacted:0"),
+			}, "\n"),
+			wantClassification: "no-local-kernel-signal",
+			wantAggregate:      "peer_tcp_stall_flows=2 peer_tcp_stall_processes=1",
+		},
+		{
+			output: strings.Join([]string{
+				darwinPeerTCPSummary(77037777, "first-peer", 50001, "0xbbb1", "0/2", "IPv4-redacted:0<->IPv4-redacted:0"),
+				darwinPeerTCPSummary(77037778, "second-peer", 50002, "0xbbb2", "0/3", "IPv4-redacted:0<->IPv4-redacted:0"),
+			}, "\n"),
+			wantClassification: "local-peer-tcp-stall",
+			wantAggregate:      "peer_tcp_stall_flows=2 peer_tcp_stall_processes=2",
 		},
 		{
 			commandErr:         errors.New("query unavailable"),
@@ -834,6 +989,9 @@ func TestCollectLocalNetworkFailureDiagnosticSeparatesAdjacentClassifications(t 
 		}
 		if testCase.wantQueryStatus != "" && !strings.Contains(diagnostic, testCase.wantQueryStatus) {
 			t.Errorf("diagnostic %q does not contain %q", diagnostic, testCase.wantQueryStatus)
+		}
+		if testCase.wantAggregate != "" && !strings.Contains(diagnostic, testCase.wantAggregate) {
+			t.Errorf("diagnostic %q does not contain aggregate %q", diagnostic, testCase.wantAggregate)
 		}
 	}
 }

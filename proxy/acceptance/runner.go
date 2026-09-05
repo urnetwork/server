@@ -38,6 +38,8 @@ const (
 	maxAPIResponseBytes    = 1024 * 1024
 	maxProbeResponseBytes  = 64 * 1024
 	localNetworkLogTimeout = 5 * time.Second
+	minPeerTCPStallSYNs    = 2
+	minPeerTCPStallPIDs    = 2
 )
 
 var protocolNames = []string{"socks", "http", "wireguard"}
@@ -213,24 +215,161 @@ type localNetworkFailureCollector func(time.Time, time.Time) string
 // Abstracts the bounded unified-log command for deterministic tests.
 type localNetworkLogCommand func(context.Context, string, ...string) ([]byte, error)
 
-// Counts only the exact Darwin allocation and Wi-Fi stall signatures used to
-// distinguish local host pressure from a remote proxy failure.
+// Counts only the exact Darwin allocation, Wi-Fi, route, and repeated TCP SYN
+// signatures used to distinguish local path pressure from a remote Proxy
+// failure. Peer identities and flow identifiers never leave the parser.
 type localNetworkSignals struct {
-	skywalkSlabFailures int
-	gsoFailures         int
-	wifiStalls          int
-	maxWifiStallScore   int
+	skywalkSlabFailures     int
+	gsoFailures             int
+	wifiStalls              int
+	maxWifiStallScore       int
+	ipv6RouterLifetimeZeros int
+	ipMonitorNetworkChanges int
+	peerTCPStallFlows       int
+	peerTCPStallProcesses   int
+}
+
+type peerTCPSummaryKey struct {
+	socketGeneration uint64
+	processPID       int
+}
+
+// Darwin emits a detailed TCP summary and its SYN counters as separate log
+// records. Both records carry this ephemeral socket-generation/PID join key.
+func parsePeerTCPSummaryKey(line string) (peerTCPSummaryKey, bool) {
+	const socketGenerationPrefix = "so_gencnt:"
+	socketGenerationIndex := strings.Index(line, socketGenerationPrefix)
+	if socketGenerationIndex < 0 {
+		return peerTCPSummaryKey{}, false
+	}
+	socketGenerationFields := strings.Fields(line[socketGenerationIndex+len(socketGenerationPrefix):])
+	if len(socketGenerationFields) == 0 {
+		return peerTCPSummaryKey{}, false
+	}
+	socketGeneration, err := strconv.ParseUint(socketGenerationFields[0], 10, 64)
+	if err != nil {
+		return peerTCPSummaryKey{}, false
+	}
+
+	const processPrefix = "process:"
+	processIndex := strings.Index(line, processPrefix)
+	if processIndex < 0 {
+		return peerTCPSummaryKey{}, false
+	}
+	processField := line[processIndex+len(processPrefix):]
+	processFieldEnd := len(processField)
+	for _, suffix := range []string{" Duration:", " flowctl:"} {
+		if suffixIndex := strings.Index(processField, suffix); suffixIndex >= 0 {
+			processFieldEnd = min(processFieldEnd, suffixIndex)
+		}
+	}
+	processField = strings.TrimSpace(processField[:processFieldEnd])
+	pidSeparator := strings.LastIndex(processField, ":")
+	if pidSeparator < 0 {
+		return peerTCPSummaryKey{}, false
+	}
+	processPID, err := strconv.Atoi(processField[pidSeparator+1:])
+	if err != nil || processPID <= 0 {
+		return peerTCPSummaryKey{}, false
+	}
+	return peerTCPSummaryKey{socketGeneration: socketGeneration, processPID: processPID}, true
+}
+
+// Extracts the opaque flow identity from the detailed summary record. It is
+// retained only long enough to deduplicate the corresponding SYN counters.
+func parsePeerTCPFlowID(line string) string {
+	const flowPrefix = "flow:"
+	flowIndex := strings.LastIndex(line, flowPrefix)
+	if flowIndex < 0 {
+		return ""
+	}
+	flowFields := strings.Fields(line[flowIndex+len(flowPrefix):])
+	if len(flowFields) == 0 {
+		return ""
+	}
+	flowID := strings.TrimRight(flowFields[0], ",;)")
+	if !strings.HasPrefix(flowID, "0x") || len(flowID) <= 2 {
+		return ""
+	}
+	return flowID
+}
+
+// Darwin compact unified-log records begin with a fixed-width local timestamp.
+// Continuation lines do not. Reset record-scoped join state at this boundary so
+// an orphan socket summary cannot claim a flow field from a later record.
+func isDarwinUnifiedLogRecordStart(line string) bool {
+	return len(line) >= len("2006-01-02 15:04:05") &&
+		line[4] == '-' && line[7] == '-' && line[10] == ' ' &&
+		line[13] == ':' && line[16] == ':'
+}
+
+// Selects only sockets which stayed in SYN_SENT after repeated outbound SYNs
+// and received no SYN. A one-SYN Happy Eyeballs loser is not path-stall proof.
+func isPeerTCPSYNStall(line string) bool {
+	if !strings.Contains(line, "t_state: SYN_SENT") {
+		return false
+	}
+	const synPrefix = "SYN in/out:"
+	synIndex := strings.Index(line, synPrefix)
+	if synIndex < 0 {
+		return false
+	}
+	synFields := strings.Fields(line[synIndex+len(synPrefix):])
+	if len(synFields) == 0 {
+		return false
+	}
+	synCounts := strings.SplitN(strings.TrimRight(synFields[0], ",;"), "/", 2)
+	if len(synCounts) != 2 {
+		return false
+	}
+	inboundSYNs, inboundErr := strconv.Atoi(synCounts[0])
+	outboundSYNs, outboundErr := strconv.Atoi(synCounts[1])
+	return inboundErr == nil && outboundErr == nil && inboundSYNs == 0 && outboundSYNs >= minPeerTCPStallSYNs
 }
 
 // Parses bounded unified-log output without retaining raw log lines.
-func parseLocalNetworkSignals(output []byte) localNetworkSignals {
+func parseLocalNetworkSignals(output []byte, runnerPID int) localNetworkSignals {
 	signals := localNetworkSignals{}
-	for _, line := range strings.Split(string(output), "\n") {
+	lines := strings.Split(string(output), "\n")
+	flowBySummary := map[peerTCPSummaryKey]string{}
+	currentSummary := peerTCPSummaryKey{}
+	haveCurrentSummary := false
+	for _, line := range lines {
+		if isDarwinUnifiedLogRecordStart(line) {
+			haveCurrentSummary = false
+		}
+		if summary, ok := parsePeerTCPSummaryKey(line); ok {
+			currentSummary = summary
+			haveCurrentSummary = true
+		}
+		if flowID := parsePeerTCPFlowID(line); flowID != "" && haveCurrentSummary {
+			flowBySummary[currentSummary] = flowID
+			haveCurrentSummary = false
+		}
+	}
+
+	peerFlows := map[string]struct{}{}
+	peerProcesses := map[int]struct{}{}
+	for _, line := range lines {
 		if strings.Contains(line, "skmem_slab_alloc_locked") && strings.Contains(line, "failed to allocate slab") {
 			signals.skywalkSlabFailures++
 		}
 		if strings.Contains(line, "netif_gso_tcp_segment_mbuf failed to alloc") {
 			signals.gsoFailures++
+		}
+		if strings.Contains(line, "RTADV ") && strings.Contains(line, "router lifetime became zero") {
+			signals.ipv6RouterLifetimeZeros++
+		}
+		if strings.Contains(line, "IPMonitor") && strings.Contains(line, "network changed:") {
+			signals.ipMonitorNetworkChanges++
+		}
+		summary, hasSummary := parsePeerTCPSummaryKey(line)
+		flowID := flowBySummary[summary]
+		if hasSummary && flowID != "" && summary.processPID != runnerPID && isPeerTCPSYNStall(line) {
+			if _, duplicate := peerFlows[flowID]; !duplicate {
+				peerFlows[flowID] = struct{}{}
+				peerProcesses[summary.processPID] = struct{}{}
+			}
 		}
 		remaining := line
 		for {
@@ -259,7 +398,31 @@ func parseLocalNetworkSignals(output []byte) localNetworkSignals {
 			remaining = remaining[digitCount:]
 		}
 	}
+	signals.peerTCPStallFlows = len(peerFlows)
+	signals.peerTCPStallProcesses = len(peerProcesses)
 	return signals
+}
+
+// Classifies only affirmative local signals. One unrelated stalled process is
+// retained as an aggregate but cannot attribute the request failure.
+func (self localNetworkSignals) classification() string {
+	causes := []string{}
+	if self.skywalkSlabFailures > 0 || self.gsoFailures > 0 {
+		causes = append(causes, "kernel-buffer-pressure")
+	}
+	if self.wifiStalls > 0 {
+		causes = append(causes, "wifi-stall")
+	}
+	if self.ipv6RouterLifetimeZeros > 0 {
+		causes = append(causes, "network-path-churn")
+	}
+	if self.peerTCPStallProcesses >= minPeerTCPStallPIDs {
+		causes = append(causes, "peer-tcp-stall")
+	}
+	if len(causes) == 0 {
+		return "no-local-kernel-signal"
+	}
+	return "local-" + strings.Join(causes, "+")
 }
 
 // Executes one bounded unified-log query in production.
@@ -294,7 +457,7 @@ func collectLocalNetworkFailureDiagnosticWith(
 
 	queryCtx, cancel := context.WithTimeout(context.Background(), localNetworkLogTimeout)
 	defer cancel()
-	const predicate = `process == "kernel" && (eventMessage CONTAINS "skmem_slab_alloc_locked" || eventMessage CONTAINS "netif_gso_tcp_segment_mbuf" || eventMessage CONTAINS "DPS Symptoms")`
+	const predicate = `(process == "kernel" && (eventMessage CONTAINS "skmem_slab_alloc_locked" || eventMessage CONTAINS "netif_gso_tcp_segment_mbuf" || eventMessage CONTAINS "DPS Symptoms" || (eventMessage CONTAINS "tcp_connection_summary" && eventMessage CONTAINS "t_state: SYN_SENT"))) || (process == "configd" && ((eventMessage CONTAINS "RTADV " && eventMessage CONTAINS "router lifetime became zero") || (category == "IPMonitor" && eventMessage CONTAINS "network changed:")))`
 	queryStart := started.Add(-2 * time.Second).Truncate(time.Second)
 	queryEnd := finished.Add(2 * time.Second).Truncate(time.Second).Add(time.Second)
 	output, err := runCommand(
@@ -322,28 +485,21 @@ func collectLocalNetworkFailureDiagnosticWith(
 		)
 	}
 
-	signals := parseLocalNetworkSignals(output)
-	classification := "no-local-kernel-signal"
-	if signals.skywalkSlabFailures > 0 || signals.gsoFailures > 0 {
-		classification = "local-kernel-buffer-pressure"
-	}
-	if signals.wifiStalls > 0 {
-		if classification == "local-kernel-buffer-pressure" {
-			classification += "+wifi-stall"
-		} else {
-			classification = "local-wifi-stall"
-		}
-	}
+	signals := parseLocalNetworkSignals(output, pid)
 	return fmt.Sprintf(
-		"local_host{os=darwin executable=%s pid=%d source=darwin-unified-log request_interval=%s classification=%s skywalk_slab_failures=%d gso_allocation_failures=%d wifi_stalls=%d max_wifi_stall_score=%d}",
+		"local_host{os=darwin executable=%s pid=%d source=darwin-unified-log request_interval=%s classification=%s skywalk_slab_failures=%d gso_allocation_failures=%d wifi_stalls=%d max_wifi_stall_score=%d ipv6_router_lifetime_zeros=%d ip_monitor_network_changes=%d peer_tcp_stall_flows=%d peer_tcp_stall_processes=%d}",
 		executable,
 		pid,
 		requestInterval,
-		classification,
+		signals.classification(),
 		signals.skywalkSlabFailures,
 		signals.gsoFailures,
 		signals.wifiStalls,
 		signals.maxWifiStallScore,
+		signals.ipv6RouterLifetimeZeros,
+		signals.ipMonitorNetworkChanges,
+		signals.peerTCPStallFlows,
+		signals.peerTCPStallProcesses,
 	)
 }
 
