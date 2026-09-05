@@ -37,6 +37,11 @@ Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
   10.213.0.1  local-pg.bringyour.com
   10.213.0.1  local-redis.bringyour.com
   ```
+- After both containers are healthy and both published ports are reachable from
+  the host, atomically publishes `/tmp/urnetwork-server-run-local.lock/ready`.
+  That attestation binds the lock's opaque owner token to the selected IP,
+  hostnames, and ports. `test-env.sh` requires the complete record and the two
+  unique launcher-managed mappings before it probes either service.
 
 ## Why not 127.0.0.1
 
@@ -49,6 +54,9 @@ The script refuses to run if `LOCAL_HOST_IP` is set to `127.0.0.1`, either
 hostname already has any unmanaged mapping, a legacy managed block remains, or
 another launcher owns `/tmp/urnetwork-server-run-local.lock`. It never tries a
 second resolved address and never silently rewrites an operator-owned entry.
+An alias that happens to reach a database is not sufficient proof: it may be a
+legacy VM route, an independently managed tunnel, or state from a launcher that
+has not finished starting.
 
 On Docker Desktop / macOS the container IPs on the docker network are not
 routable from the host, so host access (where `go test` runs) goes through the
@@ -69,6 +77,28 @@ Docker Desktop runs as the current user. The tests run as the current user.
 | --- | --- | --- |
 | `LOCAL_HOST_IP` | `10.213.0.1` | Loopback-alias IP the hostnames resolve to (must not be `127.0.0.1`). |
 | `LOCAL_DOCKER_SUBNET` | `10.213.1.0/24` | Subnet for the `urnetwork-local` docker network. |
+
+## Harness readiness and portable services
+
+Keep `run-local.sh` in the foreground for the entire test run. On exit it
+withdraws the readiness attestation before changing hosts, listeners, or the
+loopback alias. It removes readiness only when both the lock and attestation
+still contain its owner token; ambiguous state is retained for inspection and
+future preflights fail closed.
+
+An isolated portable environment may provision its own disposable PostgreSQL
+and Redis services instead of using this launcher. That workflow must select
+the checked-in resources and opt out of launcher ownership explicitly:
+
+```sh
+export WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1
+export WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES=1
+source ./test-env.sh
+```
+
+The escape skips only the launcher attestation and managed-mapping checks; the
+resource-authority checks and first-attempt service probes still run. Do not use
+it to bless developer-machine aliases or a legacy local VM route.
 
 ## Notes
 
@@ -97,6 +127,9 @@ Docker Desktop runs as the current user. The tests run as the current user.
   `local-redis.bringyour.com` aliases, flush the resolver cache, and remove a
   stale lock only after that ownership check. Preserve unrelated aliases on a
   shared hosts line.
+- A launcher started from an older checkout has no readiness attestation. Stop
+  it normally and restart the current `run-local.sh`; do not synthesize `ready`
+  by hand.
 - The postgres data volume (`pgdata`) persists across runs; the init script only
   runs on a fresh volume.
 - The postgres image must be the glibc (debian) build, not alpine: the test

@@ -14,9 +14,11 @@
 #      127.0.0.1 (see SAFETY below),
 #   5. starts postgres + redis on a dedicated docker network, publishing their
 #      ports on LOCAL_HOST_IP,
-#   6. blocks in the foreground streaming container logs, and
-#   7. on exit (Ctrl-C or otherwise) restores the port range and /etc/hosts,
-#      stops the containers, and removes the loopback alias.
+#   6. publishes a token-bound readiness attestation for the test harness,
+#   7. blocks in the foreground streaming container logs, and
+#   8. on exit (Ctrl-C or otherwise) withdraws readiness first, restores the
+#      port range and /etc/hosts, stops the containers, and removes the loopback
+#      alias.
 #
 # SAFETY: each local hostname must resolve only to LOCAL_HOST_IP, never to a
 # second address or 127.0.0.1. Tests create and DROP databases, and a tunnel to
@@ -466,11 +468,15 @@ ALIAS_ADDED=0
 STACK_OWNED=0
 CLEANED=0
 RUN_LOCK_HELD=0
-RUN_LOCK_OWNER="${SCRIPT_DIR}:$$:${RANDOM}:${RANDOM}"
+RUN_LOCK_OWNER="v1:${MAIN_PID}:${RANDOM}:${RANDOM}"
 
 cleanup() {
   [[ "$CLEANED" == 1 ]] && return
   CLEANED=1
+  if [[ "$RUN_LOCK_HELD" == 1 ]]; then
+    local_run_attestation_remove "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER" ||
+      log "warning: failed to withdraw local launcher readiness from $RUN_LOCK_DIR"
+  fi
   echo
   if [[ "$HOSTS_INSTALLED" == 1 ]]; then
     log "restoring $HOSTS_FILE"
@@ -579,6 +585,15 @@ verify_reachable || die "the DBs are healthy but $LOCAL_HOST_IP is not reachable
 log "verifying PostgreSQL access with the selected local resource"
 local_postgres_require_application_access "$PG_CONTAINER" "$PG_USER" "$PG_PASSWORD" "$PG_DB" ||
   die "postgres does not satisfy the selected local test profile"
+
+# The lock exists throughout startup, but tests may proceed only after container
+# health, host-side TCP reachability, and application authentication have succeeded.
+# A rename in the lock directory makes the complete endpoint record visible all at once.
+log "publishing launcher-owned readiness for the test harness"
+local_run_attestation_publish \
+  "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER" "$LOCAL_HOST_IP" \
+  "$PG_HOST" "$PG_PORT" "$REDIS_HOST" "$REDIS_PORT" ||
+  die "failed to publish local launcher readiness"
 
 cat <<INFO
 

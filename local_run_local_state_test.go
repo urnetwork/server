@@ -219,6 +219,34 @@ printf '%s\n' "$LOCAL_HOSTS_RESTORE_EXACT"`
 	}
 }
 
+// Matching addresses outside an empty marker block are still operator-owned;
+// marker text elsewhere in the file cannot turn those aliases into launcher state.
+func TestRunLocalHostsValidationRequiresAliasesInsideManagedBlock(t *testing.T) {
+	tempDir := t.TempDir()
+	hostsPath := filepath.Join(tempDir, "hosts")
+	contents := localDedicatedAddress + " " + localPostgresHost + "\n" +
+		localDedicatedAddress + " " + localRedisHost + "\n" +
+		localHostsMarkerBegin + "\n" + localHostsMarkerEnd + "\n"
+	if err := os.WriteFile(hostsPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runLocalStateHelper(
+		t,
+		`source "$1"
+local_hosts_validate_applied "$2" "$3" "$4" "$5" "$6" "$7"`,
+		hostsPath,
+		localDedicatedAddress,
+		localPostgresHost,
+		localRedisHost,
+		localHostsMarkerBegin,
+		localHostsMarkerEnd,
+	)
+	if err == nil {
+		t.Fatalf("validation accepted aliases outside the managed block: %q", output)
+	}
+}
+
 // An external edit invalidates whole-file ownership. Cleanup retains the edit,
 // removes only its marked mappings, and leaves the original snapshot available.
 func TestRunLocalHostsRestorePreservesConcurrentEdit(t *testing.T) {
@@ -485,6 +513,131 @@ local_run_lock_acquire "$2" second-owner`
 	}
 }
 
+// Readiness becomes visible as one complete, token-bound record and a matching
+// owner can remove it before releasing the otherwise-empty lock directory.
+func TestRunLocalStatePublishesAndRemovesReadinessAttestation(t *testing.T) {
+	lockDir := filepath.Join(t.TempDir(), "run-local.lock")
+	script := `set -euo pipefail
+source "$1"
+local_run_lock_acquire "$2" test-owner
+rename_seen=0
+expected_pending="$2/ready.pending"
+expected_ready="$2/ready"
+mv() {
+  [[ "$1" == "$expected_pending" ]]
+  [[ "$2" == "$expected_ready" ]]
+  [[ -f "$1" ]]
+  [[ ! -e "$2" ]]
+  rename_seen=1
+  command mv "$@"
+}
+local_run_attestation_publish "$2" test-owner "$3" "$4" "$5" "$6" "$7"
+[[ "$rename_seen" == 1 ]]
+[[ -f "$2/ready" ]]
+[[ ! -e "$2/ready.pending" ]]
+cat "$2/ready"
+local_run_attestation_remove "$2" test-owner
+[[ ! -e "$2/ready" ]]
+local_run_lock_release "$2" test-owner`
+	output, err := runLocalStateHelper(
+		t,
+		script,
+		lockDir,
+		localDedicatedAddress,
+		localPostgresHost,
+		"5432",
+		localRedisHost,
+		"6379",
+	)
+	if err != nil {
+		t.Fatalf("publish and remove readiness: %v\n%s", err, output)
+	}
+	expected := "format=urnetwork-server-run-local-ready-v1\n" +
+		"owner_token=test-owner\n" +
+		"host_ip=" + localDedicatedAddress + "\n" +
+		"postgres_host=" + localPostgresHost + "\n" +
+		"postgres_port=5432\n" +
+		"redis_host=" + localRedisHost + "\n" +
+		"redis_port=6379\n"
+	if string(output) != expected {
+		t.Fatalf("readiness attestation = %q; want %q", output, expected)
+	}
+	if _, err := os.Stat(lockDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released readiness lock still exists: %v", err)
+	}
+}
+
+// Cleanup cannot erase a complete readiness record after either ownership
+// proof changes, leaving the ambiguous state intact for operator inspection.
+func TestRunLocalStateReadinessCleanupRequiresMatchingOwnership(t *testing.T) {
+	tests := []struct {
+		name        string
+		changeOwner bool
+		errorText   string
+	}{
+		{
+			name:        "lock owner changed",
+			changeOwner: true,
+			errorText:   "lock ownership changed",
+		},
+		{
+			name:        "attestation owner changed",
+			changeOwner: false,
+			errorText:   "readiness ownership changed",
+		},
+	}
+
+	for _, test := range tests {
+		lockDir := filepath.Join(t.TempDir(), "run-local.lock")
+		publishScript := `set -euo pipefail
+source "$1"
+local_run_lock_acquire "$2" test-owner
+local_run_attestation_publish "$2" test-owner "$3" "$4" "$5" "$6" "$7"`
+		output, err := runLocalStateHelper(
+			t,
+			publishScript,
+			lockDir,
+			localDedicatedAddress,
+			localPostgresHost,
+			"5432",
+			localRedisHost,
+			"6379",
+		)
+		if err != nil {
+			t.Fatalf("%s: publish readiness: %v\n%s", test.name, err, output)
+		}
+
+		if test.changeOwner {
+			if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("other-owner\n"), 0o600); err != nil {
+				t.Fatalf("%s: change lock owner: %v", test.name, err)
+			}
+		} else {
+			attestationPath := filepath.Join(lockDir, "ready")
+			contents, err := os.ReadFile(attestationPath)
+			if err != nil {
+				t.Fatalf("%s: read attestation: %v", test.name, err)
+			}
+			changed := strings.Replace(string(contents), "owner_token=test-owner", "owner_token=other-owner", 1)
+			if err := os.WriteFile(attestationPath, []byte(changed), 0o600); err != nil {
+				t.Fatalf("%s: change attestation owner: %v", test.name, err)
+			}
+		}
+
+		removeScript := `source "$1"
+local_run_attestation_remove "$2" test-owner
+status=$?
+[[ -f "$2/ready" ]] || exit 99
+exit "$status"`
+		output, err = runLocalStateHelper(t, removeScript, lockDir)
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Errorf("%s: non-owner cleanup = %v, %q; want %q", test.name, err, output, test.errorText)
+		}
+		if _, err := os.Stat(filepath.Join(lockDir, "ready")); err != nil {
+			t.Errorf("%s: rejected cleanup removed readiness: %v", test.name, err)
+		}
+	}
+}
+
 // Pins the production launcher to the tested transaction and lock helpers.
 func TestRunLocalUsesTransactionalHostsOwnership(t *testing.T) {
 	contentBytes, err := os.ReadFile(filepath.Join("local", "run-local.sh"))
@@ -497,6 +650,8 @@ func TestRunLocalUsesTransactionalHostsOwnership(t *testing.T) {
 		`local_hosts_install \`,
 		`local_hosts_restore \`,
 		`local_run_lock_acquire "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER"`,
+		`local_run_attestation_publish \`,
+		`local_run_attestation_remove "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER"`,
 		`local_run_lock_release "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER"`,
 	} {
 		if !strings.Contains(content, required) {
@@ -521,5 +676,16 @@ func TestRunLocalUsesTransactionalHostsOwnership(t *testing.T) {
 	}
 	if !strings.Contains(content, `if [[ "$STACK_OWNED" != 1 ]]`) {
 		t.Error("cleanup can mutate a Docker stack that this launcher never owned")
+	}
+	reachableAt := strings.Index(content, `verify_reachable || die`)
+	publishAt := strings.Index(content, `local_run_attestation_publish \`)
+	upMessageAt := strings.Index(content, "Local environment is up.")
+	if reachableAt < 0 || publishAt < reachableAt || upMessageAt < publishAt {
+		t.Error("local launcher publishes readiness before host reachability or after its up message")
+	}
+	cleanupAt := strings.Index(content, `local_run_attestation_remove "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER"`)
+	restoreAt := strings.Index(content, `if [[ "$HOSTS_INSTALLED" == 1 ]]; then`)
+	if cleanupAt < 0 || restoreAt < cleanupAt {
+		t.Error("local launcher does not withdraw readiness before teardown starts")
 	}
 }

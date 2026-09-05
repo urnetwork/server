@@ -132,12 +132,37 @@ test_env_probe_service() {
     fi
 }
 
+test_env_validate_launcher() {
+    local postgres_host="$1"
+    local postgres_port="$2"
+    local redis_host="$3"
+    local redis_port="$4"
+    if [[ "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" == "1" ]]; then
+        return 0
+    fi
+    if ! local_run_attestation_validate \
+        "$TEST_ENV_RUN_LOCAL_LOCK_DIR" \
+        "$TEST_ENV_HOSTS_FILE" \
+        "$postgres_host" \
+        "$postgres_port" \
+        "$redis_host" \
+        "$redis_port" \
+        "$TEST_ENV_HOSTS_MARKER_BEGIN" \
+        "$TEST_ENV_HOSTS_MARKER_END"; then
+        test_env_error \
+            "launcher-managed local services are not ready; remove legacy aliases only after verifying their owner," \
+            "then start ./local/run-local.sh and wait for 'Local environment is up'"
+        return 1
+    fi
+}
+
 test_env_configure() {
     local source_path="${BASH_SOURCE[0]}"
     local source_dir
     local server_dir
     local urnetwork_home
     local portable_root
+    local local_state_file
 
     if [[ "$source_path" == */* ]]; then
         source_dir="${source_path%/*}"
@@ -150,6 +175,33 @@ test_env_configure() {
     }
     urnetwork_home="${server_dir%/*}"
     portable_root="$server_dir/local/testdata"
+    local_state_file="$server_dir/local/run-local-state.sh"
+
+    if [[ ! -f "$local_state_file" ]]; then
+        test_env_error "local launcher state helper is missing: $local_state_file"
+        return 1
+    fi
+    source "$local_state_file" || {
+        test_env_error "could not load local launcher state helper: $local_state_file"
+        return 1
+    }
+
+    if [[ -n "${WARP_TEST_ENV_TEST_HOSTS_FILE:-}" ||
+          -n "${WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR:-}" ]]; then
+        if [[ -z "${WARP_TEST_ENV_TCP_PROBE:-}" ||
+              -z "${WARP_TEST_ENV_TEST_HOSTS_FILE:-}" ||
+              -z "${WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR:-}" ]]; then
+            test_env_error "test-only local-state paths require each other and WARP_TEST_ENV_TCP_PROBE"
+            return 1
+        fi
+        TEST_ENV_HOSTS_FILE="$WARP_TEST_ENV_TEST_HOSTS_FILE"
+        TEST_ENV_RUN_LOCAL_LOCK_DIR="$WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR"
+    else
+        TEST_ENV_HOSTS_FILE="/etc/hosts"
+        TEST_ENV_RUN_LOCAL_LOCK_DIR="/tmp/urnetwork-server-run-local.lock"
+    fi
+    TEST_ENV_HOSTS_MARKER_BEGIN="# >>> urnetwork local-env (server/local/run-local.sh) >>>"
+    TEST_ENV_HOSTS_MARKER_END="# <<< urnetwork local-env (server/local/run-local.sh) <<<"
 
     if [[ -n "${WARP_ENV:-}" && "$WARP_ENV" != "local" ]]; then
         test_env_error "refusing WARP_ENV=$WARP_ENV; integration tests require WARP_ENV=local"
@@ -162,6 +214,22 @@ test_env_configure() {
     export WARP_VERSION="0.0.0"
     export BRINGYOUR_POSTGRES_HOSTNAME="${BRINGYOUR_POSTGRES_HOSTNAME:-local-pg.bringyour.com}"
     export BRINGYOUR_REDIS_HOSTNAME="${BRINGYOUR_REDIS_HOSTNAME:-local-redis.bringyour.com}"
+
+    case "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" in
+        0) ;;
+        1)
+            if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" != "1" ]]; then
+                test_env_error \
+                    "WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES=1 requires" \
+                    "WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1"
+                return 1
+            fi
+            ;;
+        *)
+            test_env_error "WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES must be 0 or 1"
+            return 1
+            ;;
+    esac
 
     if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" == "1" ]]; then
         export WARP_VAULT_HOME="$portable_root/vault"
@@ -204,7 +272,7 @@ test_env_preflight() {
     local redis_host
     local redis_port
 
-    for command_name in go grep find dirname sort; do
+    for command_name in go grep find dirname sort awk; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             test_env_error "missing prerequisite: $command_name"
             return 1
@@ -244,6 +312,7 @@ test_env_preflight() {
         return 1
     fi
 
+    test_env_validate_launcher "$pg_host" "$pg_port" "$redis_host" "$redis_port" || return $?
     test_env_probe_service postgres "$pg_host" "$pg_port" || return $?
     test_env_probe_service redis "$redis_host" "$redis_port" || return $?
 }

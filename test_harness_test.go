@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,13 @@ import (
 // into script regressions that need to control each input explicitly.
 func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...string) []string {
 	blockedNames := map[string]bool{}
+	for _, name := range []string{
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_TEST_HOSTS_FILE",
+		"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR",
+	} {
+		blockedNames[name] = true
+	}
 	for name := range overrideNameValues {
 		blockedNames[name] = true
 	}
@@ -30,6 +38,44 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 		environment = append(environment, name+"="+value)
 	}
 	return environment
+}
+
+// Writes a complete launcher state under temporary paths so shell-preflight
+// tests exercise ownership without reading or changing the host's live state.
+func writeTestEnvironmentLauncherState(
+	t *testing.T,
+	postgresHost string,
+	postgresPort string,
+	redisHost string,
+	redisPort string,
+) (string, string) {
+	t.Helper()
+	stateDir := t.TempDir()
+	lockDir := filepath.Join(stateDir, "run-local.lock")
+	hostsPath := filepath.Join(stateDir, "hosts")
+	if err := os.Mkdir(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("test-owner\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attestation := "format=urnetwork-server-run-local-ready-v1\n" +
+		"owner_token=test-owner\n" +
+		"host_ip=" + localDedicatedAddress + "\n" +
+		"postgres_host=" + postgresHost + "\n" +
+		"postgres_port=" + postgresPort + "\n" +
+		"redis_host=" + redisHost + "\n" +
+		"redis_port=" + redisPort + "\n"
+	if err := os.WriteFile(filepath.Join(lockDir, "ready"), []byte(attestation), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hosts := "127.0.0.1 localhost\n" + localHostsMarkerBegin + "\n" +
+		localDedicatedAddress + " " + postgresHost + "\n" +
+		localDedicatedAddress + " " + redisHost + "\n" + localHostsMarkerEnd + "\n"
+	if err := os.WriteFile(hostsPath, []byte(hosts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return lockDir, hostsPath
 }
 
 // Test directory discovery must retain local unit and integration packages
@@ -122,12 +168,13 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	)
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
-			"WARP_HOME":                            t.TempDir(),
-			"WARP_TEST_ENV_PROBE_RECORD":           probeRecordPath,
-			"WARP_TEST_ENV_TCP_PROBE":              probePath,
-			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES": "1",
-			"BRINGYOUR_POSTGRES_HOSTNAME":          "local-pg.bringyour.com",
-			"BRINGYOUR_REDIS_HOSTNAME":             "local-redis.bringyour.com",
+			"WARP_HOME": t.TempDir(),
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
+			"WARP_TEST_ENV_TCP_PROBE":                         probePath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":                     "local-pg.bringyour.com",
+			"BRINGYOUR_REDIS_HOSTNAME":                        "local-redis.bringyour.com",
 		},
 		"WARP_ENV",
 		"WARP_VAULT_HOME",
@@ -153,6 +200,257 @@ func TestTestEnvironmentScriptUsesPortableResources(t *testing.T) {
 	expectedProbeRecord := "postgres local-pg.bringyour.com 5432\nredis local-redis.bringyour.com 6379\n"
 	if string(probeRecord) != expectedProbeRecord {
 		t.Fatalf("service probes = %q; want %q", probeRecord, expectedProbeRecord)
+	}
+}
+
+// Legacy aliases and a launcher still starting have no complete readiness
+// proof, so both stop before even a synthetic service probe can run.
+func TestTestEnvironmentScriptRejectsUnattestedLocalTopology(t *testing.T) {
+	tests := []struct {
+		name        string
+		halfStarted bool
+		errorText   string
+	}{
+		{
+			name:        "legacy unmanaged aliases",
+			halfStarted: false,
+			errorText:   "lock has no readable owner",
+		},
+		{
+			name:        "launcher has not published readiness",
+			halfStarted: true,
+			errorText:   "readiness attestation is missing",
+		},
+	}
+
+	for _, test := range tests {
+		stateDir := t.TempDir()
+		lockDir := filepath.Join(stateDir, "run-local.lock")
+		hostsPath := filepath.Join(stateDir, "hosts")
+		probeRecordPath := filepath.Join(stateDir, "probe-record")
+		probePath := filepath.Join(stateDir, "probe")
+		hosts := "10.211.55.3 local-pg.bringyour.com\n" +
+			"10.211.55.3 local-redis.bringyour.com\n"
+		if test.halfStarted {
+			hosts = "127.0.0.1 localhost\n" + localHostsMarkerBegin + "\n" +
+				localDedicatedAddress + " " + localPostgresHost + "\n" +
+				localDedicatedAddress + " " + localRedisHost + "\n" + localHostsMarkerEnd + "\n"
+			if err := os.Mkdir(lockDir, 0o700); err != nil {
+				t.Fatalf("%s: create lock: %v", test.name, err)
+			}
+			if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("test-owner\n"), 0o600); err != nil {
+				t.Fatalf("%s: write owner: %v", test.name, err)
+			}
+			if err := os.WriteFile(filepath.Join(lockDir, "ready.pending"), []byte("partial\n"), 0o600); err != nil {
+				t.Fatalf("%s: write pending readiness: %v", test.name, err)
+			}
+		}
+		if err := os.WriteFile(hostsPath, []byte(hosts), 0o600); err != nil {
+			t.Fatalf("%s: write hosts: %v", test.name, err)
+		}
+		if err := os.WriteFile(
+			probePath,
+			[]byte("#!/bin/sh\nprintf 'called\\n' >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+			0o700,
+		); err != nil {
+			t.Fatalf("%s: write probe: %v", test.name, err)
+		}
+
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+				"WARP_TEST_ENV_TCP_PROBE":               probePath,
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+				"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+				"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+			},
+			"WARP_ENV",
+			"WARP_VAULT_HOME",
+			"WARP_CONFIG_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) ||
+			!strings.Contains(string(output), "launcher-managed local services are not ready") {
+			t.Errorf("%s: preflight = %v, %q; want early ownership failure", test.name, err, output)
+		}
+		if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: ownership failure reached service probe: %v", test.name, err)
+		}
+	}
+}
+
+// A complete attestation tied to the live lock, selected endpoints, and sole
+// managed aliases admits the existing first-attempt service probes.
+func TestTestEnvironmentScriptAcceptsLauncherManagedServices(t *testing.T) {
+	lockDir, hostsPath := writeTestEnvironmentLauncherState(
+		t,
+		localPostgresHost,
+		"5432",
+		localRedisHost,
+		"6379",
+	)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(
+		probePath,
+		[]byte("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+			"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+			"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+			"WARP_TEST_ENV_TCP_PROBE":               probePath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+			"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("managed service preflight: %v\n%s", err, output)
+	}
+	probeRecord, err := os.ReadFile(probeRecordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "postgres " + localPostgresHost + " 5432\n" +
+		"redis " + localRedisHost + " 6379\n"
+	if string(probeRecord) != expected {
+		t.Fatalf("managed service probes = %q; want %q", probeRecord, expected)
+	}
+}
+
+// Every ownership dimension is part of readiness; a stale token, endpoint, or
+// duplicate alias is rejected before reachability can disguise the mismatch.
+func TestTestEnvironmentScriptRejectsMismatchedLauncherReadiness(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutation  string
+		errorText string
+	}{
+		{
+			name:      "lock token",
+			mutation:  "lock",
+			errorText: "readiness owner does not match its lock",
+		},
+		{
+			name:      "resource endpoint",
+			mutation:  "endpoint",
+			errorText: "readiness endpoints do not match",
+		},
+		{
+			name:      "duplicate alias",
+			mutation:  "hosts",
+			errorText: "aliases are not unique launcher-managed mappings",
+		},
+	}
+
+	for _, test := range tests {
+		lockDir, hostsPath := writeTestEnvironmentLauncherState(
+			t,
+			localPostgresHost,
+			"5432",
+			localRedisHost,
+			"6379",
+		)
+		switch test.mutation {
+		case "lock":
+			if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("other-owner\n"), 0o600); err != nil {
+				t.Fatalf("%s: change lock owner: %v", test.name, err)
+			}
+		case "endpoint":
+			attestationPath := filepath.Join(lockDir, "ready")
+			contents, err := os.ReadFile(attestationPath)
+			if err != nil {
+				t.Fatalf("%s: read readiness: %v", test.name, err)
+			}
+			changed := strings.Replace(string(contents), "postgres_port=5432", "postgres_port=15432", 1)
+			if err := os.WriteFile(attestationPath, []byte(changed), 0o600); err != nil {
+				t.Fatalf("%s: change endpoint: %v", test.name, err)
+			}
+		case "hosts":
+			file, err := os.OpenFile(hostsPath, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("%s: open hosts: %v", test.name, err)
+			}
+			if _, err := file.WriteString("198.51.100.90 " + localPostgresHost + "\n"); err != nil {
+				_ = file.Close()
+				t.Fatalf("%s: duplicate alias: %v", test.name, err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatalf("%s: close hosts: %v", test.name, err)
+			}
+		default:
+			t.Fatalf("%s: unknown mutation %q", test.name, test.mutation)
+		}
+
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(
+			probePath,
+			[]byte("#!/bin/sh\nprintf 'called\\n' >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+			0o700,
+		); err != nil {
+			t.Fatalf("%s: write probe: %v", test.name, err)
+		}
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+				"WARP_TEST_ENV_TCP_PROBE":               probePath,
+				"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":  "1",
+				"BRINGYOUR_POSTGRES_HOSTNAME":           localPostgresHost,
+				"BRINGYOUR_REDIS_HOSTNAME":              localRedisHost,
+			},
+			"WARP_ENV",
+			"WARP_VAULT_HOME",
+			"WARP_CONFIG_HOME",
+		)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), test.errorText) {
+			t.Errorf("%s: preflight = %v, %q; want readiness mismatch", test.name, err, output)
+		}
+		if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: readiness mismatch reached service probe: %v", test.name, err)
+		}
+	}
+}
+
+// The unmanaged-service escape is coupled to checked-in portable resources;
+// it cannot silently bypass launcher ownership for an ordinary local run.
+func TestTestEnvironmentScriptRestrictsUnmanagedServiceEscape(t *testing.T) {
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+		},
+		"WARP_ENV",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unmanaged service escape without portable resources passed:\n%s", output)
+	}
+	if !strings.Contains(
+		string(output),
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES=1 requires WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1",
+	) {
+		t.Fatalf("unmanaged service escape failure was not explicit:\n%s", output)
 	}
 }
 
@@ -202,6 +500,13 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 	for _, test := range tests {
 		vaultDir := t.TempDir()
 		configDir := t.TempDir()
+		lockDir, hostsPath := writeTestEnvironmentLauncherState(
+			t,
+			test.postgresHostname,
+			test.postgresPort,
+			test.redisHostname,
+			test.redisPort,
+		)
 		for path, content := range map[string]string{
 			filepath.Join(vaultDir, "pg.yml"):     "authority: " + test.postgresScalar + "\n",
 			filepath.Join(vaultDir, "redis.yml"):  "authority: " + test.redisScalar + "\n",
@@ -226,13 +531,15 @@ func TestTestEnvironmentScriptParsesYamlAuthorityScalars(t *testing.T) {
 		cmd := exec.Command("bash", "./test-env.sh")
 		cmd.Env = testCommandEnvironment(
 			map[string]string{
-				"WARP_ENV":                    "local",
-				"WARP_VAULT_HOME":             vaultDir,
-				"WARP_CONFIG_HOME":            configDir,
-				"WARP_TEST_ENV_PROBE_RECORD":  probeRecordPath,
-				"WARP_TEST_ENV_TCP_PROBE":     probePath,
-				"BRINGYOUR_POSTGRES_HOSTNAME": test.postgresHostname,
-				"BRINGYOUR_REDIS_HOSTNAME":    test.redisHostname,
+				"WARP_ENV":                              "local",
+				"WARP_VAULT_HOME":                       vaultDir,
+				"WARP_CONFIG_HOME":                      configDir,
+				"WARP_TEST_ENV_TEST_HOSTS_FILE":         hostsPath,
+				"WARP_TEST_ENV_PROBE_RECORD":            probeRecordPath,
+				"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR": lockDir,
+				"WARP_TEST_ENV_TCP_PROBE":               probePath,
+				"BRINGYOUR_POSTGRES_HOSTNAME":           test.postgresHostname,
+				"BRINGYOUR_REDIS_HOSTNAME":              test.redisHostname,
 			},
 			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
 		)
@@ -328,18 +635,6 @@ func TestTestEnvironmentScriptReportsMissingGo(t *testing.T) {
 func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
 	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
 	binDir := t.TempDir()
-	vaultDir := t.TempDir()
-	configDir := t.TempDir()
-	for path, content := range map[string]string{
-		filepath.Join(vaultDir, "pg.yml"):     "authority: pg-probe.example:15432\n",
-		filepath.Join(vaultDir, "redis.yml"):  "authority: redis-probe.example:16379\n",
-		filepath.Join(configDir, "db.yml"):    "",
-		filepath.Join(configDir, "redis.yml"): "",
-	} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if err := os.WriteFile(
 		filepath.Join(binDir, "nc"),
 		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
@@ -350,15 +645,16 @@ func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
 	cmd := exec.Command("bash", "./test-env.sh")
 	cmd.Env = testCommandEnvironment(
 		map[string]string{
-			"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-			"WARP_VAULT_HOME":             vaultDir,
-			"WARP_CONFIG_HOME":            configDir,
-			"WARP_TEST_ENV_PROBE_RECORD":  probeRecordPath,
-			"BRINGYOUR_POSTGRES_HOSTNAME": "pg-probe.example",
-			"BRINGYOUR_REDIS_HOSTNAME":    "redis-probe.example",
+			"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES": "1",
+			"WARP_TEST_ENV_PROBE_RECORD":                      probeRecordPath,
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES":            "1",
+			"BRINGYOUR_POSTGRES_HOSTNAME":                     localPostgresHost,
+			"BRINGYOUR_REDIS_HOSTNAME":                        localRedisHost,
 		},
 		"WARP_ENV",
-		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+		"WARP_VAULT_HOME",
+		"WARP_CONFIG_HOME",
 		"WARP_TEST_ENV_TCP_PROBE",
 	)
 	output, err := cmd.CombinedOutput()
@@ -369,8 +665,8 @@ func TestTestEnvironmentScriptUsesBoundedDefaultTcpProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedProbeRecord := "-z -w 3 -- pg-probe.example 15432\n" +
-		"-z -w 3 -- redis-probe.example 16379\n"
+	expectedProbeRecord := "-z -w 3 -- " + localPostgresHost + " 5432\n" +
+		"-z -w 3 -- " + localRedisHost + " 6379\n"
 	if string(probeRecord) != expectedProbeRecord {
 		t.Fatalf("default service probes = %q; want %q", probeRecord, expectedProbeRecord)
 	}
@@ -384,7 +680,7 @@ func TestTestEnvironmentScriptReportsMissingDefaultTcpProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
-	for _, commandName := range []string{"dirname", "find", "go", "grep", "sort"} {
+	for _, commandName := range []string{"awk", "dirname", "find", "go", "grep", "sort"} {
 		commandPath, err := exec.LookPath(commandName)
 		if err != nil {
 			t.Fatal(err)
