@@ -16,6 +16,13 @@ suite_proxy_log() {
   printf '[suite-proxy] %s\n' "$*"
 }
 
+suite_proxy_defer_signal() {
+  local status="$1"
+  if [[ "${SUITE_PROXY_DEFERRED_SIGNAL_STATUS:-0}" == 0 ]]; then
+    SUITE_PROXY_DEFERRED_SIGNAL_STATUS="$status"
+  fi
+}
+
 suite_proxy_random_hex() {
   local value
   value="$(LC_ALL=C od -An -N 24 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" || return $?
@@ -580,6 +587,31 @@ suite_proxy_cleanup() {
   SUITE_PROXY_STATE_OWNED=0
 }
 
+# A signal cannot be allowed to exit between the exclusive state-directory
+# claim and publication of the in-process ownership snapshot used by cleanup.
+# Defer it across that short sequence, then deliver it after cleanup has enough
+# immutable state to prove what this process owns.
+suite_proxy_acquire_state() {
+  local acquire_status=0
+
+  SUITE_PROXY_DEFERRED_SIGNAL_STATUS=0
+  trap 'suite_proxy_defer_signal 130' INT
+  trap 'suite_proxy_defer_signal 143' TERM
+  suite_proxy_state_acquire \
+    "$SUITE_PROXY_STATE_DIR" "$SUITE_PROXY_OWNER_PID" \
+    "$SUITE_PROXY_OWNER_TOKEN" "$SUITE_PROXY_GENERATION" || acquire_status=$?
+  if [[ "$acquire_status" == 0 ]]; then
+    SUITE_PROXY_OWNER_START_IDENTITY="$SUITE_PROXY_ACQUIRED_START_IDENTITY"
+    SUITE_PROXY_STATE_OWNED=1
+  fi
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ "$SUITE_PROXY_DEFERRED_SIGNAL_STATUS" != 0 ]]; then
+    exit "$SUITE_PROXY_DEFERRED_SIGNAL_STATUS"
+  fi
+  return "$acquire_status"
+}
+
 suite_proxy_on_exit() {
   local status=$?
   trap - EXIT
@@ -683,6 +715,7 @@ suite_proxy_main() {
   SUITE_PROXY_REDIS_CIDFILE="$SUITE_PROXY_STATE_DIR/redis.cid"
   SUITE_PROXY_STATE_OWNED=0
   SUITE_PROXY_CLEANED=0
+  SUITE_PROXY_DEFERRED_SIGNAL_STATUS=0
 
   [[ -n "$SUITE_PROXY_HOST_IP" ]] || suite_proxy_die "SUITE_PROXY_HOST_IP is required"
   [[ -n "$SUITE_PROXY_STATE_DIR" ]] || suite_proxy_die "WARP_TEST_ENV_SUITE_PROXY_STATE_DIR is required"
@@ -710,16 +743,9 @@ suite_proxy_main() {
   suite_proxy_docker info >/dev/null || suite_proxy_die "Docker daemon is unavailable"
 
   trap suite_proxy_on_exit EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  SUITE_PROXY_STATE_OWNED=1
-  if ! suite_proxy_state_acquire \
-      "$SUITE_PROXY_STATE_DIR" "$SUITE_PROXY_OWNER_PID" \
-      "$SUITE_PROXY_OWNER_TOKEN" "$SUITE_PROXY_GENERATION"; then
-    SUITE_PROXY_STATE_OWNED=0
+  if ! suite_proxy_acquire_state; then
     suite_proxy_die "another suite proxy owner holds $SUITE_PROXY_STATE_DIR"
   fi
-  SUITE_PROXY_OWNER_START_IDENTITY="$SUITE_PROXY_ACQUIRED_START_IDENTITY"
 
   suite_proxy_verify_network ||
     suite_proxy_die "urnetwork-local is not the repository Compose network"

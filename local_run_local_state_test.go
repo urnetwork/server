@@ -1146,19 +1146,99 @@ suite_proxy_cleanup
 	}
 }
 
+// A signal delivered after the owner record is complete but before acquisition
+// returns is deferred until cleanup has the immutable start-identity snapshot.
+func TestSuiteProxyHelperDefersSignalAcrossStateAcquisition(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "suite-proxy.state")
+	cleanupRecordPath := filepath.Join(t.TempDir(), "cleanup-record")
+	script := `set -euo pipefail
+source "$1"
+source "$2"
+SUITE_PROXY_STATE_DIR="$3"
+SUITE_PROXY_OWNER_PID="$$"
+SUITE_PROXY_OWNER_TOKEN="$4"
+SUITE_PROXY_GENERATION="$5"
+SUITE_PROXY_OWNER_START_IDENTITY=""
+SUITE_PROXY_STATE_OWNED=0
+SUITE_PROXY_CLEANED=0
+SUITE_PROXY_DEFERRED_SIGNAL_STATUS=0
+cleanup_record_path="$6"
+suite_proxy_state_acquire() {
+  [[ "$1" == "$SUITE_PROXY_STATE_DIR" ]]
+  [[ "$2" == "$SUITE_PROXY_OWNER_PID" ]]
+  [[ "$3" == "$SUITE_PROXY_OWNER_TOKEN" ]]
+  [[ "$4" == "$SUITE_PROXY_GENERATION" ]]
+  mkdir "$1"
+  SUITE_PROXY_ACQUIRED_START_IDENTITY=test-start-identity
+  printf '%s\n' \
+    'format=urnetwork-server-suite-proxy-owner-v1' \
+    "owner_pid=$2" \
+    "owner_start_identity=$SUITE_PROXY_ACQUIRED_START_IDENTITY" \
+    "owner_token=$3" \
+    "generation=$4" > "$1/owner"
+  kill -TERM "$$"
+  [[ ! -e "$cleanup_record_path" ]]
+}
+suite_proxy_cleanup() {
+  [[ "$SUITE_PROXY_STATE_OWNED" == 1 ]]
+  [[ "$SUITE_PROXY_OWNER_START_IDENTITY" == test-start-identity ]]
+  [[ "$(cat "$SUITE_PROXY_STATE_DIR/owner")" == "$(printf '%s\n' \
+    'format=urnetwork-server-suite-proxy-owner-v1' \
+    "owner_pid=$SUITE_PROXY_OWNER_PID" \
+    "owner_start_identity=$SUITE_PROXY_OWNER_START_IDENTITY" \
+    "owner_token=$SUITE_PROXY_OWNER_TOKEN" \
+    "generation=$SUITE_PROXY_GENERATION")" ]]
+  printf 'owned\n' > "$cleanup_record_path"
+  rm "$SUITE_PROXY_STATE_DIR/owner"
+  rmdir "$SUITE_PROXY_STATE_DIR"
+  SUITE_PROXY_STATE_OWNED=0
+}
+trap suite_proxy_on_exit EXIT
+suite_proxy_acquire_state
+exit 99`
+	cmd := exec.Command(
+		"bash",
+		"-c",
+		script,
+		"suite-proxy-acquire-signal-test",
+		filepath.Join("local", "run-local-state.sh"),
+		filepath.Join("local", "run-suite-proxy.sh"),
+		stateDir,
+		suiteProxyTestToken,
+		suiteProxyTestGeneration,
+		cleanupRecordPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 143 {
+		t.Fatalf("deferred acquisition signal = %v, %q; want exit 143", err, output)
+	}
+	contents, err := os.ReadFile(cleanupRecordPath)
+	if err != nil || string(contents) != "owned\n" {
+		t.Fatalf("deferred acquisition cleanup = %q, %v", contents, err)
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deferred acquisition left state: %v", err)
+	}
+}
+
 // Readiness requires service-level replies, not merely a host-side TCP accept.
 func TestSuiteProxyHelperRequiresProtocolResponses(t *testing.T) {
+	requestRecordPath := filepath.Join(t.TempDir(), "request-record")
 	script := `source "$1"
 source "$2"
 SUITE_PROXY_PROBE_TIMEOUT_SECONDS=1
+request_record_path="$3"
 nc() {
+  request_hex="$(od -An -tx1 | tr -d ' \n')"
+  printf '%s\n' "$request_hex" >> "$request_record_path"
   case "$*" in
-    *" 15432") printf 'S' ;;
-    *" 16379") printf '+PONG\r\n' ;;
+    *" 15432") [[ "$request_hex" == 0000000804d2162f ]] && printf 'S' ;;
+    *" 16379") [[ "$request_hex" == 2a310d0a24340d0a50494e470d0a ]] && printf '+PONG\r\n' ;;
   esac
 }
 suite_proxy_postgres_responds 192.0.2.44 15432
 suite_proxy_redis_responds 192.0.2.44 16379
+[[ "$(cat "$request_record_path")" == $'0000000804d2162f\n2a310d0a24340d0a50494e470d0a' ]]
 nc() { return 0; }
 if suite_proxy_postgres_responds 192.0.2.44 15432; then exit 96; fi
 if suite_proxy_redis_responds 192.0.2.44 16379; then exit 97; fi`
@@ -1169,6 +1249,7 @@ if suite_proxy_redis_responds 192.0.2.44 16379; then exit 97; fi`
 		"suite-proxy-protocol-test",
 		filepath.Join("local", "run-local-state.sh"),
 		filepath.Join("local", "run-suite-proxy.sh"),
+		requestRecordPath,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

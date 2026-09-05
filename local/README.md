@@ -168,7 +168,8 @@ replaced, or malformed object, a Docker transport error, and any foreign state
 are retained fail closed for inspection. Absence requires a successful daemon
 query for the full immutable ID. The helper never edits `/etc/hosts`, adds an address, changes
 the upstream containers/network, or signals another launcher. It may pull the
-pinned Alpine tag into the local Docker image cache. Do not synthesize or edit
+selected Alpine tag into the local Docker image cache, then runs its resolved
+content-addressed image ID. Do not synthesize or edit
 the private owner/readiness files.
 
 These shell helpers require Bash 3.2 or newer. Invoke their shebang entrypoints
