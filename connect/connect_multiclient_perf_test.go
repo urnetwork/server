@@ -89,7 +89,11 @@ const (
 	// pace in 64 KiB chunks with a 1ms sleep: ~62 MiB/s
 	mcDownloadPaceChunkByteCount = 64 * 1024
 
-	mcTcpStreamByteCount = 100 * 1024 * 1024
+	// A cold TCP dial includes provider discovery, generated-client setup, and
+	// contracts in both directions. The TUN's own dial timer must preserve this
+	// whole fixture budget instead of truncating it to the 30-second default.
+	mcTcpColdStartTimeout = 60 * time.Second
+	mcTcpStreamByteCount  = 100 * 1024 * 1024
 	// minimum acceptable max tcp goodput: a collapse detector, so it sits well
 	// below the honest -race capacity band (measured steady 0.61-0.71 MiB/s on
 	// an idle M1 Max, capacity-determined) rather than inside it — background
@@ -112,6 +116,14 @@ func newLocalPerformanceClientSettings() *connect.ClientSettings {
 	return clientSettings
 }
 
+// Keeps the application socket's intrinsic deadline aligned with the full
+// multi-client cold-start budget used by the surrounding dial context.
+func newLocalPerformanceTcpTunSettings() *connect.TunSettings {
+	tunSettings := connect.DefaultTunSettings()
+	tunSettings.DialTimeout = mcTcpColdStartTimeout
+	return tunSettings
+}
+
 // Pins the fixture boundary that prevents host interface count and WAN state
 // from changing the cost of a same-process performance run.
 func TestLocalPerformanceClientSettingsConstrainIceToLoopback(t *testing.T) {
@@ -121,6 +133,19 @@ func TestLocalPerformanceClientSettingsConstrainIceToLoopback(t *testing.T) {
 	}
 	if !clientSettings.WebRtcSettings.UseLoopbackOnlyIceInterfaces {
 		t.Error("local performance fixture can gather non-loopback ICE candidates")
+	}
+}
+
+// Pins the fixture boundary that prevents the TUN's shorter production dial
+// timer from ending a valid cold route formation before the caller's budget.
+func TestLocalPerformanceTcpTunPreservesColdStartDialBudget(t *testing.T) {
+	tunSettings := newLocalPerformanceTcpTunSettings()
+	if tunSettings.DialTimeout != mcTcpColdStartTimeout {
+		t.Errorf(
+			"local performance TUN dial timeout = %s, expected %s",
+			tunSettings.DialTimeout,
+			mcTcpColdStartTimeout,
+		)
 	}
 }
 
@@ -265,7 +290,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 
 	// ---- device: tun bridged to the multi client -----------------------------
 
-	tun, err := connect.CreateTunWithDefaults(ctx)
+	tun, err := connect.CreateTun(ctx, newLocalPerformanceTcpTunSettings())
 	if err != nil {
 		panic(err)
 	}
@@ -345,7 +370,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	// ---- phase 1: connect + first byte (cold start) --------------------------
 
 	startTime := time.Now()
-	dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
+	dialCtx, dialCancel := context.WithTimeout(ctx, mcTcpColdStartTimeout)
 	probeConn, err := tun.DialContext(dialCtx, "tcp", echoAddr)
 	dialCancel()
 	if err != nil {

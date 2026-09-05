@@ -116,7 +116,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 	}()
 
 	// ---- device tun bridged to the multi client (same shape as mctcp) ---------
-	tun, err := connect.CreateTunWithDefaults(ctx)
+	tun, err := connect.CreateTun(ctx, newLocalPerformanceTcpTunSettings())
 	if err != nil {
 		panic(err)
 	}
@@ -188,7 +188,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 
 	// runUpload writes the volume to the sink; goodput from the write side.
 	runUpload := func() (float64, bool) {
-		dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
+		dialCtx, dialCancel := context.WithTimeout(ctx, mcTcpColdStartTimeout)
 		conn, err := tun.DialContext(dialCtx, "tcp", sinkAddr)
 		dialCancel()
 		if err != nil {
@@ -217,7 +217,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 
 	// runDownload reads the volume from the source; goodput from the read side.
 	runDownload := func() (float64, bool) {
-		dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
+		dialCtx, dialCancel := context.WithTimeout(ctx, mcTcpColdStartTimeout)
 		conn, err := tun.DialContext(dialCtx, "tcp", sourceAddr)
 		dialCancel()
 		if err != nil {
