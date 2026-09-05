@@ -249,6 +249,11 @@ probe with one standing `warpctl logs ... -f` stream per active service. Confirm
 the watcher is alive and owns every expected standing stream. A live parent
 with missing children is not healthy observation coverage.
 
+When recovering or auditing an existing watcher, resolve its actual stdout and
+stderr file descriptors before checking file age. The immutable binary's
+directory may belong to a predecessor run; stale files there do not prove the
+current watcher stopped observing.
+
 For a temporary exact-edge pause, preserve all other coverage:
 
 ```sh
@@ -361,6 +366,30 @@ that fails for the reproduced mechanism and passes for the fix. Keep a monitor
 probe as the production guard; do not move application behavior into
 `server/monitor`.
 
+For every iOS issue, cross-validate the same failure mechanism on Android,
+Windows, Linux, and macOS before closing the finding. This applies to the
+initial cause, adjacent defects, and the proposed fix. Trace shared Go/SDK
+implementation and each platform's actual caller, startup, callback, persistence,
+and teardown boundaries; a platform-specific entry point does not make the
+underlying bug platform-specific. Run deterministic regressions through the
+relevant shared and platform-specific paths, with an old-behavior reproduction
+and a healthy control. Record each platform as reproduced, ruled out with named
+evidence, not applicable with a source-backed reason, or unverified with the
+missing test/device/build prerequisite. Compilation alone is not behavioral
+validation, and lack of access is not proof that a platform is unaffected.
+Preserve these cross-platform findings in `SIGNALS.md` and the incident handoff,
+including each affected release artifact and any remaining verification gates.
+Device installation, VPN-profile changes, and other privileged actions still
+require the operator authority described above.
+
+For client authentication fixes, preserve the existing credential roles on
+every platform: the login JWT is the admin credential, and a separately
+derived client JWT is used by the provider. Client refresh must not overwrite
+the stored admin JWT, and provider-only process storage must not manufacture
+an admin credential from its client token. Use distinct tokens in deterministic
+login, refresh, restart, and replacement tests; equal-token fixtures cannot
+validate this separation. See `SIGNALS.md` section 13.6.
+
 For a monitor defect or new production invariant:
 
 1. assign or retain the numbered `SIGNALS.md` section;
@@ -444,6 +473,15 @@ Run the owning repository's full release-relevant tests for product fixes. A
 focused test is not sufficient when the change affects generated service
 configuration, networking, concurrency, memory ownership, migrations, or
 artifact construction.
+
+Honor each test harness's interpreter and preserve the actual test exit code.
+In particular, source Server's `test-env.sh` inside Bash, not the workstation's
+default zsh, and launch the test from that same shell so the verified resource
+exports reach it. Stop immediately if preflight fails. Use `exec` for the final
+test command or explicitly propagate its captured status; a later successful
+status message must never turn a failed preflight or test into a passing gate.
+For piped commands, preserve required stage failures with `pipefail` and the
+appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 
 ## Deployment and production verification
 

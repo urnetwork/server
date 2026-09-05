@@ -218,7 +218,7 @@
     },
     {
       "type": "timeseries",
-      "title": "\u00a74 contract failures + missing-origin details / min (lossless)",
+      "title": "\u00a74 contract failures + origin/destination details / min (lossless)",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -273,9 +273,18 @@
           "expr": "sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "G",
           "legendFormat": "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (request_companion, sender_role, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "refId": "H",
+          "legendFormat": "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
         }
       ],
-      "description": "urnetwork_connect_contract_failures_total is the lossless counter behind the sampled contract-error log exemplars. The missing-origin detail series partitions only missing_companion_origin by bounded original request bit, resolution path, relationship, and endpoint lifecycle; use those dimensions to distinguish request shapes without client identifiers. request_companion is not an endpoint-role label. An insufficient_balance step-change can indicate netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
+      "description": "urnetwork_connect_contract_failures_total is the lossless counter behind the sampled contract-error log exemplars. Missing-origin detail partitions only missing_companion_origin; inactive-destination detail partitions only inactive_destination. Both retain bounded original request bit, resolution path, relationship, and endpoint lifecycle without client identifiers. Inactive-destination detail additionally retains sender_role=client|server|absent|unknown: the reported sequence lane, not an application, device, provider, or artifact identity. request_companion is not an endpoint-role label. Details are breakdowns of the aggregate, not additional failures to add to it. Absent or incomplete detail is not zero and cannot establish attribution; reconcile fresh complete detail to its aggregate as specified in SIGNALS sections 2.17 and 2.18. An insufficient_balance step-change can indicate netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
     },
     {
       "type": "timeseries",

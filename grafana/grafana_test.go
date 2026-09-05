@@ -476,7 +476,7 @@ func TestSubtensorDashboardSeparatesArchiveAndLightnodeMetrics(t *testing.T) {
 	for _, required := range []string{
 		`"name": "node"`,
 		`subtensor(|-lightnode)`,
-		`max by (job)`,
+		`max by (host,chain,job)`,
 		`{{job}}`,
 	} {
 		if !strings.Contains(content, required) {
@@ -493,14 +493,30 @@ func TestSubtensorDashboardDistinguishesRealLagFromStaleExport(t *testing.T) {
 		`status="best"`,
 		`deriv(substrate_block_height`,
 		`[1h]`,
-		`time() - max by (job) (timestamp(`,
+		`time() - max by (host,chain,job) (timestamp(`,
+		`max by (host,chain)`,
+		`[1h:15s]`,
+		` >= time() - 90`,
+		` >= 200`,
 	} {
 		if !strings.Contains(queries, required) {
 			t.Errorf("Subtensor dashboard cannot disambiguate lag/export freshness: missing %s", required)
 		}
 	}
-	if !strings.Contains(queries, `status="sync_target"}) - max by (job)`) {
-		t.Error("Subtensor dashboard must calculate node-reported target minus best head")
+	for _, id := range []int{13, 14} {
+		panel := dashboardPanelById(dashboard, id)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("missing target panel %d", id)
+		}
+		query := panel.Targets[0].Expr
+		for _, required := range []string{`job=~"^(?:subtensor|subtensor-lightnode)$"`, `job=~"$node"`, `substrate_sub_libp2p_is_major_syncing`, `on (host,chain)`} {
+			if !strings.Contains(query, required) {
+				t.Errorf("target panel %d missing %s", id, required)
+			}
+		}
+		if strings.Contains(query, "max by (job)") || strings.Contains(query, "max by (host)") {
+			t.Errorf("target panel %d merges host or chain identity", id)
+		}
 	}
 }
 
@@ -901,7 +917,7 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 // breakdown distinguishes request shapes without exposing client identifiers.
 func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
-	wantTitle := "\u00a74 contract failures + missing-origin details / min (lossless)"
+	wantTitle := "\u00a74 contract failures + origin/destination details / min (lossless)"
 	var detailsTarget *testTarget
 	for panelIndex := range dashboard.Panels {
 		panel := &dashboard.Panels[panelIndex]
@@ -928,6 +944,58 @@ func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
 	wantLegend := "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
 	if detailsTarget.LegendFormat != wantLegend {
 		t.Errorf("missing-origin detail legend = %q, want %q", detailsTarget.LegendFormat, wantLegend)
+	}
+}
+
+// Keep the lossless aggregate beside its bounded diagnostic breakdown. Rate
+// each process counter before summing, retain every finite causal dimension,
+// and never turn missing detail into zero or expose raw endpoint identifiers.
+func TestInactiveDestinationDetailsHaveActionableDashboardQuery(t *testing.T) {
+	dashboard := readTestDashboard(t, "signals.json")
+	wantTitle := "\u00a74 contract failures + origin/destination details / min (lossless)"
+	var targets []testTarget
+	for _, panel := range dashboard.Panels {
+		if panel.Title == wantTitle {
+			targets = panel.Targets
+			break
+		}
+	}
+	if targets == nil {
+		t.Fatalf("signals dashboard lacks panel %q", wantTitle)
+	}
+	tests := []struct {
+		metric string
+		query  string
+		legend string
+	}{
+		{
+			metric: "urnetwork_connect_contract_failures_total",
+			query:  `sum by (cause, companion) (rate(urnetwork_connect_contract_failures_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+			legend: "{{cause}} companion={{companion}}",
+		},
+		{
+			metric: "urnetwork_connect_inactive_destination_details_total",
+			query:  `sum by (request_companion, sender_role, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+			legend: "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}",
+		},
+	}
+	for _, test := range tests {
+		matches := 0
+		for _, target := range targets {
+			if !strings.Contains(target.Expr, test.metric) {
+				continue
+			}
+			matches++
+			if target.Expr != test.query {
+				t.Errorf("%s query = %q, want %q", test.metric, target.Expr, test.query)
+			}
+			if target.LegendFormat != test.legend {
+				t.Errorf("%s legend = %q, want %q", test.metric, target.LegendFormat, test.legend)
+			}
+		}
+		if matches != 1 {
+			t.Errorf("%s has %d panel queries, want exactly one", test.metric, matches)
+		}
 	}
 }
 

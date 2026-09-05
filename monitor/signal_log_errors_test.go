@@ -35,6 +35,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"pool timeout", "redis: connection pool timeout", "pool-timeout"},
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
+		{"Mimir series admission", "Stats push rejected (400): per-user series limit of 75000 exceeded", "mimir-series-limit"},
 		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`, "loki-tail-backend-eof"},
 		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
 		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-entries"},
@@ -84,6 +85,64 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalMimirSeriesLimitIsSpecificAndSanitized(t *testing.T) {
+	line := `Stats push rejected (400): per-user series limit of 75000 exceeded; series metric{customer="private-customer",instance="private-instance",address="192.0.2.19:9494",detail="connect: connection refused"}`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return line, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "mimir-series-limit")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"tenant-series-admission", "series details omitted", "per-user-series admission discards",
+		"predates the desired release", "19 readiness-rejected candidates", "Preserve random instance identity",
+		"630", "627", "30d14ce", "two-hour",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("Mimir admission alert omitted %q", want)
+		}
+	}
+	for _, secret := range []string{"private-customer", "private-instance", "192.0.2.19", "metric{", "connect: connection refused"} {
+		if strings.Contains(markdown, secret) {
+			t.Errorf("Mimir admission alert retained series detail %q", secret)
+		}
+	}
+	for _, other := range alerts {
+		if other.Class == "connection-refused" || other.Class == "novel" {
+			t.Errorf("Mimir rejection body escaped into generic class %s", other.Class)
+		}
+	}
+
+	for _, control := range []string{
+		`Stats push rejected (400): sample timestamp too old`,
+		`Stats push rejected (503): per-user series limit unavailable`,
+		`level=info configured per-user series limit=75000`,
+		`Stats push accepted (202): per-user series limit=75000`,
+	} {
+		source.localFn = func(_ string, args ...string) (string, error) {
+			if len(args) > 1 && args[0] == "ls" {
+				return "repo names synthetic-grafana", nil
+			}
+			return control, nil
+		}
+		controls, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, controlAlert := range controls {
+			if controlAlert.Class == "mimir-series-limit" {
+				t.Errorf("adjacent control falsely classified: %s", control)
+			}
+		}
 	}
 }
 

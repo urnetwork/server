@@ -498,6 +498,29 @@ func TestFramerMessageTooLargeIsClassifiedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestMimirSeriesLimitStandingWindowHasStablePrivateFrameAndHealthyControl(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	if finding := findingByClass(t, tailer.drainWindow(), "mimir-series-limit"); !finding.healthy {
+		t.Fatal("empty ingestion-rejection window was not healthy")
+	}
+	for _, line := range []string{
+		`Stats push rejected (400): per-user series limit exceeded; address="192.0.2.1:9999" instance="private-first"`,
+		`Stats push rejected (400): per-user series limit exceeded; address="192.0.2.2:9999" instance="private-second"`,
+	} {
+		tailer.classify(line)
+	}
+	finding := findingByClass(t, tailer.drainWindow(), "mimir-series-limit")
+	if finding.healthy || finding.tier != tierPage || finding.sustain != 1 || finding.frame != "tenant-series-admission" {
+		t.Fatalf("series admission contract: healthy=%t tier=%s sustain=%d frame=%s", finding.healthy, finding.tier, finding.sustain, finding.frame)
+	}
+	if !strings.Contains(finding.observed, "rate=2/min") || strings.Contains(finding.evidence, "private-") || strings.Contains(finding.evidence, "192.0.2.") {
+		t.Fatal("series admission count or privacy contract failed")
+	}
+	if next := findingByClass(t, tailer.drainWindow(), "mimir-series-limit"); !next.healthy || next.target != finding.target {
+		t.Fatal("quiet standing window could not resolve the same service identity")
+	}
+}
+
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
 	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`

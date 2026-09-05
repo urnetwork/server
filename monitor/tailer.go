@@ -119,6 +119,21 @@ var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: ba
 
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
+	// A Mimir rejection body can contain arbitrary series labels, including
+	// addresses and error-shaped values. Match before generic network classes
+	// and retain neither a raw sample nor a frame extracted from those labels.
+	{name: "mimir-series-limit", re: regexp.MustCompile(`Stats push rejected \(400\):[^\r\n]*\bper-user series limit\b`),
+		sample: func(string) string {
+			return "Stats push rejected (400): per-user series limit (series details omitted)"
+		},
+		groupBy:       func(string) string { return "tenant-series-admission" },
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, §8.11, and §11.20",
+		meaning:   "Mimir rejected series admission in a remote-write request because the tenant's in-memory series budget was exhausted",
+		mechanism: "Every admitted process needs a distinct instance label so overlapping counters remain independent. A readiness-rejected API, Connect, or Taskworker candidate previously started its metrics pusher anyway; repeated attempts of one incompatible service/config pair therefore created new cohorts without a traffic cutover. Those cohorts remain in the Mimir head until removal. Separately, Warpctl returned success after an unmet rollout status timeout, allowing the existing rollout script to advance later waves. Large steady exporter families also consume the same finite budget.",
+		context:   "This is affirmative ingestion rejection at the emitting Grafana gateway, not a Grafana rendering defect or proof that the latest release initiated the incident. The 2026-09-05 first limit observation at 04:21Z predates the desired release observed at 04:31-04:35Z. Later, 19 readiness-rejected candidates matched 19 metrics-pusher initializations across six lanes in 20 minutes, proving retry amplification. Six Mimir children exposed 75000 local and 150000 global limits; roughly 82000-90000 active unique series leave less than two full active cohorts of headroom.",
+		action:    "Compare the exact running artifacts before deploying the Warp failed-target retry/status-timeout fix and the Server readiness-gated metrics fix. Install the corrected Warpctl on the build workstation and managed hosts, then restart resident workers only with operator authorization. Apply the exact candidate's prerequisite migrations before service activation; the historical rejected release required head 630 while PostgreSQL was at 627. Preserve random instance identity. Xops commit 30d14ce trims unused node-exporter collectors and removes a known floor of roughly 13340 systemd-state series; measure remaining headroom rather than raising the Mimir limit blindly. Check direct per-user-series discard deltas, memory-series creation/removal, live process cohorts, and immutable service/config identity without retaining raw series labels.",
+		verify:    "After authorized rollout and prerequisite completion, every relevant block converges to a proven artifact, rejected candidates start no metrics pusher, and no unchanged-target readiness failure recurs for 20 minutes. Require zero new per-user-series admission discards, healthy direct metric freshness, and series removal restoring measured headroom through a full two-hour recent-head observation window. Two fresh direct Mimir reads corroborate ingestion; historical continuity gaps remain independently governed by §11.20.",
+	},
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
 		meaning: "node accept path starving — process alive but event loop wedged (or syn drop)"},

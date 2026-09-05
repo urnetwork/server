@@ -20,6 +20,7 @@ type subtensorConvergenceFixture struct {
 	queuedBlocks  float64
 	sampleCount   float64
 	sampleAge     float64
+	targetSamples float64
 }
 
 func TestSubtensorConvergenceSignalSyntheticDetectsSlowSerialImport(t *testing.T) {
@@ -40,6 +41,8 @@ func TestSubtensorConvergenceSignalSyntheticDetectsSlowSerialImport(t *testing.T
 	for _, want := range []string{
 		"estimated 35.1 days",
 		"window=1h",
+		"chain=bittensor",
+		"trusted_target_sample_count=240",
 		"lag=1398810",
 		"net_blocks_per_second=0.461772",
 		"imported_blocks_per_second=0.543441",
@@ -140,7 +143,7 @@ func TestSubtensorConvergenceValidationOrderAndMissingNamesAreDeterministic(t *t
 			subtensorConvergenceImportSeconds |
 			subtensorConvergenceSamples,
 	)
-	if got, want := strings.Join(missing, ","), "lag,queued_blocks,sample_age"; got != want {
+	if got, want := strings.Join(missing, ","), "lag,queued_blocks,sample_age,target_sample_count"; got != want {
 		t.Fatalf("missing measure names = %q, want %q", got, want)
 	}
 }
@@ -148,12 +151,14 @@ func TestSubtensorConvergenceValidationOrderAndMissingNamesAreDeterministic(t *t
 func TestSubtensorConvergenceQueryUsesExactFreshOneHourSourceSeries(t *testing.T) {
 	query := subtensorConvergenceQuery(
 		"main",
-		[]string{"snow"},
-		[]string{"subtensor", "subtensor-lightnode"},
+		map[string]subtensorConvergenceTarget{
+			"snow\x00subtensor":           {host: "snow", job: "subtensor"},
+			"snow\x00subtensor-lightnode": {host: "snow", job: "subtensor-lightnode"},
+		},
 	)
 	for _, want := range []string{
 		`env="main"`,
-		`host=~"^(?:snow)$"`,
+		`host="snow"`,
 		`job=~"^(?:subtensor|subtensor-lightnode)$"`,
 		`status="best"`,
 		`status="sync_target"`,
@@ -166,6 +171,11 @@ func TestSubtensorConvergenceQueryUsesExactFreshOneHourSourceSeries(t *testing.T
 		`timestamp(`,
 		`"monitor_measure","lag"`,
 		`"monitor_measure","sample_age"`,
+		`"monitor_measure","target_sample_count"`,
+		`max by (host,chain)`,
+		`substrate_sub_libp2p_is_major_syncing`,
+		`[1h:15s]`,
+		` >= time() - 90`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("convergence query missing %q:\n%s", want, query)
@@ -210,8 +220,106 @@ func runSubtensorConvergenceFixture(t testing.TB, now time.Time, fixture subtens
 	return NewSubtensorConvergenceSignal().Run(context.Background(), settings)
 }
 
+func TestSubtensorConvergenceRejectsShortCanonicalTargetHistory(t *testing.T) {
+	now := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	_, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+		lag: 100_000, netRate: 3, targetRate: 0.08, importRate: 3.08, importSeconds: 0.2,
+		sampleCount: 240, sampleAge: 0, targetSamples: 199,
+	})
+	if err == nil || !strings.Contains(err.Error(), "199 trusted target samples") {
+		t.Fatalf("short canonical history error = %v", err)
+	}
+}
+
+func TestSubtensorConvergenceAcceptsCaughtUpNodeWithNoImports(t *testing.T) {
+	now := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	alerts, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+		lag: 0, netRate: 0, targetRate: 0, importRate: 0, importSeconds: 0,
+		sampleCount: 240, sampleAge: 0, targetSamples: 240,
+	})
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("caught-up zero-work observation: alerts=%d err=%v", len(alerts), err)
+	}
+}
+
+func TestSubtensorConvergenceParserRejectsMixedAndMissingChainsAndDuplicates(t *testing.T) {
+	now := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	fixture := subtensorConvergenceFixture{lag: 10, netRate: 1, targetRate: 0.08, importRate: 1.08, importSeconds: 0.2, sampleCount: 240}
+	raw := subtensorConvergenceFixtureJSON(t, now, "snow", "subtensor", fixture)
+	targets := map[string]subtensorConvergenceTarget{"snow\x00subtensor": {host: "snow", job: "subtensor"}}
+	for _, test := range []struct{ name, raw, want string }{
+		{name: "mixed", raw: strings.Replace(raw, `"chain":"bittensor"`, `"chain":"other-chain"`, 1), want: "mixed chain"},
+		{name: "missing", raw: strings.ReplaceAll(raw, `"chain":"bittensor",`, ""), want: "missing or mixed chain"},
+	} {
+		_, err := parseSubtensorConvergence(test.raw, targets, now)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: err=%v", test.name, err)
+		}
+	}
+	var response mimirInstantResponse
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
+		t.Fatal(err)
+	}
+	response.Data.Result = append(response.Data.Result, response.Data.Result[0])
+	duplicated, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseSubtensorConvergence(string(duplicated), targets, now); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate observation error = %v", err)
+	}
+}
+
+func TestSubtensorConvergenceQueryPreservesConfiguredHostJobPairs(t *testing.T) {
+	query := subtensorConvergenceQuery("main", map[string]subtensorConvergenceTarget{
+		"snow\x00archive": {host: "snow", job: "archive"},
+		"other\x00light":  {host: "other", job: "light"},
+	})
+	for _, want := range []string{`host="snow",job=~"^(?:archive)$"`, `host="other",job=~"^(?:light)$"`} {
+		if !strings.Contains(query, want) {
+			t.Errorf("missing inventory pair %s", want)
+		}
+	}
+	if strings.Contains(query, `host=~`) || strings.Contains(query, `archive|light`) || strings.Contains(query, `light|archive`) {
+		t.Fatal("convergence query expanded inventory into a host/job Cartesian product")
+	}
+}
+
+func TestSubtensorConvergenceParserRejectsDifferentChainsAcrossConfiguredJobs(t *testing.T) {
+	now := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	fixture := subtensorConvergenceFixture{lag: 10, netRate: 1, targetRate: 0.08, importRate: 1.08, importSeconds: 0.2, sampleCount: 240}
+	var combined mimirInstantResponse
+	for _, source := range []struct{ job, chain string }{
+		{job: "subtensor", chain: "bittensor"},
+		{job: "subtensor-lightnode", chain: "other-chain"},
+	} {
+		raw := subtensorConvergenceFixtureJSON(t, now, "snow", source.job, fixture)
+		raw = strings.ReplaceAll(raw, `"chain":"bittensor"`, `"chain":`+strconv.Quote(source.chain))
+		var response mimirInstantResponse
+		if err := json.Unmarshal([]byte(raw), &response); err != nil {
+			t.Fatal(err)
+		}
+		combined.Status, combined.Data.ResultType = response.Status, response.Data.ResultType
+		combined.Data.Result = append(combined.Data.Result, response.Data.Result...)
+	}
+	raw, err := json.Marshal(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]subtensorConvergenceTarget{
+		"snow\x00subtensor":           {host: "snow", job: "subtensor"},
+		"snow\x00subtensor-lightnode": {host: "snow", job: "subtensor-lightnode"},
+	}
+	if _, err := parseSubtensorConvergence(string(raw), targets, now); err == nil || !strings.Contains(err.Error(), "configured jobs on snow expose different chains") {
+		t.Fatalf("cross-job chain ambiguity error = %v", err)
+	}
+}
+
 func subtensorConvergenceFixtureJSON(t testing.TB, now time.Time, host, job string, fixture subtensorConvergenceFixture) string {
 	t.Helper()
+	if fixture.targetSamples == 0 {
+		fixture.targetSamples = fixture.sampleCount
+	}
 	values := []struct {
 		name  string
 		value float64
@@ -224,12 +332,13 @@ func subtensorConvergenceFixtureJSON(t testing.TB, now time.Time, host, job stri
 		{name: "queued_blocks", value: fixture.queuedBlocks},
 		{name: "sample_count", value: fixture.sampleCount},
 		{name: "sample_age", value: fixture.sampleAge},
+		{name: "target_sample_count", value: fixture.targetSamples},
 	}
 	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
 		result = append(result, map[string]any{
 			"metric": map[string]string{
-				"host": host, "job": job, "monitor_measure": value.name,
+				"host": host, "job": job, "chain": "bittensor", "monitor_measure": value.name,
 			},
 			"value": []any{
 				float64(now.Unix()),

@@ -50,6 +50,7 @@ const (
 	subtensorConvergenceQueue
 	subtensorConvergenceSamples
 	subtensorConvergenceSampleAge
+	subtensorConvergenceTargetSamples
 	subtensorConvergenceAll = (1 << iota) - 1
 )
 
@@ -65,6 +66,7 @@ var subtensorConvergenceMeasureNames = []struct {
 	{bit: subtensorConvergenceQueue, name: "queued_blocks"},
 	{bit: subtensorConvergenceSamples, name: "sample_count"},
 	{bit: subtensorConvergenceSampleAge, name: "sample_age"},
+	{bit: subtensorConvergenceTargetSamples, name: "target_sample_count"},
 }
 
 type subtensorConvergenceTarget struct {
@@ -77,6 +79,7 @@ type subtensorConvergenceTarget struct {
 
 type subtensorConvergenceMetrics struct {
 	target        subtensorConvergenceTarget
+	chain         string
 	lag           float64
 	netRate       float64
 	targetRate    float64
@@ -85,18 +88,16 @@ type subtensorConvergenceMetrics struct {
 	queuedBlocks  float64
 	sampleCount   float64
 	sampleAge     float64
+	targetSamples float64
 	mask          int
 }
 
-func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergenceTarget, []string, []string, error) {
+func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergenceTarget, error) {
 	targets := map[string]subtensorConvergenceTarget{}
-	hostNames := make([]string, 0, len(hosts))
-	jobNames := []string{}
 	for _, configuredHost := range hosts {
 		if configuredHost.subtensor == nil || len(configuredHost.subtensor.Nodes) == 0 {
-			return nil, nil, nil, fmt.Errorf("subtensor convergence: %s has no configured nodes", configuredHost.name)
+			return nil, fmt.Errorf("subtensor convergence: %s has no configured nodes", configuredHost.name)
 		}
-		hostNames = append(hostNames, configuredHost.name)
 		for _, node := range configuredHost.subtensor.Nodes {
 			// Snow's metrics jobs deliberately match the independently supervised
 			// container names. Falling back to the semantic node name keeps the
@@ -107,7 +108,7 @@ func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergence
 				job = strings.TrimSpace(node.Name)
 			}
 			if job == "" {
-				return nil, nil, nil, fmt.Errorf("subtensor convergence: %s has a node without a metrics identity", configuredHost.name)
+				return nil, fmt.Errorf("subtensor convergence: %s has a node without a metrics identity", configuredHost.name)
 			}
 			lagBand := int64(128)
 			if node.SyncMode == "warp" {
@@ -118,31 +119,15 @@ func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergence
 			}
 			key := configuredHost.name + "\x00" + job
 			if _, exists := targets[key]; exists {
-				return nil, nil, nil, fmt.Errorf("subtensor convergence: duplicate metrics identity %s/%s", configuredHost.name, job)
+				return nil, fmt.Errorf("subtensor convergence: duplicate metrics identity %s/%s", configuredHost.name, job)
 			}
 			targets[key] = subtensorConvergenceTarget{
 				host: configuredHost.name, node: node.Name, job: job,
 				lagBand: lagBand, syncMode: node.SyncMode,
 			}
-			jobNames = append(jobNames, job)
 		}
 	}
-	sort.Strings(hostNames)
-	sort.Strings(jobNames)
-	return targets, uniqueStrings(hostNames), uniqueStrings(jobNames), nil
-}
-
-func uniqueStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	result := values[:1]
-	for _, value := range values[1:] {
-		if value != result[len(result)-1] {
-			result = append(result, value)
-		}
-	}
-	return result
+	return targets, nil
 }
 
 func exactPrometheusRegex(values []string) string {
@@ -153,40 +138,73 @@ func exactPrometheusRegex(values []string) string {
 	return "^(?:" + strings.Join(escaped, "|") + ")$"
 }
 
-func subtensorConvergenceQuery(environment string, hosts, jobs []string) string {
-	labels := fmt.Sprintf(
-		`env=%s,host=~%s,job=~%s`,
-		strconv.Quote(environment),
-		strconv.Quote(exactPrometheusRegex(hosts)),
-		strconv.Quote(exactPrometheusRegex(jobs)),
-	)
-	best := `substrate_block_height{` + labels + `,status="best"}`
-	target := `substrate_block_height{` + labels + `,status="sync_target"}`
-	importCount := `substrate_block_verification_and_import_time_count{` + labels + `}`
-	importSum := `substrate_block_verification_and_import_time_sum{` + labels + `}`
-	queue := `substrate_sync_queued_blocks{` + labels + `}`
+// Select exact inventory pairs before host/chain aggregation. Independent
+// host and job matchers would admit an unconfigured cross-host job.
+func subtensorConvergenceQuery(environment string, targets map[string]subtensorConvergenceTarget) string {
+	hostJobs := map[string][]string{}
+	for _, key := range sortedSubtensorConvergenceTargetKeys(targets) {
+		target := targets[key]
+		hostJobs[target.host] = append(hostJobs[target.host], target.job)
+	}
+	hosts := make([]string, 0, len(hostJobs))
+	for host := range hostJobs {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	parts := []string{}
+	for _, host := range hosts {
+		labels := fmt.Sprintf(`env=%s,host=%s,job=~%s`, strconv.Quote(environment), strconv.Quote(host), strconv.Quote(exactPrometheusRegex(hostJobs[host])))
+		expressions := subtensorConvergenceExpressions(labels, labels)
+		for _, measure := range subtensorConvergenceMeasureNames {
+			parts = append(parts, `label_replace((`+expressions[measure.name]+`),"monitor_measure",`+strconv.Quote(measure.name)+`,"","")`)
+		}
+	}
+	return strings.Join(parts, " or ")
+}
 
-	byHostJob := func(expression string) string {
-		return `max by (host,job) (` + expression + `)`
+// Qualify source samples at each subquery step, then derive the shared chain
+// target. Equality with own best while syncing is the node's target fallback,
+// not convergence. An absent reference stays absent through the derivative.
+// Separate node labels let a dashboard display one node while both configured
+// jobs still supply the reference; monitor labels are identical in both roles.
+func subtensorConvergenceExpressions(targetLabels, nodeLabels string) map[string]string {
+	byNode := func(expression string) string { return `max by (host,chain,job) (` + expression + `)` }
+	fresh := func(metric string) string {
+		return `(` + metric + ` and (timestamp(` + metric + `) >= time() - 90))`
 	}
-	sumRate := func(metric string) string {
-		return `sum by (host,job) (rate(` + metric + `[` + subtensorConvergenceWindow + `]))`
+	best := `substrate_block_height{` + nodeLabels + `,status="best"}`
+	targetBest := byNode(fresh(`substrate_block_height{` + targetLabels + `,status="best"}`))
+	target := byNode(fresh(`substrate_block_height{` + targetLabels + `,status="sync_target"}`))
+	major := byNode(fresh(`substrate_sub_libp2p_is_major_syncing{` + targetLabels + `}`))
+	trusted := `((` + target + ` > ` + targetBest + `) or ((` + target + ` == ` + targetBest + `) and (` + major + ` == 0)))`
+	canonical := `max by (host,chain) (` + trusted + `)`
+	targetRange := `(` + canonical + `)[1h:15s]`
+	targetRate := `deriv(` + targetRange + `)`
+	targetSamples := `count_over_time(` + targetRange + `)`
+	freshBest := byNode(fresh(best))
+	// A reference behind this node is inconsistent, not zero lag. Requiring
+	// current lag also prevents a populated historical range from presenting
+	// convergence after all current target sources have disappeared.
+	lag := `((` + canonical + `) - on (host,chain) group_right () ` + freshBest + `) >= 0`
+	broadcast := func(expression string) string {
+		return `(((` + expression + `) + on (host,chain) group_right () (0 * ` + freshBest + `)) and on (host,chain,job) (` + lag + `))`
 	}
-	measure := func(name, expression string) string {
-		return `label_replace((` + expression + `),"monitor_measure",` + strconv.Quote(name) + `,"","")`
+	sumRate := func(name string) string {
+		return `sum by (host,chain,job) (rate(` + name + `{` + nodeLabels + `}[1h]))`
 	}
-
-	importRate := sumRate(importCount)
-	return strings.Join([]string{
-		measure("lag", `clamp_min(`+byHostJob(target)+` - `+byHostJob(best)+`,0)`),
-		measure("net_rate", byHostJob(`deriv(`+best+`[`+subtensorConvergenceWindow+`])`)+` - `+byHostJob(`deriv(`+target+`[`+subtensorConvergenceWindow+`])`)),
-		measure("target_rate", byHostJob(`deriv(`+target+`[`+subtensorConvergenceWindow+`])`)),
-		measure("import_rate", importRate),
-		measure("import_seconds", sumRate(importSum)+` / `+importRate),
-		measure("queued_blocks", byHostJob(queue)),
-		measure("sample_count", byHostJob(`count_over_time(`+best+`[`+subtensorConvergenceWindow+`])`)),
-		measure("sample_age", `time() - `+byHostJob(`timestamp(`+best+`)`)),
-	}, " or ")
+	importRate := sumRate(`substrate_block_verification_and_import_time_count`)
+	importTime := sumRate(`substrate_block_verification_and_import_time_sum`)
+	return map[string]string{
+		"lag":                 lag,
+		"net_rate":            `(` + byNode(`deriv(`+best+`[1h])`) + ` - on (host,chain) group_left () (` + targetRate + `)) and on (host,chain,job) (` + lag + `) and on (host,chain) (` + targetRate + ` >= 0)`,
+		"target_rate":         broadcast(targetRate),
+		"import_rate":         importRate,
+		"import_seconds":      `(` + importTime + ` / (` + importRate + ` > 0)) or ((0 * (` + importRate + ` == 0)) and (` + importTime + ` == 0))`,
+		"queued_blocks":       byNode(`substrate_sync_queued_blocks{` + nodeLabels + `}`),
+		"sample_count":        byNode(`count_over_time(` + best + `[1h])`),
+		"sample_age":          `time() - ` + byNode(`timestamp(`+best+`)`),
+		"target_sample_count": broadcast(targetSamples),
+	}
 }
 
 func (subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -194,7 +212,7 @@ func (subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	if len(subtensorHosts) == 0 {
 		return nil, fmt.Errorf("subtensor convergence: no subtensor host in inventory")
 	}
-	targets, hostNames, jobNames, err := subtensorConvergenceTargets(subtensorHosts)
+	targets, err := subtensorConvergenceTargets(subtensorHosts)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +222,7 @@ func (subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
-		url.QueryEscape(subtensorConvergenceQuery(env.cfg.env, hostNames, jobNames))
+		url.QueryEscape(subtensorConvergenceQuery(env.cfg.env, targets))
 	out, metricHost, err := shellFirstServiceGateway(
 		ctx,
 		env.runner,
@@ -272,6 +290,11 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 
 		metric := metrics[key]
 		metric.target = target
+		chain := series.Metric["chain"]
+		if chain == "" || (metric.chain != "" && metric.chain != chain) {
+			return nil, fmt.Errorf("subtensor convergence: missing or mixed chain identity for %s/%s", host, job)
+		}
+		metric.chain = chain
 		bit := 0
 		switch measure {
 		case "lag":
@@ -290,6 +313,8 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 			bit, metric.sampleCount = subtensorConvergenceSamples, value
 		case "sample_age":
 			bit, metric.sampleAge = subtensorConvergenceSampleAge, value
+		case "target_sample_count":
+			bit, metric.targetSamples = subtensorConvergenceTargetSamples, value
 		default:
 			return nil, fmt.Errorf("subtensor convergence: unknown measure %q", measure)
 		}
@@ -300,6 +325,7 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 		metrics[key] = metric
 	}
 
+	hostChains := map[string]string{}
 	for _, key := range sortedSubtensorConvergenceTargetKeys(targets) {
 		target := targets[key]
 		metric, ok := metrics[key]
@@ -313,6 +339,10 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 				target.host, target.job, strings.Join(missingSubtensorConvergenceMeasures(mask), ","), mask, subtensorConvergenceAll,
 			)
 		}
+		if previous := hostChains[target.host]; previous != "" && previous != metric.chain {
+			return nil, fmt.Errorf("subtensor convergence: configured jobs on %s expose different chains", target.host)
+		}
+		hostChains[target.host] = metric.chain
 		// Validate the observation window before interpreting its derivatives.
 		// A stale or short series can produce a physically impossible slope when
 		// the range crosses a scrape/restart boundary; that is observation loss,
@@ -335,8 +365,12 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 				target.host, target.job, metric.sampleCount, subtensorConvergenceMinSamples,
 			)
 		}
-		if metric.lag < 0 || metric.targetRate < 0 || metric.importRate <= 0 ||
-			metric.importSeconds <= 0 || metric.queuedBlocks < 0 {
+		if metric.targetSamples < subtensorConvergenceMinSamples {
+			return nil, fmt.Errorf("subtensor convergence: %s/%s has %.0f trusted target samples, want at least %d; syncing fallback is not a chain target", target.host, target.job, metric.targetSamples, subtensorConvergenceMinSamples)
+		}
+		if metric.lag < 0 || metric.targetRate < 0 || metric.importRate < 0 ||
+			metric.importSeconds < 0 || metric.queuedBlocks < 0 ||
+			(metric.importRate == 0 && metric.importSeconds != 0) {
 			return nil, fmt.Errorf(
 				"subtensor convergence: inconsistent one-hour measures for %s/%s lag=%.6f target_rate=%.6f import_rate=%.6f import_seconds=%.6f queued_blocks=%.6f",
 				target.host, target.job, metric.lag, metric.targetRate, metric.importRate, metric.importSeconds, metric.queuedBlocks,
@@ -415,21 +449,21 @@ func evaluateSubtensorConvergence(metric subtensorConvergenceMetrics, metricHost
 		symptom:   symptom,
 		mechanism: mechanism,
 		baseline: fmt.Sprintf(
-			"Fresh one-hour source metrics contain at least %d samples; a node outside its %d-block readiness band has positive net catch-up and an ETA no greater than %.0f days.",
+			"Fresh one-hour best-head and trusted same-host/chain target histories each contain at least %d samples; a node outside its %d-block readiness band has positive net catch-up and an ETA no greater than %.0f days. A syncing node's own-best target fallback is not a chain reference.",
 			subtensorConvergenceMinSamples, metric.target.lagBand, subtensorConvergenceMaxETADays,
 		),
 		observed: fmt.Sprintf(
-			"window=%s sync_mode=%s lag=%d net_blocks_per_second=%.6f target_blocks_per_second=%.6f imported_blocks_per_second=%.6f seconds_per_imported_block=%.6f queued_blocks=%.0f import_worker_busy_pct=%.1f eta_days=%s sample_count=%.0f sample_age_s=%.1f metrics_gateway=%s",
-			subtensorConvergenceWindow, metric.target.syncMode, lag, metric.netRate,
+			"window=%s sync_mode=%s chain=%s lag=%d net_blocks_per_second=%.6f target_blocks_per_second=%.6f imported_blocks_per_second=%.6f seconds_per_imported_block=%.6f queued_blocks=%.0f import_worker_busy_pct=%.1f eta_days=%s sample_count=%.0f trusted_target_sample_count=%.0f sample_age_s=%.1f metrics_gateway=%s",
+			subtensorConvergenceWindow, metric.target.syncMode, metric.chain, lag, metric.netRate,
 			metric.targetRate, metric.importRate, metric.importSeconds,
 			metric.queuedBlocks, 100*busyFraction, etaText, metric.sampleCount,
-			metric.sampleAge, metricHost,
+			metric.targetSamples, metric.sampleAge, metricHost,
 		),
-		evidence: "Mimir computes the one-hour derivative of best and sync-target height plus verification/import counter rates, queue depth, raw-sample count, and raw-sample age for the exact host/job pair.",
+		evidence: "Mimir selects exact configured host/job pairs, rejects targets older than 90s and own-best fallbacks while syncing, then takes the same-host/chain maximum before its one-hour derivative. Best-head derivatives, verification/import rates, queue depth, raw-best and trusted-target sample counts, and source age retain host/chain/job identity. A missing current reference is observation loss even when historical target samples remain.",
 		context:  "An archive full sync and a resumed warp database can both advance while failing to converge. A deep queued import pipeline plus near-full block-import-worker occupancy means adding peers cannot improve the current stage. Spare host-wide cores also cannot accelerate an importer that processes this historical path serially; faster per-core/storage hardware, a node import improvement, or a materially newer trusted chain checkpoint are distinct closure candidates. Runtime spec number alone is not checkpoint evidence: the official v452 finney checkpoint is not present in the v452 testfinney chain spec.",
-		action:   "Preserve the progressing generation. Correlate this window with the exact process cgroup cpu.stat, memory.events, io.stat, host vmstat, and current image/chain-spec checkpoint. If the queue stays deep and the import worker stays busy without CPU throttling, OOM, or disk wait, do not add peers or restart the same generation. Test a newer trusted checkpoint only in an isolated generation after proving that the exact configured chain spec contains a materially newer checkpoint; otherwise operations must accept the measured wait or provision faster single-core/storage hardware. Do not replace the archive while testing a lightnode candidate.",
+		action:   "Preserve the progressing generation. First corroborate fresh best, sync_target, and major_syncing samples on both configured jobs of this host and chain; equal target/best while syncing is fallback, not zero lag. Correlate a qualified window with the exact process cgroup cpu.stat, memory.events, io.stat, host vmstat, and current image/chain-spec checkpoint. If the queue stays deep and the import worker stays busy without CPU throttling, OOM, or disk wait, do not add peers or restart the same generation. Test a newer trusted checkpoint only in an isolated generation after proving that the exact configured chain spec contains a materially newer checkpoint; otherwise operations must accept the measured wait or provision faster single-core/storage hardware. Do not replace the archive while testing a lightnode candidate.",
 		verify: fmt.Sprintf(
-			"The same generation reaches its readiness band, or two consecutive one-hour windows retain at least %d fresh samples, positive net catch-up, and an ETA no greater than %.0f days. Any authorized replacement must prove a materially newer checkpoint and preserve the other node's exact identity.",
+			"With a currently visible trusted reference, the same generation reaches its readiness band, or two consecutive one-hour windows each retain at least %d raw-best and trusted-target samples, positive net catch-up, and an ETA no greater than %.0f days. Missing target evidence cannot resolve an alert. Any authorized replacement must prove a materially newer checkpoint and preserve the other node's exact identity.",
 			subtensorConvergenceMinSamples, subtensorConvergenceMaxETADays,
 		),
 		playbook: "SIGNALS.md §17.5",

@@ -943,6 +943,20 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+An exact `Stats push rejected (400): ... per-user series limit` line is
+`mimir-series-limit`: PAGE on the first one-minute window containing at least
+one rejection, with sustain 1. This is affirmative series-admission failure,
+so severity follows the lost observation contract rather than retry volume.
+Other HTTP statuses, other 400 reasons, and limit-configuration info lines do
+not establish this class. Match it before generic network errors because a
+rejection body can contain arbitrary series labels. Retain only the fixed
+`tenant-series-admission` frame and a fixed sample with series details omitted;
+never copy tenant labels, addresses, instance values, or metric labels into an
+alert. The emitting Grafana gateway does not identify all affected producers.
+Corroborate with bounded, remotely reduced Mimir admission-discard and
+in-memory-series counters as described in §11.20; do not infer a producer or
+rollout cause from this text alone.
+
 The 2026-09-04 Taskworker tail exposed both sides of that invariant. Its top
 unmatched shape was exact `providertunnel: tun read error: Done` at about
 65/min, while several alert samples came from unrelated `[rel]`, evaluation,
@@ -4326,6 +4340,17 @@ Absent, partial, or ambiguous detail stays unattributed while the independent
 aggregate alert remains live. No customer or route identifier enters either
 family.
 
+The internal signals dashboard keeps this detail next to the lossless
+contract-failure aggregate and the separate missing-origin breakdown. Rate
+each process counter before summing across all six finite dimensions; retain
+the selected environment and nonempty instance scope. Its legend must keep
+`sender_role` as a reported lane, not turn it into provider or app identity.
+Detail rates are partitions of their aggregate, not additional failures to
+add to it. The dashboard coverage and exact-query regressions must fail if
+this target is missing or drops one of those dimensions. A Grafana deployment
+is needed to expose a new dashboard target; it does not close provider
+lifecycle failures or make absent diagnostic samples observable.
+
 The durable repair is ordered. First deploy every API instance from server
 commit `c8dfe570` or a descendant so an inactive destination cannot pass mode
 selection or the final active-only write check and receives the additive
@@ -5274,6 +5299,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
+| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Reduce exact-process admission-discard and created/removed-series counters remotely; correlate rejected-candidate pusher starts and steady exporter cardinality. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through two hours; historical gaps stay under §11.20. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | `connect: connection refused` | Port closed: process dead or bound to wrong interface after manual restart. | `ss -lntp` on the host: absent → restart; bound 127.0.0.1-only → restart with correct conf. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
@@ -7809,6 +7835,44 @@ cover legacy, disabled, missing, unknown, healthy full-overlap, an on-disk fix
 with stale/unverifiable workers, partial host failure, a managed host with no
 units, and exclusion of non-services hosts.
 
+The 2026-09-05 rejected release exposed two additional worker/CLI boundaries.
+API, Connect, and Taskworker candidates selected service and config
+`2026.9.4+1037600680`, but direct readiness required database migration head
+630 while PostgreSQL remained at 627. The local monitor required only 629;
+its own source requirement is not the candidate's requirement. Old healthy
+containers kept serving and the Warp units had zero systemd restarts.
+Repeated candidate allocation was inside each long-lived worker, not a
+service-manager crash loop.
+
+In the Warp source correction, an unchanged failed service/config pair waits
+1, 2, 4, 8, then at most 10 minutes between failed attempts when a serving
+fallback exists or its state is unknown. For standard HTTP services the worker
+checks the allocated block port through the current redirect with a bounded fresh connection;
+Docker container presence alone does not prove readiness or routing. An
+observed missing container, refused connection, non-success HTTP response,
+unready/draining status, or mismatched block/service bypasses the delay.
+Ambiguous or missing observation retains the delay. Transparent and no-status
+services retain their existing container-presence contract, and config-updater
+does not acquire daemon retry policy. A changed service version or used config
+version attempts immediately; irrelevant config does not reset a configless
+service. Success clears failure history. The delay is process-local, so a
+worker restart is not a way to preserve or verify it. An external migration
+with unchanged versions is seen at the next bounded attempt, within the
+10-minute delay plus the ordinary readiness polling budget.
+
+The same incident exposed a silent status timeout: `pollStatusUntil` returned
+normally when the target never appeared, so the existing
+`build/all/deploy-rollout.zsh` advanced 25→50→75→100 waves. It already stops on
+a nonzero deploy result. Warp's fix returns the unmet-target error through
+the block/service pollers and deploy CLI. Read-only version listing remains a
+one-shot observation, including its visible errors, and transparent services
+retain §8.1a. This does not change the build workflow or reject intentional
+local source diffs. Check the exact workstation Warpctl and every installed
+and resident worker; software present on disk is not proof of active behavior.
+Pair these controls with the readiness-gated metrics publication in §11.20.
+These source corrections were not deployed during the observations above;
+verify each running artifact before attributing current behavior to the fix.
+
 ### 8.12 Fleet service artifact provenance
 Probe: `provenance`
 
@@ -9423,6 +9487,60 @@ after the approximately `20:03Z` through `20:05Z` full Grafana/Mimir
 replacement, not permanent ingestion loss, a denominator defect, or an
 unflushed head alone. Older fixed holes remain historical-loss evidence.
 
+The 2026-09-05 series-limit incident is a separate ingestion boundary. The
+first admission-limit observation at 04:21Z preceded the desired release
+observed at 04:31–04:35Z, so that release does not establish the initial cause.
+Later, a direct 20-minute journal reduction joined 19 readiness-rejected
+API/Connect/Taskworker candidates with exactly 19 `[stats]publishing`
+initializations across six lanes. The older serving containers stayed active.
+This proves rejected-candidate retry amplification of the series budget.
+The random per-process `instance` label prevents overlapping counters from
+sharing a series and must remain. The Server fix starts metrics only after
+startup readiness succeeds while preserving rejected `/status` and log
+visibility. Taskworker's DB/chain stats collector also waits for readiness.
+The Warp retry and timeout fixes are specified in §8.11; the exact rejected
+release independently requires an authorized migration through head 630.
+
+All six enabled Mimir children exposed a 75,000 local admission ceiling under
+the 150,000 global tenant limit. Active query-visible unique series were about
+82,000–90,000, whereas the two-hour window reached about 136,200. Stable node
+and Redis families changed little while application process cohorts expanded.
+Even the active baseline leaves less than two full active cohorts within the
+global budget. A short compaction phase dropped per-child head counts to
+54,000–59,000 with flat discard counters, but creation continued rising; that
+was temporary headroom, not recovery while candidate churn continued.
+
+Measure each exact Mimir child's loopback `/metrics` and effective `/config`
+with the existing bounded SSH transport, reducing values remotely. Retain
+only aggregate local/global limits, memory-series counts, created/removed
+series deltas, per-user-series-limit discard deltas, and process start
+identity. Compare two bounded Mimir API cardinality/freshness reads and
+same-window readiness/pusher counts; do not print raw time-series labels.
+Counter resets require a new process-generation baseline. Missing metrics or
+unreachable children are unknown, not zero discards. Keep §11.20 raw-range
+continuity as an independent control because healthy current writes do not
+recover historical gaps.
+
+Xops `30d14ce` separately trims unused node-exporter collectors to cpu,
+meminfo, diskstats, filesystem, uname, loadavg, and netdev; Planetoid also keeps
+textfile. The known systemd-state reduction alone is roughly 13,340 active
+series. Redis exporter is unchanged. This code-ready reduction was not
+deployed during diagnosis and does not guarantee sufficient rollout headroom.
+Install it only through the ordinary authorized host automation, then measure
+the new active and recent-head populations before deciding whether additional
+capacity is required. Do not erase process identity, blindly raise series
+limits, or restart Mimir to clear its head.
+
+Begin closure after the final authorized migration/artifact/worker boundary:
+every relevant block has converged to its proven service/config artifact;
+rejected candidates publish no metrics; and no unchanged-target readiness
+failure recurs for 20 minutes. Through a full two-hour recent-head observation
+window, require zero new per-user-series admission discards, fresh independent
+application metrics on two direct reads, and series removal restoring
+measured headroom for the next rollout. A confirmed exporter reduction is a
+separate source/config boundary. Historical gaps and restart durability remain
+open under their own verification windows.
+
 Pair every branch with §11.21. Do not zero `query_store_after` or
 `ignore_blocks_within` merely to fill the graph: Mimir 3.1.1 warns that querying
 replicated non-compacted blocks is inefficient and can expose duplicate sample
@@ -10316,6 +10434,128 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   the test agent beside the daemon in the container-wide cgroup marks the
   agent's sockets too, making its public-egress probe bypass the tunnel and
   turning a green result into a harness false positive.
+
+#### Client authentication, routing continuity, and cross-platform validation
+
+A client with no usable peers until its UI is opened is not sufficient evidence
+of a Connect or provider outage. Correlate the exact app/SDK artifact, tunnel
+process generation, saved destination, credential transition, peer-window
+state, and DNS/ordinary-flow outcomes across the failure and foreground
+boundary. Record only aggregate or Boolean state and relative ordering; never
+include tokens, private keys, device/customer identifiers, or raw flow labels.
+An empty window, an unavailable snapshot, and a healthy window are distinct
+states. Foreground recovery does not prove that an RPC callback was blocking
+the tunnel's independent peer-maintenance loop.
+
+For every iOS finding, validate the same mechanism and proposed correction on
+Android, Windows, Linux, and macOS. Trace actual platform callers as well as
+shared SDK code. Record each platform as reproduced, ruled out by a named
+control, not applicable for a source-backed reason, or unverified with its
+missing prerequisite. A build-only result or an unavailable device cannot prove
+behavioral absence. This requirement also covers adjacent defects found during
+the investigation, not just the first reported symptom.
+
+The following correctness boundaries require deterministic regressions:
+
+- A renewable JWT is not a stable device/session identity. Changing only the
+  credential for the same established instance must not call `LocalState.Logout`
+  or erase connect/default location, routing preferences, or provider identity.
+  Resolve one coherent, error-bearing auth snapshot and complete any required
+  reset/seed before constructing a device whose background work starts
+  immediately. Failed or partial identity reads cannot authorize a destructive
+  reset. New-login and different-instance behavior need separate controls.
+- The login/user/network JWT is the **admin credential** (`LocalState.ByJwt`).
+  Every platform must derive a separate provider client JWT after login, store
+  it in `LocalState.ByClientJwt`, and use only that client credential with the
+  provider device and its transports. Reviewed Android, iOS/macOS, Windows,
+  and Linux login paths already derive and store both credentials; Android is
+  not an exception to the other apps. A provider refresh must update only the
+  client credential while preserving the admin JWT and stable instance. Its
+  ownership guard must compare the prior client credential and instance, not
+  require equality with the admin JWT. Test distinct admin A and client B,
+  rotate B to C through the actual constructor-installed refresh callback,
+  and verify stored admin A is unchanged, the instance is unchanged, and
+  client-auth persistence, provider transport, window-client generator, and
+  client-refresh notifications all use C.
+  An equal-token fixture cannot validate this contract. A provider must not
+  fall back to the admin JWT when the client JWT is absent.
+- A Linux/Windows daemon can receive valid client auth through its control
+  request while its own storage has no auth envelope. That legitimate startup
+  must remain usable without copying the client JWT into the admin field or
+  passing the admin JWT to the daemon. The same role separation applies to an
+  Apple extension's client-only store even when a legacy tunnel configuration
+  field is named `by_jwt`: determine its role from the actual caller, not the
+  spelling. Establish any required startup ownership before enabling refresh
+  work; do not make every later empty store eligible for reseeding, because an
+  empty store can also mean an intentional logout. Preserve negative controls
+  for logout, a newer credential/session, and a retired publisher.
+- Cancellation is not completed teardown. Reject new callback admissions,
+  cancel the owned graph, and join already admitted callbacks before a
+  replacement reads/seeds the same storage or native callback owners are freed.
+  The owner must join outside the callback being joined. An old logout callback
+  parked after admission must not erase the replacement's auth or destination;
+  a join timeout is unresolved ownership, never permission to continue as if
+  cleanup finished. Also verify successful and failed startup paths release
+  their `NetworkSpaceManager`, not only the device handle.
+- A native UI queue is a separate callback boundary. Carry the originating
+  authenticated owner through the queued task and recheck it when the task
+  executes; joining the Go callback cannot drain work already posted to a
+  native dispatcher. Reviewed Android, Windows, and Linux auth-invalid handlers
+  post logout against the current application state without that owner check.
+  Force the ordering in a test: queue the old rejection, install a replacement,
+  run the queued task, and prove the replacement credentials and route survive.
+  A current-owner rejection must still log out correctly. Also test that retiring
+  an old `DeviceRemote` cannot clear a replacement's shared API credential or
+  HTTP hooks, and that a relogin's temporary admin API credential cannot be
+  copied into an old provider's configuration during an asynchronous reconcile.
+- A DNS address advertised to the OS must have a live handler for the selected
+  routing mode. Test both UDP and TCP DNS with no destination, local routing,
+  reconnect, and replacement; an advertised synthetic mask without its owning
+  multiplexer is not functional DNS. Preserve the configured custom-resolver
+  contract and distinguish device-local DNS failure from server ingress loss.
+- Reverse-RPC mirror synchronization must not overwrite a newer live window
+  event with an older baseline response. Separately prove whether a blocked
+  observer can affect the actual peer-maintenance loop. The presentation race
+  and a data-plane stall are different claims and need different controls.
+
+**2026-09-04 iPhone incident, reviewed 2026-09-05:** Apple source
+`3c47432e` at tag `v2026.9.4-1037517570` compared raw JWT text at extension
+startup and called `Logout` on a mismatch, even for the same instance. It also
+constructed `DeviceLocal` before that reset/marker sequence. Retained evidence
+shows the per-space state directory recreated at startup, same-instance
+credential divergence, and the same extension process recovering about 1.38
+seconds after the app returned to the foreground. Of 645 completed pre-foreground
+UDP/53 flows, 643 had no inbound packets while other TCP remained bidirectional.
+This supports startup state loss and missing DNS ownership as the strongest
+causal explanation. The pre-start token, exact reset-reason event, and
+pre-foreground destination/window snapshot were not retained, so the exact
+branch execution and each DNS flow's destination remain inferred.
+
+The Apple packet-tunnel source is shared with the macOS extension target; the
+raw-token reset therefore has source-confirmed macOS applicability, not a
+macOS incident reproduction. Reviewed Linux/Windows daemon startup paths do
+not contain that Apple-specific raw-token reset. They do use the shared SDK
+refresh and teardown paths, with the distinct auth layouts above, so this does
+not rule out shared failures on either platform. All five apps have the
+admin/client login split described above. The SDK helper introduced in
+`e1e70e7d`, `LocalState.setRefreshedByJwt`, violates that split by writing the
+refreshed client token into both `ByJwt` and `ByClientJwt`. The rejected initial
+lifecycle draft also repeated that assumption in its startup seed and refresh
+guard. A replacement must pass the distinct-token and lifecycle controls above;
+equal-token fixtures cannot qualify it. This is a shared persistence defect,
+not evidence that the apps omit client derivation at login, nor proof of the
+exact SDK embedded in each installed app. Cross-platform closure requires the
+relevant runtime controls and explicit source-backed not-applicable
+classifications; unavailable tests must remain unverified.
+
+The software fix and its release gates belong to the SDK and affected client
+applications; no server rollout can repair erased on-device routing state.
+After a tested artifact is authorized, verify a same-instance credential
+rotation followed by a cold tunnel launch with the UI closed, repeated peer
+formation and UDP/TCP DNS success, then a stop/replacement with a deliberately
+parked callback. Check each platform's equivalent lifecycle boundary and exact
+artifact. Keep unavailable on-device tests and OS/VPN approval prerequisites
+explicit rather than calling a source-only or focused-test result deployed.
 
 ## 14. Proxy drain (deploy) — PROXYDRAIN1
 
@@ -13110,37 +13350,75 @@ Probe: `subtensor-convergence`
 The 15-second progress check in §17.1 answers whether a node is moving. It does
 not answer whether the node is gaining on the live chain quickly enough to
 become usable. Measure each exact configured `host`/container `job` pair over a
-one-hour Mimir window:
+one-hour Mimir window, preserving `chain` identity throughout. A node's
+`sync_target` is not always a live chain reference: while syncing, it can fall
+back to that node's own best height. Subtracting that value gives false zero
+lag; deriving it per job turns fallback transitions into false target jumps.
+The locally pinned RaoFoundation/polkadot-sdk dependency at
+`cacb4310f20c7cac83eb3ccd8ed5a5ad4212608a` implements this in
+`substrate/client/service/src/metrics.rs`: `sync_target` is set from
+`best_seen_block.unwrap_or(best_number)`. The observed equality transitions
+are consistent with that source; verify the running image's dependency
+ancestry before calling the local pin its exact live revision.
+
+At each 15-second step, qualify raw best and target samples as at most 90
+seconds old. A target above its own node's best is eligible. Equality is
+eligible only with a fresh `substrate_sub_libp2p_is_major_syncing == 0` sample,
+which permits real caught-up nodes; equality while syncing or with unknown
+syncing state is not a reference. Take the maximum eligible target across the
+configured jobs on the **same host and chain before deriving its slope**.
+Using names for these qualified expressions, the calculation is:
 
 ```promql
-lag = max by (host, job) (substrate_block_height{status="sync_target"})
-    - max by (host, job) (substrate_block_height{status="best"})
+canonical_target = max by (host, chain) (eligible_target)
+lag = canonical_target - on (host, chain) group_right () fresh_best
 
-net_rate = max by (host, job) (deriv(substrate_block_height{status="best"}[1h]))
-         - max by (host, job) (deriv(substrate_block_height{status="sync_target"}[1h]))
+target_rate = deriv(canonical_target[1h:15s])
+net_rate = max by (host, chain, job) (
+  deriv(substrate_block_height{status="best"}[1h])
+) - on (host, chain) group_left () target_rate
 
-import_rate = sum by (host, job) (
+import_rate = sum by (host, chain, job) (
   rate(substrate_block_verification_and_import_time_count[1h])
 )
-seconds_per_imported_block = sum by (host, job) (
+seconds_per_imported_block = sum by (host, chain, job) (
   rate(substrate_block_verification_and_import_time_sum[1h])
 ) / import_rate
 ```
 
-Also read current `substrate_sync_queued_blocks`, the target-head derivative,
-the best-head raw-sample count, and raw-sample age. Select exact inventory
-hosts and jobs with anchored escaped matchers; do not accept an unconfigured
-series, merge the archive and lightnode, or infer health from a dashboard.
-Query through an active services host's loopback Mimir listener. A successful
-instant response is observable only when every configured node supplies the
-complete measure tuple, at least 200 samples in the one-hour range, and a raw
-best-head sample no more than 90 seconds old. Missing, partial, stale,
-non-finite, or inconsistent values are observation loss, not zero lag.
+The pseudocode names above do not replace raw-series qualification in
+`signal_subtensor_convergence.go`. Missing steps remain absent, not zero or
+own best, so a simultaneous fallback gap does not become a million-block
+target jump. Lag and slope also require a currently visible qualified target:
+a populated historical range cannot hide present observation loss. A target
+behind the displayed best is inconsistent, not clamped zero lag. A negative
+canonical slope is not accepted as catch-up evidence.
+
+Also read current `substrate_sync_queued_blocks`, best-head raw-sample count
+and age, and the valid canonical-target sample count. Build selectors per
+inventory host with only that host's anchored escaped job set; independent
+global host and job matchers admit unconfigured cross-host pairs. Preserve
+each job's metrics and reject unexpected pairs, missing/mixed chains, and
+duplicate measures rather than merging them. Both configured jobs on a host
+must name the same chain. Query through an active services host's loopback
+Mimir listener. A successful instant response is observable only when every
+configured node supplies the complete measure tuple, at least 200 raw best
+samples and 200 valid canonical-target steps in the hour, and a raw best
+sample no more than 90 seconds old. If every configured source is missing or
+falls back while syncing, report observation loss, never zero lag or recovery.
+Missing, partial, stale, non-finite, or inconsistent values have that same
+boundary. Zero actual import activity is valid: when both import count and
+duration rates are zero, report zero seconds per imported block instead of
+dividing by zero or manufacturing positive work.
 Validate configured host/job pairs in stable lexical order and name missing
 measures rather than emitting only a bit mask. Check current-sample freshness,
 then window sample count, before interpreting derivatives: a short or stale
 range that crosses a scrape/restart boundary can produce a negative target
-slope, but that slope is not chain convergence evidence.
+slope, but that slope is not chain convergence evidence. Grafana's lag and
+catch-up panels use both `subtensor` and `subtensor-lightnode` as reference
+sources even when `$node` displays only the lightnode. They still scope
+environment, host, and chain, preserve host/chain in aggregation, and show
+`target unavailable` when the reference or required history is absent.
 
 - READY: lag is at most 128 blocks for a full node or the configured
   `warp_max_lag` for a warp node. No catch-up alert is needed inside that band.
@@ -13153,8 +13431,9 @@ slope, but that slope is not chain convergence evidence.
   not recovery when lag is flat or growing.
 - Recovery requires the same generation to enter its readiness band, or two
   consecutive complete one-hour windows with a positive net rate and an ETA
-  no greater than 14 days. A restart resets the evidence boundary and cannot
-  be counted as recovery by itself.
+  no greater than 14 days, always with a currently qualified reference.
+  Missing target evidence cannot resolve the class. A restart resets the
+  evidence boundary and cannot be counted as recovery by itself.
 
 `import_rate * seconds_per_imported_block` estimates the fraction of one
 block-import worker's wall time spent verifying/importing. When that value is
@@ -13179,6 +13458,36 @@ management overlay timed out from both the monitor workstation and an enabled
 edge. Treat this as metrics/overlay observation loss and preserve the node
 generation; it does not prove an 18-block/s catch-up burst or a node restart.
 
+The separate 2026-09-05 05:51:21Z direct range query covered 70 minutes and
+281 points per height series. Both best heads were monotonic: archive gained
+15,533 blocks and lightnode 13,516. Archive target increased by 350, whereas
+lightnode target dropped 22 times, by as much as 1,297,103 blocks, to its own
+best height. All four height series were `chain="bittensor"`. Taking the
+same-host maximum before the derivative in a bounded diagnostic yielded a
+target rate of 0.083319 blocks/s and net rates of 3.599604 archive and 3.166826
+lightnode. That simple maximum corroborates the per-job fallback error; it
+does not replace the freshness, syncing-state, and canonical-history gates
+above or establish a current readiness claim. At 06:19:54Z a separate reduced
+identity query confirmed `chain="bittensor"` on both jobs for block height,
+import count/sum, major-syncing, and queue metrics. Current own-best progress
+without a fresh canonical reference still says only that the node is moving.
+Preserve its generation and distinguish target observation loss from a
+qualified nonconvergence alert.
+
+The regression gate must execute raw-series fixtures against the pinned
+Mimir 3.1.1 vendored Prometheus engine, not only compare query strings or
+precomputed slopes. From Server, run
+`MONITOR_PROMQL_ENGINE_SOURCE=<pinned-mimir-source> go test ./monitor -run '^TestSubtensorConvergencePromQLEngine$' -count=1`.
+`monitor/testdata/subtensor_promql_engine_test.go` runs in that source module
+with `-mod=vendor`; production Server dependencies remain unchanged. The
+script is generated from the actual probe query and bound to the authored
+Grafana expressions. It covers one/alternating/simultaneous fallbacks, current
+reference loss with retained history, legitimate caught-up zero imports,
+stale/short observations, a reference behind local best, and host/job/chain
+pollution. Legacy per-job controls reproduce false zero lag, negative net
+catch-up on a fallback-to-target rise, and positive net catch-up on a
+target-to-fallback drop even when qualified true lag is growing.
+
 This class may require an operational or hardware fix that software alone
 cannot supply. The available closures are a measured node import optimization,
 faster single-core/storage hardware, acceptance of the measured wait, or an
@@ -13198,10 +13507,11 @@ rates were about 0.54 blocks/s at about 1.83 seconds per imported block, or
 roughly 99.6% of one import worker's wall time. Direct cgroup and host controls
 showed no CPU quota/throttling, no OOM, ample available memory, negligible swap
 and I/O wait, and mostly idle host CPUs. Matching throughput on two databases
-at the same historical height rules out peer scarcity and a node-specific
-stuck process; it localizes the current ceiling to serial historical block
-verification/import. Keep the existing generations running while this alert
-records their real convergence horizon.
+at the same historical height ruled out peer scarcity and a node-specific
+stuck process in that window; it localized that ceiling to serial historical
+block verification/import. Keep this hardware/headroom class distinct from
+the later target-fallback observation error. Current capacity decisions need
+a new qualified one-hour window, not the historical 35-day estimate.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
