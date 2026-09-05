@@ -78,6 +78,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "ST signature/notification deployment identity", requiredVersion: 627, rowColumn: 38},
 	{name: "transfer_contract.stream_id+contract_participant", requiredVersion: 628, rowColumn: 39},
 	{name: "transfer_contract_stream_id", requiredVersion: 629, rowColumn: 40},
+	{name: "competition staging identity and admission guards", requiredVersion: 630, rowColumn: 41},
+	{name: "transfer_escrow_sweep.provider_payouts", requiredVersion: 631, rowColumn: 42},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -427,6 +429,54 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND index_name = 'transfer_contract_stream_id'
 		             AND definition LIKE '%(stream_id)%'
 		             AND definition LIKE '%stream_id IS NOT NULL%'
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'competition_round'
+		                 AND column_name = 'staging' AND data_type = 'boolean'
+		                 AND is_nullable = 'NO' AND column_default IS NULL
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'competition_round'
+		                 AND constraint_name = 'competition_round_epoch_kind'
+		                 AND constraint_type = 'c' AND validated
+		                 AND definition LIKE '%epoch_number = 0%'
+		                 AND definition LIKE '%epoch_number > 0%'
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1 FROM (VALUES
+		                   ('competition_round', 'competition_round_staging_identity_immutable', 'competition_round_staging_identity_guard'),
+		                   ('competition_candidate_review', 'competition_staging_candidate_review_blocked', 'competition_staging_candidate_review_guard'),
+		                   ('competition_round', 'competition_staging_finalization_blocked', 'competition_staging_finalization_guard')
+		               ) expected(table_name, trigger_name, function_name)
+		               WHERE NOT EXISTS (
+		                   SELECT 1 FROM pg_trigger trigger_record
+		                   JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
+		                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+		                   WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
+		                     AND trigger_record.tgname = expected.trigger_name
+		                     AND trigger_record.tgenabled = 'O'
+		                     AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
+		               )
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'transfer_escrow_sweep'
+		                 AND column_name = 'provider_payouts' AND data_type = 'jsonb'
+		                 AND is_nullable = 'YES' AND column_default IS NULL
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'transfer_escrow_sweep'
+		                 AND constraint_name = 'transfer_escrow_sweep_provider_payouts_shape'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%jsonb_typeof(provider_payouts)%'
+		                 AND definition LIKE '%jsonb_array_length(provider_payouts) > 0%'
+		           )
 		       )
 		FROM version;
 	`)

@@ -643,10 +643,20 @@ func testEnvTeardownBound() time.Duration {
 }
 
 func DefaultTestEnv() *TestEnv {
+	// Release gates must expose the first assertion or panic; development and
+	// explicit retry-policy meta-tests retain their existing retry behavior.
+	rerunCount := 4
+	switch os.Getenv("WARP_TEST_ENV_FAIL_FAST") {
+	case "", "0":
+	case "1":
+		rerunCount = 0
+	default:
+		panic("WARP_TEST_ENV_FAIL_FAST must be 0 or 1")
+	}
 	return &TestEnv{
 		ApplyDbMigrations: true,
 		Warmup:            false,
-		RerunCount:        4,
+		RerunCount:        rerunCount,
 		RerunTimeout:      15 * time.Second,
 	}
 }

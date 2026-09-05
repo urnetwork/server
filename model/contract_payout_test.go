@@ -546,6 +546,7 @@ func TestContractPayoutParticipantMatrix(t *testing.T) {
 
 			got := contractPayoutTestAmounts(t, ctx, escrow.ContractId)
 			want := map[server.Id]contractPayoutTestAmount{}
+			wantProviders := map[server.Id]int64{}
 			sortedParticipantIds := slices.Clone(participantIds)
 			slices.SortFunc(sortedParticipantIds, func(a, b server.Id) int {
 				return a.Cmp(b)
@@ -561,6 +562,7 @@ func TestContractPayoutParticipantMatrix(t *testing.T) {
 			for i, sameNetwork := range test.participantSameNetwork {
 				if !sameNetwork {
 					share := shareByParticipantId[participantIds[i]]
+					wantProviders[participantIds[i]] = share
 					amount := want[participantNetworkIds[i]]
 					amount.byteCount += share
 					amount.payout += NanoCents(share)
@@ -570,6 +572,7 @@ func TestContractPayoutParticipantMatrix(t *testing.T) {
 			if !maps.Equal(got, want) {
 				t.Fatalf("%s: payout = %v, want %v", test.name, got, want)
 			}
+			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, wantProviders)
 			assertContractPayoutTestAccounts(
 				t,
 				ctx,
@@ -691,6 +694,13 @@ func TestCompanionContractPayoutParticipantsJoinByStreamId(t *testing.T) {
 			}
 
 			want := map[server.Id]contractPayoutTestAmount{}
+			wantProviders := map[server.Id]int64{}
+			if !test.intermediarySameNetwork {
+				wantProviders[intermediaryClientId] = usedByteCount / 2
+			}
+			if !test.egressSameNetwork {
+				wantProviders[egressClientId] = usedByteCount / 2
+			}
 			for _, participant := range []struct {
 				networkId   server.Id
 				sameNetwork bool
@@ -709,6 +719,7 @@ func TestCompanionContractPayoutParticipantsJoinByStreamId(t *testing.T) {
 			if !maps.Equal(got, want) {
 				t.Fatalf("%s: companion payout = %v, want %v", test.name, got, want)
 			}
+			assertContractPayoutTestProviderAllocations(t, ctx, companionEscrow.ContractId, wantProviders)
 			assertContractPayoutTestAccounts(
 				t,
 				ctx,
@@ -805,6 +816,9 @@ func TestContractParticipantPayoutDisputeOutcomes(t *testing.T) {
 			if !maps.Equal(got, want) {
 				t.Fatalf("%s: dispute payout = %v, want %v", test.name, got, want)
 			}
+			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, map[server.Id]int64{
+				egressClientId: usedByteCount / 2, intermediaryClientId: usedByteCount / 2,
+			})
 			assertContractPayoutTestAccounts(
 				t,
 				ctx,

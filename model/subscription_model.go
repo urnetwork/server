@@ -2507,11 +2507,15 @@ func allocateContractParticipantPayouts(
 			} else if participant.ClientId.Cmp(participantSweep.destinationId) < 0 {
 				// Payout wallets are network-scoped and the sweep primary key is
 				// per network. If two hops belong to one eligible network, combine
-				// their shares and use a stable client id for provider attribution.
+				// their payment shares and keep only a legacy representative here.
+				// providerPayouts retains every client's actual subnet attribution.
 				participantSweep.destinationId = participant.ClientId
 			}
 			participantSweep.payoutByteCount += participantByteCount
 			participantSweep.payout += participantPayout
+			participantSweep.providerPayouts = append(participantSweep.providerPayouts, contractProviderPayout{
+				ClientId: participant.ClientId, PayoutByteCount: participantByteCount, PayoutNanoCents: participantPayout,
+			})
 
 			accountPayout := accountPayouts[participant.NetworkId]
 			if accountPayout == nil {
@@ -2770,14 +2774,16 @@ func settleEscrowInTx(
 										network_id,
 										payout_byte_count,
 										payout_net_revenue_nano_cents,
-										destination_id
+										destination_id,
+										provider_payouts
 									)
-									VALUES ($1, $2, $3, $4, $5, $6)
+									VALUES ($1, $2, $3, $4, $5, $6, $7)
 									ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
 									SET
 										payout_byte_count = $4,
 										payout_net_revenue_nano_cents = $5,
-										destination_id = $6
+										destination_id = $6,
+										provider_payouts = $7
 								`,
 								contractId,
 								key.balanceId,
@@ -2785,6 +2791,7 @@ func settleEscrowInTx(
 								payout.payoutByteCount,
 								payout.payout,
 								payout.destinationId,
+								payout.providerPayouts,
 							)
 						}
 					})
@@ -2882,6 +2889,15 @@ type participantSweepPayout struct {
 	destinationId   server.Id
 	payoutByteCount ByteCount
 	payout          NanoCents
+	providerPayouts []contractProviderPayout
+}
+
+// The account sweep remains network-scoped; this immutable allocation keeps
+// each provider's byte/revenue share for subnet eligibility and attribution.
+type contractProviderPayout struct {
+	ClientId        server.Id `json:"client_id"`
+	PayoutByteCount ByteCount `json:"payout_byte_count"`
+	PayoutNanoCents NanoCents `json:"payout_nano_cents"`
 }
 
 type contractPayout struct {

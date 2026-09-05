@@ -47,6 +47,86 @@ func runRetryTestEnv(t *testing.T, testEnv *TestEnv, callback func(testing.TB)) 
 	)
 }
 
+// Strict release defaults never change an explicitly selected retry policy.
+func TestDefaultTestEnvReleaseFailFastConfiguration(t *testing.T) {
+	for _, value := range []string{"", "0", "1"} {
+		t.Setenv("WARP_TEST_ENV_FAIL_FAST", value)
+		testEnv := DefaultTestEnv()
+		wantReruns := 4
+		if value == "1" {
+			wantReruns = 0
+		}
+		if testEnv.RerunCount != wantReruns || !testEnv.ApplyDbMigrations || testEnv.Warmup || testEnv.RerunTimeout != 15*time.Second {
+			t.Fatalf("fail-fast setting %q changed default environment: %+v", value, testEnv)
+		}
+	}
+	var attempts atomic.Int32
+	runRetryTestEnv(t, retryTestEnv(1), func(tb testing.TB) {
+		if attempts.Add(1) == 1 {
+			tb.Error("explicit retry-policy fixture failure")
+		}
+	})
+	if attempts.Load() != 2 {
+		t.Fatalf("strict defaults changed explicit retry policy: attempts=%d", attempts.Load())
+	}
+}
+
+// A misspelled release setting must not silently restore hidden retries.
+func TestDefaultTestEnvReleaseFailFastRejectsMalformedSetting(t *testing.T) {
+	for _, value := range []string{"true", "false", " 1", "1 ", "2", "-1"} {
+		t.Setenv("WARP_TEST_ENV_FAIL_FAST", value)
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			DefaultTestEnv()
+		}()
+		if recovered != "WARP_TEST_ENV_FAIL_FAST must be 0 or 1" {
+			t.Fatalf("malformed fail-fast setting %q: panic=%v", value, recovered)
+		}
+	}
+}
+
+// A would-pass-on-retry assertion, fatal or panic must exit unsuccessfully on
+// its first attempt. Subprocesses keep those intended failures isolated.
+func TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure(t *testing.T) {
+	if mode := os.Getenv("URNETWORK_RELEASE_FAIL_FAST_CHILD"); mode != "" {
+		var attempts atomic.Int32
+		testEnv := DefaultTestEnv()
+		testEnv.RerunTimeout = 0
+		runRetryTestEnv(t, testEnv, func(tb testing.TB) {
+			attempt := attempts.Add(1)
+			fmt.Printf("release fail-fast attempt=%d\n", attempt)
+			if attempt != 1 {
+				return
+			}
+			switch mode {
+			case "assertion":
+				tb.Error("release fixture assertion failure")
+			case "fatal":
+				tb.Fatal("release fixture fatal failure")
+			case "panic":
+				panic("release fixture panic failure")
+			default:
+				panic("invalid release fail-fast child mode")
+			}
+		})
+		return
+	}
+	t.Setenv("WARP_TEST_ENV_FAIL_FAST", "1")
+	for _, mode := range []string{"assertion", "fatal", "panic"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure$", "-test.v")
+		cmd.Env = append(os.Environ(), "URNETWORK_RELEASE_FAIL_FAST_CHILD="+mode)
+		output, err := cmd.CombinedOutput()
+		contextErr := ctx.Err()
+		cancel()
+		var exitErr *exec.ExitError
+		if contextErr != nil || !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(output), "release fail-fast attempt=1") || strings.Contains(string(output), "release fail-fast attempt=2") || !strings.Contains(string(output), "--- FAIL: TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure") {
+			t.Fatalf("%s did not fail exactly its first attempt: err=%v context=%v output=%s", mode, err, contextErr, output)
+		}
+	}
+}
+
 // Pins the lifecycle ordering that os.Exit would otherwise cut short.
 func TestRunTestMainTearsDownBeforeReturningStatus(t *testing.T) {
 	events := []string{}

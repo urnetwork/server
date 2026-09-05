@@ -1762,34 +1762,12 @@ type StNetworkUsage struct {
 	PayoutByteCount int64
 }
 
-// StProviderUsage is settled payout traffic attributed to the actual
-// destination/provider client. destination_id is denormalized onto the sweep
-// row at settlement time, so later network membership changes cannot rewrite
-// an old epoch.
+// Settled payout traffic attributed to each actual provider. The settlement
+// snapshots client shares independently of network-level account payments.
 type StProviderUsage struct {
 	ClientId        server.Id
 	NetworkId       server.Id
 	PayoutByteCount int64
-}
-
-func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime time.Time) []*StProviderUsage {
-	usages := []*StProviderUsage{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `
-            SELECT destination_id, network_id, SUM(payout_byte_count)::bigint
-            FROM transfer_escrow_sweep
-            WHERE $1 <= sweep_time AND sweep_time < $2 AND destination_id IS NOT NULL
-            GROUP BY destination_id, network_id
-        `, startTime, endTime)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				usage := &StProviderUsage{}
-				server.Raise(result.Scan(&usage.ClientId, &usage.NetworkId, &usage.PayoutByteCount))
-				usages = append(usages, usage)
-			}
-		})
-	})
-	return usages
 }
 
 // GetStEpochNetworkUsage sums `transfer_escrow_sweep.payout_byte_count` per

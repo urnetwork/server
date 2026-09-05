@@ -2855,23 +2855,19 @@ func stCanonicalProviderUsages(usages []*model.StProviderUsage) ([]*model.StProv
 	return result, nil
 }
 
-func stComputeReleasePayout(
-	ctx context.Context,
-	cfg *StConfig,
-	client StClient,
-	epoch uint64,
-	startTime, endTime time.Time,
-	startBlock, closeBlock uint64,
-) ([32]byte, int, error) {
-	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
-		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
+// Joins canonical per-client usage to that same client's wallet, reliability,
+// and positional fleet binding. Sharing an account network never merges
+// provider eligibility or lets one promoted head suppress another provider.
+func stBuildReleaseProviderInputs(
+	usages []*model.StProviderUsage,
+	reliabilityRows []*model.StClientReliability,
+	wallets map[server.Id]*model.StProviderWallet,
+	bindings []*StFleetBindingState,
+	reliabilityAMin int64,
+) ([]startifact.ProviderInput, error) {
+	if len(bindings) != len(usages) {
+		return nil, fmt.Errorf("bindingAt batch returned %d rows for %d clients", len(bindings), len(usages))
 	}
-	usages, err := stCanonicalProviderUsages(model.GetStEpochProviderUsage(ctx, startTime, endTime))
-	if err != nil {
-		return [32]byte{}, 0, err
-	}
-	reliabilityRows := model.GetStEpochClientReliability(ctx, startTime, endTime)
-	wallets := model.GetStProviderWalletsAt(ctx, endTime)
 	type reliability struct{ assignments, confirmations uint64 }
 	reliabilities := map[server.Id]reliability{}
 	for _, row := range reliabilityRows {
@@ -2885,22 +2881,8 @@ func stComputeReleasePayout(
 		reliabilities[row.ClientId] = r
 	}
 	providers := make([]startifact.ProviderInput, 0, len(usages))
-	networkForClient := map[[16]byte]server.Id{}
-	clientIds := make([][16]byte, len(usages))
 	for index, usage := range usages {
-		clientIds[index] = stId16(usage.ClientId)
-	}
-	bindings, err := client.BindingsAt(ctx, clientIds, epoch, startBlock, closeBlock)
-	if err != nil {
-		return [32]byte{}, 0, fmt.Errorf("bindingAt batch: %w", err)
-	}
-	if len(bindings) != len(usages) {
-		return [32]byte{}, 0, fmt.Errorf("bindingAt batch returned %d rows for %d clients", len(bindings), len(usages))
-	}
-	for _, usage := range usages {
-		clientId := clientIds[len(providers)]
-		provider := startifact.ProviderInput{ClientID: clientId, NetworkID: stId16(usage.NetworkId)}
-		networkForClient[clientId] = usage.NetworkId
+		provider := startifact.ProviderInput{ClientID: stId16(usage.ClientId), NetworkID: stId16(usage.NetworkId)}
 		if usage.PayoutByteCount > 0 {
 			provider.UsageBytes = uint64(usage.PayoutByteCount)
 		}
@@ -2914,20 +2896,58 @@ func stComputeReleasePayout(
 		} else {
 			provider.ExclusionReason = "missing_payout_wallet"
 		}
-		binding := bindings[len(providers)]
+		binding := bindings[index]
 		if binding == nil {
-			return [32]byte{}, 0, fmt.Errorf("bindingAt batch row %d for %s is nil", len(providers), usage.ClientId)
+			return nil, fmt.Errorf("bindingAt batch row %d for %s is nil", index, usage.ClientId)
 		}
 		if binding.Active {
 			provider.HeadExcluded = true
 			provider.BindingGeneration = binding.Generation
 			provider.ExclusionReason = "head_fleet_active"
 		}
-		provider.Eligible = provider.UsageBytes > 0 && provider.Assignments >= uint64(cfg.ReliabilityAMin) && provider.Confirmations > 0 && provider.Coldkey != ([32]byte{}) && !provider.HeadExcluded
+		provider.Eligible = provider.UsageBytes > 0 && provider.Assignments >= uint64(reliabilityAMin) && provider.Confirmations > 0 && provider.Coldkey != ([32]byte{}) && !provider.HeadExcluded
 		if !provider.Eligible && provider.ExclusionReason == "" {
 			provider.ExclusionReason = "reliability_exposure_floor"
 		}
 		providers = append(providers, provider)
+	}
+	return providers, nil
+}
+
+func stComputeReleasePayout(
+	ctx context.Context,
+	cfg *StConfig,
+	client StClient,
+	epoch uint64,
+	startTime, endTime time.Time,
+	startBlock, closeBlock uint64,
+) ([32]byte, int, error) {
+	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
+		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
+	}
+	usages, err := model.GetStEpochProviderUsage(ctx, startTime, endTime)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	usages, err = stCanonicalProviderUsages(usages)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	reliabilityRows := model.GetStEpochClientReliability(ctx, startTime, endTime)
+	wallets := model.GetStProviderWalletsAt(ctx, endTime)
+	networkForClient := map[[16]byte]server.Id{}
+	clientIds := make([][16]byte, len(usages))
+	for index, usage := range usages {
+		clientIds[index] = stId16(usage.ClientId)
+		networkForClient[clientIds[index]] = usage.NetworkId
+	}
+	bindings, err := client.BindingsAt(ctx, clientIds, epoch, startBlock, closeBlock)
+	if err != nil {
+		return [32]byte{}, 0, fmt.Errorf("bindingAt batch: %w", err)
+	}
+	providers, err := stBuildReleaseProviderInputs(usages, reliabilityRows, wallets, bindings, cfg.ReliabilityAMin)
+	if err != nil {
+		return [32]byte{}, 0, err
 	}
 	startHash, err := client.BlockHash(ctx, startBlock)
 	if err != nil {

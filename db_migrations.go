@@ -7141,4 +7141,22 @@ var migrations = []any{
 		BEFORE UPDATE OF finalized_at, winner_job_id ON competition_round
 		FOR EACH ROW EXECUTE FUNCTION competition_staging_finalization_guard();
 	`),
+
+	// Keep the exact provider allocation on the same atomic row as its account
+	// payment. A NULL value explicitly denotes legacy single-attribution data;
+	// the subnet reader accepts that fallback only for endpoint-backed contracts
+	// without the stream aggregation marker; mutable stream membership is not
+	// historical evidence of a sole provider.
+	// Adding a nullable column does not rewrite the existing large sweep table.
+	newSqlMigration(`
+		ALTER TABLE transfer_escrow_sweep
+			ADD COLUMN provider_payouts jsonb NULL;
+		ALTER TABLE transfer_escrow_sweep
+			ADD CONSTRAINT transfer_escrow_sweep_provider_payouts_shape CHECK (
+				provider_payouts IS NULL OR (
+					jsonb_typeof(provider_payouts) = 'array' AND
+					jsonb_array_length(provider_payouts) > 0
+				)
+			) NOT VALID;
+	`),
 }

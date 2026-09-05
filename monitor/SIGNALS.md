@@ -7477,6 +7477,22 @@ This is the version-to-artifact contract checked by the probe:
 | 627 | deployment-scoped ST fleet-signature/epoch-notification keys and network-time index |
 | 628 | `transfer_contract.stream_id` plus `contract_participant` and its stream/client primary key |
 | 629 | partial `transfer_contract_stream_id` |
+| 630 | `competition_round.staging`, epoch-kind constraint, and enabled staging identity/review/finalization guards |
+| 631 | nullable `transfer_escrow_sweep.provider_payouts` and its nonempty-array shape constraint |
+
+The provider allocation snapshot in version 631 is written atomically with
+each network payment row. It retains each client's exact byte and revenue
+share when several service hops share an account network. Subnet accounting
+validates both sums and client uniqueness before constructing payout leaves.
+A `NULL` snapshot denotes older history, not an empty modern allocation: the
+reader requires an endpoint-backed contract without a stream marker and an
+eligible provider matching the old `destination_id`. Older stream aggregates
+fail closed for subnet credit: stream participants can later change their
+account network, so their current membership cannot prove an old allocation.
+Such history requires investigation or independently provable recovery;
+it must not be silently reassigned to the lowest client id. The migration adds
+no default and does not scan or rewrite the existing sweep history; its shape
+constraint enforces new writes without requiring a full-table validation.
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
