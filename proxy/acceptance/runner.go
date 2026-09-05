@@ -16,9 +16,11 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,7 @@ const (
 	readinessRetryInterval = 2 * time.Second
 	maxAPIResponseBytes    = 1024 * 1024
 	maxProbeResponseBytes  = 64 * 1024
+	localNetworkLogTimeout = 5 * time.Second
 )
 
 var protocolNames = []string{"socks", "http", "wireguard"}
@@ -169,6 +172,218 @@ type httpsRequestTrace struct {
 	reused            bool
 }
 
+// Retains one request's time boundary so terminal campaign handling can add a
+// bounded local-host diagnostic without querying the host on readiness retries.
+type httpsRequestFailure struct {
+	started  time.Time
+	finished time.Time
+	detail   string
+	cause    error
+}
+
+// Preserves the existing identity-free request trace.
+func (self *httpsRequestFailure) Error() string {
+	return fmt.Sprintf("%s: %v", self.detail, self.cause)
+}
+
+// Keeps errors.Is/errors.As behavior for transport and target-status callers.
+func (self *httpsRequestFailure) Unwrap() error {
+	return self.cause
+}
+
+// Adds host provenance while leaving the underlying transport failure intact.
+type localNetworkDiagnosticError struct {
+	cause      error
+	diagnostic string
+}
+
+// Appends the bounded, identity-free host observation to the request failure.
+func (self *localNetworkDiagnosticError) Error() string {
+	return fmt.Sprintf("%v; %s", self.cause, self.diagnostic)
+}
+
+// Keeps the original request and transport errors available to errors.Is/As.
+func (self *localNetworkDiagnosticError) Unwrap() error {
+	return self.cause
+}
+
+// Resolves one failed request interval to fixed-schema local-host evidence.
+type localNetworkFailureCollector func(time.Time, time.Time) string
+
+// Abstracts the bounded unified-log command for deterministic tests.
+type localNetworkLogCommand func(context.Context, string, ...string) ([]byte, error)
+
+// Counts only the exact Darwin allocation and Wi-Fi stall signatures used to
+// distinguish local host pressure from a remote proxy failure.
+type localNetworkSignals struct {
+	skywalkSlabFailures int
+	gsoFailures         int
+	wifiStalls          int
+	maxWifiStallScore   int
+}
+
+// Parses bounded unified-log output without retaining raw log lines.
+func parseLocalNetworkSignals(output []byte) localNetworkSignals {
+	signals := localNetworkSignals{}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, "skmem_slab_alloc_locked") && strings.Contains(line, "failed to allocate slab") {
+			signals.skywalkSlabFailures++
+		}
+		if strings.Contains(line, "netif_gso_tcp_segment_mbuf failed to alloc") {
+			signals.gsoFailures++
+		}
+		remaining := line
+		for {
+			const prefix = "StallScore:"
+			index := strings.Index(remaining, prefix)
+			if index < 0 {
+				break
+			}
+			remaining = remaining[index+len(prefix):]
+			digitCount := 0
+			for digitCount < len(remaining) && remaining[digitCount] >= '0' && remaining[digitCount] <= '9' {
+				digitCount++
+			}
+			if digitCount == 0 {
+				if len(remaining) == 0 {
+					break
+				}
+				remaining = remaining[1:]
+				continue
+			}
+			score, err := strconv.Atoi(remaining[:digitCount])
+			if err == nil && score > 0 {
+				signals.wifiStalls++
+				signals.maxWifiStallScore = max(signals.maxWifiStallScore, score)
+			}
+			remaining = remaining[digitCount:]
+		}
+	}
+	return signals
+}
+
+// Executes one bounded unified-log query in production.
+func runLocalNetworkLogCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// Produces a fixed-schema observation; command failures remain explicit and
+// never become evidence that the remote Proxy caused the request failure.
+func collectLocalNetworkFailureDiagnosticWith(
+	started time.Time,
+	finished time.Time,
+	goos string,
+	executablePath string,
+	pid int,
+	runCommand localNetworkLogCommand,
+) string {
+	if finished.Before(started) {
+		finished = started
+	}
+	executable := compactDiagnosticToken(filepath.Base(executablePath))
+	requestInterval := fmt.Sprintf("%s/%s", started.UTC().Format(time.RFC3339Nano), finished.UTC().Format(time.RFC3339Nano))
+	if goos != "darwin" {
+		return fmt.Sprintf(
+			"local_host{os=%s executable=%s pid=%d source=unsupported request_interval=%s classification=query-unavailable}",
+			compactDiagnosticToken(goos),
+			executable,
+			pid,
+			requestInterval,
+		)
+	}
+
+	queryCtx, cancel := context.WithTimeout(context.Background(), localNetworkLogTimeout)
+	defer cancel()
+	const predicate = `process == "kernel" && (eventMessage CONTAINS "skmem_slab_alloc_locked" || eventMessage CONTAINS "netif_gso_tcp_segment_mbuf" || eventMessage CONTAINS "DPS Symptoms")`
+	queryStart := started.Add(-2 * time.Second).Truncate(time.Second)
+	queryEnd := finished.Add(2 * time.Second).Truncate(time.Second).Add(time.Second)
+	output, err := runCommand(
+		queryCtx,
+		"/usr/bin/log",
+		"show",
+		"--style", "compact",
+		"--info",
+		"--debug",
+		"--start", queryStart.Local().Format("2006-01-02 15:04:05"),
+		"--end", queryEnd.Local().Format("2006-01-02 15:04:05"),
+		"--predicate", predicate,
+	)
+	if err != nil {
+		queryStatus := "failed"
+		if queryCtx.Err() != nil {
+			queryStatus = "deadline"
+		}
+		return fmt.Sprintf(
+			"local_host{os=darwin executable=%s pid=%d source=darwin-unified-log request_interval=%s classification=query-unavailable query_status=%s}",
+			executable,
+			pid,
+			requestInterval,
+			queryStatus,
+		)
+	}
+
+	signals := parseLocalNetworkSignals(output)
+	classification := "no-local-kernel-signal"
+	if signals.skywalkSlabFailures > 0 || signals.gsoFailures > 0 {
+		classification = "local-kernel-buffer-pressure"
+	}
+	if signals.wifiStalls > 0 {
+		if classification == "local-kernel-buffer-pressure" {
+			classification += "+wifi-stall"
+		} else {
+			classification = "local-wifi-stall"
+		}
+	}
+	return fmt.Sprintf(
+		"local_host{os=darwin executable=%s pid=%d source=darwin-unified-log request_interval=%s classification=%s skywalk_slab_failures=%d gso_allocation_failures=%d wifi_stalls=%d max_wifi_stall_score=%d}",
+		executable,
+		pid,
+		requestInterval,
+		classification,
+		signals.skywalkSlabFailures,
+		signals.gsoFailures,
+		signals.wifiStalls,
+		signals.maxWifiStallScore,
+	)
+}
+
+// Collects provenance for the local host running the acceptance binary.
+func collectLocalNetworkFailureDiagnostic(started time.Time, finished time.Time) string {
+	return collectLocalNetworkFailureDiagnosticWith(
+		started,
+		finished,
+		runtime.GOOS,
+		os.Args[0],
+		os.Getpid(),
+		runLocalNetworkLogCommand,
+	)
+}
+
+// Annotates only request failures at their terminal campaign boundary. A
+// completed target response and a caller cancellation do not need a host query.
+func appendLocalNetworkFailureDiagnostic(err error, collect localNetworkFailureCollector) error {
+	if err == nil || collect == nil {
+		return err
+	}
+	var existingDiagnostic *localNetworkDiagnosticError
+	if errors.As(err, &existingDiagnostic) {
+		return err
+	}
+	var statusErr *targetHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return err
+	}
+	var requestFailure *httpsRequestFailure
+	if !errors.As(err, &requestFailure) {
+		return err
+	}
+	diagnostic := collect(requestFailure.started, requestFailure.finished)
+	if diagnostic == "" {
+		return err
+	}
+	return &localNetworkDiagnosticError{cause: err, diagnostic: diagnostic}
+}
+
 // Summarizes the public peer chain without retaining certificate contents.
 // TLSHandshakeDone supplies the parsed peer certificates even when normal
 // verification rejects the chain, which distinguishes origin and exit faults.
@@ -299,7 +514,6 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 // Adds identity-free timing and phase evidence to a transport error.
 func (self *httpsRequestTrace) wrap(err error, finished time.Time) error {
 	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
 	connection := "not_established"
 	if self.gotConn {
 		connection = "new"
@@ -320,15 +534,22 @@ func (self *httpsRequestTrace) wrap(err error, finished time.Time) error {
 	if self.certificate != "" {
 		path += "; " + self.certificate
 	}
-	return fmt.Errorf(
-		"request started %s; elapsed %s; phase %s; connection %s%s: %w",
+	detail := fmt.Sprintf(
+		"request started %s; elapsed %s; phase %s; connection %s%s",
 		self.started.UTC().Format(time.RFC3339Nano),
 		finished.Sub(self.started).Round(time.Millisecond),
 		self.phase,
 		connection,
 		path,
-		err,
 	)
+	started := self.started
+	self.stateLock.Unlock()
+	return &httpsRequestFailure{
+		started:  started,
+		finished: finished,
+		detail:   detail,
+		cause:    err,
+	}
 }
 
 type runDependencies struct {
@@ -766,6 +987,7 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 				r.opts.SoakInterval,
 				waitForProbeInterval,
 				r.progressf,
+				collectLocalNetworkFailureDiagnostic,
 			)
 			return err
 		},
@@ -797,6 +1019,7 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 				r.opts.SoakInterval,
 				waitForProbeInterval,
 				r.progressf,
+				collectLocalNetworkFailureDiagnostic,
 			)
 			return err
 		},
@@ -822,6 +1045,7 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 				r.opts.SoakInterval,
 				waitForProbeInterval,
 				r.progressf,
+				collectLocalNetworkFailureDiagnostic,
 			)
 			return err
 		},
@@ -848,6 +1072,7 @@ func probeHTTPSCampaign(
 	soakInterval time.Duration,
 	wait probeIntervalWait,
 	progress func(string, ...any),
+	collectLocalNetworkFailure localNetworkFailureCollector,
 ) (int, error) {
 	if wait == nil {
 		wait = waitForProbeInterval
@@ -869,12 +1094,14 @@ func probeHTTPSCampaign(
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
 			}
+			lastErr = appendLocalNetworkFailureDiagnostic(lastErr, collectLocalNetworkFailure)
 			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
 		if err := wait(probeCtx, readinessRetryInterval); err != nil {
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
 			}
+			lastErr = appendLocalNetworkFailureDiagnostic(lastErr, collectLocalNetworkFailure)
 			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
 	}
@@ -889,6 +1116,9 @@ func probeHTTPSCampaign(
 			return successfulRequests, err
 		}
 		if err := probeHTTPSRequest(ctx, client, target); err != nil {
+			if ctx.Err() == nil {
+				err = appendLocalNetworkFailureDiagnostic(err, collectLocalNetworkFailure)
+			}
 			return successfulRequests, fmt.Errorf(
 				"%s sustained request %d/%d failed after %d successful requests: %w",
 				protocol,

@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -436,6 +437,7 @@ func TestProbeHTTPSRunsConfiguredSustainedCampaign(t *testing.T) {
 		10*time.Second,
 		func(context.Context, time.Duration) error { return nil },
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -445,6 +447,69 @@ func TestProbeHTTPSRunsConfiguredSustainedCampaign(t *testing.T) {
 	}
 	if requestCount != successfulRequests {
 		t.Fatalf("target requests = %d, want %d", requestCount, successfulRequests)
+	}
+}
+
+// Adapts a deterministic function to net/http's transport boundary.
+type runnerRoundTripper func(*http.Request) (*http.Response, error)
+
+// Delegates one request without adding transport behavior.
+func (self runnerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return self(request)
+}
+
+// A failed sustained request is terminal: collect its local boundary once,
+// retain the failure, and never manufacture a retry or success.
+func TestProbeHTTPSAnnotatesTerminalTransportFailureWithoutRetry(t *testing.T) {
+	requestCount := 0
+	sentinel := errors.New("socket is not connected")
+	transport := runnerRoundTripper(func(request *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    request,
+			}, nil
+		}
+		return nil, sentinel
+	})
+	collectorCount := 0
+
+	successfulRequests, err := probeHTTPSCampaign(
+		context.Background(),
+		"HTTP CONNECT",
+		"https://validation.example/generate_204",
+		transport,
+		time.Second,
+		10*time.Second,
+		10*time.Second,
+		func(context.Context, time.Duration) error { return nil },
+		nil,
+		func(started time.Time, finished time.Time) string {
+			collectorCount++
+			if finished.Before(started) {
+				t.Errorf("collector interval = %s/%s", started, finished)
+			}
+			return "local_host{classification=local-kernel-buffer-pressure}"
+		},
+	)
+	if successfulRequests != 1 {
+		t.Errorf("successful requests = %d, want 1", successfulRequests)
+	}
+	if requestCount != 2 {
+		t.Errorf("transport requests = %d, want 2", requestCount)
+	}
+	if collectorCount != 1 {
+		t.Errorf("collector calls = %d, want 1", collectorCount)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("campaign error no longer wraps transport cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sustained request 1/1 failed after 1 successful requests") ||
+		!strings.Contains(err.Error(), "local_host{classification=local-kernel-buffer-pressure}") {
+		t.Fatalf("campaign error lost failure/provenance detail: %v", err)
 	}
 }
 
@@ -485,6 +550,10 @@ func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing
 		10*time.Second,
 		func(context.Context, time.Duration) error { return nil },
 		nil,
+		func(time.Time, time.Time) string {
+			t.Fatal("target response triggered local-host collection")
+			return ""
+		},
 	)
 	if err == nil ||
 		!strings.Contains(err.Error(), "HTTP 429") ||
@@ -636,6 +705,208 @@ func TestHTTPSRequestTraceRetainsResolvedAndConnectedEndpoints(t *testing.T) {
 		if !strings.Contains(detail, evidence) {
 			t.Errorf("trace detail %q does not contain %q", detail, evidence)
 		}
+	}
+}
+
+// Exact kernel signatures matter: nearby informational lines and a zero stall
+// score must not assign a local-host cause to a remote transport failure.
+func TestParseLocalNetworkSignalsSeparatesExactFailureSignatures(t *testing.T) {
+	output := []byte(strings.Join([]string{
+		`kernel: skmem_slab_alloc_locked "skc.buf_def.AppleBCMWLANSkywalkPool": failed to allocate slab (non-sleeping mode)`,
+		`kernel: skmem_slab_alloc_locked inventory succeeded`,
+		`kernel: netif_gso_tcp_segment_mbuf failed to alloc segment mbuf`,
+		`kernel: netif_gso_tcp_segment_mbuf completed`,
+		`kernel: DPS Symptoms StallScore:50 NetScore:50`,
+		`kernel: DPS Symptoms StallScore:0 NetScore:100`,
+		`kernel: DPS Symptoms StallScore:not-a-number`,
+		`kernel: DPS Symptoms StallScore:7 StallScore:12`,
+	}, "\n"))
+
+	signals := parseLocalNetworkSignals(output)
+	if signals.skywalkSlabFailures != 1 {
+		t.Errorf("Skywalk slab failures = %d, want 1", signals.skywalkSlabFailures)
+	}
+	if signals.gsoFailures != 1 {
+		t.Errorf("GSO failures = %d, want 1", signals.gsoFailures)
+	}
+	if signals.wifiStalls != 3 || signals.maxWifiStallScore != 50 {
+		t.Errorf("Wi-Fi stalls = %d max %d, want 3 max 50", signals.wifiStalls, signals.maxWifiStallScore)
+	}
+}
+
+// The production query is padded around the exact request but the emitted
+// evidence retains the unpadded UTC request interval and no raw log content.
+func TestCollectLocalNetworkFailureDiagnosticClassifiesDarwinSignals(t *testing.T) {
+	started := time.Date(2026, time.September, 5, 3, 20, 18, 209657000, time.UTC)
+	finished := started.Add(2 * time.Millisecond)
+	commandCount := 0
+	commandName := ""
+	commandArgs := []string{}
+	diagnostic := collectLocalNetworkFailureDiagnosticWith(
+		started,
+		finished,
+		"darwin",
+		"/private/tmp/proxy-main",
+		78800,
+		func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			commandCount++
+			commandName = name
+			commandArgs = append(commandArgs, args...)
+			if _, ok := ctx.Deadline(); !ok {
+				t.Error("local log query has no deadline")
+			}
+			return []byte(strings.Join([]string{
+				`kernel: skmem_slab_alloc_locked "skc.buf_def.AppleBCMWLANSkywalkPool": failed to allocate slab (non-sleeping mode)`,
+				`kernel: netif_gso_tcp_segment_mbuf failed to alloc segment mbuf`,
+				`kernel: DPS Symptoms StallScore:50 NetScore:50`,
+			}, "\n")), nil
+		},
+	)
+	if commandCount != 1 || commandName != "/usr/bin/log" {
+		t.Fatalf("log command = %q count %d, want /usr/bin/log once", commandName, commandCount)
+	}
+	joinedArgs := strings.Join(commandArgs, "\x00")
+	for _, expected := range []string{
+		"show\x00--style\x00compact\x00--info\x00--debug",
+		"--start\x00" + started.Add(-2*time.Second).Truncate(time.Second).Local().Format("2006-01-02 15:04:05"),
+		"--end\x00" + finished.Add(2*time.Second).Truncate(time.Second).Add(time.Second).Local().Format("2006-01-02 15:04:05"),
+		`process == "kernel"`,
+	} {
+		if !strings.Contains(joinedArgs, expected) {
+			t.Errorf("log arguments %q do not contain %q", joinedArgs, expected)
+		}
+	}
+	for _, expected := range []string{
+		"local_host{os=darwin executable=proxy-main pid=78800",
+		"request_interval=2026-09-05T03:20:18.209657Z/2026-09-05T03:20:18.211657Z",
+		"classification=local-kernel-buffer-pressure+wifi-stall",
+		"skywalk_slab_failures=1",
+		"gso_allocation_failures=1",
+		"wifi_stalls=1",
+		"max_wifi_stall_score=50",
+	} {
+		if !strings.Contains(diagnostic, expected) {
+			t.Errorf("diagnostic %q does not contain %q", diagnostic, expected)
+		}
+	}
+	if strings.Contains(diagnostic, "AppleBCMWLANSkywalkPool") {
+		t.Fatalf("diagnostic retained raw kernel output: %q", diagnostic)
+	}
+}
+
+// Wi-Fi stalls, clean intervals, and an unavailable log query are different
+// boundaries; none may be guessed from a generic transport timeout.
+func TestCollectLocalNetworkFailureDiagnosticSeparatesAdjacentClassifications(t *testing.T) {
+	started := time.Date(2026, time.September, 5, 3, 49, 11, 132992000, time.UTC)
+	cases := []struct {
+		output             string
+		commandErr         error
+		wantClassification string
+		wantQueryStatus    string
+	}{
+		{
+			output:             `kernel: DPS Symptoms StallScore:50 NetScore:50`,
+			wantClassification: "local-wifi-stall",
+		},
+		{
+			output:             `kernel: ordinary Wi-Fi telemetry StallScore:0`,
+			wantClassification: "no-local-kernel-signal",
+		},
+		{
+			commandErr:         errors.New("query unavailable"),
+			wantClassification: "query-unavailable",
+			wantQueryStatus:    "query_status=failed",
+		},
+	}
+	for _, testCase := range cases {
+		diagnostic := collectLocalNetworkFailureDiagnosticWith(
+			started,
+			started.Add(30*time.Second),
+			"darwin",
+			"proxy-main",
+			42,
+			func(context.Context, string, ...string) ([]byte, error) {
+				return []byte(testCase.output), testCase.commandErr
+			},
+		)
+		if !strings.Contains(diagnostic, "classification="+testCase.wantClassification) {
+			t.Errorf("diagnostic %q does not classify %q", diagnostic, testCase.wantClassification)
+		}
+		if testCase.wantQueryStatus != "" && !strings.Contains(diagnostic, testCase.wantQueryStatus) {
+			t.Errorf("diagnostic %q does not contain %q", diagnostic, testCase.wantQueryStatus)
+		}
+	}
+}
+
+// A terminal annotation is idempotent, preserves errors.Is, and cannot turn a
+// failed request into a successful campaign result.
+func TestAppendLocalNetworkFailureDiagnosticPreservesTransportFailure(t *testing.T) {
+	started := time.Date(2026, time.September, 5, 3, 49, 11, 132992000, time.UTC)
+	sentinel := errors.New("socket is not connected")
+	requestTrace := &httpsRequestTrace{started: started, phase: "sending_request_failed"}
+	requestErr := requestTrace.wrap(sentinel, started.Add(2*time.Millisecond))
+	collectorCount := 0
+	collector := func(gotStarted time.Time, gotFinished time.Time) string {
+		collectorCount++
+		if !gotStarted.Equal(started) || !gotFinished.Equal(started.Add(2*time.Millisecond)) {
+			t.Errorf("collector interval = %s/%s", gotStarted, gotFinished)
+		}
+		return "local_host{classification=local-kernel-buffer-pressure}"
+	}
+
+	annotated := appendLocalNetworkFailureDiagnostic(requestErr, collector)
+	annotated = appendLocalNetworkFailureDiagnostic(annotated, collector)
+	if collectorCount != 1 {
+		t.Fatalf("collector calls = %d, want 1", collectorCount)
+	}
+	if !errors.Is(annotated, sentinel) {
+		t.Fatalf("annotated failure no longer wraps transport cause: %v", annotated)
+	}
+	if !strings.Contains(annotated.Error(), "local_host{classification=local-kernel-buffer-pressure}") {
+		t.Fatalf("annotated failure lacks local-host evidence: %v", annotated)
+	}
+}
+
+// Once a target returned HTTP, the tunnel reached a server. Do not run an
+// expensive local-kernel query or confuse target policy with local transport.
+func TestAppendLocalNetworkFailureDiagnosticSkipsTargetResponse(t *testing.T) {
+	started := time.Date(2026, time.September, 5, 3, 20, 18, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "reading_response_body"}
+	requestErr := requestTrace.wrap(&targetHTTPStatusError{statusCode: http.StatusTooManyRequests}, started.Add(time.Second))
+	collectorCalled := false
+	annotated := appendLocalNetworkFailureDiagnostic(requestErr, func(time.Time, time.Time) string {
+		collectorCalled = true
+		return "unexpected"
+	})
+	if collectorCalled {
+		t.Fatal("target response triggered a local-host query")
+	}
+	var statusErr *targetHTTPStatusError
+	if !errors.As(annotated, &statusErr) || statusErr.statusCode != http.StatusTooManyRequests {
+		t.Fatalf("target error changed: %v", annotated)
+	}
+}
+
+// Unsupported hosts are explicit and do not run a guessed logging command.
+func TestCollectLocalNetworkFailureDiagnosticFailsClosedOffDarwin(t *testing.T) {
+	commandCalled := false
+	started := time.Date(2026, time.September, 5, 3, 20, 18, 0, time.UTC)
+	diagnostic := collectLocalNetworkFailureDiagnosticWith(
+		started,
+		started.Add(time.Second),
+		"linux",
+		"proxy-main",
+		42,
+		func(context.Context, string, ...string) ([]byte, error) {
+			commandCalled = true
+			return nil, nil
+		},
+	)
+	if commandCalled {
+		t.Fatal("unsupported host executed a logging command")
+	}
+	if !strings.Contains(diagnostic, "source=unsupported") || !strings.Contains(diagnostic, "classification=query-unavailable") {
+		t.Fatalf("unsupported-host diagnostic = %q", diagnostic)
 	}
 }
 

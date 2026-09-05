@@ -62,6 +62,19 @@ case "$overlap_protocols" in
   *) echo "--overlap-protocols must be true or false" >&2; exit 2 ;;
 esac
 
+network_test_gate="$root/tests/network-intensive-suite-lock.sh"
+if [[ ! -x "$network_test_gate" ]]; then
+  echo "proxy acceptance suite gate is missing or not executable: $network_test_gate" >&2
+  exit 127
+fi
+if [[ "${URNETWORK_NETWORK_TEST_LOCK_HELD:-}" != 1 ]]; then
+  exec "$network_test_gate" proxy-acceptance-main -- "$here/test-main.sh" "$@"
+fi
+if ! "$network_test_gate" --verify-held; then
+  echo "proxy acceptance suite inherited an invalid network-intensive lock" >&2
+  exit 70
+fi
+
 for command_name in go timeout tee; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "[proxy acceptance] missing prerequisite: $command_name" >&2

@@ -4374,6 +4374,25 @@ running API generation could not yet publish the new invariant. The dedicated
 instrumentation class preserves that distinction and will automatically move
 to a concrete rate result after the corrected fleet and its rate warmup exist.
 
+The 2026-09-05 04:13Z focused control separated correctness from remaining
+retry load. Sections 2.8, 2.9, 2.15, 2.16, and 2.20 were healthy, including
+zero successful contracts whose destination was already inactive. Both §2.18
+aggregate partitions were present, but the guard still rejected about
+2,854/min (`companion=false` about 299/min and `companion=true` about
+2,555/min). Independently, §2.17 measured about 1,556/min non-companion
+missing-origin failures, 99.9% in the bounded
+`stream_fallback/public/active_top/active_derived` cohort. Do not join those
+two rates: §2.18 returned no detail series, so it cannot yet say which request
+lane produced its larger rejection population. The sampled API and Connect
+inventory uniformly reported code version `2026.9.3+1036806790` while config
+reported `2026.9.4+1037600680`; the config-only advance cannot add the API
+metric. Release tags through `v2026.9.4-1037600680` branch before server commit
+`7868cd60`, so none contains the detail consumer even though the staged
+Connect module already contains `f8b1b60`. Build both services from one
+intentional current source graph containing those commits before deploying
+them for attribution. A tag, staged module, or desired config alone is not
+evidence that the running API can emit the cohort.
+
 This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
 signal. More Proxy hosts raise the active-client ceiling but do not make an
 inactive destination contractible.
@@ -10573,6 +10592,50 @@ has a deployment-contract regression which rejects its return. Wait for every
 node PING and cluster state to recover, then repeat the complete sustained and
 overlapping proxy campaign. A post-maintenance pass explains this exact
 failure; it does not waive investigation of a failure outside that boundary.
+
+**Local Darwin buffer-pressure and Wi-Fi-stall signatures (2026-09-05):**
+a client-host failure can coincide with a healthy Proxy and must remain a
+transport FAIL, but it must not be attributed to the remote block without the
+local boundary. In the first retained incident, HTTP CONNECT and SOCKS both
+failed during the three-protocol overlap with `write: socket is not connected`
+within 2 ms, while WireGuard reported `sendmsg: no buffer space available`.
+The exact request interval contained repeated Darwin kernel
+`skmem_slab_alloc_locked ... failed to allocate slab` events for the Apple
+Wi-Fi Skywalk pool and `netif_gso_tcp_segment_mbuf failed to alloc`. Those
+kernel thread IDs mapped to an independently launched SDK full test rather
+than the acceptance process. A second independently launched Server/PERFVAR
+full suite also overlapped. The selected Crisp g6 Proxy stayed running with no
+restart, OOM, interval error, or provider-window loss.
+
+The unchanged rerun exposed the adjacent pre-tunnel form. SOCKS failed at
+`phase connecting_tunnel_failed` after 30 seconds: the IPv6 SYN took about 19
+seconds to establish, the IPv4 fallback never established, and the connection
+then received no response bytes. Darwin reported `DPS Symptoms` with
+`StallScore:50` during that exact request, and unrelated local flows showed the
+same delayed SYN behavior. Fireside g9's listener, DNAT counter, source route,
+container, and host networking remained healthy. The hosted-device
+`exit_loss` event preceded this timeout, but it cannot cause a request that
+never reached `GotConn`; do not infer a provider/window failure from timeline
+proximity alone.
+
+The acceptance runner queries a two-second-padded request interval from the
+Darwin unified kernel log only after a request becomes a terminal campaign
+failure. Its fixed-schema `local_host{...}` suffix reports executable/PID,
+request interval, counts, and one of
+`local-kernel-buffer-pressure`, `local-wifi-stall`, their combined value,
+`no-local-kernel-signal`, or `query-unavailable`. It never includes raw kernel
+lines. A target HTTP response skips the query because the tunnel already
+reached a server. `no-local-kernel-signal` and `query-unavailable` do not prove
+the remote block failed; continue with packet-level public handshake, host
+listener/DNAT, and server-log evidence.
+
+Do not retry, lengthen the timeout, or convert either signature to PASS. Stop
+cooperative overlap at its source: canonical acceptance and tracked full-suite
+launchers share `tests/network-intensive-suite-lock.sh`, and agent-owned direct
+network-heavy tests must use it too. The gate cannot control arbitrary user or
+WLAN load, so retain external process ancestry when present. After correcting
+the local cause, rerun the failed sustained and three-transport campaigns; the
+original failure remains valid evidence.
 
 The proxy service intentionally has no normal public 443 status endpoint;
 `warpctl ls versions main proxy --sample` can therefore return a uniform 404.
