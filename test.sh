@@ -22,6 +22,19 @@ if ! "$network_test_gate" --verify-held; then
 fi
 source "$script_dir/test-env.sh" || exit $?
 
+# Propagates a real output-filter failure before the upstream test status. A
+# filter that closes early otherwise turns the test process into a misleading
+# SIGPIPE exit and hides the component that actually failed.
+test_pipeline_status() {
+    local test_status="$1"
+    local filter_status="$2"
+    if [[ "$filter_status" != 0 ]]; then
+        echo "test output filter failed with status $filter_status (upstream test status $test_status)" >&2
+        return "$filter_status"
+    fi
+    return "$test_status"
+}
+
 # The proxy integration tests (./proxy) drive real-time wireguard/gvisor packet
 # paths and real outbound TLS. Like the connect packet-translation tests, the
 # race detector's scheduling overhead slows that real-time delivery enough to
@@ -34,11 +47,9 @@ proxy_dir="./proxy"
 if [[ -d $proxy_dir ]]; then
     pushd $proxy_dir
     match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
-    go test -timeout 30m -v "$@" | grep --line-buffered --color=always -e "^" -e "$match"
-    test_status=${PIPESTATUS[0]}
-    if [[ $test_status != 0 ]]; then
-        exit "$test_status"
-    fi
+    go test -timeout 30m -v "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+    pipeline_status=("${PIPESTATUS[@]}")
+    test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
     popd
 fi
 
@@ -51,16 +62,12 @@ perfvar_dir="./connect/perfvar"
 if [[ -d $perfvar_dir ]]; then
     pushd $perfvar_dir
     match="/${PWD##*/}/\S*\.go\|^\S*_test.go"
-    go test -timeout 0 -p=1 -parallel=1 -v "$@" | grep --line-buffered --color=always -e "^" -e "$match"
-    test_status=${PIPESTATUS[0]}
-    if [[ $test_status != 0 ]]; then
-        exit "$test_status"
-    fi
-    GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 30m -p=1 -parallel=1 -short -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --line-buffered --color=always -e "^" -e "$match"
-    test_status=${PIPESTATUS[0]}
-    if [[ $test_status != 0 ]]; then
-        exit "$test_status"
-    fi
+    go test -timeout 0 -p=1 -parallel=1 -v "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+    pipeline_status=("${PIPESTATUS[@]}")
+    test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
+    GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 30m -p=1 -parallel=1 -short -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+    pipeline_status=("${PIPESTATUS[@]}")
+    test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
     popd
 fi
 
@@ -85,11 +92,9 @@ while IFS= read -r d; do
         # highlight source files in this dir
         match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
         # go test -v "$@" | grep --color=always -e "^" -e "$match"
-        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --line-buffered --color=always -e "^" -e "$match"
-        test_status=${PIPESTATUS[0]}
-        if [[ $test_status != 0 ]]; then
-            exit "$test_status"
-        fi
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+        pipeline_status=("${PIPESTATUS[@]}")
+        test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
         popd
     # fi
 done <<< "$test_directories"

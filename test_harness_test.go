@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 )
+
+const testServerRunnerChildMode = "URNETWORK_TEST_SERVER_RUNNER_CHILD_MODE"
 
 // These lists pin the checked-in manifest to the resources used by the local
 // full-suite environment rather than deriving the fixture from its subject.
@@ -326,6 +329,164 @@ func TestLocalTestRunnersUseBash(t *testing.T) {
 		if firstLine != "#!/usr/bin/env bash" {
 			t.Errorf("%s interpreter = %q; want bash", scriptPath, firstLine)
 		}
+	}
+}
+
+// Builds an isolated copy of the root runner with four synthetic package tiers
+// and injected go/grep commands; no repository test or service preflight runs.
+func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
+	t.Helper()
+	workspaceRoot := t.TempDir()
+	serverDir := filepath.Join(workspaceRoot, "server")
+	binDir := filepath.Join(workspaceRoot, "bin")
+	for _, directory := range []string{
+		serverDir,
+		binDir,
+		filepath.Join(workspaceRoot, "tests"),
+		filepath.Join(serverDir, "proxy"),
+		filepath.Join(serverDir, "connect", "perfvar"),
+		filepath.Join(serverDir, "fixture"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runnerBytes, err := os.ReadFile("test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerPath := filepath.Join(serverDir, "test.sh")
+	if err := os.WriteFile(runnerPath, runnerBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		filepath.Join(serverDir, "test-env.sh"):                                  "#!/usr/bin/env bash\nreturn 0\n",
+		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ]\n",
+		filepath.Join(binDir, "go"): `#!/bin/sh
+"$TEST_SERVER_RUNNER_BINARY" -test.run="^${TEST_SERVER_RUNNER_TEST_NAME}$" -test.count=1
+test_status=$?
+if [ -n "${TEST_SERVER_RUNNER_UPSTREAM_STATUS:-}" ]; then
+  printf '%s\n' "$test_status" > "$TEST_SERVER_RUNNER_UPSTREAM_STATUS"
+fi
+exit "$test_status"
+`,
+		filepath.Join(binDir, "grep"): grepScript,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return runnerPath, binDir, workspaceRoot
+}
+
+// Binary-looking test output remains text throughout all four runner tiers, so
+// grep cannot close successfully before the test process finishes writing.
+func TestServerTestScriptTreatsBinaryOutputAsText(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "binary" {
+		payload := []byte("test-runner-binary-prefix\nbinary:\x00record\n")
+		payload = append(payload, bytes.Repeat([]byte("test-runner-binary-padding\n"), 32*1024)...)
+		payload = append(payload, []byte("test-runner-binary-suffix\n")...)
+		writtenByteCount, err := os.Stdout.Write(payload)
+		if err != nil || writtenByteCount != len(payload) {
+			os.Exit(141)
+		}
+		os.Exit(0)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grepScript := `#!/bin/sh
+text_mode=0
+for argument do
+  if [ "$argument" = --binary-files=text ] || [ "$argument" = -a ]; then text_mode=1; fi
+done
+if [ "$text_mode" != 1 ]; then exit 0; fi
+exec "$TEST_SERVER_RUNNER_CAT"`
+	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, grepScript)
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", runnerPath)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":        testBinary,
+		"TEST_SERVER_RUNNER_CAT":           catPath,
+		"TEST_SERVER_RUNNER_TEST_NAME":     "TestServerTestScriptTreatsBinaryOutputAsText",
+		"URNETWORK_NETWORK_TEST_LOCK_HELD": "1",
+		"URNETWORK_ROOT":                   workspaceRoot,
+		testServerRunnerChildMode:          "binary",
+	})
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runner rejected binary test output: %v\n%s", err, output)
+	}
+	for _, signature := range [][]byte{
+		[]byte("test-runner-binary-prefix\n"),
+		[]byte{0},
+		[]byte("test-runner-binary-suffix\n"),
+	} {
+		if count := bytes.Count(output, signature); count != 4 {
+			t.Fatalf("binary runner signature %q count = %d; want 4", signature, count)
+		}
+	}
+	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
+		t.Fatal("captured binary fixture leaked a synthetic failure signature")
+	}
+}
+
+// A signaled filter closes the pipe and gives the upstream test process exit
+// 141. The runner must preserve the filter's causal status instead.
+func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "filter-signal" {
+		chunk := bytes.Repeat([]byte("test-runner-filter-padding\n"), 1024)
+		for i := 0; i < 1024; i++ {
+			writtenByteCount, err := os.Stdout.Write(chunk)
+			if err != nil || writtenByteCount != len(chunk) {
+				os.Exit(141)
+			}
+		}
+		os.Exit(70)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamStatusPath := filepath.Join(t.TempDir(), "upstream-status")
+	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nkill -TERM \"$$\"\n")
+	cmd := exec.Command("bash", runnerPath)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_SERVER_RUNNER_BINARY":          testBinary,
+		"TEST_SERVER_RUNNER_TEST_NAME":       "TestServerTestScriptReportsSignaledOutputFilter",
+		"TEST_SERVER_RUNNER_UPSTREAM_STATUS": upstreamStatusPath,
+		"URNETWORK_NETWORK_TEST_LOCK_HELD":   "1",
+		"URNETWORK_ROOT":                     workspaceRoot,
+		testServerRunnerChildMode:            "filter-signal",
+	})
+	output, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 143 {
+		t.Fatalf("runner filter failure = %v, %q; want exit 143", err, output)
+	}
+	upstreamStatusBytes, readErr := os.ReadFile(upstreamStatusPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(upstreamStatusBytes) != "141\n" {
+		t.Fatalf("upstream status = %q; want 141", upstreamStatusBytes)
+	}
+	if count := strings.Count(string(output), "test output filter failed with status 143 (upstream test status 141)"); count != 1 {
+		t.Fatalf("filter diagnostic count = %d; want 1", count)
+	}
+	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
+		t.Fatal("captured filter fixture leaked a synthetic failure signature")
 	}
 }
 
