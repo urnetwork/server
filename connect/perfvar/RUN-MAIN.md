@@ -77,9 +77,34 @@ external blocker is documented with the evidence needed to remove it.
 - The independent unit is a simulator run/process or an Android session block,
   not a request, packet, telemetry sample, or Go benchmark iteration. Do not
   manufacture significance from autocorrelated observations.
-- Keep credentials, device serials, client/provider IDs, IP addresses, carrier
+- Keep credentials, client/provider IDs, IP addresses, carrier
   and cell identifiers, DNS answers, cookies, headers, packet payloads, and
   signed URLs out of logs, commits, and the measurement ledger.
+- Physical Android testing is locked to exactly this two-device allowlist:
+
+  | Role | Serial | Model |
+  |---|---|---|
+  | `device-a` | `3B161FDJG001KT` | Pixel 8 Pro |
+  | `device-b` | `R5CX21FY6ND` | Galaxy S24 Ultra |
+
+  Before each PERFVAR, LOWBAR, or MEMSTEADY block, require `adb devices -l` to
+  show both serials in `device` state and no other attached serial. Pass each
+  serial explicitly to its device process; a missing, unauthorized, or offline
+  serial makes the physical block `INVALID_ENVIRONMENT`. Public measurements
+  use only the opaque roles; serials are retained in the private manifest for
+  reproducibility.
+
+  A fail-closed preflight is:
+
+  ```sh
+  actual=$(adb devices | awk 'NR > 1 && NF {print $1 ":" $2}' | sort)
+  expected=$(printf '%s\n' \
+    '3B161FDJG001KT:device' 'R5CX21FY6ND:device' | sort)
+  test "$(printf '%s\n' "$actual")" = "$(printf '%s\n' "$expected")" || {
+    echo 'authorized Android device set mismatch' >&2
+    exit 1
+  }
+  ```
 - Do not infer an HTTP status, origin policy, or bot challenge from encrypted
   payloads. Browser-only response metadata is diagnostic and may not be turned
   into a Connect packet-blackhole signal.
@@ -95,6 +120,11 @@ external blocker is documented with the evidence needed to remove it.
   operator explicitly requests it.
 - Profilers perturb allocation, scheduling, and GC. Profile runs are
   attribution-only and never enter an acceptance comparison.
+- The PERFVAR suite is capped at 70% of the host's logical CPUs. Compute
+  `ceil(0.70 * nproc)` for `GOMAXPROCS` (rounding up is permitted), and leave
+  the remaining CPUs available for low-intensity tests and host services. The
+  selected value is part of the compatibility key and must be recorded with
+  every result.
 
 ## Source and baseline identity
 
@@ -142,8 +172,9 @@ mkdir -m 700 "$URN_REG_RUN_DIR"/{private,manifest,simulator,devices,analysis,dia
 Give the campaign an opaque ID such as `pv-20260831-001`. Raw logs, NDJSON,
 profiles, control APKs, credentials, client IDs, and browser artifacts stay in
 the private bundle. The checked-in ledger stores only privacy-safe aggregates,
-the bundle SHA-256, and a private retention locator. It must not store Android
-serials or stable client/provider identifiers.
+the bundle SHA-256, and a private retention locator. Public artifacts must not
+store stable client/provider identifiers; the private manifest may store the
+two allowlisted Android serials solely for device identity verification.
 
 Before measurement, write a manifest containing the compatibility key, exact
 commands, planned ordering, planned sample count, primary metrics, guards,
