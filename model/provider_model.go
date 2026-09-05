@@ -6,16 +6,18 @@ package model
 //   POST /stats/provider-last-n            StatsProvider           (single provider, last_n hours)
 //   POST /stats/providers-overview-last-n  StatsProvidersOverview  (network aggregate)
 //
-// All figures are real aggregates over the caller network's provider clients
-// (a provider is the `destination_id` of a transfer_contract). Data sources:
+// All figures are real aggregates over the caller network's provider clients.
+// Data sources:
 //   transfer bytes   transfer_contract ⋈ contract_close (settled bytes)
 //   contracts/clients transfer_contract (by create_time)
-//   payout            transfer_escrow_sweep ⋈ transfer_contract (net revenue)
+//   payout            transfer_escrow_sweep.provider_payouts (settled client shares)
 //   uptime/events     network_client_connection (connect/disconnect)
 //   search interest   search_provider_stats (see search_provider_stats_model.go)
 //
 // Reads are grouped by client in a single query per metric (never N+1) and are
 // fronted by a short-TTL per-network cache at the handler layer.
+// Payouts require the original sweep network as well as current client
+// ownership; the provider view does not change historical account balances.
 
 import (
 	"context"
@@ -113,6 +115,7 @@ func statsProviders(
 ) (*StatsProvidersResult, error) {
 	networkId := clientSession.ByJwt.NetworkId
 	providers := []*ProviderStats{}
+	var returnErr error
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
@@ -193,27 +196,22 @@ func statsProviders(
 			}
 		})
 
-		// payout (net revenue) per provider
+		// Validate whole network allocations before selecting current providers.
 		payoutNanoCents := map[server.Id]NanoCents{}
-		result, err = conn.Query(
-			clientSession.Ctx,
-			`
-			SELECT s.destination_id, COALESCE(SUM(s.payout_net_revenue_nano_cents), 0)
-			FROM transfer_escrow_sweep s
-			WHERE s.destination_id = ANY($1::uuid[]) AND s.sweep_time >= $2
-			GROUP BY s.destination_id
-			`,
-			ids,
-			windowStart,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var nanoCents NanoCents
-				server.Raise(result.Scan(&clientId, &nanoCents))
-				payoutNanoCents[clientId] = nanoCents
+		clientDayPayouts, err := queryProviderPayoutStats(clientSession.Ctx, conn, networkId, windowStart, now)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		for _, clientId := range order {
+			for _, amount := range clientDayPayouts[clientId] {
+				if math.MaxInt64-payoutNanoCents[clientId] < amount {
+					returnErr = fmt.Errorf("provider payout total exceeds nanocent range for client %s", clientId)
+					return
+				}
+				payoutNanoCents[clientId] += amount
 			}
-		})
+		}
 
 		// search interest per provider
 		searchInterest := map[server.Id]int{}
@@ -255,6 +253,9 @@ func statsProviders(
 			})
 		}
 	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
 
 	return &StatsProvidersResult{
 		CreatedTime: server.NowUtc(),
@@ -327,6 +328,7 @@ func StatsProvider(
 	clientDetails := []*ClientDetail{}
 
 	found := false
+	var returnErr error
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
 		// ownership: the client must belong to the caller's network
@@ -373,26 +375,15 @@ func StatsProvider(
 			}
 		})
 
-		// payout (net revenue) per day
-		result, err = conn.Query(
-			clientSession.Ctx,
-			`
-			SELECT to_char(s.sweep_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(s.payout_net_revenue_nano_cents), 0)
-			FROM transfer_escrow_sweep s
-			WHERE s.destination_id = $1 AND s.sweep_time >= $2
-			GROUP BY day
-			`,
-			clientId,
-			windowStart,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var day string
-				var nanoCents NanoCents
-				server.Raise(result.Scan(&day, &nanoCents))
-				payout[day] = NanoCentsToUsd(nanoCents)
-			}
-		})
+		// The snapshot's original network owns this client's daily revenue.
+		clientDayPayouts, err := queryProviderPayoutStats(clientSession.Ctx, conn, networkId, windowStart, now)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		for day, amount := range clientDayPayouts[clientId] {
+			payout[day] = NanoCentsToUsd(amount)
+		}
 
 		// contracts + distinct served clients per day
 		result, err = conn.Query(
@@ -489,6 +480,9 @@ func StatsProvider(
 		// with-input handlers pass impl errors through unwrapped.
 		return nil, fmt.Errorf("%d Not authorized to view this provider.", http.StatusForbidden)
 	}
+	if returnErr != nil {
+		return nil, returnErr
+	}
 
 	return &StatsProviderResult{
 		Lookback:       windowLookbackDays(windowStart, now),
@@ -554,6 +548,7 @@ func StatsProvidersOverview(
 	searchInterest := gapFilledIntDays(days)
 	contracts := gapFilledIntDays(days)
 	clients := gapFilledIntDays(days)
+	var returnErr error
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
@@ -608,26 +603,26 @@ func StatsProvidersOverview(
 			}
 		})
 
-		// payout per day
-		result, err = conn.Query(
-			clientSession.Ctx,
-			`
-			SELECT to_char(s.sweep_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(s.payout_net_revenue_nano_cents), 0)
-			FROM transfer_escrow_sweep s
-			WHERE s.destination_id = ANY($1::uuid[]) AND s.sweep_time >= $2
-			GROUP BY day
-			`,
-			ids,
-			windowStart,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var day string
-				var nanoCents NanoCents
-				server.Raise(result.Scan(&day, &nanoCents))
-				payout[day] = NanoCentsToUsd(nanoCents)
+		// Sum exact shares for the same visible providers as the other metrics.
+		// Historical network account totals remain independent of this view.
+		clientDayPayouts, err := queryProviderPayoutStats(clientSession.Ctx, conn, networkId, windowStart, now)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		dayPayouts := map[string]NanoCents{}
+		for _, clientId := range providerIds {
+			for day, amount := range clientDayPayouts[clientId] {
+				if math.MaxInt64-dayPayouts[day] < amount {
+					returnErr = fmt.Errorf("provider payout total exceeds nanocent range for network %s on %s", networkId, day)
+					return
+				}
+				dayPayouts[day] += amount
 			}
-		})
+		}
+		for day, amount := range dayPayouts {
+			payout[day] = NanoCentsToUsd(amount)
+		}
 
 		// contracts + distinct served clients per day
 		result, err = conn.Query(
@@ -686,6 +681,9 @@ func StatsProvidersOverview(
 			uptime[day] = hours / providerCount
 		}
 	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
 
 	return &StatsProvidersOverviewResult{
 		Lookback:       windowLookbackDays(windowStart, now),

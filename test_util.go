@@ -736,6 +736,9 @@ func (self *TestEnv) runWithSetup(
 	preflight func() error,
 	setup func() func(),
 ) {
+	if self.RerunCount < 0 || self.RerunCount == int(^uint(0)>>1) {
+		t.Fatalf("invalid test rerun count %d", self.RerunCount)
+	}
 	if err := preflight(); err != nil {
 		t.Fatalf("local integration test preflight: %v", err)
 	}
@@ -743,9 +746,10 @@ func (self *TestEnv) runWithSetup(
 	for i := 0; i < n; i += 1 {
 		// Each attempt runs against a retryTB wrapper, so a failed assertion is
 		// recorded locally instead of failing the real *testing.T (see retryTB).
-		tb := &retryTB{TB: t}
+		tb := &retryTB{TB: t, propagateLateFailure: os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1"}
 		var panicValue any
 		var panicStack []byte
+		attemptReturned := false
 
 		// Run each attempt in its own goroutine: tb.Fatal/FailNow (and assert.*,
 		// which call FailNow) end a failed attempt with runtime.Goexit, which
@@ -760,6 +764,12 @@ func (self *TestEnv) runWithSetup(
 				// so the final attempt can re-raise it on the test goroutine.
 				if r := recover(); r != nil {
 					panicValue = r
+					panicStack = debug.Stack()
+					tb.Fail()
+				} else if !attemptReturned && !tb.Failed() && !tb.Skipped() {
+					// A bare Goexit or compatibility panic(nil) is not a clean
+					// return. Intentional Fatal and Skip already marked tb.
+					panicValue = errors.New("test attempt exited without returning")
 					panicStack = debug.Stack()
 					tb.Fail()
 				}
@@ -779,21 +789,34 @@ func (self *TestEnv) runWithSetup(
 				teardownDone := make(chan struct{})
 				go func() {
 					defer close(teardownDone)
+					teardownReturned := false
+					defer func() {
+						if !teardownReturned {
+							tb.Error("test environment teardown exited without returning")
+						}
+					}()
 					teardown()
+					teardownReturned = true
 				}()
+				teardownBound := testEnvTeardownBound()
 				select {
 				case <-teardownDone:
-				case <-time.After(testEnvTeardownBound()):
-					glog.Errorf("[test_env]teardown blocked >60s (attempt goroutines still holding env resources); abandoning teardown so the failure can report\n")
+				case <-time.After(teardownBound):
+					glog.Errorf("[test_env]teardown blocked >%s (attempt goroutines still holding env resources); abandoning teardown so the failure can report\n", teardownBound)
+					if os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1" {
+						tb.Errorf("release test environment abandoned teardown after %s", teardownBound)
+					}
 				}
 			}()
 			callback(tb)
+			attemptReturned = true
 		}()
 		<-done
+		tb.completeAttempt()
 
-		// A Skip in the test body is intentional, not flaky: skip the real test
-		// and stop rerunning.
-		if tb.Skipped() {
+		// A clean Skip is intentional. It cannot erase an earlier assertion,
+		// teardown failure, or late failure from this attempt.
+		if tb.Skipped() && !tb.Failed() {
 			t.SkipNow()
 			return
 		}
@@ -836,15 +859,29 @@ func (self *TestEnv) runWithSetup(
 // propagates. Other methods (Log, Helper, Name, ...) fall through to *testing.T.
 type retryTB struct {
 	testing.TB
-	stateLock sync.Mutex
-	failed    bool
-	skipped   bool
+	stateLock            sync.Mutex
+	failed               bool
+	skipped              bool
+	attemptEnded         bool
+	propagateLateFailure bool
 }
 
 func (self *retryTB) Fail() {
 	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
 	self.failed = true
+	propagate := self.attemptEnded && self.propagateLateFailure
+	self.stateLock.Unlock()
+	if propagate {
+		// Cleanup callbacks and joined late workers use this same wrapper after
+		// Run returns; their failures must still reach the real release test.
+		self.TB.Fail()
+	}
+}
+
+func (self *retryTB) completeAttempt() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.attemptEnded = true
 }
 
 func (self *retryTB) FailNow() {

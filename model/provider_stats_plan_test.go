@@ -84,10 +84,7 @@ func TestStatsQueryPlans(t *testing.T) {
 				SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
 				FROM transfer_contract WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2 GROUP BY destination_id`, five, w24)
 
-			assertStatsIndexPlan(t, ctx, conn, "04_payout_list", `
-				SELECT tc.destination_id, COALESCE(SUM(s.payout_net_revenue_nano_cents), 0)
-				FROM transfer_escrow_sweep s INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
-				WHERE tc.destination_id = ANY($1::uuid[]) AND s.sweep_time >= $2 GROUP BY tc.destination_id`, five, w24)
+			assertStatsIndexPlan(t, ctx, conn, "04_payout_list", providerPayoutStatsSql, networkId, w24, now)
 
 			assertStatsIndexPlan(t, ctx, conn, "05_search_list", `
 				SELECT client_id, COALESCE(SUM(match_count), 0)
@@ -106,10 +103,7 @@ func TestStatsQueryPlans(t *testing.T) {
 				FROM transfer_contract tc INNER JOIN contract_close cc ON cc.contract_id = tc.contract_id AND cc.party = 'destination'
 				WHERE tc.destination_id = $1 AND tc.close_time >= $2 GROUP BY day`, providerId0, w72)
 
-			assertStatsIndexPlan(t, ctx, conn, "09_payout_day_single", `
-				SELECT to_char(s.sweep_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(s.payout_net_revenue_nano_cents), 0)
-				FROM transfer_escrow_sweep s INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
-				WHERE tc.destination_id = $1 AND s.sweep_time >= $2 GROUP BY day`, providerId0, w72)
+			assertStatsIndexPlan(t, ctx, conn, "09_payout_day_single", providerPayoutStatsSql, networkId, w72, now)
 
 			assertStatsIndexPlan(t, ctx, conn, "10_contracts_day_single", `
 				SELECT to_char(create_time, 'YYYY-MM-DD') AS day, COUNT(*), COUNT(DISTINCT source_id)
@@ -133,6 +127,8 @@ func TestStatsQueryPlans(t *testing.T) {
 				SELECT client_id, connect_time, disconnect_time, connected
 				FROM network_client_connection WHERE client_id = ANY($1::uuid[]) AND connect_time <= $3 AND (disconnect_time IS NULL OR disconnect_time >= $2)
 				ORDER BY client_id, connect_time`, all, w72, now)
+
+			assertStatsIndexPlan(t, ctx, conn, "14_overview_payout", providerPayoutStatsSql, networkId, w72, now)
 
 			assertStatsIndexPlan(t, ctx, conn, "15_retention_delete", `
 				DELETE FROM search_provider_stats USING (
@@ -197,10 +193,14 @@ func statsPlanSeed(ctx context.Context, conn server.PgConn, networkId, sourceNet
 		SELECT gen_random_uuid(), now() - ((g % 500) || ' hours')::interval, 'destination', 1000000000
 		FROM generate_series(1, $1) g ON CONFLICT DO NOTHING`, statsPlanBackground)
 
-	// transfer_escrow_sweep: provider sweeps + background
+	// Real modern allocations exercise the same expansion and validation as
+	// all three payout APIs; unrelated networks remain outside their scope.
 	exec(`
-		INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, payout_byte_count, payout_net_revenue_nano_cents, sweep_time)
-		SELECT contract_id, gen_random_uuid(), $2, transfer_byte_count, 1000000000, close_time
+		INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, destination_id,
+		    payout_byte_count, payout_net_revenue_nano_cents, sweep_time, provider_payouts)
+		SELECT contract_id, gen_random_uuid(), $2, destination_id, transfer_byte_count, 1000000000, close_time,
+		    jsonb_build_array(jsonb_build_object('client_id', destination_id,
+		        'payout_byte_count', transfer_byte_count, 'payout_nano_cents', 1000000000))
 		FROM transfer_contract WHERE destination_id = ANY($1::uuid[]) ON CONFLICT DO NOTHING`, providers, networkId)
 	exec(`
 		INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, payout_byte_count, payout_net_revenue_nano_cents, sweep_time)

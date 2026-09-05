@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -123,6 +124,149 @@ func TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure(t *testing.T) {
 		var exitErr *exec.ExitError
 		if contextErr != nil || !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(output), "release fail-fast attempt=1") || strings.Contains(string(output), "release fail-fast attempt=2") || !strings.Contains(string(output), "--- FAIL: TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure") {
 			t.Fatalf("%s did not fail exactly its first attempt: err=%v context=%v output=%s", mode, err, contextErr, output)
+		}
+	}
+}
+
+// A successful callback cannot certify a release when its teardown has been
+// abandoned. The teardown is held by an explicit barrier until Run returns.
+func TestDefaultTestEnvReleaseFailFastRejectsAbandonedTeardown(t *testing.T) {
+	if mode := os.Getenv("URNETWORK_RELEASE_TEARDOWN_CHILD"); mode != "" {
+		releaseTeardown := make(chan struct{})
+		teardownFinished := make(chan struct{})
+		defer func() {
+			close(releaseTeardown)
+			<-teardownFinished
+		}()
+		DefaultTestEnv().runWithSetup(t, func(testing.TB) {
+			fmt.Println("release teardown callback passed")
+		}, func() error { return nil }, func() func() {
+			return func() {
+				defer close(teardownFinished)
+				fmt.Println("release teardown entered blocking barrier")
+				<-releaseTeardown
+			}
+		})
+		return
+	}
+	for _, setting := range []string{"1", "0"} {
+		t.Setenv("WARP_TEST_ENV_FAIL_FAST", setting)
+		t.Setenv("WARP_TEST_TEARDOWN_BOUND_SECONDS", "1")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDefaultTestEnvReleaseFailFastRejectsAbandonedTeardown$", "-test.v")
+		cmd.Env = append(os.Environ(), "URNETWORK_RELEASE_TEARDOWN_CHILD=1")
+		output, err := cmd.CombinedOutput()
+		contextErr := ctx.Err()
+		cancel()
+		wire := string(output)
+		if contextErr != nil || !strings.Contains(wire, "release teardown callback passed") || !strings.Contains(wire, "release teardown entered blocking barrier") || !strings.Contains(wire, "abandoning teardown") {
+			t.Fatalf("teardown barrier was not reached and abandoned: setting=%s err=%v context=%v output=%s", setting, err, contextErr, wire)
+		}
+		if setting == "0" {
+			if err != nil {
+				t.Fatalf("release-only teardown policy changed development behavior: %v output=%s", err, wire)
+			}
+			continue
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(wire, "--- FAIL: TestDefaultTestEnvReleaseFailFastRejectsAbandonedTeardown") {
+			t.Fatalf("strict release accepted an abandoned teardown: err=%v output=%s", err, wire)
+		}
+	}
+}
+
+// Exercise every wrapper exit boundary in a real child testing.T. A skipped
+// failure, unreturned attempt, invalid attempt count or post-attempt assertion
+// must not be converted into a successful package exit.
+func TestDefaultTestEnvReleaseFailFastRejectsFalseGreenExits(t *testing.T) {
+	if mode := os.Getenv("URNETWORK_RELEASE_FALSE_GREEN_CHILD"); mode != "" {
+		testEnv := DefaultTestEnv()
+		testEnv.RerunTimeout = 0
+		if mode == "negative-count" {
+			testEnv.RerunCount = -1
+		} else if mode == "overflow-count" {
+			testEnv.RerunCount = int(^uint(0) >> 1)
+		}
+		lateFailure := make(chan struct{})
+		lateFinished := make(chan struct{})
+		testEnv.runWithSetup(t, func(tb testing.TB) {
+			fmt.Println("release attempt callback entered")
+			switch mode {
+			case "failed-skip":
+				tb.Error("fixture failure before skip")
+				tb.Skip("later skip must not erase failure")
+			case "callback-goexit":
+				runtime.Goexit()
+			case "callback-nil-panic":
+				panic(nil)
+			case "cleanup-failure":
+				tb.Cleanup(func() { tb.Error("fixture cleanup failure") })
+			case "late-failure":
+				go func() {
+					defer close(lateFinished)
+					<-lateFailure
+					tb.Error("fixture post-attempt failure")
+				}()
+			case "clean-skip":
+				tb.Skip("intentional clean skip")
+			}
+		}, func() error {
+			fmt.Println("release attempt preflight entered")
+			return nil
+		}, func() func() {
+			if mode == "setup-goexit" {
+				runtime.Goexit()
+			}
+			return func() {
+				if mode == "teardown-goexit" {
+					runtime.Goexit()
+				}
+			}
+		})
+		if mode == "late-failure" {
+			close(lateFailure)
+			<-lateFinished
+		}
+		return
+	}
+	t.Setenv("WARP_TEST_ENV_FAIL_FAST", "1")
+	for _, testCase := range []struct {
+		mode        string
+		wantFailure bool
+		wantOutput  string
+	}{
+		{mode: "failed-skip", wantFailure: true, wantOutput: "fixture failure before skip"},
+		{mode: "negative-count", wantFailure: true, wantOutput: "invalid test rerun count"},
+		{mode: "overflow-count", wantFailure: true, wantOutput: "invalid test rerun count"},
+		{mode: "callback-goexit", wantFailure: true, wantOutput: "test attempt exited without returning"},
+		{mode: "callback-nil-panic", wantFailure: true, wantOutput: "test attempt exited without returning"},
+		{mode: "setup-goexit", wantFailure: true, wantOutput: "test attempt exited without returning"},
+		{mode: "teardown-goexit", wantFailure: true, wantOutput: "test environment teardown exited without returning"},
+		{mode: "cleanup-failure", wantFailure: true, wantOutput: "fixture cleanup failure"},
+		{mode: "late-failure", wantFailure: true, wantOutput: "fixture post-attempt failure"},
+		{mode: "clean-skip", wantOutput: "--- SKIP: TestDefaultTestEnvReleaseFailFastRejectsFalseGreenExits"},
+		{mode: "zero-reruns", wantOutput: "release attempt callback entered"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDefaultTestEnvReleaseFailFastRejectsFalseGreenExits$", "-test.v")
+		cmd.Env = append(os.Environ(), "URNETWORK_RELEASE_FALSE_GREEN_CHILD="+testCase.mode)
+		if testCase.mode == "callback-nil-panic" {
+			cmd.Env = append(cmd.Env, "GODEBUG=panicnil=1")
+		}
+		output, err := cmd.CombinedOutput()
+		contextErr := ctx.Err()
+		cancel()
+		wire := string(output)
+		var exitErr *exec.ExitError
+		failed := errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+		if contextErr != nil || failed != testCase.wantFailure || err != nil && !failed || !strings.Contains(wire, testCase.wantOutput) {
+			t.Errorf("%s false-green boundary: wantFailure=%t err=%v context=%v output=%s", testCase.mode, testCase.wantFailure, err, contextErr, wire)
+		}
+		if (testCase.mode == "negative-count" || testCase.mode == "overflow-count") && strings.Contains(wire, "release attempt preflight entered") {
+			t.Errorf("%s performed preflight before rejecting invalid attempt count", testCase.mode)
+		}
+		if testCase.mode == "zero-reruns" && strings.Count(wire, "release attempt callback entered") != 1 {
+			t.Errorf("zero reruns did not execute exactly one attempt: %s", wire)
 		}
 	}
 }
