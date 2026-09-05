@@ -10,6 +10,31 @@ import (
 	"testing"
 )
 
+// Pins both the endpoint and credentials to one fixture; protocol tests must
+// never resolve an operator's vault, even when an API key was already cached.
+func newBrevoProtocolTestServer(t *testing.T, handler http.Handler) {
+	t.Helper()
+	t.Setenv("WARP_VAULT_HOME", t.TempDir())
+	const fixtureApiKey = "brevo-protocol-test-key"
+	previousBaseUrl := brevoApiBaseUrl
+	previousApiKey := brevoApiKey
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if values := r.Header.Values("api-key"); len(values) != 1 || values[0] != fixtureApiKey {
+			t.Error("protocol request did not use exactly one fixture API key")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	brevoApiBaseUrl = testServer.URL + "/v3"
+	brevoApiKey = func() string { return fixtureApiKey }
+	t.Cleanup(func() {
+		testServer.Close()
+		brevoApiBaseUrl = previousBaseUrl
+		brevoApiKey = previousApiKey
+	})
+}
+
 func TestBrevo(t *testing.T) {
 	contacts := map[string]bool{}
 	listEmails := map[string]map[string]bool{}
@@ -21,7 +46,7 @@ func TestBrevo(t *testing.T) {
 			t.Errorf("encode response: %v", err)
 		}
 	}
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v3/contacts":
 			var args BrevoContactArgs
@@ -90,13 +115,6 @@ func TestBrevo(t *testing.T) {
 			writeJson(w, http.StatusNotFound, BrevoContactResult{Code: "not_found"})
 		}
 	}))
-	defer testServer.Close()
-
-	previousBaseUrl := brevoApiBaseUrl
-	brevoApiBaseUrl = testServer.URL + "/v3"
-	defer func() {
-		brevoApiBaseUrl = previousBaseUrl
-	}()
 
 	ctx := context.Background()
 	userEmails := []string{}
@@ -136,19 +154,12 @@ func TestBrevo(t *testing.T) {
 }
 
 func TestBrevoAddContactRejectsMalformedSuccessResponse(t *testing.T) {
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		if _, err := w.Write([]byte("{")); err != nil {
 			t.Errorf("write response: %v", err)
 		}
 	}))
-	defer testServer.Close()
-
-	previousBaseUrl := brevoApiBaseUrl
-	brevoApiBaseUrl = testServer.URL
-	defer func() {
-		brevoApiBaseUrl = previousBaseUrl
-	}()
 
 	if err := BrevoAddContact(context.Background(), "test@ur.io"); err == nil {
 		t.Fatal("malformed successful response was accepted")
@@ -157,7 +168,7 @@ func TestBrevoAddContactRejectsMalformedSuccessResponse(t *testing.T) {
 
 func TestBrevoAddToListRejectsMissingContactsResult(t *testing.T) {
 	requestCount := 0
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.Header().Set("Content-Type", "application/json")
 		if requestCount == 1 {
@@ -172,13 +183,6 @@ func TestBrevoAddToListRejectsMissingContactsResult(t *testing.T) {
 			t.Errorf("write list response: %v", err)
 		}
 	}))
-	defer testServer.Close()
-
-	previousBaseUrl := brevoApiBaseUrl
-	brevoApiBaseUrl = testServer.URL
-	defer func() {
-		brevoApiBaseUrl = previousBaseUrl
-	}()
 
 	if err := BrevoAddToList(context.Background(), "test@ur.io", 11); err == nil {
 		t.Fatal("success response without contacts was accepted")

@@ -34,3 +34,10 @@ throwaway resources under `local/testdata`; normally a sibling `vault`/`config`
 checkout or explicit `WARP_VAULT_HOME`/`WARP_CONFIG_HOME` takes precedence. Set
 `WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1` to force the throwaway resources in an
 environment that also has sibling configuration checkouts.
+
+Use the same resource selection for the launcher and tests. For example, forcing
+portable resources only for `go test` cannot authenticate to a container started
+with different `vault/local/pg.yml` credentials. A persistent PostgreSQL volume
+retains its initialized password even if the container environment changes.
+Prefer the matching local profile; see [local setup](local/README.md) before
+reinitializing a volume.

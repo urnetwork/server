@@ -66,10 +66,13 @@ SERVER_DIR="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 URNETWORK_HOME="$(cd -- "$SERVER_DIR/.." >/dev/null 2>&1 && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 LOCAL_STATE_FILE="$SCRIPT_DIR/run-local-state.sh"
+LOCAL_SERVICES_FILE="$SCRIPT_DIR/run-local-services.sh"
 OS="$(uname -s)"
 
 [[ -f "$LOCAL_STATE_FILE" ]] || die "local state helper not found: $LOCAL_STATE_FILE"
 source "$LOCAL_STATE_FILE"
+[[ -f "$LOCAL_SERVICES_FILE" ]] || die "local services helper not found: $LOCAL_SERVICES_FILE"
+source "$LOCAL_SERVICES_FILE"
 
 WARP_ENV="${WARP_ENV:-local}"
 [[ "$WARP_ENV" == "local" ]] || die "refusing WARP_ENV=$WARP_ENV; the local test stack requires WARP_ENV=local"
@@ -572,6 +575,10 @@ wait_healthy "$REDIS_CONTAINER" 60 || die "redis failed to start (see: ${DC[*]} 
 
 log "verifying $LOCAL_HOST_IP:$PG_PORT and $LOCAL_HOST_IP:$REDIS_PORT are reachable"
 verify_reachable || die "the DBs are healthy but $LOCAL_HOST_IP is not reachable on ports $PG_PORT/$REDIS_PORT (loopback alias / port publish problem)"
+
+log "verifying PostgreSQL access with the selected local resource"
+local_postgres_require_application_access "$PG_CONTAINER" "$PG_USER" "$PG_PASSWORD" "$PG_DB" ||
+  die "postgres does not satisfy the selected local test profile"
 
 cat <<INFO
 

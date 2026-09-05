@@ -53,8 +53,8 @@ second resolved address and never silently rewrites an operator-owned entry.
 On Docker Desktop / macOS the container IPs on the docker network are not
 routable from the host, so host access (where `go test` runs) goes through the
 published ports on the loopback alias rather than the container's network IP.
-`sudo` is used only to edit `/etc/hosts` and manage the loopback alias; docker
-and the tests run as you.
+On Linux, Docker and host networking changes run through `sudo`; on macOS,
+Docker Desktop runs as the current user. The tests run as the current user.
 
 ## Flags
 
@@ -78,9 +78,16 @@ and the tests run as you.
   `testdata/vault` fixture. The fallback credentials are public and throwaway;
   no production secret is stored in this repository.
 - `WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1` forces the checked-in fixture when a
-  sibling vault checkout also exists.
-- If you change the selected `pg.yml`, re-run with `--fresh` so the postgres
-  init script re-provisions the role.
+  sibling vault checkout also exists. Set it consistently for both the launcher
+  and the test shell; forcing it only for tests selects a different password
+  from a stack initialized with `vault/local/pg.yml`.
+- Startup authenticates with the selected application password and checks
+  `CREATEDB`. Container health and an open port alone do not prove that the
+  selected profile matches an existing PostgreSQL volume.
+- When authentication fails, select the profile used to initialize the volume.
+  Changing Compose environment values does not update existing database roles.
+  Only use `--fresh` to change profiles when the local database contents are
+  disposable: it deletes the PostgreSQL data volume and initializes a new one.
 - A refused hosts/lock preflight happens before `--fresh`, loopback, kernel, or
   Docker mutation. Do not delete a marker or lock merely because its recorded
   PID looks old. First verify that no `run-local.sh` process and no child

@@ -2831,6 +2831,30 @@ func stId16(id server.Id) [16]byte {
 	return out
 }
 
+// Copies and deterministically orders database rows before any positional
+// binding lookup or snapshot commitment. One logical provider must have one
+// network attribution in a payout epoch; ambiguous duplicates fail closed.
+func stCanonicalProviderUsages(usages []*model.StProviderUsage) ([]*model.StProviderUsage, error) {
+	result := append([]*model.StProviderUsage(nil), usages...)
+	for index, usage := range result {
+		if usage == nil || usage.ClientId == (server.Id{}) || usage.NetworkId == (server.Id{}) || usage.PayoutByteCount < 0 {
+			return nil, fmt.Errorf("provider usage row %d is nil, zero-identity, or negative", index)
+		}
+	}
+	sort.Slice(result, func(left, right int) bool {
+		if compared := result[left].ClientId.Cmp(result[right].ClientId); compared != 0 {
+			return compared < 0
+		}
+		return result[left].NetworkId.Less(result[right].NetworkId)
+	})
+	for index := 1; index < len(result); index++ {
+		if result[index-1].ClientId == result[index].ClientId {
+			return nil, fmt.Errorf("provider %s has ambiguous usage in multiple network rows", result[index].ClientId)
+		}
+	}
+	return result, nil
+}
+
 func stComputeReleasePayout(
 	ctx context.Context,
 	cfg *StConfig,
@@ -2842,7 +2866,10 @@ func stComputeReleasePayout(
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
 	}
-	usages := model.GetStEpochProviderUsage(ctx, startTime, endTime)
+	usages, err := stCanonicalProviderUsages(model.GetStEpochProviderUsage(ctx, startTime, endTime))
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	reliabilityRows := model.GetStEpochClientReliability(ctx, startTime, endTime)
 	wallets := model.GetStProviderWalletsAt(ctx, endTime)
 	type reliability struct{ assignments, confirmations uint64 }
