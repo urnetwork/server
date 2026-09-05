@@ -10789,6 +10789,22 @@ device event follows persistence and allows the exact saved consumer to load.
 This is an adjacent source-confirmed startup liveness gap in the proposed fix,
 not evidence that refresh caused the captured old process to exit.
 
+Apply that settlement rule to post-start wake/path recovery too. The reviewed
+recovery path still tries three immediate observations, then returns before
+wake probes/grace checks or abandons the requested path recovery. Its persistent
+JWT listener saves shared credentials but does not resume the abandoned work.
+A current connect intent with no consumer can therefore remain unrecovered
+after publication succeeds until another wake, path change or app action.
+Retain a coalesced, current-owner recovery request and resume it on actual
+successful publication; do not reset healthy transports on every refresh.
+An attempt deadline must not discard the only later settlement wakeup. Retire
+pending work on stop/replacement, preserve explicit disconnect, and do not retry
+real read/decode errors as if they were unsettled authentication. Force events
+before the observation, during a held observation and after a bounded attempt,
+then assert actual consumer/probe progress without another external trigger.
+This source-confirmed adjacent gap is under repair, not an observed incident
+branch or a qualified native fix.
+
 A delayed startup also needs current-generation publication, not merely a
 thread-safe pointer or a last-moment Boolean check. Hold an old constructor or
 Load continuation, start/stop a newer session, then release the old work: it
@@ -10943,6 +10959,15 @@ their own deterministic controls before closure:
   success. Extension session renewal/restore also needs controls for a failed
   read, a delayed old selection, and storage failure after live proxy change.
   These are source findings, not reproductions of the iPhone incident.
+  In the web settings document, a failed read is also converted to `raw=null`
+  and can discard a cached specific location. A failed write caches the new
+  choice against that same null marker, so a later successful read of the old
+  record discards the claimed in-memory fallback. Preserve last-known state
+  and pending explicit changes separately from storage observation. A cold
+  unreadable record is not an empty document: do not merge a patch over unknown
+  fields or silently select best-available on that basis. Test the actual
+  module with failing reads and quota/write failures, readable old records,
+  later explicit commits, genuine absence and separate network identities.
   A specific restore defect writes `proxy_enabled=false` after a malformed
   Firefox multi-IP record, failed Firefox listener installation, or Chromium
   settings failure. That converts an error into durable disconnect and disables
