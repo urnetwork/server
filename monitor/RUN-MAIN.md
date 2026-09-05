@@ -22,26 +22,26 @@ Use two explicit agent roles for every pass through this harness:
   the deterministic test gates after a proposed fix. The Go watcher itself is
   model-neutral; this requirement names the agent responsible for operating
   and interpreting it.
-- A `gpt-5.6-sol` agent at `max` reasoning owns failure diagnosis and repair.
+- A `gpt-6-astra` agent at `max` reasoning owns failure diagnosis and repair.
   It receives the frozen alert and Terra's observation evidence, establishes
   the causal mechanism and affected boundary, changes the owning code and
   catalog, and writes deterministic regressions. It may run bounded read-only
   source-of-truth discriminators needed for diagnosis, but it does not replace
   Terra as the monitor runner or declare its own change verified.
 
-For each new or materially changed alert, Terra hands Sol the alert identity,
+For each new or materially changed alert, Terra hands Astra the alert identity,
 observation time, monitor binary hash, target, raw bounded evidence, source
-identity, and relevant healthy control. Sol returns the causal explanation,
+identity, and relevant healthy control. Astra returns the causal explanation,
 patch, regression names, external prerequisites, and closure window. Terra then
 runs the focused, package, race, vet, build, and production observation gates
-and reports the exact results back to Sol. A failing gate returns to Sol for
+and reports the exact results back to Astra. A failing gate returns to Astra for
 another diagnosis/fix pass; a passing narrow test never substitutes for the
 full Terra verification. Keep the same authoritative watcher alive throughout
 this exchange unless the safe-promotion procedure requires a handoff.
 
 ## Agent contract
 
-Coordinate the Terra monitor runner and Sol failure fixer described above.
+Coordinate the Terra monitor runner and Astra failure fixer described above.
 Repeatedly:
 
 1. run every registered monitor signal against the intended environment;
