@@ -31,6 +31,61 @@ test_env_find_resource() {
     return 1
 }
 
+test_env_tls_directory_has_pair() {
+    local directory="$1"
+    local host_name="$2"
+
+    [[ -f "$directory/$host_name/$host_name.crt" &&
+       -r "$directory/$host_name/$host_name.crt" &&
+       -f "$directory/$host_name/$host_name.key" &&
+       -r "$directory/$host_name/$host_name.key" ]]
+}
+
+test_env_tls_tree_has_pair() {
+    local tree_root="$1"
+    local host_name="$2"
+    local version_path
+    local version_name
+
+    if test_env_tls_directory_has_pair "$tree_root" "$host_name"; then
+        return 0
+    fi
+    while IFS= read -r version_path; do
+        version_name="${version_path##*/}"
+        if [[ "$version_name" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][a-zA-Z0-9.-]+)?$ ]] &&
+            test_env_tls_directory_has_pair "$version_path" "$host_name"; then
+            return 0
+        fi
+    done < <(find "$tree_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | LC_ALL=C sort)
+    return 1
+}
+
+test_env_tls_tree_complete() {
+    local tree_root="$1"
+    local host_name
+    for host_name in ur.network bringyour.com main-connect.ur.network main-connect.bringyour.com; do
+        test_env_tls_tree_has_pair "$tree_root" "$host_name" || return $?
+    done
+}
+
+test_env_find_resource_tree() {
+    local root="$1"
+    local resource_name="$2"
+    local candidate
+    for candidate in \
+        "$root/$resource_name" \
+        "$root/local/$resource_name" \
+        "$root/all/$resource_name"; do
+        if [[ -d "$candidate" && -r "$candidate" && -x "$candidate" ]] &&
+            test_env_tls_tree_complete "$candidate"; then
+            TEST_ENV_RESOURCE_PATH="$candidate"
+            return 0
+        fi
+    done
+    test_env_error "required complete resource tree is missing: $root/{,local/,all/}$resource_name"
+    return 1
+}
+
 # Reads the checked-in, non-executable resource boundary for a complete local
 # server suite. Resource names are constrained to one path element before the
 # normal root/local/all resolver is used.
@@ -45,6 +100,7 @@ test_env_validate_suite_resource_manifest() {
     local seen_resource_keys="|"
     local line_number=0
     local vault_resource_count=0
+    local vault_tree_count=0
     local config_resource_count=0
 
     if [[ ! -f "$manifest_path" || -L "$manifest_path" || ! -r "$manifest_path" ]]; then
@@ -64,7 +120,7 @@ test_env_validate_suite_resource_manifest() {
             test_env_error "suite resource manifest has an invalid entry: $manifest_path"
             return 1
         fi
-        if [[ "$line" =~ ^(vault|config)=([a-zA-Z0-9][a-zA-Z0-9._-]*)$ ]]; then
+        if [[ "$line" =~ ^(vault|vault_tree|config)=([a-zA-Z0-9][a-zA-Z0-9._-]*)$ ]]; then
             resource_kind="${BASH_REMATCH[1]}"
             resource_name="${BASH_REMATCH[2]}"
         else
@@ -72,6 +128,10 @@ test_env_validate_suite_resource_manifest() {
             return 1
         fi
         resource_key="$resource_kind:$resource_name"
+        if [[ "$resource_kind" == vault_tree && "$resource_name" != tls ]]; then
+            test_env_error "suite resource manifest has an unsupported vault tree: $resource_name"
+            return 1
+        fi
         if [[ "$seen_resource_keys" == *"|$resource_key|"* ]]; then
             test_env_error "suite resource manifest has a duplicate entry: $resource_key"
             return 1
@@ -80,12 +140,15 @@ test_env_validate_suite_resource_manifest() {
         if [[ "$resource_kind" == vault ]]; then
             vault_resource_count=$((vault_resource_count + 1))
             test_env_find_resource "$vault_root" "$resource_name" || return $?
+        elif [[ "$resource_kind" == vault_tree ]]; then
+            vault_tree_count=$((vault_tree_count + 1))
+            test_env_find_resource_tree "$vault_root" "$resource_name" || return $?
         else
             config_resource_count=$((config_resource_count + 1))
             test_env_find_resource "$config_root" "$resource_name" || return $?
         fi
     done < "$manifest_path"
-    if [[ "$line_number" == 0 || "$vault_resource_count" == 0 ||
+    if [[ "$line_number" == 0 || "$vault_resource_count" == 0 || "$vault_tree_count" == 0 ||
           "$config_resource_count" == 0 ]]; then
         test_env_error "suite resource manifest is incomplete: $manifest_path"
         return 1

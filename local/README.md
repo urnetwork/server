@@ -139,12 +139,18 @@ boundary is:
 - vault: `auth.yml`, `brevo.yml`, `circle.yml`, `client.yml`, `coinbase.yml`,
   `helius.yml`, `ipinfo.yml`, `jwt.yml`, `jwt-local-evaluator.pem`,
   `password.yml`, `pg.yml`, `proxy.yml`, `redis.yml`, `services.yml`, `st.yml`,
-  `stripe.yml`, `wireguard.yml`, and `x402.yml`;
+  `stripe.yml`, `wireguard.yml`, and `x402.yml`, plus `tls` certificate/key
+  pairs for `ur.network`, `bringyour.com`, `main-connect.ur.network`, and
+  `main-connect.bringyour.com`; each pair must be colocated in the direct tree
+  or one versioned directory;
 - config: `apple_roots.pem`, `brevo.yml`, `city-list.yml`, `db.yml`,
   `email.yml`, `iso-country-list.yml`, `pro.yml`, `redis.yml`, `settings.yml`,
   `subsidy.yml`, and `tls.yml`.
 
 An incomplete explicit resource checkout is rejected fail closed.
+If a private temporary vault root overrides only `pg.yml`, it must preserve both
+the source vault's `local` and `all` resolver scopes; linking only `local` hides
+the versioned TLS tree from `WARP_VAULT_HOME` and is rejected by preflight.
 Suite-proxy mode is mutually exclusive with managed-local test paths,
 `WARP_TEST_ENV_USE_PORTABLE_RESOURCES`, and
 `WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES`. It never guesses a vault or

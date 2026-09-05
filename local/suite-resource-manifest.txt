@@ -17,6 +17,7 @@ vault=st.yml
 vault=stripe.yml
 vault=wireguard.yml
 vault=x402.yml
+vault_tree=tls
 config=apple_roots.pem
 config=brevo.yml
 config=city-list.yml

@@ -657,6 +657,30 @@ func TestLoadTestRedisLeaseConfigurationReportsMissingFixture(t *testing.T) {
 // runtime.Goexit), and 4 passes. Each failure is recorded only on the retryTB
 // wrapper, so the real *testing.T never fails and the test passes.
 func TestRunRetriesUntilPass(t *testing.T) {
+	if os.Getenv("URNETWORK_RERUN_SUCCESS_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRunRetriesUntilPass$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "URNETWORK_RERUN_SUCCESS_CHILD=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("retry child did not recover on its fourth attempt: %v\n%s", err, out)
+		}
+		output := string(out)
+		for _, signature := range []string{
+			"[flaky]test failed iteration[1/4] err = flaky panic on the first attempt",
+			"TestRunRetriesUntilPass.func1",
+			"[flaky]test failed iteration[2/4] (assertion failure, see test log)",
+			"1 does not equal 2",
+			"[flaky]test failed iteration[3/4] (assertion failure, see test log)",
+			"[flaky]test passed iteration[4/4]",
+			"--- PASS: TestRunRetriesUntilPass",
+		} {
+			if strings.Count(output, signature) != 1 {
+				t.Fatalf("retry child signature %q count = %d; want 1", signature, strings.Count(output, signature))
+			}
+		}
+		return
+	}
+
 	var attempts atomic.Int32
 	var preflights atomic.Int32
 	testEnv := retryTestEnv(3)
@@ -703,7 +727,25 @@ func TestRunFailsAfterExhaustion(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected the child test to fail after exhausting reruns, but it passed:\n%s", out)
 	}
-	t.Logf("child test failed after exhausting reruns, as expected:\n%s", out)
+	output := string(out)
+	for _, expected := range []struct {
+		signature string
+		count     int
+	}{
+		{signature: "persistent failure", count: 2},
+		{signature: "[flaky]test failed iteration[1/2] (assertion failure, see test log)", count: 1},
+		{signature: "[flaky]test failed iteration[2/2] (assertion failure, see test log)", count: 1},
+		{signature: "--- FAIL: TestRunFailsAfterExhaustion", count: 1},
+	} {
+		if count := strings.Count(output, expected.signature); count != expected.count {
+			t.Fatalf(
+				"exhausted retry child signature %q count = %d; want %d",
+				expected.signature,
+				count,
+				expected.count,
+			)
+		}
+	}
 }
 
 // TestRunReportsPanicOriginAfterExhaustion checks that retry recovery retains
@@ -729,6 +771,9 @@ func TestRunReportsPanicOriginAfterExhaustion(t *testing.T) {
 	}
 	if !strings.Contains(output, "TestRunReportsPanicOriginAfterExhaustion.func1") {
 		t.Fatalf("expected callback origin in child output:\n%s", out)
+	}
+	if strings.Count(output, "[flaky]test failed iteration[1/1] err = persistent panic") != 1 {
+		t.Fatalf("expected one panic-attempt diagnostic in child output:\n%s", out)
 	}
 }
 

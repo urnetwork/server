@@ -34,6 +34,9 @@ var (
 		"wireguard.yml",
 		"x402.yml",
 	}
+	suiteProxyTestVaultTreeNames = []string{
+		"tls",
+	}
 	suiteProxyTestLocalConfigResourceNames = []string{
 		"brevo.yml",
 		"db.yml",
@@ -138,11 +141,32 @@ func writeTestEnvironmentSuiteProxyResources(
 	vaultDir := t.TempDir()
 	configDir := t.TempDir()
 	vaultLocalDir := filepath.Join(vaultDir, "local")
+	vaultAllDir := filepath.Join(vaultDir, "all")
 	configLocalDir := filepath.Join(configDir, "local")
 	configAllDir := filepath.Join(configDir, "all")
-	for _, path := range []string{vaultLocalDir, configLocalDir, configAllDir} {
+	for _, path := range []string{vaultLocalDir, vaultAllDir, configLocalDir, configAllDir} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
+		}
+	}
+	for _, resourceName := range suiteProxyTestVaultTreeNames {
+		resourceTreeDir := filepath.Join(vaultAllDir, resourceName, "2026.9.2")
+		for _, hostName := range []string{
+			"ur.network",
+			"bringyour.com",
+			"main-connect.ur.network",
+			"main-connect.bringyour.com",
+		} {
+			hostDir := filepath.Join(resourceTreeDir, hostName)
+			if err := os.MkdirAll(hostDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, extension := range []string{"crt", "key"} {
+				resourcePath := filepath.Join(hostDir, hostName+"."+extension)
+				if err := os.WriteFile(resourcePath, []byte("synthetic\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	for _, resourceName := range suiteProxyTestVaultResourceNames {
@@ -315,6 +339,9 @@ func TestSuiteProxyResourceManifestMatchesFullLocalSuiteBoundary(t *testing.T) {
 	expectedLines := []string{"format=urnetwork-server-suite-resources-v1"}
 	for _, resourceName := range suiteProxyTestVaultResourceNames {
 		expectedLines = append(expectedLines, "vault="+resourceName)
+	}
+	for _, resourceName := range suiteProxyTestVaultTreeNames {
+		expectedLines = append(expectedLines, "vault_tree="+resourceName)
 	}
 	configResourceNames := append([]string{}, suiteProxyTestLocalConfigResourceNames...)
 	configResourceNames = append(configResourceNames, suiteProxyTestAllConfigResourceNames...)
@@ -630,6 +657,118 @@ func TestTestEnvironmentScriptRejectsSuiteProxyConfigManifestGap(t *testing.T) {
 	}
 	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing config resource reached probe: %v", err)
+	}
+}
+
+// Nested versioned TLS assets are resolved through vault/all rather than a flat
+// local resource, so an overlay that preserves only vault/local must fail before
+// any service probe or database test starts.
+func TestTestEnvironmentScriptRejectsSuiteProxyVaultTreeGap(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	if err := os.Remove(filepath.Join(
+		vaultDir,
+		"all",
+		"tls",
+		"2026.9.2",
+		"ur.network",
+		"ur.network.key",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "required complete resource tree is missing") ||
+		!strings.Contains(string(output), "/{,local/,all/}tls") {
+		t.Fatalf("missing suite TLS tree = %v, %q", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing TLS tree reached service probes: %v", err)
+	}
+}
+
+// A certificate and key in different version directories are not a usable
+// resolver result, even when both leaf paths exist somewhere in the TLS tree.
+func TestTestEnvironmentScriptRejectsSuiteProxySplitVersionTlsPair(t *testing.T) {
+	stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+	vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+		t,
+		"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+		"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+	)
+	sourcePath := filepath.Join(
+		vaultDir,
+		"all",
+		"tls",
+		"2026.9.2",
+		"ur.network",
+		"ur.network.key",
+	)
+	targetDir := filepath.Join(vaultDir, "all", "tls", "2026.9.3", "ur.network")
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(sourcePath, filepath.Join(targetDir, "ur.network.key")); err != nil {
+		t.Fatal(err)
+	}
+	binDir := writeTestEnvironmentSuiteProxyTools(t)
+	probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+	probePath := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\nprintf called >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "./test-env.sh")
+	cmd.Env = testCommandEnvironment(
+		map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+			"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+			"WARP_CONFIG_HOME":                    configDir,
+			"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+			"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+			"WARP_TEST_ENV_TCP_PROBE":             probePath,
+			"WARP_VAULT_HOME":                     vaultDir,
+		},
+		"BRINGYOUR_POSTGRES_HOSTNAME",
+		"BRINGYOUR_REDIS_HOSTNAME",
+		"WARP_ENV",
+		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "required complete resource tree is missing") ||
+		!strings.Contains(string(output), "/{,local/,all/}tls") {
+		t.Fatalf("split-version suite TLS pair = %v, %q", err, output)
+	}
+	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("split-version TLS pair reached service probes: %v", err)
 	}
 }
 
