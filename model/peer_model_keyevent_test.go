@@ -115,8 +115,8 @@ func TestNetworkPeerDeltaLoadsOnceAcrossListeners(t *testing.T) {
 // TestNetworkPeerMemberKeys asserts the PEERSSTREAMS2 per-member key
 // lifecycle alongside the registry writers: add writes the key with the
 // registration ttl, refresh extends the ttl without rewriting, provide-mode
-// updates rewrite preserving the ttl, remove deletes, and the delta read
-// surfaces the registered peer.
+// updates rewrite preserving the ttl, a missing member forces a fresh re-add,
+// remove deletes, and the delta read surfaces the registered peer.
 func TestNetworkPeerMemberKeys(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -160,12 +160,19 @@ func TestNetworkPeerMemberKeys(t *testing.T) {
 		// no-ops — assert the key survived untouched instead)
 		connect.AssertEqual(t, ttl < memberTtl(), true)
 
-		// refresh restores a vanished member key
+		// A vanished member means the registration was lost. Refresh must not
+		// restore metadata captured before a concurrent replacement; its caller
+		// takes the false branch and re-adds with a fresh canonical profile.
 		server.Redis(ctx, func(r server.RedisClient) {
 			r.Del(ctx, networkPeerMemberKey(networkId, clientId))
 		})
 		ok = RefreshNetworkPeer(ctx, networkId, clientId, residentId, ttl)
-		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, ok, false)
+		connect.AssertEqual(t, memberTtl() < 0, true)
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{
+			ClientId:   clientId,
+			DeviceName: "device a",
+		}, residentId, ttl)
 		connect.AssertEqual(t, 0 < memberTtl(), true)
 
 		// remove deletes the member key

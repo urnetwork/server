@@ -119,6 +119,22 @@ func networkPeerMemberKey(networkId server.Id, clientId server.Id) string {
 	return fmt.Sprintf("{np_%s}p:%s", networkId, clientId)
 }
 
+// Per-client mutation fence for the denormalized peer registration. Add reads
+// canonical provide modes only after planting this key; every registry
+// mutation compares or advances it in the same Redis-slot transition. Keeping
+// it as a TTL'd string, rather than a field in the per-network meta hash,
+// bounds state for clients that leave an otherwise-active network.
+func networkPeerMutationVersionKey(networkId server.Id, clientId server.Id) string {
+	return fmt.Sprintf("{np_%s}mv:%s", networkId, clientId)
+}
+
+// A short-lived receipt makes one logical mutation replay-safe across both
+// go-redis command retries and the server Redis wrapper's callback retries.
+// The operation id is stable across optimistic-state retries.
+func networkPeerMutationReceiptKey(networkId server.Id, operationId server.Id) string {
+	return fmt.Sprintf("{np_%s}mr:%s", networkId, operationId)
+}
+
 // NetworkPeerKeyEventPattern is the psubscribe pattern for the keyspace
 // channels of ALL per-member peer keys on a db. One broad pattern per
 // subscriber connection keeps the redis-side pattern-match cost O(1) per
@@ -206,26 +222,6 @@ type NetworkPeerEvent struct {
 	NetworkPeerEventType NetworkPeerEventType
 	// for removed, the entries are disconnect markers
 	Peers []*NetworkPeer
-}
-
-// bumpNetworkPeerVersion marks the network's peer registry as changed
-// (PEERS2.md): readers poll this per-network counter at their own rate and
-// full-read on any mismatch. v1 published the change over sharded pubsub
-// here; per-event delivery to every device of the network is exactly the
-// fanout that melted the cluster on 2026-07-15, so v2 delivers nothing —
-// a change costs one INCR, and read cost is demand-driven at the readers.
-func bumpNetworkPeerVersion(
-	ctx context.Context,
-	r server.RedisClient,
-	networkId server.Id,
-) {
-	pipe := r.TxPipeline()
-	pipe.Incr(ctx, networkPeerEventIdKey(networkId))
-	pipe.Expire(ctx, networkPeerEventIdKey(networkId), networkPeerKeyTtl)
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		panic(err)
-	}
 }
 
 // how long a `NetworkPeersEnabled` decision is cached per network. The
@@ -492,8 +488,266 @@ func sortedProvideModesList(provideModes map[ProvideMode]bool) []ProvideMode {
 	return provideModesList
 }
 
-// AddNetworkPeer registers a connected top-level client in the peer registry
-// and publishes an updated event
+const (
+	networkPeerMutationRetryDelay  = 5 * time.Millisecond
+	networkPeerMutationMaxAttempts = 16
+	networkPeerMutationReceiptTtl  = 5 * time.Minute
+)
+
+// One optimistic read used by the exact-value Lua comparisons. A pipeline read
+// may race another writer, but no torn pair can pass the later comparison.
+type networkPeerMutationState struct {
+	metaBytes          []byte
+	hasMeta            bool
+	mutationVersion    int64
+	hasMutationVersion bool
+}
+
+// Returns an independent profile for registry storage. In particular, an Add
+// retry must not rewrite the caller's stale ProvideModes slice while replacing
+// it with the canonical sorted value.
+func cloneNetworkPeer(peer *NetworkPeer) *NetworkPeer {
+	clonedPeer := *peer
+	clonedPeer.ProvideModes = slices.Clone(peer.ProvideModes)
+	clonedPeer.Roles = slices.Clone(peer.Roles)
+	if peer.DisconnectTime != nil {
+		disconnectTime := *peer.DisconnectTime
+		clonedPeer.DisconnectTime = &disconnectTime
+	}
+	return &clonedPeer
+}
+
+// Captures the two values every ownership-sensitive mutation compares in its
+// Lua transition. Missing version is valid for registrations written by a
+// pre-fence binary and is distinct from version zero.
+func getNetworkPeerMutationState(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+) (state networkPeerMutationState) {
+	member := string(clientId.Bytes())
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.Pipeline()
+		metaCmd := pipe.HGet(ctx, networkPeerMetaKey(networkId), member)
+		mutationVersionCmd := pipe.Get(ctx, networkPeerMutationVersionKey(networkId, clientId))
+		_, err := pipe.Exec(ctx)
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+
+		metaBytes, err := metaCmd.Bytes()
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+		if err == nil {
+			state.metaBytes = metaBytes
+			state.hasMeta = true
+		}
+
+		mutationVersion, err := mutationVersionCmd.Int64()
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+		if err == nil {
+			state.mutationVersion = mutationVersion
+			state.hasMutationVersion = true
+		}
+	})
+	return
+}
+
+// Rate-limits a conflicting mutation retry and makes cancellation one bound
+// when a peer is changing continuously.
+func waitNetworkPeerMutationRetry(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(networkPeerMutationRetryDelay):
+		return true
+	}
+}
+
+// Runs a conflicting optimistic mutation only a finite number of times. The
+// attempt callback returns true for every terminal outcome, including a
+// guarded no-op; false means its exact-value comparison lost a race.
+func retryNetworkPeerMutation(ctx context.Context, attempt func() bool) bool {
+	for attemptIndex := 0; attemptIndex < networkPeerMutationMaxAttempts; attemptIndex++ {
+		if attempt() {
+			return true
+		}
+		if attemptIndex+1 == networkPeerMutationMaxAttempts || !waitNetworkPeerMutationRetry(ctx) {
+			return false
+		}
+	}
+	return false
+}
+
+// Plants the intent observed by provide-mode updates before Add reads the
+// canonical modes. Its TTL is refreshed so a slow but live registration does
+// not lose the fence between the read and commit.
+func prepareNetworkPeerMutation(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+) (mutationVersion int64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		var err error
+		mutationVersion, err = r.Eval(
+			ctx,
+			`
+			local mutation_version_key = KEYS[1]
+			local key_ttl_seconds = ARGV[1]
+
+			local mutation_version = redis.call('GET', mutation_version_key)
+			if mutation_version == false then
+				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+				return 0
+			end
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+			return tonumber(mutation_version)
+			`,
+			[]string{networkPeerMutationVersionKey(networkId, clientId)},
+			int64(networkPeerKeyTtl/time.Second),
+		).Int64()
+		if err != nil {
+			panic(err)
+		}
+	})
+	return
+}
+
+// Commits one registration only if no provide update or lifecycle mutation
+// occurred since canonical modes were loaded.
+func addNetworkPeerAtMutationVersion(
+	ctx context.Context,
+	networkId server.Id,
+	peer *NetworkPeer,
+	residentId server.Id,
+	ttl time.Duration,
+	expectedMutationVersion int64,
+	operationId server.Id,
+	pruneOperationId server.Id,
+) (added bool) {
+	meta := &networkPeerMeta{
+		Peer:       peer,
+		ResidentId: residentId,
+	}
+	metaBytes := meta.Bytes()
+	member := string(peer.ClientId.Bytes())
+	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		addedInt, err := r.Eval(
+			ctx,
+			`
+			local meta_key = KEYS[1]
+			local member_key = KEYS[2]
+			local connected_key = KEYS[3]
+			local disconnected_key = KEYS[4]
+			local event_id_key = KEYS[5]
+			local mutation_version_key = KEYS[6]
+			local mutation_receipt_key = KEYS[7]
+
+			local member = ARGV[1]
+			local expected_mutation_version = ARGV[2]
+			local meta = ARGV[3]
+			local expiry_ms = ARGV[4]
+			local member_ttl_ms = ARGV[5]
+			local key_ttl_seconds = ARGV[6]
+			local receipt_ttl_seconds = ARGV[7]
+
+			local previous_result = redis.call('GET', mutation_receipt_key)
+			if previous_result ~= false then
+				return tonumber(previous_result)
+			end
+
+			if redis.call('GET', mutation_version_key) ~= expected_mutation_version then
+				return 0
+			end
+
+			redis.call('HSET', meta_key, member, meta)
+			redis.call('SET', member_key, meta, 'PX', member_ttl_ms)
+			redis.call('ZADD', connected_key, expiry_ms, member)
+			redis.call('ZREM', disconnected_key, member)
+			redis.call('INCR', mutation_version_key)
+			redis.call('INCR', event_id_key)
+
+			redis.call('EXPIRE', meta_key, key_ttl_seconds)
+			redis.call('EXPIRE', connected_key, key_ttl_seconds)
+			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+			redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+			return 1
+			`,
+			[]string{
+				networkPeerMetaKey(networkId),
+				networkPeerMemberKey(networkId, peer.ClientId),
+				networkPeerConnectedKey(networkId),
+				networkPeerDisconnectedKey(networkId),
+				networkPeerEventIdKey(networkId),
+				networkPeerMutationVersionKey(networkId, peer.ClientId),
+				networkPeerMutationReceiptKey(networkId, operationId),
+			},
+			member,
+			expectedMutationVersion,
+			metaBytes,
+			expiryMs,
+			ttl.Milliseconds(),
+			int64(networkPeerKeyTtl/time.Second),
+			int64(networkPeerMutationReceiptTtl/time.Second),
+		).Int()
+		if err != nil {
+			panic(err)
+		}
+		added = addedInt == 1
+		if added {
+			pruneNetworkPeers(ctx, r, networkId, pruneOperationId)
+		}
+	})
+	return
+}
+
+// The loader boundary keeps the ordering test deterministic without a
+// package-global hook. Production supplies GetProvideModes; a test can stop
+// the first load after the intent fence has been planted.
+func addNetworkPeerWithProvideModesLoader(
+	ctx context.Context,
+	networkId server.Id,
+	peer *NetworkPeer,
+	residentId server.Id,
+	ttl time.Duration,
+	loadProvideModes func() (map[ProvideMode]bool, error),
+) bool {
+	operationId := server.NewId()
+	pruneOperationId := server.NewId()
+	return retryNetworkPeerMutation(ctx, func() bool {
+		mutationVersion := prepareNetworkPeerMutation(ctx, networkId, peer.ClientId)
+		provideModes, err := loadProvideModes()
+		server.Raise(err)
+
+		registeredPeer := cloneNetworkPeer(peer)
+		registeredPeer.ProvideModes = sortedProvideModesList(provideModes)
+		if addNetworkPeerAtMutationVersion(
+			ctx,
+			networkId,
+			registeredPeer,
+			residentId,
+			ttl,
+			mutationVersion,
+			operationId,
+			pruneOperationId,
+		) {
+			return true
+		}
+		return false
+	})
+}
+
+// Registers a connected top-level client and publishes an updated event. The
+// provide modes in `peer` are only a profile snapshot: registration reloads
+// their canonical value behind the mutation fence so a concurrent SetProvide
+// cannot be overwritten by a stale announce.
 func AddNetworkPeer(
 	ctx context.Context,
 	networkId server.Id,
@@ -501,41 +755,105 @@ func AddNetworkPeer(
 	residentId server.Id,
 	ttl time.Duration,
 ) {
-	meta := &networkPeerMeta{
-		Peer:       peer,
-		ResidentId: residentId,
-	}
-	member := string(peer.ClientId.Bytes())
-	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
-
-	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
-		pipe.HSet(ctx, networkPeerMetaKey(networkId), member, meta.Bytes())
-		// the per-member key: `set` announces the (re-)registration to key-event
-		// listeners (PEERSSTREAMS2.md)
-		pipe.Set(ctx, networkPeerMemberKey(networkId, peer.ClientId), meta.Bytes(), ttl)
-		pipe.ZAdd(ctx, networkPeerConnectedKey(networkId), redis.Z{
-			Score:  float64(expiryMs),
-			Member: member,
-		})
-		pipe.ZRem(ctx, networkPeerDisconnectedKey(networkId), member)
-		pipe.Expire(ctx, networkPeerMetaKey(networkId), networkPeerKeyTtl)
-		pipe.Expire(ctx, networkPeerConnectedKey(networkId), networkPeerKeyTtl)
-		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			panic(err)
-		}
-
-		bumpNetworkPeerVersion(ctx, r, networkId)
-
-		pruneNetworkPeers(ctx, r, networkId)
+	addNetworkPeerWithProvideModesLoader(ctx, networkId, peer, residentId, ttl, func() (map[ProvideMode]bool, error) {
+		return GetProvideModes(ctx, peer.ClientId)
 	})
 }
 
-// RefreshNetworkPeer extends the connected expiry of a registered peer.
-// Returns false when the peer is not registered by `residentId`,
-// in which case the caller should re-add the peer.
+// Extends one exact registration without producing a visible event. A missing
+// member key is a lost registration, not permission to recreate metadata read
+// before a concurrent replacement.
+func refreshNetworkPeerAtMutationState(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	ttl time.Duration,
+	state networkPeerMutationState,
+	pruneOperationId server.Id,
+) (refreshed bool, conflict bool) {
+	member := string(clientId.Bytes())
+	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+	hasMutationVersionInt := 0
+	if state.hasMutationVersion {
+		hasMutationVersionInt = 1
+	}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		refreshedInt, err := r.Eval(
+			ctx,
+			`
+			local meta_key = KEYS[1]
+			local member_key = KEYS[2]
+			local connected_key = KEYS[3]
+			local disconnected_key = KEYS[4]
+			local mutation_version_key = KEYS[5]
+
+			local member = ARGV[1]
+			local expected_meta = ARGV[2]
+			local expected_version_exists = ARGV[3] == '1'
+			local expected_version = ARGV[4]
+			local expiry_ms = ARGV[5]
+			local member_ttl_ms = ARGV[6]
+			local key_ttl_seconds = ARGV[7]
+
+			if redis.call('HGET', meta_key, member) ~= expected_meta then
+				return 0
+			end
+			local mutation_version = redis.call('GET', mutation_version_key)
+			if expected_version_exists then
+				if mutation_version == false or mutation_version ~= expected_version then
+					return 0
+				end
+			elseif mutation_version ~= false then
+				return 0
+			end
+
+			local member_meta = redis.call('GET', member_key)
+			local member_ttl = redis.call('PTTL', member_key)
+			if member_meta == false or member_meta ~= expected_meta or member_ttl <= 0 then
+				return 2
+			end
+
+			if mutation_version == false then
+				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+			end
+			redis.call('ZADD', connected_key, expiry_ms, member)
+			redis.call('PEXPIRE', member_key, member_ttl_ms)
+			redis.call('EXPIRE', meta_key, key_ttl_seconds)
+			redis.call('EXPIRE', connected_key, key_ttl_seconds)
+			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+			return 1
+			`,
+			[]string{
+				networkPeerMetaKey(networkId),
+				networkPeerMemberKey(networkId, clientId),
+				networkPeerConnectedKey(networkId),
+				networkPeerDisconnectedKey(networkId),
+				networkPeerMutationVersionKey(networkId, clientId),
+			},
+			member,
+			state.metaBytes,
+			hasMutationVersionInt,
+			state.mutationVersion,
+			expiryMs,
+			ttl.Milliseconds(),
+			int64(networkPeerKeyTtl/time.Second),
+		).Int()
+		if err != nil {
+			panic(err)
+		}
+		refreshed = refreshedInt == 1
+		conflict = refreshedInt == 0
+		if refreshed {
+			pruneNetworkPeers(ctx, r, networkId, pruneOperationId)
+		}
+	})
+	return
+}
+
+// Extends the connected expiry only while the exact resident registration is
+// still current. False tells the caller to load a fresh profile and re-add.
 func RefreshNetworkPeer(
 	ctx context.Context,
 	networkId server.Id,
@@ -543,84 +861,150 @@ func RefreshNetworkPeer(
 	residentId server.Id,
 	ttl time.Duration,
 ) (ok bool) {
-	member := string(clientId.Bytes())
-
-	server.Redis(ctx, func(r server.RedisClient) {
-		metaBytes, _ := r.HGet(ctx, networkPeerMetaKey(networkId), member).Bytes()
-		meta, _ := loadNetworkPeerMeta(metaBytes)
+	pruneOperationId := server.NewId()
+	retryNetworkPeerMutation(ctx, func() bool {
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		server.Raise(err)
 		if meta == nil || meta.ResidentId != residentId {
-			return
+			return true
 		}
-
-		expiryMs := server.NowUtc().Add(ttl).UnixMilli()
-		pipe := r.TxPipeline()
-		pipe.ZAdd(ctx, networkPeerConnectedKey(networkId), redis.Z{
-			Score:  float64(expiryMs),
-			Member: member,
-		})
-		// extend the member key's ttl WITHOUT rewriting it: a refresh is not a
-		// visible change, and EXPIRE's `expire` notification is ignored by
-		// key-event listeners (PEERSSTREAMS2.md). Restore below if it vanished.
-		memberExpireCmd := pipe.Expire(ctx, networkPeerMemberKey(networkId, clientId), ttl)
-		pipe.Expire(ctx, networkPeerMetaKey(networkId), networkPeerKeyTtl)
-		pipe.Expire(ctx, networkPeerConnectedKey(networkId), networkPeerKeyTtl)
-		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			panic(err)
+		refreshed, conflict := refreshNetworkPeerAtMutationState(
+			ctx,
+			networkId,
+			clientId,
+			ttl,
+			state,
+			pruneOperationId,
+		)
+		if refreshed {
+			ok = true
+			return true
 		}
-		if !memberExpireCmd.Val() {
-			// the member key expired (e.g. missed refreshes through a redis
-			// hiccup) while the registration survived: restore it. The `set`
-			// notification re-announces the peer, which is correct here.
-			err := r.Set(ctx, networkPeerMemberKey(networkId, clientId), metaBytes, ttl).Err()
-			if err != nil {
-				panic(err)
-			}
+		if !conflict {
+			return true
 		}
-		ok = true
-
-		pruneNetworkPeers(ctx, r, networkId)
+		return false
 	})
 	return
 }
 
-// RemoveNetworkPeer removes a peer from the registry and publishes a
-// disconnect marker. The remove applies only when the peer is still
-// registered by `residentId`, so a replaced resident cannot remove the
-// replacement's registration.
+// Removes one exact registration, advances its mutation fence, and publishes
+// a disconnect marker in one transition.
+func removeNetworkPeerAtMutationState(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	state networkPeerMutationState,
+	operationId server.Id,
+) (removed bool) {
+	member := string(clientId.Bytes())
+	disconnectTimeMs := server.NowUtc().UnixMilli()
+	hasMutationVersionInt := 0
+	if state.hasMutationVersion {
+		hasMutationVersionInt = 1
+	}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		removedInt, err := r.Eval(
+			ctx,
+			`
+			local meta_key = KEYS[1]
+			local member_key = KEYS[2]
+			local connected_key = KEYS[3]
+			local disconnected_key = KEYS[4]
+			local event_id_key = KEYS[5]
+			local mutation_version_key = KEYS[6]
+			local mutation_receipt_key = KEYS[7]
+
+			local member = ARGV[1]
+			local expected_meta = ARGV[2]
+			local expected_version_exists = ARGV[3] == '1'
+			local expected_version = ARGV[4]
+			local disconnect_time_ms = ARGV[5]
+			local key_ttl_seconds = ARGV[6]
+			local receipt_ttl_seconds = ARGV[7]
+
+			local previous_result = redis.call('GET', mutation_receipt_key)
+			if previous_result ~= false then
+				return tonumber(previous_result)
+			end
+
+			if redis.call('HGET', meta_key, member) ~= expected_meta then
+				return 0
+			end
+			local mutation_version = redis.call('GET', mutation_version_key)
+			if expected_version_exists then
+				if mutation_version == false or mutation_version ~= expected_version then
+					return 0
+				end
+			elseif mutation_version ~= false then
+				return 0
+			end
+
+			if mutation_version == false then
+				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+			end
+			redis.call('INCR', mutation_version_key)
+			redis.call('HDEL', meta_key, member)
+			redis.call('DEL', member_key)
+			redis.call('ZREM', connected_key, member)
+			redis.call('ZADD', disconnected_key, disconnect_time_ms, member)
+			redis.call('INCR', event_id_key)
+
+			redis.call('EXPIRE', meta_key, key_ttl_seconds)
+			redis.call('EXPIRE', connected_key, key_ttl_seconds)
+			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+			redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+			return 1
+			`,
+			[]string{
+				networkPeerMetaKey(networkId),
+				networkPeerMemberKey(networkId, clientId),
+				networkPeerConnectedKey(networkId),
+				networkPeerDisconnectedKey(networkId),
+				networkPeerEventIdKey(networkId),
+				networkPeerMutationVersionKey(networkId, clientId),
+				networkPeerMutationReceiptKey(networkId, operationId),
+			},
+			member,
+			state.metaBytes,
+			hasMutationVersionInt,
+			state.mutationVersion,
+			disconnectTimeMs,
+			int64(networkPeerKeyTtl/time.Second),
+			int64(networkPeerMutationReceiptTtl/time.Second),
+		).Int()
+		if err != nil {
+			panic(err)
+		}
+		removed = removedInt == 1
+	})
+	return
+}
+
+// Removes a peer only while the exact resident registration read here is
+// current, so a delayed teardown cannot delete a replacement.
 func RemoveNetworkPeer(
 	ctx context.Context,
 	networkId server.Id,
 	clientId server.Id,
 	residentId server.Id,
 ) {
-	member := string(clientId.Bytes())
-
-	server.Redis(ctx, func(r server.RedisClient) {
-		metaBytes, _ := r.HGet(ctx, networkPeerMetaKey(networkId), member).Bytes()
-		meta, _ := loadNetworkPeerMeta(metaBytes)
+	operationId := server.NewId()
+	retryNetworkPeerMutation(ctx, func() bool {
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		server.Raise(err)
 		if meta == nil || meta.ResidentId != residentId {
-			return
+			return true
 		}
-
-		disconnectTime := server.NowUtc()
-		pipe := r.TxPipeline()
-		pipe.HDel(ctx, networkPeerMetaKey(networkId), member)
-		// `del` announces the clean disconnect to key-event listeners
-		pipe.Del(ctx, networkPeerMemberKey(networkId, clientId))
-		pipe.ZRem(ctx, networkPeerConnectedKey(networkId), member)
-		pipe.ZAdd(ctx, networkPeerDisconnectedKey(networkId), redis.Z{
-			Score:  float64(disconnectTime.UnixMilli()),
-			Member: member,
-		})
-		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			panic(err)
+		if removeNetworkPeerAtMutationState(ctx, networkId, clientId, state, operationId) {
+			return true
 		}
-
-		bumpNetworkPeerVersion(ctx, r, networkId)
+		return false
 	})
 }
 
@@ -857,9 +1241,9 @@ func CanConnectNetworkPeer(ctx context.Context, clientId server.Id) bool {
 	return !Pro().ConcurrentClientsExceeded(pro, connectedCount)
 }
 
-// UpdateNetworkPeerProvideModes updates the provide modes of a registered
-// peer and publishes an updated event. No-op when the client is not a
-// registered peer or the modes did not change.
+// Updates the provide modes of a registered peer and publishes an updated
+// event. An Add intent with no metadata is still fenced so its stale canonical
+// read cannot commit afterward.
 func UpdateNetworkPeerProvideModes(
 	ctx context.Context,
 	clientId server.Id,
@@ -872,77 +1256,182 @@ func UpdateNetworkPeerProvideModes(
 	updateNetworkPeerProvideModes(ctx, *networkId, clientId, provideModes)
 }
 
-func updateNetworkPeerProvideModes(
+// Compares both values from one optimistic snapshot, then advances the fence
+// before conditionally rewriting a healthy member. False means a concurrent
+// mutation won and the caller must reload both values.
+func updateNetworkPeerProvideModesAtMutationState(
 	ctx context.Context,
 	networkId server.Id,
 	clientId server.Id,
-	provideModes map[ProvideMode]bool,
-) {
+	provideModesList []ProvideMode,
+	state networkPeerMutationState,
+	operationId server.Id,
+) (complete bool) {
 	member := string(clientId.Bytes())
-	provideModesList := sortedProvideModesList(provideModes)
+	updatedMetaBytes := []byte{}
+	hasUpdatedMeta := false
+	if state.hasMeta {
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		server.Raise(err)
+		if meta != nil && meta.Peer != nil && !slices.Equal(meta.Peer.ProvideModes, provideModesList) {
+			meta.Peer = cloneNetworkPeer(meta.Peer)
+			meta.Peer.ProvideModes = slices.Clone(provideModesList)
+			updatedMetaBytes = meta.Bytes()
+			hasUpdatedMeta = true
+		}
+	}
+	hasMetaInt := 0
+	if state.hasMeta {
+		hasMetaInt = 1
+	}
+	hasMutationVersionInt := 0
+	if state.hasMutationVersion {
+		hasMutationVersionInt = 1
+	}
+	hasUpdatedMetaInt := 0
+	if hasUpdatedMeta {
+		hasUpdatedMetaInt = 1
+	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		metaBytes, _ := r.HGet(ctx, networkPeerMetaKey(networkId), member).Bytes()
-		meta, _ := loadNetworkPeerMeta(metaBytes)
-		if meta == nil {
-			// not a registered peer
-			return
-		}
-		if slices.Equal(meta.Peer.ProvideModes, provideModesList) {
-			// no change
-			return
-		}
-
-		meta.Peer.ProvideModes = provideModesList
-		updatedMetaBytes := meta.Bytes()
-
-		// Metadata, membership existence/TTL, resident ownership (encoded in
-		// the exact old metadata), and the version bump are one atomic
-		// transition. SET KEEPTTL would create a missing member without a TTL;
-		// this script instead refuses missing/persistent/stale registrations.
-		updated, err := r.Eval(
+		completeInt, err := r.Eval(
 			ctx,
 			`
 			local meta_key = KEYS[1]
 			local member_key = KEYS[2]
-			local event_id_key = KEYS[3]
-			local member = ARGV[1]
-			local expected_meta = ARGV[2]
-			local updated_meta = ARGV[3]
-			local event_ttl_seconds = ARGV[4]
+			local connected_key = KEYS[3]
+			local disconnected_key = KEYS[4]
+			local event_id_key = KEYS[5]
+			local mutation_version_key = KEYS[6]
+			local mutation_receipt_key = KEYS[7]
 
-			local hash_meta = redis.call('HGET', meta_key, member)
-			local member_meta = redis.call('GET', member_key)
-			local member_ttl_ms = redis.call('PTTL', member_key)
-			if hash_meta == false or member_meta == false or member_ttl_ms <= 0 then
+			local member = ARGV[1]
+			local expected_meta_exists = ARGV[2] == '1'
+			local expected_meta = ARGV[3]
+			local expected_version_exists = ARGV[4] == '1'
+			local expected_version = ARGV[5]
+			local updated_meta_exists = ARGV[6] == '1'
+			local updated_meta = ARGV[7]
+			local key_ttl_seconds = ARGV[8]
+			local receipt_ttl_seconds = ARGV[9]
+
+			local previous_result = redis.call('GET', mutation_receipt_key)
+			if previous_result ~= false then
+				return tonumber(previous_result)
+			end
+
+			local current_meta = redis.call('HGET', meta_key, member)
+			if expected_meta_exists then
+				if current_meta == false or current_meta ~= expected_meta then
+					return 0
+				end
+			elseif current_meta ~= false then
 				return 0
 			end
-			if hash_meta ~= expected_meta or member_meta ~= expected_meta then
+
+			local mutation_version = redis.call('GET', mutation_version_key)
+			if expected_version_exists then
+				if mutation_version == false or mutation_version ~= expected_version then
+					return 0
+				end
+			elseif mutation_version ~= false then
 				return 0
+			end
+
+			-- No registration and no Add intent: a later Add necessarily plants
+			-- its fence after this canonical update and therefore reads it.
+			if current_meta == false and mutation_version == false then
+				redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+				return 1
+			end
+
+			-- Legacy registrations have metadata but no mutation key. Initialize
+			-- them in this same transition before advancing the fence.
+			if mutation_version == false then
+				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+			end
+			redis.call('INCR', mutation_version_key)
+			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+
+			-- An in-flight Add has an intent key but no metadata. Advancing the
+			-- key above is the entire update; its stale Add CAS must now retry.
+			if current_meta == false then
+				redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+				return 1
+			end
+			if not updated_meta_exists then
+				redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+				return 1
+			end
+
+			local member_meta = redis.call('GET', member_key)
+			local member_ttl_ms = redis.call('PTTL', member_key)
+			if member_meta == false or member_meta ~= expected_meta or member_ttl_ms <= 0 then
+				redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+				return 1
 			end
 
 			redis.call('HSET', meta_key, member, updated_meta)
 			redis.call('SET', member_key, updated_meta, 'PX', member_ttl_ms)
 			redis.call('INCR', event_id_key)
-			redis.call('EXPIRE', event_id_key, event_ttl_seconds)
+			redis.call('EXPIRE', meta_key, key_ttl_seconds)
+			redis.call('EXPIRE', connected_key, key_ttl_seconds)
+			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+			redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
 			return 1
 			`,
 			[]string{
 				networkPeerMetaKey(networkId),
 				networkPeerMemberKey(networkId, clientId),
+				networkPeerConnectedKey(networkId),
+				networkPeerDisconnectedKey(networkId),
 				networkPeerEventIdKey(networkId),
+				networkPeerMutationVersionKey(networkId, clientId),
+				networkPeerMutationReceiptKey(networkId, operationId),
 			},
 			member,
-			metaBytes,
+			hasMetaInt,
+			state.metaBytes,
+			hasMutationVersionInt,
+			state.mutationVersion,
+			hasUpdatedMetaInt,
 			updatedMetaBytes,
 			int64(networkPeerKeyTtl/time.Second),
+			int64(networkPeerMutationReceiptTtl/time.Second),
 		).Int()
 		if err != nil {
 			panic(err)
 		}
-		if updated != 1 {
-			return
+		complete = completeInt == 1
+	})
+	return
+}
+
+// Retries only when the exact registry snapshot changed between its read and
+// Lua transition. The shared delay, context, and attempt cap bound sustained
+// churn.
+func updateNetworkPeerProvideModes(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	provideModes map[ProvideMode]bool,
+) bool {
+	provideModesList := sortedProvideModesList(provideModes)
+	operationId := server.NewId()
+	return retryNetworkPeerMutation(ctx, func() bool {
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		if updateNetworkPeerProvideModesAtMutationState(
+			ctx,
+			networkId,
+			clientId,
+			provideModesList,
+			state,
+			operationId,
+		) {
+			return true
 		}
+		return false
 	})
 }
 
@@ -954,12 +1443,114 @@ func networkPeerDisconnectMarker(clientId server.Id, disconnectTime time.Time) *
 	}
 }
 
-// pruneNetworkPeers moves expired connected peers to disconnect markers and
-// ages out markers older than the disconnected window. Piggybacks on peer
-// activity (add/refresh), so a crashed resident's peer is pruned by the other
-// residents of the network. A concurrent refresh can race the prune at the
-// expiry boundary; the refresh then re-adds on its next poll (self-healing).
-func pruneNetworkPeers(ctx context.Context, r server.RedisClient, networkId server.Id) {
+// Rechecks scanned candidates against the live connected score in the same
+// transition that removes them. A refresh or re-add after the scan moves the
+// score past `cutoffMs`, so the stale prune cannot delete that registration.
+func pruneNetworkPeerCandidates(
+	ctx context.Context,
+	r server.RedisClient,
+	networkId server.Id,
+	candidates []redis.Z,
+	cutoffMs int64,
+	operationId server.Id,
+) (prunedCount int) {
+	if len(candidates) == 0 {
+		return 0
+	}
+
+	keys := []string{
+		networkPeerMetaKey(networkId),
+		networkPeerConnectedKey(networkId),
+		networkPeerDisconnectedKey(networkId),
+		networkPeerEventIdKey(networkId),
+		networkPeerMutationReceiptKey(networkId, operationId),
+	}
+	args := []any{
+		cutoffMs,
+		int64(networkPeerKeyTtl / time.Second),
+		int64(networkPeerMutationReceiptTtl / time.Second),
+	}
+	for _, candidate := range candidates {
+		member := candidate.Member.(string)
+		clientId := server.Id([]byte(member))
+		keys = append(
+			keys,
+			networkPeerMemberKey(networkId, clientId),
+			networkPeerMutationVersionKey(networkId, clientId),
+		)
+		args = append(args, member)
+	}
+
+	var err error
+	prunedCount, err = r.Eval(
+		ctx,
+		`
+		local meta_key = KEYS[1]
+		local connected_key = KEYS[2]
+		local disconnected_key = KEYS[3]
+		local event_id_key = KEYS[4]
+		local mutation_receipt_key = KEYS[5]
+
+		local cutoff_ms = tonumber(ARGV[1])
+		local key_ttl_seconds = ARGV[2]
+		local receipt_ttl_seconds = ARGV[3]
+		local pruned_count = 0
+
+		local previous_result = redis.call('GET', mutation_receipt_key)
+		if previous_result ~= false then
+			return tonumber(previous_result)
+		end
+
+		for candidate_index = 1, #ARGV - 3 do
+			local member = ARGV[candidate_index + 3]
+			local member_key_index = 6 + (candidate_index - 1) * 2
+			local member_key = KEYS[member_key_index]
+			local mutation_version_key = KEYS[member_key_index + 1]
+			local current_expiry_ms = redis.call('ZSCORE', connected_key, member)
+
+			if current_expiry_ms ~= false and tonumber(current_expiry_ms) <= cutoff_ms then
+				local mutation_version = redis.call('GET', mutation_version_key)
+				if mutation_version == false then
+					redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+				end
+				redis.call('INCR', mutation_version_key)
+				redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+				redis.call('HDEL', meta_key, member)
+				redis.call('DEL', member_key)
+				redis.call('ZREM', connected_key, member)
+				redis.call('ZADD', disconnected_key, current_expiry_ms, member)
+				pruned_count = pruned_count + 1
+			end
+		end
+
+		if pruned_count > 0 then
+			redis.call('INCR', event_id_key)
+			redis.call('EXPIRE', meta_key, key_ttl_seconds)
+			redis.call('EXPIRE', connected_key, key_ttl_seconds)
+			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+		end
+		redis.call('SET', mutation_receipt_key, pruned_count, 'EX', receipt_ttl_seconds)
+		return pruned_count
+		`,
+		keys,
+		args...,
+	).Int()
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
+// Moves expired connected peers to disconnect markers and ages old markers
+// out. It piggybacks on peer activity; the mutation helper makes the scan safe
+// against a concurrent refresh or re-add.
+func pruneNetworkPeers(
+	ctx context.Context,
+	r server.RedisClient,
+	networkId server.Id,
+	operationId server.Id,
+) {
 	nowMs := server.NowUtc().UnixMilli()
 
 	expired, err := r.ZRangeByScoreWithScores(ctx, networkPeerConnectedKey(networkId), &redis.ZRangeBy{
@@ -969,35 +1560,7 @@ func pruneNetworkPeers(ctx context.Context, r server.RedisClient, networkId serv
 	if err != nil {
 		panic(err)
 	}
-
-	if 0 < len(expired) {
-		markers := []*NetworkPeer{}
-		pipe := r.TxPipeline()
-		for _, z := range expired {
-			member := z.Member.(string)
-			clientId := server.Id([]byte(member))
-			expiryTime := time.UnixMilli(int64(z.Score))
-			markers = append(markers, networkPeerDisconnectMarker(clientId, expiryTime))
-			pipe.HDel(ctx, networkPeerMetaKey(networkId), member)
-			// align the key-event disconnect (`del`, or the earlier `expired` if
-			// the key already lapsed) with the marker
-			pipe.Del(ctx, networkPeerMemberKey(networkId, clientId))
-			pipe.ZRem(ctx, networkPeerConnectedKey(networkId), member)
-			pipe.ZAdd(ctx, networkPeerDisconnectedKey(networkId), redis.Z{
-				Score:  z.Score,
-				Member: member,
-			})
-		}
-		// the ZAdd above can create the disconnected key (Expire in add/refresh
-		// is a no-op on a missing key), which would otherwise live ttl-less
-		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			panic(err)
-		}
-
-		bumpNetworkPeerVersion(ctx, r, networkId)
-	}
+	pruneNetworkPeerCandidates(ctx, r, networkId, expired, nowMs, operationId)
 
 	// age out old disconnect markers
 	err = r.ZRemRangeByScore(

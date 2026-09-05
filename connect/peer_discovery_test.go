@@ -273,10 +273,11 @@ func (self *peerDiscoveryEnv) newTransportWithMode(
 	)
 }
 
-// setProvideModes announces the provide modes and waits for the platform ack
+// setProvideModes announces the provide modes and waits for the platform's
+// committed out-of-band ack, not the in-band delivery-only ack.
 func (self *peerDiscoveryEnv) setProvideModes(client *connect.Client, provideModes map[protocol.ProvideMode]bool) {
 	provideAck := make(chan error, 1)
-	client.ContractManager().SetProvideModesWithReturnTrafficWithAckCallback(
+	client.ContractManager().SetProvideModesWithReturnTrafficWithOobAckCallback(
 		provideModes,
 		func(err error) {
 			select {

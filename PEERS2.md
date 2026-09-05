@@ -35,7 +35,7 @@ and all subscription machinery, poll the counter.
 
 ### 3.1 Writer side (delta from v1: -SPublish, +prune bump)
 
-All mutations already flow through peer_model.go with per-network TxPipelines.
+All mutations flow through peer_model.go on the per-network Redis slot.
 - `AddNetworkPeer` / re-add: keep the eid INCR (drop SPublish). Heartbeat
   REFRESH (ttl extension, no membership/metadata change) must NOT bump —
   v1 already distinguishes refresh (no publish) from re-add (publish).
@@ -56,6 +56,45 @@ All mutations already flow through peer_model.go with per-network TxPipelines.
   poll contract.**
 - Counter key hygiene: `Expire {np_}eid networkPeerKeyTtl` alongside every
   bump (already the family pattern, 24h refresh-on-touch).
+
+Every ordinary-client mutation is one same-slot Lua transition. A TTL'd
+per-client `{np_<networkId>}mv:<clientId>` version fences the metadata hash,
+member key, connected/disconnected sets, and visible event id:
+
+- Add plants/reads the version before loading canonical provide modes and
+  commits only if the version is unchanged. A conflict reloads the canonical
+  modes and retries under the caller's context.
+- A provide update advances an existing registration's version, or an Add
+  intent's version even while metadata is absent. If neither exists it leaves
+  no key: any later Add necessarily plants its intent after the committed
+  update and reads the new canonical modes.
+- Refresh compares the exact metadata and version before extending expiry. A
+  vanished member returns false so the resident reloads and re-adds; it never
+  resurrects a metadata snapshot read before a replacement.
+- Remove compares the exact metadata and version, then advances the version,
+  removes the member, records the marker, and bumps the event id atomically.
+- Prune's zset scan produces candidates only. Its Lua transition rechecks each
+  live score against the cutoff and advances the deleted peer's version, so a
+  refresh or re-add after the scan cannot be deleted by stale prune work.
+
+Conflict retries are rate-limited, context-aware, and capped at 16 attempts.
+The fixed cap matters for resident teardown, which deliberately uses a
+background context after ownership has transferred: sustained replacement
+churn may leave cleanup to TTL/prune, but cannot retain that teardown forever.
+
+Add, provide update, remove, and prune carry a stable logical operation id.
+Their Lua transitions check and atomically write a five-minute same-slot
+`{np_<networkId>}mr:<operationId>` receipt before returning success. If Redis
+applies a transition but its response is lost, either go-redis command replay
+or the server Redis callback replay observes the receipt and returns the
+original result without advancing the mutation version or event id twice.
+Receipts are deliberately much longer than the Redis retry window and expire
+independently to bound state. Refresh, intent preparation, and disconnect
+marker aging use only replay-idempotent absolute writes and need no receipt.
+
+The version is a per-client string rather than a field in a per-network hash.
+Its 24-hour TTL bounds departed-client state even while other clients keep the
+network's registry active. The change adds no database or gob migration.
 
 ### 3.2 Reader side (replaces NetworkPeerListener's transport)
 
@@ -143,8 +182,12 @@ failure: peers lists go stale. That is the entire blast radius.
 
 ## 6. Rollout plan (this release)
 
-1. Implement behind the existing `EnableNetworkPeers` flag (both settings
-   structs). Default stays false.
+1. Use the existing `EnableNetworkPeers` flag (both settings structs) as the
+   mutation-fence rollout barrier. The fence is understood only by the new
+   writer: disable peer registration, drain every old connect writer, deploy
+   the fenced build, then re-enable registration. An old Add ignores the new
+   version key; enabling before the old writers drain would retain the original
+   race during that overlap. No data migration or registry flush is required.
 2. Tests: rewire peer lifecycle tests (registration announce-driven + poll
    delivery — the v1 tests asserting pubsub delivery become poll-tick
    assertions with a short PollInterval); keep TestNetworkPeerEventGapReset
@@ -190,9 +233,9 @@ failure: peers lists go stale. That is the entire blast radius.
 
 ## 9. Implementation inventory (files)
 
-- `model/peer_model.go`: publishNetworkPeerEvent → bumpNetworkPeerVersion
-  (INCR + Expire, no SPublish); prune bump; NetworkPeerListener → poll loop
-  (keep accumulator/diff/reset internals); delete subscribe plumbing.
+- `model/peer_model.go`: writer Lua transitions INCR + Expire the event id
+  without SPublish; prune bump; NetworkPeerListener → poll loop (keep
+  accumulator/diff/reset internals); delete subscribe plumbing.
 - `connect/resident.go`: listener construction unchanged apart from settings
   (poll interval); heartbeat/teardown already correct from the outage fixes.
 - `connect/transport_announce.go`: registration already in place (flag-gated);

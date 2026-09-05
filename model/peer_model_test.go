@@ -5,12 +5,14 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-playground/assert/v2"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -198,6 +200,92 @@ func splitNetworkPeers(peers []*NetworkPeer) (connected map[server.Id]*NetworkPe
 	return
 }
 
+// Writes the pre-fence registry shape so rolling-upgrade compatibility tests
+// exercise metadata and member keys without a mutation-version key.
+func addLegacyNetworkPeer(
+	t testing.TB,
+	ctx context.Context,
+	networkId server.Id,
+	peer *NetworkPeer,
+	residentId server.Id,
+	ttl time.Duration,
+) {
+	t.Helper()
+	meta := &networkPeerMeta{
+		Peer:       peer,
+		ResidentId: residentId,
+	}
+	metaBytes := meta.Bytes()
+	member := string(peer.ClientId.Bytes())
+	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		pipe.HSet(ctx, networkPeerMetaKey(networkId), member, metaBytes)
+		pipe.Set(ctx, networkPeerMemberKey(networkId, peer.ClientId), metaBytes, ttl)
+		pipe.ZAdd(ctx, networkPeerConnectedKey(networkId), redis.Z{
+			Score:  float64(expiryMs),
+			Member: member,
+		})
+		pipe.ZRem(ctx, networkPeerDisconnectedKey(networkId), member)
+		pipe.Set(ctx, networkPeerEventIdKey(networkId), 1, networkPeerKeyTtl)
+		pipe.Expire(ctx, networkPeerMetaKey(networkId), networkPeerKeyTtl)
+		pipe.Expire(ctx, networkPeerConnectedKey(networkId), networkPeerKeyTtl)
+		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
+		if _, err := pipe.Exec(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if r.Exists(ctx, networkPeerMutationVersionKey(networkId, peer.ClientId)).Val() != 0 {
+			t.Fatal("legacy registration unexpectedly has a mutation-version key")
+		}
+	})
+}
+
+// A transient exact-value conflict remains retryable and converges before the
+// finite attempt budget is consumed.
+func TestNetworkPeerMutationRetryCompletesAfterConflict(t *testing.T) {
+	attempts := 0
+	complete := retryNetworkPeerMutation(context.Background(), func() bool {
+		attempts++
+		return attempts == 3
+	})
+	if !complete || attempts != 3 {
+		t.Fatalf("retry result = %v after %d attempts; want true after 3", complete, attempts)
+	}
+}
+
+// Cancellation stops a conflicting mutation at its next rate-limited retry
+// boundary rather than consuming the remaining attempt budget.
+func TestNetworkPeerMutationRetryStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	complete := retryNetworkPeerMutation(ctx, func() bool {
+		attempts++
+		cancel()
+		return false
+	})
+	if complete || attempts != 1 {
+		t.Fatalf("retry result = %v after %d attempts; want false after 1", complete, attempts)
+	}
+}
+
+// A caller without a cancellable context still returns after the fixed
+// attempt budget when every optimistic comparison conflicts.
+func TestNetworkPeerMutationRetryStopsAtAttemptLimit(t *testing.T) {
+	attempts := 0
+	complete := retryNetworkPeerMutation(context.Background(), func() bool {
+		attempts++
+		return false
+	})
+	if complete || attempts != networkPeerMutationMaxAttempts {
+		t.Fatalf(
+			"retry result = %v after %d attempts; want false after %d",
+			complete,
+			attempts,
+			networkPeerMutationMaxAttempts,
+		)
+	}
+}
+
 func TestNetworkPeerLifecycle(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -247,9 +335,25 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 			ClientId:     clientId2,
 			ProvideModes: []ProvideMode{ProvideModeStream},
 		}
+		addPeer := func(peer *NetworkPeer, residentId server.Id) {
+			provideModes := map[ProvideMode]bool{}
+			for _, provideMode := range peer.ProvideModes {
+				provideModes[provideMode] = true
+			}
+			addNetworkPeerWithProvideModesLoader(
+				ctx,
+				networkId,
+				peer,
+				residentId,
+				ttl,
+				func() (map[ProvideMode]bool, error) {
+					return provideModes, nil
+				},
+			)
+		}
 
-		AddNetworkPeer(ctx, networkId, peer1, residentId1, ttl)
-		AddNetworkPeer(ctx, networkId, peer2, residentId2, ttl)
+		addPeer(peer1, residentId1)
+		addPeer(peer2, residentId2)
 
 		eventId, peers := GetNetworkPeers(ctx, networkId)
 		assert.Equal(t, eventId, GetNetworkPeerEventId(ctx, networkId))
@@ -296,7 +400,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		assert.Equal(t, len(c.Markers()), 1)
 
 		// a reconnect clears the marker
-		AddNetworkPeer(ctx, networkId, peer1, residentId1, ttl)
+		addPeer(peer1, residentId1)
 		_, peers = GetNetworkPeers(ctx, networkId)
 		connected, markers = splitNetworkPeers(peers)
 		assert.Equal(t, len(connected), 2)
@@ -447,6 +551,751 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		}
 		connected = c.Connected()
 		assert.Equal(t, connected[clientId].ProvideModes, []ProvideMode{ProvideModeStream})
+	})
+}
+
+// A provide commit that finishes before registration must be loaded again;
+// the profile captured before SetProvide is not authoritative at Add time.
+func TestNetworkPeerProvideUpdateBeforeAddUsesCanonicalModes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "provide-before-add", server.NewId())
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "device a", "spec a")
+		_, topLevel, _, staleProfile, _ := GetNetworkPeerProfile(ctx, clientId)
+		if !topLevel || staleProfile == nil {
+			t.Fatal("client profile is not an active top-level peer")
+		}
+		if len(staleProfile.ProvideModes) != 0 {
+			t.Fatalf("initial provide modes = %v; want empty", staleProfile.ProvideModes)
+		}
+
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModeNetwork: []byte("network-key"),
+			ProvideModePublic:  []byte("public-key"),
+			ProvideModeStream:  []byte("stream-key"),
+		})
+		server.Redis(ctx, func(r server.RedisClient) {
+			if r.Exists(ctx, networkPeerMutationVersionKey(networkId, clientId)).Val() != 0 {
+				t.Fatal("update without a registration or Add intent retained a mutation key")
+			}
+		})
+
+		AddNetworkPeer(ctx, networkId, staleProfile, residentId, time.Minute)
+		peer := GetNetworkPeerMember(ctx, networkId, clientId)
+		if peer == nil {
+			t.Fatal("peer was not registered")
+		}
+		wantProvideModes := []ProvideMode{ProvideModeNetwork, ProvideModePublic, ProvideModeStream}
+		if !slices.Equal(peer.ProvideModes, wantProvideModes) {
+			t.Fatalf("registered provide modes = %v; want %v", peer.ProvideModes, wantProvideModes)
+		}
+		if len(staleProfile.ProvideModes) != 0 {
+			t.Fatalf("Add mutated the stale caller profile: %v", staleProfile.ProvideModes)
+		}
+	})
+}
+
+// The local loader barrier fixes the harmful order: Add has read stale modes,
+// SetProvide fences its still-absent metadata, and Add must reload before it
+// can commit.
+func TestNetworkPeerProvideUpdateDuringAddRetries(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		staleProvideModes := map[ProvideMode]bool{ProvideModePublic: true}
+		currentProvideModes := map[ProvideMode]bool{
+			ProvideModeNetwork: true,
+			ProvideModePublic:  true,
+			ProvideModeStream:  true,
+		}
+		firstLoad := make(chan struct{})
+		releaseFirstLoad := make(chan struct{})
+		addDone := make(chan struct{})
+		var releaseFirstLoadOnce sync.Once
+		defer releaseFirstLoadOnce.Do(func() {
+			close(releaseFirstLoad)
+		})
+		loadCount := 0
+
+		go func() {
+			defer close(addDone)
+			addNetworkPeerWithProvideModesLoader(
+				ctx,
+				networkId,
+				&NetworkPeer{ClientId: clientId, Principal: "svc-a"},
+				residentId,
+				time.Minute,
+				func() (map[ProvideMode]bool, error) {
+					loadCount += 1
+					if loadCount == 1 {
+						loadedProvideModes := staleProvideModes
+						close(firstLoad)
+						<-releaseFirstLoad
+						return loadedProvideModes, nil
+					}
+					return currentProvideModes, nil
+				},
+			)
+		}()
+
+		select {
+		case <-firstLoad:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Add did not reach its fenced provide-mode load")
+		}
+		updateNetworkPeerProvideModes(ctx, networkId, clientId, currentProvideModes)
+		releaseFirstLoadOnce.Do(func() {
+			close(releaseFirstLoad)
+		})
+		select {
+		case <-addDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Add did not finish after the provide update")
+		}
+
+		if loadCount != 2 {
+			t.Fatalf("provide-mode load count = %d; want one stale read and one retry", loadCount)
+		}
+		peer := GetNetworkPeerMember(ctx, networkId, clientId)
+		if peer == nil {
+			t.Fatal("peer was not registered")
+		}
+		wantProvideModes := []ProvideMode{ProvideModeNetwork, ProvideModePublic, ProvideModeStream}
+		if !slices.Equal(peer.ProvideModes, wantProvideModes) {
+			t.Fatalf("registered provide modes = %v; want %v", peer.ProvideModes, wantProvideModes)
+		}
+	})
+}
+
+// Continuous provide mutations can reject every Add CAS, but even a caller
+// with a background context stops after the shared finite attempt budget.
+func TestNetworkPeerAddStopsAtConflictAttemptLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		loadCount := 0
+		added := addNetworkPeerWithProvideModesLoader(
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: clientId},
+			server.NewId(),
+			time.Minute,
+			func() (map[ProvideMode]bool, error) {
+				loadCount++
+				if !updateNetworkPeerProvideModes(
+					ctx,
+					networkId,
+					clientId,
+					map[ProvideMode]bool{ProvideModeStream: true},
+				) {
+					t.Fatal("conflicting provide update did not commit")
+				}
+				return map[ProvideMode]bool{}, nil
+			},
+		)
+		if added {
+			t.Fatal("Add committed despite a conflict in every attempt")
+		}
+		if loadCount != networkPeerMutationMaxAttempts {
+			t.Fatalf("provide-mode loads = %d; want %d", loadCount, networkPeerMutationMaxAttempts)
+		}
+		if GetNetworkPeerMember(ctx, networkId, clientId) != nil {
+			t.Fatal("exhausted Add left registered metadata")
+		}
+	})
+}
+
+// A stale writer holding a consumed version cannot overwrite the modes from a
+// completed update, even before the normal Add retry loop runs.
+func TestNetworkPeerStaleAddAfterProvideUpdateIsRejected(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		expectedMutationVersion := prepareNetworkPeerMutation(ctx, networkId, clientId)
+
+		provideModes := map[ProvideMode]bool{ProvideModeStream: true}
+		updateNetworkPeerProvideModes(ctx, networkId, clientId, provideModes)
+		added := addNetworkPeerAtMutationVersion(
+			ctx,
+			networkId,
+			&NetworkPeer{
+				ClientId:     clientId,
+				ProvideModes: []ProvideMode{ProvideModePublic},
+			},
+			residentId,
+			time.Minute,
+			expectedMutationVersion,
+			server.NewId(),
+			server.NewId(),
+		)
+		if added {
+			t.Fatal("stale Add committed after a provide update advanced its fence")
+		}
+		if GetNetworkPeerMember(ctx, networkId, clientId) != nil {
+			t.Fatal("rejected stale Add left registered metadata")
+		}
+
+		addNetworkPeerWithProvideModesLoader(
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: clientId},
+			residentId,
+			time.Minute,
+			func() (map[ProvideMode]bool, error) {
+				return provideModes, nil
+			},
+		)
+		peer := GetNetworkPeerMember(ctx, networkId, clientId)
+		if peer == nil || !slices.Equal(peer.ProvideModes, []ProvideMode{ProvideModeStream}) {
+			t.Fatalf("retry registered peer = %+v; want stream mode", peer)
+		}
+	})
+}
+
+// Registration stores deterministic mode order and an independent copy of
+// every adjacent profile field while replacing only the stale modes.
+func TestNetworkPeerAddSortsModesAndPreservesProfile(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		cases := []struct {
+			provideModes     map[ProvideMode]bool
+			wantProvideModes []ProvideMode
+		}{
+			{
+				provideModes:     map[ProvideMode]bool{},
+				wantProvideModes: []ProvideMode{},
+			},
+			{
+				provideModes:     map[ProvideMode]bool{ProvideModeNetwork: true},
+				wantProvideModes: []ProvideMode{ProvideModeNetwork},
+			},
+			{
+				provideModes:     map[ProvideMode]bool{ProvideModePublic: true},
+				wantProvideModes: []ProvideMode{ProvideModePublic},
+			},
+			{
+				provideModes:     map[ProvideMode]bool{ProvideModeStream: true},
+				wantProvideModes: []ProvideMode{ProvideModeStream},
+			},
+			{
+				provideModes: map[ProvideMode]bool{
+					ProvideModeStream:  true,
+					ProvideModePublic:  true,
+					ProvideModeNetwork: true,
+				},
+				wantProvideModes: []ProvideMode{ProvideModeNetwork, ProvideModePublic, ProvideModeStream},
+			},
+		}
+
+		for i, c := range cases {
+			networkId := server.NewId()
+			clientId := server.NewId()
+			profile := &NetworkPeer{
+				ClientId:     clientId,
+				ProvideModes: []ProvideMode{ProvideModeStream, ProvideModeNetwork},
+				Principal:    "svc-a",
+				Roles:        []string{"admin", "provider"},
+				DeviceName:   "device a",
+				DeviceSpec:   "spec a",
+			}
+			addNetworkPeerWithProvideModesLoader(
+				ctx,
+				networkId,
+				profile,
+				server.NewId(),
+				time.Minute,
+				func() (map[ProvideMode]bool, error) {
+					return c.provideModes, nil
+				},
+			)
+
+			peer := GetNetworkPeerMember(ctx, networkId, clientId)
+			if peer == nil {
+				t.Fatalf("case %d did not register a peer", i)
+			}
+			if !slices.Equal(peer.ProvideModes, c.wantProvideModes) {
+				t.Errorf("case %d modes = %v; want %v", i, peer.ProvideModes, c.wantProvideModes)
+			}
+			if peer.Principal != profile.Principal ||
+				!slices.Equal(peer.Roles, profile.Roles) ||
+				peer.DeviceName != profile.DeviceName ||
+				peer.DeviceSpec != profile.DeviceSpec {
+				t.Errorf("case %d changed adjacent profile fields: got %+v; source %+v", i, peer, profile)
+			}
+			wantSourceModes := []ProvideMode{ProvideModeStream, ProvideModeNetwork}
+			if !slices.Equal(profile.ProvideModes, wantSourceModes) {
+				t.Errorf("case %d mutated source modes = %v; want %v", i, profile.ProvideModes, wantSourceModes)
+			}
+		}
+	})
+}
+
+// A refresh admitted against an old resident snapshot must not extend the
+// replacement registration, even if the replacement has identical metadata.
+func TestNetworkPeerStaleRefreshCannotTouchReplacement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		oldResidentId := server.NewId()
+		newResidentId := server.NewId()
+		peer := &NetworkPeer{ClientId: clientId, Principal: "svc-a"}
+		loadProvideModes := func() (map[ProvideMode]bool, error) {
+			return map[ProvideMode]bool{}, nil
+		}
+
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, peer, oldResidentId, time.Minute, loadProvideModes)
+		staleState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, peer, newResidentId, time.Minute, loadProvideModes)
+		var replacementExpiry float64
+		server.Redis(ctx, func(r server.RedisClient) {
+			replacementExpiry = r.ZScore(ctx, networkPeerConnectedKey(networkId), string(clientId.Bytes())).Val()
+		})
+
+		refreshed, conflict := refreshNetworkPeerAtMutationState(
+			ctx,
+			networkId,
+			clientId,
+			10*time.Minute,
+			staleState,
+			server.NewId(),
+		)
+		if refreshed {
+			t.Fatal("stale refresh changed a replacement registration")
+		}
+		if !conflict {
+			t.Fatal("stale refresh was not rejected as a mutation conflict")
+		}
+		currentState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		currentMeta, err := loadNetworkPeerMeta(currentState.metaBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if currentMeta == nil || currentMeta.ResidentId != newResidentId {
+			t.Fatalf("current resident = %+v; want replacement %s", currentMeta, newResidentId)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			currentExpiry := r.ZScore(ctx, networkPeerConnectedKey(networkId), string(clientId.Bytes())).Val()
+			if currentExpiry != replacementExpiry {
+				t.Fatalf("stale refresh changed replacement expiry from %f to %f", replacementExpiry, currentExpiry)
+			}
+		})
+	})
+}
+
+// A delayed teardown compares both metadata and mutation version, so it cannot
+// delete a replacement that committed after the teardown read.
+func TestNetworkPeerStaleRemoveCannotDeleteReplacement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		oldResidentId := server.NewId()
+		newResidentId := server.NewId()
+		peer := &NetworkPeer{ClientId: clientId, Principal: "svc-a"}
+		loadProvideModes := func() (map[ProvideMode]bool, error) {
+			return map[ProvideMode]bool{}, nil
+		}
+
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, peer, oldResidentId, time.Minute, loadProvideModes)
+		staleState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, peer, newResidentId, time.Minute, loadProvideModes)
+		if removeNetworkPeerAtMutationState(ctx, networkId, clientId, staleState, server.NewId()) {
+			t.Fatal("stale remove deleted a replacement registration")
+		}
+
+		currentState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		currentMeta, err := loadNetworkPeerMeta(currentState.metaBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if currentMeta == nil || currentMeta.ResidentId != newResidentId {
+			t.Fatalf("current resident = %+v; want replacement %s", currentMeta, newResidentId)
+		}
+		_, peers := GetNetworkPeers(ctx, networkId)
+		connected, markers := splitNetworkPeers(peers)
+		if connected[clientId] == nil || markers[clientId] != nil {
+			t.Fatalf("replacement state after stale remove: connected=%+v markers=%+v", connected, markers)
+		}
+	})
+}
+
+// A prune scan is only a candidate list. Refreshing a candidate before the
+// Lua transition moves its live score, and the stale scan must leave it alone.
+func TestNetworkPeerPruneRechecksAfterRefresh(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		addNetworkPeerWithProvideModesLoader(
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: clientId},
+			residentId,
+			time.Minute,
+			func() (map[ProvideMode]bool, error) {
+				return map[ProvideMode]bool{}, nil
+			},
+		)
+
+		cutoffMs := server.NowUtc().UnixMilli()
+		member := string(clientId.Bytes())
+		var candidates []redis.Z
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.ZAdd(ctx, networkPeerConnectedKey(networkId), redis.Z{
+				Score:  float64(cutoffMs - 1),
+				Member: member,
+			}).Err())
+			var err error
+			candidates, err = r.ZRangeByScoreWithScores(ctx, networkPeerConnectedKey(networkId), &redis.ZRangeBy{
+				Min: "-inf",
+				Max: strconv.FormatInt(cutoffMs, 10),
+			}).Result()
+			server.Raise(err)
+		})
+		if len(candidates) != 1 {
+			t.Fatalf("prune candidates = %d; want 1", len(candidates))
+		}
+		if !RefreshNetworkPeer(ctx, networkId, clientId, residentId, time.Minute) {
+			t.Fatal("refresh did not repair the candidate's expiry")
+		}
+		eventId := GetNetworkPeerEventId(ctx, networkId)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			if prunedCount := pruneNetworkPeerCandidates(
+				ctx,
+				r,
+				networkId,
+				candidates,
+				cutoffMs,
+				server.NewId(),
+			); prunedCount != 0 {
+				t.Fatalf("stale candidate prune removed %d refreshed peers", prunedCount)
+			}
+		})
+		if GetNetworkPeerEventId(ctx, networkId) != eventId {
+			t.Fatal("skipped stale prune changed the peer event id")
+		}
+		_, peers := GetNetworkPeers(ctx, networkId)
+		connected, markers := splitNetworkPeers(peers)
+		if connected[clientId] == nil || markers[clientId] != nil {
+			t.Fatalf("refreshed peer after stale prune: connected=%+v markers=%+v", connected, markers)
+		}
+	})
+}
+
+// Retrying an applied command with the same logical operation id returns its
+// recorded result without advancing mutation or event versions a second time.
+func TestNetworkPeerMutationReceiptsPreventDuplicateEffects(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		peer := &NetworkPeer{ClientId: clientId, Principal: "svc-a"}
+		readMutationVersion := func(clientId server.Id) int64 {
+			var mutationVersion int64
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				mutationVersion, err = r.Get(ctx, networkPeerMutationVersionKey(networkId, clientId)).Int64()
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			return mutationVersion
+		}
+		assertVersionsUnchanged := func(wantEventId int64, wantMutationVersion int64, clientId server.Id) {
+			t.Helper()
+			if eventId := GetNetworkPeerEventId(ctx, networkId); eventId != wantEventId {
+				t.Fatalf("replay event id = %d; want %d", eventId, wantEventId)
+			}
+			if mutationVersion := readMutationVersion(clientId); mutationVersion != wantMutationVersion {
+				t.Fatalf("replay mutation version = %d; want %d", mutationVersion, wantMutationVersion)
+			}
+		}
+
+		expectedMutationVersion := prepareNetworkPeerMutation(ctx, networkId, clientId)
+		addOperationId := server.NewId()
+		addPruneOperationId := server.NewId()
+		if !addNetworkPeerAtMutationVersion(
+			ctx,
+			networkId,
+			peer,
+			residentId,
+			time.Minute,
+			expectedMutationVersion,
+			addOperationId,
+			addPruneOperationId,
+		) {
+			t.Fatal("initial Add did not commit")
+		}
+		eventIdAfterAdd := GetNetworkPeerEventId(ctx, networkId)
+		mutationVersionAfterAdd := readMutationVersion(clientId)
+		if !addNetworkPeerAtMutationVersion(
+			ctx,
+			networkId,
+			peer,
+			residentId,
+			time.Minute,
+			expectedMutationVersion,
+			addOperationId,
+			addPruneOperationId,
+		) {
+			t.Fatal("Add replay did not return its recorded success")
+		}
+		assertVersionsUnchanged(eventIdAfterAdd, mutationVersionAfterAdd, clientId)
+
+		updateState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		updateOperationId := server.NewId()
+		provideModes := []ProvideMode{ProvideModeNetwork, ProvideModeStream}
+		if !updateNetworkPeerProvideModesAtMutationState(
+			ctx,
+			networkId,
+			clientId,
+			provideModes,
+			updateState,
+			updateOperationId,
+		) {
+			t.Fatal("initial provide update did not commit")
+		}
+		eventIdAfterUpdate := GetNetworkPeerEventId(ctx, networkId)
+		mutationVersionAfterUpdate := readMutationVersion(clientId)
+		if !updateNetworkPeerProvideModesAtMutationState(
+			ctx,
+			networkId,
+			clientId,
+			provideModes,
+			updateState,
+			updateOperationId,
+		) {
+			t.Fatal("provide update replay did not return its recorded success")
+		}
+		assertVersionsUnchanged(eventIdAfterUpdate, mutationVersionAfterUpdate, clientId)
+
+		removeState := getNetworkPeerMutationState(ctx, networkId, clientId)
+		removeOperationId := server.NewId()
+		if !removeNetworkPeerAtMutationState(ctx, networkId, clientId, removeState, removeOperationId) {
+			t.Fatal("initial Remove did not commit")
+		}
+		eventIdAfterRemove := GetNetworkPeerEventId(ctx, networkId)
+		mutationVersionAfterRemove := readMutationVersion(clientId)
+		if !removeNetworkPeerAtMutationState(ctx, networkId, clientId, removeState, removeOperationId) {
+			t.Fatal("Remove replay did not return its recorded success")
+		}
+		assertVersionsUnchanged(eventIdAfterRemove, mutationVersionAfterRemove, clientId)
+
+		prunedClientId := server.NewId()
+		addNetworkPeerWithProvideModesLoader(
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: prunedClientId},
+			server.NewId(),
+			time.Minute,
+			func() (map[ProvideMode]bool, error) {
+				return map[ProvideMode]bool{}, nil
+			},
+		)
+		cutoffMs := server.NowUtc().UnixMilli()
+		member := string(prunedClientId.Bytes())
+		candidates := []redis.Z{{
+			Score:  float64(cutoffMs - 1),
+			Member: member,
+		}}
+		pruneOperationId := server.NewId()
+		server.Redis(ctx, func(r server.RedisClient) {
+			if err := r.ZAdd(ctx, networkPeerConnectedKey(networkId), candidates[0]).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if prunedCount := pruneNetworkPeerCandidates(
+				ctx,
+				r,
+				networkId,
+				candidates,
+				cutoffMs,
+				pruneOperationId,
+			); prunedCount != 1 {
+				t.Fatalf("initial prune count = %d; want 1", prunedCount)
+			}
+		})
+		eventIdAfterPrune := GetNetworkPeerEventId(ctx, networkId)
+		mutationVersionAfterPrune := readMutationVersion(prunedClientId)
+		server.Redis(ctx, func(r server.RedisClient) {
+			if prunedCount := pruneNetworkPeerCandidates(
+				ctx,
+				r,
+				networkId,
+				candidates,
+				cutoffMs,
+				pruneOperationId,
+			); prunedCount != 1 {
+				t.Fatalf("prune replay count = %d; want recorded count 1", prunedCount)
+			}
+		})
+		assertVersionsUnchanged(eventIdAfterPrune, mutationVersionAfterPrune, prunedClientId)
+	})
+}
+
+// A provide update atomically adopts a pre-fence registration, advances its
+// new fence, and preserves identity fields while rewriting sorted modes.
+func TestNetworkPeerProvideUpdateAdoptsLegacyRegistration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		peer := &NetworkPeer{
+			ClientId:     clientId,
+			ProvideModes: []ProvideMode{ProvideModePublic},
+			Principal:    "svc-a",
+			Roles:        []string{"admin", "provider"},
+			DeviceName:   "device a",
+			DeviceSpec:   "spec a",
+		}
+		addLegacyNetworkPeer(t, ctx, networkId, peer, residentId, time.Minute)
+		previousEventId := GetNetworkPeerEventId(ctx, networkId)
+
+		if !updateNetworkPeerProvideModes(ctx, networkId, clientId, map[ProvideMode]bool{
+			ProvideModeStream:  true,
+			ProvideModeNetwork: true,
+		}) {
+			t.Fatal("provide update exhausted its conflict retries")
+		}
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		if !state.hasMeta || !state.hasMutationVersion || state.mutationVersion != 1 {
+			t.Fatalf("adopted state = %+v; want metadata at mutation version 1", state)
+		}
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantProvideModes := []ProvideMode{ProvideModeNetwork, ProvideModeStream}
+		if meta == nil || meta.ResidentId != residentId || meta.Peer == nil ||
+			!slices.Equal(meta.Peer.ProvideModes, wantProvideModes) ||
+			meta.Peer.Principal != peer.Principal ||
+			!slices.Equal(meta.Peer.Roles, peer.Roles) ||
+			meta.Peer.DeviceName != peer.DeviceName ||
+			meta.Peer.DeviceSpec != peer.DeviceSpec {
+			t.Fatalf("updated legacy metadata = %+v; want modes %v and identity %+v", meta, wantProvideModes, peer)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			memberMeta, err := r.Get(ctx, networkPeerMemberKey(networkId, clientId)).Bytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(memberMeta) != string(state.metaBytes) {
+				t.Fatal("updated legacy member and metadata hash differ")
+			}
+		})
+		if eventId := GetNetworkPeerEventId(ctx, networkId); eventId != previousEventId+1 {
+			t.Fatalf("provide update event id = %d; want %d", eventId, previousEventId+1)
+		}
+	})
+}
+
+// A heartbeat atomically initializes the fence for a healthy pre-fence
+// registration without changing metadata or publishing a visible event.
+func TestNetworkPeerRefreshAdoptsLegacyRegistration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		peer := &NetworkPeer{ClientId: clientId, Principal: "svc-a"}
+		addLegacyNetworkPeer(t, ctx, networkId, peer, residentId, 30*time.Second)
+		previousEventId := GetNetworkPeerEventId(ctx, networkId)
+		member := string(clientId.Bytes())
+		var previousExpiry float64
+		server.Redis(ctx, func(r server.RedisClient) {
+			previousExpiry = r.ZScore(ctx, networkPeerConnectedKey(networkId), member).Val()
+		})
+
+		if !RefreshNetworkPeer(ctx, networkId, clientId, residentId, 2*time.Minute) {
+			t.Fatal("legacy registration refresh returned false")
+		}
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		if !state.hasMeta || !state.hasMutationVersion || state.mutationVersion != 0 {
+			t.Fatalf("refreshed state = %+v; want metadata at mutation version 0", state)
+		}
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if meta == nil || meta.ResidentId != residentId || meta.Peer == nil || meta.Peer.Principal != peer.Principal {
+			t.Fatalf("refresh changed legacy identity: %+v", meta)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			currentExpiry := r.ZScore(ctx, networkPeerConnectedKey(networkId), member).Val()
+			if currentExpiry <= previousExpiry {
+				t.Fatalf("refresh expiry = %f; want greater than %f", currentExpiry, previousExpiry)
+			}
+			memberMeta, err := r.Get(ctx, networkPeerMemberKey(networkId, clientId)).Bytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(memberMeta) != string(state.metaBytes) {
+				t.Fatal("refreshed legacy member and metadata hash differ")
+			}
+			memberTtl, err := r.PTTL(ctx, networkPeerMemberKey(networkId, clientId)).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if memberTtl <= time.Minute {
+				t.Fatalf("refreshed member ttl = %s; want greater than 1m", memberTtl)
+			}
+		})
+		if eventId := GetNetworkPeerEventId(ctx, networkId); eventId != previousEventId {
+			t.Fatalf("refresh event id = %d; want unchanged %d", eventId, previousEventId)
+		}
+	})
+}
+
+// Teardown atomically adopts and removes a pre-fence registration, retaining
+// a version tombstone that prevents delayed writers from reviving it.
+func TestNetworkPeerRemoveAdoptsLegacyRegistration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		addLegacyNetworkPeer(
+			t,
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: clientId, Principal: "svc-a"},
+			residentId,
+			time.Minute,
+		)
+		previousEventId := GetNetworkPeerEventId(ctx, networkId)
+
+		RemoveNetworkPeer(ctx, networkId, clientId, residentId)
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		if state.hasMeta || !state.hasMutationVersion || state.mutationVersion != 1 {
+			t.Fatalf("removed state = %+v; want no metadata at mutation version 1", state)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			if r.Exists(ctx, networkPeerMemberKey(networkId, clientId)).Val() != 0 {
+				t.Fatal("Remove retained the legacy member key")
+			}
+		})
+		if eventId := GetNetworkPeerEventId(ctx, networkId); eventId != previousEventId+1 {
+			t.Fatalf("Remove event id = %d; want %d", eventId, previousEventId+1)
+		}
+		_, peers := GetNetworkPeers(ctx, networkId)
+		connected, markers := splitNetworkPeers(peers)
+		if connected[clientId] != nil || markers[clientId] == nil {
+			t.Fatalf("removed legacy state: connected=%+v markers=%+v", connected, markers)
+		}
 	})
 }
 
