@@ -10782,6 +10782,17 @@ child-exit error hid this result. The shared SDK correction is under validation,
 not evidence that either file was malformed on the incident iPhone. Legacy
 unchecked getters still cannot report observation errors.
 
+The adjacent scalar boundary includes complete integer and network-mode
+records: accepting a valid prefix while discarding trailing damage is not a
+successful read. Share decoding with the legacy getters that run before
+DeviceLocal.Load: NetworkSpaceManager restores control-IP policy, and
+DeviceRemote restores and queues control-IP policy and log verbosity. A
+malformed record must not become an explicitly set bootstrap value. Preserve
+valid legacy values and existing defaults/clamps; do not impose new enum or
+startup policy. Deterministic controls must seed the actual LocalState directory
+and cross cold manager/remote construction, not only call the parser. These
+additional corrections remain under validation, not incident attribution.
+
 Generated bindings must retain the ownership and getters of auth snapshots,
 conditional-reset results, and immutable load/save results. In the C/C++
 generator, treating these private-state objects as JSON erases their values
@@ -10987,6 +10998,12 @@ their own deterministic controls before closure:
   guard. Pairing durability is not proof of destination restoration. Linux's
   opt-in GUI launch also needs a held-first-Sync control: a new remote's nil
   live selection must not bypass a saved specific/private app selection.
+  Distinguish a failed/cached remote observation from a successful nil location;
+  even successful nil does not prove disconnection, because a ProviderSpec-only
+  destination can have a real consumer without a display location. Do not
+  replace that destination with an implicit best-available choice. A checked
+  current-location read also cannot replace Windows' selected/default-location
+  UI semantics without preserving that separate selection contract.
   The pairing regression must force the real subscription/pinning boundary,
   assert that its first successful sync commits a rereadable session without
   another edge, and retain an already-connected initial-level control. Arm
