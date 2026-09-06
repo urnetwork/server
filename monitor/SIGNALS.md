@@ -7,8 +7,11 @@ server/MONITOR.md, the distilled incident-diagnosis runbook.
 
 Distilled from the 2026-07-15 incident day (redis cluster instability + pg
 coupling + the network-peers pubsub outage) and the preceding two weeks of
-database performance work. Every signal here was actually used to diagnose or
-verify; every threshold comes from observed healthy/broken values on main.
+database performance work. Historical incident entries were used to diagnose or
+verify; their thresholds come from observed healthy/broken values on main.
+Prospective protocol requirements are explicitly labeled, notably §22's subnet
+correctness catalog: those alert bands are proposed policy/SLO requirements,
+not measured production baselines or a claim that their probes are implemented.
 Updated 2026-07-17 after the transfer_contract planner-stats CPU wall — that
 incident was diagnosed and recovered with this doc (new: 2.3 landmine variant,
 2.6 open-set canary, 5.8 playbook, query_wait_timeout class). Updated again
@@ -190,6 +193,10 @@ lifecycle event, not loss of production visibility, and must not emit a
 `monitor/visibility` alert. Cadence mode enforces each alert's consecutive-tick
 `Sustain` value and resets that identity after a healthy tick; `--once`
 deliberately reports current violations immediately for diagnosis.
+
+Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
+whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
+settlement and public evidence. A healthy §17 result does not satisfy §22.
 
 Related docs: FOLLOWUP.md (open items ledger), redis conf overrides in
 xops .../redis/redis.conf.j2, grafana redis-cluster dashboard + alert rules.
@@ -14911,3 +14918,357 @@ service, router state, carrier NAT, or physical links. A hardware replacement,
 router configuration repair, or carrier operation may be required. Verify
 recovery from the server-side session inventory, the dedicated direct-path
 control, and dependent host probes rather than from one successful ping.
+
+---
+
+## 22. Subnet continuous correctness — SUBNET1
+
+Status (2026-09-06): **required monitoring specification; new subnet probes are
+not implemented or registered by this documentation change**. Existing §17
+`subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
+or settlement correctness. The `subnet-*` identifiers below are reserved alert
+classes, not `Probe:` declarations or metric names. Implement each family with
+its source adapter, deterministic tests and registry entry before claiming
+automated coverage. Until then, a deployed subnet requiring that family has an
+explicit coverage gap, never a green result from an absent metric.
+
+Sources of requirements: sibling `sn/WHITEPAPER.md` version 1.0, `sn/VALIDATOR.md`,
+`sn/protocol`, `sn/validator`, `sn/evm/src`, and the real server `/verify` and
+`/sn/*` handlers. `sn/FINALIZE-COMPLETE.md` records remaining runtime/evidence
+integration; a proposed helper or authored test is not a deployed signal.
+These requirements apply after testnet validation as well as during it.
+
+### 22.0 Observation contract, clocks, and severity
+
+Observe the complete configured operator and validator census, all live native
+UIDs and eligible head candidates, every due operator/epoch, and every finalized
+entitlement. Discovery must start from independently pinned deployment/chain
+state, not only the entities returned by a possibly incomplete producer feed.
+An operator pool has one vault-owned UID; tail providers are not native UIDs.
+The head target is 200 **fleets**, not 200 clients. Testnet's 1,000 miners are
+the campaign population, not a fixed mainnet monitor limit or an assumption that
+1,000 native UID slots exist.
+
+Use these four observation states explicitly:
+
+- **healthy:** fresh, complete, authenticated inputs satisfy the invariant;
+- **violated:** complete evidence proves a mismatch;
+- **unknown:** unavailable, stale, truncated, conflicting, unsupported or
+  unauthenticated input prevents deciding; raise visibility/capability alerts;
+- **not deployed:** an independently configured disabled feature is expected
+  absent. Do not report a successful economic check for an undeployed contract.
+
+Read native and EVM state at explicit **finalized block number/hash pairs**.
+Bind EVM receipts, logs and contract calls to canonical RPC-supplied hashes;
+Subtensor's synthetic EVM hash must not be reconstructed from Ethereum header
+fields. Compare endpoints at the **same height/hash**, not two moving `latest`
+heads. Retain the runtime spec/transaction/state versions, exact Wasm and
+metadata hashes, chain ID, genesis, netuid, contract addresses and code hashes.
+Use the effective signed policy and operator/binding version at each boundary;
+the latest policy cannot rewrite an old epoch's meaning. Recheck canonicality
+before advancing the monitor's durable finalized cursor. An unfinalized reorg
+is retryable observation state; contradictory finalized history is an incident.
+
+Keep native tempo/CRv4 reveal/application clocks separate from UR settlement
+epochs, root windows, close grace, finalization offsets and claim TTL/grace.
+Derive deadlines from the effective on-chain/signed policy in **blocks**.
+`WHITEPAPER.md` §5 currently specifies a test-only 360-block UR epoch; mainnet
+remains 50,400 blocks (approximately seven days), with independently reviewed
+root/finalization windows. Never inherit a testnet duration on mainnet or alert
+merely because a valid commitment has not reached its native reveal window.
+
+Proposed collection/SLO defaults, to be verified in testnet before deployment:
+
+- Incremental finalized-event/state checks every 60 seconds; replay each new
+  applied native vector and each newly due operator/epoch. Fetch exact artifacts
+  once per authenticated content hash; still recheck availability and anchors.
+- `page, Sustain=1` for a proved custody, authorization, accepted-proof,
+  canonical-history or applied-weight invariant violation. Preserve the first
+  counterexample; smoothing cannot erase it.
+- `warn, Sustain=2` for missing telemetry, reduced coverage or transient
+  dependency loss. Page when it prevents all validators/required operators from
+  meeting a protocol deadline, or persists past the configured service recovery
+  budget. Report expected deadline, observed finalized height and remaining
+  blocks instead of guessing a universal timeout.
+- Warn before a due action when remaining blocks cannot accommodate its
+  measured p95 completion/retry time plus finality margin; page the responsible
+  service after a required deadline is missed. With no valid latency baseline,
+  report the margin as unknown, not zero. Optional provider withdrawal is not a
+  required keeper deadline.
+- Expensive complete replay runs incrementally with a retained completeness
+  frontier; each completed epoch must be fully reconciled. Sampling is an early
+  warning only and cannot certify all payouts, all proofs or all 200 head slots.
+
+All probes are **read-only**. Share the existing four-probe admission and
+two-SSH-commands-per-destination bounds; add one shared endpoint RPC budget,
+bounded concurrency, deadlines, pagination, response bytes and retry backoff.
+Reserve capacity for real operators/validators. No unbounded `eth_getLogs`
+scan, full MinIO listing, 1,000 simultaneous RPC workers or automatic replay of
+an ambiguous transaction. Monitoring never deploys/upgrades, spends, stakes,
+registers, changes weights/policy, restarts services or injects public-chain
+attacks. A separately authorized testnet canary is not a passive probe.
+
+### 22.1 Chain, deployment, policy, and governance
+
+Measure with native finalized RPC, EVM `eth_getCode` / `eth_getStorageAt` /
+block-pinned `eth_call`, decoded governance events, and the independent release
+manifest. Verify all three contract coldkeys and their one-time links, not just
+the coordinator proxy. Reuse §17 for gateway/sync diagnosis.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-runtime-identity` | Chain/genesis/netuid and complete runtime/Wasm/metadata tuple match reviewed current signing authority; historical artifacts are read-only. A matching spec number alone is insufficient. | Page on a live writer using an unreviewed identity; warn on observer incompatibility. Preserve both endpoint responses and route to runtime compatibility review, not a blind pin update. |
+| `subnet-finality-divergence` | Independent endpoints agree on the same finalized native checkpoint and the same finalized EVM checkpoint, with their runtime-defined relationship verified; finalized cursor never rolls back or silently skips a gap. Syncing/stale private RPC is not a substitute for a synced operational endpoint. | Page on contradictory finalized history; unknown/warn on one unavailable endpoint. Retain both hashes and runtime identities; investigate provider routing/indexing before attributing a chain fault. |
+| `subnet-deployment-governance` | Coordinator implementation/ERC-1967 slot, immutable vault/sink bytecode, mapped coldkeys, recorder/coordinator links, owner/guardian/oracle and upgrade events match the approved deployment. Testnet uses its dedicated owner; mainnet uses the approved distinct 2-of-3 multisig. | Page on unauthorized drift, a mutable/replaced custody contract, role overlap outside policy, or testnet authority on mainnet. Capture exact code/slot/role evidence; request governance incident response. |
+| `subnet-policy-schedule` | Policy hashes/signers, future-effective versions, positive tier rates, theta, quality/weight caps, prefix granularity, epoch windows and expiration rules are exact and non-overlapping. Live native mechanism count, UID capacity, permits, CRv4, Liquid Alpha, immunity, stake thresholds and version key match the reviewed profile. | Page if a live writer uses a wrong/retroactive policy or disables a required defense; warn for an authorized upcoming change not yet adopted. Preserve effective epoch and every affected reader/writer version. |
+
+Mainnet's timelock hardening is a governance phase, not something to infer from
+the presence of a Safe. Check the phase actually authorized. A paused
+coordinator may stop new-risk actions; it must not block a claim already fixed
+in the immutable vault. The runtime-454 native weight getter reports 65535
+despite retained cap storage; enforce and observe the **signed policy cap**,
+not a misleading storage value. Query current values; do not make this catalog
+an independent mutable runtime allowlist.
+
+### 22.2 Pool registration, validator identity, and fleet ownership
+
+Use the complete metagraph plus block-pinned `Keys`, reverse `Uids`, `Owner`,
+stake and `ValidatorPermit`; compare native commitments with coordinator
+mirrors, operator versions and fleet binding history. Wallet SS58 strings alone
+do not prove historical UID ownership.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-pool-custody-identity` | Every active NO has exactly its registered pool hotkey/UID under the immutable vault coldkey; escrow is correctly registered and pool, deposit, reserve and participant roles remain distinct. | Page on foreign ownership, reused UID credited to the old NO, duplicate active roles or a custody mismatch. Reconstruct the registration/rotation boundary before any repair. |
+| `subnet-validator-eligibility` | Each expected active validator has its actual historical hotkey/coldkey, sufficient stake, permit and supported weight version at the scoring/application block; declared measurement key/activation is attributable to that identity. | Warn on permit/stake loss or a stopped eligible validator; page if ineligible/forged identity evidence is accepted. Retain stake ranking and native registration/permit changes. |
+| `subnet-fleet-binding-invalid` | Client Ed25519 consent and hotkey sr25519 authorization bind chain, netuid, coordinator, fleet, generation, epoch interval and finalized manifest commitment. Both directions of live UID mapping and membership/revocation history agree. | Page if an invalid, expired, revoked, stolen, overlapping or wrong-generation binding receives credit. Rejected hostile requests are counted, not themselves a custody breach. |
+| `subnet-commitment-mirror-lag` | Native commitment and finalized mirror match with the configured freshness; cleanup/version history cannot leave a deregistered or reassigned hotkey eligible. | Warn on stale/missing mirror; page on a false mirror being used or deadline-wide loss of valid membership. Preserve native inclusion plus EVM mirror receipt and effective versions. |
+
+### 22.3 Operator demand deposits, conviction, and reserve
+
+Reconstruct `Deposit`, `ConvictionAdded`, `ReservePrincipalAdded`, nonces and
+caps from complete finalized logs; compare counters only as cross-checks. Read
+actual `(coldkey,hotkey,netuid)` stake deltas at the matching receipts. A staged
+transfer alone is not a successful demand deposit.
+
+For each validator/NO decision, replay `sn/validator/deposit_audit.go` and
+`protocol.RequiredDepositRao` against the independently expected, signed,
+committed prior-epoch payout artifact. Record `usage_bytes`, source boundaries,
+`conviction_before_rao`, tier/rate numerator and denominator, floor/caps,
+`required_deposit_rao`, `observed_deposit_rao`, `status` and `disposition`.
+**Both underdeposit and overdeposit are mismatches** in the release's exact
+signed-usage audit. Optional GB/users reports are not independently proven
+customer demand: this check proves consistency with the signed claim, not a
+trustless revenue/usage oracle. Economic suspicion remains separately labeled.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-deposit-attribution` | Exact scoped signer, nonce, deadline, effective policy/NO, amount and matching reserve principal events; no duplicate log, cross-NO staging theft or voluntary conviction counted as epoch demand. | Page on accepted misattribution/replay or counter/event inconsistency. Keep call bytes, log indices, before/after stake and nonce, including failed/reverted attempts. |
+| `subnet-operator-deposit-mismatch` | A signed operator usage claim matches the canonical required deposit exactly. `deposit_mismatch`, invalid/equivocating artifacts or post-deadline unavailability remain explicit. | Warn for the responsible NO when complete audit proves mismatch; page if it causes broad deadline failure. Preserve required/observed delta and source artifact; do not confuse pre-deadline `artifact_pending` or an authorized bootstrap rule with dishonesty. |
+| `subnet-deposit-penalty-bypass` | Each validator records `zero_pool_weight` for a noncompliant NO and its corresponding submitted/revealed/applied row gives that pool zero or omits it. Other compliant NOs keep operating. | Page if bad demand is weighted, one NO's failure poisons all scoring, or a later compliant recovery remains incorrectly rejected after its next eligible application. Align the audit with its actual native cycle; old applied weights are not a new bypass. |
+| `subnet-reserve-principal` | `liveStake() >= principal`; global/per-NO principal and cumulative conviction reconcile; reserve coldkey/hotkey stay immutable and separate from claims. No path sources a reserve withdrawal. | Page on any proved deficit, unauthorized outflow or custody drift. Check exact runtime share accounting; never fund an escrow discrepancy from the reserve. |
+| `subnet-reserve-credit-delta` | A deposit's reserve receipt covers its full principal, with only the pinned zero-to-two-rao surplus; principal is not reduced to conceal a runtime rounding loss. | Page on a receipt/state delta outside the exact allowed interval or a failed move recorded as funded. Retain both destination share-pool transitions. |
+| `subnet-reserve-yield` | Reserve delegate take is zero; observed dividends compound under the correct coldkey. Publish deposits, voluntary conviction, rounding donations and yield separately. | Page on unauthorized take/custody change; warn on unexplained yield loss across eligible completed tempos. A low demand ratio is an economic warning, not by itself a protocol invariant failure. |
+
+### 22.4 Real validation paths, attempt completeness, and pool quality
+
+Sources: `/verify/keys`, `/verify/stats`, `/verify/proofs`, signed attempt/cut
+artifacts and the validators' durable decision history. Independently verify
+SEED/EXTEND/ASSIGN/FINAL and validator signatures with their historical keys;
+an HTTP 200 or a server-reported count does not establish correctness.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-path-proof-invalid` | Exact domain, trail/VPK/server-key identity, depth/assignment chain, timestamps, prefix hashes and both completed-proof signatures verify; no accepted replay, fork, tamper or wrong operator/epoch. | Page if invalid evidence enters scoring or a committed artifact. Count correctly refused attacks separately; preserve minimal signed counterexample bytes. |
+| `subnet-verify-poisoning` | Unknown/ambiguous seeds keep the prescribed normal-looking protocol through depth M but never publish a scored proof; idempotent retries return the same assignment without duplicate effects. Poison/valid response shapes and latency distributions remain comparable. | Page on poisoned evidence receiving credit or a proved direct membership oracle; warn on statistically supported timing separation or broken idempotency. Use separately authorized bounded controls, never arbitrary public-IP enumeration. |
+| `subnet-attempt-history-gap` | Every admitted attempt has one ordered durable sequence and eventual success/failure/abandonment/cancellation outcome; cuts retain the complete authenticated prefix, prior root and terminal closure. | Page on an accepted gap, fork, missing denominator, double application, restart refold or history fabricated from successful trails alone. Unknown on unreadable history; recover from retained journal evidence, never reset statistics to zero. |
+| `subnet-measurement-coverage` | Per-validator/per-NO/provider assignment/completion counts, age, a_min eligibility, latency and terminal-attempt lag meet the signed policy and configured coverage SLO. Report all eligible providers, not just sampled survivors. | Warn on a persistent coverage hole or loss of expected validator diversity; page if required scoring cannot finish by its deadline. Separate provider failure from validator abandonment, shared-region outage or operator transport failure. |
+| `subnet-pool-quality-mismatch` | Replayed non-seed, server-assigned transitions, Wilson/latency statistics, EMA carry/fold and exact exposure-weighted tail PPM produce the published Q_n; head members are excluded. | Page on signed/computed quality divergence, seed credit, repeated fold, wrong failure attribution or floating-point rounding substituted for the required integer rule. Retain the input cut and prior EMA. |
+| `subnet-egress-attribution` | Exact source-IP attribution is unique, forwarded headers are trusted only at the authorized ingress, allocation/release churn is reflected, and IPv4/IPv6 keyed scoring prefixes match policy. | Page if an ambiguous/spoofed/stale address is credited or raw IP/key material leaks in public evidence. Warn on growth of excluded mappings; investigate source attribution before blaming providers. |
+| `subnet-measurement-bias` | Independent-validator coverage and outcome distributions are visible by provider/NO/time cohort; adversarial abandonment, too-perfect single-validator clusters and selective `/verify` service are investigated. | Warn on statistically supported outliers with sample sizes and controls. Do not label collusion/slashing proved from correlation or promise proof-of-routing: the stronger `VALIDATOR.md` §10 defenses remain outside v1. |
+
+### 22.5 Top-200 promotion, zero weight, demotion, and tier isolation
+
+For **each validator independently**, replay its full eligible candidate census,
+active dual-signed bindings and verified non-seed prefix observations. Each
+distinct scoring hash contributes one unit total divided among its eligible
+sharing fleets; repeated clients, exact IPs in one prefix and repeated trails
+must not multiply it. Reproduce the configured EMA, tie break, self-mask,
+selection and capped integer vector, retaining rejected candidates and reasons.
+The monitor must not replace the validators' own lists with an operator's list
+or require independently measured lists to be identical.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-head-selection` | Selection considers the full candidate set, including more than 200 candidates in acceptance, and chooses at most the policy head limit by independently reproduced split-adjusted breadth. | Page on accepted selection/census truncation, invented routability, wrong tie/EMA or shared-prefix score inflation. Unknown if the excluded-candidate evidence is missing. |
+| `subnet-head-weight-bypass` | A registered claimant outside that validator's selected list receives zero/absent head weight; a selected, live, eligible, non-self claimant receives the exact policy-derived positive weight when representable. | Page on non-selected positive weight or unexplained selected zero weight in the matching signed/revealed/applied cycle. Registration alone never establishes eligibility; distinguish a not-yet-live winning challenger and infeasible cap/rounding from a valid paid head. |
+| `subnet-promotion-churn` | A promoted fleet's own coldkey/hotkey acquires its UID within its authorized burn ceiling, bindings become effective, scores apply and native rewards follow. Demotion uses actual native deregistration, not an assumed top-N eviction primitive. | Warn on unproductive churn, coverage-driven score dips or a winner stalled after its configured promotion SLO; page on unauthorized burn or attribution to a reused UID. Retain immunity, emission floor, registration block and challenger/replaced identity. |
+| `subnet-tier-double-pay` | Each client belongs to exactly one payout tier at the effective boundary. Active head clients are absent from every NO tail artifact; valid demoted clients re-enter their permitted pools without duplicating historical credit. | Page on double pay, wrong-epoch exclusion/re-entry or head rewards entering the vault. Compare bindings, client-level payout inputs and native ownership, not only aggregated coldkey totals. |
+| `subnet-head-native-payout` | Actual applied incentive and attributable native emission accrue to the selected head's own coldkey/hotkey, not an operator, escrow, reserve or a former UID owner. | Page on proved wrong recipient/amount; warn on missing expected native payment after the applicable emission cycle. Separate registration funding, user transfers, delegation, dividends and share rounding from incentive. |
+| `subnet-promotion-economics` | Realized head/tail pay and churn are visible over aligned mature windows; the policy goal is lowest-paid qualified head >= highest-paid comparable tail provider. | Warn if promotion persistently becomes a pay cut or head/pool eviction thrashes. Report theta, breadth, coverage, immunity and realized per-tier pay; governance decides changes, the monitor does not. |
+
+### 22.6 Native weight lifecycle, consensus, and validator dividends
+
+Trace each durable decision through its signed CRv4 payload/commit extrinsic,
+canonical finalized success, drand reveal, runtime application and subsequent
+emission. A transaction hash, EVM receipt or `LastUpdate` alone is not proof
+that the intended native row was applied. Validator weights remain independent;
+the operator/coordinator is not a central weight authority.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-weight-vector` | Exact u16 row matches the validator's demand/quality and head evidence, policy theta/cap/rounding, self/own-NO masks, eligible recipients and single mechanism. Empty-tier behavior matches policy; no baseline is silently diverted to owner/immune UIDs. | Page on a signed or finalized mismatch, unauthorized recipient, cap breach or fake fallback. Preserve full vectors and explain every component before normalizing. |
+| `subnet-crv4-lifecycle` | One durable intent per intended cycle; correct version, nonce, mortal era, valid drand input, reveal/application ordering and exact included call/events. Uncertain submission is reconciled before replacement. | Warn on backlog/retry age approaching the real deadline; page on a missed required cycle, duplicate effect, revealed-but-unapplied row or success claimed for a failed extrinsic. Retain transaction index and dispatch result. |
+| `subnet-consensus-divergence` | Per-validator declared/revealed/applied rows, stake, bonds, clipping, vtrust and independent stake share are visible; stake-weighted policy adoption matches the authorized bootstrap/governance profile. | Warn on sustained unexplained disagreement, stale-copy signatures, validator concentration change or vtrust collapse. Page when an exact authorized-vector invariant fails. Owner-majority at launch is expected; identical rows alone do not prove copying and clipping is not guaranteed instant slashing. |
+| `subnet-validator-native-payout` | Actual native dividend events/state changes belong to the historical validator and its delegators under the pinned runtime; reserve-compounded yield is separate from freely received validator income. | Page on proved misattribution or reporting contract transfers as validator dividends; warn on missing expected dividends after eligible mature cycles. No validator effort bounty, fee pool or `claimValidator` is required by v1. |
+
+Do not compare realized Yuma emissions to theta or a simple `stake * vtrust`
+formula with zero tolerance: clipping, bonds, emission schedules, delegation
+and exact runtime arithmetic intervene. Replay the pinned native algorithm and
+report intended versus realized split separately. Non-selected zero **new
+weight** also does not erase already-earned/still-pending emission from an older
+valid cycle. Preserve that chronology in any apparent unexpected-payment alert.
+
+### 22.7 Pool emission capture, roots, claims, carry, and conservation
+
+Sources: finalized coordinator/vault logs, block-pinned entitlements and
+accounting getters, exact stake positions, signed payout artifacts, authenticated
+provider claim previews, and actual native transfer results. Every NO has its
+own root; do not invent a global claim root or pay providers from deposits.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-epoch-progress` | Each due NO closes within close grace, commits its root within the root window, finalizes no earlier than permitted, and advances independently of a broken peer NO. | Warn on at-risk/missed operator publication; page on overdue required settlement or early/incorrect finalization. A missed close must record zero and defer stake to a later timely boundary, never assign a multi-epoch delta to the first missed epoch. |
+| `subnet-capture-delta` | Captured funding equals measured pool decrease and escrow increase. A sub-minimum TAO-equivalent move has explicit dust deferral; a failed price read/transfer cannot become success or manufactured zero funding. | Page on fabricated/misattributed capture or failed movement entered into accounting. Warn on persistent unexplained deferral after the threshold becomes feasible. Record immutable transfer floor and exact finalized price input. |
+| `subnet-payout-root` | Authorized NO root and artifact hash reproduce the canonical signed payout list, exact 10,000-bps allocation, deterministic remainder rule, claimant identity and historical head exclusion. | Page on accepted malformed/equivocating/wrong-domain root or artifact, or finalized entitlement rewrite. Warn on missing publication after its deadline; custody caps do not make an unfair or unavailable list correct. |
+| `subnet-claim-correctness` | A valid same-NO/epoch Merkle proof creates exactly the leaf's integer entitlement once, for its fixed coldkey; invalid/replayed/cross-root/cross-epoch proofs cannot create credit. | Page on duplicate/redirected/excess credit or valid finalized claims blocked by coordinator pause/upgrade/deactivation. Investigate ordinary proof/request errors without auto-submitting claims. |
+| `subnet-claim-credit-payment` | `Claimed` means logical credit, `ClaimPaymentDeferred` means unpaid durable credit, and `ClaimPaid` requires measured escrow decrease/recipient increase. Credit aggregates across epochs/NOs only for the same coldkey, survives expiry and is permissionlessly retryable. | Page on credit loss, double payment, wrong destination or claimed-as-paid reporting. Warn when a configured claimant/keeper SLO is missed despite feasible transfer; sub-floor credit or a provider choosing not to withdraw is not a breach. |
+| `subnet-carry-isolation` | Missing-root and expired unclaimed remainder become only the same NO's carry; already-claimed credit is excluded. Expiry is after snapshotted TTL/grace and each remainder is consumed once. | Page on cross-NO movement, early expiry, lost durable credit, double carry or an old entitlement being reopened. Reconcile both adjacent epochs before closing the incident. |
+| `subnet-vault-conservation` | Exact counters satisfy the identities below at one finalized checkpoint, and native escrow covers all accounted obligations; unexplained external stake is identified separately. | Page on any proved deficit, negative/inconsistent amount or fabricated paid/captured event. Stop claiming healthy settlement; identify the first divergent receipt and preserve the entire affected liability set. |
+
+Executable conservation requirements (`WHITEPAPER.md` §6.1):
+
+```text
+totalCaptured = totalPaid + escrowAccounted
+escrowAccounted = pendingFunding + outstandingLiability
+poolTotal(epoch,noId) = capturedEmission(epoch,noId) + admittedSameOperatorCarry
+claimed(epoch,noId) <= poolTotal(epoch,noId)
+liveEscrowStake >= escrowAccounted
+liveReserveStake >= principal
+```
+
+Reconstruct counters independently from ordered events and immutable state;
+compare them to contract getters and runtime stake, not just to each other.
+Use exact integer rao/wei arithmetic and only explicitly documented share-pool
+rounding tolerances. A balance increase alone can be a transfer/donation or
+dividend; it does not prove miner emission. Retain pending funding, finalized
+unclaimed entitlement, claim credit, paid transfer, expiry and carry as distinct
+states so obligations are neither double-counted nor silently dropped.
+
+### 22.8 Public artifacts, validator evidence anchors, and audit continuity
+
+Existing read surfaces are `/sn/epoch`, `/sn/head`, `/sn/artifact`,
+`/sn/attempt-artifact`, `/sn/artifacts`, `/sn/evidence`,
+`/sn/evidence/history` and `/verify/{keys,stats,proofs}`; use their actual typed
+query/auth contracts in `server/api/handlers/sn_handlers.go`. `/sn/pool/claim`
+is a claimant-scoped preview, not a public enumeration authority. Public history
+is served through the **server API backed by server/blob MinIO**; a successful
+MinIO health request is not evidence that an old signed artifact can be read.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-artifact-integrity` | Exact bytes, hash, signature, schema, operator/deployment/epoch domain, proof/root and chain commitment all agree; the complete index is ordered and bounded. | Page on accepted tampering, equivocation, duplicate/forked pages or a producer-selected authority. Unknown on missing/truncated bytes; retain the bad content by hash without publishing secrets. |
+| `subnet-evidence-anchor` | Every required validator attempt/closure/statistics/head/decision evidence commitment is present in its approved on-chain contract-pool scope with the exact digest, identity, activation, policy, epoch and inclusion/finality boundary. Its referenced full proof is independently retrievable and verifiable. | Page on false/foreign/rewritten or accepted missing anchors; warn when required anchoring is delayed, page past its deadline. A digest is not full proof bytes, and a local/MinIO artifact is not proof of on-chain inclusion. |
+| `subnet-history-availability` | Both configured operator API origins serve identical content-addressed evidence and complete paginated history, including older epochs and key/policy rotations; backing storage retention covers claim/grace, dispute/audit and recovery obligations. | Warn if one required origin/object becomes unavailable; page if all copies or already-earned-claim evidence are lost. Two URLs into one MinIO are not independent storage failure domains. Distinguish pruned RPC state from server history loss. |
+| `subnet-audit-replay-gap` | A separate secretless reader can traverse activation -> full attempt prefix -> terminal closure -> quality/head decision -> native application -> settlement/credit/payment, including all negative/excluded cases. | Page on a completed epoch falsely reported fully verified; warn on lag before its audit SLO. Emit missing requirements explicitly; checksums alone cannot establish semantic correctness or completeness. |
+
+The precise validator-evidence storage profile must be approved and versioned
+before rollout: on-chain digest plus signed API-served proof is not equivalent
+to storing all proof bytes in the contract pool. `sn/FINALIZE-COMPLETE.md`
+§10.1 still tracks that choice/integration. Do not silently choose a weaker
+profile, invent a deployed contract method, or mark anchoring green because a
+helper exists. Activation attribution is not the parked validator effort bounty.
+
+`FINAL.md` and its independently replayed on-chain evidence are the acceptance
+baseline, not perpetual health certificates. Continue checking new epochs and
+the availability of that historical evidence after the simulator stops.
+
+### 22.9 Process correctness, resources, and adversarial noise
+
+Correlate real operator/API/connect, miner and validator generations with
+structured lifecycle/intent records, bounded queues and existing PG/Redis/MinIO,
+Subtensor, Loki and Mimir signals. `/hello` can remain 200 while `/verify` or
+settlement is broken (§8.7). Private testnet PG/Redis and shared external
+MinIO/Subtensor have different ownership; a loopback test fault must not be
+diagnosed as permission to restart shared infrastructure.
+
+| Alert class | Healthy requirement / trip condition | Severity and action |
+|---|---|---|
+| `subnet-runtime-liveness` | Every expected real role advances its phase-specific progress marker; successful paths, durable terminal records, weights, roots and payments reach their actual deadlines. No duplicate owner continues writing after shutdown. | Warn on a stalled component despite process health; page on a required missed deadline or duplicate active writer. Preserve exact process/build/config generation and last joined worker result. |
+| `subnet-state-durability` | Journal/snapshot/EMA/intent prefixes reconcile without rollback, duplicate fold or loss; sync/write/close errors remain visible; independent physical namespaces and bounded replay are retained across restart. | Page on silent error, state loss, namespace replacement or a live process continuing from uncertain persistence. Quarantine the state for authorized recovery; never delete journals, truncate history or reset nonces to make the alert clear. |
+| `subnet-capacity-margin` | CPU utilization across available cores, heap/RSS, disk/inodes, descriptor counts, queue age/bytes, replay debt, artifact growth and RPC budget leave enough measured capacity for the full mainnet epoch and retention horizon. | Warn on sustained budget pressure or insufficient projected runway; page on dropped authoritative evidence or deadline failure. A single saturated core with idle peers is a profiling signal, not proof that raising concurrency is safe. |
+| `subnet-writer-funding` | Each scoped signer has enough available native TAO/EVM gas and intended alpha staging to complete its due work within the approved per-action/campaign ceilings; reserved, pending and confirmed spend reconcile. | Warn on insufficient funded runway, price/burn movement or an unresolved nonce/intent; page on cap overspend or a missed required transaction deadline. Never auto-fund, trade, restake or resend an ambiguous transaction. |
+| `subnet-adversarial-resilience` | Rejected attacks are counted by known vector while interleaved honest controls continue to complete with bounded latency, resource use and correct money/weight outcomes. | Page on an accepted exploit, honest-control starvation or escaped resource bound; warn on growing attack pressure. Expected testnet fault windows stay annotated and still require their negative/positive outcomes and recovery, never blanket alert suppression. |
+| `subnet-monitor-coverage` | Every required role, operator, validator, candidate group, epoch, artifact kind and capability has fresh observations; exporter/scrape/log absence is distinct from zero failures. | Warn immediately for unimplemented required probes or configuration gaps; sustain transient visibility loss for two cadences, page at a threatened/missed correctness deadline. Show the missing census/frontier and dependency cause, not a green empty dashboard. |
+
+Keep the live testnet adversarial catalogue mapped to these alert families:
+weight copying/Yuma gaming, ownership/UID churn, unauthorized or cross-domain
+signatures, malformed/replayed/poisoned trails, selective service/abandonment,
+false deposits, root/evidence equivocation, RPC inconsistency, custody and
+dependency/resource failures. Chain-wide runtime exploit tests stay in a pinned
+local environment; the production monitor observes rather than generates them.
+No slashing, proof-of-routing guarantee or instant vtrust response is invented.
+
+### 22.10 Alert evidence, recovery, and implementation acceptance
+
+An alert must carry the §7 stable identity plus:
+
+- Environment, chain/genesis/netuid, deployment and contract scope; stable
+  target = NO, validator hotkey, fleet, contract or service. Put changing
+  epoch/UID/transaction/block details in evidence/context (or a bounded frame),
+  not the only target that a later healthy observation must match.
+- First/last occurrence, observation age, finalized native/EVM checkpoints,
+  exact effective policy/runtime/build identities, comparison source and
+  completeness status. Include `expected`, `observed`, exact integer delta,
+  deadline/remaining blocks, and the offending invariant/decision reason.
+- Minimal reproducible transaction/extrinsic hash, index, dispatch/receipt
+  status, decoded event fields, pre/post state, content hashes and retrievable
+  proof/index references. A hash without its bytes or chain inclusion is not a
+  substitute for either. Keep raw bounded captures for independent review.
+- Safe next action and explicit recovery proof. Do not print seeds, wallet
+  passwords, vault secret values, JWTs, raw egress IPs or unbounded client-level
+  labels in metrics/tickets; public hotkeys and already-public chain hashes are
+  sufficient where possible. Sensitive supporting data stays access-controlled.
+
+Liveness/visibility incidents resolve only after fresh complete healthy checks
+for the §7 five-minute recovery window **and** reconciliation of missed work.
+Custody, authorization, finalized-proof and accounting counterexamples remain
+open until independently replayed, attributed and dispositioned; a later healthy
+balance or missing metric cannot erase them. Expected rejections resolve only
+when the exact positive control and any deferred work recover. Raise an issue
+for broken/misconfigured PG, Redis, MinIO, Subtensor or observability services
+with their direct discriminators; do not relabel all failures as generic RPC
+flakiness or restart them automatically.
+
+Implementation acceptance for each proposed family is mandatory:
+
+1. Add a named `signal_<key>.go` / `_test.go`, catalog `Probe:` line and
+   `NewSignals` registration only when it truly observes the stated inputs.
+   Add explicit typed exporters/readers for unavailable decision/ledger state;
+   do not scrape secrets or infer success from log silence.
+2. Deterministic tests following `connect/CODESTYLE.md` must cover healthy,
+   violated, unknown, disabled, deadline-before/after, recovery, partial census,
+   malformed/trailing/oversized input, exact-block mismatch and cancellation.
+   Test the real reducer/adapter and alert identity, not merely presence of a
+   metric or runbook string. Reproduce every discovered root cause pre-fix and
+   exercise adjacent call sites; use barriers/state transitions, not sleeps.
+3. Feed known testnet bad-deposit and recovery cycles, >200 head candidates,
+   selected/non-selected claimants, real pool Merkle/path proofs, unpaid credit,
+   carry/expiry, pause/upgrade and concurrent adverse traffic into the observer.
+   Prove both detection and absence of false money/correctness alarms on valid
+   pending/dust/immune/deferred states. Deliberate attacks require separate
+   simulator authority; the monitor remains passive.
+4. Register complete collection with bounded shared RPC/SSH budgets; retain
+   code/fixture pins and actual test results. Peer-review alerts against on-chain
+   evidence before enabling production paging. This documentation has coverage
+   regression tests, **not** an implemented or qualified subnet probe battery.
