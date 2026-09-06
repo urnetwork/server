@@ -371,6 +371,16 @@ func verifySeed(
 	verify *VerifyArgs,
 	clientSession *session.ClientSession,
 ) (any, error) {
+	return verifySeedWithAdmission(verify, clientSession, nil)
+}
+
+// The optional private observer stops deterministic admission tests before
+// configuration or mutable state. Production uses the same checks with nil.
+func verifySeedWithAdmission(
+	verify *VerifyArgs,
+	clientSession *session.ClientSession,
+	beforeState func() error,
+) (any, error) {
 	ctx := clientSession.Ctx
 
 	// input shape (a caller that cannot even form the message gets a plain
@@ -387,6 +397,14 @@ func verifySeed(
 	}
 	if verify.M < 0 {
 		return nil, fmt.Errorf("400 M must be non-negative")
+	}
+	if verify.M > 255 {
+		return nil, fmt.Errorf("400 M must be at most 255")
+	}
+	if beforeState != nil {
+		if err := beforeState(); err != nil {
+			return nil, err
+		}
 	}
 	// Configuration and all Redis/PostgreSQL state are intentionally resolved
 	// only after the complete signed-message shape is present. This prevents

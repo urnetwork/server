@@ -87,6 +87,11 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if err := recover(); err != nil {
+			// Preserve net/http's exact transport-abort signal, including after
+			// a flushed prefix. An error response would forge a clean EOF.
+			if err == http.ErrAbortHandler {
+				panic(err)
+			}
 			if server.IsDoneError(err) {
 				// A Done panic is the standard cancellation path. In particular,
 				// Connect can observe it after Gorilla has hijacked the H1 socket;
