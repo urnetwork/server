@@ -10769,6 +10769,19 @@ intent/OS policy, transient provider state and shutdown are not preference
 autosave. Adoption and deterministic qualification are in progress; these
 requirements are not evidence of an installed fix.
 
+**2026-09-05 checked-policy regression:** actual SDK recovery testing found that
+`fmt.Sscanf(..., "%t", ...)` can accept arbitrary non-boolean text as `false`
+without an error. A malformed `.blocker_enabled` therefore produced a successful
+Load, and `.route_local-2` shares that decoder. Directory/null fixtures alone
+missed this failure. Checked loading must accept complete known boolean tokens,
+preserve legitimate false/legacy values, and reject malformed bytes before any
+preference or saved consumer is adopted. Test both actual files, unchanged
+stored intent/evidence, and a successful explicit Load after repair. Preserve
+the subprocess's assertion output when testing diagnostic export; a generic
+child-exit error hid this result. The shared SDK correction is under validation,
+not evidence that either file was malformed on the incident iPhone. Legacy
+unchecked getters still cannot report observation errors.
+
 Generated bindings must retain the ownership and getters of auth snapshots,
 conditional-reset results, and immutable load/save results. In the C/C++
 generator, treating these private-state objects as JSON erases their values
@@ -10855,6 +10868,25 @@ locks. Preserve each platform's existing key-versus-secret persistence policy.
 Unreadable retained secrets are not absence or permission to regenerate them.
 Test a held stale save against reset/new ownership, a save admitted before
 reset, partial write failures and ordinary disabled-providing/local-only use.
+
+**2026-09-05 binary-secret persistence regression:** a real freshly initialized
+provider exposed JSON corruption of its random key bytes. The SDK's existing Go
+string contains raw bytes, not necessarily UTF-8; ordinary JSON string encoding
+replaces invalid bytes. ASCII-only fixtures cannot qualify this boundary.
+Require deterministic binary/NUL and all-byte round trips through actual save,
+close/join, fresh storage, constructor and key load, plus the existing gob RPC
+and generated C++ JSON paths. A compatible correction must retain literal
+legacy strings without prefix heuristics, distinguish a strict binary encoding,
+and reject malformed/conflicting representations without regeneration. Already
+replaced bytes are irrecoverable; do not claim old-reader/downgrade compatibility
+for a new binary representation. Current Apple iOS/macOS and Android persistence
+forwards opaque Go list handles, but extracting individual secrets as native
+UTF-8 strings is unsafe. Windows/Linux currently inspect key modes through C++
+callbacks; their JSON boundary still needs byte-preserving validation. No secret
+persistence caller was found in `mmm/ur.io` or `extension`; that is scoped source
+applicability, not live-platform qualification. Fixes and cross-platform gates
+remain in progress, and this finding does not explain the missing iPhone consumer
+or the old process's termination.
 
 An initially empty auth envelope does not establish ownership of orphan
 preferences. Constructor seeding alone must not authorize importing their
