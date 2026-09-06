@@ -11554,6 +11554,55 @@ drop, UDP receive-buffer error, OOM, or memory pressure. A later direct control
 passed 60/60 over each address family. A fully passing control window also had
 broad Wi-Fi, router-advertisement, and unrelated-process SYN signals.
 
+The 2026-09-06 Fireside g3 campaign closed the gateway/WAN form. The isolated
+HTTP CONNECT request 60/60 timed out awaiting headers from
+21:37:34.951Z--21:38:04.954Z after 60 successful requests, and overlapping
+SOCKS request 5/60 received EOF awaiting headers from
+21:51:14.483Z--21:51:42.957Z after its proxy connection, target TLS handshake,
+and request write. The exact request windows contained `configd` router-
+lifetime-zero records at 21:37:48.322Z and 21:51:24.590Z, matching IPMonitor
+changes and independent repeated-unanswered-SYN flows across eight and three
+non-runner processes, respectively. The second interval's raw socket records
+included at least seven independent IPv4 flows plus other IPv4 and IPv6 flows,
+so this was dual-stack common-path loss rather than IPv6 withdrawal alone.
+
+Fireside's g3 Proxy process stayed ready, undrained, and in one generation.
+Exact-window H1 pending work, WireGuard peer/decryption queue drops, receive
+failures, return backpressure, host packet drops, UDP receive-buffer errors,
+OOM, and memory pressure were zero or unchanged, with ample transport and host
+capacity. The HTTP target appeared in the hosted DeviceLocal route, and the
+SOCKS trace crossed the public proxy and completed its target request write.
+The private tracker record was lost before its `last_out`/`last_in` counters
+became durable, so these observations do not prove the HTTP RemoteEgress or
+return edge. A Device RPC read timeout/detach followed the first local router
+transition by about 16 seconds, and no detach occurred in the second interval;
+the independently connected RPC was a victim of the common path, not its cause.
+
+A later same-gateway control identified the first hop as a UniFi Dream Machine
+SE and captured the mechanism directly. At 22:03:26.815Z it advertised a
+1,800-second high-preference router lifetime and a preferred/valid prefix; at
+22:03:29.582Z it explicitly advertised router lifetime zero and prefix
+preferred lifetime zero, after which `configd` removed the default route. An
+eight-minute, 87-sample control then recorded seven direct IPv4 HTTPS failures
+while every LAN-gateway ping succeeded, every sample retained an IPv6 default,
+and the UDM `hasInternet` flag never became false. Contemporaneous IPv4 and
+IPv6 sockets across unrelated processes sent 3--13 SYNs with no inbound
+packet. This later control proves the explicit-withdrawal and dual-stack UDM/
+WAN signature, not the timing of the earlier requests; gateway reachability
+and the appliance health flag are not proof of WAN data-plane health.
+
+Treat this exact combination as acceptance-host UDM/WAN/upstream disruption.
+Preserve and inspect the UDM WAN, ISP, DHCPv6-PD, and failover logs and config,
+then repair the component causing explicit router withdrawal and simultaneous
+IPv4/IPv6 data-plane loss. No Server, Connect, or Proxy deployment can repair
+it. Before repeating acceptance, require at least 30 minutes with no explicit
+withdrawal or default-route removal, uninterrupted direct IPv4 and IPv6 HTTPS
+controls, and no multi-process repeated-SYN cluster. Then require three
+consecutive unchanged focused proxy acceptance passes, including the sustained
+isolated and three-protocol overlap cases; do not add retries or lengthen the
+timeout. A passing verification demonstrates recovery and does not relabel the
+retained failures.
+
 Do not promote one request's `no-local-kernel-signal` to remote attribution:
 the exact request query is intentionally narrow and can precede the decisive
 local transition. Campaign-wide Wi-Fi, router-advertisement, and SYN signals
