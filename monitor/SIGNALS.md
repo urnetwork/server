@@ -11551,16 +11551,20 @@ host. HTTP, SOCKS, and WireGuard all failed in the overlap. Crisp remained
 ready and undrained with no process restart, H1 pending work, WireGuard peer or
 decryption queue drops, receive-routine exit, return backpressure, host packet
 drop, UDP receive-buffer error, OOM, or memory pressure. A later direct control
-passed 60/60 over each address family after the Darwin path signals stopped.
+passed 60/60 over each address family. A fully passing control window also had
+broad Wi-Fi, router-advertisement, and unrelated-process SYN signals.
 
 Do not promote one request's `no-local-kernel-signal` to remote attribution:
 the exact request query is intentionally narrow and can precede the decisive
-local transition. Reconcile the full campaign window and unrelated-process
-TCP summaries as well as each request interval. Conversely, outer WireGuard
-`sent` counts are not server-ingress evidence. A clean host/Proxy window plus
-larger encrypted return datagrams still moves the boundary inward as described
-below; the broader local signals above move it outward to the acceptance host.
-Keep the transport result failed, repair or wait out that path, and repeat the
+local transition. Campaign-wide Wi-Fi, router-advertisement, and SYN signals
+are context only; their presence in a passing control means they cannot move
+an individual request's boundary. Attribution requires exact correlation
+between that request's interval and its packet/byte counters. In particular,
+outer WireGuard `sent` counts are not server-ingress evidence. A matching
+hosted-device `last_out` RemoteEgress delta proves Proxy received and decrypted
+the outbound packet, moving the boundary past the client and WireGuard public
+path; `last_in` retains the corresponding return boundary. Without that exact
+request-boundary correlation, keep the transport result failed and repeat the
 same campaign unchanged.
 
 The acceptance runner queries a two-second-padded request interval from a
