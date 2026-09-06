@@ -10801,6 +10801,35 @@ opaque handles, nullable errors, save-callback result ownership and existing
 signatures, with an old-classification semantic failure and healthy controls.
 Header generation or a host smoke test alone is not native-app qualification.
 
+Checked optional storage also has a Swift error-import boundary. A Go
+`(nil, nil)` result means successful absence, but an Objective-C object return
+with an `NSError` output can import as a nonoptional throwing Swift method:
+returning nil then throws `nilError`. Optional coercion at the caller does not
+repair that contract, and `try?` would also suppress genuine storage failures.
+Use a nonnil checked read-result envelope with an error-free optional getter
+for current/default destinations, paired-snapshot destinations, and saved key
+material. Preserve the existing checked loader's ownership/error decisions and
+legacy API; a read must neither create an identity nor rewrite an empty record.
+Qualify the actual newly generated regular and extension SDKs, including Swift
+getter spellings and nonoptional snapshot/reset/Load returns, not only Go tests
+or header text.
+
+The September 6 native counterfactual ran all 26 controls: seven valid
+missing/legacy-empty cases threw `nilError`, while nineteen present-value and
+genuine-error controls passed. The corrected callers must pass those same
+controls without blanket error suppression, including unchanged malformed
+records and dangling-link read failures. This defect was found in the proposed
+recovery integration, not the incident's installed artifact; it does not
+identify the historical reset/read/missed-save branch or process-exit reason.
+Android's JNI mapping and C++ error/optional mapping do not use Swift's import
+convention, but still need their own actual binding controls; Go success is
+not proof of native success. Android absence and legacy-empty key tests must
+leave auth/routing records, bytes and modification times unchanged. Windows
+and Linux native file readers are a separate error-versus-absence boundary.
+`mmm/ur.io` and `extension` do not expose these local-storage methods; audit
+their existing remote-observation and persistence paths separately rather than
+claiming the Swift fix qualifies browser recovery.
+
 The proposed startup path also needs an actual credential-settlement event,
 not merely a small immediate retry count. API refresh installs its new client
 JWT before the device callback finishes durable publication; all three immediate
