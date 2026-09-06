@@ -11537,6 +11537,32 @@ public proxy listeners; it is downstream evidence. A subsequent exact
 same-configuration overlap passed after cleanup. That proves intermittency,
 not that the retained failure was a flake.
 
+The 2026-09-06 Crisp g2 reproduction exposed the adjacent split-request form.
+Isolated HTTP and SOCKS campaigns first passed 60/60, then WireGuard lost the
+262-byte TLS Finished/request tail after receiving and acknowledging the
+complete checksum-valid server handshake. The origin's FIN about ten seconds
+later still acknowledged only the preceding ClientHello. The client's outer
+UDP sends had no syscall error, but that proves only kernel admission, not that
+the datagrams crossed Wi-Fi or reached the Proxy host. During the complete
+four-minute failure window, Darwin recorded 13 repeated-unanswered-SYN sockets
+across six processes, three `StallScore:50` records, and then a router-lifetime
+zero plus matching IPMonitor change; cleanup also failed resolving the API
+host. HTTP, SOCKS, and WireGuard all failed in the overlap. Crisp remained
+ready and undrained with no process restart, H1 pending work, WireGuard peer or
+decryption queue drops, receive-routine exit, return backpressure, host packet
+drop, UDP receive-buffer error, OOM, or memory pressure. A later direct control
+passed 60/60 over each address family after the Darwin path signals stopped.
+
+Do not promote one request's `no-local-kernel-signal` to remote attribution:
+the exact request query is intentionally narrow and can precede the decisive
+local transition. Reconcile the full campaign window and unrelated-process
+TCP summaries as well as each request interval. Conversely, outer WireGuard
+`sent` counts are not server-ingress evidence. A clean host/Proxy window plus
+larger encrypted return datagrams still moves the boundary inward as described
+below; the broader local signals above move it outward to the acceptance host.
+Keep the transport result failed, repair or wait out that path, and repeat the
+same campaign unchanged.
+
 The acceptance runner queries a two-second-padded request interval from a
 bounded Darwin unified-log predicate only after a request becomes a terminal
 campaign failure. It includes the exact kernel allocation/DPS/TCP-summary
