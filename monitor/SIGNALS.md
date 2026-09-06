@@ -10740,6 +10740,31 @@ was Jetsam-only, not a general crash-report inventory. Do not turn these
 coverage gaps, process-table membership, or another component's termination
 into a cause for this extension's exit.
 
+Audit diagnostic failures as a separate process-lifetime boundary. The installed
+SDK enables console logging and aliases stderr to stdout on iOS/Android. Its
+glog console sink propagates write errors into `sinkf`, which emits
+`log: exiting because of error writing previous log to sinks:` and aborts even
+for an ordinary Info call. A console endpoint failure must not request process
+termination: drop that failed console write without retrying or disabling the
+other sinks, preserve its actual byte count, and allow subsequent console
+writes. Explicit Fatal/Exit and errors from unrelated custom sinks must retain
+their termination contracts. `glog_stderr_test.go` covers zero/partial writes,
+a real closed file, ordinary file-log persistence and recovery, and bounded
+subprocess controls for Fatal, Exit and custom-sink errors. This correction is
+separate from SDK dependency integration and native artifact qualification;
+an operating-system SIGPIPE before a write returns is a different mechanism.
+
+The retained incident logs contain no matching sink-error fatal signature,
+which materially weakens this hypothesis for the old iPhone process. The
+installed logger attempts the remaining sinks after a console error and
+explicitly flushes/syncs its files before aborting; its ordinary periodic flush
+interval alone does not explain a missing fatal record. The default full-log
+export inventories all four severities, while selected exports and later
+four-newest-file pruning can omit files. Neither successful flushing nor an
+omission/rotation at the incident time is established. Do not label the old
+exit a console failure without affirmative crash, endpoint or log evidence,
+and do not treat a host subprocess regression as proof of an iOS occurrence.
+
 The matching installed source has another concrete missed-save mechanism:
 PacketTunnelProvider opens RPC before its destination-persistence listener,
 and one startup fallback also applies a location before that listener. The SDK
@@ -10936,6 +10961,16 @@ SDK storage, named defaults, consumer construction, owner retirement and
 same-owner credential rotation. These controls do not establish the historical
 iPhone branch or guarantee delivery of a cross-process intent written after
 the finish cutoff.
+
+Apple checkpoint `2c6e1b8f` passed all 56 focused Foundation owner/startup
+controls normally and with Thread Sanitizer, plus 22 reduced-SDK native cold
+controls normally. An otherwise unchanged six-case native counterfactual that
+ignores changed intent fails late connect, late disconnect and same-owner
+rotation, while its three unchanged/retired-owner controls pass. A separate
+counterfactual that misclassifies queued finish work as running fails both
+cancellation/deadline cleanup controls while the unchanged-disconnect control
+passes. These isolate the corrected handoffs, not historical execution or
+whole-device sleep/replacement behavior.
 
 The adjacent source audit found no identical duplicate-start/reset ordering in
 Android or `extension`, and `mmm/ur.io` already checked an unchanged device key
