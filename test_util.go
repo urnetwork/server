@@ -688,20 +688,118 @@ db: "%s"`,
 // remained pointed at the persistent database, migrations would run there
 // while the test itself saw an empty temporary schema.
 func pushTestPgResources(pg, maintenancePg map[string]any, database string) func() {
-	popPg := Vault.PushSimpleResource(
+	return pushTestPgResourcesWithReset(pg, maintenancePg, database, PgReset)
+}
+
+// Runs every registered cleanup, preserving the initiating panic exactly when
+// cleanup succeeds. Defers also drain the remaining callbacks after Goexit.
+func runTestEnvCleanup(initialFailure any, callbacks ...func()) {
+	var failures []any
+	if initialFailure != nil {
+		failures = append(failures, initialFailure)
+	}
+	defer func() {
+		if len(failures) == 1 {
+			panic(failures[0])
+		}
+		if len(failures) > 1 {
+			cleanupErrors := make([]error, 0, len(failures))
+			for _, failure := range failures {
+				if err, ok := failure.(error); ok {
+					cleanupErrors = append(cleanupErrors, err)
+				} else {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("test environment panic: %v", failure))
+				}
+			}
+			panic(errors.Join(cleanupErrors...))
+		}
+	}()
+	for index := len(callbacks) - 1; index >= 0; index-- {
+		callback := callbacks[index]
+		defer func() {
+			defer func() {
+				if failure := recover(); failure != nil {
+					failures = append(failures, failure)
+				}
+			}()
+			if callback != nil {
+				callback()
+			}
+		}()
+	}
+}
+
+// The initiating caller owns completion; reentrant/in-progress repeats are
+// no-ops. Completed repeats preserve a failure without running callbacks twice.
+// External cleanup never runs under the state lock.
+type testEnvCleanup struct {
+	stateLock sync.Mutex
+	callback  func()
+	started   bool
+	completed bool
+	failure   any
+}
+
+// Returns one completion owner's private cleanup entry point.
+func oneShotTestEnvCleanup(callback func()) func() {
+	cleanup := &testEnvCleanup{callback: callback}
+	return cleanup.execute
+}
+
+// Claims the callbacks before unlocking and preserves the terminal outcome.
+func (self *testEnvCleanup) execute() {
+	self.stateLock.Lock()
+	if self.started {
+		priorFailure, priorCompleted := self.failure, self.completed
+		self.stateLock.Unlock()
+		if priorCompleted && priorFailure != nil {
+			panic(priorFailure)
+		}
+		return
+	}
+	self.started = true
+	self.stateLock.Unlock()
+	returned := false
+	defer func() {
+		result := recover()
+		if !returned && result == nil {
+			result = errors.New("test environment cleanup exited before completing")
+		}
+		self.stateLock.Lock()
+		self.failure, self.completed = result, true
+		self.stateLock.Unlock()
+		if result != nil {
+			panic(result)
+		}
+	}()
+	self.callback()
+	returned = true
+}
+
+// Retains actual override push/pop while tests intercept only pool I/O. A
+// failure before the pair's reset returns must undo its already-pushed routes.
+func pushTestPgResourcesWithReset(pg, maintenancePg map[string]any, database string, resetPools func()) func() {
+	var popPg, popMaintenance func()
+	restore := oneShotTestEnvCleanup(func() {
+		runTestEnvCleanup(nil, popMaintenance, popPg, resetPools)
+	})
+	ready := false
+	defer func() {
+		if !ready {
+			runTestEnvCleanup(recover(), restore)
+		}
+	}()
+	popPg = Vault.PushSimpleResource(
 		DefaultPgVaultResourceName,
 		testPgResourceForDatabase(pg, database),
 	)
-	popMaintenance := Vault.PushSimpleResource(
+	popMaintenance = Vault.PushSimpleResource(
 		MaintenancePgVaultResourceName,
 		testPgResourceForDatabase(maintenancePg, database),
 	)
-	PgReset()
-	return func() {
-		popMaintenance()
-		popPg()
-		PgReset()
-	}
+	resetPools()
+	ready = true
+	return restore
 }
 
 // in each test file, `func TestMain(m *testing.M) {(&server.TestEnv{}).TestMain(m)}`
@@ -983,21 +1081,59 @@ func (self *TestEnv) setup() func() {
 		int(bytes[0]),
 		testRedisLeaseTtl,
 	)
+	return self.setupWithAcquiredStores(ctx, pg, maintenancePg, testPgDbName, redisAuthority, redisPassword, testRedisLease.db, func() { testRedisLease.release(ctx) }, nil)
+}
+
+// Keeps the post-acquisition lifecycle and real resource overrides intact.
+// A call-local observer may intercept external effects for hermetic ordering
+// tests; normal setup passes nil and executes every original store operation.
+func (self *TestEnv) setupWithAcquiredStores(ctx context.Context, pg, maintenancePg map[string]any, testPgDbName, redisAuthority, redisPassword string, testRedisDb int, releaseRedis func(), observeEffect func(string, func())) func() {
+	perform := func(operation string, effect func()) {
+		if observeEffect == nil {
+			effect()
+		} else {
+			observeEffect(operation, effect)
+		}
+	}
+	var popPgResources, popRedis func()
+	restoreRoutes := oneShotTestEnvCleanup(func() {
+		runTestEnvCleanup(nil,
+			func() {
+				if popRedis != nil {
+					runTestEnvCleanup(nil, popRedis, func() { perform("redis-reset", RedisReset) })
+				}
+			},
+			func() {
+				if popPgResources != nil {
+					popPgResources()
+				}
+			},
+		)
+	})
+	releaseLease := oneShotTestEnvCleanup(releaseRedis)
 	setupSucceeded := false
+	warmupStarted := false
 	defer func() {
 		if !setupSucceeded {
-			testRedisLease.release(ctx)
+			runTestEnvCleanup(recover(),
+				func() {
+					if warmupStarted {
+						perform("reset", Reset)
+					}
+				},
+				restoreRoutes, releaseLease,
+			)
 		}
 	}()
-	testRedisDb := testRedisLease.db
 
-	reapOrphanedTestPgDbs(ctx)
+	perform("pg-reap", func() { reapOrphanedTestPgDbs(ctx) })
 
-	Db(ctx, func(conn PgConn) {
-		_, err := conn.Exec(
-			ctx,
-			fmt.Sprintf(
-				`
+	perform("pg-create", func() {
+		Db(ctx, func(conn PgConn) {
+			_, err := conn.Exec(
+				ctx,
+				fmt.Sprintf(
+					`
 					CREATE DATABASE %s
 					WITH
 						OWNER=%s
@@ -1006,16 +1142,17 @@ func (self *TestEnv) setup() func() {
 						LC_CTYPE='en_US.UTF-8'
 						TEMPLATE='template0'
 				`,
-				testPgDbName,
-				pg["user"],
-			),
-		)
-		Raise(err)
-	}, OptReadWrite())
+					testPgDbName,
+					pg["user"],
+				),
+			)
+			Raise(err)
+		}, OptReadWrite())
+	})
 
-	popPgResources := pushTestPgResources(pg, maintenancePg, testPgDbName)
+	popPgResources = pushTestPgResourcesWithReset(pg, maintenancePg, testPgDbName, func() { perform("pg-reset", PgReset) })
 
-	popRedis := Vault.PushSimpleResource(
+	popRedis = Vault.PushSimpleResource(
 		"redis.yml",
 		[]byte(fmt.Sprintf(
 			`
@@ -1029,20 +1166,23 @@ cluster: %t`,
 			false,
 		)),
 	)
-	RedisReset()
+	perform("redis-reset", RedisReset)
 
-	Redis(ctx, func(client RedisClient) {
-		cmd := client.FlushDB(ctx)
-		_, err := cmd.Result()
-		Raise(err)
+	perform("redis-flush", func() {
+		Redis(ctx, func(client RedisClient) {
+			cmd := client.FlushDB(ctx)
+			_, err := cmd.Result()
+			Raise(err)
+		})
 	})
 
 	if self.ApplyDbMigrations {
-		ApplyDbMigrations(ctx)
+		perform("pg-migrate", func() { ApplyDbMigrations(ctx) })
 	}
 
 	if self.Warmup {
-		Warmup(AllWarmupTargets()...)
+		warmupStarted = true
+		perform("warmup", func() { Warmup(AllWarmupTargets()...) })
 	}
 
 	// PEERSSTREAMS2: key-event delivery defaults on, so make the test redis
@@ -1053,39 +1193,48 @@ cluster: %t`,
 		defer func() {
 			recover()
 		}()
-		Testing_EnableKeyspaceNotifications(ctx)
+		perform("redis-notifications", func() { Testing_EnableKeyspaceNotifications(ctx) })
 	}()
 
 	setupSucceeded = true
-	return func() {
-		defer testRedisLease.release(ctx)
+	return oneShotTestEnvCleanup(func() {
+		routesCleanupStarted := false
+		defer func() {
+			runTestEnvCleanup(recover(), func() {
+				if !routesCleanupStarted {
+					restoreRoutes()
+				}
+			}, releaseLease)
+		}()
 
-		Reset()
+		perform("reset", Reset)
 
-		Redis(ctx, func(client RedisClient) {
-			cmd := client.FlushDB(ctx)
-			_, err := cmd.Result()
-			Raise(err)
+		perform("redis-flush", func() {
+			Redis(ctx, func(client RedisClient) {
+				cmd := client.FlushDB(ctx)
+				_, err := cmd.Result()
+				Raise(err)
+			})
 		})
 
-		popRedis()
-		RedisReset()
+		routesCleanupStarted = true
+		restoreRoutes()
 
-		popPgResources()
-
-		Db(ctx, func(conn PgConn) {
-			_, err := conn.Exec(
-				ctx,
-				fmt.Sprintf(
-					`
+		perform("pg-drop", func() {
+			Db(ctx, func(conn PgConn) {
+				_, err := conn.Exec(
+					ctx,
+					fmt.Sprintf(
+						`
 						DROP DATABASE %s
 					`,
-					testPgDbName,
-				),
-			)
-			Raise(err)
-		}, OptReadWrite())
-	}
+						testPgDbName,
+					),
+				)
+				Raise(err)
+			}, OptReadWrite())
+		})
+	})
 }
 
 // testPgDbOrphanAge is how old an abandoned test database must be before the

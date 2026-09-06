@@ -469,6 +469,9 @@ func (self *Resolver) ResourcePath(relPath string) (string, error) {
 }
 
 func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
+	if paths, owned, err := ownedTestProcessResourcePaths(self.mountType, relPath); owned {
+		return paths, err
+	}
 	if filepath.IsAbs(relPath) {
 		panic("Resource path must be relative.")
 	}
