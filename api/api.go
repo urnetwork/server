@@ -211,6 +211,7 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
+		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
 		router.NewRoute("GET", "/sn/evidence", handlers.SnEvidence),
 		router.NewRoute("POST", "/sn/evidence", handlers.SnEvidence),
