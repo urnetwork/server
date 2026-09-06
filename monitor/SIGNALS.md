@@ -10898,6 +10898,73 @@ an empty startup reservation and clear shared intent even before a device is
 published. Test overlapping logout completions and a held constructor; rejecting
 late native publication alone is not proof of cross-manager storage exclusion.
 
+An already-running duplicate start must not cancel that session's pending
+recovery. The reviewed Apple path queued unconditional transport/wake cancellation
+before its successful duplicate-start return; reusing the live device could
+therefore remove its recovery work without replacing it. Reserve first for a
+genuine new startup, then check that exact ticket when queued cancellation runs.
+Do not require a published device for this check: an admitted but unpublished
+startup must still retire the previous recovery bookkeeping. Duplicate and
+logout-rejected starts must enqueue nothing. `TunnelProviderSessionOwnerTests`
+forces all six admission cases with manually drained queues and real work-item
+cancellation flags, including `testAlreadyRunningStartupPreservesPendingRecoveryWork`
+and `testNewerStartupTicketRejectsOldQueuedRecoveryCancellation`.
+
+Apple checkpoint `95d2e839` passed all 28 current owner controls normally and
+with Thread Sanitizer. Restoring only the old cancellation ordering/ticket
+policy fails five new tests while the published-current healthy control passes.
+These are Foundation ownership tests, not a complete NetworkExtension lifecycle
+or device qualification. They do not establish that the overnight iPhone issued
+a duplicate start. Full release verification remains open, including the prior
+unsigned extension's 41.517 MiB versus unchanged 39 MiB size failure; do not raise
+the ceiling or change the build workflow to declare this source fix qualified.
+
+Startup observation and queued startup completion are separate admissions. A
+newer shared connect or disconnect can arrive after destination restoration
+while the main-queue finish is held. Recheck the checked shared intent for the
+same recovery/destination owner at finish admission. If it changed, reconcile
+only the destination on the existing worker, retaining the original auth
+subscription and deadline; never replay successful Load/autosave preparation.
+Complete success on that admitted stack rather than opening a second queue
+gap. A queued callback is not an executing SDK read: cancellation/deadline must
+release the retired startup's resources without draining main, while cleanup
+must still join a read that actually began. Malformed/unavailable intent is a
+checked failure, not absence or permission to choose another location.
+`TunnelAuthStartupContinuationTests` holds both queues and the checked read;
+`TunnelNativeColdRestoreTests` exercises late connect/disconnect with actual
+SDK storage, named defaults, consumer construction, owner retirement and
+same-owner credential rotation. These controls do not establish the historical
+iPhone branch or guarantee delivery of a cross-process intent written after
+the finish cutoff.
+
+The adjacent source audit found no identical duplicate-start/reset ordering in
+Android or `extension`, and `mmm/ur.io` already checked an unchanged device key
+before teardown. This does not close their recovery qualification. Separate
+source hazards need exact stale-owner controls: Linux checks a generation before
+separately publishing `ioLoopDied_`, Windows can retain an old watchdog verdict whose
+`FailsafeStop` has no originating-session admission, and MMM's pre-fix path could
+reuse the same `extension:<instance>` key across disconnect/reconnect while an
+old attachment failure still targeted global teardown. Force those exact
+producer-to-effect boundaries with a newer-session healthy control; tests of descriptor reuse,
+watchdog budgets or merely unequal attachment keys do not cover them. macOS
+shares the changed Apple provider path but still needs native lifecycle gates.
+
+MMM also had a connected-page handoff gap: a location pick while the hosted
+device was loading was saved/displayed without issuing the device reconnect.
+The extension's already-connected `SET_LOCATION` path assumes that page command
+has happened; it is not an acknowledgement that the device applied the choice.
+Retain the latest explicit pick for the exact still-connected attachment and
+drain it before publishing readiness. Fence constructor completion, callbacks
+and failure cleanup by attachment identity, not only the reusable
+`extension:<instance>` key. Do not replay an unchanged historical page
+preference over extension-owned state or turn a disconnected pick into an
+automatic connection. `device-session.test.mjs` holds constructor, pairing and
+command completion, including same-key replacement, a newer pick arriving
+during an older command, and healthy no-request/equal-pick controls. This queue
+is page-local, not durable across page close; JS command admission is not
+remote acknowledgement or proof that providers are forwarding. Native browser
+and extension lifecycle qualification remains a separate gate.
+
 Native stop must also cover the pending-to-ready handoff: if stop observes a
 pending startup and readiness wins before cancellation is delivered, stop must
 still retire that exact published device. An already-failed pending operation
