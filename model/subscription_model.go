@@ -1495,6 +1495,18 @@ func createTransferEscrowInTx(
 		priority = UnpaidPriority
 	}
 
+	if err := lockActiveContractClientsInTx(
+		ctx,
+		tx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+	); err != nil {
+		returnErr = err
+		return
+	}
+
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for balanceId, escrow := range balanceEscrows {
 			batch.Queue(
@@ -1584,6 +1596,64 @@ func createTransferEscrowInTx(
 	}
 
 	return
+}
+
+type contractClientLifecycle struct {
+	networkId server.Id
+	active    bool
+}
+
+func lockActiveContractClientsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+) error {
+	clientIds := []server.Id{sourceId}
+	if destinationId != sourceId {
+		clientIds = append(clientIds, destinationId)
+	}
+	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+
+	// Contract creations may share these rows, while lifecycle UPDATE and
+	// DELETE must wait. Stable order prevents opposite-direction contracts
+	// from acquiring the same pair in opposite orders.
+	clientLifecycles := map[server.Id]contractClientLifecycle{}
+	result, err := tx.Query(
+		ctx,
+		`
+			/* contract_lifecycle_write_boundary */
+			SELECT client_id, network_id, active
+			FROM network_client
+			WHERE client_id = ANY($1)
+			ORDER BY client_id
+			FOR SHARE
+		`,
+		clientIds,
+	)
+	server.Raise(err)
+	defer result.Close()
+	for result.Next() {
+		var clientId server.Id
+		var lifecycle contractClientLifecycle
+		server.Raise(result.Scan(&clientId, &lifecycle.networkId, &lifecycle.active))
+		clientLifecycles[clientId] = lifecycle
+	}
+	server.Raise(result.Err())
+
+	sourceLifecycle, sourceFound := clientLifecycles[sourceId]
+	if !sourceFound || !sourceLifecycle.active || sourceLifecycle.networkId != sourceNetworkId {
+		return ErrActiveClientNotFound
+	}
+	destinationLifecycle, destinationFound := clientLifecycles[destinationId]
+	if !destinationFound || !destinationLifecycle.active || destinationLifecycle.networkId != destinationNetworkId {
+		return ErrContractDestinationInactive
+	}
+	return nil
 }
 
 // renaming of `CreateTransferEscrow` since contract is the top level concept
@@ -1975,11 +2045,50 @@ func CreateContractNoEscrow(
 	contractTransferByteCount ByteCount,
 ) (contractId server.Id, returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		contractId = server.NewId()
-
-		server.RaisePgResult(tx.Exec(
+		contractId, returnErr = createContractNoEscrowInTx(
 			ctx,
-			`
+			tx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+		)
+	})
+	if returnErr != nil {
+		return
+	}
+	// network / friends-and-family egress has no payer but is still
+	// contract-creating usage: count the source's top-level identity in the
+	// block users stat
+	StampTopLevelClientContractTime(ctx, sourceId)
+	return
+}
+
+func createContractNoEscrowInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+) (contractId server.Id, returnErr error) {
+	if err := lockActiveContractClientsInTx(
+		ctx,
+		tx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+	); err != nil {
+		return server.Id{}, err
+	}
+
+	contractId = server.NewId()
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_contract (
                     contract_id,
                     source_network_id,
@@ -1991,19 +2100,14 @@ func CreateContractNoEscrow(
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
             `,
-			contractId,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-			server.NowUtc(),
-		))
-	})
-	// network / friends-and-family egress has no payer but is still
-	// contract-creating usage: count the source's top-level identity in the
-	// block users stat
-	StampTopLevelClientContractTime(ctx, sourceId)
+		contractId,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferByteCount,
+		server.NowUtc(),
+	))
 	return
 }
 

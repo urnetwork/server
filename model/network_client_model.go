@@ -54,6 +54,10 @@ const MaxClientPrincipalLength = 256
 // errors.Is to separate this terminal state from infrastructure failures.
 var ErrActiveClientNotFound = errors.New("Client does not exist.")
 
+// Identifies a destination that cannot participate at the contract write
+// boundary. Controllers map this state to a route-specific reliability result.
+var ErrContractDestinationInactive = errors.New("Contract destination is inactive.")
+
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
 
@@ -786,23 +790,14 @@ func RemoveNetworkClient(
 
 	// important: must check `network_id = session network_id`
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		tag, err := tx.Exec(
+		rowCount, err := deactivateNetworkClientsInTx(
 			session.Ctx,
-			`
-				UPDATE network_client
-				SET
-					active = false,
-					deactivate_time = $3
-				WHERE
-					client_id = $1 AND
-					network_id = $2
-			`,
-			removeClient.ClientId,
+			tx,
+			[]server.Id{removeClient.ClientId},
 			session.ByJwt.NetworkId,
-			server.NowUtc(),
 		)
 		server.Raise(err)
-		if tag.RowsAffected() != 1 {
+		if rowCount != 1 {
 			removeClientResult = &RemoveNetworkClientResult{
 				Error: &RemoveNetworkClientError{
 					Message: "Client does not exist.",
@@ -823,8 +818,57 @@ func RemoveNetworkClient(
 // no single transaction runs long or holds locks for long.
 const RemoveNetworkClientsBatchCount = 10000
 
-func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) {
-	_, err := tx.Exec(
+func deactivateNetworkClientsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	clientIds []server.Id,
+	networkId server.Id,
+) (int64, error) {
+	orderedClientIds := slices.Clone(clientIds)
+	slices.SortFunc(orderedClientIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	orderedClientIds = slices.Compact(orderedClientIds)
+
+	lockedClientIds := []server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`
+			/* network_client_deactivation_write_boundary */
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				network_id = $2
+			ORDER BY client_id
+			FOR UPDATE
+		`,
+		orderedClientIds,
+		networkId,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer result.Close()
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			return 0, err
+		}
+		lockedClientIds = append(lockedClientIds, clientId)
+	}
+	if err := result.Err(); err != nil {
+		return 0, err
+	}
+	if len(lockedClientIds) == 0 {
+		return 0, nil
+	}
+
+	// Capture the lifecycle timestamp only after every target row is locked.
+	// A concurrent contract holding FOR SHARE must remain ordered before this
+	// deactivation in both database state and recorded time.
+	deactivateTime := server.NowUtc()
+	tag, err := tx.Exec(
 		ctx,
 		`
 			UPDATE network_client
@@ -835,10 +879,18 @@ func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientId
 				client_id = ANY($1) AND
 				network_id = $2
 		`,
-		clientIds,
+		lockedClientIds,
 		networkId,
-		server.NowUtc(),
+		deactivateTime,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) {
+	_, err := deactivateNetworkClientsInTx(ctx, tx, clientIds, networkId)
 	server.Raise(err)
 }
 
@@ -2493,14 +2545,27 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			tag := server.RaisePgResult(tx.Exec(
+			clientIds := []server.Id{}
+			result, err := tx.Query(
 				ctx,
 				`
-				UPDATE network_client
-				SET active = false, deactivate_time = $2
-				WHERE client_id IN (
+					WITH candidate AS MATERIALIZED (
+						SELECT network_client.client_id
+						FROM network_client
+						LEFT JOIN network_client_connection ON
+							network_client_connection.client_id = network_client.client_id AND
+							network_client_connection.connected = true
+						WHERE
+							network_client.active = true AND
+							network_client.source_client_id IS NULL AND
+							network_client.auth_time < $1 AND
+							network_client_connection.client_id IS NULL
+						ORDER BY network_client.auth_time ASC, network_client.client_id ASC
+						LIMIT $2
+					)
 					SELECT network_client.client_id
 					FROM network_client
+					JOIN candidate ON candidate.client_id = network_client.client_id
 					LEFT JOIN network_client_connection ON
 						network_client_connection.client_id = network_client.client_id AND
 						network_client_connection.connected = true
@@ -2509,13 +2574,36 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 						network_client.source_client_id IS NULL AND
 						network_client.auth_time < $1 AND
 						network_client_connection.client_id IS NULL
-					ORDER BY network_client.auth_time ASC
-					LIMIT $3
-				)
+					ORDER BY network_client.client_id
+					FOR UPDATE OF network_client
 				`,
 				minTopLevelAuthTime.UTC(),
-				server.NowUtc(),
 				markTopLevelBatchCount,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					clientIds = append(clientIds, clientId)
+				}
+			})
+			if len(clientIds) == 0 {
+				return
+			}
+
+			// The ordered FOR UPDATE above has completed before this timestamp
+			// is captured, so a lifecycle reader that won the row lock remains
+			// earlier than the deactivation it delayed.
+			deactivateTime := server.NowUtc()
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_client
+					SET active = false, deactivate_time = $2
+					WHERE client_id = ANY($1) AND active = true
+				`,
+				clientIds,
+				deactivateTime,
 			))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)

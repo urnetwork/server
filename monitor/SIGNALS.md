@@ -4292,9 +4292,10 @@ zero-success invariant directly instead of relying on the failed-request rate
 to imply it.
 
 The durable software fix has two halves. The API rejects an inactive or missing
-destination before provide-mode selection and repeats active-only endpoint
-checks at the contract write boundary. Those destination-lifecycle and bounded
-missing-origin failures use the additive wire result
+destination before provide-mode selection, then locks and validates both
+endpoint lifecycle rows inside the contract insertion transaction. Those
+destination-lifecycle and bounded missing-origin failures use the additive
+wire result
 `ContractError_Reliability`; balance, policy, setup, trust, and malformed
 contract results remain distinct. Connect binds every ContractManager callback
 to the exact multi-client channel that emitted it. A matching Reliability
@@ -4669,14 +4670,16 @@ identifiers or contract content.
   contradictory, or its median exceeds its p95. Preserve that as observation
   failure rather than coercing it to zero.
 
-Use §8.12 to prove every API artifact contains server commit `c8dfe570`, after
-satisfying the selected artifact's append-only migration prerequisite. The API
-must reject the stale destination before mode selection and repeat the
-active-only check at the write boundary. A Connect-bearing client containing
-`5b33c91` separately consumes the Reliability result and retires only the
-emitting route, reducing repeated attempts; client behavior cannot substitute
-for the server-side zero-success invariant. Do not delete contract history,
-inactive clients, or provide keys to manufacture a healthy result.
+Use §8.12 to prove every API artifact contains server commit `c8dfe570` for the
+pre-selection guard and the later transactional lifecycle-lock correction,
+after satisfying the selected artifact's append-only migration prerequisite.
+The API must reject the stale destination before mode selection and lock and
+validate both endpoint rows in the insertion transaction. A Connect-bearing
+client containing `5b33c91` separately consumes the Reliability result and
+retires only the emitting route, reducing repeated attempts; client behavior
+cannot substitute for the server-side zero-success invariant. Do not delete
+contract history, inactive clients, or provide keys to manufacture a healthy
+result.
 
 This is a **software lifecycle-correctness** alert. It is not fixed by adding
 Proxy hardware, widening a timeout, weakening provider eligibility, or
@@ -4715,6 +4718,28 @@ those routes as successes, which withholds the distinct Reliability result the
 fixed clients need to retire them. Preserve the ordered API-then-client repair;
 do not turn the aggregate cardinalities into customer identifiers or clear
 durable history.
+
+A bounded `2026-09-07` transaction-order audit found one newer successful
+non-companion, same-network contract whose insert committed after the
+destination deactivation transaction and whose create time was 4.468ms after
+the recorded deactivation time. This single affirmative row disproved the
+claim that the active reads added by `c8dfe570` closed the write boundary: both
+reads still occurred before the contract transaction, while the no-escrow and
+escrow inserts neither locked nor revalidated the lifecycle rows. The same
+audit found that deactivation callers captured their timestamp before an
+`UPDATE` could wait for a row lock, which could make a later deactivation look
+earlier than a contract that correctly won serialization.
+
+The source correction locks source and destination lifecycle rows in stable
+client-id order with `FOR SHARE`, validates their active state and supplied
+network mapping inside the same transaction, and only then inserts either kind
+of contract. Destination failure remains the route-specific Reliability class;
+source failure remains NoPermission. Every network-client deactivation path
+now takes explicit ordered `FOR UPDATE` locks before capturing one batch
+timestamp and applying the update. This makes the winner visible in both row
+state and timestamps: a committed deactivation makes the waiting contract fail,
+while a contract that holds the shared lifecycle lock commits before the
+deactivator records its time.
 
 Implementation convention: SIGNALS.md §2.20 (`stale-contracts`) maps to
 `signal_stale_contracts.go` and `signal_stale_contracts_test.go`. Synthetic

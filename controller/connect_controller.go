@@ -26,7 +26,7 @@ import (
 
 var ControlId = server.Id(connect.ControlId)
 
-var errContractDestinationInactive = errors.New("Contract destination is inactive.")
+var errContractDestinationInactive = model.ErrContractDestinationInactive
 
 var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()

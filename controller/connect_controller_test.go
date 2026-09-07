@@ -47,8 +47,8 @@ func TestContractResultErrorSeparatesReliabilityFromAccountFailures(t *testing.T
 			want: protocol.ContractError_Reliability,
 		},
 		{
-			name: "inactive destination",
-			err:  fmt.Errorf("write-boundary race: %w", errContractDestinationInactive),
+			name: "inactive destination at write boundary",
+			err:  fmt.Errorf("write-boundary race: %w", model.ErrContractDestinationInactive),
 			want: protocol.ContractError_Reliability,
 		},
 		{
