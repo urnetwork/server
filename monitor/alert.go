@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -55,6 +56,9 @@ func (alerts Alerts) ToMarkdown() string { return alerts.Markdown() }
 // WriteMarkdown writes this collection's deterministic alert document.
 func (alerts Alerts) WriteMarkdown(w io.Writer) error { return WriteAlertsMarkdown(w, alerts) }
 
+// WriteJSONL writes this collection as deterministic, one-alert-per-line JSON.
+func (alerts Alerts) WriteJSONL(w io.Writer) error { return WriteAlertsJSONL(w, alerts) }
+
 // Identity is the stable de-duplication key prescribed by SIGNALS.md §7.
 // Target is stable; incident-varying attribution belongs in Frame.
 func (a Alert) Identity() string {
@@ -104,13 +108,7 @@ func (a Alert) String() string { return a.Markdown() }
 // sorted by severity and stable identity so repeated runs produce reviewable
 // diffs even when probes complete in a different order.
 func AlertsMarkdown(alerts []Alert) string {
-	ordered := append([]Alert(nil), alerts...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].Severity != ordered[j].Severity {
-			return ordered[i].Severity == SeverityPage
-		}
-		return ordered[i].Identity() < ordered[j].Identity()
-	})
+	ordered := orderedAlerts(alerts)
 
 	var b strings.Builder
 	b.WriteString("# Monitor alerts\n\n")
@@ -132,6 +130,32 @@ func AlertsMarkdown(alerts []Alert) string {
 func WriteAlertsMarkdown(w io.Writer, alerts []Alert) error {
 	_, err := io.WriteString(w, AlertsMarkdown(alerts))
 	return err
+}
+
+// WriteAlertsJSONL writes one complete Alert JSON object per line. It sorts a
+// copy by the same severity and identity contract as AlertsMarkdown, disables
+// HTML escaping so evidence text is not rewritten, and emits nothing for an
+// empty collection.
+func WriteAlertsJSONL(w io.Writer, alerts []Alert) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	for _, alert := range orderedAlerts(alerts) {
+		if err := encoder.Encode(alert); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func orderedAlerts(alerts []Alert) []Alert {
+	ordered := append([]Alert(nil), alerts...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Severity != ordered[j].Severity {
+			return ordered[i].Severity == SeverityPage
+		}
+		return ordered[i].Identity() < ordered[j].Identity()
+	})
+	return ordered
 }
 
 func signalReference(a Alert) string {

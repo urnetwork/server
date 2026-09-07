@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 var signalKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
@@ -160,6 +161,80 @@ func TestMonitorSignalsReturnsCopy(t *testing.T) {
 	if got := len(monitor.Signals()); got != want {
 		t.Fatalf("mutating returned slice changed registry: got %d, want %d", got, want)
 	}
+}
+
+type selectionSignal struct {
+	number string
+	key    string
+	id     string
+}
+
+func (s selectionSignal) Number() string         { return s.number }
+func (s selectionSignal) Key() string            { return s.key }
+func (s selectionSignal) ID() string             { return s.id }
+func (s selectionSignal) Name() string           { return s.key }
+func (s selectionSignal) Cadence() time.Duration { return time.Minute }
+func (s selectionSignal) Run(context.Context, SignalSettings) (Alerts, error) {
+	return nil, nil
+}
+
+func TestIncludeSignalsSelectsIdentifierFormsInRegistryOrder(t *testing.T) {
+	signals := []Signal{
+		selectionSignal{number: "1.1", key: "alpha", id: "probe/alpha"},
+		selectionSignal{number: "1.2", key: "beta", id: "probe/beta"},
+		selectionSignal{number: "1.3", key: "gamma", id: "probe/gamma"},
+	}
+	selected, err := IncludeSignals(signals, "probe/gamma", "1.1", "beta", "probe/gamma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 3 || selected[0].Key() != "alpha" || selected[1].Key() != "beta" || selected[2].Key() != "gamma" {
+		t.Fatalf("selected keys = %v, want [alpha beta gamma]", signalKeys(selected))
+	}
+}
+
+func TestIncludeSignalsFailsClosed(t *testing.T) {
+	signals := []Signal{
+		selectionSignal{number: "1.1", key: "alpha", id: "probe/alpha"},
+		selectionSignal{number: "1.2", key: "beta", id: "probe/beta"},
+	}
+	tests := []struct {
+		name        string
+		signals     []Signal
+		identifiers []string
+		wantError   string
+	}{
+		{name: "empty", signals: signals, wantError: "at least one included signal is required"},
+		{name: "unknown", signals: signals, identifiers: []string{"alpha", "missing"}, wantError: `included signal "missing" is not registered`},
+		{
+			name: "ambiguous",
+			signals: []Signal{
+				selectionSignal{number: "1.1", key: "shared", id: "probe/alpha"},
+				selectionSignal{number: "1.2", key: "beta", id: "shared"},
+			},
+			identifiers: []string{"shared"},
+			wantError:   `included signal "shared" matches multiple registered signals`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selected, err := IncludeSignals(test.signals, test.identifiers...)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("IncludeSignals error = %v, want %q", err, test.wantError)
+			}
+			if selected != nil {
+				t.Fatalf("IncludeSignals returned partial selection %v on error", signalKeys(selected))
+			}
+		})
+	}
+}
+
+func signalKeys(signals []Signal) []string {
+	keys := make([]string, 0, len(signals))
+	for _, signal := range signals {
+		keys = append(keys, signal.Key())
+	}
+	return keys
 }
 
 func TestExcludeSignalsExcludesOnlyNamedSignal(t *testing.T) {

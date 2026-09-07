@@ -198,7 +198,8 @@ test supplies a source with deterministic PostgreSQL, Redis, host-command,
 local-command, and raw TCP-exchange output. An `Alert` carries stable identity
 plus symptom, mechanism, baseline, observed values, evidence, action,
 verification, and playbook fields. `Alert.Markdown` and `AlertsMarkdown`
-render the same value as a detailed human-readable alert file.
+render the same value as a detailed human-readable alert file;
+`WriteAlertsJSONL` emits the ordered structured values one alert per line.
 Task-oriented synthetic failures also assert that every seeded identifier is
 absent from the rendered Markdown, while exact internal lifecycle correlation
 still selects the correct attempt and executor.
@@ -391,7 +392,7 @@ thin `server/cli/monitor` command:
 server/monitor/
   MONITOR.md            this design
   SIGNALS.md            the signal catalog (what "wrong" looks like)
-  alert.go              structured Alert and Markdown rendering
+  alert.go              structured Alert plus Markdown and JSONL rendering
   settings.go           SignalSettings and injectable SignalSource
   signal.go             Signal interface and common adapter
   registry.go           Monitor constructor and explicit signal registry

@@ -1,6 +1,6 @@
 // Package monitor turns the named, numbered checks in SIGNALS.md into
 // reusable Go signals. Executable wiring belongs in server/cli/monitor;
-// probes, settings, execution, registration, and Markdown rendering remain in
+// probes, settings, execution, registration, and alert rendering remain in
 // this package.
 package monitor
 

@@ -13,58 +13,37 @@ and continue until the operator ends the run or its requested duration expires.
 
 ## Model roles and handoff
 
-Use two explicit agent roles for every pass through this harness:
+Use two explicit, long-lived agent roles for every pass; reuse the same agents
+so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution. It runs
-  preflight checks, builds and starts the immutable monitor binary, polls the
-  authoritative watcher and all standing tails, preserves alert snapshots,
-  runs focused signals, corroborates observation-path identity, and executes
-  the deterministic test gates after a proposed fix. The Go watcher itself is
-  model-neutral; this requirement names the agent responsible for operating
-  and interpreting it.
-- A `gpt-5.6-sol` agent at `max` reasoning owns failure diagnosis and repair.
-  It receives the frozen alert and Terra's observation evidence, establishes
-  the causal mechanism and affected boundary, changes the owning code and
-  catalog, and writes deterministic regressions. It may run bounded read-only
-  source-of-truth discriminators needed for diagnosis, but it does not replace
-  Terra as the monitor runner or declare its own change verified.
+- A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution: preflight,
+  immutable binary, authoritative watcher and tails, alert capture, focused
+  reruns, source identity, and every verification gate. The Go watcher remains
+  model-neutral; Terra operates and interprets it.
+- A `gpt-5.6-sol` agent at `max` reasoning owns diagnosis and repair for every
+  new, changed, or unresolved causal boundary. It may run bounded read-only
+  discriminators, but Terra remains the runner and verifier.
 
-For each new or materially changed alert, Terra hands Sol the alert identity,
-observation time, monitor binary hash, target, raw bounded evidence, source
-identity, and relevant healthy control. Sol returns the causal explanation,
-patch, regression names, external prerequisites, and closure window. Terra then
-runs the focused, package, race, vet, build, and production observation gates
-and reports the exact results back to Sol. A failing gate returns to Sol for
-another diagnosis/fix pass; a passing narrow test never substitutes for the
-full Terra verification. Keep the same authoritative watcher alive throughout
-this exchange unless the safe-promotion procedure requires a handoff.
+For each such boundary, Terra sends a deterministic delta manifest referencing
+the prior ledger record and object hashes described below; group shared
+dependency/artifact/rollout failures and keep unrelated causes separate. Never
+paste full all-signal Markdown, logs, raw evidence, or test output into a model
+handoff. Sol pulls the complete Alert and only bounded relevant source objects
+by hash on demand, then returns cause/patch/regressions/prerequisites/window;
+Terra returns gate manifests. Keep both agents and the watcher alive unless
+safe promotion requires a handoff.
 
 ## Agent contract
 
-Coordinate the Terra monitor runner and Sol failure fixer described above.
-Repeatedly:
+Run every signal; freeze, corroborate, classify, and diagnose each finding;
+make the smallest owning fix with synthetic coverage and catalog updates; pass
+all gates; then verify the exact production boundary, checkpoint, promote
+without an observation gap, and continue.
 
-1. run every registered monitor signal against the intended environment;
-2. preserve the emitted alert and its observation time;
-3. corroborate the finding at the direct source of truth;
-4. distinguish a real incident from observation loss, expected operational
-   state, a secondary symptom, stale alert guidance, or a monitor defect;
-5. establish the causal mechanism and the exact affected boundary;
-6. implement the smallest durable root-cause fix in the owning repository;
-7. add deterministic regression coverage, including a synthetic reproduction;
-8. update [SIGNALS.md](SIGNALS.md) and the relevant `signal_<key>.go` probe when
-   the learned healthy/broken contract or diagnostic playbook changed;
-9. pass the focused, package, race, and release-relevant test gates;
-10. identify the exact artifact, migration, configuration, hardware, or
-    operator action required for production verification;
-11. after that boundary is present in production, observe for the signal's
-    full verification window and prove recovery from direct evidence; and
-12. checkpoint the tested work, promote the new monitor binary without an
-    observation gap, and continue with the remaining findings.
-
-Do useful independent work while a build, rollout, migration, router change,
-capacity addition, or observation window is pending. A blocked finding does
-not pause unrelated probes or investigations.
+This is context-delivery optimization only: never substitute a cheaper model,
+skip a severity, lose warnings or `cannot-observe`, or delete/truncate evidence.
+Do not raise production `runLoopMaxConcurrentSignals`, add watchers outside
+bounded promotion, shorten windows, or persist sustain counters/ticket state.
 
 ## Non-negotiable safety boundaries
 
@@ -201,17 +180,26 @@ WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   2>"$monitor_snapshot_dir/stderr.log"
 ```
 
-`-once` runs every registered signal serially, emits every current band
-violation, and exits nonzero if any probe itself could not execute. It
-deliberately bypasses consecutive-cadence sustain gating, so label its output a
-snapshot rather than a page. Preserve both files even on a nonzero exit: the
-Markdown contains structured visibility alerts and stderr can distinguish an
-observation-path failure.
+`-once` runs selected signals serially, emits every current violation, bypasses
+sustain gating, and exits nonzero on probe failure. Preserve stdout and stderr
+even then: visibility alerts retain findings and stderr distinguishes an
+observation-path failure. Label this a snapshot, not a page.
 
-The CLI does not have an include-only flag. For reusable focused execution,
-call `Monitor.RunSignal` by semantic key from Go. From the CLI, repeated
-`-exclude-signal <key-or-number-or-id>` is a deliberate diagnostic tool, not a
-way to certify overall health.
+`monitor -list-signals` lists selector values without loading the environment,
+Vault, or settings. After required full coverage, use focused reruns by
+repeating `-include-signal` with a key, number, or probe ID. Include and exclude
+selectors are mutually exclusive; empty, unknown, or ambiguous includes fail
+closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
+
+```sh
+WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
+  -include-signal edge-ipv6 -include-signal 20.2 \
+  -format jsonl >"$monitor_snapshot_dir/alerts.jsonl"
+```
+
+`-format markdown` is the default. `-format jsonl` writes one complete alert
+object per line in deterministic severity/identity order; a healthy JSONL
+snapshot is an empty file.
 
 ## Start the authoritative continuous watcher
 
@@ -229,19 +217,20 @@ WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
   2>"$monitor_run_dir/stderr.log"
 ```
 
-Run that final command in a durable attached execution session so the agent can
-poll it, send a graceful signal, and prove it remains alive. Record in a run
-ledger outside the repository:
-
-- binary path and SHA-256;
-- process ID and execution-session handle;
-- environment and address mode;
-- start time in UTC and operator timezone;
-- alert and stderr paths;
-- current server commit and dirty state;
-- active service-tail count derived from the current `services.yml` inventory;
-- every signal or edge-IPv6 exclusion and its reason; and
-- pending deployment boundaries and verification deadlines.
+Run the final command in a durable attached session. Give the run a stable ID
+and append only to `$BRINGYOUR_HOME/monitor/runs/<run-id>/ledger.jsonl`. Keep
+complete Alert JSONL, raw bounded source evidence, logs, patches, and test
+transcripts immutable at
+`$BRINGYOUR_HOME/monitor/objects/sha256/<first-two-hex>/<sha256>`. Each compact,
+deterministic handoff manifest carries `identity`, `severity`, `signal_key`,
+`class`, `target`, `observed_at`, object hash/length, `prior_record`, and only
+field/evidence deltas; its ledger record also names UTC time, causal boundary,
+kind, and source/producer. Exclude secrets and unredacted customer data. On
+resume, verify objects and recover each boundary's last record, never delete or
+recollect evidence. Watcher records also carry binary path/hash, PID/session,
+environment/mode/start timezone, alert/stderr objects, server commit/dirty
+state, expected tails, exclusions/reasons, boundaries, and deadlines. The
+session must support polling, graceful stop, and liveness proof.
 
 Continuous mode runs signals at their own cadences, limits ordinary probe
 concurrency, applies each alert's sustain count, and replaces the bounded log
@@ -293,8 +282,9 @@ mature predecessor alert; absence from the candidate before its required number
 of cadences is not recovery. Before stopping the predecessor, record its alert
 path/hash and any still-failing direct observation in the ledger. Keep that
 evidence until the candidate either re-emits the identity or completes the
-documented healthy resolution window. Do not introduce persistent ticket state
-as part of a watcher handoff without a separate design decision.
+documented healthy resolution window. Do not persist sustain counters or
+introduce persistent ticket state as part of a watcher handoff without a
+separate design decision.
 
 ## Alert validation loop
 
@@ -510,15 +500,17 @@ status message must never turn a failed preflight or test into a passing gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 
-When recording test-source diff hashes, use a consistent explicit Git executable
-and `git diff --binary --full-index`; record the executable/version and include
-the participating untracked files separately. Different Git versions can render
-different abbreviated `index` lines for identical source, so a changed patch-text
-hash alone does not establish a source mutation. Compare complete full-index
-diffs and participating file bytes before classifying a mismatch. Preserve the
-original metadata and corrective evidence; a stable, fully attested test need
-not be rerun merely because its diff rendering differed. This is a test-evidence
-rule, not a clean-checkout or build-admission requirement.
+Batch ready gates by causal boundary. Reuse a successful result only for an
+exact fingerprint covering repository bases, dependency locks, toolchain,
+command/arguments, relevant environment and harness/config, and a consistent
+Git executable's `git diff --binary --full-index` plus participating untracked
+paths and bytes. Record Git version, exit status, and transcript object; handoffs
+reference an exact-fingerprint pass instead of repeating its output. Any changed
+input invalidates reuse, and production observations are never cached. Git
+versions can render different abbreviated `index` lines,
+so compare full-index diffs and untracked bytes before declaring a mutation;
+preserve the original metadata and correction. This is test evidence, not a
+clean-checkout or build-admission rule.
 
 ## Deployment and production verification
 
@@ -571,12 +563,13 @@ Before each checkpoint:
 
 Do not push or deploy merely because a checkpoint exists.
 
-Then continue the loop. Poll the authoritative process/session and new alert
-output at a cadence that cannot leave the agent silent or blind. Reconcile each
-open identity against its last material state rather than repeatedly reporting
-the same prose. During long waits, investigate other alerts, improve synthetic
-coverage, validate artifact provenance, or refine the catalog. Quiet periods
-are observation windows, not permission to stop.
+Then continue. For blocked work, record its owner, unblocking event, and earliest
+meaningful UTC deadline; wait on that build/session/rollout event or schedule
+one bounded deadline check instead of polling unchanged state. Meanwhile handle
+other boundaries. Poll the authoritative watcher often enough to remain
+observable; unchanged periodic samples become ledger/liveness records without
+repeated prose. Use quiet windows for other alerts, synthetic coverage,
+provenance, or catalog work rather than stopping.
 
 ## Status handoff
 

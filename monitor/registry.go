@@ -119,6 +119,51 @@ func NewSignals() []Signal {
 	}
 }
 
+// IncludeSignals returns only the registered signals named by short key,
+// SIGNALS.md number, or probe ID. At least one identifier is required, and
+// every identifier must resolve to exactly one signal. This fail-closed
+// contract prevents an empty, misspelled, or ambiguous focused invocation
+// from silently expanding to the complete production registry.
+func IncludeSignals(signals []Signal, identifiers ...string) ([]Signal, error) {
+	if len(identifiers) == 0 {
+		return nil, fmt.Errorf("monitor: at least one included signal is required")
+	}
+
+	requested := make([]string, 0, len(identifiers))
+	matches := make(map[string]int, len(identifiers))
+	for _, identifier := range identifiers {
+		if _, duplicate := matches[identifier]; duplicate {
+			continue
+		}
+		requested = append(requested, identifier)
+		matches[identifier] = 0
+	}
+
+	selected := make([]Signal, 0, len(signals))
+	for _, signal := range signals {
+		matched := false
+		for _, identifier := range requested {
+			if identifier == signal.Key() || identifier == signal.Number() || identifier == signal.ID() {
+				matches[identifier]++
+				matched = true
+			}
+		}
+		if matched {
+			selected = append(selected, signal)
+		}
+	}
+	for _, identifier := range requested {
+		switch matches[identifier] {
+		case 0:
+			return nil, fmt.Errorf("monitor: included signal %q is not registered", identifier)
+		case 1:
+		default:
+			return nil, fmt.Errorf("monitor: included signal %q matches multiple registered signals", identifier)
+		}
+	}
+	return selected, nil
+}
+
 // ExcludeSignals returns the registered signals except those named by short
 // key, SIGNALS.md number, or probe ID. Unknown names fail closed so a typo
 // cannot silently re-enable a signal an operator intended to pause.
