@@ -279,6 +279,50 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 	}
 }
 
+func TestEdgeIPv6SignalSyntheticUnknownLBAdmissionDoesNotBecomeReset(t *testing.T) {
+	address := "2001:db8:20::1"
+	result := edgeIPv6Result{
+		host: &host{name: "synthetic-edge.example"},
+		configured: EdgeIPv6InterfaceSettings{
+			Interface:     "synthetic-if-a",
+			Block:         "synthetic-edge.example-lb-a",
+			Address:       address,
+			ProbeHostname: "api-v6.example",
+		},
+		http: map[string]string{
+			"monitor_http_code":  "000",
+			"monitor_exitcode":   "7",
+			"monitor_remote_ip":  "",
+			"monitor_time_total": "0.050000",
+		},
+		identity: map[string]string{
+			"configured_present": "1",
+			"operstate":          "up",
+			"unit_active":        "active",
+		},
+		egress: map[string]string{
+			"self_probe_status":    "7",
+			"self_exitcode":        "7",
+			"self_http_code":       "000",
+			"self_time_total":      "0.010000",
+			"route_status":         "0",
+			"route_device":         "synthetic-if-a",
+			"route_source":         address,
+			"source_egress_status": "0",
+			"source_egress":        address,
+		},
+		admissionErr: errors.New("synthetic bounded journal observation timed out"),
+	}
+
+	findings := edgeIPv6Findings(result, false, false)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want only the admission visibility failure: %+v", len(findings), findings)
+	}
+	if findings[0].class != "cannot-observe" || findings[0].target != "synthetic-edge.example/synthetic-if-a/lb-admission" {
+		t.Fatalf("admission visibility finding = %+v", findings[0])
+	}
+}
+
 func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T) {
 	addresses := []string{
 		"2001:db8:1::10",

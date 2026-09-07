@@ -14478,7 +14478,12 @@ retains both identities: the interface selects the unit and route, while the
 exact configured LB block validates `service run`. Its synthetic regression
 deliberately gives those fields unrelated values so returning to the short
 identity cannot pass. An identity failure remains unknown state and must never
-be interpreted as absence of the nginx admission error.
+be interpreted as absence of the nginx admission error. A 2026-09-07 promotion
+control then caught the adjacent case: a bounded journal observation timed out
+after the other admission predicates matched, and the probe emitted both
+`cannot-observe` and a speculative `edge-ipv6-reset`. Admission-observation
+failure now terminates that target's causal classification at unknown; a
+synthetic regression proves it cannot fall through to reset.
 
 If the bounded admission discriminator is absent, continue to classify the
 ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order

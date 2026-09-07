@@ -364,6 +364,9 @@ func edgeIPv6Findings(
 	}
 	if result.admissionErr != nil {
 		findings = append(findings, cannotObserveFinding(target+"/"+result.configured.Interface+"/lb-admission", result.admissionErr))
+		if edgeIPv6AdmissionCandidate(result) {
+			return findings
+		}
 	}
 	if observerCommonMode {
 		return findings
