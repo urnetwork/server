@@ -10332,6 +10332,33 @@ volume cleared for read-only inspection, the existing bounded metrics refresh
 can reconstruct current rows from disk. That refresh repairs visibility only.
 It neither proves the filesystem safe nor authorizes a catch-up transfer.
 
+A bounded `2026-09-07` retry control further separates the repaired archive
+media from the still-failing network path. One systemd-owned generation ran
+for 50m26s before its PostgreSQL stream reset; the serial Redis connection then
+failed two seconds later. Immediately afterward, both exact direct-forward
+ports failed from Planetoid while unrelated external SSH and HTTPS controls
+succeeded and the host retained the same public egress identity. Both forwards
+remained reachable from an independent source. The next systemd-owned
+generation ran for 12m03s before another rsync stream ended with a reset,
+broken pipe, and unexpected EOF; it had no timeout, authentication, host-key,
+disk-full, filesystem-I/O, read-only, mount, or clearance failure. Both source
+ports were directly routed and reachable from Planetoid again after that
+attempt, and systemd started exactly one further resumable generation after
+the configured 30-minute delay.
+
+Together those controls rule out the management VPN, archive filesystem,
+credentials, and either source SSH service being globally unavailable. They
+bound the remaining failure to state specific to Planetoid's sustained flows
+through the shared offsite/public-forward path: the offsite router/WAN/NAT or
+the destination gateway's firewall, conntrack, or intrusion-prevention state.
+Short post-failure TCP success is a recovery control, not proof that multi-hour
+state retention is fixed. Preserve the systemd-owned writer and rsync partials;
+obtain paired bounded router lifecycle, WAN selection, conntrack occupancy and
+drop evidence at the next reset. The operational closure is a stable direct
+path whose state lifetime and capacity exceed the longest archive transfer.
+Software retry/resume remains required defense in depth but cannot repair a
+gateway or carrier that discards established flows.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
