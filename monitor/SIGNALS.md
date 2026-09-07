@@ -10384,6 +10384,38 @@ path whose state lifetime and capacity exceed the longest archive transfer.
 Software retry/resume remains required defense in depth but cannot repair a
 gateway or carrier that discards established flows.
 
+That further generation then supplied a third same-class failure. Its one
+PostgreSQL socket advanced by 124,689,028 received bytes during a 15-second
+sample, remained active for 43m07s, and then ended with the same reset, broken
+pipe, protocol-stream error, and unexpected EOF. Both direct ports and two
+unrelated Internet controls were reachable immediately after the failure.
+The PostgreSQL source had one extra authenticated session at the generation
+start whose sshd process recorded no session-close boundary by the client
+failure, while the surrounding short monitor sessions did close. This proves
+the transfer was neither idle nor rejected at authentication and makes a fixed
+rsync/application timeout untenable: three resumable attempts failed after
+materially different active durations. Preserve the next systemd retry and
+prioritize paired gateway state evidence over changes to either source host.
+
+The following systemd-owned retry supplied a sharper tuple-lifetime boundary.
+The PostgreSQL pull was accepted by its source and then failed after exactly
+120 seconds with a reset, broken pipe, and rsync protocol error; the sequential
+Redis pull reset one second later before its source accepted an SSH session.
+Neither source sshd was down. A delayed postflight found both direct ports
+unreachable from Planetoid while the same ports remained reachable from an
+independent workstation and ordinary IPv4 HTTPS from Planetoid remained
+healthy; both direct ports later recovered without a host or service change.
+This excludes a global source outage, authentication, archive media, and
+generic Planetoid IPv4 loss. It localizes the remaining fault to shared
+per-destination or per-source state between Planetoid and the public-forward
+gateway: the offsite router/WAN/NAT path or the destination gateway's
+conntrack/firewall/IDS. The 120-second first failure is consistent with a
+silently blackholed established flow reaching its TCP retransmission limit;
+the immediately failed sibling connection is evidence that the shared path
+state outlived that flow. Do not convert this correlation into a router or
+gateway verdict without simultaneous lifecycle/conntrack evidence from both
+boundaries.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
