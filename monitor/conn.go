@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"net"
@@ -343,7 +344,8 @@ func (self *runner) sshArgsWithKeys(target, remoteCmd string, connectTimeout tim
 // is passed on stdin line 1, never on argv. The read-only guard and statement
 // timeout are applied via PGOPTIONS at connection, not as inline set
 // statements — set prints a command tag to stdout that would pollute the
-// parsed rows. Rows come back split on '|' (psql -A -F'|' -t).
+// parsed rows. PostgreSQL CSV framing keeps embedded newlines and delimiter
+// characters inside their source cell.
 func (self *runner) pg(ctx context.Context, sql string) ([]pgRow, error) {
 	h := self.cfg.hostByRole("pg-primary")
 	if h == nil {
@@ -352,7 +354,7 @@ func (self *runner) pg(ctx context.Context, sql string) ([]pgRow, error) {
 	remoteCmd := fmt.Sprintf(
 		"IFS= read -r PGPASSWORD; export PGPASSWORD; "+
 			"export PGOPTIONS='-c statement_timeout=30000 -c default_transaction_read_only=on'; "+
-			"exec psql -h localhost -p %d -U %s %s -X -A -F'|' -t -v ON_ERROR_STOP=1 -f -",
+			"exec psql -h localhost -p %d -U %s %s -X --csv -t -v ON_ERROR_STOP=1 -f -",
 		self.cfg.pgPort, self.cfg.pgUser, self.cfg.pgDb,
 	)
 	stdin := self.cfg.pgPassword + "\n" + sql
@@ -360,10 +362,14 @@ func (self *runner) pg(ctx context.Context, sql string) ([]pgRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parsePgRows(out), nil
+	rows, err := parsePgRows(out)
+	if err != nil {
+		return nil, fmt.Errorf("parse PostgreSQL CSV output: %w", err)
+	}
+	return rows, nil
 }
 
-// pgRow is one psql output row, its cells split on '|'.
+// pgRow is one structurally decoded psql CSV output row.
 type pgRow []string
 
 func (self pgRow) str(i int) string {
@@ -373,16 +379,28 @@ func (self pgRow) str(i int) string {
 	return strings.TrimSpace(self[i])
 }
 
-func parsePgRows(out string) []pgRow {
-	rows := []pgRow{}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.TrimSpace(line) == "" {
+// Parse structurally so arbitrary PostgreSQL text cannot create a synthetic
+// row or column. A successful psql result terminates every record; rejecting a
+// missing terminator keeps truncated SSH output from becoming an observation.
+func parsePgRows(out string) ([]pgRow, error) {
+	if out == "" {
+		return []pgRow{}, nil
+	}
+	if !strings.HasSuffix(out, "\n") {
+		return nil, fmt.Errorf("unterminated final record")
+	}
+	records, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]pgRow, 0, len(records))
+	for _, record := range records {
+		if len(record) == 1 && strings.TrimSpace(record[0]) == "" {
 			continue
 		}
-		rows = append(rows, pgRow(strings.Split(line, "|")))
+		rows = append(rows, pgRow(record))
 	}
-	return rows
+	return rows, nil
 }
 
 // redis runs redis-cli against a node port on a redis host and returns raw

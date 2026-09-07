@@ -2,10 +2,123 @@ package monitor
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// PostgreSQL text may contain every former line and pipe delimiter. The psql
+// CSV contract must retain it in one cell instead of manufacturing rows.
+func TestPostgreSQLRowsPreserveEmbeddedRecordAndFieldDelimiters(t *testing.T) {
+	cfg := &monitorConfig{
+		addressMode: addressModeOverlay,
+		hosts: []*host{{
+			name: "pg-1", overlayIp: "192.0.2.10", roles: []string{"pg-primary"},
+		}},
+		pgPort: 5432, pgUser: "monitor", pgDb: "synthetic",
+		sshConnectTimeout: time.Second, commandTimeout: time.Second,
+	}
+	runner := newRunner(cfg)
+	var remoteCmd string
+	runner.runSSH = func(_ context.Context, args []string, _ string) (string, string, error) {
+		remoteCmd = args[len(args)-1]
+		return "\"alpha\nbeta\",left|right,\"quote\"\"cell\"\nsecond,,value\n", "", nil
+	}
+
+	rows, err := runner.pg(context.Background(), "SELECT synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(remoteCmd, " --csv -t ") || strings.Contains(remoteCmd, "-F'|'") {
+		t.Fatalf("PostgreSQL command does not require structural CSV output: %s", remoteCmd)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("parsed rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if got := rows[0].str(0); got != "alpha\nbeta" {
+		t.Fatalf("embedded newline cell = %q", got)
+	}
+	if got := rows[0].str(1); got != "left|right" {
+		t.Fatalf("embedded pipe cell = %q", got)
+	}
+	if got := rows[0].str(2); got != "quote\"cell" {
+		t.Fatalf("embedded quote cell = %q", got)
+	}
+}
+
+// Malformed or truncated output is unknown state, never a partial database
+// observation that downstream probes may attribute to a real object.
+func TestPostgreSQLRowsFailClosedOnMalformedOrTruncatedOutput(t *testing.T) {
+	for _, output := range []string{
+		"first,second\nthird\n",
+		"\"unfinished,record\n",
+		"complete,record\ntruncated,record",
+	} {
+		if _, err := parsePgRows(output); err == nil {
+			t.Errorf("malformed PostgreSQL output parsed successfully: %q", output)
+		}
+	}
+}
+
+// The production incident put a newline, pipe, and durable identifier in one
+// task error. Legacy delimiter splitting turned its continuation into a second
+// task family and moved the identifier into the unredacted alert frame.
+func TestPostgreSQLFramingDoesNotCreateTaskIdentifierFrame(t *testing.T) {
+	const taskId = "01a07b25-2590-abcd-1234-56789abcdef0"
+	cfg := &monitorConfig{
+		env: "synthetic", addressMode: addressModeOverlay,
+		hosts: []*host{{
+			name: "pg-1", overlayIp: "192.0.2.10", roles: []string{"pg-primary"},
+		}},
+		pgPort: 5432, pgUser: "monitor", pgDb: "synthetic",
+		sshConnectTimeout: time.Second, commandTimeout: time.Second,
+	}
+	runner := newRunner(cfg)
+	runner.runSSH = func(_ context.Context, args []string, stdin string) (string, string, error) {
+		remoteCmd := args[len(args)-1]
+		switch {
+		case strings.Contains(stdin, "UpdateClientLocations"):
+			return "12\n", "", nil
+		case strings.Contains(stdin, "WITH history AS"):
+			return "", "", nil
+		case strings.Contains(stdin, "WITH failures AS"):
+			if strings.Contains(remoteCmd, " --csv -t ") {
+				return "CloseExpiredContracts,1,0,1,7,-5,\"Timeout\nforce close contract " + taskId + "|private\",1800,1,deadline-timeout=1,18.4,200,8MB\n", "", nil
+			}
+			return "CloseExpiredContracts|1|0|1|7|-5|Timeout\nforce close contract " + taskId + "|private|1800|1|deadline-timeout=1|18.4|200|8MB\n", "", nil
+		default:
+			t.Fatalf("unexpected PostgreSQL query: %s", stdin)
+			return "", "", nil
+		}
+	}
+
+	findings, err := (taskCanaryProbe{}).check(context.Background(), &probeEnv{
+		cfg: cfg, runner: runner, now: func() time.Time { return time.Unix(0, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskFindings := []finding{}
+	for _, result := range findings {
+		if result.class == "task-parked" && !result.healthy {
+			taskFindings = append(taskFindings, result)
+		}
+	}
+	if len(taskFindings) != 1 {
+		t.Fatalf("task alert rows = %d, want 1: %#v", len(taskFindings), taskFindings)
+	}
+	if taskFindings[0].frame != "CloseExpiredContracts" {
+		t.Fatalf("task alert frame = %q", taskFindings[0].frame)
+	}
+	alert := alertFromFinding(SignalSettings{
+		Environment: "synthetic", Now: func() time.Time { return time.Unix(0, 0) },
+	}, "1.2", "task-canaries", "Task canaries", taskFindings[0])
+	requireAlertOmits(t, alert, taskId)
+	if !strings.Contains(alert.Markdown(), "<task-id>|private") {
+		t.Fatalf("task error was not retained and redacted in its source cell: %s", alert.Markdown())
+	}
+}
 
 // A top-level signal limit is insufficient because individual probes fan out
 // internally. Every fresh probe environment must share the transport-level

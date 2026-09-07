@@ -93,8 +93,11 @@ consequences:
   LAN IPs like 192.168.51.x are NOT routable but 172.28.208.x is). Address
   selection is a config knob, not an architecture change.
 - No pg/redis client libraries needed for the remote side; psql/redis-cli
-  on the hosts are the client. Output is parsed (psql `-A -F'|' -t` for
-  machine-readable rows; `INFO`/`CLUSTER NODES` are line protocols).
+  on the hosts are the client. Output is parsed (psql `--csv -t` with a
+  structural CSV decoder for machine-readable rows; `INFO`/`CLUSTER NODES`
+  are line protocols). Embedded newlines, pipes, and quotes remain inside the
+  PostgreSQL cell that owns them; malformed or unterminated CSV fails closed
+  as an observation error.
 - Direct TCP connectors (pgx to 5432, go-redis to nodes) are a later
   in-LAN optimization behind the same connector interface, not a
   requirement.
@@ -518,6 +521,11 @@ probes; every other signal and host continues. Unknown host names fail closed.
    PGOPTIONS at connection); `--once` needs `Immediate` mode to surface
    findings without waiting for the multi-tick sustain. (Log-class probe 1.5
    deferred to phase 6.)
+   A 2026-09-07 task error exposed a second shared framing bug: newline/pipe
+   splitting could turn an error continuation into a synthetic task-family
+   frame, bypassing the error-cell identifier redactor. The PostgreSQL
+   transport now decodes psql CSV structurally and rejects malformed or
+   truncated output instead of attributing a fragment.
 2. **Ticket lifecycle — DONE in phase 1** (identity/dedupe/hysteresis/
    auto-resolve; JSON event line on stderr). Additional alerting channels
    (webhook, github pr, persistence/spool) deliberately DEFERRED — console

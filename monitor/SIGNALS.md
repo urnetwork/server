@@ -274,6 +274,14 @@ FROM failures GROUP BY task;
   correlation only. Their deterministic failure cases require the rendered
   Markdown to omit the synthetic identifiers. Historical opaque identifiers in
   this catalog are represented as `<redacted-id>`.
+- GOTCHA — PostgreSQL text is not a line-and-pipe protocol. On 2026-09-07, an
+  error continuation was split into a synthetic task-family frame, and part of
+  its durable identifier crossed the frame boundary before the error-cell
+  redactor could run. The shared transport must request psql CSV and decode it
+  structurally so newlines, pipes, and quotes remain in their owning cell.
+  Malformed, wrong-width, or unterminated output is `cannot-observe`, never a
+  partial row. Keep raw task errors bounded and redact identifiers only after
+  structural decoding; no error fragment may become an alert identity.
 - The 2026-09-03 `BackfillClock` failure is a distinct exact-deadline
   workload bug, not evidence that its ten-minute `MaxTime` is too small. The
   task reached 600.00s, rescheduled, and repeated. A direct read-only snapshot
