@@ -563,6 +563,7 @@ func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6Int
 			}
 			byHost[host] = append(byHost[host], EdgeIPv6InterfaceSettings{
 				Interface:     interfaceName,
+				Block:         configuredHost + "-" + interfaceName,
 				Address:       address,
 				ProbeHostname: "api-v6." + domain,
 			})

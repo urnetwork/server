@@ -14469,6 +14469,17 @@ configured-pool listener, no new exact admission signature for 15 minutes, and
 three pinned HTTP/1.1 200 responses from each of three independent external
 observers.
 
+The first 2026-09-07 admission-probe generation failed closed with
+`cannot-observe` before reading sockets or journals. It had conflated the short
+interface identity used in the systemd unit filename with Warpctl's full LB
+block argument. An active unit therefore produced an identity count of zero
+even though the correct controller was running. The services loader now
+retains both identities: the interface selects the unit and route, while the
+exact configured LB block validates `service run`. Its synthetic regression
+deliberately gives those fields unrelated values so returning to the short
+identity cannot pass. An identity failure remains unknown state and must never
+be interpreted as absence of the nginx admission error.
+
 If the bounded admission discriminator is absent, continue to classify the
 ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order
 and compare every pool target with live listening sockets. During a

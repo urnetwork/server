@@ -10,20 +10,20 @@ import (
 
 func TestActiveEdgeIPv6FromServicesUsesOnlyCurrentNontransparentInterfaces(t *testing.T) {
 	services := servicesYaml{
-		Domain: "bringyour.com",
+		Domain: "network.example",
 		Versions: []servicesVersionYaml{
 			{LB: servicesLBYaml{Interfaces: map[string]map[string]servicesLBInterfaceYaml{
-				"by-us-fmt-5-edge-3.bringyour.com": {
-					"eno2np1": {IPv6: "2001:db8:5860::381"},
-					"eno1np0": {IPv6: "2001:db8:5880::380"},
+				"synthetic-edge-3.network.example": {
+					"public-b": {IPv6: "2001:db8:1::2"},
+					"public-a": {IPv6: "2001:db8:1::1"},
 				},
-				"fireside.bringyour.com": {
-					"eno1np0": {IPv6: "2001:db8:5960::1", Transparent: true},
+				"synthetic-edge-proxy.network.example": {
+					"public-a": {IPv6: "2001:db8:2::1", Transparent: true},
 				},
 			}}},
 			{LB: servicesLBYaml{Interfaces: map[string]map[string]servicesLBInterfaceYaml{
-				"by-us-fmt-5-edge-3.bringyour.com": {
-					"eno3": {IPv6: "2001:db8::e382"},
+				"synthetic-edge-3.network.example": {
+					"historical": {IPv6: "2001:db8:3::1"},
 				},
 			}}},
 		},
@@ -33,22 +33,24 @@ func TestActiveEdgeIPv6FromServicesUsesOnlyCurrentNontransparentInterfaces(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	edge := got["by-us-fmt-5-edge-3"]
+	edge := got["synthetic-edge-3"]
 	if len(edge) != 2 {
 		t.Fatalf("active edge interfaces = %+v, want two", edge)
 	}
-	if edge[0].Interface != "eno1np0" || edge[0].Address != "2001:db8:5880::380" ||
-		edge[1].Interface != "eno2np1" || edge[1].Address != "2001:db8:5860::381" {
+	if edge[0].Interface != "public-a" || edge[0].Block != "synthetic-edge-3.network.example-public-a" ||
+		edge[0].Address != "2001:db8:1::1" || edge[1].Interface != "public-b" ||
+		edge[1].Block != "synthetic-edge-3.network.example-public-b" ||
+		edge[1].Address != "2001:db8:1::2" {
 		t.Fatalf("active edge interfaces = %+v", edge)
 	}
-	if edge[0].ProbeHostname != "api-v6.bringyour.com" {
+	if edge[0].ProbeHostname != "api-v6.network.example" {
 		t.Fatalf("probe hostname = %q", edge[0].ProbeHostname)
 	}
-	if _, ok := got["fireside"]; ok {
+	if _, ok := got["synthetic-edge-proxy"]; ok {
 		t.Fatalf("transparent proxy host became an edge IPv6 target: %+v", got)
 	}
 	for _, configured := range edge {
-		if strings.Contains(configured.Address, "e382") || configured.Interface == "eno3" {
+		if configured.Address == "2001:db8:3::1" || configured.Interface == "historical" {
 			t.Fatalf("historical version leaked into active targets: %+v", edge)
 		}
 	}
@@ -108,7 +110,7 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	}
 	settings := syntheticSettings(source)
 	settings.Hosts = []HostSettings{{
-		Name: "by-us-fmt-5-edge-3",
+		Name: "synthetic-edge-3",
 		EdgeIPv6: []EdgeIPv6InterfaceSettings{
 			{Interface: "eno-healthy", Address: addresses["healthy"], ProbeHostname: "api-v6.example"},
 			{Interface: "eno-drift", Address: addresses["drift"], ProbeHostname: "api-v6.example"},
@@ -161,6 +163,11 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 		"rejected":   "2001:db8:10::2",
 		"dead_first": "2001:db8:10::3",
 	}
+	interfaces := map[string]string{
+		"healthy":    "synthetic-if-a",
+		"rejected":   "synthetic-if-b",
+		"dead_first": "synthetic-if-c",
+	}
 	var admissionCalls atomic.Int32
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
@@ -193,7 +200,7 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 					if name == "healthy" || !strings.Contains(command, address) {
 						continue
 					}
-					interfaceName := "synthetic-" + strings.ReplaceAll(name, "_", "-")
+					interfaceName := interfaces[name]
 					return "curl: (7) synthetic self refusal\n" +
 						"self_http_code=000\nself_exitcode=7\nself_time_total=0.000800\nself_probe_status=7\n" +
 						"route_device=" + interfaceName + "\nroute_source=" + address + "\nroute_status=0\n" +
@@ -216,10 +223,10 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 				if strings.Contains(command, "journalctl -u") || strings.Contains(command, "systemctl cat") {
 					t.Fatalf("admission command dumps unit or journal contents: %s", command)
 				}
-				if strings.Contains(command, "synthetic-rejected") {
+				if strings.Contains(command, "expected_block='synthetic-edge.example-lb-b'") {
 					return "lb_observation_status=1\nlb_listener_count=0\nlb_map_hash_error_count=2\n", nil
 				}
-				if strings.Contains(command, "synthetic-dead-first") {
+				if strings.Contains(command, "expected_block='synthetic-edge.example-lb-c'") {
 					return "lb_observation_status=1\nlb_listener_count=1\nlb_map_hash_error_count=0\n", nil
 				}
 				return "", errors.New("unexpected synthetic admission command")
@@ -232,9 +239,9 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 	settings.Hosts = []HostSettings{{
 		Name: "edge-synthetic.example",
 		EdgeIPv6: []EdgeIPv6InterfaceSettings{
-			{Interface: "synthetic-healthy", Address: addresses["healthy"], ProbeHostname: "api-v6.example"},
-			{Interface: "synthetic-rejected", Address: addresses["rejected"], ProbeHostname: "api-v6.example"},
-			{Interface: "synthetic-dead-first", Address: addresses["dead_first"], ProbeHostname: "api-v6.example"},
+			{Interface: interfaces["healthy"], Block: "synthetic-edge.example-lb-a", Address: addresses["healthy"], ProbeHostname: "api-v6.example"},
+			{Interface: interfaces["rejected"], Block: "synthetic-edge.example-lb-b", Address: addresses["rejected"], ProbeHostname: "api-v6.example"},
+			{Interface: interfaces["dead_first"], Block: "synthetic-edge.example-lb-c", Address: addresses["dead_first"], ProbeHostname: "api-v6.example"},
 		},
 	}}
 
@@ -377,7 +384,7 @@ func TestEdgeIPv6SignalSyntheticObserverRoutePreservesRealReset(t *testing.T) {
 	source := &syntheticSource{
 		localFn: func(name string, _ ...string) (string, error) {
 			if name == "/sbin/route" {
-				return "route to: 2606:4700:4700::1111\ninterface: en0\n", nil
+				return "route to: 2001:db8:ffff::1\ninterface: synthetic0\n", nil
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
 				edgeHTTPFixture("000", "7", "", "0.000072"), errors.New("exit status 7")

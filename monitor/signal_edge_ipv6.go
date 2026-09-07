@@ -219,7 +219,7 @@ printf '%%s\nself_probe_status=%%s\nroute_device=%%s\nroute_source=%%s\nroute_st
 func edgeIPv6AdmissionCommand(configured EdgeIPv6InterfaceSettings, environment string) string {
 	unit := shellSingleQuote("warp-" + environment + "-lb-" + configured.Interface + ".service")
 	expectedEnvironment := shellSingleQuote(environment)
-	expectedBlock := shellSingleQuote(configured.Interface)
+	expectedBlock := shellSingleQuote(configured.Block)
 	return fmt.Sprintf(`# %s
 set -u
 unit=%s

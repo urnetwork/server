@@ -104,7 +104,13 @@ type SubtensorNodeSettings struct {
 // ProbeHostname supplies TLS SNI while Address pins the request to this exact
 // interface instead of allowing DNS health selection to hide one failed edge.
 type EdgeIPv6InterfaceSettings struct {
-	Interface     string
+	Interface string
+
+	// Block is the exact Warp LB block argument. Warp deliberately uses the
+	// shorter interface name in the systemd unit name, so the two identities
+	// are not interchangeable.
+	Block string
+
 	Address       string
 	ProbeHostname string
 }
