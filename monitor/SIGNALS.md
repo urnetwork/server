@@ -915,6 +915,20 @@ for p in $(seq 6380 6411); do timeout 2 redis-cli -p $p PING >/dev/null || echo 
   1/32 of keys WITHOUT flipping cluster_state on other nodes — the monitor
   MUST check per-node liveness, not just cluster_state.
 
+The Redis dashboard and alerts must also respect the collection cadence. Since
+2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
+seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
+to one minute, which contains fewer than two samples and makes counter-derived
+panels look empty even while all gauges and raw exporter counters are healthy.
+On 2026-09-07, main returned 32 current series for each of
+`redis_commands_processed_total`, `redis_evicted_keys_total`, and
+`redis_expired_keys_total`, but `count(rate(...[1m]))` returned no value while
+`count(rate(...[5m]))` returned all 32. Use a fixed five-minute range for Redis
+exporter counter rates in `grafana/dashboards/redis-cluster.json` and in the
+matching Redis alert rules. A partially blank dashboard with live `redis_up`
+and gauge panels is a query-window visibility failure, not a Redis outage; an
+entirely blank dashboard still follows §11.14.
+
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`
 
@@ -10718,16 +10732,30 @@ Another lower-level wake/retry signal alone therefore cannot repair missing
 desired consumer state. Discovery API timeouts and initial candidate health
 failures are downstream gates, not an explanation for an unconstructed window.
 
-The reason startup had no destination is still unproven. The raw-token/instance
-stale-state branch can erase `.connect_location`; `GetConnectLocation` also
-conflates missing, unreadable, and malformed state with nil. The shared-intent
-fallback rejects app-origin intent, while app startup can replay its separately
-saved location over RPC. Successful cleanup and those selection inputs were
-not logged. Do not turn a source-supported wipe hypothesis into an observed
-file operation, blame successful token refresh for an earlier computed stale
-flag, or infer a device mutation from local archive-copy times. A failed device
-container query is unavailable evidence, not an empty container or a healthy
-state read. The previous extension's replacement cause is a separate question.
+The installed-release startup gate is exact even though the internal reason is
+unproven. It reads the extension's local-state location and, only when that is
+nil, reads the autonomous shared-intent location. Any nonnil result synchronously
+enters SDK destination setup and emits the unconditional consumer constructor
+banner before successful `startTunnel` completion. Successful startup without
+that banner therefore proves `extension location == nil AND autonomous shared
+intent location == nil`; it is stronger than a zero-provider observation.
+`GetConnectLocation` still conflates missing, unavailable, unreadable, malformed,
+and undecodable state with nil, and the shared-intent helper folds its own
+missing/read/decode/disconnected/app-source cases into nil. The evidence does
+not select either internal branch.
+
+A privacy-safe September 4 state capture after old PID 6470 started proves that
+a valid extension-side location then existed and matched the app's location,
+while app and extension raw JWTs differed and their stable instance identity
+matched. That is exactly a shape the installed raw-JWT stale classifier could
+misclassify and erase through local-state logout. The configured/keychain JWT
+selected at replacement startup and the immediately pre-start stored JWT were
+not retained, and the successful cleanup branch had no breadcrumb. Raw-JWT
+cleanup is therefore strongly plausible but unproved, not an observed file
+operation. Do not blame the later successful token refresh for a stale decision
+computed earlier, infer a mutation from archive-copy times, or treat a failed
+container query as an empty container. The process-replacement cause remains a
+separate question.
 
 The later full-capture audit confirms this limit: the two unified archives
 cover 13:47–14:47 and 13:40–15:13 UTC, not the 09:22 replacement. The sole
@@ -10739,6 +10767,20 @@ archives add no termination reason or saved-state decision. The collection
 was Jetsam-only, not a general crash-report inventory. Do not turn these
 coverage gaps, process-table membership, or another component's termination
 into a cause for this extension's exit.
+
+The bounded historical audit narrows the transition without inventing its
+cause. Old PID 6470's 46,559 retained records end at 09:22:26.948 UTC after a
+09:22:04.635 heartbeat with five exits and five proven providers. Replacement
+PID 9531 initializes at 09:22:53.377, 26.429 seconds later. All old constructor
+banners identify build `1037574650`; the replacement identifies `1037600680`.
+The newer bundle was necessarily installed and available before replacement,
+but the retained interval has no stop, install-completion, crash, watchdog, or
+Jetsam record. A September 4 capture from the same phone and TestFlight channel
+is the positive mechanism control: TestFlight made a new build live and
+MobileInstallation terminated the old Network Extension. Apple also defines
+`.appUpdate` for this case. Those facts make update the strongest exit candidate
+for September 5, but do not distinguish an update-triggered termination from an
+earlier install followed by an unrelated exit.
 
 Audit diagnostic failures as a separate process-lifetime boundary. The installed
 SDK enables console logging and aliases stderr to stdout on iOS/Android. Its
@@ -10764,6 +10806,43 @@ four-newest-file pruning can omit files. Neither successful flushing nor an
 omission/rotation at the incident time is established. Do not label the old
 exit a console failure without affirmative crash, endpoint or log evidence,
 and do not treat a host subprocess regression as proof of an iOS occurrence.
+
+Apple commit `e63e877a` adds the missing future discriminators without changing
+connect intent. It durably flushes fixed `startup completed` or duplicate-start
+`startup preserved` after the existing startup-started breadcrumb and before
+successful NetworkExtension completion. Stop classifies `.appUpdate` distinctly
+as `app-update` but does not persist it as a disconnect, joins callback-safe SDK
+cleanup for at most 250 milliseconds, records `stop completed` or `stop timeout`,
+then takes the final sample, flushes, and always invokes stop completion. A later
+new lifecycle with no stop result remains evidence of callback absence, abrupt
+reap, or unavailable old-build buffering rather than a guessed reason.
+
+Keep binary size correction separate from lifecycle semantics. The committed
+project setting enables `DEPLOYMENT_POSTPROCESSING` only for the VPN extension's
+Release `iphoneos` build; it does not affect Debug, simulator, or macOS builds.
+On the isolated diagnostic candidate, Xcode emitted the real Strip phase and
+the extension was 37,191,112 bytes, 3,703,352 bytes below the unchanged
+40,894,464-byte ceiling, with the existing FIPS-default-off gate passing. The
+three diagnostic source blobs and project setting in `e63e877a` are
+byte-identical to that gated candidate, while all other recovery blobs are
+byte-identical to the preceding 143-test normal/TSan candidate. A fresh build of
+the complete current multi-repository heads remains the release gate because
+newer unrelated Connect blocker/security data also enters the linked binary.
+
+Cross-platform closure remains explicit. Apple main `e63e877a` and SDK main
+`1b15b904` contain the Apple recovery and shared state/RPC layers. The four
+Connect recovery blobs remain byte-identical to checkpoint `f5e3a92e` while
+their current-main integration is independently gated; macOS shares the
+provider path but still needs current-head native compilation. Android
+checkpoints `47e97e8e` plus `f765643b` implement the same checked
+owner/load/autosave replacement defense,
+but remain outside current Android main and need a fresh current-head native
+binding/application qualification. The already-integrated `mmm/ur.io` and
+browser-extension fixes preserve unreadable state and explicit intent. Windows
+and Linux remain app/GUI-RPC-owned at daemon startup; no new daemon autoconnect
+policy is authorized here. Glog main `892ade4` is independent hardening because
+the incident has neither its fatal signature nor console endpoint evidence; do
+not bundle it as a proven iOS root-cause fix.
 
 The matching installed source has another concrete missed-save mechanism:
 PacketTunnelProvider opens RPC before its destination-persistence listener,
