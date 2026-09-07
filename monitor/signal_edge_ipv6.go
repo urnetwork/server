@@ -30,22 +30,25 @@ func (edgeIPv6Probe) tier() string           { return tierPage }
 func (edgeIPv6Probe) cadence() time.Duration { return 5 * time.Minute }
 
 const (
-	edgeIPv6IdentityMarker = "monitor-signal-18.1-edge-ipv6-identity"
-	edgeIPv6EgressMarker   = "monitor-signal-18.1-edge-ipv6-egress"
+	edgeIPv6IdentityMarker  = "monitor-signal-18.1-edge-ipv6-identity"
+	edgeIPv6EgressMarker    = "monitor-signal-18.1-edge-ipv6-egress"
+	edgeIPv6AdmissionMarker = "monitor-signal-18.1-edge-ipv6-lb-admission"
 )
 
 type edgeIPv6Result struct {
-	host        *host
-	configured  EdgeIPv6InterfaceSettings
-	http        map[string]string
-	httpOutput  string
-	httpErr     error
-	identity    map[string]string
-	identityRaw string
-	identityErr error
-	egress      map[string]string
-	egressRaw   string
-	egressErr   error
+	host         *host
+	configured   EdgeIPv6InterfaceSettings
+	http         map[string]string
+	httpOutput   string
+	httpErr      error
+	identity     map[string]string
+	identityRaw  string
+	identityErr  error
+	egress       map[string]string
+	egressRaw    string
+	egressErr    error
+	admission    map[string]string
+	admissionErr error
 }
 
 func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -159,6 +162,17 @@ func runEdgeIPv6Task(ctx context.Context, env *probeEnv, result edgeIPv6Result) 
 	egressCommand := edgeIPv6EgressCommand(configured)
 	result.egressRaw, result.egressErr = env.runner.shell(ctx, result.host, egressCommand)
 	result.egress = parseKeyValueLines(result.egressRaw)
+	if edgeIPv6AdmissionCandidate(result) {
+		admissionOutput, err := env.runner.shell(
+			ctx,
+			result.host,
+			edgeIPv6AdmissionCommand(configured, env.cfg.env),
+		)
+		result.admissionErr = err
+		if err == nil {
+			result.admission, result.admissionErr = parseEdgeIPv6Admission(admissionOutput)
+		}
+	}
 	return result
 }
 
@@ -186,7 +200,7 @@ func edgeIPv6EgressCommand(configured EdgeIPv6InterfaceSettings) string {
 	return fmt.Sprintf(`# %s
 configured_address=%s
 probe_hostname=%s
-self_probe=$(curl --ipv6 --http1.1 --silent --show-error --connect-timeout 3 --max-time 5 --noproxy '*' --interface "$configured_address" --resolve "$probe_hostname:443:[$configured_address]" --output /dev/null --write-out 'self_http_code=%%{http_code}\nself_exitcode=%%{exitcode}\n' "https://$probe_hostname/hello" 2>&1)
+self_probe=$(curl --ipv6 --http1.1 --silent --show-error --connect-timeout 3 --max-time 5 --noproxy '*' --interface "$configured_address" --resolve "$probe_hostname:443:[$configured_address]" --output /dev/null --write-out 'self_http_code=%%{http_code}\nself_exitcode=%%{exitcode}\nself_time_total=%%{time_total}\n' "https://$probe_hostname/hello" 2>&1)
 self_probe_status=$?
 route_probe=$(ip -6 route get 2606:4700:4700::1111 from "$configured_address" 2>&1)
 route_status=$?
@@ -197,6 +211,122 @@ source_egress_status=$?
 source_egress=$(printf '%%s' "$source_egress" | tr -d '\r\n')
 printf '%%s\nself_probe_status=%%s\nroute_device=%%s\nroute_source=%%s\nroute_status=%%s\nsource_egress=%%s\nsource_egress_status=%%s\n' "$self_probe" "$self_probe_status" "$route_device" "$route_source" "$route_status" "$source_egress" "$source_egress_status"`,
 		edgeIPv6EgressMarker, address, probeHostname)
+}
+
+// edgeIPv6AdmissionCommand reduces process, socket, and journal state on the
+// host. It deliberately returns only counts: neither the unit arguments nor a
+// journal message can enter alert evidence.
+func edgeIPv6AdmissionCommand(configured EdgeIPv6InterfaceSettings, environment string) string {
+	unit := shellSingleQuote("warp-" + environment + "-lb-" + configured.Interface + ".service")
+	expectedEnvironment := shellSingleQuote(environment)
+	expectedBlock := shellSingleQuote(configured.Interface)
+	return fmt.Sprintf(`# %s
+set -u
+unit=%s
+expected_environment=%s
+expected_block=%s
+for required in awk journalctl ss systemctl timeout tr; do
+  command -v "$required" >/dev/null 2>&1 || exit 20
+done
+main_pid=$(timeout 5s systemctl show "$unit" -p MainPID --value 2>/dev/null) || exit 21
+case "$main_pid" in ''|*[!0-9]*|0) exit 22 ;; esac
+[ -r "/proc/$main_pid/cmdline" ] || exit 23
+arguments=$(timeout 5s tr '\000' '\n' < "/proc/$main_pid/cmdline") || exit 24
+identity_count=$(printf '%%s\n' "$arguments" | awk -v environment="$expected_environment" -v block="$expected_block" '
+  { argument[++count]=$0 }
+  END {
+    matches=0
+    for (i=1; i+4<=count; i++) {
+      if (argument[i] == "service" && argument[i+1] == "run" &&
+          argument[i+2] == environment && argument[i+3] == "lb" &&
+          argument[i+4] == block) matches++
+    }
+    print matches
+  }') || exit 25
+[ "$identity_count" = 1 ] || exit 26
+portblocks=$(printf '%%s\n' "$arguments" | awk '
+  index($0, "--portblocks=") == 1 { value=substr($0, 14); matches++ }
+  END { if (matches == 1 && value != "") print value; else exit 1 }') || exit 27
+socket_rows=$(timeout 5s sh -c 'set -e; ss -ltnH; ss -lunH' 2>/dev/null) || exit 28
+listener_count=$(printf '%%s\n' "$socket_rows" | awk -v blocks="$portblocks" '
+  BEGIN {
+    block_count=split(blocks, block, ";")
+    for (i=1; i<=block_count; i++) {
+      if (split(block[i], fields, ":") != 3) invalid=1
+      spec_count=split(fields[3], spec, ",")
+      for (j=1; j<=spec_count; j++) {
+        range_count=split(spec[j], range, "-")
+        if (range_count == 1 && range[1] ~ /^[0-9]+$/) {
+          low[++ranges]=range[1]+0; high[ranges]=range[1]+0
+        } else if (range_count == 2 && range[1] ~ /^[0-9]+$/ && range[2] ~ /^[0-9]+$/ && range[1]+0 <= range[2]+0) {
+          low[++ranges]=range[1]+0; high[ranges]=range[2]+0
+        } else invalid=1
+      }
+    }
+  }
+  {
+    port=$4
+    sub(/^.*:/, "", port)
+    if (port !~ /^[0-9]+$/) next
+    for (i=1; i<=ranges; i++) {
+      if (low[i] <= port+0 && port+0 <= high[i]) { listeners++; break }
+    }
+  }
+  END { if (invalid || ranges == 0) exit 1; print listeners+0 }') || exit 29
+journal_identifier="warp|$expected_environment|lb|$expected_block"
+journal_lines=$(timeout 10s journalctl --no-pager --quiet --since '15 minutes ago' -n 20 -o cat SYSLOG_IDENTIFIER="$journal_identifier" --grep='^nginx: \[emerg\] could not build map_hash, you should increase map_hash_bucket_size: [0-9]+$' 2>/dev/null)
+journal_status=$?
+if [ "$journal_status" -ne 0 ] && { [ "$journal_status" -ne 1 ] || [ -n "$journal_lines" ]; }; then
+  exit 30
+fi
+map_hash_error_count=$(printf '%%s\n' "$journal_lines" | awk '
+  NF {
+    if ($0 !~ /^nginx: \[emerg\] could not build map_hash, you should increase map_hash_bucket_size: [0-9]+$/) invalid=1
+    matches++
+  }
+  END { if (invalid || matches > 20) exit 1; print matches+0 }') || exit 31
+printf 'lb_observation_status=1\nlb_listener_count=%%s\nlb_map_hash_error_count=%%s\n' "$listener_count" "$map_hash_error_count"`,
+		edgeIPv6AdmissionMarker, unit, expectedEnvironment, expectedBlock)
+}
+
+func parseEdgeIPv6Admission(output string) (map[string]string, error) {
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+		if len(parts) != 2 || values[parts[0]] != "" {
+			return nil, fmt.Errorf("edge IPv6 LB admission observation is malformed")
+		}
+		switch parts[0] {
+		case "lb_observation_status", "lb_listener_count", "lb_map_hash_error_count":
+			values[parts[0]] = parts[1]
+		default:
+			return nil, fmt.Errorf("edge IPv6 LB admission observation is malformed")
+		}
+	}
+	listeners, listenerErr := strconv.Atoi(values["lb_listener_count"])
+	errors, errorErr := strconv.Atoi(values["lb_map_hash_error_count"])
+	if values["lb_observation_status"] != "1" || listenerErr != nil || listeners < 0 ||
+		errorErr != nil || errors < 0 || errors > 20 {
+		return nil, fmt.Errorf("edge IPv6 LB admission observation is malformed")
+	}
+	return values, nil
+}
+
+func edgeIPv6AdmissionCandidate(result edgeIPv6Result) bool {
+	publicTotal, publicTotalErr := strconv.ParseFloat(result.http["monitor_time_total"], 64)
+	selfTotal, selfTotalErr := strconv.ParseFloat(result.egress["self_time_total"], 64)
+	return result.identityErr == nil && result.egressErr == nil &&
+		result.http["monitor_exitcode"] == "7" && result.http["monitor_remote_ip"] == "" &&
+		publicTotalErr == nil && publicTotal < 1 &&
+		result.identity["configured_present"] == "1" && result.identity["operstate"] == "up" &&
+		result.identity["unit_active"] == "active" &&
+		result.egress["self_probe_status"] == "7" && result.egress["self_exitcode"] == "7" &&
+		result.egress["self_http_code"] == "000" && selfTotalErr == nil && selfTotal < 1 &&
+		result.egress["route_status"] == "0" &&
+		result.egress["route_device"] == result.configured.Interface &&
+		result.egress["route_source"] == result.configured.Address &&
+		result.egress["source_egress_status"] == "0" &&
+		result.egress["source_egress"] == result.configured.Address
 }
 
 func edgeIPv6Findings(
@@ -232,6 +362,9 @@ func edgeIPv6Findings(
 	if result.egressErr != nil {
 		findings = append(findings, cannotObserveFinding(target+"/"+result.configured.Interface+"/source-egress", result.egressErr))
 	}
+	if result.admissionErr != nil {
+		findings = append(findings, cannotObserveFinding(target+"/"+result.configured.Interface+"/lb-admission", result.admissionErr))
+	}
 	if observerCommonMode {
 		return findings
 	}
@@ -242,7 +375,7 @@ func edgeIPv6Findings(
 
 	class, mechanism, action := classifyEdgeIPv6Failure(result)
 	observed := fmt.Sprintf(
-		"address=%s interface=%s http_code=%s curl_exit=%s remote_ip=%s total_seconds=%s operstate=%s configured_present=%s unit_active=%s self_http_code=%s self_exit=%s route_device=%s route_source=%s route_status=%s source_egress=%s source_egress_status=%s",
+		"address=%s interface=%s http_code=%s curl_exit=%s remote_ip=%s total_seconds=%s operstate=%s configured_present=%s unit_active=%s self_http_code=%s self_exit=%s self_total_seconds=%s route_device=%s route_source=%s route_status=%s source_egress=%s source_egress_status=%s",
 		result.configured.Address,
 		result.configured.Interface,
 		result.http["monitor_http_code"],
@@ -254,18 +387,30 @@ func edgeIPv6Findings(
 		result.identity["unit_active"],
 		result.egress["self_http_code"],
 		result.egress["self_exitcode"],
+		result.egress["self_time_total"],
 		result.egress["route_device"],
 		result.egress["route_source"],
 		result.egress["route_status"],
 		result.egress["source_egress"],
 		result.egress["source_egress_status"],
 	)
+	if result.admission != nil {
+		observed += fmt.Sprintf(
+			" lb_listener_count=%s lb_map_hash_error_count=%s",
+			result.admission["lb_listener_count"],
+			result.admission["lb_map_hash_error_count"],
+		)
+	}
 	evidence := strings.TrimSpace(strings.Join([]string{
 		"public probe: " + strings.TrimSpace(result.httpOutput),
 		"public probe error: " + errorString(result.httpErr),
 		"host identity: " + strings.TrimSpace(result.identityRaw),
 		"bound source egress: " + strings.TrimSpace(result.egressRaw),
 	}, "\n"))
+	verify := "Repeat three exact-address HTTP/1.1 IPv6 requests, require three 200 responses, and confirm the repaired layer's counters advance without changing the configured identity."
+	if class == "edge-lb-config-rejected" {
+		verify = "Confirm the exact corrected Warp artifact is deployed, at least one configured-pool listener is live, no new exact map-hash admission signature appears for 15 minutes, and three pinned HTTP/1.1 IPv6 requests from each of three independent external observers return 200."
+	}
 	findings = append(findings, finding{
 		probeId: "lb/edge-ipv6", tier: tierPage,
 		class: class, target: target, frame: frame, sustain: 2,
@@ -275,7 +420,7 @@ func edgeIPv6Findings(
 		observed:  observed,
 		evidence:  evidence,
 		action:    action,
-		verify:    "Repeat three exact-address HTTP/1.1 IPv6 requests, require three 200 responses, and confirm the repaired layer's counters advance without changing the configured identity.",
+		verify:    verify,
 		playbook:  "SIGNALS.md §18.1",
 	})
 	return findings
@@ -399,6 +544,16 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 			"Capture the pinned SYN at the host, inspect exact DNAT counters, and verify source-bound egress plus gateway reachability. Change only the first layer where packets disappear."
 	}
 	if exitCode == "7" && total < 1 {
+		listenerCount, listenerErr := strconv.Atoi(result.admission["lb_listener_count"])
+		mapHashErrors, mapHashErr := strconv.Atoi(result.admission["lb_map_hash_error_count"])
+		if edgeIPv6AdmissionCandidate(result) && result.admissionErr == nil &&
+			result.admission["lb_observation_status"] == "1" &&
+			listenerErr == nil && listenerCount == 0 &&
+			mapHashErr == nil && mapHashErrors > 0 {
+			return "edge-lb-config-rejected",
+				"The interface, configured address, LB controller, exact source route, and bound-source egress are healthy, but both public and host-local SNI fail immediately, no configured LB pool listener is live, and the bounded recent journal observation found nginx rejecting the generated configuration because its map hash bucket is too small. The active controller is not proof of LB readiness; this is configuration admission failure, not dead-first DNAT.",
+				"Build and deploy a Warp LB artifact whose generated nginx HTTP configuration explicitly sizes map_hash_bucket_size for its longest generated status-map key and passes production-capable nginx validation. Do not edit live generated config, remove DNAT targets, change routes, or restart the unchanged artifact."
+		}
 		return "edge-ipv6-reset",
 			"The exact public tuple rejected immediately. During a rolling LB drain this is the dead-first DNAT signature: an earlier rule can target a pool port whose nginx listener has closed while a later live target is shadowed.",
 			"Inspect ordered IPv4/IPv6 DNAT rules and live sockets. Remove only a fully proven dead target, and deploy the Warp duplicate-to-single socket reconciliation; do not change the IPv6 address or route to treat a reset."

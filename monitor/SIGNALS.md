@@ -14447,13 +14447,37 @@ changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
 excluded; this is how an operator-declared offline edge such as edge-5 stays out
 of both the health denominator and remote diagnostics.
 
-A curl exit 7 in less than one second is the immediate-reset signature only
-after a bounded monitor-local IPv6 route lookup proves the observer has a
-route. Inspect DNAT rules in order and compare every pool target with live
-listening sockets. During a duplicate-to-single rolling transition, an old
-first rule can point at a listener that closed after the overlap scan while
-shadowing a later live rule. Remove only the proven dead target and deploy
-Warp's final socket-authoritative reconciliation on that transition.
+A curl exit 7 in less than one second is an immediate refusal only after a
+bounded monitor-local IPv6 route lookup proves the observer has a route. Do not
+automatically label every such refusal dead-first DNAT. When the interface,
+configured address, LB controller, exact source route, and bound-source egress
+are healthy, the host-local SNI request also refuses in less than one second,
+and no configured LB pool socket is listening, reduce the matching LB journal
+to a count of one exact recent nginx `could not build map_hash` admission
+signature. A positive count emits PAGE `edge-lb-config-rejected`. The probe
+retains only the listener count and admission-error count; process arguments,
+generated configuration, journal text, and identifiers never enter evidence.
+
+`edge-lb-config-rejected` means the active controller could not admit its
+generated nginx configuration and therefore opened no LB listener. Build and
+deploy a Warp LB artifact whose generated HTTP configuration explicitly sizes
+`map_hash_bucket_size` for its longest generated status-map key and passes the
+production-capable nginx validation test. Do not edit the generated live
+configuration, remove DNAT targets, change the interface/route, or restart the
+unchanged artifact. Verify the exact corrected artifact, at least one live
+configured-pool listener, no new exact admission signature for 15 minutes, and
+three pinned HTTP/1.1 200 responses from each of three independent external
+observers.
+
+If the bounded admission discriminator is absent, continue to classify the
+ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order
+and compare every pool target with live listening sockets. During a
+duplicate-to-single rolling transition, an old first rule can point at a
+listener that closed after the overlap scan while shadowing a later live rule.
+Remove only the proven dead target and deploy Warp's final socket-authoritative
+reconciliation on that transition. If the admission observation itself fails,
+emit `cannot-observe` alongside the reset-class fallback; never infer a config
+rejection from controller activity or an unbounded log search.
 
 Run the monitor-local route lookup before the exact probes and again after an
 all-target immediate failure. When either lookup proves no route and every

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -150,6 +151,123 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	for _, alert := range alerts {
 		if strings.Contains(alert.Frame, "eno-healthy") {
 			t.Fatalf("healthy interface alerted: %+v", alert)
+		}
+	}
+}
+
+func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T) {
+	addresses := map[string]string{
+		"healthy":    "2001:db8:10::1",
+		"rejected":   "2001:db8:10::2",
+		"dead_first": "2001:db8:10::3",
+	}
+	var admissionCalls atomic.Int32
+	source := &syntheticSource{
+		localFn: func(name string, args ...string) (string, error) {
+			if name == "/sbin/route" {
+				return "route to: 2001:db8:ffff::1\ninterface: synthetic0\n", nil
+			}
+			if name != "curl" {
+				return "", errors.New("unexpected synthetic local command")
+			}
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, "["+addresses["healthy"]+"]"):
+				return edgeHTTPFixture("200", "0", addresses["healthy"], "0.080000"), nil
+			case strings.Contains(joined, "["+addresses["rejected"]+"]"):
+				return "curl: (7) Failed to connect to api-v6.example port 443 after 73 ms: Couldn't connect to server\n" +
+					edgeHTTPFixture("000", "7", "", "0.073000"), errors.New("exit status 7")
+			case strings.Contains(joined, "["+addresses["dead_first"]+"]"):
+				return "curl: (7) Failed to connect to api-v6.example port 443 after 37 ms: Couldn't connect to server\n" +
+					edgeHTTPFixture("000", "7", "", "0.037000"), errors.New("exit status 7")
+			default:
+				return "", errors.New("unexpected synthetic edge address")
+			}
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			switch {
+			case strings.Contains(command, edgeIPv6IdentityMarker):
+				return "operstate=up\nconfigured_present=1\nunit_active=active\n", nil
+			case strings.Contains(command, edgeIPv6EgressMarker):
+				for name, address := range addresses {
+					if name == "healthy" || !strings.Contains(command, address) {
+						continue
+					}
+					interfaceName := "synthetic-" + strings.ReplaceAll(name, "_", "-")
+					return "curl: (7) synthetic self refusal\n" +
+						"self_http_code=000\nself_exitcode=7\nself_time_total=0.000800\nself_probe_status=7\n" +
+						"route_device=" + interfaceName + "\nroute_source=" + address + "\nroute_status=0\n" +
+						"source_egress=" + address + "\nsource_egress_status=0\n", nil
+				}
+				return "", errors.New("missing synthetic egress address")
+			case strings.Contains(command, edgeIPv6AdmissionMarker):
+				admissionCalls.Add(1)
+				for _, want := range []string{
+					"journalctl --no-pager --quiet --since '15 minutes ago' -n 20 -o cat",
+					"SYSLOG_IDENTIFIER=\"$journal_identifier\"",
+					"could not build map_hash",
+					"ss -ltnH",
+					"ss -lunH",
+				} {
+					if !strings.Contains(command, want) {
+						t.Fatalf("admission command missing bounded discriminator %q", want)
+					}
+				}
+				if strings.Contains(command, "journalctl -u") || strings.Contains(command, "systemctl cat") {
+					t.Fatalf("admission command dumps unit or journal contents: %s", command)
+				}
+				if strings.Contains(command, "synthetic-rejected") {
+					return "lb_observation_status=1\nlb_listener_count=0\nlb_map_hash_error_count=2\n", nil
+				}
+				if strings.Contains(command, "synthetic-dead-first") {
+					return "lb_observation_status=1\nlb_listener_count=1\nlb_map_hash_error_count=0\n", nil
+				}
+				return "", errors.New("unexpected synthetic admission command")
+			default:
+				return "", errors.New("unexpected synthetic host command")
+			}
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{
+		Name: "edge-synthetic.example",
+		EdgeIPv6: []EdgeIPv6InterfaceSettings{
+			{Interface: "synthetic-healthy", Address: addresses["healthy"], ProbeHostname: "api-v6.example"},
+			{Interface: "synthetic-rejected", Address: addresses["rejected"], ProbeHostname: "api-v6.example"},
+			{Interface: "synthetic-dead-first", Address: addresses["dead_first"], ProbeHostname: "api-v6.example"},
+		},
+	}}
+
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionCalls.Load() != 2 {
+		t.Fatalf("admission calls = %d, want rejected and dead-first controls", admissionCalls.Load())
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %d, want rejected and dead-first only: %+v", len(alerts), alerts)
+	}
+	rejected := requireAlertClass(t, alerts, "edge-lb-config-rejected")
+	if !strings.Contains(rejected.Mechanism, "configuration admission failure") ||
+		!strings.Contains(rejected.Action, "map_hash_bucket_size") ||
+		!strings.Contains(rejected.Observed, "lb_listener_count=0") ||
+		!strings.Contains(rejected.Observed, "lb_map_hash_error_count=2") ||
+		!strings.Contains(rejected.Verify, "exact corrected Warp artifact") {
+		t.Fatalf("config-rejected alert lacks bounded causal evidence: %s", rejected.Markdown())
+	}
+	for _, forbidden := range []string{"dead-first DNAT", "[emerg] could not build map_hash", "ExecStart", "--portblocks="} {
+		if strings.Contains(rejected.Evidence, forbidden) {
+			t.Fatalf("config-rejected evidence leaked %q: %s", forbidden, rejected.Evidence)
+		}
+	}
+	deadFirst := requireAlertClass(t, alerts, "edge-ipv6-reset")
+	if !strings.Contains(deadFirst.Mechanism, "dead-first DNAT") {
+		t.Fatalf("dead-first control lost reset diagnosis: %s", deadFirst.Markdown())
+	}
+	for _, alert := range alerts {
+		if strings.Contains(alert.Frame, "synthetic-healthy") {
+			t.Fatalf("healthy control alerted: %+v", alert)
 		}
 	}
 }
