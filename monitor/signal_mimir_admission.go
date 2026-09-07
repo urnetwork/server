@@ -621,16 +621,6 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 			}
 
 			assessment.descriptorInstances++
-			if !instance.discardPresent {
-				hostComplete = false
-				assessment.directComplete = false
-				assessment.comparable = false
-				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-					target: hostName + "/mimir-admission",
-					err:    fmt.Errorf("exact per-user-series-limit counter row is unavailable"),
-				})
-				continue
-			}
 
 			headroom := instance.localLimit - instance.memorySeries
 			if !metricRangeInitialized {
@@ -1098,16 +1088,22 @@ for port in $ports; do
       if (local_count == 1 || $NF < local_minimum) local_minimum=$NF
       if (local_count == 1 || $NF > local_maximum) local_maximum=$NF
     }
-    /^cortex_discarded_samples_total[{]/ && /reason="per_user_series_limit"/ && numeric($NF) {
+    /^cortex_discarded_samples_total[{]/ && index($0, "reason=\"per_user_series_limit\"") > 0 {
+      discard_seen++
+      if ($0 !~ /(^|[{,])reason="per_user_series_limit"([,}])/ || !numeric($NF)) {
+        discard_invalid++
+        next
+      }
       discard_count++
       discard_total+=$NF
     }
     END {
-	      if (process_count != 1 || process_start_value <= 0 || memory_count != 1 ||
+      if (process_count != 1 || process_start_value <= 0 || memory_count != 1 ||
           active_count < 1 || created_count < 1 || removed_count < 1 ||
-          local_count < 1 || local_minimum <= 0 || local_minimum != local_maximum) exit 42
+          local_count < 1 || local_minimum <= 0 || local_minimum != local_maximum ||
+          discard_invalid > 0 || discard_seen != discard_count) exit 42
       descriptor=(descriptor_help == 1 && descriptor_type == 1)
-	      printf "process_start %s\n", process_start_text
+      printf "process_start %s\n", process_start_text
       printf "memory_series %.0f\n", memory_series
       printf "active_series %.0f\n", active_series
       printf "created_total %.0f\n", created_total

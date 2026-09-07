@@ -117,6 +117,29 @@ func mimirAdmissionCompleteInstanceFixtureAt(
 	})
 }
 
+// An exact reason vector has no exported child until Mimir first increments a
+// user/group label tuple. The family descriptor makes that absence observable.
+func mimirAdmissionLazyZeroInstanceFixture(
+	processStart int64,
+	createdTotal int64,
+	removedTotal int64,
+) string {
+	return mimirAdmissionInstanceFixture(mimirAdmissionFixtureOptions{
+		port:              mimirAdmissionSyntheticPort,
+		observable:        true,
+		processStart:      strconv.FormatInt(processStart, 10),
+		memorySeries:      111111,
+		activeSeries:      55555,
+		createdTotal:      createdTotal,
+		removedTotal:      removedTotal,
+		localLimit:        mimirAdmissionSyntheticLocalLimit,
+		globalLimit:       mimirAdmissionSyntheticGlobalLimit,
+		discardDescriptor: true,
+		discardPresent:    false,
+		discardTotal:      0,
+	})
+}
+
 // mimirAdmissionHostFixture appends the strict fleet and context trailer.
 func mimirAdmissionHostFixture(
 	instances []string,
@@ -289,6 +312,81 @@ func TestMimirAdmissionSignalPagesOnInitialPositiveExactCounter(t *testing.T) {
 		if !strings.Contains(alert.Markdown(), required) {
 			t.Errorf("Mimir admission alert lacks %q:\n%s", required, alert.Markdown())
 		}
+	}
+}
+
+// A valid family descriptor makes an uninstantiated exact reason an observed
+// zero. A later disappearance after a positive remains a reset, not recovery.
+func TestMimirAdmissionSignalTreatsDescriptorBackedAbsentRowAsLazyZero(t *testing.T) {
+	stateDir := t.TempDir()
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2032, 1, 2, 4, 5, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	lazyZero := map[string]mimirAdmissionSyntheticResponse{
+		"metrics-a.example": {output: mimirAdmissionHostFixture(
+			[]string{mimirAdmissionLazyZeroInstanceFixture(processStart, 123456, 3456)},
+			true,
+			0,
+			0,
+			0,
+		)},
+	}
+	if alerts := runMimirAdmissionSyntheticWithStateDir(t, signal, start, stateDir, lazyZero); len(alerts) != 0 {
+		t.Fatalf("descriptor-backed lazy zero alerted: %+v", alerts)
+	}
+	persisted := mimirAdmissionPersistedState{}
+	loaded, err := loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &persisted)
+	if err != nil || !loaded || len(persisted.Histories) != 1 || persisted.Histories[0].DiscardTotal != 0 {
+		t.Fatalf("lazy-zero baseline was not persisted: loaded=%t state=%+v err=%v", loaded, persisted, err)
+	}
+
+	positive := mimirAdmissionSingleHostResponses(processStart, 4, 123460, 3456, [3]int64{})
+	page := requireAlertClass(
+		t,
+		runMimirAdmissionSyntheticWithStateDir(t, signal, start.Add(time.Minute), stateDir, positive),
+		"mimir-series-limit",
+	)
+	if !strings.Contains(page.Markdown(), "discard_counter_increase=4") {
+		t.Fatalf("positive row after lazy zero lost its exact delta: %s", page.Markdown())
+	}
+
+	resetAt := start.Add(2 * time.Minute)
+	lazyZeroAfterPositive := map[string]mimirAdmissionSyntheticResponse{
+		"metrics-a.example": {output: mimirAdmissionHostFixture(
+			[]string{mimirAdmissionLazyZeroInstanceFixture(processStart, 123460, 3456)},
+			true,
+			0,
+			0,
+			0,
+		)},
+	}
+	resetAlerts := runMimirAdmissionSyntheticWithStateDir(t, signal, resetAt, stateDir, lazyZeroAfterPositive)
+	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
+	requireAlertClass(t, resetAlerts, "mimir-series-limit")
+	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+		t.Fatalf("disappearing positive row was not treated as a reset: %s", resetVisibility.Markdown())
+	}
+	persisted = mimirAdmissionPersistedState{}
+	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &persisted)
+	if err != nil || !loaded || !persisted.Incident || persisted.QuietSinceUnix != 0 ||
+		len(persisted.Histories) != 1 || persisted.Histories[0].DiscardTotal != 0 {
+		t.Fatalf("lazy-zero reset did not preserve the durable incident: loaded=%t state=%+v err=%v", loaded, persisted, err)
+	}
+
+	quietAt := resetAt.Add(time.Minute)
+	requireAlertClass(
+		t,
+		runMimirAdmissionSyntheticWithStateDir(t, signal, quietAt, stateDir, lazyZeroAfterPositive),
+		"mimir-series-limit",
+	)
+	if alerts := runMimirAdmissionSyntheticWithStateDir(
+		t,
+		signal,
+		quietAt.Add(mimirAdmissionQuietWindow),
+		stateDir,
+		lazyZeroAfterPositive,
+	); len(alerts) != 0 {
+		t.Fatalf("complete lazy-zero quiet window did not clear: %+v", alerts)
 	}
 }
 
@@ -626,8 +724,8 @@ func TestMimirAdmissionSignalEarlyStateFailuresRetainMaturePage(t *testing.T) {
 	}
 }
 
-// Whole-family and exact-reason absence remain distinct unknown states.
-func TestMimirAdmissionSignalTreatsDescriptorAndExactReasonAbsenceSeparately(t *testing.T) {
+// Whole-family absence and malformed bounded frames remain unknown states.
+func TestMimirAdmissionSignalKeepsDescriptorLossAndMalformedFramesUnknown(t *testing.T) {
 	signal := NewMimirAdmissionSignal()
 	start := time.Date(2032, 3, 4, 5, 6, 0, 0, time.UTC)
 	processStart := start.Add(-time.Hour).Unix()
@@ -679,27 +777,7 @@ func TestMimirAdmissionSignalTreatsDescriptorAndExactReasonAbsenceSeparately(t *
 	requireAlertClass(t, malformedAlerts, "cannot-observe")
 	requireAlertClass(t, malformedAlerts, "mimir-series-limit")
 
-	reasonMissing := strings.Replace(descriptorMissing, "discard_descriptor 0", "discard_descriptor 1", 1)
-	reasonAlerts := runMimirAdmissionSynthetic(
-		t,
-		signal,
-		start.Add(6*time.Hour),
-		map[string]mimirAdmissionSyntheticResponse{
-			"metrics-a.example": {output: mimirAdmissionHostFixture([]string{reasonMissing}, true, 0, 0, 0)},
-		},
-	)
-	reasonVisibility := requireAlertClass(t, reasonAlerts, "cannot-observe")
-	held := requireAlertClass(t, reasonAlerts, "mimir-series-limit")
-	if !strings.Contains(reasonVisibility.Markdown(), "exact per-user-series-limit counter row is unavailable") {
-		t.Fatalf("exact-reason absence lost its boundary: %s", reasonVisibility.Markdown())
-	}
-	for _, required := range []string{"direct_complete=false", "comparable=false", "quiet_complete=0s"} {
-		if !strings.Contains(held.Markdown(), required) {
-			t.Errorf("unknown exact-reason tick advanced quiet hold; missing %q: %s", required, held.Markdown())
-		}
-	}
-
-	flatAt := start.Add(6*time.Hour + time.Minute)
+	flatAt := start.Add(4*time.Hour + time.Minute)
 	flat := mimirAdmissionSingleHostResponses(processStart, 5, 130000, 3000, [3]int64{})
 	requireAlertClass(t, runMimirAdmissionSynthetic(t, signal, flatAt, flat), "mimir-series-limit")
 	if alerts := runMimirAdmissionSynthetic(t, signal, flatAt.Add(mimirAdmissionQuietWindow), flat); len(alerts) != 0 {
@@ -981,9 +1059,23 @@ case "${*}" in
       'cortex_ingester_memory_series_created_total{instance="generated-instance-b"} 234567' \
       'cortex_ingester_memory_series_removed_total{instance="generated-instance-a"} 3456' \
       'cortex_ingester_memory_series_removed_total{instance="generated-instance-b"} 4567' \
-      'cortex_ingester_local_limits{limit="max_global_series_per_user",source="metrics-a.example"} 333333' \
-      'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-a"} 2' \
-      'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-b"} 5'
+      'cortex_ingester_local_limits{limit="max_global_series_per_user",source="metrics-a.example"} 333333'
+    case "${MIMIR_ADMISSION_TEST_SHAPE:-positive}" in
+      positive)
+        printf '%s\n' \
+          'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-a"} 2' \
+          'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-b"} 5'
+        ;;
+      lazy-zero)
+        printf '%s\n' \
+          'cortex_discarded_samples_total{reason="generated_other_reason",source="generated-source-c"} 11'
+        ;;
+      malformed-exact)
+        printf '%s\n' \
+          'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-d"} generated-malformed-value'
+        ;;
+      *) exit 3 ;;
+    esac
     ;;
   *) exit 2 ;;
 esac
@@ -999,20 +1091,27 @@ shift
 exec "$@"
 `)
 
-	command := exec.Command("sh", "-c", mimirAdmissionScript("192.0.2.10"))
-	command.Env = append(
-		os.Environ(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"journal_identifiers=warp|synthetic-environment|api|generated-api-a",
-	)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Mimir admission reducer: %v\n%s", err, output)
+	runReducer := func(shape string) (mimirAdmissionHostSample, []byte) {
+		t.Helper()
+		command := exec.Command("sh", "-c", mimirAdmissionScript("192.0.2.10"))
+		command.Env = append(
+			os.Environ(),
+			"PATH="+binDir+":"+os.Getenv("PATH"),
+			"journal_identifiers=warp|synthetic-environment|api|generated-api-a",
+			"MIMIR_ADMISSION_TEST_SHAPE="+shape,
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Mimir admission reducer (%s): %v\n%s", shape, err, output)
+		}
+		sample, err := parseMimirAdmissionHostSample(string(output))
+		if err != nil {
+			t.Fatalf("parse Mimir admission reducer output (%s): %v\n%s", shape, err, output)
+		}
+		return sample, output
 	}
-	sample, err := parseMimirAdmissionHostSample(string(output))
-	if err != nil {
-		t.Fatalf("parse Mimir admission reducer output: %v\n%s", err, output)
-	}
+
+	sample, output := runReducer("positive")
 	if sample.count != 1 || len(sample.instances) != 1 || !sample.journalComplete ||
 		sample.publisherStarts != 1 || sample.readinessRejects != 1 || sample.admissionRejects != 1 {
 		t.Fatalf("reducer lost host aggregates: %+v\n%s", sample, output)
@@ -1040,6 +1139,20 @@ exec "$@"
 		if strings.Contains(string(output), forbidden) {
 			t.Errorf("reducer output leaked synthetic fixture marker %q: %s", forbidden, output)
 		}
+	}
+
+	lazySample, lazyOutput := runReducer("lazy-zero")
+	if lazySample.count != 1 || len(lazySample.instances) != 1 ||
+		!lazySample.instances[0].observable || !lazySample.instances[0].discardDescriptor ||
+		lazySample.instances[0].discardPresent || lazySample.instances[0].discardTotal != 0 {
+		t.Fatalf("reducer did not preserve descriptor-backed lazy zero: %+v\n%s", lazySample, lazyOutput)
+	}
+	malformedSample, malformedOutput := runReducer("malformed-exact")
+	if malformedSample.count != 1 || len(malformedSample.instances) != 1 || malformedSample.instances[0].observable {
+		t.Fatalf("reducer accepted malformed exact counter row: %+v\n%s", malformedSample, malformedOutput)
+	}
+	if strings.Contains(string(malformedOutput), "generated-malformed-value") {
+		t.Fatalf("reducer leaked malformed synthetic source text: %s", malformedOutput)
 	}
 }
 

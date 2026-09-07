@@ -127,8 +127,9 @@ reduces the exact recent-store and replacement-handoff settings needed to
 explain a temporary query blind zone without exposing rendered credentials.
 The admission follow-up adds §11.20a (`mimir-admission`): it reduces each exact
 Mimir child's series-admission counters and headroom at one-minute cadence,
-keeps descriptor or exact-reason absence unknown, and requires a complete
-two-hour quiet window before resolving a direct admission page.
+keeps descriptor loss unknown, treats an uninstantiated exact-reason child as
+zero, and requires a complete two-hour quiet window before resolving a direct
+admission page.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -9655,15 +9656,16 @@ presence, and the exact per-user-series discard total. Any malformed,
 duplicated, missing, or trailing field fails closed. Raw metric labels,
 rendered configuration, tenant values, and journal lines never leave the host.
 
-Descriptor presence and exact-reason presence are separate observation
-boundaries. A missing discard-counter descriptor is unknown because the whole
-family may be unavailable. A present family with no exact
-`per_user_series_limit` row is also unknown, not an observed zero: exposition
-cannot prove whether that labeled counter has never been instantiated or was
-lost at the collection boundary. Either state emits a distinct fixed
-`cannot-observe` finding, blocks the quiet timer, and preserves a prior
-`mimir-series-limit` page. A confirmed positive sibling still pages even when
-another child or host is unknown.
+The exact HELP/TYPE descriptor is the observation boundary. A missing or
+malformed discard-counter descriptor is unknown because the whole family may
+be unavailable. With that descriptor present, no
+`per_user_series_limit` row is an observed zero: Mimir always registers that
+reason's counter vector, but Prometheus emits no `{user,group}` child until an
+increment instantiates it. A malformed exact-reason row still fails closed. A
+same-generation disappearance after a positive observation is a monotonic
+counter decrease, so it emits `cannot-observe`, preserves the page, and starts
+a zero baseline only for a subsequent quiet interval. A confirmed positive
+sibling still pages even when another child or host is unknown.
 
 Counter state is keyed by host, listener port, and the canonical full-precision
 process start exposed by that child; whole-second rounding must never collapse
@@ -9675,8 +9677,8 @@ decrease establishes an incomparable boundary; neither can clear an active
 incident or be interpreted as a negative delta. Resolution begins only on a
 later complete, same-generation, non-increasing fleet observation and requires
 two uninterrupted hours of complete comparable zero deltas. Observation loss,
-descriptor/reason absence, another generation change, or another increase
-resets that quiet window.
+descriptor loss, a malformed exact-reason row, another generation change, or
+another increase resets that quiet window.
 
 The bounded host/port/process histories, active-incident bit, and quiet boundary
 are stored atomically under the configured monitor state directory through the
