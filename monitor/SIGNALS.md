@@ -923,6 +923,9 @@ for p in $(seq 6380 6411); do timeout 2 redis-cli -p $p PING >/dev/null || echo 
   1/32 of keys WITHOUT flipping cluster_state on other nodes — the monitor
   MUST check per-node liveness, not just cluster_state.
 
+### 1.4a Redis exporter counter-rate visibility
+Probe: `redis-rates`
+
 The Redis dashboard and alerts must also respect the collection cadence. Since
 2026-08-26, edge-6 intentionally staggers its 32 exporter scrapes from 61 to 92
 seconds to avoid a remote-write burst. Grafana can resolve `$__rate_interval`
@@ -936,6 +939,32 @@ exporter counter rates in `grafana/dashboards/redis-cluster.json` and in the
 matching Redis alert rules. A partially blank dashboard with live `redis_up`
 and gauge panels is a query-window visibility failure, not a Redis outage; an
 entirely blank dashboard still follows §11.14.
+
+- HEALTHY: fresh raw `commands_processed`, `evicted_keys`, and `expired_keys`
+  counters and their five-minute rates each cover all configured Redis nodes;
+  dashboard panels 8, 9, and 11 contain their five required fixed `[5m]`
+  ranges; and the `redis-node-wedged` rule contains its two required fixed
+  `[5m]` ranges.
+- WARN `redis-dashboard-rate-window`: the live dashboard UID is present but
+  any expected counter rate is missing, dynamic, or not `[5m]`.
+- WARN `redis-alert-rate-window`: the live `redis-node-wedged` provisioning
+  rule is present but either counter range is missing or not `[5m]`.
+- WARN `redis-rate-source-coverage`: a fresh raw counter or five-minute rate
+  does not cover every configured node. Diagnose exporter scrape, Fluent Bit
+  remote-write, and Mimir freshness before attributing an empty panel solely
+  to its definition. The probe retains aggregate counts only; it never emits
+  node labels, Grafana response bodies, or the admin credential.
+- ROOT-CAUSE ORDER: compare raw, one-minute, and five-minute cardinalities in
+  one bounded Mimir observation; then read the exact dashboard and alert-rule
+  UIDs through Grafana's authenticated API. If raw and five-minute coverage
+  are complete while the live definitions use shorter/dynamic ranges, build
+  and deploy Grafana from server commit `3e59900c` and Warp commit `a314e4d`.
+  Do not restart Redis or remove the intentional scrape staggering.
+- VERIFY: every active Grafana block runs the corrected artifact; two
+  consecutive reads show five dashboard and two wedged-rule `[5m]` ranges,
+  no dynamic/short ranges, and all configured nodes in each raw and
+  five-minute counter cohort. The operations and expiration panels then show
+  current data; a genuine zero eviction rate renders as zero, not No data.
 
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`

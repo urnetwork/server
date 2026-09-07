@@ -47,6 +47,7 @@ func NewSignals() []Signal {
 		NewPgCapacitySignal(),
 		NewPoolRetentionSignal(),
 		NewRedisClusterSignal(),
+		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),
 		NewActiveQueriesSignal(),
 		NewWaitEventsSignal(),
