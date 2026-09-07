@@ -110,6 +110,7 @@ func NewSignals() []Signal {
 		NewLogShipperSignal(),
 		NewLokiTailersSignal(),
 		NewMimirContinuitySignal(),
+		NewMimirAdmissionSignal(),
 		NewMimirShutdownSignal(),
 		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),

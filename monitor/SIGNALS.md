@@ -125,6 +125,10 @@ The direct runtime follow-up adds §11.21 (`mimir-shutdown`): it initially prove
 all six enabled Grafana blocks rendered shutdown flushing false. It now also
 reduces the exact recent-store and replacement-handoff settings needed to
 explain a temporary query blind zone without exposing rendered credentials.
+The admission follow-up adds §11.20a (`mimir-admission`): it reduces each exact
+Mimir child's series-admission counters and headroom at one-minute cadence,
+keeps descriptor or exact-reason absence unknown, and requires a complete
+two-hour quiet window before resolving a direct admission page.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -5357,7 +5361,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
-| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Reduce exact-process admission-discard and created/removed-series counters remotely; correlate rejected-candidate pusher starts and steady exporter cardinality. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through two hours; historical gaps stay under §11.20. |
+| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters; correlate rejected-candidate pusher starts and steady exporter cardinality as context only. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through a complete two-hour window; historical gaps stay under §11.20. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | `connect: connection refused` | Port closed: process dead or bound to wrong interface after manual restart. | `ss -lntp` on the host: absent → restart; bound 127.0.0.1-only → restart with correct conf. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
@@ -6957,6 +6961,7 @@ Tier-1 (warn):
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, wall-clock-moving left edge is temporary store visibility, repeated fixed post-boundary gap is loss |
+| mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
@@ -9610,6 +9615,78 @@ monitor therefore requests an explicit operator architecture decision rather
 than prescribing either design. Never shared-mount one WAL/TSDB directory into
 overlapping generations, zero-fill or span-null the dashboard, or reinterpret
 a missing observation as zero throughput.
+
+### 11.20a Mimir series-admission counters and headroom
+
+Probe: `mimir-admission`
+
+Run this PAGE-tier probe every minute on every enabled `services` host. It
+enumerates loopback listeners, admits a child only when its build-info endpoint
+identifies Grafana Mimir, then reduces that exact child's metrics and the two
+allowlisted series-limit fields from its effective configuration. The remote
+reducer returns only a strict fixed frame: process start, memory/active series,
+created/removed counters, local/global limits, descriptor and exact-reason
+presence, and the exact per-user-series discard total. Any malformed,
+duplicated, missing, or trailing field fails closed. Raw metric labels,
+rendered configuration, tenant values, and journal lines never leave the host.
+
+Descriptor presence and exact-reason presence are separate observation
+boundaries. A missing discard-counter descriptor is unknown because the whole
+family may be unavailable. A present family with no exact
+`per_user_series_limit` row is also unknown, not an observed zero: exposition
+cannot prove whether that labeled counter has never been instantiated or was
+lost at the collection boundary. Either state emits a distinct fixed
+`cannot-observe` finding, blocks the quiet timer, and preserves a prior
+`mimir-series-limit` page. A confirmed positive sibling still pages even when
+another child or host is unknown.
+
+Counter state is keyed by host, listener port, and the canonical full-precision
+process start exposed by that child; whole-second rounding must never collapse
+overlapping children or rapid replacements. A positive exact total on a new
+generation and every positive same-generation delta emit
+`mimir-series-limit` immediately, with stable target `mimir-fleet` and frame
+`per-user-series-limit`. A process-generation change or a monotonic counter
+decrease establishes an incomparable boundary; neither can clear an active
+incident or be interpreted as a negative delta. Resolution begins only on a
+later complete, same-generation, non-increasing fleet observation and requires
+two uninterrupted hours of complete comparable zero deltas. Observation loss,
+descriptor/reason absence, another generation change, or another increase
+resets that quiet window.
+
+The bounded host/port/process histories, active-incident bit, and quiet boundary
+are stored atomically under the configured monitor state directory through the
+shared versioned state lock. Every check reloads that state after acquiring the
+cross-process lock, so overlapping watcher generations cannot overwrite a
+newer incident or baseline with a stale in-memory copy. Each fresh watcher
+resets the inherited quiet boundary exactly once: time before that watcher
+started is not a complete observation. Observation and save are transactional;
+an unsuccessful save preserves the prior durable incident, baseline, and quiet
+boundary and emits `cannot-observe` beside any retained direct page. Unreadable
+state or an unavailable state lock likewise cannot emit a healthy resolution;
+when the current process already holds a mature incident, that page remains
+beside the fixed visibility finding without mutating its cached baselines or
+quiet boundary. Current child identities and persisted histories are both
+capped at 1,024; exceeding either bound fails closed without replacing state.
+Thus a same-generation counter reset to zero, watcher overlap or restart, an
+early state failure, and a failed save cannot erase an earlier admission
+incident or manufacture two hours of quiet.
+
+The same bounded host command counts publisher starts, readiness rejections,
+and exact admission-rejection log matches over its short journal window, but
+returns only those aggregate counts. They are context, never the detection
+source: equality can support rejected-candidate amplification only after exact
+artifact and rollout correlation, while inequality cannot select a different
+cause. Publisher/readiness counts therefore neither open nor clear the direct
+counter page. Memory-series headroom and created/removed deltas likewise guide
+capacity diagnosis without replacing the affirmative admission counter.
+
+For closure, prove every enabled child and exact reason are observable without
+a generation or counter-reset gap, then retain zero new admission increments
+and measured rollout headroom through the complete two-hour window. Verify two
+fresh independent application-metric reads and the exact running Server/Warp
+artifacts. Do not raise a limit, suppress labels, retry rejected candidates,
+or restart Mimir merely to reset the visible counter. Historical availability
+and replacement durability remain independent under §11.20 and §11.21.
 
 ### 11.21 Mimir shutdown durability configuration
 
