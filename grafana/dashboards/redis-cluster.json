@@ -413,7 +413,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "avg command latency",
-      "description": "Per-node average command latency: rate(redis_commands_duration_seconds_total) / rate(redis_commands_processed_total). Idle nodes (no commands) are hidden. Threshold line at the 5ms wedged-node page level.",
+      "description": "Per-node five-minute average command latency: rate(redis_commands_duration_seconds_total) / rate(redis_commands_processed_total). The fixed window covers the intentionally staggered 61–92 second Redis scrapes; $__rate_interval can be only one minute and return no series. Idle nodes (no commands) are hidden. Threshold line at the 5ms wedged-node page level.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -476,7 +476,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, node) (rate(redis_commands_duration_seconds_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval])) / (sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval])) > 0)",
+          "expr": "sum by (host, node) (rate(redis_commands_duration_seconds_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m])) / (sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m])) > 0)",
           "legendFormat": "{{host}} {{node}}",
           "datasource": {
             "type": "prometheus",
@@ -489,7 +489,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "ops / s",
-      "description": "Commands processed per second per node.",
+      "description": "Commands processed per second per node, averaged over five minutes so every intentionally staggered 61–92 second scrape contributes enough samples.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -536,7 +536,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "expr": "sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m]))",
           "legendFormat": "{{host}} {{node}}",
           "datasource": {
             "type": "prometheus",
@@ -618,7 +618,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "evicted + expired keys / s",
-      "description": "Key eviction rate (maxmemory pressure; any sustained eviction warns) and key expiry rate (normal ttl churn) per node.",
+      "description": "Five-minute per-node rates, long enough to cover the intentionally staggered 61–92 second Redis scrapes. Key eviction is maxmemory pressure; key expiry is normal TTL churn.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -665,7 +665,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, node) (rate(redis_evicted_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "expr": "sum by (host, node) (rate(redis_evicted_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m]))",
           "legendFormat": "evicted {{host}} {{node}}",
           "datasource": {
             "type": "prometheus",
@@ -674,7 +674,7 @@
         },
         {
           "refId": "B",
-          "expr": "sum by (host, node) (rate(redis_expired_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "expr": "sum by (host, node) (rate(redis_expired_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m]))",
           "legendFormat": "expired {{host}} {{node}}",
           "datasource": {
             "type": "prometheus",

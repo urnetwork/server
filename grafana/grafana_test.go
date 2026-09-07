@@ -220,6 +220,39 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 	}
 }
 
+func TestRedisClusterCounterRatesCoverStaggeredScrapes(t *testing.T) {
+	dashboard := readTestDashboard(t, "redis-cluster.json")
+	wantMetrics := map[int][]string{
+		8:  {"redis_commands_duration_seconds_total", "redis_commands_processed_total"},
+		9:  {"redis_commands_processed_total"},
+		11: {"redis_evicted_keys_total", "redis_expired_keys_total"},
+	}
+
+	for panelID, metrics := range wantMetrics {
+		panel := dashboardPanelById(dashboard, panelID)
+		if panel == nil {
+			t.Errorf("Redis counter-rate panel %d is missing", panelID)
+			continue
+		}
+		expressions := make([]string, 0, len(panel.Targets))
+		for _, target := range panel.Targets {
+			expressions = append(expressions, target.Expr)
+		}
+		joined := strings.Join(expressions, "\n")
+		for _, metric := range metrics {
+			if !strings.Contains(joined, "rate("+metric) {
+				t.Errorf("Redis panel %d is missing rate for %s: %s", panelID, metric, joined)
+			}
+		}
+		if strings.Contains(joined, "$__rate_interval") {
+			t.Errorf("Redis panel %d uses $__rate_interval, which can be shorter than the 61–92 second staggered scrape interval: %s", panelID, joined)
+		}
+		if strings.Count(joined, "[5m]") != len(metrics) {
+			t.Errorf("Redis panel %d must use one five-minute range per counter, got: %s", panelID, joined)
+		}
+	}
+}
+
 type testTarget struct {
 	Expr         string `json:"expr"`
 	Instant      bool   `json:"instant"`
