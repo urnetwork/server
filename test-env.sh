@@ -386,6 +386,7 @@ test_env_configure() {
     local server_dir
     local urnetwork_home
     local portable_root
+    local private_authority
     local local_state_file
     local suite_proxy_state_dir="${WARP_TEST_ENV_SUITE_PROXY_STATE_DIR:-}"
 
@@ -476,6 +477,44 @@ test_env_configure() {
             return 1
             ;;
     esac
+
+    # A disposable gate can supply its own daemon-assigned service ports.
+    # This remains the explicit portable escape, with exact authorities and
+    # the same service probes; it cannot redirect the managed local profile.
+    if [[ -n "${WARP_TEST_ENV_PORTABLE_ROOT:-}" ]]; then
+        if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" != 1 ||
+              "${WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES:-0}" != 1 ]]; then
+            test_env_error "a private portable root requires both portable service flags"
+            return 1
+        fi
+        portable_root="$WARP_TEST_ENV_PORTABLE_ROOT"
+        if [[ "$portable_root" != /* || ! -d "$portable_root" || -L "$portable_root" || ! -O "$portable_root" ]]; then
+            test_env_error "private portable resource root must be an absolute owned physical directory"
+            return 1
+        fi
+        if [[ "$(cd -- "$portable_root" && pwd -P)" != "$portable_root" ]]; then
+            test_env_error "private portable resource root must not contain a path alias"
+            return 1
+        fi
+        if [[ "$(stat -c '%a' "$portable_root")" != 700 ]]; then
+            test_env_error "private portable resource root must have mode 700"
+            return 1
+        fi
+        for private_authority in \
+            "${WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY:-}" \
+            "${WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY:-}"; do
+            if [[ ! "$private_authority" =~ ^127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] ||
+                (( 10#${BASH_REMATCH[1]:-0} > 65535 )); then
+                test_env_error "private portable services require explicit loopback host and port"
+                return 1
+            fi
+            test_env_split_authority "$private_authority" || return $?
+        done
+        if [[ "$WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY" == "$WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY" ]]; then
+            test_env_error "private portable services require distinct endpoints"
+            return 1
+        fi
+    fi
 
     if [[ "$TEST_ENV_SUITE_PROXY_MODE" == 1 ]]; then
         if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" != 0 ||
@@ -586,6 +625,17 @@ test_env_preflight() {
     test_env_read_scalar "$pg_resource_path" authority || return $?
     test_env_expand_scalar "$TEST_ENV_SCALAR" || return $?
     pg_authority="$TEST_ENV_SCALAR"
+    if [[ -n "${WARP_TEST_ENV_PORTABLE_ROOT:-}" ]]; then
+        if [[ "$pg_authority" != "$WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY" ]]; then
+            test_env_error "PostgreSQL authority differs from the private portable endpoint"
+            return 1
+        fi
+        test_env_find_resource "$WARP_VAULT_HOME" pg_maintenance.yml || return $?
+        if ! cmp -s "$pg_resource_path" "$TEST_ENV_RESOURCE_PATH"; then
+            test_env_error "PostgreSQL maintenance resource differs from its private application resource"
+            return 1
+        fi
+    fi
     test_env_split_authority "$pg_authority" || return $?
     pg_host="$TEST_ENV_HOST"
     pg_port="$TEST_ENV_PORT"
@@ -603,6 +653,10 @@ test_env_preflight() {
     test_env_read_scalar "$redis_resource_path" authority || return $?
     test_env_expand_scalar "$TEST_ENV_SCALAR" || return $?
     redis_authority="$TEST_ENV_SCALAR"
+    if [[ -n "${WARP_TEST_ENV_PORTABLE_ROOT:-}" && "$redis_authority" != "$WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY" ]]; then
+        test_env_error "Redis authority differs from the private portable endpoint"
+        return 1
+    fi
     test_env_split_authority "$redis_authority" || return $?
     redis_host="$TEST_ENV_HOST"
     redis_port="$TEST_ENV_PORT"

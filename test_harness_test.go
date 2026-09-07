@@ -63,6 +63,9 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 	blockedNames := map[string]bool{}
 	for _, name := range []string{
 		"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+		"WARP_TEST_ENV_PORTABLE_ROOT",
+		"WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY",
+		"WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY",
 		"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR",
 		"WARP_TEST_ENV_TEST_HOSTS_FILE",
 		"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR",
