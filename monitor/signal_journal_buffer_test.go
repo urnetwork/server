@@ -159,7 +159,7 @@ func TestJournalBufferCommandIsBoundedAndUsesEffectiveConfig(t *testing.T) {
 }
 
 func TestJournalBufferCommandCrossSystemdCoverage(t *testing.T) {
-	for _, test := range []struct {
+	for _, testCase := range []struct {
 		name          string
 		latestMode    string
 		boundaryMode  string
@@ -179,31 +179,45 @@ func TestJournalBufferCommandCrossSystemdCoverage(t *testing.T) {
 		{name: "cutoff-too-young", latestMode: "string", boundaryMode: "young"},
 		{name: "access-error", latestMode: "error", boundaryMode: "string"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			output, err := runJournalBufferCommand(t, test.latestMode, test.boundaryMode)
-			if !test.wantCommandOK {
-				if err == nil {
-					t.Fatalf("command succeeded with latest=%s boundary=%s:\n%s", test.latestMode, test.boundaryMode, output)
-				}
-				if strings.Contains(output, "private-journal-detail") {
-					t.Fatalf("command leaked raw journal failure: %s", output)
-				}
-				return
+		output, err := runJournalBufferCommand(t, testCase.latestMode, testCase.boundaryMode)
+		if !testCase.wantCommandOK {
+			if err == nil {
+				t.Fatalf(
+					"%s: command succeeded with latest=%s boundary=%s:\n%s",
+					testCase.name,
+					testCase.latestMode,
+					testCase.boundaryMode,
+					output,
+				)
 			}
-			if err != nil {
-				t.Fatalf("command failed: %v\n%s", err, output)
+			if strings.Contains(output, "private-journal-detail") {
+				t.Fatalf("%s: command leaked raw journal failure: %s", testCase.name, output)
 			}
-			sample, err := parseJournalBufferSample(output)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sample.coveragePresent != test.wantPresent {
-				t.Fatalf("coverage_present=%t, want %t:\n%s", sample.coveragePresent, test.wantPresent, output)
-			}
-			if test.wantPresent && sample.boundaryEntryAgeSeconds < 3000 {
-				t.Fatalf("boundary age=%d, want >=3000", sample.boundaryEntryAgeSeconds)
-			}
-		})
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: command failed: %v\n%s", testCase.name, err, output)
+		}
+		sample, err := parseJournalBufferSample(output)
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		if sample.coveragePresent != testCase.wantPresent {
+			t.Fatalf(
+				"%s: coverage_present=%t, want %t:\n%s",
+				testCase.name,
+				sample.coveragePresent,
+				testCase.wantPresent,
+				output,
+			)
+		}
+		if testCase.wantPresent && sample.boundaryEntryAgeSeconds < 3000 {
+			t.Fatalf(
+				"%s: boundary age=%d, want >=3000",
+				testCase.name,
+				sample.boundaryEntryAgeSeconds,
+			)
+		}
 	}
 }
 
@@ -265,6 +279,16 @@ exec /usr/bin/awk "$@"
 	writeExecutable("timeout", `#!/bin/sh
 shift
 exec "$@"
+`)
+	// The command and its fake journalctl child must share one clock. Sampling
+	// the real clock twice made a loaded test host manufacture a future latest
+	// record when process startup crossed more than one second.
+	writeExecutable("date", `#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then
+  echo 2000000000
+  exit 0
+fi
+exec /bin/date "$@"
 `)
 	writeExecutable("journalctl", `#!/bin/sh
 case " $* " in

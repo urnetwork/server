@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,33 +22,48 @@ type backupArchiveFixture struct {
 }
 
 type backupArchiveWriterFixture struct {
-	unitState          string
-	mainPID            int64
-	remoteUnitState    string
-	remoteUnitSubstate string
-	remoteMainPID      int64
-	remoteResult       string
-	remoteRestart      string
-	remoteRestartDelay string
-	remoteExitStatus   int64
-	remoteInvocationID string
-	remoteExecStart    int64
-	remoteTimerState   string
-	remoteTimerNext    int64
-	remoteBoot         int64
-	remotePGSource     string
-	remotePGPort       int64
-	remoteRedisSource  string
-	remoteRedisPort    int64
-	remoteMount        string
-	remoteMountPresent *bool
-	remoteMountSource  string
-	remoteMountFSType  string
-	remoteMountOptions string
-	remoteMountLineage string
-	clearanceState     string
-	storageReadable    *bool
-	storageEvents      []backupArchiveStorageEventFixture
+	unitState                    string
+	unitSubstate                 string
+	mainPID                      int64
+	result                       string
+	exitStatus                   int64
+	invocationID                 string
+	execStart                    int64
+	timerState                   string
+	timerUnitFileState           string
+	timerNext                    *int64
+	githubArchivePathState       string
+	remoteArchivePathState       string
+	archivePathsMatch            *bool
+	archiveMountsMatch           *bool
+	archivePathsOnMount          *bool
+	archivePathPermissionsSecure *bool
+	remoteUnitState              string
+	remoteUnitSubstate           string
+	remoteMainPID                int64
+	remoteResult                 string
+	remoteRestart                string
+	remoteRestartDelay           string
+	remoteExitStatus             int64
+	remoteInvocationID           string
+	remoteExecStart              int64
+	remoteTimerState             string
+	remoteTimerUnitFileState     string
+	remoteTimerNext              int64
+	remoteBoot                   int64
+	remotePGSource               string
+	remotePGPort                 int64
+	remoteRedisSource            string
+	remoteRedisPort              int64
+	remoteMount                  string
+	remoteMountPresent           *bool
+	remoteMountSource            string
+	remoteMountFSType            string
+	remoteMountOptions           string
+	remoteMountLineage           string
+	clearanceState               string
+	storageReadable              *bool
+	storageEvents                []backupArchiveStorageEventFixture
 }
 
 type backupArchiveStorageEventFixture struct {
@@ -67,6 +85,210 @@ func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
 	alerts := runBackupArchiveFixtures(t, now, fixtures...)
 	if len(alerts) != 0 {
 		t.Fatalf("healthy backup archives alerted: %+v", alerts)
+	}
+}
+
+// A valid previous tarball does not make the writer healthy. This reproduces
+// the gap where the last archive remained inside five days while systemd had
+// already recorded a failed oneshot.
+func TestBackupArchivesSignalSyntheticDetectsFailedGitHubWriterBeforeFreshnessBreach(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 30, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-4 * 24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState:    "failed",
+		unitSubstate: "failed",
+		result:       "exit-code",
+		exitStatus:   1,
+		invocationID: "present",
+		execStart:    123456,
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-writer-failed",
+		"backup-1/github",
+	)
+	if alert.Sustain != 1 || alert.Severity != SeverityPage {
+		t.Fatalf("GitHub writer failure urgency=%s/%d, want page/1", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"unit_state=failed",
+		"unit_substate=failed",
+		"result=exit-code",
+		"exit_status=1",
+		"invocation_id_present=true",
+		"still-young previous tarball",
+		"single-writer boundary",
+		"operator authorization",
+		"SIGNALS.md §11.22",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("GitHub writer failure missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if unexpected := findBackupArchiveAlert(
+		alerts,
+		"backup-archive-stale",
+		"backup-1/github-urnetwork",
+	); unexpected != nil {
+		t.Fatalf("fresh archive was misclassified as stale: %+v", *unexpected)
+	}
+}
+
+// Storage-repair tooling may deliberately stop timers. A successful previous
+// service result cannot hide that no later calendar owner was restored.
+func TestBackupArchivesSignalSyntheticDetectsUnscheduledGitHubTimer(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 31, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	missingNext := int64(0)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		timerState:         "inactive",
+		timerUnitFileState: "enabled",
+		timerNext:          &missingNext,
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-timer-unscheduled",
+		"backup-1/github",
+	)
+	if alert.Sustain != 1 || alert.Severity != SeverityPage {
+		t.Fatalf("GitHub timer urgency=%s/%d, want page/1", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"timer_state=inactive",
+		"timer_unit_file_state=enabled",
+		"timer_next=missing",
+		"no proven durable future code-backup trigger",
+		"does not schedule itself",
+		"offline archive-repair workflow",
+		"explicit operator authorization",
+		"persistent missed trigger may immediately create",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("GitHub timer alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if unexpected := findBackupArchiveAlert(
+		alerts,
+		"backup-archive-writer-failed",
+		"backup-1/github",
+	); unexpected != nil {
+		t.Fatalf("successful idle writer was misclassified as failed: %+v", *unexpected)
+	}
+}
+
+// The data writer uses a separate persistent calendar owner. Existing valid
+// PostgreSQL and Redis generations must not hide a disabled future schedule.
+func TestBackupArchivesSignalSyntheticDetectsUnscheduledDataTimer(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 31, 30, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteTimerState:         "inactive",
+		remoteTimerUnitFileState: "disabled",
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-timer-unscheduled",
+		"backup-1/remote",
+	)
+	if alert.Sustain != 1 || alert.Severity != SeverityPage {
+		t.Fatalf("data timer urgency=%s/%d, want page/1", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"timer_state=inactive",
+		"timer_unit_file_state=disabled",
+		"future PostgreSQL/Redis backup trigger",
+		"latest/weekly/monthly",
+		"dedicated direct SSH endpoints",
+		"explicit operator authorization",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("data timer alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if unexpected := findBackupArchiveAlert(
+		alerts,
+		"backup-archive-timer-unscheduled",
+		"backup-1/github",
+	); unexpected != nil {
+		t.Fatalf("healthy GitHub timer was misclassified as unscheduled: %+v", *unexpected)
+	}
+}
+
+// A repaired and mounted external filesystem can still lack the configured
+// root directory. Both writers intentionally refuse that state rather than
+// falling through to a similarly named directory on the system disk.
+func TestBackupArchivesSignalSyntheticDetectsMissingEffectiveArchiveRoot(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 32, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		githubArchivePathState:       "missing",
+		remoteArchivePathState:       "missing",
+		archivePathsOnMount:          boolPointer(false),
+		archivePathPermissionsSecure: boolPointer(false),
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-root-unavailable",
+		"backup-1/archive-root",
+	)
+	if alert.Sustain != 1 || alert.Severity != SeverityPage {
+		t.Fatalf("archive-root urgency=%s/%d, want page/1", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"github_path_state=missing",
+		"data_path_state=missing",
+		"writer_paths_match=true",
+		"writer_mounts_match=true",
+		"paths_on_configured_mount=false",
+		"root_owner_mode_0700=false",
+		"mount_state=read-write",
+		"fail closed",
+		"system disk",
+		"root:root mode 0700",
+		"explicit operator authorization",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("missing archive-root alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if unexpected := findBackupArchiveAlert(
+		alerts,
+		"backup-archive-volume-unavailable",
+		"backup-1/archive-volume",
+	); unexpected != nil {
+		t.Fatalf("healthy mounted volume was conflated with its missing root: %+v", *unexpected)
 	}
 }
 
@@ -395,7 +617,7 @@ func TestBackupArchivesSignalSyntheticUnrelatedDeviceFaultDoesNotTaintArchiveVol
 		})
 	}
 	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
-		remoteInvocationID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		remoteInvocationID: "present",
 		remoteExecStart:    42,
 		remoteMountLineage: "dm-2,sda1,sda",
 		storageReadable:    boolPointer(true),
@@ -512,7 +734,7 @@ func TestBackupArchivesSignalSyntheticSuccessfulIdleWithRecentRowsIsNotRecoveryI
 		remoteUnitState:    "inactive",
 		remoteUnitSubstate: "dead",
 		remoteResult:       "success",
-		remoteInvocationID: "cccccccccccccccccccccccccccccccc",
+		remoteInvocationID: "present",
 		remoteExecStart:    123456,
 	}, fixtures...)
 	if alert := findBackupArchiveAlert(alerts, "backup-archive-recovery-idle", "backup-1/remote"); alert != nil {
@@ -573,6 +795,14 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 		"remote_mount_options",
 		"InvocationID",
 		"NextElapseUSecRealtime",
+		"UnitFileState",
+		"github_result",
+		"github_archive_path_state",
+		"remote_archive_path_state",
+		"archive_paths_on_mount",
+		"archive_path_permissions_secure",
+		"stat -c '%u:%g:%a'",
+		"remote_timer_unit_file_state",
 		"remote_mount_lineage",
 		"lsblk -srno KNAME",
 		"remote_storage_journal_readable",
@@ -582,6 +812,53 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 	} {
 		if !strings.Contains(backupArchiveWriterCommand, want) {
 			t.Fatalf("writer observation command missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"printf 'github_archive_path=%s",
+		"printf 'remote_archive_path=%s",
+		"printf 'github_environment=%s",
+		"printf 'remote_environment=%s",
+	} {
+		if strings.Contains(backupArchiveWriterCommand, forbidden) {
+			t.Fatalf("writer observation command emits private effective value %q", forbidden)
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandReducesInvocationIdentifiersToPresence(t *testing.T) {
+	binDir := t.TempDir()
+	invocationID := "0123456789abcdef0123456789abcdef"
+	systemctl := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'-p InvocationID'*) printf '%s\\n' '" + invocationID + "' ;;\n" +
+		"esac\n"
+	for _, name := range []string{"systemctl", "date", "sudo", "mountpoint", "journalctl"} {
+		body := "#!/bin/sh\nexit 1\n"
+		if name == "systemctl" {
+			body = systemctl
+		}
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatalf("write synthetic %s: %v", name, err)
+		}
+	}
+	command := exec.Command("sh", "-c", backupArchiveWriterCommand)
+	command.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	outputBytes, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run writer observation command: %v\n%s", err, outputBytes)
+	}
+	output := string(outputBytes)
+	if strings.Contains(output, invocationID) {
+		t.Fatalf("writer observation leaked a full invocation identifier:\n%s", output)
+	}
+	for _, want := range []string{
+		"github_invocation_id=present\n",
+		"remote_invocation_id=present\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("writer observation missing %q:\n%s", want, output)
 		}
 	}
 }
@@ -639,11 +916,18 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 26 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 41 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
+		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
+		{name: "github exit", output: strings.Replace(valid, "github_exit_status=0", "github_exit_status=nope", 1), want: "invalid GitHub exit status"},
+		{name: "github invocation", output: strings.Replace(valid, "github_invocation_id=present", "github_invocation_id=not-a-state", 1), want: "invalid github_invocation_id"},
+		{name: "github timer epoch", output: strings.Replace(valid, "github_timer_next_epoch=2000000000", "github_timer_next_epoch=tomorrow", 1), want: "invalid github_timer_next_epoch"},
+		{name: "archive path state", output: strings.Replace(valid, "github_archive_path_state=directory", "github_archive_path_state=unknown", 1), want: "invalid github_archive_path_state"},
+		{name: "archive path mount", output: strings.Replace(valid, "archive_paths_on_mount=true", "archive_paths_on_mount=maybe", 1), want: "invalid archive_paths_on_mount"},
+		{name: "data timer unit file", output: strings.Replace(valid, "remote_timer_unit_file_state=enabled", "remote_timer_unit_file_state=ENABLED", 1), want: "invalid remote_timer_unit_file_state"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
-		{name: "invocation", output: strings.Replace(valid, "remote_invocation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "remote_invocation_id=not-a-uuid", 1), want: "invalid remote_invocation_id"},
+		{name: "invocation", output: strings.Replace(valid, "remote_invocation_id=present", "remote_invocation_id=not-a-state", 1), want: "invalid remote_invocation_id"},
 		{name: "timer epoch", output: strings.Replace(valid, "remote_timer_next_epoch=2000000000", "remote_timer_next_epoch=tomorrow", 1), want: "invalid remote_timer_next_epoch"},
 		{name: "mount present", output: strings.Replace(valid, "remote_mount_present=true", "remote_mount_present=maybe", 1), want: "invalid remote_mount_present"},
 		{name: "mount options", output: strings.Replace(valid, "remote_mount_options=rw,nosuid,nodev,relatime,errors=remount-ro", "remote_mount_options=rw secret", 1), want: "invalid remote_mount_options"},
@@ -653,12 +937,10 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		{name: "event kind", output: valid + "remote_storage_event=1788450000,other,sda\n", want: "invalid remote_storage_event kind"},
 		{name: "event device", output: valid + "remote_storage_event=1788450000,transport,sda;bad\n", want: "invalid remote_storage_event device"},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
-			if err == nil || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("parse error=%v, want substring %q", err, testCase.want)
-			}
-		})
+		_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
+		if err == nil || !strings.Contains(err.Error(), testCase.want) {
+			t.Fatalf("%s: parse error=%v, want substring %q", testCase.name, err, testCase.want)
+		}
 	}
 }
 
@@ -955,6 +1237,46 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.unitState == "" {
 		fixture.unitState = "inactive"
 	}
+	if fixture.unitSubstate == "" {
+		fixture.unitSubstate = "dead"
+	}
+	if fixture.result == "" {
+		fixture.result = "success"
+	}
+	if fixture.invocationID == "" {
+		fixture.invocationID = "present"
+		if fixture.execStart == 0 {
+			fixture.execStart = 1
+		}
+	}
+	if fixture.timerState == "" {
+		fixture.timerState = "active"
+	}
+	if fixture.timerUnitFileState == "" {
+		fixture.timerUnitFileState = "enabled"
+	}
+	if fixture.timerNext == nil {
+		timerNext := int64(2_000_000_000)
+		fixture.timerNext = &timerNext
+	}
+	if fixture.githubArchivePathState == "" {
+		fixture.githubArchivePathState = "directory"
+	}
+	if fixture.remoteArchivePathState == "" {
+		fixture.remoteArchivePathState = "directory"
+	}
+	if fixture.archivePathsMatch == nil {
+		fixture.archivePathsMatch = boolPointer(true)
+	}
+	if fixture.archiveMountsMatch == nil {
+		fixture.archiveMountsMatch = boolPointer(true)
+	}
+	if fixture.archivePathsOnMount == nil {
+		fixture.archivePathsOnMount = boolPointer(true)
+	}
+	if fixture.archivePathPermissionsSecure == nil {
+		fixture.archivePathPermissionsSecure = boolPointer(true)
+	}
 	if fixture.remoteUnitState == "" {
 		fixture.remoteUnitState = "inactive"
 	}
@@ -971,13 +1293,16 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteRestartDelay = "30min"
 	}
 	if fixture.remoteInvocationID == "" {
-		fixture.remoteInvocationID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		fixture.remoteInvocationID = "present"
 		if fixture.remoteExecStart == 0 {
 			fixture.remoteExecStart = 1
 		}
 	}
 	if fixture.remoteTimerState == "" {
 		fixture.remoteTimerState = "active"
+	}
+	if fixture.remoteTimerUnitFileState == "" {
+		fixture.remoteTimerUnitFileState = "enabled"
 	}
 	if fixture.remoteTimerNext == 0 {
 		fixture.remoteTimerNext = 2_000_000_000
@@ -1023,7 +1348,21 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	}
 	output := fmt.Sprintf(
 		"github_unit_state=%s\n"+
+			"github_unit_substate=%s\n"+
 			"github_main_pid=%d\n"+
+			"github_result=%s\n"+
+			"github_exit_status=%d\n"+
+			"github_invocation_id=%s\n"+
+			"github_exec_start_monotonic=%d\n"+
+			"github_timer_state=%s\n"+
+			"github_timer_unit_file_state=%s\n"+
+			"github_timer_next_epoch=%d\n"+
+			"github_archive_path_state=%s\n"+
+			"remote_archive_path_state=%s\n"+
+			"archive_paths_match=%t\n"+
+			"archive_mounts_match=%t\n"+
+			"archive_paths_on_mount=%t\n"+
+			"archive_path_permissions_secure=%t\n"+
 			"remote_unit_state=%s\n"+
 			"remote_unit_substate=%s\n"+
 			"remote_main_pid=%d\n"+
@@ -1034,6 +1373,7 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_invocation_id=%s\n"+
 			"remote_exec_start_monotonic=%d\n"+
 			"remote_timer_state=%s\n"+
+			"remote_timer_unit_file_state=%s\n"+
 			"remote_timer_next_epoch=%d\n"+
 			"remote_boot_epoch=%d\n"+
 			"remote_pg_source=%s\n"+
@@ -1049,7 +1389,21 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_clearance_state=%s\n"+
 			"remote_storage_journal_readable=%t\n",
 		fixture.unitState,
+		fixture.unitSubstate,
 		fixture.mainPID,
+		fixture.result,
+		fixture.exitStatus,
+		fixture.invocationID,
+		fixture.execStart,
+		fixture.timerState,
+		fixture.timerUnitFileState,
+		*fixture.timerNext,
+		fixture.githubArchivePathState,
+		fixture.remoteArchivePathState,
+		*fixture.archivePathsMatch,
+		*fixture.archiveMountsMatch,
+		*fixture.archivePathsOnMount,
+		*fixture.archivePathPermissionsSecure,
 		fixture.remoteUnitState,
 		fixture.remoteUnitSubstate,
 		fixture.remoteMainPID,
@@ -1060,6 +1414,7 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteInvocationID,
 		fixture.remoteExecStart,
 		fixture.remoteTimerState,
+		fixture.remoteTimerUnitFileState,
 		fixture.remoteTimerNext,
 		fixture.remoteBoot,
 		fixture.remotePGSource,

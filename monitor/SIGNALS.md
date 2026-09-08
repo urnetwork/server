@@ -9949,18 +9949,29 @@ sample on Planetoid before treating the panel as capacity evidence.
 
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
-role. It also reads `github-backup-archive.service` state and MainPID plus the
-effective `remote-backup-archive.service` active state, substate, MainPID,
-result, exit status, restart policy, restart delay, current InvocationID and
-monotonic start time, plus its four non-secret PostgreSQL/Redis source endpoint
-values directly on that backup host. It reads the data timer's active state and
-next realtime trigger plus the host boot time; an empty current-boot invocation
-therefore cannot masquerade as a successful run merely because systemd exposes
-default `Result=success` and `ExecMainStatus=0` values after a reboot. From the
-same effective unit it reads `BRINGYOUR_BACKUP_MOUNT`, then uses `mountpoint`
+role. It also reads each archive writer directly on that backup host. For
+`github-backup-archive.service` it reads active state, substate, MainPID,
+result, exit status, current InvocationID presence, and monotonic start time;
+for `github-backup-archive.timer` it reads active state, durable unit-file
+state, and its next realtime trigger. The effective
+`remote-backup-archive.service` contributes the equivalent execution identity,
+restart policy, restart delay, and its four non-secret PostgreSQL/Redis source
+endpoint values. The data timer contributes active state and next realtime
+trigger, durable unit-file state, plus the host boot time; an empty current-boot
+invocation therefore cannot masquerade as a successful run merely because
+systemd exposes default `Result=success` and `ExecMainStatus=0` values after a
+reboot. From the same effective unit it reads `BRINGYOUR_BACKUP_MOUNT`, then
+uses `mountpoint`
 and direct `findmnt` source, filesystem type, and options to classify that exact
 destination as missing, read-only, read-write, or unknown. In particular,
 ext4's `emergency_ro` overrides a simultaneous top-level `rw` mount flag.
+It separately reduces each writer's effective `BRINGYOUR_BACKUP_PATH` to a
+directory-state enum and reports only whether both paths and mounts match,
+whether `findmnt` places both roots on that exact mounted filesystem, and
+whether their shared root has root:root ownership and mode 0700. Effective
+paths and environments never leave the backup host. This catches a repaired
+read-write volume whose expected archive directory was not recreated without
+exposing local layout or allowing a bare system-disk directory to look healthy.
 
 For a currently mounted read-write destination, the host-side discriminator
 also resolves the mapper, partition, and backing disk through `lsblk -s` and
@@ -9987,9 +9998,16 @@ at least one complete generation; and each newest completion is no more than
 five days old. While the GitHub unit is active, its MainPID is nonzero, both
 producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
+Outside an execution transition, the GitHub writer is either running or
+inactive with `Result=success` and `ExecMainStatus=0`. Its persistent daily
+timer is active, has durable `UnitFileState=enabled`, and exposes a current or
+future next trigger. A still-fresh previous code tarball does not satisfy either
+execution or scheduling health.
 The data-pull oneshot has effective `Restart=on-failure` and
 `RestartUSec=30min`, so a late encrypted-disk mount can recover without making
-successful pulls repeat. The effective data-pull unit matches the two
+successful pulls repeat. Its persistent daily timer is also active, durably
+enabled, and exposes a current or future next trigger. The effective data-pull
+unit matches the two
 dedicated direct SSH endpoints and ports recorded in monitor inventory. These
 bulk paths deliberately bypass the `172.28.*` management VPN; the monitor
 itself may still use that VPN to inspect Planetoid. An executing data pull has
@@ -10076,14 +10094,26 @@ BROKEN:
   output failure becomes `unobservable`. It returns only that state, unit
   states, PID presence, and the normalized latest fault boundary. A valid
   clearance suppresses this writer-safety page while the independently retained
-  30-day recovery page remains active. Do not auto-stop an in-flight transfer or infer that
-  installing the interlock retroactively protects it. Require an explicit
-  current-writer operator decision. The safest repair sequence stops both
-  writers before hardware isolation and offline `e2fsck`, then records the
+  30-day recovery page remains active. Do not auto-stop an in-flight transfer
+  or infer that installing the interlock retroactively protects it. Require an
+  explicit current-writer operator decision. The safest repair sequence stops
+  both writers before hardware isolation and offline `e2fsck`, then records the
   exact stable identity, performs the helper-owned bounded write/read/delete
   test, observes the 30-minute fault-free probation, and authorizes one writer.
   A missing, mismatched, stale/vacuumed, malformed, or post-fault clearance
   fails closed. Reboot, journal replay, and a fresh `rw` mount never create it.
+- `backup-archive-root-unavailable` is immediate when the archive volume is
+  read-write but either effective writer path is missing, is not a directory,
+  differs from its sibling, names a different mount, resolves outside the
+  configured mounted filesystem, or lacks the root:root mode-0700 contract.
+  Both writers deliberately require this directory to pre-exist; mounting or
+  repairing the external filesystem does not recreate it. Never create a
+  similarly named directory beneath an absent mount, because that makes the
+  system disk an accidental backup destination. After stable-device clearance
+  and with both writers stopped, an explicitly authorized Planetoid directory
+  task may create only the exact effective root. Prove its mount membership and
+  permissions twice before allowing a persistent timer to consume a missed
+  trigger.
 - `backup-archive-recovery-idle` is immediate when PostgreSQL or Redis
   completion is missing/stale, the archive is mounted read-write, the data unit
   is inactive/dead with no MainPID, InvocationID, or current-boot start time,
@@ -10093,6 +10123,26 @@ BROKEN:
   leaving the next attempt until tomorrow. Restore visibility with only the
   bounded metrics refresh after storage clearance, then require separate
   operator authorization for exactly one catch-up pull.
+- `backup-archive-writer-failed` is immediate when the GitHub oneshot is not in
+  an execution transition and its terminal ActiveState, Result, or
+  ExecMainStatus is unsuccessful. It is independent of the five-day age gate:
+  a valid prior tarball can remain fresh while every future code recovery point
+  is already broken. Preserve invocation-ID privacy, inspect only the bounded
+  unit journal, and classify archive clearance/mount, provider authentication,
+  API/transfer, capacity, compression, and atomic-publication boundaries before
+  retrying. Clearing systemd's failed marker is not repair. Keep the
+  single-writer rule and obtain operator authorization before one catch-up run.
+- `backup-archive-timer-unscheduled` is immediate, independently for the code
+  and PostgreSQL/Redis writers, when its timer is not active, is not durably
+  enabled, has no next trigger, or reports a trigger materially in the past.
+  A young valid generation in `latest`, `weekly`, or `monthly` does not prove
+  that another generation is scheduled. The offline filesystem repair workflow
+  intentionally stops both writers and timers, but its clearance marker does
+  not itself prove that scheduling was restored. After any writer failure is
+  understood and the stable-device clearance remains valid, an operator may
+  apply the current Planetoid playbook or enable/start only the intended timer.
+  A persistent missed trigger can launch immediately, so first prove that
+  neither writer is active; do not start a service merely to silence this alert.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
   MainPID, or its producer heartbeat value is absent or more than 90 seconds
@@ -10112,6 +10162,25 @@ BROKEN:
   target or port differs from its exact monitor-inventory direct SSH endpoint,
   or when either source uses `172.28.*`. This is a configuration failure even
   when the management VPN is reachable; bulk PG/Redis payloads must not use it.
+
+On 2026-09-08, after the archive-volume repair workflow, a direct reduced
+systemd read found the GitHub writer terminally failed with no MainPID,
+`Result=exit-code`, and `ExecMainStatus=1`; its timer was inactive and exposed
+no next trigger. The last invocation's bounded journal classified only
+filesystem failures: zero credential/authentication, network, lock, wrapper,
+or configuration evidence. The external filesystem itself was mounted
+read-write with a valid clearance marker, but the exact effective archive root
+shared by the units was missing. Both prior code generations were still about
+four days old, so the existing freshness, phase, and mount checks emitted no
+writer, root, or scheduling failure. That is a monitor false negative. The
+timer's journal records an explicit later stop, but the bounded privacy-safe
+evidence cannot attribute its actor or reason; do not turn that uncertainty
+into a deployment claim. The direct root, execution, and timer classes above
+close the detection gap. Operational closure still requires the root-only
+directory on the exact mounted filesystem, bounded failed-invocation evidence,
+valid storage clearance, an explicitly authorized single writer, two validated
+code artifacts/manifests, two matching direct Mimir reads, and a durably active
+next timer trigger.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -14264,6 +14333,26 @@ sample. The observed temporary post-recovery proof was 12/12 five-second
 samples with two peers and `isSyncing=true`, while the head advanced from
 701,762 to 733,678. Never turn a zero-peer `isSyncing=false` sample into a ready
 signal.
+
+On 2026-09-08, the lightnode again held zero peers for more than three monitor
+samples and reported `isSyncing=false` with its target equal to its own stale
+head. Its small continuing head movement during that interval was queued import
+work, not proof of live peer recovery. An enabled services-host gateway first
+observed the archive healthy with 14 peers while the lightnode remained at
+zero, then lost both Snow RPC endpoints 17 seconds later; workstation SSH to
+Snow also flapped while independent enabled services-host controls remained
+reachable. This establishes a volatile Snow/overlay-gateway visibility boundary
+alongside the peer loss, not a fleet-wide overlay outage and not a node reset.
+Without intervention, two later direct samples showed the same data generations
+advancing: the lightnode rose from one to two peers, returned to
+`isSyncing=true`, and imported 258 blocks while the archive retained 14 peers
+and imported 254. Subsequent monitor samples reached three lightnode peers.
+That is real transient recovery, but it does not close the recurrent peer
+fragility or public-inbound requirement. The approved least-privilege helper
+does not expose container DNS, bootnode TCP, current logs, or a public listener;
+record those as unobservable until an approved narrow discriminator or an
+independent WAN TCP/30333 test is available. Do not bypass that boundary or
+restart a progressing generation merely to collect broader logs.
 
 ### 17.3 2026-08-20 incident signature
 
