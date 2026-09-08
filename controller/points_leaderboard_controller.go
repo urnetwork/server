@@ -181,7 +181,9 @@ func pointsLeaderboardError(message string) *PointsLeaderboardResult {
 // GetPointsLeaderboard pages the newest snapshot: every ranked network, in
 // the sort's order, named only where the network turned on
 // points_leaderboard_public. A signed-in caller also gets `me`, its own row
-// with its own name whether or not that switch is on.
+// with its own name for the caller's own card, whether or not that switch is
+// on; in the list itself the caller's row is anonymous like everyone else's
+// until it opts in, so the caller sees what everyone sees.
 func GetPointsLeaderboard(
 	args *PointsLeaderboardArgs,
 	clientSession *session.ClientSession,
@@ -261,8 +263,8 @@ func pointsLeaderboardMe(
 	}
 	networkId := clientSession.ByJwt.NetworkId
 	settings := model.GetNetworkPointsLeaderboardSettings(ctx, networkId)
-	// the network always sees its own name, ranked or not; Anonymous says
-	// how everyone else sees it. The token can predate a rename, so the
+	// `me` carries the network's own name for its own card, ranked or not;
+	// Anonymous says how everyone (the caller included, in the list) sees it. The token can predate a rename, so the
 	// settings read supplies the current database name.
 	me := &PointsLeaderboardMe{
 		PointsLeaderboardRow: PointsLeaderboardRow{
