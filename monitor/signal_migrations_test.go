@@ -44,6 +44,17 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"competition_staging_candidate_review_blocked",
 			"competition_staging_finalization_blocked",
 			"transfer_escrow_sweep_provider_payouts_shape",
+			"transfer_contract_unresolved_source_pair_create_time",
+			"transfer_contract_unresolved_destination_pair_create_time",
+			"transfer_contract_unresolved_payer_transfer_byte_count",
+			"indisvalid",
+			"indisready",
+			"(source_id, destination_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)",
+			"(destination_id, source_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)",
+			"(payer_network_id) INCLUDE (transfer_byte_count)",
+			"source_id IS NOT NULL",
+			"destination_id IS NOT NULL",
+			"payer_network_id IS NOT NULL",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -286,14 +297,14 @@ func TestMigrationsSignalDoesNotRequireFutureLeaderboardArtifactsAtVersion606(t 
 	}
 }
 
-func TestMigrationsSignalReportsMissingPublishedArtifacts614Through631(t *testing.T) {
+func TestMigrationsSignalReportsMissingPublishedArtifacts614Through634(t *testing.T) {
 	head := server.MigrationCount()
-	if head < 631 {
-		t.Fatalf("test requires migration head 631 or newer, got %d", head)
+	if head < 634 {
+		t.Fatalf("test requires migration head 634 or newer, got %d", head)
 	}
 	tested := 0
 	for _, artifact := range migrationArtifacts {
-		if artifact.requiredVersion < 614 || 631 < artifact.requiredVersion {
+		if artifact.requiredVersion < 614 || 634 < artifact.requiredVersion {
 			continue
 		}
 		tested++
@@ -321,17 +332,17 @@ func TestMigrationsSignalReportsMissingPublishedArtifacts614Through631(t *testin
 			}
 		}
 	}
-	if tested != 18 {
-		t.Fatalf("tested %d artifacts for versions 614-631, want 18", tested)
+	if tested != 21 {
+		t.Fatalf("tested %d artifacts for versions 614-634, want 21", tested)
 	}
 }
 
-func TestMigrationArtifactCatalogCoversEveryVersion614Through631(t *testing.T) {
+func TestMigrationArtifactCatalogCoversEveryVersion614Through634(t *testing.T) {
 	byVersion := map[int][]migrationArtifact{}
 	for _, artifact := range migrationArtifacts {
 		byVersion[artifact.requiredVersion] = append(byVersion[artifact.requiredVersion], artifact)
 	}
-	for version := 614; version <= 631; version++ {
+	for version := 614; version <= 634; version++ {
 		artifacts := byVersion[version]
 		if len(artifacts) != 1 {
 			t.Fatalf("version %d has %d artifact contracts, want 1: %+v", version, len(artifacts), artifacts)

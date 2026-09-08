@@ -80,6 +80,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_contract_stream_id", requiredVersion: 629, rowColumn: 40},
 	{name: "competition staging identity and admission guards", requiredVersion: 630, rowColumn: 41},
 	{name: "transfer_escrow_sweep.provider_payouts", requiredVersion: 631, rowColumn: 42},
+	{name: "transfer_contract_unresolved_source_pair_create_time", requiredVersion: 632, rowColumn: 43},
+	{name: "transfer_contract_unresolved_destination_pair_create_time", requiredVersion: 633, rowColumn: 44},
+	{name: "transfer_contract_unresolved_payer_transfer_byte_count", requiredVersion: 634, rowColumn: 45},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -89,11 +92,20 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			FROM migration_audit
 			WHERE status = 'success'
 		), index_artifact AS (
-			SELECT tablename::text AS table_name,
-			       indexname::text AS index_name,
-			       regexp_replace(indexdef, '[[:space:]]+', ' ', 'g') AS definition
-			FROM pg_indexes
-			WHERE schemaname = 'public'
+			SELECT table_relation.relname::text AS table_name,
+			       index_relation.relname::text AS index_name,
+			       regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g') AS definition,
+			       regexp_replace(
+			           pg_get_expr(index_record.indpred, index_record.indrelid),
+			           '[[:space:]]+', ' ', 'g'
+			       ) AS predicate_definition,
+			       index_record.indisvalid,
+			       index_record.indisready
+			FROM pg_index AS index_record
+			JOIN pg_class AS index_relation ON index_relation.oid = index_record.indexrelid
+			JOIN pg_class AS table_relation ON table_relation.oid = index_record.indrelid
+			JOIN pg_namespace AS namespace ON namespace.oid = table_relation.relnamespace
+			WHERE namespace.nspname = 'public'
 		), constraint_artifact AS (
 			SELECT relation.relname::text AS table_name,
 			       constraint_record.conname::text AS constraint_name,
@@ -477,6 +489,42 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 AND definition LIKE '%jsonb_typeof(provider_payouts)%'
 		                 AND definition LIKE '%jsonb_array_length(provider_payouts) > 0%'
 		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_unresolved_source_pair_create_time'
+		             AND indisvalid
+		             AND indisready
+		             AND definition LIKE '%(source_id, destination_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
+		             AND predicate_definition ILIKE '%CASE%'
+		             AND predicate_definition ILIKE '%outcome IS NULL%'
+		             AND predicate_definition ILIKE '%dispute = false%'
+		             AND predicate_definition ILIKE '%source_id IS NOT NULL%'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_unresolved_destination_pair_create_time'
+		             AND indisvalid
+		             AND indisready
+		             AND definition LIKE '%(destination_id, source_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
+		             AND predicate_definition ILIKE '%CASE%'
+		             AND predicate_definition ILIKE '%outcome IS NULL%'
+		             AND predicate_definition ILIKE '%dispute = false%'
+		             AND predicate_definition ILIKE '%destination_id IS NOT NULL%'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_unresolved_payer_transfer_byte_count'
+		             AND indisvalid
+		             AND indisready
+		             AND definition LIKE '%(payer_network_id) INCLUDE (transfer_byte_count)%'
+		             AND predicate_definition ILIKE '%CASE%'
+		             AND predicate_definition ILIKE '%outcome IS NULL%'
+		             AND predicate_definition ILIKE '%dispute = false%'
+		             AND predicate_definition ILIKE '%payer_network_id IS NOT NULL%'
 		       )
 		FROM version;
 	`)
