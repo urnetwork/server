@@ -721,13 +721,41 @@ const netEscrowReservationPageSQL = `
     GROUP BY selected_escrow.balance_id
 `
 
+// The healthy bounded-lateral page completes below one second, and the prior
+// degraded implementation averaged about seven seconds. Two minutes leaves a
+// wide load margin while remaining far inside the task's 30-minute client-side
+// deadline and the monitor's overrun boundary. PostgreSQL must own this fence:
+// a dead taskworker cannot send a context cancellation for detached work.
+const netEscrowReservationPageStatementTimeout = 2 * time.Minute
+
+// Captures the one transaction-local configuration operation used by the
+// production PgTx and deterministic recorder.
+type netEscrowReservationPageConfigurer interface {
+	Exec(context.Context, string, ...any) (server.PgTag, error)
+}
+
+// Applies the server-side fence only to the transaction containing one page;
+// pooled sessions and unrelated maintenance retain their configured timeout.
+func configureNetEscrowReservationPageTimeout(
+	ctx context.Context,
+	tx netEscrowReservationPageConfigurer,
+	timeout time.Duration,
+) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT set_config('statement_timeout', $1, true)`,
+		strconv.FormatInt(timeout.Milliseconds(), 10)+"ms",
+	))
+}
+
 func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) map[server.Id]ByteCount {
 	pending := map[server.Id]ByteCount{}
 	if len(balanceIds) == 0 {
 		return pending
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+	server.Tx(ctx, func(tx server.PgTx) {
+		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
+		result, err := tx.Query(
 			ctx,
 			netEscrowReservationPageSQL,
 			balanceIds,
@@ -740,7 +768,7 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 				pending[balanceId] = reserved
 			}
 		})
-	})
+	}, server.TxReadCommitted, pgx.ReadOnly)
 	return pending
 }
 
@@ -1777,7 +1805,9 @@ func CreateCompanionTransferEscrow(
                         SELECT contract_id, create_time
                         FROM transfer_contract
                         WHERE
-                            open = true AND
+							-- The CASE is equivalent to the generated open flag but
+							-- opaque to legacy false-zero open/outcome indexes.
+							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                             source_id = $1 AND
                             destination_id = $2 AND
                             companion_contract_id IS NULL
@@ -1847,7 +1877,9 @@ func CreateCompanionTransferEscrow(
                             SELECT contract_id, create_time
                             FROM transfer_contract
                             WHERE
-                                open = true AND
+								-- Keep both generic open and outcome-null partial
+								-- indexes ineligible for this pair lookup.
+								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
                                 companion_contract_id IS NOT NULL
@@ -1946,7 +1978,9 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
                     transfer_escrow.contract_id = transfer_contract.contract_id
 
                 WHERE
-                    transfer_contract.open = true AND
+					-- This is equivalent to the generated-open expression but
+					-- remains opaque to false-zero legacy partial indexes.
+					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
                     transfer_contract.transfer_byte_count <= $3 AND
@@ -3116,7 +3150,9 @@ func GetOpenContractIds(
                 LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
-                    transfer_contract.open = true AND
+					-- Use the opaque equivalent predicate so unrelated
+					-- false-zero open/outcome indexes are ineligible.
+					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2
             `,
@@ -3276,7 +3312,9 @@ func GetOpenContractIdsForSourceOrDestination(
                     contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
-                    transfer_contract.open = true AND (
+					-- Both endpoint arms have isolated, symmetric partial
+					-- indexes over this opaque equivalent predicate.
+					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND (
                         transfer_contract.source_id = $1 OR
                         transfer_contract.destination_id = $1
                     )
@@ -5571,7 +5609,9 @@ func GetOpenTransferByteCount(
 			FROM transfer_contract
 			WHERE
 			    payer_network_id = $1 AND
-			    open = TRUE
+			    -- Isolate this payer aggregate from every false-zero global,
+			    -- pair, or create-time partial index.
+			    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
 			`,
 			payerNetworkId,
 		)

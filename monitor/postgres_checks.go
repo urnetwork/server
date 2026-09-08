@@ -752,9 +752,9 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	return findings, nil
 }
 
-// pgStatsLandmineProbe is the daily §7 stats-landmine check: pg_stats on
-// transfer_contract.open must keep both values in the mcv list, and the
-// open-partial indexes must show nonzero reltuples after analyze (2.3 tells).
+// pgStatsLandmineProbe is the daily §7 stats-landmine check. Statistics still
+// expose deployed legacy readers to false-zero costs; the three isolated
+// predicate/index families are the durable boundary for current readers.
 type pgStatsLandmineProbe struct{}
 
 func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
@@ -767,33 +767,73 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		target = h.name
 	}
 	rows, err := env.runner.pg(ctx, `
+		WITH transfer_contract_indexes AS (
+		 SELECT i.relname AS index_name,
+		        i.reltuples,
+		        x.indisvalid,
+		        x.indisready,
+		        pg_get_indexdef(i.oid) AS index_definition,
+		        pg_get_expr(x.indpred,x.indrelid) AS index_predicate
+		 FROM pg_class i
+		 JOIN pg_index x ON x.indexrelid=i.oid
+		 JOIN pg_class t ON t.oid=x.indrelid
+		 JOIN pg_namespace n ON n.oid=t.relnamespace
+		 WHERE n.nspname=current_schema() AND t.relname='transfer_contract'
+		)
 		SELECT
 		 coalesce((SELECT n_distinct::text FROM pg_stats
 		           WHERE schemaname=current_schema() AND tablename='transfer_contract' AND attname='open'),'missing'),
-		 (SELECT count(*) FROM pg_class i JOIN pg_index x ON x.indexrelid=i.oid
-		  JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-		  WHERE n.nspname=current_schema() AND t.relname='transfer_contract'
-		    AND x.indpred IS NOT NULL AND pg_get_expr(x.indpred,x.indrelid) ILIKE '%open%'
-		    AND i.reltuples=0);
+		 (SELECT count(*) FROM transfer_contract_indexes
+		  WHERE index_predicate IS NOT NULL
+		    AND (index_predicate ILIKE '%open%'
+		         OR index_name='transfer_contract_outcome_null')
+		    AND reltuples=0),
+		 (SELECT count(*) FROM transfer_contract_indexes
+		  WHERE indisvalid AND indisready
+		    AND index_predicate ILIKE '%CASE%'
+		    AND index_predicate ILIKE '%outcome IS NULL%'
+		    AND index_predicate ILIKE '%dispute = false%'
+		    AND (
+		      (index_name='transfer_contract_unresolved_source_pair_create_time'
+		       AND index_definition ILIKE '%(source_id, destination_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
+		       AND index_predicate ILIKE '%source_id IS NOT NULL%')
+		      OR
+		      (index_name='transfer_contract_unresolved_destination_pair_create_time'
+		       AND index_definition ILIKE '%(destination_id, source_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
+		       AND index_predicate ILIKE '%destination_id IS NOT NULL%')
+		      OR
+		      (index_name='transfer_contract_unresolved_payer_transfer_byte_count'
+		       AND index_definition ILIKE '%(payer_network_id) INCLUDE (transfer_byte_count)%'
+		       AND index_predicate ILIKE '%payer_network_id IS NOT NULL%')
+		    ));
 	`)
 	if err != nil {
 		return nil, err
 	}
 	nDistinct := ""
-	zeroPartialIndexes := 0
+	zeroLegacyPartialIndexes := 0
+	structuralIndexShapes := 0
 	if len(rows) > 0 {
 		nDistinct = rows[0].str(0)
-		zeroPartialIndexes = atoiRow(rows[0], 1)
+		zeroLegacyPartialIndexes = atoiRow(rows[0], 1)
+		structuralIndexShapes = atoiRow(rows[0], 2)
 	}
-	if nDistinct == "1" || zeroPartialIndexes > 0 {
+	if nDistinct == "1" || zeroLegacyPartialIndexes > 0 || structuralIndexShapes != 3 {
+		action := "Apply the pending database migration before deploying the rewritten API and Connect readers. It builds all three isolated indexes online without first adding an unbounded large-table ANALYZE to the incident load."
+		if structuralIndexShapes == 3 {
+			action = "Run ANALYZE transfer_contract for immediate relief to still-deployed legacy readers, then verify API and Connect run the rewritten pair/payer queries. Do not treat another statistics-target increase as the durable fix."
+		}
 		return []finding{{
 			probeId: "pg/stats-landmine", tier: tierWarn,
 			class: "stats-landmine", target: target, frame: "transfer_contract.open", sustain: 1,
-			symptom:  fmt.Sprintf("transfer_contract.open planner landmine is armed: n_distinct=%s zero-row open partial indexes=%d", nDistinct, zeroPartialIndexes),
-			baseline: "n_distinct=2 with mcv {f,t}; at 1 the planner treats open=true as ~0 rows and pair lookups flip to o(open-set) plans",
-			observed: fmt.Sprintf("n_distinct=%s zero_open_partial_indexes=%d", nDistinct, zeroPartialIndexes),
-			context:  "remediate with ANALYZE transfer_contract; durable fix = statistics target 10000 on the column (db_migrations)",
-			playbook: "SIGNALS.md 5.8",
+			symptom:   fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes),
+			mechanism: "A false-only ANALYZE sample makes every WHERE-open or outcome-null partial index look free. Legacy pair/payer queries can then scan the complete unresolved set; current readers avoid that cost through opaque equivalent predicates and isolated index families.",
+			baseline:  "three valid isolated source-pair, destination-pair, and payer indexes; generated-open statistics normally retain both values for legacy readers",
+			observed:  fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes),
+			context:   "The 2026-09-08 recurrence proved statistics target 10000 was not durable: physical clustering still produced n_distinct=1 and zero-row estimates on a billion-row table. ANALYZE is immediate incident relief; structural query predicates and access families are the root fix.",
+			action:    action,
+			verify:    "All three structural indexes are valid/ready, pair and payer plans use their matching family even under a synthetic false-zero sample, active backends collapse, and repeated pair lookups do not scan the generic open/create-time index.",
+			playbook:  "SIGNALS.md 5.8",
 		}}, nil
 	}
 	return []finding{healthyFinding("pg/stats-landmine", tierWarn, "stats-landmine", target)}, nil

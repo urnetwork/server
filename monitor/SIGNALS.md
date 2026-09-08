@@ -2290,10 +2290,27 @@ each = 96 cores pegged.
   {f,t} {0.9985,0.0015} → plan flipped to transfer_contract_pair_open_create_time
   (4,588ms/988,593 buffers → 0.68ms/9 buffers); active backends 387→2 within a
   minute.
-- DURABLE FIX still pending as of 2026-07-17: `ALTER TABLE transfer_contract
-  ALTER COLUMN open SET STATISTICS 10000;` then ANALYZE (3M-row sample sees a
-  6e-5 value reliably) — without it the next steady-state ANALYZE re-arms the
-  mine.
+- The 2026-09-08 recurrence disproved the proposed statistics-only durable
+  fix. The table had grown beyond one billion rows and the already-deployed
+  statistics target of 10,000 again produced `n_distinct=1`, `{f}@1.0`, and
+  zero-row estimates for every open partial index. Hundreds of pair and payer
+  readers then chose an O(open-set) path and saturated all database cores.
+  Physical clustering makes repeated sampling an availability dependency;
+  raising the target again is not a root fix.
+- Current durable fix: pair readers use an equivalent `CASE` expression as an
+  opaque planner boundary and isolated source-pair and destination-pair
+  partial indexes; the payer aggregate uses its own isolated predicate/index
+  family. The opacity is necessary because the first direct rewrite still let
+  a false-zero global `outcome IS NULL` index win and filter the pair. The
+  generic `WHERE open ORDER BY create_time` index
+  remains for the intentionally global close poll. The migration builds all
+  three structural indexes online. It deliberately does not precede them with
+  a full-table `ANALYZE`: at statistics target 10,000, the first production
+  attempt requested a three-million-block random sample and made less than two
+  percent progress in twenty minutes while adding I/O to the incident. ANALYZE
+  remains optional incident relief only when its measured work is bounded. A deterministic regression
+  creates the false-zero catalog state and requires every pair/payer plan to
+  stay on its matching family while the global poll retains its generic index.
 
 ### 2.4 Vacuum health
 Probe: `vacuum-health`
@@ -5948,9 +5965,15 @@ elevated even though redis is healthy (run 1.4 first to rule redis out).
    (~440k/8min observed). Expect a brief above-median flush of queued demand
    (11.8k/min seen) before the rate settles at the daily baseline — a ramp,
    not a re-incident.
-5. Durable fix: raise the column's statistics target (2.3) so steady-state
-   ANALYZE keeps seeing the rare value; verify the next two ANALYZE passes
-   keep both values in pg_stats.
+5. Durable fix: remove sampling from the pair/payer access-path decision. Use
+   an equivalent opaque `CASE` predicate with isolated source-pair,
+   destination-pair, and payer partial-index families. `ANALYZE` remains the
+   immediate recovery step for old deployed readers, but the 2026-09-08
+   recurrence proved a statistics target of 10,000 can still miss the rare
+   value after table growth and physical clustering. Verify all three indexes
+   are valid/ready and a deterministic false-zero plan test keeps every scoped
+   query off the generic open/create-time index. Then require two consecutive
+   production samples with single-digit active counts and bounded pair calls.
 
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list
@@ -6974,7 +6997,7 @@ Tier-1 (warn):
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
 | journal-buffer-config / journal-buffer-short | host | §8.5b effective policy plus a bounded near-hour entry | any policy drift for 2 probes; no 50-to-55-minute record after 70 minutes uptime for 2 probes |
 | log-shipper-fd-budget / log-shipper-churn | host | §11.14 Fluent Bit soft/hard fd limits and automatic restart count | either limit < 65,536 or NRestarts > 0 for 2 probes |
-| stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
+| stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, any legacy open/outcome-null partial index reltuples=0, or fewer than three valid/ready exact isolated pair/payer structural index shapes | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
@@ -7674,6 +7697,16 @@ This is the version-to-artifact contract checked by the probe:
 | 629 | partial `transfer_contract_stream_id` |
 | 630 | `competition_round.staging`, epoch-kind constraint, and enabled staging identity/review/finalization guards |
 | 631 | nullable `transfer_escrow_sweep.provider_payouts` and its nonempty-array shape constraint |
+| 632 | `transfer_contract_unresolved_source_pair_create_time` |
+| 633 | `transfer_contract_unresolved_destination_pair_create_time` |
+| 634 | `transfer_contract_unresolved_payer_transfer_byte_count` |
+
+Versions 632–634 are the §2.3 structural plan repair. All three versions must be
+valid and ready, with the opaque equivalent-open `CASE` predicates and their
+family-specific non-null discriminator. API and Connect require head 634
+before the rewritten pair/payer queries activate; Taskworker independently
+uses the §5.11 database-side reservation-page timeout without a new schema
+dependency.
 
 The provider allocation snapshot in version 631 is written atomically with
 each network payment row. It retains each client's exact byte and revenue

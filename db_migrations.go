@@ -7159,4 +7159,60 @@ var migrations = []any{
 				)
 			) NOT VALID;
 	`),
+
+	// transfer_contract.open is equivalent to this CASE predicate, but the CASE
+	// is a deliberate planner boundary. If ANALYZE observes no open rows, every
+	// `WHERE open` and `WHERE outcome IS NULL` partial index is recorded with
+	// reltuples=0 and an unrelated global index can look free. PostgreSQL cannot
+	// derive either legacy predicate from the opaque CASE, so pair-scoped
+	// readers remain inside this family. The redundant NOT NULL arm separates
+	// pair and payer families. create_time preserves the earliest-origin order;
+	// included columns cover the other pair readers without widening the btree
+	// ordering key.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_unresolved_source_pair_create_time
+		 ON transfer_contract (source_id, destination_id, create_time)
+		 INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND source_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_unresolved_source_pair_create_time
+		 ON transfer_contract (source_id, destination_id, create_time)
+		 INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND source_id IS NOT NULL`,
+	),
+
+	// The endpoint-sync query has symmetric source/destination arms. Keeping a
+	// reverse-key sibling lets PostgreSQL form an exact BitmapOr even when the
+	// open-value statistics and all legacy open-partial sizes are false-zero.
+	// It is also an exact (reversed) pair path if it competes with the source
+	// index for a two-ended lookup.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_unresolved_destination_pair_create_time
+		 ON transfer_contract (destination_id, source_id, create_time)
+		 INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND destination_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_unresolved_destination_pair_create_time
+		 ON transfer_contract (destination_id, source_id, create_time)
+		 INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND destination_id IS NOT NULL`,
+	),
+
+	// The open-byte SUM is the third hot shape affected by the same false-zero
+	// plan. Its predicate discriminator makes the pair indexes ineligible, and
+	// the INCLUDE column keeps the aggregate index-only after visibility permits.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_unresolved_payer_transfer_byte_count
+		 ON transfer_contract (payer_network_id)
+		 INCLUDE (transfer_byte_count)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND payer_network_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_unresolved_payer_transfer_byte_count
+		 ON transfer_contract (payer_network_id)
+		 INCLUDE (transfer_byte_count)
+		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		   AND payer_network_id IS NOT NULL`,
+	),
 }

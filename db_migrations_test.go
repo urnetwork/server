@@ -50,6 +50,32 @@ func migrationIndex(t testing.TB, marker string) int {
 	return -1
 }
 
+// The three structural families are deliberately contiguous and ordered. Do
+// not put a full-table ANALYZE in front of them: at statistics target 10,000,
+// production requested a three-million-block random sample and made less than
+// two percent progress in twenty minutes under the incident load.
+func TestTransferContractOpenPlanRepairMigrationOrder(t *testing.T) {
+	indexMarkers := []string{
+		"transfer_contract_unresolved_source_pair_create_time",
+		"transfer_contract_unresolved_destination_pair_create_time",
+		"transfer_contract_unresolved_payer_transfer_byte_count",
+	}
+	for index, marker := range indexMarkers {
+		migrationPosition := migrationIndex(t, marker)
+		if index > 0 && migrationPosition != migrationIndex(t, indexMarkers[index-1])+1 {
+			t.Errorf("%s migration index = %d; structural repair migrations must be contiguous and ordered", marker, migrationPosition)
+		}
+		if _, ok := migrations[migrationPosition].(*OnlineSqlMigration); !ok {
+			t.Errorf("%s migration is %T, want *OnlineSqlMigration", marker, migrations[migrationPosition])
+		}
+	}
+	for _, migration := range migrations {
+		if codeMigration, ok := migration.(*CodeMigration); ok && codeMigration.id == "20260908_analyze_transfer_contract_open_stats" {
+			t.Fatal("unbounded transfer_contract ANALYZE must not precede the structural repair")
+		}
+	}
+}
+
 // Migration versions are an append-only production protocol. Versions
 // 588-590 were applied before the escrow/retention fixes were merged; moving
 // those new migrations ahead of the published competition sequence made a DB
