@@ -69,6 +69,68 @@ func TestLiveBlobStoreContentAddressedCanary(t *testing.T) {
 	}
 }
 
+// Prove the configured competition archive has every immutable-retention
+// property required by the production readiness gate. This is intentionally
+// opt-in because it interrogates the live MinIO bucket policy.
+func TestLiveBlobStoreRetentionProtection(t *testing.T) {
+	if os.Getenv("SIM_TESTNET_LIVE_BLOB") != "1" {
+		t.Skip("set SIM_TESTNET_LIVE_BLOB=1 with WARP_ENV to probe the configured server/blob store")
+	}
+	store, ok := LoadBlobStore()
+	if !ok {
+		t.Fatal("configured MinIO blob store is unavailable")
+	}
+	if bucket := strings.TrimSpace(os.Getenv("SIM_TESTNET_LIVE_BLOB_BUCKET")); bucket != "" {
+		config, present := LoadBlobStoreConfig()
+		if !present || config.Local {
+			t.Fatal("configured MinIO blob store cannot be overridden")
+		}
+		config.Bucket = bucket
+		overrideStore, err := NewBlobStore(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store = overrideStore
+	}
+	protected, ok := store.(ProtectedBlobStore)
+	if !ok {
+		t.Fatalf("configured blob store %q cannot prove immutable retention", store.Authority())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	proof, err := protected.CheckProtection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.ObjectLock != "COMPLIANCE" || !proof.Versioning || len(proof.ReplicationTargets) == 0 {
+		t.Fatalf("incomplete MinIO retention proof: %+v", proof)
+	}
+	retained, ok := store.(RetainedBlobStore)
+	if !ok {
+		t.Fatalf("configured blob store %q cannot write retained objects", store.Authority())
+	}
+	content := []byte("urnetwork competition retained canary v1\n")
+	digest := sha256.Sum256(content)
+	localPath := filepath.Join(t.TempDir(), "retained-canary")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := path.Join(store.Prefix(), "competition", "preflight", fmt.Sprintf("%x", digest[:]), strconv.FormatInt(NowUtc().UnixNano(), 10))
+	retention, err := retained.PutRetained(ctx, key, localPath, "application/octet-stream", NowUtc().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := retained.GetVersion(ctx, retention.Key, retention.VersionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(actual, content) {
+		t.Fatalf("retained MinIO canary read=%q read_error=%v close_error=%v", actual, readErr, closeErr)
+	}
+}
+
 func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	store := NewLocalBlobStore(root, "stats")

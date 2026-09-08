@@ -256,6 +256,7 @@ func validSettings() *Settings {
 			PreparationWindowSeconds: 16 * 60 * 60, SubmissionFeeUsd: 20,
 		},
 		ArtifactRoot:         "/var/lib/urnetwork/competition",
+		ArtifactBucket:       "competition",
 		ConfigLocalDirectory: "/srv/warp/config/local",
 		VaultLocalDirectory:  "/srv/warp/vault/local",
 		SeasonEndsAt:         time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
@@ -274,6 +275,30 @@ func validSettings() *Settings {
 		SeedKey:           []byte("0123456789abcdef0123456789abcdef"),
 		workloadGenerator: fakeWorkloadGenerator{},
 		artifactArchive:   fakeArtifactArchive{},
+	}
+}
+
+// The competition archive must not inherit the ordinary stats bucket because
+// that bucket predates object locking and cannot satisfy retained submissions.
+func TestArtifactArchiveDefaultsToDedicatedBucket(t *testing.T) {
+	cleanup := server.Vault.PushSimpleResource("minio.yml", []byte(`
+authority: minio.example.com:9000
+access_key: test-access
+secret_key: test-secret
+bucket: blob
+`))
+	defer cleanup()
+
+	archive, err := loadArtifactArchive("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobArchive, ok := archive.(*blobArtifactArchive)
+	if !ok {
+		t.Fatalf("archive type = %T", archive)
+	}
+	if bucket := blobArchive.store.Bucket(); bucket != "competition" {
+		t.Fatalf("competition archive bucket = %q, want competition", bucket)
 	}
 }
 
@@ -434,6 +459,11 @@ func TestSettingsValidateFrozenPolicy(t *testing.T) {
 		t.Fatal("vault/main accepted as the direct local mount")
 	}
 	settings = validSettings()
+	settings.ArtifactBucket = "../competition"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("invalid competition artifact bucket accepted")
+	}
+	settings = validSettings()
 	settings.EvaluationPolicy.ConfigLocalSha256 = ""
 	if err := settings.Validate(); err == nil {
 		t.Fatal("unfrozen direct config/local digest accepted")
@@ -526,6 +556,35 @@ func TestRoundGenerationReadinessPrecedesRoundRebaseline(t *testing.T) {
 	checks["authoritative_evaluator_host"] = false
 	if roundGenerationChecksPass(checks) {
 		t.Fatal("round generation accepted an unqualified evaluator boundary")
+	}
+}
+
+func TestReadinessFailureIncludesAuthenticatedCheckDetails(t *testing.T) {
+	settings := validSettings()
+	store := &fakeStore{readiness: map[string]bool{
+		"configuration": true, "frozen_policy": true,
+		"retention_window": true, "database": true,
+		"fifo_slot": true, "queue_admission": true,
+		"authoritative_evaluator_host": true, "artifact_storage": true,
+		"host_rebaseline": true,
+	}}
+	service := newServiceWithImageDigest(
+		settings,
+		store,
+		"",
+		errors.New("runtime image digest is absent"),
+	)
+	result, evalError := service.Ready(context.Background())
+	if evalError == nil || evalError.Code != "not_ready" || evalError.Readiness == nil {
+		t.Fatalf("readiness failure = %#v", evalError)
+	}
+	if result.Ready || result.Checks["api_image_identity"] ||
+		!result.Checks["artifact_archive"] {
+		t.Fatalf("readiness result = %#v", result)
+	}
+	if evalError.Readiness.CheckedAt != result.CheckedAt ||
+		!reflect.DeepEqual(evalError.Readiness.Checks, result.Checks) {
+		t.Fatalf("error readiness = %#v, result = %#v", evalError.Readiness, result)
 	}
 }
 

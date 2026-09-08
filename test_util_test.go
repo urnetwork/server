@@ -360,6 +360,7 @@ db: "maintenance-db"
 // without reading a developer's vault or opening network connections.
 func pushTestEnvironmentPreflightResources(t *testing.T) {
 	t.Helper()
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", "")
 	t.Setenv("WARP_ENV", "local")
 	t.Setenv("WARP_VAULT_HOME", filepath.Join(t.TempDir(), "vault"))
 	t.Setenv("WARP_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))

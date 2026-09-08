@@ -243,10 +243,11 @@ type CompetitionGate struct {
 }
 
 type CompetitionError struct {
-	Kind      string `json:"kind"`
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retriable bool   `json:"retriable"`
+	Kind      string                      `json:"kind"`
+	Code      string                      `json:"code"`
+	Message   string                      `json:"message"`
+	Retriable bool                        `json:"retriable"`
+	Readiness *CompetitionReadinessResult `json:"readiness,omitempty"`
 }
 
 func (self *CompetitionError) Error() string {

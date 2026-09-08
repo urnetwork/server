@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"runtime"
@@ -21,8 +20,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "net/http/pprof" // Import for side effects
-
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/glog"
@@ -30,13 +27,6 @@ import (
 
 // each test runs with its own postgres and redis db
 // the database is dropped at the end of the test
-
-var pprofServer = sync.OnceFunc(func() {
-	go func() {
-		http.ListenAndServe(":6060", nil)
-	}()
-	// e.g. `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
-})
 
 const (
 	testRedisLeaseCoordinatorDb     = 0
@@ -358,6 +348,32 @@ func validateTestEnvironmentName() error {
 	return nil
 }
 
+// Private portable services admit exact loopback authorities only after both
+// explicit escape flags. Recheck after Go settings and resource resolution,
+// before any probe, database creation, or Redis lease can touch a service.
+func validatePrivatePortableTestAuthority(service string, authority string) error {
+	if os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT") == "" {
+		return nil
+	}
+	if os.Getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") != "1" ||
+		os.Getenv("WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES") != "1" {
+		return errors.New("a private portable root requires both portable service flags")
+	}
+	expected := os.Getenv("WARP_TEST_ENV_PORTABLE_" + strings.ToUpper(service) + "_AUTHORITY")
+	host, port, err := net.SplitHostPort(expected)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || host != "127.0.0.1" || portErr != nil || portNumber < 1 || portNumber > 65535 || strconv.Itoa(portNumber) != port {
+		return fmt.Errorf("private portable %s requires an explicit loopback host and port", service)
+	}
+	if authority != expected {
+		return fmt.Errorf("%s authority differs from the private portable endpoint", service)
+	}
+	if os.Getenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY") == os.Getenv("WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY") {
+		return errors.New("private portable services require distinct endpoints")
+	}
+	return nil
+}
+
 // Loads only the Redis fixture used by lease integration tests that do not
 // create a PostgreSQL database.
 func loadTestRedisLeaseConfiguration() (
@@ -379,6 +395,9 @@ func loadTestRedisLeaseConfiguration() (
 	configuration.redisAuthority = redisResource.RequireString("authority")
 	configuration.redisPassword = redisResource.RequireString("password")
 	configuration.redisReservedDb = redisResource.RequireInt("db")
+	if err := validatePrivatePortableTestAuthority("redis", configuration.redisAuthority); err != nil {
+		return configuration, err
+	}
 	if redisResource.RequireBool("cluster") {
 		return configuration, errors.New("local tests require logical redis databases, not a redis cluster")
 	}
@@ -459,6 +478,9 @@ func loadTestEnvironmentConfiguration() (
 		},
 	}
 	for _, service := range services {
+		if err := validatePrivatePortableTestAuthority(service.name, service.authority); err != nil {
+			return configuration, err
+		}
 		host, _, err := net.SplitHostPort(service.authority)
 		if err != nil {
 			return configuration, fmt.Errorf("invalid %s authority: %w", service.name, err)
@@ -470,6 +492,17 @@ func loadTestEnvironmentConfiguration() (
 				host,
 				service.expectedHost,
 			)
+		}
+	}
+	if os.Getenv("WARP_TEST_ENV_PORTABLE_ROOT") != "" {
+		maintenance, err := Vault.SimpleResource(MaintenancePgVaultResourceName)
+		if err != nil {
+			return configuration, errors.New("private portable PostgreSQL maintenance resource is required")
+		}
+		for _, key := range []string{"authority", "user", "password", "db"} {
+			if maintenance.RequireString(key) != pgResource.RequireString(key) {
+				return configuration, errors.New("PostgreSQL maintenance resource differs from its private application resource")
+			}
 		}
 	}
 	return configuration, nil
@@ -939,8 +972,6 @@ func (self *retryTB) Skipped() bool {
 }
 
 func (self *TestEnv) setup() func() {
-	pprofServer()
-
 	Reset()
 
 	// tests are allowed only in the `local` env

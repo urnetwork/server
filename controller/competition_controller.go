@@ -76,14 +76,38 @@ type artifactRetention struct {
 	Objects                   []retainedArtifact `json:"objects"`
 }
 
-func loadArtifactArchive() (artifactArchive, error) {
+const defaultCompetitionArtifactBucket = "competition"
+
+func loadArtifactArchive(bucket string) (artifactArchive, error) {
 	store, ok := server.LoadBlobStore()
 	if !ok {
 		return nil, errors.New("competition MinIO blob store is unavailable")
 	}
+	if bucket = strings.TrimSpace(bucket); bucket == "" {
+		bucket = defaultCompetitionArtifactBucket
+	}
 	env, _ := server.Env()
-	if env != "local" && strings.HasPrefix(store.Authority(), "local:") {
-		return nil, errors.New("competition artifact retention requires MinIO outside local development")
+	if strings.HasPrefix(store.Authority(), "local:") {
+		if env != "local" {
+			return nil, errors.New("competition artifact retention requires MinIO outside local development")
+		}
+		retainedStore, retained := store.(server.RetainedBlobStore)
+		if !retained {
+			return nil, errors.New("competition blob store does not support immutable retention")
+		}
+		return &blobArtifactArchive{store: retainedStore}, nil
+	}
+	config, present := server.LoadBlobStoreConfig()
+	if !present {
+		return nil, errors.New("competition MinIO blob-store configuration is unavailable")
+	}
+	if !config.Local {
+		config.Bucket = bucket
+		var err error
+		store, err = server.NewBlobStore(config)
+		if err != nil {
+			return nil, fmt.Errorf("competition MinIO bucket %q: %w", bucket, err)
+		}
 	}
 	retainedStore, ok := store.(server.RetainedBlobStore)
 	if !ok {
@@ -477,6 +501,7 @@ var (
 	gitShaPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	tokenNamePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	minioBucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 )
 
 type Settings struct {
@@ -488,6 +513,7 @@ type Settings struct {
 	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
 	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
 	ArtifactRoot               string           `yaml:"artifact_root"`
+	ArtifactBucket             string           `yaml:"artifact_bucket"`
 	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
 	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
 	SeasonEndsAt               time.Time        `yaml:"season_ends_at"`
@@ -516,6 +542,7 @@ type settingsFile struct {
 	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
 	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
 	ArtifactRoot               string           `yaml:"artifact_root"`
+	ArtifactBucket             string           `yaml:"artifact_bucket"`
 	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
 	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
 	SeasonEndsAt               time.Time        `yaml:"season_ends_at"`
@@ -572,6 +599,7 @@ func LoadSettings() (*Settings, error) {
 		EvaluationPolicy:           public.EvaluationPolicy,
 		SeasonPolicy:               public.SeasonPolicy,
 		ArtifactRoot:               filepath.Clean(public.ArtifactRoot),
+		ArtifactBucket:             strings.TrimSpace(public.ArtifactBucket),
 		ConfigLocalDirectory:       filepath.Clean(public.ConfigLocalDirectory),
 		VaultLocalDirectory:        filepath.Clean(public.VaultLocalDirectory),
 		SeasonEndsAt:               public.SeasonEndsAt.UTC(),
@@ -588,7 +616,7 @@ func LoadSettings() (*Settings, error) {
 		Tokens:                     secret.Tokens,
 		SeedKey:                    seedKey,
 	}
-	s.artifactArchive, err = loadArtifactArchive()
+	s.artifactArchive, err = loadArtifactArchive(s.ArtifactBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -689,6 +717,9 @@ func (self *Settings) Validate() error {
 	}
 	if !filepath.IsAbs(self.ArtifactRoot) || self.ArtifactRoot == string(filepath.Separator) || self.ArtifactRoot == "." {
 		return errors.New("artifact_root must be an absolute non-root path")
+	}
+	if self.ArtifactBucket != "" && !minioBucketPattern.MatchString(self.ArtifactBucket) {
+		return errors.New("artifact_bucket must be a valid MinIO bucket name")
 	}
 	if err := validateLocalMountDirectory(self.ConfigLocalDirectory, "config"); err != nil {
 		return err
@@ -2787,17 +2818,23 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	settings, err := self.Settings()
 	if err != nil {
 		result.Checks["configuration"] = false
-		return result, infrastructureError("configuration_unavailable", "competition configuration is not ready")
+		evalError := infrastructureError("configuration_unavailable", "competition configuration is not ready")
+		evalError.Readiness = &result
+		return result, evalError
 	}
 	checks, err := self.readinessChecks(ctx, settings)
+	result.Checks = checks
 	if err != nil {
 		result.Checks["database"] = false
-		return result, infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
+		evalError := infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
+		evalError.Readiness = &result
+		return result, evalError
 	}
-	result.Checks = checks
 	result.Ready = allChecks(checks)
 	if !result.Ready {
-		return result, infrastructureError("not_ready", "competition evaluator is not ready")
+		evalError := infrastructureError("not_ready", "competition evaluator is not ready")
+		evalError.Readiness = &result
+		return result, evalError
 	}
 	return result, nil
 }
@@ -2854,7 +2891,11 @@ func (self *Service) requireSecureEvaluator(ctx context.Context, settings *Setti
 func (self *Service) requireRoundGenerationInfrastructure(ctx context.Context, settings *Settings) *CompetitionError {
 	checks, err := self.readinessChecks(ctx, settings)
 	if err != nil || !roundGenerationChecksPass(checks) {
-		return infrastructureError("not_ready", "competition evaluator infrastructure is not ready for round generation")
+		evalError := infrastructureError("not_ready", "competition evaluator infrastructure is not ready for round generation")
+		evalError.Readiness = &ReadinessResult{
+			Ready: false, Checks: checks, CheckedAt: server.NowUtc(),
+		}
+		return evalError
 	}
 	return nil
 }
@@ -2862,7 +2903,11 @@ func (self *Service) requireRoundGenerationInfrastructure(ctx context.Context, s
 func (self *Service) requireStagingRoundInfrastructure(ctx context.Context, settings *Settings) *CompetitionError {
 	checks, err := self.readinessChecks(ctx, settings)
 	if err != nil {
-		return infrastructureError("not_ready", "competition staging infrastructure is not ready")
+		evalError := infrastructureError("not_ready", "competition staging infrastructure is not ready")
+		evalError.Readiness = &ReadinessResult{
+			Ready: false, Checks: checks, CheckedAt: server.NowUtc(),
+		}
+		return evalError
 	}
 	for _, name := range []string{
 		"configuration",
@@ -2873,7 +2918,11 @@ func (self *Service) requireStagingRoundInfrastructure(ctx context.Context, sett
 		"api_image_identity",
 	} {
 		if !checks[name] {
-			return infrastructureError("not_ready", "competition staging infrastructure is not ready")
+			evalError := infrastructureError("not_ready", "competition staging infrastructure is not ready")
+			evalError.Readiness = &ReadinessResult{
+				Ready: false, Checks: checks, CheckedAt: server.NowUtc(),
+			}
+			return evalError
 		}
 	}
 	return nil

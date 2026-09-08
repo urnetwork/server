@@ -618,21 +618,21 @@ func (self *minioBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 func (self *minioBlobStore) checkRetentionConfiguration(ctx context.Context) error {
 	exists, err := self.client.BucketExists(ctx, self.bucket)
 	if err != nil {
-		return err
+		return fmt.Errorf("check minio blob bucket existence: %w", err)
 	}
 	if !exists {
 		return errors.New("minio blob bucket does not exist")
 	}
 	objectLock, _, _, _, err := self.client.GetObjectLockConfig(ctx, self.bucket)
 	if err != nil {
-		return err
+		return fmt.Errorf("read minio blob bucket object-lock configuration: %w", err)
 	}
 	if objectLock != "Enabled" {
 		return errors.New("minio blob bucket does not have object lock enabled")
 	}
 	versioning, err := self.client.GetBucketVersioning(ctx, self.bucket)
 	if err != nil {
-		return err
+		return fmt.Errorf("read minio blob bucket versioning configuration: %w", err)
 	}
 	if !versioning.Enabled() {
 		return errors.New("minio blob bucket does not have versioning enabled")
@@ -671,7 +671,7 @@ func (self *minioBlobStore) CheckProtection(ctx context.Context) (*BlobProtectio
 	}
 	config, err := self.client.GetBucketReplication(ctx, self.bucket)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read minio blob bucket replication configuration: %w", err)
 	}
 	targets, err := enabledReplicationTargets(config)
 	if err != nil {
