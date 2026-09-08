@@ -752,9 +752,10 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	return findings, nil
 }
 
-// pgStatsLandmineProbe is the daily §7 stats-landmine check. Statistics still
-// expose deployed legacy readers to false-zero costs; the three isolated
-// predicate/index families are the durable boundary for current readers.
+// pgStatsLandmineProbe is the daily §7 stats-landmine check. The three isolated
+// predicate/index families are the durable boundary for current readers; once
+// they exist, a bounded statistics target keeps ANALYZE itself from becoming
+// the next availability event.
 type pgStatsLandmineProbe struct{}
 
 func (self pgStatsLandmineProbe) id() string             { return "pg/stats-landmine" }
@@ -805,7 +806,13 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		      (index_name='transfer_contract_unresolved_payer_transfer_byte_count'
 		       AND index_definition ILIKE '%(payer_network_id) INCLUDE (transfer_byte_count)%'
 		       AND index_predicate ILIKE '%payer_network_id IS NOT NULL%')
-		    ));
+		    )),
+		 coalesce((
+		   SELECT attribute_record.attstattarget::text
+		   FROM pg_attribute attribute_record
+		   WHERE attribute_record.attrelid='transfer_contract'::regclass
+		     AND attribute_record.attname='open'
+		 ),'missing');
 	`)
 	if err != nil {
 		return nil, err
@@ -813,26 +820,28 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	nDistinct := ""
 	zeroLegacyPartialIndexes := 0
 	structuralIndexShapes := 0
+	statisticsTarget := ""
 	if len(rows) > 0 {
 		nDistinct = rows[0].str(0)
 		zeroLegacyPartialIndexes = atoiRow(rows[0], 1)
 		structuralIndexShapes = atoiRow(rows[0], 2)
+		statisticsTarget = rows[0].str(3)
 	}
-	if nDistinct == "1" || zeroLegacyPartialIndexes > 0 || structuralIndexShapes != 3 {
-		action := "Apply the pending database migration before deploying the rewritten API and Connect readers. It builds all three isolated indexes online without first adding an unbounded large-table ANALYZE to the incident load."
-		if structuralIndexShapes == 3 {
-			action = "Run ANALYZE transfer_contract for immediate relief to still-deployed legacy readers, then verify API and Connect run the rewritten pair/payer queries. Do not treat another statistics-target increase as the durable fix."
+	if structuralIndexShapes != 3 || statisticsTarget != "300" {
+		action := "Apply the pending database migrations before deploying the rewritten API and Connect readers. They build all three isolated indexes online, then cap the open-column statistics target at 300; do not put an unbounded large-table ANALYZE ahead of them."
+		if structuralIndexShapes == 3 && statisticsTarget != "300" {
+			action = "Apply the bounded open-statistics migration. If legacy readers need immediate relief first, temporarily set the open-column target to 300, run ANALYZE transfer_contract (open) with a measured deadline, verify the three legacy plans, and restore only the intended persistent settings."
 		}
 		return []finding{{
 			probeId: "pg/stats-landmine", tier: tierWarn,
 			class: "stats-landmine", target: target, frame: "transfer_contract.open", sustain: 1,
-			symptom:   fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes),
-			mechanism: "A false-only ANALYZE sample makes every WHERE-open or outcome-null partial index look free. Legacy pair/payer queries can then scan the complete unresolved set; current readers avoid that cost through opaque equivalent predicates and isolated index families.",
-			baseline:  "three valid isolated source-pair, destination-pair, and payer indexes; generated-open statistics normally retain both values for legacy readers",
-			observed:  fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes),
-			context:   "The 2026-09-08 recurrence proved statistics target 10000 was not durable: physical clustering still produced n_distinct=1 and zero-row estimates on a billion-row table. ANALYZE is immediate incident relief; structural query predicates and access families are the root fix.",
+			symptom:   fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3 statistics target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget),
+			mechanism: "A false-only sample makes every WHERE-open or outcome-null partial index look free, while target 10000 makes each corrective or automatic ANALYZE sample three million rows. Current pair/payer readers avoid both dependencies through opaque equivalent predicates, isolated index families, and the bounded target.",
+			baseline:  "three valid isolated source-pair, destination-pair, and payer indexes plus open-column statistics target 300; legacy partial estimates are no longer an availability boundary",
+			observed:  fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d statistics_target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget),
+			context:   "The 2026-09-08 recurrence proved statistics target 10000 was not durable: physical clustering still produced n_distinct=1 on a billion-row table, then both manual and automatic three-million-row samples became resource-starved behind the resulting read pileup. A temporary target-300 column-only sample restored plans; structural query predicates and access families are the root fix.",
 			action:    action,
-			verify:    "All three structural indexes are valid/ready, pair and payer plans use their matching family even under a synthetic false-zero sample, active backends collapse, and repeated pair lookups do not scan the generic open/create-time index.",
+			verify:    "All three structural indexes are valid/ready, attstattarget is 300, pair and payer plans use their matching family even under a synthetic false-zero sample, active backends collapse, and repeated pair lookups do not scan the generic open/create-time index.",
 			playbook:  "SIGNALS.md 5.8",
 		}}, nil
 	}

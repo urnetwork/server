@@ -210,6 +210,26 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 	}
 }
 
+// A new CREATE INDEX CONCURRENTLY can finish its table scan before an optional
+// reliability re-anchor that starts moments later. The re-anchor then owns an
+// older snapshot and prevents index validation until its full-window scan ends.
+func TestReliabilityRunningReanchorDefersForNewConcurrentIndex(t *testing.T) {
+	if reliabilityRunningReanchorAllowedForMaintenance(false, true) {
+		t.Fatal("new concurrent index build allowed an optional reliability re-anchor")
+	}
+}
+
+// Small routine vacuums should not suppress the periodic correction. The live
+// catalog query classifies only vacuums older than the established-work floor.
+func TestReliabilityRunningReanchorAllowsBriefVacuum(t *testing.T) {
+	if !reliabilityRunningReanchorAllowedForMaintenance(false, false) {
+		t.Fatal("brief vacuum suppressed an optional reliability re-anchor")
+	}
+	if reliabilityRunningReanchorAllowedForMaintenance(true, false) {
+		t.Fatal("established vacuum allowed an optional reliability re-anchor")
+	}
+}
+
 // A current writer can finish one lookback while older Taskworkers are still
 // eligible to claim the next recurring task. The old UPSERT does not mention
 // either migration column. Prove the database guard resets version 1 even when

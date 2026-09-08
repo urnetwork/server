@@ -43,10 +43,14 @@ func mergeIPv6ObserverRouteObservations(
 // endpoint into an availability dependency.
 func observeIPv6ObserverRoute(ctx context.Context, runner probeRunner) ipv6ObserverRouteObservation {
 	output, err := runner.local(ctx, "/sbin/route", "-n", "get", "-inet6", ipv6ObserverRouteProbeAddress)
+	// Darwin's route command can write an authoritative "not in table"
+	// diagnostic while still exiting zero. Classify the output before the exit
+	// status so that common observer loss does not fan out into one unknown per
+	// production endpoint.
+	if ipv6RouteAbsentOutput(output) {
+		return ipv6ObserverRouteObservation{state: ipv6ObserverRouteAbsent}
+	}
 	if err != nil {
-		if ipv6RouteAbsentOutput(output) {
-			return ipv6ObserverRouteObservation{state: ipv6ObserverRouteAbsent}
-		}
 		return ipv6ObserverRouteObservation{state: ipv6ObserverRouteUnobservable}
 	}
 	for _, line := range strings.Split(output, "\n") {

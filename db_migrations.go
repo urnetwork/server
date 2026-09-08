@@ -7215,4 +7215,21 @@ var migrations = []any{
 		 WHERE (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
 		   AND payer_network_id IS NOT NULL`,
 	),
+
+	// The legacy target of 10000 makes every ANALYZE sample three million rows.
+	// On the billion-row production table, the 2026-09-08 incident showed that
+	// this could run for hours under a read stampede and still miss the clustered
+	// true values. The three preceding predicate/index families make pair and
+	// payer plan selection independent of the generated-open sample. Keep a
+	// still-above-default target for general estimates, but restore the table's
+	// fixed one-million-change autoanalyze cadence without making each pass an
+	// availability event.
+	newSqlMigration(`
+		ALTER TABLE transfer_contract
+			ALTER COLUMN open SET STATISTICS 300,
+			SET (
+				autovacuum_analyze_scale_factor = 0,
+				autovacuum_analyze_threshold = 1000000
+			)
+	`),
 }

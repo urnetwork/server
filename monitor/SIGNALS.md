@@ -2306,9 +2306,16 @@ each = 96 cores pegged.
   remains for the intentionally global close poll. The migration builds all
   three structural indexes online. It deliberately does not precede them with
   a full-table `ANALYZE`: at statistics target 10,000, the first production
-  attempt requested a three-million-block random sample and made less than two
-  percent progress in twenty minutes while adding I/O to the incident. ANALYZE
-  remains optional incident relief only when its measured work is bounded. A deterministic regression
+  attempt requested a three-million-block random sample and became so
+  resource-starved that normal backend cancellation could not be processed
+  until the pathological reads were briefly canceled. Autovacuum immediately
+  retried the same oversized sample. Incident recovery temporarily set the
+  `open` target to 300, suppressed only automatic analyze retries, ran
+  `ANALYZE transfer_contract (open)` under a measured deadline, and restored
+  `{f,t}` statistics plus nonzero partial-index estimates. Active client
+  backends fell from hundreds to five immediately. Migration 635 makes target
+  300 durable and restores the fixed one-million-change autoanalyze cadence;
+  it runs only after all three structural indexes exist. A deterministic regression
   creates the false-zero catalog state and requires every pair/payer plan to
   stay on its matching family while the global poll retains its generic index.
 
@@ -3511,6 +3518,19 @@ Diagnosis order:
    a fleet-wide cluster with full shard queues means pool-path saturation.
    Raising the socket timeout only hides either failure and retains scarce
    connections longer.
+
+The 2026-09-08 CPU-wall investigation added a general route-cache containment
+boundary. A cold cached route now acquires a Redis `SETNX` fill lease with a
+ttl bounded by the cache lifetime. Exactly one API process runs the database
+producer; overlapping misses recheck once and return an explicit transient
+503 with `Retry-After` instead of starting another fill or returning a null
+success. Successful publication is token-guarded and atomic; a failed fill or
+ambiguous unpublished write retains the lease until ttl expiry so demand
+cannot retry the expensive query on every request. This is defense in depth,
+not attribution for that incident: fresh active-query evidence assigned the
+wall to transfer-contract pair/payer plans, while provider-stat cache fills
+were absent from the active top shapes. Verify cache coalescing independently
+and never use it to clear §2.3.
 
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
@@ -5356,20 +5376,36 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   lookback in its own `READ COMMITTED` maintenance transaction before either
   score writer runs. A timeout on a later lookback preserves earlier aggregate
   rows and markers, so the retry rolls those windows instead of rescanning
-  them. If a VACUUM or concurrent index build is already present in PostgreSQL's
-  progress views for at least five minutes, defer only the optional cadence
-  anchor and roll this cycle; reconsider it on the next half-hour run. Missing
-  state and backward-window recovery still re-anchor immediately because they
-  have no correct delta path. Do not raise the task deadline.
+  them. Defer only the optional cadence anchor when a concurrent index build is
+  present at all, or when a VACUUM has remained in its progress view for at
+  least five minutes; roll this cycle and reconsider the correction on the next
+  half-hour run. The grace excludes small routine vacuums, but must not apply to
+  index builds because their final validation can wait for a snapshot opened
+  moments after the build began. Missing state and backward-window recovery
+  still re-anchor immediately because they have no correct delta path. Do not
+  raise the task deadline.
 - Deterministic proof: the model test injects a failure immediately after the
   first lookback transaction commits, verifies that its marker survives while
   the second is absent, then resumes and commits the remaining lookback. The
   cadence table separately proves that established maintenance defers a due
-  periodic anchor but never suppresses bootstrap or backward-window repair.
+  periodic anchor, a newly observed concurrent index build defers immediately,
+  and neither condition suppresses bootstrap or backward-window repair.
   Production verification is: most cycles remain below p95; a quiet anchor
   commits markers one lookback at a time; an interrupted retry retains them;
   the task error clears; and downstream REINDEX/VACUUM progress rather than
   acquiring an immediate replacement blocker.
+- 2026-09-08 fresh-index overlap control: an online transfer-contract migration
+  was already building its second structural index when UpdateReliabilities
+  checked the maintenance guard roughly 25 seconds later. The old shared
+  five-minute floor still allowed an optional full-anchor INSERT. That INSERT
+  retained the only snapshot blocking the third index after all 26.3 million
+  heap blocks were scanned, proving that “new index work” is not equivalent to
+  a brief routine vacuum. The source guard now treats every row in
+  `pg_stat_progress_create_index` as immediate deferral while retaining the
+  five-minute floor only for vacuum. Let the already-running checkpoint reach
+  its bounded outcome; cancellation is not the source fix. Verify the index
+  leaves `waiting for old snapshots`, the migration reaches its head, and a
+  later optional re-anchor does not start beside any concurrent index build.
 - Observed legacy recovery: the same-argument retry completed at 08:43:45Z in
   842s, advanced every marker by 163 blocks, and released REINDEX into an active
   transfer-contract index scan. The fast retry does not invalidate the fix: the
@@ -5956,9 +5992,15 @@ elevated even though redis is healthy (run 1.4 first to rule redis out).
    per-call cost from a 60s pg_stat_statements counter delta; lifetime means
    dilute the step-change.
 3. pg_stats on the flag column: n_distinct=1 / {v}@1.0 = the 2.3 landmine.
-   Fix: ANALYZE <table> (89s on 530M rows). Recovery is immediate — active
-   collapses to single digits within a minute as in-flight bad-plan
-   executions drain; no restarts needed, plans re-resolve on next execution.
+   Never launch an unbounded full-table `ANALYZE` during the pileup. On the
+   billion-row table, target 10,000 requests a three-million-row sample and
+   both manual and automatic attempts became resource-starved. For old-reader
+   relief, first prevent another automatic attempt, temporarily set only the
+   rare flag's target to 300, run `ANALYZE transfer_contract (open)` with a
+   measured deadline, then verify `n_distinct=2`, nonzero legacy partial-index
+   `reltuples`, and all three plain `EXPLAIN` plans. Restore the intended
+   reloptions even on failure. The 2026-09-08 bounded pass restored active
+   backends from hundreds to five without a database restart.
 4. Aftermath (1.2 gotchas apply): parked tasks self-recover as backoff run_at
    arrives — only pull forward rows parked > 5 min out with expired leases.
    Watch the open set (2.6) drain once close runs return to seconds
@@ -5967,13 +6009,14 @@ elevated even though redis is healthy (run 1.4 first to rule redis out).
    not a re-incident.
 5. Durable fix: remove sampling from the pair/payer access-path decision. Use
    an equivalent opaque `CASE` predicate with isolated source-pair,
-   destination-pair, and payer partial-index families. `ANALYZE` remains the
-   immediate recovery step for old deployed readers, but the 2026-09-08
-   recurrence proved a statistics target of 10,000 can still miss the rare
-   value after table growth and physical clustering. Verify all three indexes
-   are valid/ready and a deterministic false-zero plan test keeps every scoped
-   query off the generic open/create-time index. Then require two consecutive
-   production samples with single-digit active counts and bounded pair calls.
+   destination-pair, and payer partial-index families. Once those families are
+   valid, cap the `open` target at 300 so a future ANALYZE is not itself an
+   availability event; the current readers remain correct even if a later
+   sample contains no true value. Verify all three indexes are valid/ready,
+   `attstattarget=300`, and a deterministic false-zero plan test keeps every
+   scoped query off the generic open/create-time index. Then require two
+   consecutive production samples with single-digit active counts and bounded
+   pair calls.
 
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list
@@ -7019,7 +7062,7 @@ Tier-1 (warn):
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
 | journal-buffer-config / journal-buffer-short | host | §8.5b effective policy plus a bounded near-hour entry | any policy drift for 2 probes; no 50-to-55-minute record after 70 minutes uptime for 2 probes |
 | log-shipper-fd-budget / log-shipper-churn | host | §11.14 Fluent Bit soft/hard fd limits and automatic restart count | either limit < 65,536 or NRestarts > 0 for 2 probes |
-| stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, any legacy open/outcome-null partial index reltuples=0, or fewer than three valid/ready exact isolated pair/payer structural index shapes | daily check |
+| stats-landmine | pg | fewer than three valid/ready exact isolated pair/payer structural index shapes, or `transfer_contract.open` statistics target is not the bounded value 300; legacy n_distinct/reltuples remain evidence while the structural repair is incomplete | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
@@ -14728,6 +14771,21 @@ keep each immediate target as `cannot-observe`; do not guess reset causality.
 Any successful exact IPv6 request disproves an all-target observer outage for
 that sample, and ordinary per-edge refusal, timeout, policy-route, upstream,
 and HTTP classifications remain active.
+
+The 2026-09-08 LB recovery exposed an adjacent observer-classification defect.
+After a clean dual-stack sample, the monitor workstation temporarily lost its
+route to the edge prefixes. All eight exact IPv6 requests returned the same
+immediate no-route shape, while an offsite observer reached all eight targets
+and the public IPv4 service sweep remained healthy. On this macOS generation,
+`/sbin/route` printed its exact `not in table` diagnostic but exited zero and
+returned no interface. The old helper inspected absence text only after a
+nonzero exit, so both §18.1 and §18.2 fanned the common observation loss into
+eight per-target unknowns. The shared route helper now treats the bounded
+absence diagnostic as authoritative independent of exit status. Synthetic
+edge and TLS regressions reproduce the zero-exit form and require one common
+observer-route finding without leaking the route text or configured targets.
+This correction improves attribution only; the offsite exact-address battery,
+not the new classification, is the proof that production IPv6 stayed healthy.
 
 A timeout is different. If the host owns the exact address, serves HTTP 200 when
 the same SNI request is pinned locally to it, and a request bound to that source

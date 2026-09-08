@@ -338,7 +338,9 @@ func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T
 				if strings.Join(args, " ") != "-n get -inet6 "+ipv6ObserverRouteProbeAddress {
 					t.Fatalf("route arguments = %q", strings.Join(args, " "))
 				}
-				return "route: writing to routing socket: not in table\n", errors.New("exit status 1")
+				// macOS route can report an absent route in its output while
+				// still exiting zero. The diagnostic text remains authoritative.
+				return "route: writing to routing socket: not in table\n", nil
 			}
 			if name != "curl" {
 				return "", errors.New("unexpected local command")

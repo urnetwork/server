@@ -1166,34 +1166,45 @@ func reliabilityRunningNeedsRecompute(
 }
 
 // reliabilityRunningPeriodicReanchorAllowed keeps an optional full-window
-// scan from starting beside established VACUUM/REINDEX work. These progress
-// views contain utility statements that pg_stat_statements omits. A five-minute
-// floor excludes tiny routine vacuums; bootstrap and backwards-window repairs
-// bypass this result in reliabilityRunningNeedsRecompute.
+// scan from starting beside VACUUM or index-build work. Index builds block as
+// soon as they enter the progress view: even a new concurrent build can reach
+// its old-snapshot wait before the full-window scan finishes. The five-minute
+// floor excludes tiny routine vacuums only; bootstrap and backwards-window
+// repairs bypass this result in reliabilityRunningNeedsRecompute.
 func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.PgTx) (allowed bool) {
+	var establishedVacuum bool
+	var indexBuild bool
 	result, err := tx.Query(
 		ctx,
 		`
-		SELECT NOT EXISTS (
+		SELECT
+			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_vacuum p
 			JOIN pg_stat_activity a USING (pid)
 			WHERE a.query_start <= clock_timestamp() - make_interval(secs => $1)
-			UNION ALL
+			),
+			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_create_index p
-			JOIN pg_stat_activity a USING (pid)
-			WHERE a.query_start <= clock_timestamp() - make_interval(secs => $1)
-		)
+			)
 		`,
 		int64(reliabilityRunningMaintenanceDeferralAfter/time.Second),
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&allowed))
+			server.Raise(result.Scan(&establishedVacuum, &indexBuild))
 		}
 	})
+	allowed = reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum, indexBuild)
 	return
+}
+
+// A concurrent index build must win immediately because its final validation
+// waits for snapshots that predate the build. Brief vacuums retain the grace
+// period applied by the catalog query.
+func reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum bool, indexBuild bool) bool {
+	return !establishedVacuum && !indexBuild
 }
 
 func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackIndex int) (w reliabilityRunningWindow) {

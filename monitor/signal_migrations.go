@@ -83,6 +83,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_contract_unresolved_source_pair_create_time", requiredVersion: 632, rowColumn: 43},
 	{name: "transfer_contract_unresolved_destination_pair_create_time", requiredVersion: 633, rowColumn: 44},
 	{name: "transfer_contract_unresolved_payer_transfer_byte_count", requiredVersion: 634, rowColumn: 45},
+	{name: "transfer_contract bounded open statistics", requiredVersion: 635, rowColumn: 46},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -525,6 +526,20 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition ILIKE '%outcome IS NULL%'
 		             AND predicate_definition ILIKE '%dispute = false%'
 		             AND predicate_definition ILIKE '%payer_network_id IS NOT NULL%'
+		       ),
+		       EXISTS (
+		           SELECT 1
+		           FROM pg_attribute attribute_record
+		           JOIN pg_class relation ON relation.oid = attribute_record.attrelid
+		           JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+		           WHERE namespace.nspname = 'public'
+		             AND relation.relname = 'transfer_contract'
+		             AND attribute_record.attname = 'open'
+		             AND attribute_record.attstattarget = 300
+		             AND coalesce(relation.reloptions, ARRAY[]::text[]) @> ARRAY[
+		                 'autovacuum_analyze_scale_factor=0',
+		                 'autovacuum_analyze_threshold=1000000'
+		             ]::text[]
 		       )
 		FROM version;
 	`)

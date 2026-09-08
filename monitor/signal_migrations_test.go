@@ -55,6 +55,9 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"source_id IS NOT NULL",
 			"destination_id IS NOT NULL",
 			"payer_network_id IS NOT NULL",
+			"attstattarget = 300",
+			"autovacuum_analyze_scale_factor=0",
+			"autovacuum_analyze_threshold=1000000",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -297,14 +300,14 @@ func TestMigrationsSignalDoesNotRequireFutureLeaderboardArtifactsAtVersion606(t 
 	}
 }
 
-func TestMigrationsSignalReportsMissingPublishedArtifacts614Through634(t *testing.T) {
+func TestMigrationsSignalReportsMissingPublishedArtifacts614Through635(t *testing.T) {
 	head := server.MigrationCount()
-	if head < 634 {
-		t.Fatalf("test requires migration head 634 or newer, got %d", head)
+	if head < 635 {
+		t.Fatalf("test requires migration head 635 or newer, got %d", head)
 	}
 	tested := 0
 	for _, artifact := range migrationArtifacts {
-		if artifact.requiredVersion < 614 || 634 < artifact.requiredVersion {
+		if artifact.requiredVersion < 614 || 635 < artifact.requiredVersion {
 			continue
 		}
 		tested++
@@ -332,17 +335,17 @@ func TestMigrationsSignalReportsMissingPublishedArtifacts614Through634(t *testin
 			}
 		}
 	}
-	if tested != 21 {
-		t.Fatalf("tested %d artifacts for versions 614-634, want 21", tested)
+	if tested != 22 {
+		t.Fatalf("tested %d artifacts for versions 614-635, want 22", tested)
 	}
 }
 
-func TestMigrationArtifactCatalogCoversEveryVersion614Through634(t *testing.T) {
+func TestMigrationArtifactCatalogCoversEveryVersion614Through635(t *testing.T) {
 	byVersion := map[int][]migrationArtifact{}
 	for _, artifact := range migrationArtifacts {
 		byVersion[artifact.requiredVersion] = append(byVersion[artifact.requiredVersion], artifact)
 	}
-	for version := 614; version <= 634; version++ {
+	for version := 614; version <= 635; version++ {
 		artifacts := byVersion[version]
 		if len(artifacts) != 1 {
 			t.Fatalf("version %d has %d artifact contracts, want 1: %+v", version, len(artifacts), artifacts)

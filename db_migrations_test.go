@@ -53,7 +53,9 @@ func migrationIndex(t testing.TB, marker string) int {
 // The three structural families are deliberately contiguous and ordered. Do
 // not put a full-table ANALYZE in front of them: at statistics target 10,000,
 // production requested a three-million-block random sample and made less than
-// two percent progress in twenty minutes under the incident load.
+// two percent progress in twenty minutes under the incident load. Once the
+// structural boundary exists, cap future samples without weakening the
+// one-million-change autoanalyze cadence.
 func TestTransferContractOpenPlanRepairMigrationOrder(t *testing.T) {
 	indexMarkers := []string{
 		"transfer_contract_unresolved_source_pair_create_time",
@@ -72,6 +74,23 @@ func TestTransferContractOpenPlanRepairMigrationOrder(t *testing.T) {
 	for _, migration := range migrations {
 		if codeMigration, ok := migration.(*CodeMigration); ok && codeMigration.id == "20260908_analyze_transfer_contract_open_stats" {
 			t.Fatal("unbounded transfer_contract ANALYZE must not precede the structural repair")
+		}
+	}
+	statsPosition := migrationIndex(t, "ALTER COLUMN open SET STATISTICS 300")
+	lastIndexPosition := migrationIndex(t, indexMarkers[len(indexMarkers)-1])
+	if statsPosition != lastIndexPosition+1 {
+		t.Fatalf("bounded statistics migration index = %d, want %d immediately after structural indexes", statsPosition, lastIndexPosition+1)
+	}
+	statsMigration, ok := migrations[statsPosition].(*SqlMigration)
+	if !ok {
+		t.Fatalf("bounded statistics migration is %T, want *SqlMigration", migrations[statsPosition])
+	}
+	for _, marker := range []string{
+		"autovacuum_analyze_scale_factor = 0",
+		"autovacuum_analyze_threshold = 1000000",
+	} {
+		if !strings.Contains(statsMigration.sql, marker) {
+			t.Errorf("bounded statistics migration lacks %q", marker)
 		}
 	}
 }
