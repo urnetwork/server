@@ -365,7 +365,7 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 					observation.Public.EVMChainID,
 				),
 				context:  "This is an upstream/configuration boundary. Lagging local nodes correctly report the historical runtime at their own heads until they import the transition block; do not restart, replace, or reset a progressing database merely because the public current runtime advanced.",
-				action:   "Independently verify the official upstream release artifact and exact on-chain transition, then update expected_spec_version—and expected_transaction_version if it changed—in each stale owning configuration while preserving owners that already match. Rebuild and promote the monitor after its inventory changes; do not restart either node solely for this pin update.",
+				action:   "Independently verify the official upstream release artifact—or, when artifact publication lags execution, the ruleset-locked live-network mirror commit and its runtime source—plus the exact on-chain transition and code hash. Then update expected_spec_version—and expected_transaction_version if it changed—in each stale owning configuration while preserving owners that already match. Rebuild and promote the monitor after its inventory changes; do not restart either node solely for this pin update.",
 				verify:   "The public reference repeatedly retains the exact chain/genesis/EVM identity at the verified newer runtime, every configuration owner agrees on it, and the runtime-ahead alert clears after monitor promotion while progressing historical nodes retain their ordinary lag classifications. At convergence, each node and gateway must report the new pinned runtime.",
 				playbook: "SIGNALS.md §17.1",
 			})

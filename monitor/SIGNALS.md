@@ -14124,7 +14124,9 @@ name, and EVM identity while reporting a spec version greater than the pin,
 the probe emits `subtensor-runtime-ahead`. That is an upstream runtime
 transition and stale configuration boundary, not the generic wrong-RPC
 `subtensor-identity` class. Preserve page severity: independently verify the
-official release artifact and exact on-chain transition, then update
+official release artifact or, when artifact publication lags live execution,
+the ruleset-locked live-network mirror commit and its runtime source. Also
+verify the exact on-chain transition and code hash, then update
 `expected_spec_version` (and transaction version if it changed) together in
 each stale owning configuration while preserving an owner that already
 matches. Rebuild and promote the watcher when its inventory changes. Do not
@@ -14170,6 +14172,26 @@ Updating an expected on-chain runtime does not itself require a new node image,
 new data generation, or a node restart. Synthetic pin-update controls must
 preserve the progressing archive/lightnode lag findings, and an older public
 runtime or wrong genesis must still fail identity verification.
+
+On 2026-09-08, testfinney advanced again while the runtime-454 watcher handoff
+was in progress. Repeated direct reads place the exact boundary between block
+7,961,280
+(`0x47103273fdf527021a8fd79639c234c828157e37bace2089b8293808b7450e35`,
+spec 454/transaction 1) and block 7,961,281
+(`0x0e08d72b430d4ec90dcc22d01343c5892705f2921b9eff1a2aebd8a9a69a563a`,
+spec 455/transaction 1). The post-transition on-chain `:code` is 2,516,332
+bytes with SHA-256
+`232bfc0d65ec2dbe4280b152e23f13879df9692d2286dd08c6ba14483deee00f`.
+At that observation no v455 release tag or release asset existed yet.
+RaoFoundation's ruleset-locked `testnet` mirror instead moved to verified
+GitHub merge commit `67dcf7f791dc495064c293f080a0702cb433e51e`, titled
+`release-455`; its runtime source pins spec 455 and transaction version 1, and
+the official release train's testnet smoke check passed. The official mirror
+contract says this branch records what testnet currently runs, so it closes
+the intended-source identity without pretending that an unpublished release
+artifact was compared byte-for-byte. Preserve the recorded on-chain code hash
+and compare it with the v455 artifact when publication completes. Vault and
+Xops were reconciled to 455/1 without replacing either progressing node.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
