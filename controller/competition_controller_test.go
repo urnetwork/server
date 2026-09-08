@@ -278,6 +278,30 @@ func validSettings() *Settings {
 	}
 }
 
+// The competition archive must not inherit the ordinary stats bucket because
+// that bucket predates object locking and cannot satisfy retained submissions.
+func TestArtifactArchiveUsesDedicatedConfiguredBucket(t *testing.T) {
+	cleanup := server.Vault.PushSimpleResource("minio.yml", []byte(`
+authority: minio.example.com:9000
+access_key: test-access
+secret_key: test-secret
+bucket: blob
+`))
+	defer cleanup()
+
+	archive, err := loadArtifactArchive("competition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobArchive, ok := archive.(*blobArtifactArchive)
+	if !ok {
+		t.Fatalf("archive type = %T", archive)
+	}
+	if bucket := blobArchive.store.Bucket(); bucket != "competition" {
+		t.Fatalf("competition archive bucket = %q, want competition", bucket)
+	}
+}
+
 func testApiImageDigest() string {
 	return "sha256:" + strings.Repeat("6", 64)
 }
