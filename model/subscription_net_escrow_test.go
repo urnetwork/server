@@ -10,15 +10,33 @@ package model
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
+
+type recordingNetEscrowReservationPageConfigurer struct {
+	statements []string
+	arguments  [][]any
+}
+
+func (self *recordingNetEscrowReservationPageConfigurer) Exec(
+	_ context.Context,
+	sql string,
+	arguments ...any,
+) (server.PgTag, error) {
+	self.statements = append(self.statements, sql)
+	self.arguments = append(self.arguments, append([]any(nil), arguments...))
+	return server.PgTag{}, nil
+}
 
 // A large scalar-array predicate is not a durable access-path boundary: at
 // production cardinality PostgreSQL planned every 10,000-balance page as a
@@ -44,6 +62,85 @@ func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
 		strings.Index(netEscrowReservationPageSQL, "OFFSET 0") {
 		t.Fatalf("unsettled prefilter escaped the lateral optimization boundary:\n%s", netEscrowReservationPageSQL)
 	}
+}
+
+// A taskworker can disappear without delivering a cancellation to PostgreSQL.
+// Keep each normally sub-second page independently fenced well inside the
+// enclosing 30-minute task deadline, using transaction-local state only.
+func TestNetEscrowReservationPageConfiguresServerSideTimeout(t *testing.T) {
+	recorder := &recordingNetEscrowReservationPageConfigurer{}
+	configureNetEscrowReservationPageTimeout(
+		context.Background(),
+		recorder,
+		netEscrowReservationPageStatementTimeout,
+	)
+
+	if netEscrowReservationPageStatementTimeout != 2*time.Minute {
+		t.Fatalf("reservation page timeout = %v, want 2m", netEscrowReservationPageStatementTimeout)
+	}
+	if len(recorder.statements) != 1 {
+		t.Fatalf("reservation page timeout statements = %d, want 1", len(recorder.statements))
+	}
+	if got, want := recorder.statements[0], `SELECT set_config('statement_timeout', $1, true)`; got != want {
+		t.Fatalf("reservation page timeout statement = %q, want %q", got, want)
+	}
+	if len(recorder.arguments) != 1 || len(recorder.arguments[0]) != 1 {
+		t.Fatalf("reservation page timeout argument shape = %v, want one argument", recorder.arguments)
+	}
+	if got, want := recorder.arguments[0][0], "120000ms"; got != want {
+		t.Fatalf("reservation page timeout = %v, want %s", got, want)
+	}
+}
+
+// Uses a held table lock as an explicit barrier: the guarded statement cannot
+// complete, so PostgreSQL itself must cancel it. Rolling back the page
+// transaction must also restore the pooled session's prior timeout.
+func TestNetEscrowReservationPageTimeoutCancelsAndStaysLocal(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		server.Db(ctx, func(lockConn server.PgConn) {
+			lockTx, err := lockConn.Begin(ctx)
+			server.Raise(err)
+			lockReleased := false
+			defer func() {
+				if !lockReleased {
+					_ = lockTx.Rollback(ctx)
+				}
+			}()
+			server.RaisePgResult(lockTx.Exec(ctx, `LOCK TABLE transfer_contract IN ACCESS EXCLUSIVE MODE`))
+
+			server.Db(ctx, func(blockedConn server.PgConn) {
+				var baseline string
+				server.Raise(blockedConn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&baseline))
+
+				pageTx, err := blockedConn.Begin(ctx)
+				server.Raise(err)
+				configureNetEscrowReservationPageTimeout(ctx, pageTx, 25*time.Millisecond)
+
+				var configured string
+				server.Raise(pageTx.QueryRow(ctx, `SHOW statement_timeout`).Scan(&configured))
+				if configured != "25ms" {
+					t.Fatalf("transaction statement timeout = %q, want 25ms", configured)
+				}
+
+				_, queryErr := pageTx.Exec(ctx, `SELECT count(*) FROM transfer_contract`)
+				var pgErr *pgconn.PgError
+				if !errors.As(queryErr, &pgErr) || pgErr.Code != pgerrcode.QueryCanceled {
+					t.Fatalf("blocked page error = %v, want PostgreSQL query cancellation", queryErr)
+				}
+				server.Raise(pageTx.Rollback(ctx))
+
+				var restored string
+				server.Raise(blockedConn.QueryRow(ctx, `SHOW statement_timeout`).Scan(&restored))
+				if restored != baseline {
+					t.Fatalf("pooled statement timeout = %q after rollback, want baseline %q", restored, baseline)
+				}
+			})
+
+			server.Raise(lockTx.Rollback(ctx))
+			lockReleased = true
+		})
+	})
 }
 
 // The expiry-boundary repair must stay proportional to authoritative open
