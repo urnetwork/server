@@ -6681,6 +6681,28 @@ calls with zero new legacy-`ANY` calls, reservation-page adjacent mean below one
 second, full passes below 120 seconds, small aggregates, and a full quiet
 negative-counter interval.
 
+The 2026-09-08 database wall exposed a separate cancellation failure at this
+same page boundary. The task framework stopped and retried `ReconcileNetEscrow`
+at its 30-minute client deadline, but PostgreSQL retained eight detached
+bounded-lateral page statements; the oldest remained active for more than
+three hours. A taskworker process or PgBouncer connection failure therefore
+cannot be the only execution fence. Each page now runs in its own transaction
+with a transaction-local PostgreSQL `statement_timeout` of two minutes. Healthy
+pages complete below one second and the degraded plan previously averaged
+roughly seven seconds, so this preserves substantial load headroom while
+remaining one fifteenth of the task deadline. The setting rolls back with the
+page transaction and cannot leak through the pool. Deterministic tests hold a
+table lock, require PostgreSQL itself to cancel the page, and then prove the
+pooled session's prior timeout is restored. Deploy Taskworker to activate the
+fence. The monitor calls a page between two and thirty minutes a
+`netescrow-reservation-overrun`: it proves a slow path or absent server fence,
+but does not alone prove the task no longer owns it. Only a page older than the
+30-minute task maximum is `netescrow-reservation-detached` without additional
+task/session correlation. Recovery requires old detached statements to drain
+after the §2.3 plan repair and no new reservation page to remain active beyond
+two minutes; do not raise `MaxTime`, blindly terminate existing backends, or
+confuse the fence with the access-path fix.
+
 Continued monitoring proved that the covering index is required as a second
 access-path fix. At 08:16Z on 2026-08-31, a current bounded-lateral run was
 still active after 951 seconds. Nine adjacent reservation-page calls averaged
@@ -7030,6 +7052,8 @@ Tier-1 (warn):
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
+| netescrow-reservation-overrun | pg | 5.11 current bounded-lateral reservation page count and oldest query age | any page >= 120s and <= 30m; slow/missing-fence warning, not detached attribution |
+| netescrow-reservation-detached | pg | 5.11 current bounded-lateral reservation page count and oldest query age | any page > 30m task maximum; detached attribution without task/session correlation |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
 | netescrow-mirror-write | standing logs | `[netescrow]mirror write failed after` | any warns; never blindly replay the non-idempotent mutation |

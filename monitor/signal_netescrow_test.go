@@ -6,6 +6,72 @@ import (
 	"testing"
 )
 
+// A page above the server timeout but below the task deadline is an overrun;
+// without task/session correlation it is not yet evidence of detachment.
+func TestNetEscrowSignalSyntheticReservationPageOverrun(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return []Row{{"0", "0", "0", "0", "0", "0", "0", "0", "0"}}, nil
+			}
+			for _, want := range []string{"FROM pg_stat_activity", "CROSS JOIN LATERAL", "oldest_s >= 120"} {
+				if !strings.Contains(query, want) {
+					t.Fatalf("detached-page query is missing %q:\n%s", want, query)
+				}
+			}
+			return []Row{{"reservation-page", "3", "721"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reservation-overrun")
+	for _, detail := range []string{
+		"active_reservation_pages=3",
+		"oldest_reservation_page_s=721",
+		"server_timeout_s=120",
+		"does not by itself prove the page is detached",
+		"transaction-local two-minute statement_timeout",
+	} {
+		if !strings.Contains(alert.Markdown(), detail) {
+			t.Fatalf("detached-page alert missing %q:\n%s", detail, alert.Markdown())
+		}
+	}
+	if strings.Contains(alerts.Markdown(), "netescrow-reservation-detached") {
+		t.Fatalf("sub-task-deadline page was misclassified as detached:\n%s", alerts.Markdown())
+	}
+}
+
+// A database page older than the enclosing task's 30-minute maximum can no
+// longer be owned by that task attempt and is therefore detached.
+func TestNetEscrowSignalSyntheticDetachedReservationPage(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return []Row{{"0", "0", "0", "0", "0", "0", "0", "0", "0"}}, nil
+			}
+			return []Row{{"reservation-page", "2", "1801"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "netescrow-reservation-detached").Markdown()
+	for _, detail := range []string{
+		"oldest_reservation_page_s=1801",
+		"task_attempt_limit_s=1800",
+		"older than the enclosing 30-minute task attempt",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("detached-page alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
 func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {

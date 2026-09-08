@@ -11,8 +11,9 @@ import (
 )
 
 // SIGNALS.md §5.11 maps to signal_netescrow.go and signal_netescrow_test.go.
-// This root-cause probe watches authoritative task durations and aggregate
-// drift corrections; log-errors independently reports negative aftermath.
+// This root-cause probe watches authoritative task durations, detached
+// database pages, and aggregate drift corrections; log-errors independently
+// reports negative aftermath.
 func NewNetEscrowSignal() Signal {
 	return &signalAdapter{
 		number: "5.11",
@@ -57,6 +58,7 @@ var netEscrowAggregateRe = regexp.MustCompile(
 
 const (
 	netEscrowReconcileRunLimit = 2 * time.Minute
+	netEscrowTaskAttemptLimit  = 30 * time.Minute
 	netEscrowActiveLogLookback = 2 * time.Minute
 	netEscrowIncidentLookback  = 45 * time.Minute
 	netEscrowDriftLogLookback  = 15 * time.Minute
@@ -175,15 +177,33 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := pgTarget(env)
 	rows, err := env.runner.pg(ctx, `
-		SELECT 'completed'::text,
-		       round(extract(epoch FROM run_end_time-run_start_time))::int AS duration_s,
-		       round(extract(epoch FROM now()-run_end_time))::int AS age_s
-		FROM finished_task
-		WHERE split_part(function_name,'.',3) = 'ReconcileNetEscrow'
-		  AND run_end_time > now() - interval '45 minutes'
-		  AND run_end_time-run_start_time >= interval '120 seconds'
-		ORDER BY run_end_time DESC
-		LIMIT 1;
+		WITH completed_overrun AS (
+			SELECT round(extract(epoch FROM run_end_time-run_start_time))::int AS duration_s,
+			       round(extract(epoch FROM now()-run_end_time))::int AS age_s
+			FROM finished_task
+			WHERE split_part(function_name,'.',3) = 'ReconcileNetEscrow'
+			  AND run_end_time > now() - interval '45 minutes'
+			  AND run_end_time-run_start_time >= interval '120 seconds'
+			ORDER BY run_end_time DESC
+			LIMIT 1
+		), active_reservation_pages AS (
+			SELECT count(*)::int AS active_count,
+			       coalesce(max(round(extract(epoch FROM clock_timestamp()-query_start))::int),0) AS oldest_s
+			FROM pg_stat_activity
+			WHERE backend_type='client backend'
+			  AND state='active'
+			  AND query ILIKE '%FROM unnest(%'
+			  AND query ILIKE '%CROSS JOIN LATERAL%'
+			  AND query ILIKE '%requested_balance.balance_id%'
+			  AND query ILIKE '%transfer_contract.outcome IS NULL%'
+			  AND query NOT ILIKE '%FROM pg_stat_activity%'
+		)
+		SELECT 'completed'::text, duration_s, age_s
+		FROM completed_overrun
+		UNION ALL
+		SELECT 'reservation-page'::text, active_count, oldest_s
+		FROM active_reservation_pages
+		WHERE oldest_s >= 120;
 	`)
 	if err != nil {
 		return nil, err
@@ -213,24 +233,34 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	ageSeconds := 0
 	completedDurationSeconds := 0
 	completedAgeSeconds := 0
-	if len(rows) > 0 {
-		completedDurationSeconds = atoi(rows[0].str(1))
-		completedAgeSeconds = atoi(rows[0].str(2))
+	completedSeen := false
+	activeReservationPages := 0
+	oldestReservationPageSeconds := 0
+	for _, row := range rows {
+		switch row.str(0) {
+		case "completed":
+			completedSeen = true
+			completedDurationSeconds = atoi(row.str(1))
+			completedAgeSeconds = atoi(row.str(2))
+		case "reservation-page":
+			activeReservationPages = atoi(row.str(1))
+			oldestReservationPageSeconds = atoi(row.str(2))
+		}
 	}
 	// The taskworker log query deliberately overlaps two minutes. Immediately
 	// after a run completes it can therefore still return that run's final
 	// eval-active heartbeat. A newer finished_task row whose duration reaches
 	// or exceeds the heartbeat is authoritative lifecycle evidence for the same
 	// run. Older completed precursors do not mask a genuinely live successor.
-	completionSupersedesHeartbeat := len(rows) > 0 &&
+	completionSupersedesHeartbeat := completedSeen &&
 		0 <= completedAgeSeconds &&
 		completedAgeSeconds <= int(netEscrowActiveLogLookback/time.Second) &&
 		activeSeconds <= completedDurationSeconds
 	if activeSeconds >= int(netEscrowReconcileRunLimit/time.Second) && !completionSupersedesHeartbeat {
 		phase = "active"
 		durationSeconds = activeSeconds
-	} else if len(rows) > 0 {
-		phase = rows[0].str(0)
+	} else if completedSeen {
+		phase = "completed"
 		durationSeconds = completedDurationSeconds
 		ageSeconds = completedAgeSeconds
 	} else if activeLogErr != nil {
@@ -238,6 +268,31 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	findings := []finding{}
+	if netEscrowReconcileRunLimit <= time.Duration(oldestReservationPageSeconds)*time.Second {
+		probeID := "pg/netescrow-reservation-overrun"
+		class := "netescrow-reservation-overrun"
+		mechanism := "The database page exceeded the two-minute server execution fence target. While it remains within the enclosing 30-minute task attempt, this sample proves an access-path or missing-fence overrun but does not by itself prove the page is detached from its task."
+		context := "The 2026-09-08 recurrence established the access-path defect that made these pages slow. A page under the task deadline can still have an active owner, so retain the lifecycle distinction while repairing the query and enforcing the database timeout."
+		if netEscrowTaskAttemptLimit < time.Duration(oldestReservationPageSeconds)*time.Second {
+			probeID = "pg/netescrow-reservation-detached"
+			class = "netescrow-reservation-detached"
+			mechanism = "Task cancellation is not a PostgreSQL execution fence. This page is older than the enclosing 30-minute task attempt, proving that its task can no longer own the original execution; each scheduled retry can add another detached copy."
+			context = "The 2026-09-08 recurrence retained multiple copies for hours after the enclosing 30-minute task attempts ended. The access-path defect caused load; missing server-side cancellation let abandoned work accumulate."
+		}
+		findings = append(findings, finding{
+			probeId: probeID, tier: tierWarn,
+			class: class, target: target, frame: "bounded-lateral reservation page", sustain: 1,
+			symptom:   fmt.Sprintf("%d NetEscrow reservation pages remain active; oldest is %ds (safe band < %ds)", activeReservationPages, oldestReservationPageSeconds, int(netEscrowReconcileRunLimit/time.Second)),
+			mechanism: mechanism,
+			baseline:  "Reservation pages normally complete below one second; after the fenced Taskworker deploy, PostgreSQL cancels every page before 120 seconds.",
+			observed:  fmt.Sprintf("active_reservation_pages=%d oldest_reservation_page_s=%d server_timeout_s=%d task_attempt_limit_s=%d", activeReservationPages, oldestReservationPageSeconds, int(netEscrowReconcileRunLimit/time.Second), int(netEscrowTaskAttemptLimit/time.Second)),
+			evidence:  "The current pg_stat_activity query text matches the bounded-lateral NetEscrow reservation shape and excludes the monitor query itself. Correlate its plan with §2.3 before attributing the original slowdown.",
+			context:   context,
+			action:    "Repair the §2.3 access path, then deploy Taskworker with the transaction-local two-minute statement_timeout. Let existing copies drain after planner recovery; do not raise the task deadline or blindly terminate backends.",
+			verify:    "No new bounded-lateral reservation page exceeds 120 seconds after every Taskworker block runs the fenced build, old copies drain without replacement, and recurring reconciliations return below 120 seconds.",
+			playbook:  "SIGNALS.md §5.11",
+		})
+	}
 	if aggregate, previous, direction, windowBoundary, ok := latestLargeNetEscrowDrift(aggregates); ok {
 		observed := fmt.Sprintf(
 			"balances=%d networks_drifted=%d over_reserved=%s under_reserved=%s threshold_bytes=%d lookback_s=%d",
@@ -318,7 +373,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if phase == "active" {
 		phaseWithArticle = "an active"
 		incidentContext = "Taskworker's eval-active heartbeat supplies this live elapsed time; it is not inferred from a scheduling timestamp."
-		if len(rows) > 0 {
+		if completedSeen {
 			observed += fmt.Sprintf(" precursor_completed_duration_s=%d precursor_completed_age_s=%d", completedDurationSeconds, completedAgeSeconds)
 			incidentContext += fmt.Sprintf(" The active successor follows a completed %ds overrun that ended %ds ago; retain both lifecycle points until the chain converges.", completedDurationSeconds, completedAgeSeconds)
 			evidence += " Compare both consecutive reconcile aggregates; an active successor does not erase its completed overrun precursor."
