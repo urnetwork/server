@@ -181,7 +181,7 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 		nDistinct := rows[0].str(0)
 		verdict := "healthy (both values present)"
 		if nDistinct == "1" {
-			verdict = "landmine armed (2.3): rare value missing from stats — ANALYZE transfer_contract"
+			verdict = "landmine armed (2.3): ANALYZE gives immediate relief; verify the isolated pair/payer predicate-index migration for durable protection"
 		}
 		parts = append(parts, fmt.Sprintf("pg_stats transfer_contract.open: n_distinct=%s mcv=%s freqs=%s -> %s",
 			nDistinct, rows[0].str(1), rows[0].str(2), verdict))
