@@ -396,6 +396,9 @@ type providerEgressProbePass struct {
 	fullOptions           fleetprobe.FullOptions
 	runBlackhole          func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error)
 	runFull               func(context.Context, []string, fleetprobe.FullOptions) (prober.Summary, error)
+	// refreshFleet re-counts the fleet gauges after a pass that did work; nil
+	// skips it (tests, and passes with nothing due).
+	refreshFleet func(context.Context)
 }
 
 // run executes both independently due batches with one certificate-pin
@@ -408,23 +411,30 @@ func (self *providerEgressProbePass) run(
 	errList := []error{}
 	blackholeClientIds, err := self.blackholeDue(ctx, args.Blackhole.Limit)
 	if err != nil {
+		egressProbePassErrorsTotal.WithLabelValues("blackhole_due").Inc()
 		errList = append(errList, fmt.Errorf("get blackhole due providers: %w", err))
 	}
 	fullClientIds, err := self.fullDue(ctx, args.Full.Limit)
 	if err != nil {
+		egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
 		errList = append(errList, fmt.Errorf("get full-probe due providers: %w", err))
 	}
+	egressProbePassDue.WithLabelValues("blackhole").Set(float64(len(blackholeClientIds)))
+	egressProbePassDue.WithLabelValues("full").Set(float64(len(fullClientIds)))
 	result := &ProviderEgressProbeResult{
 		Full:         len(blackholeClientIds) == args.Blackhole.Limit || len(fullClientIds) == args.Full.Limit,
 		FullDue:      len(fullClientIds),
 		BlackholeDue: len(blackholeClientIds),
 	}
 	if len(blackholeClientIds) == 0 && len(fullClientIds) == 0 {
+		egressProbePassesTotal.WithLabelValues("blackhole", "empty").Inc()
+		egressProbePassesTotal.WithLabelValues("full", "empty").Inc()
 		return result, errors.Join(errList...)
 	}
 
 	pins, err := self.loadPins(ctx)
 	if err != nil {
+		egressProbePassErrorsTotal.WithLabelValues("pins").Inc()
 		errList = append(errList, fmt.Errorf("load geolocation pins: %w", err))
 		return result, errors.Join(errList...)
 	}
@@ -437,14 +447,23 @@ func (self *providerEgressProbePass) run(
 		options.Pins = pinSource
 		options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
 		options.Concurrency = args.Blackhole.Concurrency
+		startTime := time.Now()
 		summary, runErr := self.runBlackhole(ctx, blackholeClientIds, options)
+		egressProbePassSeconds.WithLabelValues("blackhole").Observe(time.Since(startTime).Seconds())
 		if runErr != nil {
+			egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+			egressProbePassErrorsTotal.WithLabelValues("blackhole_run").Inc()
 			errList = append(errList, fmt.Errorf("run blackhole batch: %w", runErr))
 		} else {
+			egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
 			result.Checked = len(summary.Checks)
 			result.Dark = summary.Dark
 			result.TunnelFailed = summary.TunnelFailed
+			egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(result.Checked))
+			egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(result.Dark))
+			egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(result.TunnelFailed))
 			if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+				egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
 				errList = append(errList, fmt.Errorf("submit blackhole batch: %w", submitErr))
 			}
 		}
@@ -454,6 +473,7 @@ func (self *providerEgressProbePass) run(
 	// tunnels after task drain would extend shutdown and duplicate work after
 	// the lease is recovered by another worker.
 	if err := ctx.Err(); err != nil {
+		egressProbePassErrorsTotal.WithLabelValues("canceled").Inc()
 		errList = append(errList, err)
 		return result, errors.Join(errList...)
 	}
@@ -464,17 +484,30 @@ func (self *providerEgressProbePass) run(
 		options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
 		options.Concurrency = args.Full.Concurrency
 		options.AllDestinations = args.Full.AllDestinations
+		startTime := time.Now()
 		summary, runErr := self.runFull(ctx, fullClientIds, options)
+		egressProbePassSeconds.WithLabelValues("full").Observe(time.Since(startTime).Seconds())
 		if runErr != nil {
+			egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+			egressProbePassErrorsTotal.WithLabelValues("full_run").Inc()
 			errList = append(errList, fmt.Errorf("run full-probe batch: %w", runErr))
 		} else {
+			egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
 			result.Attempted = summary.Attempted
 			result.Submitted = summary.Submitted
 			result.Failed = summary.Failed
+			egressProbePassProvidersTotal.WithLabelValues("full", "attempted").Add(float64(summary.Attempted))
+			egressProbePassProvidersTotal.WithLabelValues("full", "submitted").Add(float64(summary.Submitted))
+			egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
+			egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
+			recordEgressProbeGeolocationDiagnostics(summary)
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		egressProbePassErrorsTotal.WithLabelValues("canceled").Inc()
 		errList = append(errList, err)
+	} else if self.refreshFleet != nil {
+		self.refreshFleet(ctx)
 	}
 
 	return result, errors.Join(errList...)
@@ -511,6 +544,10 @@ func runProviderEgressProbe(
 		Version:           server.RequireVersion(),
 	}
 
+	// every finding the prober submits passes through the metrics reporter
+	// first (see provider_egress_probe_metrics.go), then to the operator
+	reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
+
 	var bandwidthSampler *bandwidth.Sampler
 	bandwidthTargets := []bandwidth.Target{}
 	if args.Full.Bandwidth {
@@ -528,8 +565,8 @@ func runProviderEgressProbe(
 		})
 		bandwidthSampler = &bandwidth.Sampler{
 			Targets: bandwidthTargets,
-			Reserve: operator,
-			Submit:  operator,
+			Reserve: reporter,
+			Submit:  reporter,
 			Timeout: time.Duration(args.Full.BandwidthTimeoutSeconds) * time.Second,
 		}
 	}
@@ -544,20 +581,21 @@ func runProviderEgressProbe(
 			}
 			return fleetprobe.ValidateGeolocationPins(servedPins)
 		},
-		submitBlackholeChecks: operator.SubmitBlackholeChecks,
+		submitBlackholeChecks: reporter.SubmitBlackholeChecks,
 		blackholeOptions: fleetprobe.BlackholeOptions{
 			TunnelConfig: tunnelConfig,
 		},
 		fullOptions: fleetprobe.FullOptions{
 			TunnelConfig:   tunnelConfig,
-			Submit:         operator,
-			Attempts:       operator,
-			HealthResults:  operator,
+			Submit:         reporter,
+			Attempts:       reporter,
+			HealthResults:  reporter,
 			Bandwidth:      bandwidthSampler,
 			BandwidthHosts: bandwidth.TargetHosts(bandwidthTargets),
 		},
 		runBlackhole: fleetprobe.RunBlackhole,
 		runFull:      fleetprobe.RunFull,
+		refreshFleet: refreshEgressProbeFleetMetrics,
 	}
 	result, err := pass.run(ctx, args)
 
