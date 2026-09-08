@@ -79,9 +79,26 @@ type releaseGateServicesFixture struct {
 	probe     string
 }
 
+// macOS exposes its temporary directory through /var even though the physical
+// path is rooted at /private/var. The release gate deliberately rejects path
+// aliases, so fixtures must start from the canonical path and reserve symlink
+// coverage for the tests that create one explicitly.
+func releaseGateCanonicalTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
 func newReleaseGateServicesFixture(t *testing.T) *releaseGateServicesFixture {
 	t.Helper()
-	self := &releaseGateServicesFixture{root: filepath.Join(t.TempDir(), "gate"), workspace: t.TempDir(), state: t.TempDir()}
+	self := &releaseGateServicesFixture{
+		root:      filepath.Join(releaseGateCanonicalTempDir(t), "gate"),
+		workspace: releaseGateCanonicalTempDir(t),
+		state:     releaseGateCanonicalTempDir(t),
+	}
 	if err := os.Mkdir(self.root, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -108,16 +125,16 @@ func newReleaseGateServicesFixture(t *testing.T) *releaseGateServicesFixture {
 			t.Fatal(err)
 		}
 	}
-	self.docker = filepath.Join(t.TempDir(), "docker")
+	self.docker = filepath.Join(releaseGateCanonicalTempDir(t), "docker")
 	if err := os.WriteFile(self.docker, []byte(releaseGateDockerFixture), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	self.lock = filepath.Join(t.TempDir(), "release.lock.yml")
+	self.lock = filepath.Join(releaseGateCanonicalTempDir(t), "release.lock.yml")
 	lock := "    postgres: postgres:18@sha256:" + strings.Repeat("a", 64) + "\n    redis: redis:8-alpine@sha256:" + strings.Repeat("b", 64) + "\n"
 	if err := os.WriteFile(self.lock, []byte(lock), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	self.probe = filepath.Join(t.TempDir(), "probe")
+	self.probe = filepath.Join(releaseGateCanonicalTempDir(t), "probe")
 	if err := os.WriteFile(self.probe, []byte("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$GATE_ROOT/probes\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -197,13 +214,15 @@ func TestReleaseGateServicesConcurrentOwnersKeepIndependentCleanup(t *testing.T)
 	output, err := self.run(t, `
 mkdir -m 700 "$GATE_ROOT/a" "$GATE_ROOT/b"
 mkfifo "$GATE_ROOT/ready" "$GATE_ROOT/release-a" "$GATE_ROOT/release-b"
-exec {ready_fd}<>"$GATE_ROOT/ready"
-exec {a_fd}<>"$GATE_ROOT/release-a"
-exec {b_fd}<>"$GATE_ROOT/release-b"
+# Bash 3.2, which remains the system shell on macOS, predates dynamic
+# descriptor allocation. Fixed high descriptors are private to this fixture.
+exec 7<>"$GATE_ROOT/ready"
+exec 8<>"$GATE_ROOT/release-a"
+exec 9<>"$GATE_ROOT/release-b"
 a_pid='' b_pid=''
 join_fixture_owners() {
-  printf 'release\n' >&"$a_fd"
-  printf 'release\n' >&"$b_fd"
+  printf 'release\n' >&8
+  printf 'release\n' >&9
   if [[ -n "$a_pid" ]]; then wait "$a_pid" || :; fi
   if [[ -n "$b_pid" ]]; then wait "$b_pid" || :; fi
 }
@@ -212,7 +231,7 @@ owner_a() (
   trap 'release_gate_services_cleanup' EXIT
   export FAKE_PG_PORT=45431 FAKE_REDIS_PORT=46371
   release_gate_services_start "$GATE_ROOT/a" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
-  printf 'a\n' >&"$ready_fd"
+  printf 'a\n' >&7
   read -r release < "$GATE_ROOT/release-a"
   exit 23
 )
@@ -220,7 +239,7 @@ owner_b() (
   trap 'release_gate_services_cleanup' EXIT
   export FAKE_PG_PORT=55431 FAKE_REDIS_PORT=56371
   release_gate_services_start "$GATE_ROOT/b" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
-  printf 'b\n' >&"$ready_fd"
+  printf 'b\n' >&7
   read -r release < "$GATE_ROOT/release-b"
   release_gate_service_find postgres
   [[ -n "$RELEASE_GATE_SERVICE_ID" ]]
@@ -229,11 +248,11 @@ owner_b() (
 )
 owner_a & a_pid=$!
 owner_b & b_pid=$!
-read -r first <&"$ready_fd"
-read -r second <&"$ready_fd"
+read -r first <&7
+read -r second <&7
 [[ "$first:$second" == a:b || "$first:$second" == b:a ]]
 [[ "$(< "$GATE_ROOT/a/services/owner")" != "$(< "$GATE_ROOT/b/services/owner")" ]]
-printf 'release\n' >&"$a_fd"
+printf 'release\n' >&8
 status=0; wait "$a_pid" || status=$?
 [[ "$status" == 23 ]]
 kill -0 "$b_pid"
@@ -242,7 +261,7 @@ for service in postgres redis; do
   b_id="$(< "$GATE_ROOT/b/services/$service.cid")"
   [[ "$a_id" != "$b_id" && ! -e "$FAKE_STATE/$a_id.meta" && -f "$FAKE_STATE/$b_id.meta" ]]
 done
-printf 'release\n' >&"$b_fd"
+printf 'release\n' >&9
 wait "$b_pid"
 `)
 	if err != nil {
@@ -384,7 +403,11 @@ func TestTestEnvironmentPrivatePortableShellRejectsMaintenanceBeforeProbe(t *tes
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 printf 'authority: shared.invalid:5432\n' > "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg_maintenance.yml"
-if source "$FIXTURE_WORKSPACE/server/test-env.sh"; then exit 90; fi
+set +e
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+source_status=$?
+set -e
+[[ "$source_status" != 0 ]]
 [[ ! -e "$GATE_ROOT/probes" ]]
 `)
 	if err != nil || !strings.Contains(string(output), "maintenance resource differs") {
@@ -396,7 +419,11 @@ func TestTestEnvironmentPrivatePortableShellRequiresBothEscapeFlags(t *testing.T
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 export WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES=0
-if source "$FIXTURE_WORKSPACE/server/test-env.sh"; then exit 90; fi
+set +e
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+source_status=$?
+set -e
+[[ "$source_status" != 0 ]]
 [[ ! -e "$GATE_ROOT/probes" ]]
 `)
 	if err != nil || !strings.Contains(string(output), "requires both portable service flags") {
@@ -408,7 +435,11 @@ func TestTestEnvironmentPrivatePortableShellRejectsOutOfRangePort(t *testing.T) 
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 export WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY=127.0.0.1:65536
-if source "$FIXTURE_WORKSPACE/server/test-env.sh"; then exit 90; fi
+set +e
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+source_status=$?
+set -e
+[[ "$source_status" != 0 ]]
 [[ ! -e "$GATE_ROOT/probes" ]]
 `)
 	if err != nil || !strings.Contains(string(output), "explicit loopback host and port") {
@@ -421,7 +452,11 @@ func TestTestEnvironmentPrivatePortableShellRejectsAncestorAlias(t *testing.T) {
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 ln -s "$GATE_ROOT" "$GATE_ROOT/alias"
 export WARP_TEST_ENV_PORTABLE_ROOT="$GATE_ROOT/alias/services/resources"
-if source "$FIXTURE_WORKSPACE/server/test-env.sh"; then exit 90; fi
+set +e
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+source_status=$?
+set -e
+[[ "$source_status" != 0 ]]
 [[ ! -e "$GATE_ROOT/probes" ]]
 `)
 	if err != nil || !strings.Contains(string(output), "must not contain a path alias") {
@@ -432,7 +467,7 @@ if source "$FIXTURE_WORKSPACE/server/test-env.sh"; then exit 90; fi
 func pushPrivatePortableTestResources(t *testing.T) {
 	t.Helper()
 	pushTestEnvironmentPreflightResources(t)
-	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", t.TempDir())
+	t.Setenv("WARP_TEST_ENV_PORTABLE_ROOT", releaseGateCanonicalTempDir(t))
 	t.Setenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES", "1")
 	t.Setenv("WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES", "1")
 	t.Setenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY", "127.0.0.1:35431")
