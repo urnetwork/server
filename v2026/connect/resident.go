@@ -1,0 +1,4368 @@
+package connect
+
+import (
+	"bufio"
+	"context"
+	"encoding/binary"
+	"encoding/gob"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	// "io"
+	"math/rand"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	// "errors"
+	// mathrand "math/rand"
+	"bytes"
+	cryptorand "crypto/rand"
+	// "slices"
+
+	// "runtime/debug"
+
+	"maps"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/glog/v2026"
+
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/connect/v2026/protocol"
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+)
+
+// note -
+// we use one socket per client transport because the socket will block based on the slowest destination
+
+/*
+resident packet flow A->D
+
+client (A)
+	-> routes
+		-> client transport (ws)
+			-> exchange transport (ws)
+			    -> resident transport (exchange connection)
+			        -> routes
+			            -> control resident A (clientId=ControlId)
+			      	        -> client receive (resident_controller)
+			      	        -> client forward
+			      	        	-> resident forward D (exchange connection)
+			      	        		-> resident.forward
+			      	        			-> control resident D (clientId=ControlId)
+			      	        				resident.forward sends the data on the most appropriate route
+			      	        				which for D will put the transfer frame on client (D)
+			      	        				(see the reflection of client to resident flow)
+			      	        				-> routes
+			      	        					-> resident transport (exchange connection)
+			      	        						-> exchange transport (ws)
+			      	        							-> client transport (ws)
+			      	        								-> routes
+			      	        									-> client(D)
+*/
+
+type ByteCount = model.ByteCount
+
+var ControlId = server.Id(connect.ControlId)
+
+var forwardDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "forward_dropped_messages",
+		Help:      "Messages dropped because the forward buffer to the destination resident was full",
+	},
+)
+
+var forwardReceiveDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "forward_receive_dropped_messages",
+		Help:      "Messages dropped because the resident client's forward buffer was full on the receive side of an exchange forward",
+	},
+)
+
+var abuseDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "abuse_dropped_messages",
+		Help:      "Messages dropped because they failed a resident abuse check (bad source, forward limit, or no active contract)",
+	},
+)
+
+// Receive-side queue refusals are loss signals for the end-to-end Transfer
+// recovery layer. The bounded label set identifies the exact carrier/bridge
+// boundary without creating per-client series.
+const (
+	receiveQueueBoundaryConnectH1               = "connect_h1"
+	receiveQueueBoundaryConnectH3               = "connect_h3"
+	receiveQueueBoundaryExchangeAcceptTransport = "exchange_accept_transport"
+	receiveQueueBoundaryExchangeAcceptForward   = "exchange_accept_forward"
+	receiveQueueBoundaryExchangeOutboundSocket  = "exchange_outbound_socket"
+	receiveQueueBoundaryExchangeToResident      = "exchange_to_resident"
+	receiveQueueBoundaryResidentClientControl   = "resident_client_control"
+	receiveQueueBoundaryResidentClientForward   = "resident_client_forward"
+)
+
+var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "receive_queue_dropped_messages",
+		Help:      "Complete Transfer messages dropped by zero-wait receive queue admission",
+	},
+	[]string{"boundary"},
+)
+
+var receiveQueueDroppedBytesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "receive_queue_dropped_bytes",
+		Help:      "Complete Transfer message bytes dropped by zero-wait receive queue admission",
+	},
+	[]string{"boundary"},
+)
+
+func recordReceiveQueueDrop(boundary string, byteCount int) {
+	receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Inc()
+	receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(float64(max(0, byteCount)))
+}
+
+// Exchange I/O is measured at the application framing boundary. A frame is
+// recorded only after its complete 4-byte header and payload have been read or
+// written, so retries and failed partial writes cannot inflate the totals.
+// These labels are deliberately closed sets: this is one of the hottest paths
+// in connect and must not create per-peer or per-client series.
+var exchangeIOFramesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_io_frames_total",
+		Help:      "Completed exchange protocol frames, partitioned by I/O direction and frame kind",
+	},
+	[]string{"direction", "kind"},
+)
+
+var exchangeIOBytesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_io_bytes_total",
+		Help:      "Bytes in completed exchange protocol frames, including each 4-byte frame header, partitioned by I/O direction and frame kind",
+	},
+	[]string{"direction", "kind"},
+)
+
+var exchangeActiveConnectionsGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_active_connections",
+		Help:      "Active post-handshake exchange connection endpoints, partitioned by inbound or outbound direction and operation",
+	},
+	[]string{"direction", "op"},
+)
+
+type exchangeIODirection uint8
+
+const (
+	exchangeIODirectionSent exchangeIODirection = iota
+	exchangeIODirectionReceived
+	exchangeIODirectionCount
+)
+
+type exchangeIOFrameKind uint8
+
+const (
+	exchangeIOFrameKindData exchangeIOFrameKind = iota
+	exchangeIOFrameKindPing
+	exchangeIOFrameKindHandshake
+	exchangeIOFrameKindCount
+)
+
+const exchangeIOFrameHeaderByteCount = 4
+
+var exchangeIODirectionLabels = [exchangeIODirectionCount]string{"sent", "received"}
+var exchangeIOFrameKindLabels = [exchangeIOFrameKindCount]string{"data", "ping", "handshake"}
+
+type exchangeIOCollectors struct {
+	frames prometheus.Counter
+	bytes  prometheus.Counter
+}
+
+// Pre-bind every label combination once rather than performing a CounterVec
+// lookup for every frame on this multi-billion-call path.
+var exchangeIOCollectorsByLabel [exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
+
+func recordExchangeIO(direction exchangeIODirection, kind exchangeIOFrameKind, payloadByteCount int) {
+	collectors := &exchangeIOCollectorsByLabel[direction][kind]
+	collectors.frames.Inc()
+	collectors.bytes.Add(float64(exchangeIOFrameHeaderByteCount + payloadByteCount))
+}
+
+// residentClientsGauge is the number of distinct connected client devices with
+// a resident on this node (one resident per client id). summed across nodes in
+// grafana it is the total active clients. kept in sync with the residents map
+// under stateLock. this differs from connected_clients (transport.go), which
+// counts transport connections and can be several per client
+var residentClientsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_clients",
+		Help:      "Number of distinct connected client devices (residents) on this node",
+	},
+)
+
+// drainResidentsRemainingGauge is the drain progress without ssh-ing to find
+// the `docker stop` child: the remaining resident/connection count while the
+// service drains, 0 once the drain completes (CONNECTDRAIN2.md §3.5)
+var drainResidentsRemainingGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_residents_remaining",
+		Help:      "Residents/connections remaining to evict while the service drains; 0 when the drain completes",
+	},
+)
+
+// drainExcusesWrittenCounter minus drain_excuses_consumed is the clients that
+// did not return after a drain (real capacity loss, not a deploy artifact)
+var drainExcusesWrittenCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_excuses_written",
+		Help:      "Drain excuse markers written for drained or migrated residents",
+	},
+)
+
+// nominationRefusedCounter partitions refused resident nominations by a
+// bounded cause. A refusal is driven by client redials — a fleet reconnecting
+// through a deploy drives this at an unbounded rate — so it is counted rather
+// than logged per occurrence; the detail is at V(1).
+var nominationRefusedCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "nominations_refused_total",
+		Help:      "Resident nominations refused, partitioned by a bounded cause",
+	},
+	[]string{"cause"},
+)
+
+func init() {
+	prometheus.MustRegister(forwardDroppedCounter)
+	prometheus.MustRegister(forwardReceiveDroppedCounter)
+	prometheus.MustRegister(abuseDroppedCounter)
+	prometheus.MustRegister(receiveQueueDroppedMessagesCounter)
+	prometheus.MustRegister(receiveQueueDroppedBytesCounter)
+	prometheus.MustRegister(exchangeIOFramesCounter)
+	prometheus.MustRegister(exchangeIOBytesCounter)
+	prometheus.MustRegister(exchangeActiveConnectionsGauge)
+	prometheus.MustRegister(residentClientsGauge)
+	prometheus.MustRegister(drainResidentsRemainingGauge)
+	prometheus.MustRegister(drainExcusesWrittenCounter)
+	prometheus.MustRegister(nominationRefusedCounter)
+
+	for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
+		for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
+			exchangeIOCollectorsByLabel[direction][kind] = exchangeIOCollectors{
+				frames: exchangeIOFramesCounter.WithLabelValues(
+					exchangeIODirectionLabels[direction],
+					exchangeIOFrameKindLabels[kind],
+				),
+				bytes: exchangeIOBytesCounter.WithLabelValues(
+					exchangeIODirectionLabels[direction],
+					exchangeIOFrameKindLabels[kind],
+				),
+			}
+		}
+	}
+	for _, direction := range []string{"inbound", "outbound"} {
+		for _, op := range []string{"transport", "forward", "unknown"} {
+			exchangeActiveConnectionsGauge.WithLabelValues(direction, op).Set(0)
+		}
+	}
+	for _, boundary := range []string{
+		receiveQueueBoundaryConnectH1,
+		receiveQueueBoundaryConnectH3,
+		receiveQueueBoundaryExchangeAcceptTransport,
+		receiveQueueBoundaryExchangeAcceptForward,
+		receiveQueueBoundaryExchangeOutboundSocket,
+		receiveQueueBoundaryExchangeToResident,
+		receiveQueueBoundaryResidentClientControl,
+		receiveQueueBoundaryResidentClientForward,
+	} {
+		receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Add(0)
+		receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(0)
+	}
+}
+
+// use 0 for deadlock testing
+// the client can suffer from head of queue blocking when the forwards/clients are changing rates
+// (flow control in the application protocol level should establish a steady rate)
+// a larger exchange buffer size helps mitigate this
+// note this also bounds the hidden queueing per hop. The end-to-end queue across all hops
+// must drain well inside the client resend timeout floor (`MinResendInterval`, 2s), or
+// delayed acks trigger mass spurious retransmission under load.
+const defaultExchangeBufferSize = 4096
+
+// the resident forward `send` queue to a peer resident. This must stay large
+// enough in production for congestion control to work freely across the hop.
+// use 0 for deadlock testing (see `ForwardBufferSize`).
+const defaultForwardBufferSize = 4096
+
+// Callback queues retain only bounded burst state after the shared Client
+// receive sequence returns. Forward queues are sharded by destination so one
+// slow contract lookup cannot delay unrelated destinations.
+const (
+	defaultResidentControlQueueSize       = 256
+	defaultResidentForwardQueueSize       = 4096
+	defaultResidentForwardQueueShardCount = 16
+)
+
+// message writes on all layers have a single `WriteTimeout`
+// this is because all layers have the same back pressure
+// layers may have different read timeouts because of different keep alive/ping settings
+type ExchangeSettings struct {
+	ConnectHandlerSettings
+
+	ExchangeBufferSize int
+
+	// `send` queue depth of a `ResidentForward` to a peer resident. Kept
+	// separate from `ExchangeBufferSize` so production can hold a deep queue
+	// for congestion control while deadlock tests set it to 0.
+	ForwardBufferSize int
+	// timeout for the owned forward worker to enqueue onto a `ResidentForward`.
+	// The Client callback always uses zero-wait ingress regardless of this
+	// value. Production uses 0; exact-delivery tests may let the sender worker
+	// wait on a zero-size forward buffer. `AddForward` delivery to the local
+	// client uses the normal `WriteTimeout`, not this.
+	ForwardTimeout time.Duration
+
+	// Total zero-wait callback ingress capacity. Forward capacity is divided
+	// across destination-stable shards.
+	ResidentControlQueueSize       int
+	ResidentForwardQueueSize       int
+	ResidentForwardQueueShardCount int
+
+	// pending messages on an exchange connection are coalesced into a single
+	// writev up to these limits, to amortize the per-message syscall cost
+	ExchangeWriteBatchCount     int
+	ExchangeWriteBatchByteCount ByteCount
+	// read buffer for exchange connections, to amortize the framer's
+	// header+body reads across messages
+	ExchangeReadBufferByteCount int
+
+	MinContractTransferByteCount ByteCount
+
+	StartInternalPort                int
+	MaxConcurrentForwardsPerResident int
+
+	// ResidentIdleTimeout time.Duration
+	ForwardIdleTimeout time.Duration
+	ControlMinTimeout  time.Duration
+
+	ExchangeConnectTimeout             time.Duration
+	ExchangePingTimeout                time.Duration
+	ExchangeReadTimeout                time.Duration
+	ExchangeReadHeaderTimeout          time.Duration
+	ExchangeWriteHeaderTimeout         time.Duration
+	ExchangeReconnectAfterErrorTimeout time.Duration
+	// DialContext, when set, creates outbound internal exchange connections.
+	// Tests use it to place edge-to-edge TCP below a userspace network model.
+	// Nil retains the host TCP dialer. The exchange owns and closes successful
+	// returned connections.
+	DialContext connect.DialContextFunction
+
+	ExchangeResidentTtl time.Duration
+
+	// Master switch for network peers, on the PEERS2 dirty-counter + poll
+	// architecture (PEERS2.md) — the v1 pubsub delivery that caused the
+	// 2026-07-15 outage is gone. Gates registration (announce), heartbeat
+	// refresh, teardown bump, and the per-resident poll listener.
+	// NewConnectHandler propagates this into ConnectionAnnounceSettings, so
+	// this is the single switch for both.
+	EnableNetworkPeers bool
+
+	// dirty-counter poll cadence for the per-resident listeners (PEERS2.md):
+	// each tick is one GET on the entity's slot (jittered ±20%), with a full
+	// read only on version mismatch or every ListenerFullReadEvery-th tick
+	// (insurance against a missed bump)
+	NetworkPeersPollInterval time.Duration
+	StreamHopsPollInterval   time.Duration
+	ListenerFullReadEvery    int
+
+	// redis key-event delta delivery for the peers + stream-hops listeners
+	// (PEERSSTREAMS2.md). Off -> pure PEERS2 poll behavior above.
+	KeyEventDelivery KeyEventDeliverySettings
+
+	ExchangeResidentWaitTimeout time.Duration
+	ExchangeResidentPollTimeout time.Duration
+
+	ForwardEnforceActiveContracts bool
+
+	ContractManagerCheckTimeout time.Duration
+	DrainOneTimeout             time.Duration
+	DrainAllTimeout             time.Duration
+
+	// drain coordination (CONNECTDRAIN2.md). `EnableDrainExcuse` gates the
+	// excuse markers written at drain / migrate and their consumption in the
+	// announce new-connection branch. `EnableDrainCoordination` gates the
+	// admission gate (new connections are refused while draining) and the
+	// migrate broadcast, so evicted clients land on a sibling instead of
+	// bouncing on the draining service.
+	EnableDrainExcuse       bool
+	EnableDrainCoordination bool
+	// ttl for the drain excuse markers; bounds a stale marker to one excuse
+	// window. Must cover redial + announce delay + the first sync (~2-3 min)
+	DrainExcuseTtl time.Duration
+	// the window over which migrate times are jittered across the drained
+	// clients; the straggler sweep starts after the window
+	DrainMigrateWindow time.Duration
+	// bound on enqueueing one migrate frame during the broadcast, so a
+	// wedged client cannot stall the drain
+	DrainMigrateSendTimeout time.Duration
+	// maximum number of migrate sends in flight. Together with
+	// DrainMigrateBroadcastTimeout this prevents a large or wedged resident
+	// population from serially consuming the whole migration window.
+	DrainMigrateFanout int
+	// aggregate wall-clock bound for the migrate broadcast. Residents that
+	// cannot be attempted inside this budget fall through to the straggler
+	// sweep instead of delaying every successfully notified client.
+	DrainMigrateBroadcastTimeout time.Duration
+	// target duration for the straggler sweep; the per-resident pace adapts
+	// to the remaining count within this budget, capped by `DrainOneTimeout`
+	DrainStragglerSweepTimeout time.Duration
+
+	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+
+	StreamPollTimeout time.Duration
+
+	// passed to controller.ConnectControlFrames so SignStoredContract uses
+	// the right HMAC-cutover network event time for this exchange.
+	ContractManagerSettings *connect.ContractManagerSettings
+
+	ExchangeChaosSettings
+}
+
+type ExchangeChaosSettings struct {
+	ResidentShutdownPerSecond float64
+}
+
+func DefaultExchangeSettings() *ExchangeSettings {
+	return DefaultExchangeSettingsWithBufferSize(defaultExchangeBufferSize)
+}
+
+func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
+	connectionHandlerSettings := DefaultConnectHandlerSettings()
+	exchangeResidentWaitTimeout := 30 * time.Second
+	return &ExchangeSettings{
+		ConnectHandlerSettings: *connectionHandlerSettings,
+
+		ExchangeBufferSize: bufferSize,
+
+		ForwardBufferSize: defaultForwardBufferSize,
+		// non-blocking receive-forward delivery in production
+		ForwardTimeout:                 0,
+		ResidentControlQueueSize:       defaultResidentControlQueueSize,
+		ResidentForwardQueueSize:       defaultResidentForwardQueueSize,
+		ResidentForwardQueueShardCount: defaultResidentForwardQueueShardCount,
+
+		ExchangeWriteBatchCount:     256,
+		ExchangeWriteBatchByteCount: ByteCount(256 * 1024),
+		ExchangeReadBufferByteCount: 64 * 1024,
+
+		// 64kib minimum contract
+		// this is set high enough to limit the number of parallel contracts and avoid contract spam
+		MinContractTransferByteCount: ByteCount(64 * 1024),
+
+		// this must match the warp `settings.yml` for the environment
+		StartInternalPort: 5080,
+
+		MaxConcurrentForwardsPerResident: 8 * 1024,
+
+		// ResidentIdleTimeout: 300 * time.Minute,
+		ForwardIdleTimeout: 15 * time.Minute,
+		ControlMinTimeout:  5 * time.Millisecond,
+
+		ExchangeConnectTimeout:             15 * time.Second,
+		ExchangePingTimeout:                connectionHandlerSettings.MinPingTimeout,
+		ExchangeReadTimeout:                connectionHandlerSettings.ReadTimeout,
+		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
+		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
+		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
+		ExchangeResidentTtl:                300 * time.Second,
+		// network peers re-enabled on the PEERS2 poll architecture (PEERS2.md) —
+		// the pubsub delivery that caused the 2026-07-15 outage is gone (no
+		// standing connections, no fanout; readers poll a per-network counter).
+		// This is the single source of truth: NewConnectHandler propagates it
+		// into ConnectionAnnounceSettings so one flag gates both. Canary by
+		// deploying to one connect block first (PEERS2.md §6).
+		EnableNetworkPeers:       true,
+		NetworkPeersPollInterval: 5 * time.Second,
+		StreamHopsPollInterval:   5 * time.Second,
+		ListenerFullReadEvery:    10,
+		KeyEventDelivery: KeyEventDeliverySettings{
+			// ON (2026-07-18). PREREQUISITE: `notify-keyspace-events "Kg$sx"`
+			// must be live on every data node BEFORE this build deploys (xops
+			// redis.conf.j2 + redis-set-notify-keyspace-events.sh) — with
+			// generation off, peer/hop delivery silently degrades to the
+			// corrective poll cadence below (minutes, vs seconds on v2).
+			Enabled:                 true,
+			CorrectivePollInterval:  5 * time.Minute,
+			ResubscribeTimeout:      5 * time.Second,
+			TopologyRefreshInterval: 60 * time.Second,
+			ResyncSpreadTimeout:     30 * time.Second,
+		},
+
+		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
+		ExchangeResidentPollTimeout: 15 * time.Second,
+
+		ForwardEnforceActiveContracts: true,
+
+		// default drain 300/minute
+		DrainOneTimeout: 200 * time.Millisecond,
+		// this is set by warp
+		DrainAllTimeout: 60 * time.Minute,
+
+		EnableDrainExcuse:            true,
+		EnableDrainCoordination:      true,
+		DrainExcuseTtl:               5 * time.Minute,
+		DrainMigrateWindow:           2 * time.Minute,
+		DrainMigrateSendTimeout:      1 * time.Second,
+		DrainMigrateFanout:           64,
+		DrainMigrateBroadcastTimeout: 10 * time.Second,
+		DrainStragglerSweepTimeout:   60 * time.Second,
+
+		ContractManagerCheckTimeout: 5 * time.Second,
+
+		StreamPollTimeout: 60 * time.Second,
+
+		ContractManagerSettings: connect.DefaultContractManagerSettings(),
+
+		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
+	}
+}
+
+func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
+	return &ExchangeChaosSettings{
+		ResidentShutdownPerSecond: 0.0,
+	}
+}
+
+// residents live in the exchange
+// a resident for a client id can be nominated to live in the exchange with `NominateLocalResident`
+// any time a resident is not reachable by a transport, the transport should nominate a local resident
+// KeyEventDeliverySettings configures the redis key-event delta transport
+// (PEERSSTREAMS2.md). All tunables live here — no global constants.
+type KeyEventDeliverySettings struct {
+	// master switch. When enabled the exchange runs one shared key-event
+	// subscriber, residents' listeners consume per-key deltas, and the poll
+	// becomes the corrective backstop at `CorrectivePollInterval` with the
+	// unconditional insurance read disabled. Off -> pure PEERS2 poll.
+	Enabled bool
+	// corrective poll cadence while events are enabled (±20% jitter). This
+	// bounds the staleness of any dropped event.
+	CorrectivePollInterval time.Duration
+	// backoff between failed (re)subscribes
+	ResubscribeTimeout time.Duration
+	// how often the subscriber re-checks the cluster master set (a moved
+	// slot emits events on the new owner)
+	TopologyRefreshInterval time.Duration
+	// a (re)subscribe resyncs every registration; the resyncs are trickled
+	// over this window so they do not stampede the registry
+	ResyncSpreadTimeout time.Duration
+}
+
+const defaultKeyEventCorrectivePollInterval = 5 * time.Minute
+
+type Exchange struct {
+	// cleanupCtx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	host    string
+	service string
+	block   string
+	// any of the ports may be used
+	// a range of ports are used to scale one socket per transport or forward,
+	// since each port allows at most 65k connections from another connect instance
+	hostToServicePorts map[int]int
+	routes             map[string]string
+
+	settings *ExchangeSettings
+	// Optional already-bound sockets keyed by service port. Tests use these to
+	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
+	// interference. The Exchange owns and closes every supplied listener.
+	servicePortListeners          map[int]net.Listener
+	servicePortListenersCloseOnce sync.Once
+	// Nil in production; ownership tests replace protocol handling after the
+	// real accept-loop admission boundary.
+	handleExchangeConnectionForTest func(net.Conn)
+	// Nil in production; generation tests observe the exact point at which an
+	// accepted header has found no local resident and is about to wait.
+	afterResidentMissingForTest func()
+
+	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
+	// KeyEventDelivery.Enabled
+	keyEventSubscriber *keyEventSubscriber
+
+	// set once `Drain` starts. While draining, new connections are refused
+	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
+	// evicted clients land on a sibling service instead of bouncing on this
+	// one (CONNECTDRAIN2.md §3.3)
+	draining atomic.Bool
+
+	stateLock sync.Mutex
+	// client id -> resident
+	residents map[server.Id]*Resident
+	// client id -> closed and removed whenever that client's resident map entry
+	// changes. Accepted exchange handshakes use it to avoid sleeping through a
+	// resident installation while retaining the poll timeout as a backstop.
+	residentChanges map[server.Id]chan struct{}
+
+	// client id -> connection id -> cancel func
+	connections map[server.Id]map[server.Id]context.CancelFunc
+	// client ids already given a drain excuse. Residents carry their own
+	// drained bit for teardown behavior, but connection-only split state has
+	// no Resident on which to store that bit.
+	drainedClients map[server.Id]struct{}
+
+	// residentWorkerLock closes admission before tests or an orderly owner wait
+	// for all resident cleanup, including its final model/Redis removals.
+	residentWorkerLock    sync.Mutex
+	residentWorkersClosed bool
+	residentWorkers       sync.WaitGroup
+
+	// connectionWorkerLock closes listener and accepted-connection admission
+	// before WaitForIdle joins every exchange socket owner.
+	connectionWorkerLock    sync.Mutex
+	connectionWorkersClosed bool
+	connectionWorkers       sync.WaitGroup
+}
+
+func (self *Exchange) IsDraining() bool {
+	return self.draining.Load()
+}
+
+func NewExchange(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+) *Exchange {
+	return newExchange(ctx, host, service, block, hostToServicePorts, routes, settings, nil)
+}
+
+// NewExchangeWithListeners is equivalent to NewExchange, but uses the
+// already-bound listener for each matching service port. It lets an in-process
+// server retain an OS-assigned port continuously through startup.
+func NewExchangeWithListeners(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+	servicePortListeners map[int]net.Listener,
+) *Exchange {
+	return newExchange(
+		ctx,
+		host,
+		service,
+		block,
+		hostToServicePorts,
+		routes,
+		settings,
+		maps.Clone(servicePortListeners),
+	)
+}
+
+func newExchange(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+	servicePortListeners map[int]net.Listener,
+) *Exchange {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	exchange := &Exchange{
+		ctx:                  cancelCtx,
+		cancel:               cancel,
+		host:                 host,
+		service:              service,
+		block:                block,
+		hostToServicePorts:   hostToServicePorts,
+		routes:               routes,
+		settings:             settings,
+		servicePortListeners: servicePortListeners,
+		residents:            map[server.Id]*Resident{},
+		residentChanges:      map[server.Id]chan struct{}{},
+		connections:          map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients:       map[server.Id]struct{}{},
+	}
+
+	if settings.KeyEventDelivery.Enabled {
+		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
+		// residents register their listeners with it in `Resident.Run`
+		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
+	}
+
+	go server.HandleError(exchange.Run, cancel)
+
+	return exchange
+}
+
+func NewExchangeWithDefaults(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+) *Exchange {
+	return NewExchange(ctx, host, service, block, hostToServicePorts, routes, DefaultExchangeSettings())
+}
+
+// reads the host and port configuration from the env
+func NewExchangeFromEnv(ctx context.Context, settings *ExchangeSettings) *Exchange {
+	host := server.RequireHost()
+	service := server.RequireService()
+	block := server.RequireBlock()
+	routes := server.Routes()
+
+	// service port -> host port
+	hostPorts := server.RequireHostPorts()
+	// internal ports start at `StartInternalPort` and proceed consecutively
+	// each port can handle 65k connections
+	// the number of connections depends on the number of expected concurrent destinations
+	// the expected port usage is `number_of_residents * expected(number_of_destinations_per_resident)`,
+	// and at most `number_of_residents * MaxConcurrentForwardsPerResident`
+
+	// host port -> service port
+	hostToServicePorts := map[int]int{}
+	servicePort := settings.StartInternalPort
+	for {
+		hostPort, ok := hostPorts[servicePort]
+		if !ok {
+			break
+		}
+		hostToServicePorts[hostPort] = servicePort
+		servicePort += 1
+	}
+	if len(hostToServicePorts) == 0 {
+		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", settings.StartInternalPort))
+	}
+
+	return NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
+}
+
+func NewExchangeFromEnvWithDefaults(ctx context.Context) *Exchange {
+	return NewExchangeFromEnv(ctx, DefaultExchangeSettings())
+}
+
+// Admits one exchange listener or accepted connection before shutdown.
+func (self *Exchange) beginConnectionWorker() bool {
+	self.connectionWorkerLock.Lock()
+	defer self.connectionWorkerLock.Unlock()
+	if self.connectionWorkersClosed {
+		return false
+	}
+	self.connectionWorkers.Add(1)
+	return true
+}
+
+// Releases one exchange listener or accepted connection.
+func (self *Exchange) endConnectionWorker() {
+	self.connectionWorkers.Done()
+}
+
+// Starts one admitted exchange socket owner.
+func (self *Exchange) startConnectionWorker(run func()) bool {
+	if !self.beginConnectionWorker() {
+		return false
+	}
+	go server.HandleError(func() {
+		defer self.endConnectionWorker()
+		run()
+	}, self.cancel)
+	return true
+}
+
+func (self *Exchange) NominateLocalResident(
+	clientId server.Id,
+	instanceId server.Id,
+	residentIdToReplace *server.Id,
+) bool {
+	// Admit before any model work. Close takes the same lock, so WaitForIdle
+	// cannot observe a zero worker count while a pre-close nomination is still
+	// between its database work and goroutine handoff.
+	self.residentWorkerLock.Lock()
+	if self.residentWorkersClosed {
+		self.residentWorkerLock.Unlock()
+		return false
+	}
+	self.residentWorkers.Add(1)
+	self.residentWorkerLock.Unlock()
+	workerStarted := false
+	defer func() {
+		if !workerStarted {
+			self.residentWorkers.Done()
+		}
+	}()
+
+	// Connection-activation gate for the plan's concurrent connected-client limit.
+	// a draining exchange refuses new residents, so a redialing client fails
+	// fast here and lands on a sibling service via the lb
+	if self.settings.EnableDrainCoordination && self.draining.Load() {
+		nominationRefusedCounter.WithLabelValues("draining").Inc()
+		if glog.V(1) {
+			glog.Infof("[exchange]nominate refused: draining\n")
+		}
+		return false
+	}
+
+	// Refuse to nominate a resident for a client that would push the network past
+	// its limit, which keeps the client from becoming active. Public providers are
+	// exempt and a re-nomination of an already-connected client is not a new
+	// connection (see model.CanConnectNetworkPeer). This is a no-op while
+	// enforce_concurrent_clients is false in pro.yml.
+	if !model.CanConnectNetworkPeer(self.ctx, clientId) {
+		nominationRefusedCounter.WithLabelValues("concurrent_client_limit").Inc()
+		if glog.V(1) {
+			glog.Infof(
+				"[exchange]nominate refused: client %s is over the network concurrent client limit\n",
+				clientId,
+			)
+		}
+		return false
+	}
+
+	residentId := server.NewId()
+
+	nomination := &model.NetworkClientResident{
+		ClientId:              clientId,
+		InstanceId:            instanceId,
+		ResidentId:            residentId,
+		ResidentHost:          self.host,
+		ResidentService:       self.service,
+		ResidentBlock:         self.block,
+		ResidentInternalPorts: slices.Collect(maps.Keys(self.hostToServicePorts)),
+	}
+	nominated := model.NominateResident(
+		self.ctx,
+		residentIdToReplace,
+		nomination,
+		self.settings.ExchangeResidentTtl,
+	)
+	if !nominated {
+		return false
+	}
+
+	resident := NewResident(
+		self.ctx,
+		self,
+		clientId,
+		instanceId,
+		residentId,
+	)
+	workerStarted = true
+	// note: initial peer registration happens in ConnectionAnnounce.run once
+	// the connection survives the announce window (2026-07-15: registration
+	// on the nomination hot path melted pubsub under connection churn and
+	// hung nominations against memory-full redis nodes). The heartbeat below
+	// maintains and re-adds the registration for the resident's lifetime.
+	go server.HandleError(func() {
+		defer self.residentWorkers.Done()
+		defer func() {
+			cleanupCtx := context.Background()
+			model.RemoveResidentForClient(
+				cleanupCtx,
+				clientId,
+				resident.residentId,
+			)
+			// RemoveNetworkPeer no-ops (no publish) when this resident never
+			// registered, so churny residents that died before announcing
+			// emit nothing here.
+			// a drained teardown skips the disconnect marker entirely: the
+			// member registration ttl converts a non-returning client to a
+			// disconnect anyway, and a returning client refreshes the entry
+			// with no visible blip (CONNECTDRAIN2.md §3.2)
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() {
+				if resident.peerCategory == model.NetworkPeerCategoryProxy {
+					model.RemoveNetworkProxyPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+					)
+				} else {
+					model.RemoveNetworkPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+						resident.residentId,
+					)
+				}
+			}
+		}()
+
+		defer self.closeResidentAndWait(resident)
+
+		server.HandleError(resident.Run)
+		if glog.V(1) {
+			glog.Infof("[r]close %s\n", clientId)
+		}
+	})
+	go server.HandleError(func() {
+		defer resident.Cancel()
+		for {
+			if resident.CancelIfIdle() {
+				if glog.V(1) {
+					glog.Infof("[r]idle %s\n", clientId)
+				}
+				return
+			}
+
+			select {
+			case <-resident.Done():
+				return
+			case <-time.After(self.settings.ExchangeResidentTtl):
+			}
+		}
+	})
+	// poll the resident the same as exchange connections
+	go server.HandleError(func() {
+		defer resident.Cancel()
+		for {
+			select {
+			case <-resident.Done():
+				return
+			case <-time.After(self.settings.ExchangeResidentTtl / 4):
+			}
+
+			pollResident := func() bool {
+				return server.HandleErrorWithReturn(func() bool {
+					currentResident := model.GetResidentForClientWithInstance(self.ctx, clientId, instanceId, self.settings.ExchangeResidentTtl)
+					if currentResident == nil {
+						return false
+					}
+					return residentId == currentResident.ResidentId
+				})
+			}
+
+			if !pollResident() {
+				if glog.V(1) {
+					glog.Infof("[r]not current %s\n", clientId)
+				}
+				return
+			}
+
+			// heartbeat the network peer registration on the same poll.
+			// Refresh only while the client holds a transport to this
+			// resident: a resident can outlive its client's connection
+			// (e.g. kept active by inbound forward pings up to
+			// `ForwardIdleTimeout`), and without a refresh the registration
+			// expires after `ExchangeResidentTtl` and other residents prune
+			// it to a disconnect marker, bounding disconnect detection.
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+				server.HandleError(func() {
+					if resident.peerCategory == model.NetworkPeerCategoryProxy {
+						// AddNetworkProxyPeer doubles as the heartbeat, and is
+						// also the initial proxy registration (proxy clients
+						// do not pass through ConnectionAnnounce)
+						model.AddNetworkProxyPeer(self.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+						return
+					}
+					if !model.RefreshNetworkPeer(self.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
+						// the registration was lost (e.g. expired while the
+						// client was disconnected, or pruned at an expiry
+						// race); re-add with a fresh profile
+						// peersEnabled is not re-checked: peerNetworkId set means
+						// the network was enabled when the resident was created
+						if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
+							model.AddNetworkPeer(self.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
+						}
+					}
+				})
+			}
+		}
+	})
+
+	var replacedResident *Resident
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		replacedResident = self.residents[clientId]
+		self.residents[clientId] = resident
+		self.notifyResidentChangedLocked(clientId)
+		residentClientsGauge.Set(float64(len(self.residents)))
+	}()
+	if replacedResident != nil {
+		replacedResident.Cancel()
+	}
+	if glog.V(1) {
+		glog.Infof("[r]open %s\n", clientId)
+	}
+
+	return true
+}
+
+// Removes one resident from routing and joins all of its owned transfer work.
+func (self *Exchange) closeResidentAndWait(resident *Resident) {
+	resident.Close()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if currentResident := self.residents[resident.clientId]; resident == currentResident {
+			delete(self.residents, resident.clientId)
+			self.notifyResidentChangedLocked(resident.clientId)
+		}
+		residentClientsGauge.Set(float64(len(self.residents)))
+	}()
+	if err := resident.CloseAndWait(context.Background()); err != nil {
+		glog.Errorf("[r]close wait %s = %s\n", resident.clientId, err)
+	}
+}
+
+// runs the exchange to expose local nominated residents
+// there should be one local exchange per service
+func (self *Exchange) Run() {
+	// start exchange connection servers
+	for _, servicePort := range self.hostToServicePorts {
+		port := servicePort
+		if !self.startConnectionWorker(func() {
+			self.serveExchangeConnection(port)
+		}) {
+			return
+		}
+	}
+
+	select {
+	case <-self.ctx.Done():
+	}
+}
+
+func (self *Exchange) serveExchangeConnection(port int) {
+	defer self.cancel()
+
+	serverSocket := self.servicePortListeners[port]
+	if serverSocket == nil {
+		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+
+		listenConfig := net.ListenConfig{
+			Control: server.SoReusePort,
+		}
+
+		var err error
+		// leave host part empty to listen on all available interfaces
+		serverSocket, err = listenConfig.Listen(
+			self.ctx,
+			"tcp",
+			fmt.Sprintf("%s:%d", listenIpv4, listenPort),
+		)
+		if err != nil {
+			return
+		}
+	}
+	defer serverSocket.Close()
+
+	acceptDone := make(chan struct{})
+	go server.HandleError(func() {
+		defer close(acceptDone)
+		defer self.cancel()
+
+		for {
+			select {
+			case <-self.ctx.Done():
+				return
+			default:
+			}
+
+			conn, err := serverSocket.Accept()
+			if err != nil {
+				return
+			}
+			if !self.startConnectionWorker(func() {
+				self.handleAcceptedExchangeConnection(conn)
+			}) {
+				conn.Close()
+				return
+			}
+		}
+	})
+
+	select {
+	case <-self.ctx.Done():
+	}
+	serverSocket.Close()
+	<-acceptDone
+}
+
+// Runs one accepted connection after its exchange lifecycle admission.
+func (self *Exchange) handleAcceptedExchangeConnection(conn net.Conn) {
+	if handleForTest := self.handleExchangeConnectionForTest; handleForTest != nil {
+		defer conn.Close()
+		handleForTest(conn)
+		return
+	}
+	self.handleExchangeConnection(conn)
+}
+
+type exchangeResidentGeneration int
+
+const (
+	exchangeResidentGenerationMissing exchangeResidentGeneration = iota
+	exchangeResidentGenerationCurrent
+	exchangeResidentGenerationChanged
+)
+
+// Resolves one requested generation against the only resident generation that
+// can currently accept exchange traffic for the client.
+func (self *Exchange) matchResidentGeneration(
+	clientId server.Id,
+	residentId server.Id,
+) (*Resident, exchangeResidentGeneration, <-chan struct{}) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	resident := self.residents[clientId]
+	if resident == nil {
+		if self.residentChanges == nil {
+			self.residentChanges = map[server.Id]chan struct{}{}
+		}
+		residentChanged := self.residentChanges[clientId]
+		if residentChanged == nil {
+			residentChanged = make(chan struct{})
+			self.residentChanges[clientId] = residentChanged
+		}
+		return nil, exchangeResidentGenerationMissing, residentChanged
+	}
+	if resident.residentId == residentId {
+		return resident, exchangeResidentGenerationCurrent, nil
+	}
+	return resident, exchangeResidentGenerationChanged, nil
+}
+
+// Wakes every accepted handshake waiting for this client's resident map entry.
+// The caller holds stateLock while publishing the corresponding map change.
+func (self *Exchange) notifyResidentChangedLocked(clientId server.Id) {
+	if residentChanged := self.residentChanges[clientId]; residentChanged != nil {
+		close(residentChanged)
+		delete(self.residentChanges, clientId)
+	}
+}
+
+func (self *Exchange) handleExchangeConnection(conn net.Conn) {
+	defer conn.Close()
+
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	defer handleCancel()
+	// Cancellation alone cannot interrupt a net.Conn blocked before its header
+	// is decoded. Close the accepted socket at the context edge so Exchange
+	// shutdown joins pre-header owners immediately instead of waiting for the
+	// independent header deadline.
+	stopContextClose := context.AfterFunc(handleCtx, func() {
+		_ = conn.Close()
+	})
+	defer stopContextClose()
+
+	receiveBuffer := NewReceiveOnlyExchangeBuffer(self.settings)
+
+	header, err := receiveBuffer.ReadHeader(handleCtx, conn)
+	if err != nil {
+		return
+	}
+
+	connectionId := server.NewId()
+	self.registerConnection(header.ClientId, connectionId, handleCancel)
+	defer self.unregisterConnection(header.ClientId, connectionId)
+
+	c := func() *Resident {
+		endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
+		for {
+			resident, generation, residentChanged := self.matchResidentGeneration(
+				header.ClientId,
+				header.ResidentId,
+			)
+			switch generation {
+			case exchangeResidentGenerationCurrent:
+				return resident
+			case exchangeResidentGenerationChanged:
+				// The model can briefly advertise a replacement before the local
+				// resident map installs it. Rejecting either a stale or an early
+				// generation makes the caller refresh after its bounded reconnect
+				// delay. Waiting here is unsafe: a stale generation can never
+				// become current again, so it otherwise occupies the socket until
+				// the full header deadline and blocks forward recovery behind it.
+				glog.V(1).Infof(
+					"[ecr]resident generation changed client=%s requested=%s current=%s\n",
+					header.ClientId,
+					header.ResidentId,
+					resident.residentId,
+				)
+				return nil
+			case exchangeResidentGenerationMissing:
+				if afterMissing := self.afterResidentMissingForTest; afterMissing != nil {
+					afterMissing()
+				}
+			}
+
+			if glog.V(1) {
+				glog.Infof("[ecr]wait for resident %s/%s\n", header.ClientId, header.ResidentId)
+			}
+
+			timeout := endTime.Sub(time.Now())
+			if timeout <= 0 {
+				return nil
+			}
+			timeout = min(timeout, self.settings.ExchangeResidentPollTimeout)
+			pollTimer := time.NewTimer(timeout)
+			select {
+			case <-handleCtx.Done():
+				pollTimer.Stop()
+				return nil
+			case <-residentChanged:
+			case <-pollTimer.C:
+			}
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+		}
+	}
+	var resident *Resident
+	if glog.V(2) {
+		// use shallow log to avoid unsafe memory reads on print
+		resident = server.TraceWithReturnShallowLog(
+			fmt.Sprintf("[ecr]wait for resident %s/%s", header.ClientId, header.ResidentId),
+			c,
+		)
+	} else {
+		resident = c()
+	}
+
+	if resident == nil {
+		glog.V(1).Infof("[ecr]no resident\n")
+		return
+	}
+
+	if resident.IsDone() {
+		if glog.V(1) {
+			glog.Infof("[ecr]resident done %s/%s\n", header.ClientId, header.ResidentId)
+		}
+		return
+	}
+
+	// echo back the header
+	if err := receiveBuffer.WriteHeader(handleCtx, conn, header); err != nil {
+		if glog.V(1) {
+			glog.Infof("[ecr]write header %s/%s error = %s\n", header.ClientId, header.ResidentId, err)
+		}
+		return
+	}
+	activeConnectionGauge := exchangeActiveConnectionsGauge.WithLabelValues("inbound", exchangeOpMetricLabel(header.Op))
+	activeConnectionGauge.Inc()
+	defer activeConnectionGauge.Dec()
+
+	go server.HandleError(func() {
+		defer handleCancel()
+		select {
+		case <-handleCtx.Done():
+		case <-resident.Done():
+		}
+	})
+
+	runTransport := func(send chan []byte, receive chan []byte, removeTransport func()) {
+		var workers sync.WaitGroup
+		// startWorker joins socket ownership before queue drainage.
+		startWorker := func(run func()) {
+			workers.Add(1)
+			go server.HandleError(func() {
+				defer workers.Done()
+				run()
+			}, handleCancel)
+		}
+
+		startWorker(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+			// gather pending messages into `batch` without blocking, bounded by
+			// the write batch limits, and write them with a single writev.
+			// returns false to end the send loop (closed channel or write error).
+			writeBatch := func(message []byte, ok bool) bool {
+				if !ok {
+					return false
+				}
+				resident.UpdateActivity()
+				open := true
+				batch = append(batch[:0], message)
+				batchByteCount := ByteCount(len(message))
+			gather:
+				for open && len(batch) < self.settings.ExchangeWriteBatchCount && batchByteCount < self.settings.ExchangeWriteBatchByteCount {
+					select {
+					case next, nextOk := <-send:
+						if !nextOk {
+							open = false
+						} else {
+							batch = append(batch, next)
+							batchByteCount += ByteCount(len(next))
+						}
+					default:
+						break gather
+					}
+				}
+				err := sendBuffer.WriteMessages(conn, batch)
+				batch = batch[:0]
+				if err != nil {
+					return false
+				}
+				if glog.V(1) {
+					glog.Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
+				}
+				return open
+			}
+			// reusable ping timer (hot-path timer reuse): the slow select arms a
+			// timer each iteration the send channel briefly drains between bursts.
+			pingTimer := time.NewTimer(0)
+			defer pingTimer.Stop()
+			for {
+				// fast path without arming the ping timer
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-send:
+					if !writeBatch(message, ok) {
+						return
+					}
+					continue
+				default:
+				}
+
+				pingTimer.Reset(self.settings.ExchangePingTimeout)
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-send:
+					if !writeBatch(message, ok) {
+						return
+					}
+				case <-pingTimer.C:
+					// send a ping
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		})
+
+		startWorker(func() {
+			defer func() {
+				handleCancel()
+				close(receive)
+			}()
+
+			// Messages from the transport are received by the resident; messages
+			// not destined for ControlId are handled by its forward callback.
+			for {
+				message, err := receiveBuffer.ReadMessage(conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				if glog.V(2) {
+					glog.Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+				}
+
+				messageByteCount := len(message)
+				sendResult := sendPooledReceive(
+					handleCtx.Done(),
+					nil,
+					receive,
+					message,
+					connect.CarrierReliabilityReliable,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
+					resident.UpdateActivity()
+					if glog.V(2) {
+						glog.Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+					}
+				case pooledMessageSendDone:
+					return
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeAcceptTransport,
+						messageByteCount,
+					)
+					return
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecr]handle done\n")
+		}
+
+		// Stop route admission before stopping the socket workers. Closing the
+		// connection then releases any worker blocked in a read or write. Once
+		// both producers have exited, every queued pooled message has one owner
+		// here and can be returned.
+		closeExchangeTransportQueues(
+			removeTransport,
+			func() {
+				handleCancel()
+				conn.Close()
+			},
+			&workers,
+			send,
+			receive,
+		)
+	}
+
+	runForward := func(forward chan []byte, closeForward func()) {
+		// messages from the forward are to be forwarded by the resident
+		// the only route a resident has is to its client_id
+		// a forward is a send where the source id does not match the client
+
+		var workers sync.WaitGroup
+		// startWorker joins the ping and socket-reader lifecycles.
+		startWorker := func(run func()) {
+			workers.Add(1)
+			go server.HandleError(func() {
+				defer workers.Done()
+				run()
+			}, handleCancel)
+		}
+
+		startWorker(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		})
+
+		startWorker(func() {
+			defer func() {
+				handleCancel()
+				close(forward)
+			}()
+
+			for {
+				message, err := receiveBuffer.ReadMessage(conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				messageByteCount := len(message)
+				sendResult := sendPooledReceive(
+					handleCtx.Done(),
+					nil,
+					forward,
+					message,
+					connect.CarrierReliabilityReliable,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
+					resident.UpdateActivity()
+					if glog.V(2) {
+						glog.Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+					}
+				case pooledMessageSendDone:
+					return
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeAcceptForward,
+						messageByteCount,
+					)
+					return
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecrf]handle done\n")
+		}
+
+		// The socket reader is the only producer. Stop it before canceling and
+		// joining the resident consumer, so closeForward can deterministically
+		// return every message the consumer did not accept.
+		handleCancel()
+		conn.Close()
+		workers.Wait()
+		closeForward()
+		returnReadyPooledMessages(forward)
+	}
+
+	switch header.Op {
+	case ExchangeOpTransport:
+		send, receive, closeTransport, err := resident.AddTransportWithProperties(
+			header.transferCarrierProperties(),
+		)
+		if err == nil {
+			runTransport(send, receive, closeTransport)
+		} else {
+			glog.Infof("[ecr]transport connect err = %s", err)
+		}
+
+	case ExchangeOpForward:
+		forward, closeForward, err := resident.AddForward()
+		if err == nil {
+			runForward(forward, closeForward)
+		} else {
+			glog.Infof("[ecr]forward connect err = %s", err)
+		}
+	}
+}
+
+func (self *Exchange) registerConnection(clientId server.Id, connectionId server.Id, handleCancel context.CancelFunc) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	handleCancels, ok := self.connections[clientId]
+	if !ok {
+		handleCancels = map[server.Id]context.CancelFunc{}
+		self.connections[clientId] = handleCancels
+	}
+	handleCancels[connectionId] = handleCancel
+}
+
+func (self *Exchange) unregisterConnection(clientId server.Id, connectionId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	handleCancels, ok := self.connections[clientId]
+	if ok {
+		delete(handleCancels, connectionId)
+		if len(handleCancels) == 0 {
+			delete(self.connections, clientId)
+			// matchResidentGeneration only creates a change channel for an
+			// accepted connection. Once the last connection is gone, no waiter
+			// remains and an unchanged missing client must not retain map state.
+			delete(self.residentChanges, clientId)
+		}
+	}
+}
+
+// markClientDrained writes a drain excuse exactly once per client, including
+// the split-state case where the client has a local transport connection but
+// its Resident is hosted on another exchange. A zero resident id records that
+// there was no local resident at the time of the drain.
+func (self *Exchange) markClientDrained(clientId server.Id, residentId server.Id) {
+	self.stateLock.Lock()
+	if _, ok := self.drainedClients[clientId]; ok {
+		self.stateLock.Unlock()
+		return
+	}
+	self.drainedClients[clientId] = struct{}{}
+	self.stateLock.Unlock()
+
+	if self.settings.EnableDrainExcuse {
+		model.SetDrainExcuse(
+			self.ctx,
+			clientId,
+			residentId,
+			self.settings.DrainExcuseTtl,
+		)
+		drainExcusesWrittenCounter.Inc()
+	}
+}
+
+// markDrained marks the resident's teardown as drain-caused and writes its
+// excuse marker, exactly once per client (CONNECTDRAIN2.md §3.1, §3.2).
+func (self *Exchange) markDrained(resident *Resident) {
+	resident.drained.Store(true)
+	self.markClientDrained(resident.clientId, resident.residentId)
+}
+
+// sendResidentMigrate asks the resident's client to establish a replacement
+// transport (make-before-break) and redial at `migrateTime`
+// (CONNECTDRAIN2.md §3.3). Returns false when the migrate frame was not sent.
+// An older client ignores the unknown message type and falls back to the
+// eviction plus excuse path.
+func (self *Exchange) sendResidentMigrate(
+	resident *Resident,
+	migrateTime time.Time,
+	timeout time.Duration,
+) bool {
+	frame, err := connect.ToFrame(&protocol.ResidentMigrate{
+		MigrateTime: uint64(migrateTime.UnixMilli()),
+	}, connect.DefaultProtocolVersion)
+	if err != nil {
+		return false
+	}
+	return resident.client.SendWithTimeout(
+		frame,
+		connect.Id(resident.clientId),
+		nil,
+		timeout,
+	)
+}
+
+// migrateResidents broadcasts migrate frames with migrate times jittered
+// across `DrainMigrateWindow`, then waits for the clients to move themselves:
+// a migrated client closes its old transport once its replacement is up, so
+// the wait watches only clients that actually received a migrate frame.
+// Bounded fanout and an aggregate broadcast deadline prevent a large number of
+// wedged send queues from serially consuming the migration window. Returns
+// when those connections are gone or the migrate window (bounded by the drain
+// deadline) elapses; whatever remains falls to the straggler sweep.
+func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.Time) {
+	if len(residents) == 0 {
+		return
+	}
+
+	startTime := time.Now()
+	migrateEndTime := startTime.Add(self.settings.DrainMigrateWindow)
+	if drainEndTime.Before(migrateEndTime) {
+		migrateEndTime = drainEndTime
+	}
+
+	broadcastEndTime := startTime.Add(self.settings.DrainMigrateBroadcastTimeout)
+	if migrateEndTime.Before(broadcastEndTime) {
+		broadcastEndTime = migrateEndTime
+	}
+	if !startTime.Before(broadcastEndTime) {
+		return
+	}
+
+	fanout := self.settings.DrainMigrateFanout
+	if fanout < 1 {
+		fanout = 1
+	}
+	if len(residents) < fanout {
+		fanout = len(residents)
+	}
+
+	type migrateResult struct {
+		clientId server.Id
+		sent     bool
+	}
+	jobs := make(chan *Resident)
+	results := make(chan migrateResult, len(residents))
+	var workers sync.WaitGroup
+	for range fanout {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for resident := range jobs {
+				remaining := time.Until(broadcastEndTime)
+				if remaining <= 0 {
+					results <- migrateResult{clientId: resident.clientId}
+					continue
+				}
+				sendTimeout := self.settings.DrainMigrateSendTimeout
+				if remaining < sendTimeout {
+					sendTimeout = remaining
+				}
+				migrateTime := startTime
+				if jitterWindow := migrateEndTime.Sub(startTime); 0 < jitterWindow {
+					migrateTime = migrateTime.Add(time.Duration(rand.Int63n(int64(jitterWindow))))
+				}
+				results <- migrateResult{
+					clientId: resident.clientId,
+					sent:     self.sendResidentMigrate(resident, migrateTime, sendTimeout),
+				}
+			}
+		}()
+	}
+
+	attemptedCount := 0
+sendLoop:
+	for _, resident := range residents {
+		select {
+		case jobs <- resident:
+			attemptedCount += 1
+		case <-self.ctx.Done():
+			break sendLoop
+		case <-time.After(time.Until(broadcastEndTime)):
+			break sendLoop
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+
+	sentClientIds := map[server.Id]struct{}{}
+	for result := range results {
+		if result.sent {
+			sentClientIds[result.clientId] = struct{}{}
+		}
+	}
+	if len(sentClientIds) == 0 {
+		return
+	}
+	glog.Infof(
+		"[c]drain migrate broadcast to %d residents (%d/%d attempted)\n",
+		len(sentClientIds),
+		attemptedCount,
+		len(residents),
+	)
+
+	for {
+		if migrateEndTime.Before(time.Now()) {
+			return
+		}
+		remainingCount := func() int {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			n := 0
+			for clientId := range sentClientIds {
+				if 0 < len(self.connections[clientId]) {
+					n += 1
+				}
+			}
+			return n
+		}()
+		drainResidentsRemainingGauge.Set(float64(remainingCount))
+		if remainingCount == 0 {
+			return
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
+func (self *Exchange) drainClientCountLocked() int {
+	clientIds := make(map[server.Id]struct{}, len(self.connections)+len(self.residents))
+	for clientId := range self.connections {
+		clientIds[clientId] = struct{}{}
+	}
+	for clientId := range self.residents {
+		clientIds[clientId] = struct{}{}
+	}
+	return len(clientIds)
+}
+
+// Drain sheds this exchange's residents for shutdown (CONNECTDRAIN2.md):
+//  1. flip the admission gate, so evicted clients redial to a sibling service
+//     instead of bouncing on this one
+//  2. mark and excuse every current resident up front, so the reconnect is
+//     excused no matter when the client redials
+//  3. broadcast migrate frames with jittered migrate times and wait for
+//     clients to move themselves (make-before-break, when coordination is on)
+//  4. evict the stragglers, paced to finish within
+//     `DrainStragglerSweepTimeout`
+//
+// The whole drain is bounded by `DrainAllTimeout`.
+func (self *Exchange) Drain() {
+	self.draining.Store(true)
+	drainEndTime := time.Now().Add(self.settings.DrainAllTimeout)
+
+	residents, connectionOnlyClientIds := func() ([]*Resident, []server.Id) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		residents := slices.Collect(maps.Values(self.residents))
+		connectionOnlyClientIds := make([]server.Id, 0)
+		for clientId := range self.connections {
+			if self.residents[clientId] == nil {
+				connectionOnlyClientIds = append(connectionOnlyClientIds, clientId)
+			}
+		}
+		return residents, connectionOnlyClientIds
+	}()
+	for _, resident := range residents {
+		self.markDrained(resident)
+	}
+	for _, clientId := range connectionOnlyClientIds {
+		self.markClientDrained(clientId, server.Id{})
+	}
+
+	if self.settings.EnableDrainCoordination {
+		self.migrateResidents(residents, drainEndTime)
+	}
+
+	// straggler sweep: evict whatever remains, adapting the pace so the sweep
+	// finishes within the sweep budget (never slower than `DrainOneTimeout`
+	// per resident)
+	sweepEndTime := time.Now().Add(self.settings.DrainStragglerSweepTimeout)
+	if drainEndTime.Before(sweepEndTime) {
+		sweepEndTime = drainEndTime
+	}
+	for i := 0; ; i += 1 {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		if drainEndTime.Before(time.Now()) {
+			remainingCount := func() int {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				return self.drainClientCountLocked()
+			}()
+			drainResidentsRemainingGauge.Set(float64(remainingCount))
+			glog.Infof("[c]drain deadline with at least %d remaining\n", remainingCount)
+			break
+		}
+		clientId, resident, handleCancels, remainingCount, ok := func() (server.Id, *Resident, []context.CancelFunc, int, bool) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+
+			n := self.drainClientCountLocked()
+
+			// active connections with potential residents
+			for clientId, handleCancels := range self.connections {
+				resident := self.residents[clientId]
+				return clientId, resident, slices.Collect(maps.Values(handleCancels)), n - 1, true
+			}
+			// residents without active connections
+			for clientId, resident := range self.residents {
+				return clientId, resident, nil, n - 1, true
+			}
+			return server.Id{}, nil, nil, 0, false
+		}()
+		if !ok {
+			drainResidentsRemainingGauge.Set(0)
+			glog.Infof("[c]drain complete\n")
+			break
+		}
+		drainResidentsRemainingGauge.Set(float64(remainingCount))
+		if i%100 == 0 {
+			glog.Infof("[c][%d]drain in progress (at least %d remaining)\n", i, remainingCount)
+		}
+		if resident != nil {
+			self.markDrained(resident)
+			resident.Close()
+		} else {
+			self.markClientDrained(clientId, server.Id{})
+		}
+		for _, handleCancel := range handleCancels {
+			handleCancel()
+		}
+		pace := self.settings.DrainOneTimeout
+		if 0 < remainingCount {
+			if p := time.Until(sweepEndTime) / time.Duration(remainingCount); p < pace {
+				pace = p
+			}
+		}
+		if pace < time.Millisecond {
+			// sweep budget exhausted: evict as fast as possible without spinning
+			pace = time.Millisecond
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(pace):
+		}
+	}
+}
+
+// the listener poll cadences, retimed when key-event delivery is on: the
+// poll becomes the corrective backstop and the unconditional insurance read
+// is disabled (PEERSSTREAMS2.md §5.4)
+func (self *Exchange) networkPeersPollInterval() time.Duration {
+	if self.settings.KeyEventDelivery.Enabled {
+		// The process-wide key-event subscriber performs one shared
+		// authoritative reconcile per network at the corrective cadence.
+		// Per-listener polling remains a slower independent backstop.
+		return 2 * self.keyEventCorrectivePollInterval()
+	}
+	return self.settings.NetworkPeersPollInterval
+}
+
+func (self *Exchange) streamHopsPollInterval() time.Duration {
+	if self.settings.KeyEventDelivery.Enabled {
+		return 2 * self.keyEventCorrectivePollInterval()
+	}
+	return self.settings.StreamHopsPollInterval
+}
+
+func (self *Exchange) keyEventCorrectivePollInterval() time.Duration {
+	if interval := self.settings.KeyEventDelivery.CorrectivePollInterval; 0 < interval {
+		return interval
+	}
+	return defaultKeyEventCorrectivePollInterval
+}
+
+func (self *Exchange) listenerFullReadEvery() int {
+	if self.settings.KeyEventDelivery.Enabled {
+		return 0
+	}
+	return self.settings.ListenerFullReadEvery
+}
+
+func (self *Exchange) Close() {
+	self.residentWorkerLock.Lock()
+	self.residentWorkersClosed = true
+	self.residentWorkerLock.Unlock()
+	self.connectionWorkerLock.Lock()
+	self.connectionWorkersClosed = true
+	self.connectionWorkerLock.Unlock()
+	// Close supplied sockets synchronously. Cancellation cannot own this edge:
+	// Close can win before Run admits the listener worker, in which case no
+	// worker exists to observe cancellation or execute its deferred Close.
+	self.servicePortListenersCloseOnce.Do(func() {
+		for _, listener := range self.servicePortListeners {
+			if listener != nil {
+				_ = listener.Close()
+			}
+		}
+	})
+	if self.keyEventSubscriber != nil {
+		self.keyEventSubscriber.Close()
+	}
+	self.cancel()
+}
+
+// WaitForIdle waits until every admitted resident, listener, and accepted
+// connection has completed teardown. Close must be called first so neither
+// wait group can receive another admission.
+func (self *Exchange) WaitForIdle(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		self.residentWorkers.Wait()
+		self.connectionWorkers.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-done:
+		return true
+	}
+}
+
+// each call overwrites the internal buffer
+type ExchangeBuffer struct {
+	settings *ExchangeSettings
+
+	framer *connect.Framer
+
+	// reads are buffered to amortize the framer's header+body reads.
+	// a buffer must be used with a single connection for all reads
+	// (header and messages), or buffered bytes would be lost.
+	reader     *bufio.Reader
+	readerConn net.Conn
+
+	// reusable writev iovec backing for WriteMessages. like the reader, a
+	// buffer writes from a single goroutine, so the backing is reused across
+	// batches instead of allocating one per flush.
+	writeBuffers net.Buffers
+}
+
+func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
+	// framerSettings := connect.DefaultFramerSettings()
+	// framerSettings.MaxMessageLen = int(settings.MaxMessageLen)
+	return &ExchangeBuffer{
+		settings: settings,
+		framer:   connect.NewFramer(settings.FramerSettings),
+	}
+}
+
+func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
+	return NewDefaultExchangeBuffer(settings)
+}
+
+func (self *ExchangeBuffer) connReader(conn net.Conn) *bufio.Reader {
+	if self.readerConn != conn {
+		self.reader = bufio.NewReaderSize(conn, self.settings.ExchangeReadBufferByteCount)
+		self.readerConn = conn
+	}
+	return self.reader
+}
+
+func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
+	b := bytes.NewBuffer(nil)
+	e := gob.NewEncoder(b)
+	e.Encode(header)
+	headerBytes := b.Bytes()
+
+	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
+	if err := self.framer.Write(conn, headerBytes); err != nil {
+		return err
+	}
+	recordExchangeIO(exchangeIODirectionSent, exchangeIOFrameKindHandshake, len(headerBytes))
+	return nil
+}
+
+func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
+	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
+	headerBytes, err := self.framer.Read(self.connReader(conn))
+	if err != nil {
+		return nil, err
+	}
+	defer connect.MessagePoolReturn(headerBytes)
+	recordExchangeIO(exchangeIODirectionReceived, exchangeIOFrameKindHandshake, len(headerBytes))
+
+	var header ExchangeHeader
+
+	b := bytes.NewBuffer(headerBytes)
+	e := gob.NewDecoder(b)
+	err = e.Decode(&header)
+	if err != nil {
+		return nil, err
+	}
+	return &header, nil
+}
+
+// FIXME resident transport can have write backpressure timeout
+
+func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
+	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	err := self.framer.Write(conn, transferFrameBytes)
+	if err == nil {
+		recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+	}
+	connect.MessagePoolReturn(transferFrameBytes)
+	return err
+}
+
+// WriteMessages writes a batch of framed messages with a single writev
+// (one length-header iovec plus one body iovec per message), amortizing the
+// per-message syscall cost of `WriteMessage`. The whole batch shares one
+// `WriteTimeout` like every other layer. The input messages are always
+// returned to the message pool (success or error paths).
+func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch [][]byte) error {
+	if len(transferFrameBytesBatch) == 0 {
+		return nil
+	}
+	if len(transferFrameBytesBatch) == 1 {
+		return self.WriteMessage(conn, transferFrameBytesBatch[0])
+	}
+
+	for _, transferFrameBytes := range transferFrameBytesBatch {
+		messageLen := len(transferFrameBytes)
+		if self.settings.FramerSettings.MaxMessageLen < messageLen {
+			for _, b := range transferFrameBytesBatch {
+				connect.MessagePoolReturn(b)
+			}
+			return fmt.Errorf("Max message len exceeded (%d<%d)", self.settings.FramerSettings.MaxMessageLen, messageLen)
+		}
+		if math.MaxUint16 < messageLen {
+			for _, b := range transferFrameBytesBatch {
+				connect.MessagePoolReturn(b)
+			}
+			return fmt.Errorf("Max possible message len exceeded (%d<%d)", math.MaxUint16, messageLen)
+		}
+	}
+
+	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+
+	headers := connect.MessagePoolGet(exchangeIOFrameHeaderByteCount * len(transferFrameBytesBatch))
+	defer connect.MessagePoolReturn(headers)
+
+	self.writeBuffers = self.writeBuffers[:0]
+	for i, transferFrameBytes := range transferFrameBytesBatch {
+		header := headers[exchangeIOFrameHeaderByteCount*i : exchangeIOFrameHeaderByteCount*i+exchangeIOFrameHeaderByteCount]
+		binary.BigEndian.PutUint16(header[0:2], uint16(len(transferFrameBytes)))
+		binary.BigEndian.PutUint16(header[2:exchangeIOFrameHeaderByteCount], uint16(0))
+		self.writeBuffers = append(self.writeBuffers, header, transferFrameBytes)
+	}
+
+	// WriteTo drains its receiver, so write through a local copy; self.writeBuffers
+	// keeps its backing for the next batch.
+	buffers := self.writeBuffers
+	n, err := buffers.WriteTo(conn)
+	// A writev can finish a frame prefix before a later iovec fails. Account
+	// for that completed prefix without treating the partial trailing frame as
+	// a packet.
+	for _, transferFrameBytes := range transferFrameBytesBatch {
+		frameByteCount := int64(exchangeIOFrameHeaderByteCount + len(transferFrameBytes))
+		if frameByteCount <= n {
+			recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+			n -= frameByteCount
+		}
+		connect.MessagePoolReturn(transferFrameBytes)
+	}
+	return err
+}
+
+func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
+	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
+	if err != nil {
+		return nil, err
+	}
+	recordExchangeIO(exchangeIODirectionReceived, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+	return transferFrameBytes, nil
+}
+
+func exchangeIOMessageKind(transferFrameBytes []byte) exchangeIOFrameKind {
+	if len(transferFrameBytes) == 0 {
+		return exchangeIOFrameKindPing
+	}
+	return exchangeIOFrameKindData
+}
+
+type ExchangeOp byte
+
+const (
+	ExchangeOpTransport ExchangeOp = 0x01
+	// forward does not add a transport to the client
+	// forward calls `Forward` on the resident and does not use routes
+	ExchangeOpForward ExchangeOp = 0x02
+)
+
+func exchangeOpMetricLabel(op ExchangeOp) string {
+	switch op {
+	case ExchangeOpTransport:
+		return "transport"
+	case ExchangeOpForward:
+		return "forward"
+	default:
+		return "unknown"
+	}
+}
+
+type ExchangeHeader struct {
+	Version                               int
+	ClientId                              server.Id
+	ResidentId                            server.Id
+	Op                                    ExchangeOp
+	UnreliableTransfer                    bool
+	UnreliableTransferMaxMessageByteCount int
+	UnreliableFlowIsolation               bool
+	UnreliableFlowReserve                 bool
+}
+
+func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
+	return connect.TransferCarrierProperties{
+		Unreliable:                    self.UnreliableTransfer,
+		UnreliableMaxMessageByteCount: self.UnreliableTransferMaxMessageByteCount,
+		UnreliableFlowIsolation:       self.UnreliableFlowIsolation,
+		UnreliableFlowReserve:         self.UnreliableFlowReserve,
+	}
+}
+
+type ExchangeConnection struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	sendAdmission pooledMessageSendAdmission
+	conn          net.Conn
+	sendBuffer    *ExchangeBuffer
+	receiveBuffer *ExchangeBuffer
+	send          chan []byte
+	receive       chan []byte
+	settings      *ExchangeSettings
+
+	header ExchangeHeader
+	host   string
+	port   int
+
+	// Set only by NewExchangeConnection after a successful handshake. Tests
+	// that directly construct a socket worker do not own a gauge observation.
+	trackActiveMetric bool
+
+	// Test-only ownership barriers are nil in production. They run outside
+	// locks after a socket worker has taken or transferred queue ownership.
+	afterReceiveEnqueueForTest func([]byte)
+	afterSendDequeueForTest    func()
+}
+
+func NewExchangeConnection(
+	ctx context.Context,
+	header ExchangeHeader,
+	host string,
+	port int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+) (*ExchangeConnection, error) {
+	// look up the host in the env routes
+	hostRoute, ok := routes[host]
+	if !ok {
+		// use the hostname as the route
+		// this requires the DNS to be configured correctly at the site
+		hostRoute = host
+	}
+
+	authority := fmt.Sprintf("%s:%d", hostRoute, port)
+
+	dialer := &net.Dialer{
+		Timeout: settings.ExchangeConnectTimeout,
+	}
+	dialContext := dialer.DialContext
+	if settings.DialContext != nil {
+		dialContext = settings.DialContext
+	}
+	conn, err := dialContext(ctx, "tcp", authority)
+	if err != nil {
+		return nil, err
+	}
+	// The caller context must also interrupt the header handshake. A deadline
+	// alone can otherwise retain a half-open outbound socket after its resident
+	// owner has begun teardown.
+	stopContextClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopContextClose()
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetLinger(0)
+		tcpConn.SetKeepAliveConfig(net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     1 * time.Second,
+			Interval: 1 * time.Second,
+			Count:    15,
+		})
+	}
+
+	success := false
+	defer func() {
+		if !success {
+			conn.Close()
+		}
+	}()
+
+	sendBuffer := NewDefaultExchangeBuffer(settings)
+	receiveBuffer := NewReceiveOnlyExchangeBuffer(settings)
+
+	// write header
+	err = sendBuffer.WriteHeader(ctx, conn, &header)
+	if err != nil {
+		return nil, err
+	}
+
+	// the connection echoes back the header if connected to the resident
+	// else the connection is closed
+	// the header must be read with the receive buffer, which owns all reads
+	// on the connection (the buffered reader may read past the header)
+	_, err = receiveBuffer.ReadHeader(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+
+	success = true
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	connection := &ExchangeConnection{
+		ctx:               cancelCtx,
+		cancel:            cancel,
+		done:              make(chan struct{}),
+		conn:              conn,
+		sendBuffer:        sendBuffer,
+		receiveBuffer:     receiveBuffer,
+		send:              make(chan []byte, settings.ExchangeBufferSize),
+		receive:           make(chan []byte, settings.ExchangeBufferSize),
+		settings:          settings,
+		header:            header,
+		host:              host,
+		port:              port,
+		trackActiveMetric: true,
+	}
+	exchangeActiveConnectionsGauge.WithLabelValues("outbound", exchangeOpMetricLabel(header.Op)).Inc()
+	go server.HandleError(connection.Run, cancel)
+
+	return connection, nil
+}
+
+func (self *ExchangeConnection) Run() {
+	var workers sync.WaitGroup
+	// startWorker joins every socket worker before final queue drainage.
+	startWorker := func(run func()) {
+		workers.Add(1)
+		go server.HandleError(func() {
+			defer workers.Done()
+			run()
+		}, self.cancel)
+	}
+	defer func() {
+		self.sendAdmission.close()
+		self.cancel()
+		self.conn.Close()
+		self.sendAdmission.wait()
+		workers.Wait()
+		returnReadyPooledMessages(self.send)
+		returnReadyPooledMessages(self.receive)
+		if self.trackActiveMetric {
+			exchangeActiveConnectionsGauge.WithLabelValues("outbound", exchangeOpMetricLabel(self.header.Op)).Dec()
+		}
+		close(self.done)
+	}()
+
+	// only a transport connection will receive messages
+	switch self.header.Op {
+	case ExchangeOpTransport:
+		startWorker(func() {
+			defer func() {
+				self.cancel()
+				close(self.receive)
+			}()
+
+			for {
+				select {
+				case <-self.ctx.Done():
+					return
+				default:
+				}
+				message, err := self.receiveBuffer.ReadMessage(self.conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				messageByteCount := len(message)
+				sendResult := sendPooledReceive(
+					self.ctx.Done(),
+					nil,
+					self.receive,
+					message,
+					connect.CarrierReliabilityReliable,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
+					self.notifyReceiveEnqueuedForTest(message)
+					if glog.V(2) {
+						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					}
+				case pooledMessageSendDone:
+					return
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeOutboundSocket,
+						messageByteCount,
+					)
+					return
+				}
+			}
+		})
+	case ExchangeOpForward:
+		// nothing to receive, but time out on missing pings
+		close(self.receive)
+
+		startWorker(func() {
+			defer self.cancel()
+
+			for {
+				select {
+				case <-self.ctx.Done():
+					return
+				default:
+				}
+				message, err := self.receiveBuffer.ReadMessage(self.conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					connect.MessagePoolReturn(message)
+					continue
+				}
+				// else drop
+				connect.MessagePoolReturn(message)
+			}
+		})
+	}
+
+	startWorker(func() {
+		defer self.cancel()
+
+		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+		// gather pending messages into `batch` without blocking, bounded by the
+		// write batch limits, and write them with a single writev.
+		// returns false to end the send loop (closed channel or write error).
+		writeBatch := func(message []byte, ok bool) bool {
+			if !ok {
+				return false
+			}
+			open := true
+			batch = append(batch[:0], message)
+			batchByteCount := ByteCount(len(message))
+		gather:
+			for open && len(batch) < self.settings.ExchangeWriteBatchCount && batchByteCount < self.settings.ExchangeWriteBatchByteCount {
+				select {
+				case next, nextOk := <-self.send:
+					if !nextOk {
+						open = false
+					} else {
+						batch = append(batch, next)
+						batchByteCount += ByteCount(len(next))
+					}
+				default:
+					break gather
+				}
+			}
+			self.notifySendDequeuedForTest()
+			err := self.sendBuffer.WriteMessages(self.conn, batch)
+			batch = batch[:0]
+			if err != nil {
+				return false
+			}
+			if glog.V(2) {
+				glog.Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+			}
+			return open
+		}
+		// reusable ping timer (hot-path timer reuse): the slow select below arms
+		// a timer each iteration the send channel briefly drains between bursts.
+		pingTimer := time.NewTimer(0)
+		defer pingTimer.Stop()
+
+		for {
+			// fast path without arming the ping timer
+			select {
+			case <-self.ctx.Done():
+				return
+			case message, ok := <-self.send:
+				if !writeBatch(message, ok) {
+					return
+				}
+				continue
+			default:
+			}
+
+			pingTimer.Reset(self.settings.ExchangePingTimeout)
+			select {
+			case <-self.ctx.Done():
+				return
+			case message, ok := <-self.send:
+				if !writeBatch(message, ok) {
+					return
+				}
+			case <-pingTimer.C:
+				// send a ping
+				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
+					return
+				}
+			}
+		}
+	})
+
+	select {
+	case <-self.ctx.Done():
+	}
+}
+
+// Signals a test after the receive worker transfers one pooled message.
+func (self *ExchangeConnection) notifyReceiveEnqueuedForTest(message []byte) {
+	if callback := self.afterReceiveEnqueueForTest; callback != nil {
+		callback(message)
+	}
+}
+
+// Signals a test after the send worker owns its batch and before socket I/O.
+func (self *ExchangeConnection) notifySendDequeuedForTest() {
+	if callback := self.afterSendDequeueForTest; callback != nil {
+		callback()
+	}
+}
+
+func (self *ExchangeConnection) IsDone() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ExchangeConnection) Done() <-chan struct{} {
+	return self.ctx.Done()
+}
+
+// sendMessage admits one pooled message to the connection send queue. It
+// returns the message when the connection is already closing.
+func (self *ExchangeConnection) sendMessage(
+	ctxDone <-chan struct{},
+	message []byte,
+	timer *time.Timer,
+	timeout time.Duration,
+) pooledMessageSendResult {
+	if !self.sendAdmission.start() {
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	}
+	defer self.sendAdmission.done()
+	return sendPooledMessage(
+		ctxDone,
+		self.Done(),
+		self.send,
+		message,
+		timer,
+		timeout,
+	)
+}
+
+func (self *ExchangeConnection) Close() {
+	self.sendAdmission.close()
+	self.cancel()
+	self.conn.Close()
+	self.sendAdmission.wait()
+	<-self.done
+	returnReadyPooledMessages(self.send)
+	returnReadyPooledMessages(self.receive)
+}
+
+func (self *ExchangeConnection) Cancel() {
+	self.cancel()
+	self.conn.Close()
+}
+
+type ResidentTransport struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	sendAdmission pooledMessageSendAdmission
+
+	exchange *Exchange
+	header   ExchangeHeader
+
+	clientId   server.Id
+	instanceId server.Id
+
+	routes map[string]string
+
+	send    chan []byte
+	receive chan []byte
+
+	beforeReliableReceiveWaitForTest func()
+}
+
+// pooledMessageSendResult describes the final ownership of one queue offer.
+type pooledMessageSendResult int
+
+const (
+	// pooledMessageSendDelivered transfers ownership to the destination queue.
+	pooledMessageSendDelivered pooledMessageSendResult = iota
+	// pooledMessageSendDropped returns ownership after a backpressure timeout.
+	pooledMessageSendDropped
+	// pooledMessageSendDone returns ownership because a lifecycle ended.
+	pooledMessageSendDone
+)
+
+// A timeout has already returned the skipped message to the pool, so the
+// framed connection may continue only after an actual enqueue. Done and drop
+// both retire this generation; reconnect starts from a recoverable boundary.
+func pooledMessageSendKeepsGeneration(result pooledMessageSendResult) bool {
+	return result == pooledMessageSendDelivered
+}
+
+// pooledMessageSendAdmission joins queue producers with owner teardown without
+// holding a lock while a producer waits for destination capacity.
+type pooledMessageSendAdmission struct {
+	stateLock sync.Mutex
+	closing   bool
+	producers sync.WaitGroup
+}
+
+// start admits one producer without holding the state lock during its send.
+func (self *pooledMessageSendAdmission) start() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closing {
+		return false
+	}
+	self.producers.Add(1)
+	return true
+}
+
+// done releases one producer admitted by start.
+func (self *pooledMessageSendAdmission) done() {
+	self.producers.Done()
+}
+
+// close prevents future admission. Existing producers are joined separately
+// after their owning context has been canceled.
+func (self *pooledMessageSendAdmission) close() {
+	self.stateLock.Lock()
+	self.closing = true
+	self.stateLock.Unlock()
+}
+
+// wait joins every producer admitted before close.
+func (self *pooledMessageSendAdmission) wait() {
+	self.producers.Wait()
+}
+
+// Joins a closed worker group while allowing an orderly owner deadline.
+func waitForWorkerGroup(ctx context.Context, workers *sync.WaitGroup, name string) error {
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for %s: %w", name, ctx.Err())
+	}
+}
+
+// sendPooledMessage sends one pooled message or returns it when ownership
+// cannot transfer. A nil peerDone disables the peer-lifecycle arm.
+func sendPooledMessage(
+	ctxDone <-chan struct{},
+	peerDone <-chan struct{},
+	destination chan<- []byte,
+	message []byte,
+	timer *time.Timer,
+	timeout time.Duration,
+) pooledMessageSendResult {
+	// Give an already-complete lifecycle priority over a writable buffered
+	// destination. This makes cancellation ownership deterministic.
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	default:
+	}
+
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	default:
+	}
+
+	timer.Reset(timeout)
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	case <-timer.C:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDropped
+	}
+}
+
+// sendPooledReceive transfers one complete carrier message while preserving
+// the physical lane's delivery contract. Reliable framed lanes propagate
+// bounded queue backpressure to their socket reader; a true datagram lane
+// refuses immediately so its reader can continue draining the packet socket.
+func sendPooledReceive(
+	ctxDone <-chan struct{},
+	peerDone <-chan struct{},
+	destination chan<- []byte,
+	message []byte,
+	reliability connect.CarrierReliability,
+	beforeReliableWaitForTest ...func(),
+) pooledMessageSendResult {
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	default:
+	}
+
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	default:
+	}
+
+	if reliability == connect.CarrierReliabilityReliable {
+		if 0 < len(beforeReliableWaitForTest) && beforeReliableWaitForTest[0] != nil {
+			beforeReliableWaitForTest[0]()
+		}
+		select {
+		case <-ctxDone:
+			connect.MessagePoolReturn(message)
+			return pooledMessageSendDone
+		case <-peerDone:
+			connect.MessagePoolReturn(message)
+			return pooledMessageSendDone
+		case destination <- message:
+			return pooledMessageSendDelivered
+		}
+	}
+
+	connect.MessagePoolReturn(message)
+	return pooledMessageSendDropped
+}
+
+// returnReadyPooledMessages returns every pooled message currently queued on
+// a channel. The channel may be open or closed and may have another receiver
+// during teardown.
+func returnReadyPooledMessages(messages <-chan []byte) {
+	for {
+		select {
+		case message, ok := <-messages:
+			if !ok {
+				return
+			}
+			connect.MessagePoolReturn(message)
+		default:
+			return
+		}
+	}
+}
+
+// closeExchangeTransportQueues stops and joins the socket workers after route
+// removal has joined old snapshot writers, then returns both queue directions.
+func closeExchangeTransportQueues(
+	removeTransport func(),
+	stopWorkers func(),
+	workers *sync.WaitGroup,
+	send <-chan []byte,
+	receive <-chan []byte,
+) {
+	removeTransport()
+	stopWorkers()
+	workers.Wait()
+	returnReadyPooledMessages(send)
+	returnReadyPooledMessages(receive)
+}
+
+func NewResidentTransport(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+) *ResidentTransport {
+	return NewResidentTransportWithProperties(
+		ctx,
+		exchange,
+		clientId,
+		instanceId,
+		connect.TransferCarrierProperties{},
+	)
+}
+
+// Carries physical delivery semantics to the resident node. Gob ignores this
+// added field on old peers and decodes it as false from them.
+func NewResidentTransportWithProperties(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	properties connect.TransferCarrierProperties,
+) *ResidentTransport {
+	header := ExchangeHeader{
+		Op:                                    ExchangeOpTransport,
+		UnreliableTransfer:                    properties.Unreliable,
+		UnreliableTransferMaxMessageByteCount: properties.UnreliableMaxMessageByteCount,
+		UnreliableFlowIsolation:               properties.UnreliableFlowIsolation,
+		UnreliableFlowReserve:                 properties.UnreliableFlowReserve,
+	}
+	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
+}
+
+func newResidentTransport(
+	ctx context.Context,
+	exchange *Exchange,
+	header ExchangeHeader,
+	clientId server.Id,
+	instanceId server.Id,
+) *ResidentTransport {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	transport := &ResidentTransport{
+		ctx:        cancelCtx,
+		cancel:     cancel,
+		exchange:   exchange,
+		header:     header,
+		clientId:   clientId,
+		instanceId: instanceId,
+		send:       make(chan []byte, exchange.settings.ExchangeBufferSize),
+		receive:    make(chan []byte, exchange.settings.ExchangeBufferSize),
+	}
+	return transport
+}
+
+func (self *ResidentTransport) Run() {
+	defer func() {
+		self.sendAdmission.close()
+		self.cancel()
+		self.sendAdmission.wait()
+		close(self.receive)
+		returnReadyPooledMessages(self.send)
+		returnReadyPooledMessages(self.receive)
+	}()
+
+	handle := func(connection *ExchangeConnection) {
+		handleCtx, handleCancel := context.WithCancel(self.ctx)
+		var workers sync.WaitGroup
+		startWorker := func(run func()) {
+			workers.Add(1)
+			go server.HandleError(func() {
+				defer workers.Done()
+				run()
+			})
+		}
+		defer func() {
+			handleCancel()
+			connection.Close()
+			workers.Wait()
+		}()
+
+		startWorker(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-connection.Done():
+			}
+		})
+
+		switch self.header.Op {
+		case ExchangeOpTransport:
+			startWorker(func() {
+				defer handleCancel()
+				// write
+				writeTimer := time.NewTimer(0)
+				defer writeTimer.Stop()
+				for {
+					select {
+					case <-handleCtx.Done():
+						return
+					case message, ok := <-self.send:
+						if !ok {
+							// transport closed
+							self.cancel()
+							return
+						}
+						sendResult := connection.sendMessage(
+							handleCtx.Done(),
+							message,
+							writeTimer,
+							self.exchange.settings.WriteTimeout,
+						)
+						if !pooledMessageSendKeepsGeneration(sendResult) {
+							return
+						}
+					}
+				}
+			})
+
+			// The internal exchange is a reliable framed TCP hop. Propagate its
+			// fixed queue backpressure instead of creating an invisible sequence
+			// gap between the edge carrier and the resident Transfer receiver.
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-connection.receive:
+					if !ok {
+						// need a new connection
+						return
+					}
+					messageByteCount := len(message)
+					sendResult := sendPooledReceive(
+						handleCtx.Done(),
+						connection.Done(),
+						self.receive,
+						message,
+						connect.CarrierReliabilityReliable,
+					)
+					if sendResult == pooledMessageSendDone {
+						return
+					}
+					if sendResult == pooledMessageSendDropped {
+						recordReceiveQueueDrop(
+							receiveQueueBoundaryExchangeToResident,
+							messageByteCount,
+						)
+						return
+					}
+				}
+			}
+		}
+
+	}
+
+	skippedReconnectWait := false
+	for {
+		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
+		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
+			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+			headerCopy := self.header
+			headerCopy.ClientId = self.clientId
+			headerCopy.ResidentId = resident.ResidentId
+			exchangeConnection, err := NewExchangeConnection(
+				self.ctx,
+				headerCopy,
+				resident.ResidentHost,
+				port,
+				self.exchange.routes,
+				self.exchange.settings,
+			)
+
+			if err != nil {
+				if glog.V(1) {
+					glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				}
+			}
+
+			if err == nil {
+				c := func() {
+					handle(exchangeConnection)
+				}
+				if glog.V(2) {
+					server.Trace(
+						fmt.Sprintf("[rt]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+						c,
+					)
+				} else {
+					c()
+				}
+			}
+		}
+
+		if resident == nil && !skippedReconnectWait {
+			// there is no resident to reconnect to, so nominate immediately
+			// rather than waiting the reconnect timeout. This is the common
+			// cold-connect path. `skippedReconnectWait` bounds the skip to
+			// every other iteration, so a repeatedly failing nomination still
+			// backs off below.
+			skippedReconnectWait = true
+			select {
+			case <-self.ctx.Done():
+				return
+			default:
+			}
+		} else {
+			skippedReconnectWait = false
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-reconnect.After():
+			}
+		}
+
+		var residentIdToReplace *server.Id
+		if resident != nil {
+			residentIdToReplace = &resident.ResidentId
+		}
+
+		c := func() bool {
+			return self.exchange.NominateLocalResident(
+				self.clientId,
+				self.instanceId,
+				residentIdToReplace,
+			)
+		}
+		if glog.V(2) {
+			server.TraceWithReturn(
+				fmt.Sprintf("[rt]nominate %s", self.clientId),
+				c,
+			)
+		} else {
+			c()
+		}
+	}
+}
+
+func (self *ResidentTransport) IsDone() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ResidentTransport) Done() <-chan struct{} {
+	return self.ctx.Done()
+}
+
+// sendReceivedMessage admits one complete edge-carrier message using the
+// delivery contract of the physical lane that produced it.
+func (self *ResidentTransport) sendReceivedMessage(
+	ctxDone <-chan struct{},
+	message []byte,
+	reliability connect.CarrierReliability,
+) pooledMessageSendResult {
+	if !self.sendAdmission.start() {
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	}
+	defer self.sendAdmission.done()
+	return sendPooledReceive(
+		ctxDone,
+		self.Done(),
+		self.send,
+		message,
+		reliability,
+		self.beforeReliableReceiveWaitForTest,
+	)
+}
+
+func (self *ResidentTransport) Close() {
+	self.sendAdmission.close()
+	self.cancel()
+	self.sendAdmission.wait()
+	returnReadyPooledMessages(self.send)
+}
+
+func (self *ResidentTransport) Cancel() {
+	self.cancel()
+}
+
+type ResidentForward struct {
+	ctx           context.Context
+	cancel        context.CancelFunc
+	sendAdmission pooledMessageSendAdmission
+
+	exchange *Exchange
+
+	clientId server.Id
+
+	send chan []byte
+
+	// activity is tracked with an atomic, not a mutex, so UpdateActivity is
+	// lock-free on the per-frame forward path
+	lastActivityNanos atomic.Int64
+}
+
+func NewResidentForward(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+) *ResidentForward {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	transport := &ResidentForward{
+		ctx:      cancelCtx,
+		cancel:   cancel,
+		exchange: exchange,
+		clientId: clientId,
+		send:     make(chan []byte, exchange.settings.ForwardBufferSize),
+	}
+	transport.lastActivityNanos.Store(time.Now().UnixNano())
+	return transport
+}
+
+func (self *ResidentForward) Run() {
+	defer func() {
+		self.sendAdmission.close()
+		self.cancel()
+		self.sendAdmission.wait()
+		returnReadyPooledMessages(self.send)
+	}()
+
+	handle := func(connection *ExchangeConnection) {
+		handleCtx, handleCancel := context.WithCancel(self.ctx)
+		var workers sync.WaitGroup
+		defer func() {
+			handleCancel()
+			connection.Close()
+			workers.Wait()
+		}()
+		workers.Add(1)
+		go server.HandleError(func() {
+			defer workers.Done()
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-connection.Done():
+			}
+		})
+
+		// write
+		writeTimer := time.NewTimer(0)
+		defer writeTimer.Stop()
+		for {
+			select {
+			case <-handleCtx.Done():
+				return
+			case message, ok := <-self.send:
+				if !ok {
+					// transport closed
+					return
+				}
+				sendResult := connection.sendMessage(
+					handleCtx.Done(),
+					message,
+					writeTimer,
+					self.exchange.settings.WriteTimeout,
+				)
+				if !pooledMessageSendKeepsGeneration(sendResult) {
+					if sendResult == pooledMessageSendDropped && glog.V(1) {
+						glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
+					}
+					return
+				}
+			}
+		}
+	}
+
+	for {
+		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
+		resident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
+			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+			header := ExchangeHeader{
+				ClientId:   self.clientId,
+				ResidentId: resident.ResidentId,
+				Op:         ExchangeOpForward,
+			}
+			exchangeConnection, err := NewExchangeConnection(
+				self.ctx,
+				header,
+				resident.ResidentHost,
+				port,
+				self.exchange.routes,
+				self.exchange.settings,
+			)
+			if err != nil {
+				if glog.V(1) {
+					glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				}
+			}
+			if err == nil {
+				c := func() {
+					handle(exchangeConnection)
+				}
+				if glog.V(2) {
+					server.Trace(
+						fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+						c,
+					)
+				} else {
+					c()
+				}
+			}
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-reconnect.After():
+		}
+	}
+}
+
+func (self *ResidentForward) UpdateActivity() bool {
+	select {
+	case <-self.ctx.Done():
+		return false
+	default:
+		self.lastActivityNanos.Store(time.Now().UnixNano())
+		return true
+	}
+}
+
+func (self *ResidentForward) CancelIfIdle() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+	}
+
+	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+	if self.exchange.settings.ForwardIdleTimeout <= idleTimeout {
+		self.cancel()
+		return true
+	}
+	return false
+}
+
+func (self *ResidentForward) IsDone() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ResidentForward) Done() <-chan struct{} {
+	return self.ctx.Done()
+}
+
+func (self *ResidentForward) Close() {
+	self.sendAdmission.close()
+	self.cancel()
+	self.sendAdmission.wait()
+	returnReadyPooledMessages(self.send)
+}
+
+func (self *ResidentForward) Cancel() {
+	self.cancel()
+}
+
+type Resident struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	exchange *Exchange
+
+	clientId   server.Id
+	instanceId server.Id
+	residentId server.Id
+
+	// set when the client is a top-level client of its network.
+	// Top-level clients are registered in the network peer registry and
+	// receive network peer updates (see model/peer_model.go).
+	peerNetworkId *server.Id
+	// the initial peer registration, captured at create
+	peerProfile *model.NetworkPeer
+	// the peer category. Proxy clients are registered for counting but get no
+	// peer subscription and never appear in the peer list.
+	peerCategory model.NetworkPeerCategory
+
+	// the client id in the resident is always `connect.ControlId`
+	client                  *connect.Client
+	residentContractManager *residentContractManager
+	residentController      *residentController
+
+	// stateLock guards the transports and forwards maps. It is an RWMutex because
+	// the worker's per-frame forward lookup is a read; only forward
+	// create/replace and transport add/remove take the write lock.
+	stateLock sync.RWMutex
+
+	transports map[*clientTransport]bool
+
+	// destination id -> forward
+	forwards map[server.Id]*ResidentForward
+
+	// forwardWorkerLock closes admission before CloseAndWait joins every
+	// exchange-forward Run loop that can own a pooled transfer frame.
+	forwardWorkerLock    sync.Mutex
+	forwardWorkersClosed bool
+	forwardWorkers       sync.WaitGroup
+
+	// Client callbacks only validate and offer borrowed input to these bounded
+	// queues. Their owned workers may rate-limit, query storage, or block as a
+	// sender without parking the shared Client receive sequence.
+	controlIngressAdmission pooledMessageSendAdmission
+	forwardIngressAdmission pooledMessageSendAdmission
+	controlIngress          chan []*protocol.Frame
+	forwardIngress          []chan residentForwardIngress
+	callbackWorkers         sync.WaitGroup
+	closeOnce               sync.Once
+
+	controlLimiter *limiter
+
+	// activity is tracked with an atomic, not stateLock, so UpdateActivity is
+	// lock-free on the per-frame inbound and forward paths
+	lastActivityNanos atomic.Int64
+
+	// set when the teardown is caused by a server drain / migrate rather than
+	// a client disconnect. The cleanup then skips the peer disconnect marker:
+	// the member registration ttl converts a non-returning client to a
+	// disconnect anyway, and a returning client refreshes the entry with no
+	// visible blip (CONNECTDRAIN2.md §3.2)
+	drained atomic.Bool
+
+	clientReceiveUnsub func()
+	clientForwardUnsub func()
+
+	// Nil in production; tests use this barrier after forward cancellation and
+	// immediately before teardown joins the active consumer.
+	beforeForwardCloseJoinForTest func()
+	// Nil in production; tests observe the exact internal-client join boundary.
+	beforeClientCloseJoinForTest func()
+	// Nil in production; tests capture the exact listener frame before its
+	// ownership is offered to the internal client.
+	beforeListenerFrameSendForTest func(*protocol.Frame)
+	// Nil in production; tests observe construction and joined shutdown of the
+	// stream-hop listener owned by Run.
+	afterStreamHopListenerStartForTest     func(*model.StreamHopListener)
+	afterStreamHopListenerCloseWaitForTest func()
+
+	// streamHopListener *model.StreamHopListener
+}
+
+func NewResident(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	residentId server.Id,
+) *Resident {
+	glog.V(1).Infof("[r]create")
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	// use a tag with the client so that the logging does not show up as the control id
+	clientTag := fmt.Sprintf("c(%s)", clientId.String())
+	clientSettings := connect.DefaultClientSettingsWithBufferSize(exchange.settings.ExchangeBufferSize)
+	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, connect.NewNoContractClientOob(), clientSettings)
+
+	// no contract is required between the platform and client
+	// because the platform creates the contracts for the client
+	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
+
+	residentContractManager := newResidentContractManager(
+		cancelCtx,
+		cancel,
+		clientId,
+		exchange.settings,
+	)
+
+	residentController := newResidentController(
+		cancelCtx,
+		clientId,
+		residentContractManager,
+		exchange.settings,
+	)
+
+	resident := &Resident{
+		ctx:                     cancelCtx,
+		cancel:                  cancel,
+		exchange:                exchange,
+		clientId:                clientId,
+		instanceId:              instanceId,
+		residentId:              residentId,
+		client:                  client,
+		residentContractManager: residentContractManager,
+		residentController:      residentController,
+		transports:              map[*clientTransport]bool{},
+		forwards:                map[server.Id]*ResidentForward{},
+		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
+	}
+	resident.lastActivityNanos.Store(time.Now().UnixNano())
+
+	// only top-level clients are network peers and get peer subscriptions.
+	// Networks over the top-level client limit (created before the limit)
+	// are excluded (`peersEnabled`): their peer replay and event fan-out
+	// would scale with the connected top-level client count.
+	if networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peersEnabled && peerProfile != nil {
+		resident.peerNetworkId = &networkId
+		resident.peerProfile = peerProfile
+		resident.peerCategory = category
+	}
+	resident.startClientCallbackWorkers()
+
+	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
+	resident.clientReceiveUnsub = clientReceiveUnsub
+
+	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
+	resident.clientForwardUnsub = clientForwardUnsub
+
+	/*
+			// each hop on the stream receives this to configure its state,
+		// including the first and last hops
+		// this is sent each time a stream contract is created
+		message StreamOpen {
+		    // ulid
+		    optional bytes source_id = 2;
+		    // ulid
+		    optional bytes destination_id = 1;
+		    // ulid
+		    bytes stream_id = 3;
+		}
+
+		// each hop on the stream receives this to configure its state
+		// this is sent when all open contracts for the stream are closed
+		message StreamClose {
+		    // ulid
+		    bytes stream_id = 3;
+		}
+
+		message StreamReset {
+		    repeated StreamOpen streams = 1;
+		}
+	*/
+
+	// go server.HandleError(resident.clientForward, cancel)
+	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
+		go server.HandleError(resident.chaos, cancel)
+	}
+
+	return resident
+}
+
+type residentForwardIngress struct {
+	path               connect.TransferPath
+	transferFrameBytes []byte
+}
+
+func shareResidentControlFrames(frames []*protocol.Frame) []*protocol.Frame {
+	shared := make([]*protocol.Frame, len(frames))
+	for frameIndex, frame := range frames {
+		shared[frameIndex] = &protocol.Frame{
+			MessageType:  frame.MessageType,
+			MessageBytes: connect.MessagePoolShareReadOnly(frame.MessageBytes),
+			Raw:          frame.Raw,
+		}
+	}
+	return shared
+}
+
+func returnResidentControlFrames(frames []*protocol.Frame) {
+	for _, frame := range frames {
+		connect.MessagePoolReturn(frame.MessageBytes)
+	}
+}
+
+func residentControlFrameByteCount(frames []*protocol.Frame) int {
+	byteCount := 0
+	for _, frame := range frames {
+		byteCount += len(frame.MessageBytes)
+	}
+	return byteCount
+}
+
+// Starts one ordered control consumer and destination-stable forward shards.
+// Channels remain open; cancellation stops each sole consumer, which then
+// drains and returns every queued pooled owner.
+func (self *Resident) startClientCallbackWorkers() {
+	settings := self.exchange.settings
+	self.controlIngress = make(chan []*protocol.Frame, max(0, settings.ResidentControlQueueSize))
+
+	shardCount := max(1, settings.ResidentForwardQueueShardCount)
+	totalForwardCapacity := max(0, settings.ResidentForwardQueueSize)
+	self.forwardIngress = make([]chan residentForwardIngress, shardCount)
+	for shardIndex := range shardCount {
+		shardCapacity := totalForwardCapacity / shardCount
+		if shardIndex < totalForwardCapacity%shardCount {
+			shardCapacity++
+		}
+		self.forwardIngress[shardIndex] = make(chan residentForwardIngress, shardCapacity)
+	}
+
+	self.callbackWorkers.Add(1)
+	go server.HandleError(func() {
+		defer self.callbackWorkers.Done()
+		self.runClientControlIngress()
+	}, self.cancel)
+	for shardIndex := range self.forwardIngress {
+		self.callbackWorkers.Add(1)
+		go server.HandleError(func() {
+			defer self.callbackWorkers.Done()
+			self.runClientForwardIngress(shardIndex)
+		}, self.cancel)
+	}
+}
+
+func (self *Resident) runClientControlIngress() {
+	defer func() {
+		for {
+			select {
+			case frames := <-self.controlIngress:
+				returnResidentControlFrames(frames)
+			default:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case frames := <-self.controlIngress:
+			func() {
+				defer returnResidentControlFrames(frames)
+				self.controlLimiter.delay()
+				if err := self.residentController.HandleControlFrames(frames); err != nil {
+					if glog.V(1) {
+						glog.Infof("[rr]control error = %s\n", err)
+					}
+				}
+			}()
+		}
+	}
+}
+
+func (self *Resident) runClientForwardIngress(shardIndex int) {
+	queue := self.forwardIngress[shardIndex]
+	defer func() {
+		for {
+			select {
+			case message := <-queue:
+				connect.MessagePoolReturn(message.transferFrameBytes)
+			default:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case message := <-queue:
+			self.processClientForward(message.path, message.transferFrameBytes)
+		}
+	}
+}
+
+func (self *Resident) chaos() {
+	defer self.Cancel()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+
+		bs := make([]byte, 1)
+		cryptorand.Read(bs)
+		b := int(bs[0])
+		c := int(256.0 * self.exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond)
+
+		if b < c {
+			glog.Infof("[chaos][%s]%d <> %d\n", self.residentId, b, c)
+			return
+		}
+	}
+}
+
+// streamHopToProtocol converts a model stream hop to the client's
+// `StreamOpen` form (nil source/destination stay unset)
+func streamHopToProtocol(hop model.StreamHop) *protocol.StreamOpen {
+	streamOpen := &protocol.StreamOpen{
+		StreamId: hop.StreamId().Bytes(),
+	}
+	if sourceId := hop.SourceId(); sourceId != nil {
+		streamOpen.SourceId = sourceId.Bytes()
+	}
+	if destinationId := hop.DestinationId(); destinationId != nil {
+		streamOpen.DestinationId = destinationId.Bytes()
+	}
+	return streamOpen
+}
+
+// streamHopsToReset builds the authoritative stream snapshot for a client: a
+// `StreamReset` listing the current hops. A reconcile-style client keeps the
+// relisted streams alive; an older client cancels-and-reopens
+func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
+	streams := []*protocol.StreamOpen{}
+	for _, hop := range hops {
+		streams = append(streams, streamHopToProtocol(hop))
+	}
+	return &protocol.StreamReset{
+		Streams: streams,
+	}
+}
+
+func (self *Resident) Run() {
+	defer self.cancel()
+
+	// the initial stream state is sent as a `StreamReset` with the full hop
+	// snapshot from the listener's first read (below), NOT an eager empty
+	// reset: a client with a reconcile-style reset handler keeps its relisted
+	// streams (and their p2p transports) alive across a resident migration
+	// (CONNECTDRAIN2.md §3.3). An older client cancels-and-reopens on the
+	// reset, which matches the previous empty-reset behavior.
+	// Subsequent hop changes are sent incrementally (open/close), identical
+	// for both client generations.
+	streamHopAccumulator := model.NewStreamHopAccumulator(
+		func(hop model.StreamHop) {
+			// added
+			streamOpen := streamHopToProtocol(hop)
+			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
+			self.sendListenerFrame(frame)
+		},
+		func(hop model.StreamHop) {
+			// removed
+			streamClose := &protocol.StreamClose{
+				StreamId: hop.StreamId().Bytes(),
+			}
+			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
+			self.sendListenerFrame(frame)
+		},
+	)
+	// the listener callback runs on the single listener goroutine
+	initialHopSync := true
+	streamHopListener := model.NewStreamHopListener(
+		self.ctx,
+		self.clientId,
+		func(event *model.StreamHopEvent) {
+			if initialHopSync {
+				initialHopSync = false
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamHopsToReset(event.StreamHops))
+				self.sendListenerFrame(frame)
+			}
+			// the accumulator emits adds for the first snapshot too; the
+			// client's open is idempotent for streams kept by the reset
+			streamHopAccumulator.Event(event)
+		},
+		self.exchange.streamHopsPollInterval(),
+		self.exchange.listenerFullReadEvery(),
+	)
+	if self.afterStreamHopListenerStartForTest != nil {
+		self.afterStreamHopListenerStartForTest(streamHopListener)
+	}
+	defer func() {
+		streamHopListener.CloseAndWait()
+		if self.afterStreamHopListenerCloseWaitForTest != nil {
+			self.afterStreamHopListenerCloseWaitForTest()
+		}
+	}()
+	if self.exchange.keyEventSubscriber != nil {
+		// key events are the live delivery; the poll above is the corrective
+		// backstop (PEERSSTREAMS2.md). The corrective cadence is minutes, so
+		// registration forces the initial full read immediately.
+		removeHopListener := self.exchange.keyEventSubscriber.AddHopListener(self.clientId, streamHopListener)
+		defer removeHopListener()
+		streamHopListener.Resync()
+	}
+
+	// only top-level client-category peers get network peer updates.
+	// The listener polls the per-network version counter and sends the
+	// complete list on any change (PEERS2.md). Proxy clients are counted but
+	// get no listener — a hosted device does not consume the peer list.
+	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
+		networkPeerListener := model.NewNetworkPeerListener(
+			self.ctx,
+			*self.peerNetworkId,
+			self.handleNetworkPeerEvent,
+			self.exchange.networkPeersPollInterval(),
+			self.exchange.listenerFullReadEvery(),
+		)
+		defer networkPeerListener.CloseAndWait()
+		if self.exchange.keyEventSubscriber != nil {
+			// key events deliver per-peer deltas; the poll above is the
+			// corrective backstop (PEERSSTREAMS2.md). The corrective cadence is
+			// minutes, so registration forces the initial full read immediately.
+			removePeerListener := self.exchange.keyEventSubscriber.AddPeerListener(*self.peerNetworkId, networkPeerListener)
+			defer removePeerListener()
+			networkPeerListener.Resync()
+		}
+	}
+
+	select {
+	case <-self.ctx.Done():
+	case <-self.client.Done():
+	}
+}
+
+// the number of peers per `NetworkPeersUpdate` frame
+const networkPeersUpdateBatchSize = 50
+
+// handleNetworkPeerEvent translates peer registry events into control frames
+// for the client, excluding the client itself from the peer list
+func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
+	frames := []*protocol.Frame{}
+	if event.NetworkPeerEventType == model.NetworkPeerEventTypeReset {
+		frames = append(frames, connect.RequireToFrameWithDefaultProtocolVersion(&protocol.NetworkPeersReset{}))
+	}
+
+	peers := []*protocol.NetworkPeer{}
+	flush := func() {
+		if 0 < len(peers) {
+			frames = append(frames, connect.RequireToFrameWithDefaultProtocolVersion(&protocol.NetworkPeersUpdate{
+				Peers: peers,
+			}))
+			peers = []*protocol.NetworkPeer{}
+		}
+	}
+	for _, peer := range event.Peers {
+		if peer.ClientId == self.clientId {
+			continue
+		}
+		peers = append(peers, networkPeerToProtocol(peer))
+		if networkPeersUpdateBatchSize <= len(peers) {
+			flush()
+		}
+	}
+	flush()
+
+	for _, frame := range frames {
+		self.sendListenerFrame(frame)
+	}
+}
+
+// Sends one listener-produced control frame to the resident client. A failed
+// send leaves ownership with the caller, including when listener delivery
+// loses the client-close race, so this boundary must return the pooled bytes.
+func (self *Resident) sendListenerFrame(frame *protocol.Frame) {
+	if self.beforeListenerFrameSendForTest != nil {
+		self.beforeListenerFrameSendForTest(frame)
+	}
+	if !self.client.Send(frame, connect.Id(self.clientId), nil) {
+		connect.MessagePoolReturn(frame.MessageBytes)
+	}
+}
+
+func networkPeerToProtocol(peer *model.NetworkPeer) *protocol.NetworkPeer {
+	p := &protocol.NetworkPeer{
+		ClientId:   peer.ClientId.Bytes(),
+		Principal:  peer.Principal,
+		Roles:      peer.Roles,
+		DeviceName: peer.DeviceName,
+		DeviceSpec: peer.DeviceSpec,
+	}
+	for _, provideMode := range peer.ProvideModes {
+		p.ProvideModes = append(p.ProvideModes, protocol.ProvideMode(provideMode))
+	}
+	if peer.DisconnectTime != nil {
+		disconnectTime := uint64(peer.DisconnectTime.UnixMilli())
+		p.DisconnectTime = &disconnectTime
+	}
+	return p
+}
+
+/*
+func (self *Resident) clientForward() {
+	defer self.cancel()
+
+	// resident transports via `AddTransport` will route to the clientId only
+	// add a route for all other destinations to route via the exchange forward
+
+	forward := make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	forwardTransport := connect.NewSendClientTransportWithComplement(true, connect.Id(self.clientId))
+
+	routeManager := self.client.RouteManager()
+	routeManager.UpdateTransport(forwardTransport, []connect.Route{forward})
+
+	defer func() {
+		routeManager.RemoveTransport(forwardTransport)
+	}()
+
+	for {
+		select {
+		case <- self.ctx.Done():
+			return
+		case transferFrameBytes := <- forward:
+			filteredTransferFrame := &protocol.FilteredTransferFrame{}
+			if err := proto.Unmarshal(transferFrameBytes, filteredTransferFrame); err != nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+			if filteredTransferFrame.TransferPath == nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+			sourceId, err := connect.IdFromBytes(filteredTransferFrame.TransferPath.SourceId)
+			if err != nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+			destinationId, err := connect.IdFromBytes(filteredTransferFrame.TransferPath.DestinationId)
+			if err != nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+
+			self.handleClientForward(sourceId, destinationId, transferFrameBytes)
+		}
+	}
+}
+*/
+
+// `connect.ForwardFunction`
+func (self *Resident) handleClientForward(path connect.TransferPath, transferFrameBytes []byte) {
+	sourceId := server.Id(path.SourceId)
+	destinationId := server.Id(path.DestinationId)
+
+	self.UpdateActivity()
+
+	if destinationId == ControlId {
+		// the resident client id is `ControlId`. It should never forward to itself.
+		panic("Bad forward destination.")
+	}
+
+	if sourceId != self.clientId {
+		if glog.V(1) {
+			glog.Infof("[rf]abuse not from client (%s<>%s) ->%s len=%d\n", sourceId, self.clientId, destinationId, len(transferFrameBytes))
+		}
+		// the message is not from the client
+		// clients are not allowed to forward from other clients
+		// drop without delay. This is called from the client receive loop,
+		// which must not block: a delay here freezes all forwarding for the
+		// client (data and acks), which gridlocks bidirectional transfer.
+		abuseDroppedCounter.Inc()
+		return
+	}
+
+	if !self.forwardIngressAdmission.start() {
+		return
+	}
+	defer self.forwardIngressAdmission.done()
+	shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
+	message := residentForwardIngress{
+		path:               path,
+		transferFrameBytes: shared,
+	}
+	shardIndex := int(destinationId[len(destinationId)-1]) % len(self.forwardIngress)
+	select {
+	case <-self.ctx.Done():
+		connect.MessagePoolReturn(shared)
+	case self.forwardIngress[shardIndex] <- message:
+		return
+	default:
+		connect.MessagePoolReturn(shared)
+		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
+		// This callback carries reliable Transfer frames. It cannot block the
+		// shared client receive loop, so retire this generation on saturation;
+		// reconnect/recovery can replay from a known sequence boundary.
+		self.cancel()
+		if glog.V(1) {
+			glog.Infof("[rf]retire ingress full %s->%s\n", sourceId, destinationId)
+		}
+	}
+}
+
+// Owns one shared transfer-frame buffer after zero-wait callback admission.
+// Slow forward construction and sender backpressure run only on the
+// destination-stable worker shard.
+func (self *Resident) processClientForward(path connect.TransferPath, transferFrameBytes []byte) {
+	sourceId := server.Id(path.SourceId)
+	destinationId := server.Id(path.DestinationId)
+	messageOwned := true
+	defer func() {
+		if messageOwned {
+			connect.MessagePoolReturn(transferFrameBytes)
+		}
+	}()
+
+	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
+
+	initForward := func() *ResidentForward {
+		// Fast path: reuse a live existing forward without doing any slow work.
+		// This is the per-frame lookup, so it takes only a read lock.
+		if existing := func() *ResidentForward {
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
+			if f := self.forwards[destinationId]; f != nil && f.UpdateActivity() {
+				return f
+			}
+			return nil
+		}(); existing != nil {
+			return existing
+		}
+
+		// Check the per-resident forward limit (snapshot; the limit can be
+		// momentarily exceeded by one if multiple goroutines race past this
+		// point, which is acceptable).
+		limit := func() bool {
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
+			_, ok := self.forwards[destinationId]
+			return !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards)
+		}()
+		if limit {
+			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
+			abuseDroppedCounter.Inc()
+			return nil
+		}
+
+		// Slow path: contract check may hit the DB. Do it without holding
+		// Resident.stateLock so concurrent forwards do not serialize on it.
+		if self.exchange.settings.ForwardEnforceActiveContracts {
+			if !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
+				if glog.V(1) {
+					glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
+				}
+				abuseDroppedCounter.Inc()
+				return nil
+			}
+		}
+
+		// Build a new forward. No lock needed.
+		forward := NewResidentForward(self.ctx, self.exchange, destinationId)
+		if !self.startForwardWorker(forward, func() {
+			defer func() {
+				forward.Cancel()
+				func() {
+					self.stateLock.Lock()
+					defer self.stateLock.Unlock()
+					if currentForward := self.forwards[destinationId]; forward == currentForward {
+						delete(self.forwards, destinationId)
+					}
+				}()
+			}()
+			forward.Run()
+
+			if glog.V(1) {
+				glog.Infof("[rf]close %s->%s\n", sourceId, destinationId)
+			}
+		}) {
+			forward.Close()
+			return nil
+		}
+		go server.HandleError(func() {
+			for {
+				if forward.CancelIfIdle() {
+					if glog.V(1) {
+						glog.Infof("[rf]idle %s->%s\n", sourceId, destinationId)
+					}
+					return
+				}
+
+				select {
+				case <-forward.Done():
+					return
+				case <-time.After(self.exchange.settings.ForwardIdleTimeout):
+				}
+			}
+		})
+
+		// Install. Another goroutine may have raced ahead with a live forward
+		// while we were doing the contract check; if so, yield to it.
+		var replacedForward *ResidentForward
+		var raceWinner *ResidentForward
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if existing := self.forwards[destinationId]; existing != nil && existing.UpdateActivity() {
+				raceWinner = existing
+				return
+			}
+			replacedForward = self.forwards[destinationId]
+			self.forwards[destinationId] = forward
+		}()
+		if raceWinner != nil {
+			forward.Cancel()
+			return raceWinner
+		}
+		if replacedForward != nil {
+			replacedForward.Cancel()
+		}
+		if glog.V(1) {
+			glog.Infof("[rf]open %s->%s\n", sourceId, destinationId)
+		}
+		return forward
+	}
+
+	c := func() bool {
+		forward := initForward()
+
+		if forward == nil {
+			return false
+		}
+
+		if !forward.sendAdmission.start() {
+			return false
+		}
+		defer forward.sendAdmission.done()
+
+		// fast path: enqueue without blocking
+		select {
+		case <-forward.Done():
+			return false
+		case forward.send <- transferFrameBytes:
+			messageOwned = false
+			return true
+		default:
+		}
+
+		// Forwards are nonblocking in production. A test may let this owned
+		// sender worker wait for deterministic delivery over a zero-size buffer;
+		// that wait never propagates into the Client receive callback.
+		if 0 < self.exchange.settings.ForwardTimeout {
+			select {
+			case <-forward.Done():
+				return false
+			case forward.send <- transferFrameBytes:
+				messageOwned = false
+				return true
+			case <-time.After(self.exchange.settings.ForwardTimeout):
+			}
+		}
+
+		forwardDroppedCounter.Inc()
+		if glog.V(1) {
+			glog.Infof("[rf]drop full %s->%s\n", sourceId, destinationId)
+		}
+		return false
+	}
+
+	if glog.V(2) {
+		server.TraceWithReturn(
+			fmt.Sprintf("[rf]handle client forward %s->%s", sourceId, destinationId),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
+// `connect.ReceiveFunction`
+func (self *Resident) handleClientReceive(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
+	sourceId := server.Id(source.SourceId)
+
+	if sourceId != self.clientId {
+		if glog.V(1) {
+			glog.Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
+		}
+		// only messages from the resident client are processed by the resident
+		// drop without delay (this is called from the client receive dispatch,
+		// which must not block)
+		abuseDroppedCounter.Inc()
+		return
+	}
+
+	self.UpdateActivity()
+	if len(frames) == 0 || !self.controlIngressAdmission.start() {
+		return
+	}
+	defer self.controlIngressAdmission.done()
+	byteCount := residentControlFrameByteCount(frames)
+	shared := shareResidentControlFrames(frames)
+	select {
+	case <-self.ctx.Done():
+		returnResidentControlFrames(shared)
+	case self.controlIngress <- shared:
+		return
+	default:
+		returnResidentControlFrames(shared)
+		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientControl, byteCount)
+		// Control Transfer delivery has already reached its final application
+		// callback, so silently skipping a frame can acknowledge durable state
+		// that was never applied. Retire the resident generation and let normal
+		// reconnect/control sync replay it.
+		self.Cancel()
+	}
+}
+
+// The caller removes the returned transport after its socket workers stop.
+func (self *Resident) AddTransport() (
+	send chan []byte,
+	receive chan []byte,
+	closeTransport func(),
+	returnErr error,
+) {
+	return self.AddTransportWithProperties(connect.TransferCarrierProperties{})
+}
+
+// Publishes one resident route with the delivery semantics negotiated by its
+// edge connection.
+func (self *Resident) AddTransportWithProperties(
+	properties connect.TransferCarrierProperties,
+) (
+	send chan []byte,
+	receive chan []byte,
+	closeTransport func(),
+	returnErr error,
+) {
+	send = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	receive = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+
+	// in `connect` the transport is bidirectional
+	// in the resident, each transport is a single direction
+	transport := &clientTransport{
+		sendTransport:    connect.NewSendClientTransport(connect.DestinationId(connect.Id(self.clientId))),
+		receiveTransport: connect.NewReceiveGatewayTransport(),
+	}
+
+	routeManager := self.client.RouteManager()
+	routeManager.UpdateTransportWithProperties(
+		transport.sendTransport,
+		[]connect.Route{send},
+		properties,
+	)
+	routeManager.UpdateTransportWithProperties(
+		transport.receiveTransport,
+		[]connect.Route{receive},
+		connect.TransferCarrierProperties{
+			ReceiveReliability: connect.CarrierReliabilityReliable,
+		},
+	)
+
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.transports[transport] = true
+	}()
+
+	closeTransport = func() {
+		routeManager := self.client.RouteManager()
+		routeManager.RemoveTransport(transport.sendTransport)
+		routeManager.RemoveTransport(transport.receiveTransport)
+
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			delete(self.transports, transport)
+		}()
+
+		// note `send` is not closed. This channel is left open.
+		// it used to be closed after a delay, but it is not needed to close it.
+	}
+
+	return
+}
+
+// AddForward attaches one exchange-forward queue to the resident client.
+func (self *Resident) AddForward() (
+	forward chan []byte,
+	closeForward func(),
+	returnErr error,
+) {
+	return self.addForwardWithReceive(func(message []byte) bool {
+		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
+	})
+}
+
+// addForwardWithReceive creates the accept-side forward queue. Tests provide
+// a controlled receiver to verify teardown while a delivery is in progress.
+func (self *Resident) addForwardWithReceive(
+	receive func(message []byte) bool,
+) (
+	forward chan []byte,
+	closeForward func(),
+	returnErr error,
+) {
+	forwardCtx, forwardCancel := context.WithCancel(self.ctx)
+
+	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	forwardDone := make(chan struct{})
+
+	go server.HandleError(func() {
+		defer func() {
+			forwardCancel()
+			close(forwardDone)
+		}()
+		for {
+			select {
+			case <-forwardCtx.Done():
+				return
+			case message, ok := <-forward:
+				if !ok {
+					return
+				}
+				if !receive(message) {
+					forwardReceiveDroppedCounter.Inc()
+					if glog.V(1) {
+						glog.Infof("[rf]drop receive full %s\n", self.clientId)
+					}
+					connect.MessagePoolReturn(message)
+				}
+
+			}
+		}
+	})
+
+	var closeOnce sync.Once
+	closeForward = func() {
+		closeOnce.Do(func() {
+			forwardCancel()
+			if self.beforeForwardCloseJoinForTest != nil {
+				self.beforeForwardCloseJoinForTest()
+			}
+			<-forwardDone
+			returnReadyPooledMessages(forward)
+		})
+	}
+
+	return
+}
+
+// func (self *Resident) Forward(transferFrameBytes []byte) bool {
+// 	self.UpdateActivity()
+// 	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.WriteTimeout)
+// }
+
+func (self *Resident) UpdateActivity() bool {
+	select {
+	case <-self.ctx.Done():
+		return false
+	default:
+		self.lastActivityNanos.Store(time.Now().UnixNano())
+		return true
+	}
+}
+
+// TransportCount is the number of client transports attached to this
+// resident. Zero means the client currently has no connection to the
+// platform via this resident.
+func (self *Resident) TransportCount() int {
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
+	return len(self.transports)
+}
+
+// idle if no activity in `ExchangeResidentTtl`
+func (self *Resident) CancelIfIdle() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+	}
+
+	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+	if self.exchange.settings.ExchangeResidentTtl <= idleTimeout {
+		self.cancel()
+		return true
+	}
+	return false
+}
+
+func (self *Resident) IsDone() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	case <-self.client.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *Resident) Done() <-chan struct{} {
+	return self.ctx.Done()
+}
+
+func (self *Resident) Cancel() {
+	self.cancel()
+	self.client.Cancel()
+}
+
+// Starts one owned exchange-forward loop unless resident shutdown has begun.
+func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) bool {
+	self.forwardWorkerLock.Lock()
+	defer self.forwardWorkerLock.Unlock()
+	if self.forwardWorkersClosed {
+		return false
+	}
+	self.forwardWorkers.Add(1)
+	go server.HandleError(func() {
+		defer self.forwardWorkers.Done()
+		run()
+	}, self.cancel)
+	return true
+}
+
+// Cancels and removes every forward currently visible to routing.
+func (self *Resident) cancelForwards() {
+	var forwards []*ResidentForward
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		forwards = slices.Collect(maps.Values(self.forwards))
+		clear(self.forwards)
+	}()
+	for _, forward := range forwards {
+		forward.Cancel()
+	}
+}
+
+// Stops admission and requests shutdown without waiting for owned workers.
+func (self *Resident) Close() {
+	self.closeOnce.Do(func() {
+		self.controlIngressAdmission.close()
+		self.forwardIngressAdmission.close()
+		self.forwardWorkerLock.Lock()
+		self.forwardWorkersClosed = true
+		self.forwardWorkerLock.Unlock()
+
+		self.cancel()
+		self.client.Cancel()
+		if self.clientReceiveUnsub != nil {
+			self.clientReceiveUnsub()
+		}
+		if self.clientForwardUnsub != nil {
+			self.clientForwardUnsub()
+		}
+		// self.streamHopListener.Close()
+		self.cancelForwards()
+	})
+}
+
+// Stops and joins the internal client and every exchange-forward loop.
+func (self *Resident) CloseAndWait(ctx context.Context) error {
+	self.Close()
+	if self.beforeClientCloseJoinForTest != nil {
+		self.beforeClientCloseJoinForTest()
+	}
+	clientErr := self.client.CloseAndWait(ctx)
+	self.controlIngressAdmission.wait()
+	self.forwardIngressAdmission.wait()
+	callbackErr := waitForWorkerGroup(ctx, &self.callbackWorkers, "resident callback workers")
+	if self.residentController != nil {
+		self.residentController.Close()
+	}
+	// A callback already admitted before Close may have installed its forward
+	// after the first snapshot. The client join makes this second sweep final.
+	self.cancelForwards()
+	forwardErr := waitForWorkerGroup(ctx, &self.forwardWorkers, "resident forward workers")
+	return errors.Join(clientErr, callbackErr, forwardErr)
+}
+
+type clientTransport struct {
+	sendTransport    connect.Transport
+	receiveTransport connect.Transport
+}
+
+type limiter struct {
+	ctx           context.Context
+	mutex         sync.Mutex
+	minTimeout    time.Duration
+	lastCheckTime time.Time
+}
+
+func newLimiter(ctx context.Context, minTimeout time.Duration) *limiter {
+	return &limiter{
+		ctx:           ctx,
+		minTimeout:    minTimeout,
+		lastCheckTime: time.Time{},
+	}
+}
+
+// a simple delay since the last call
+func (self *limiter) delay() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	now := time.Now()
+	timeout := self.minTimeout - now.Sub(self.lastCheckTime)
+	self.lastCheckTime = now
+	if 0 < timeout {
+		if glog.V(2) {
+			glog.Infof("[limiter]delay for %.2fms\n", float64(timeout)/float64(time.Millisecond))
+		}
+		select {
+		case <-self.ctx.Done():
+		case <-time.After(timeout):
+		}
+	}
+}
