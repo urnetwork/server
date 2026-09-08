@@ -76,28 +76,38 @@ type artifactRetention struct {
 	Objects                   []retainedArtifact `json:"objects"`
 }
 
+const defaultCompetitionArtifactBucket = "competition"
+
 func loadArtifactArchive(bucket string) (artifactArchive, error) {
 	store, ok := server.LoadBlobStore()
 	if !ok {
 		return nil, errors.New("competition MinIO blob store is unavailable")
 	}
-	if bucket = strings.TrimSpace(bucket); bucket != "" {
-		config, present := server.LoadBlobStoreConfig()
-		if !present {
-			return nil, errors.New("competition MinIO blob-store configuration is unavailable")
-		}
-		if !config.Local {
-			config.Bucket = bucket
-			var err error
-			store, err = server.NewBlobStore(config)
-			if err != nil {
-				return nil, fmt.Errorf("competition MinIO bucket %q: %w", bucket, err)
-			}
-		}
+	if bucket = strings.TrimSpace(bucket); bucket == "" {
+		bucket = defaultCompetitionArtifactBucket
 	}
 	env, _ := server.Env()
-	if env != "local" && strings.HasPrefix(store.Authority(), "local:") {
-		return nil, errors.New("competition artifact retention requires MinIO outside local development")
+	if strings.HasPrefix(store.Authority(), "local:") {
+		if env != "local" {
+			return nil, errors.New("competition artifact retention requires MinIO outside local development")
+		}
+		retainedStore, retained := store.(server.RetainedBlobStore)
+		if !retained {
+			return nil, errors.New("competition blob store does not support immutable retention")
+		}
+		return &blobArtifactArchive{store: retainedStore}, nil
+	}
+	config, present := server.LoadBlobStoreConfig()
+	if !present {
+		return nil, errors.New("competition MinIO blob-store configuration is unavailable")
+	}
+	if !config.Local {
+		config.Bucket = bucket
+		var err error
+		store, err = server.NewBlobStore(config)
+		if err != nil {
+			return nil, fmt.Errorf("competition MinIO bucket %q: %w", bucket, err)
+		}
 	}
 	retainedStore, ok := store.(server.RetainedBlobStore)
 	if !ok {
