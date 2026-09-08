@@ -149,6 +149,17 @@ production alert.
 Before any service release build, run the registered `release-builder` signal
 against the intended environment. The local repositories are intentionally the
 authoritative deployment source, including deliberate uncommitted changes.
+Enumerate every local module replacement used by the target (`replace ../...`
+in the module graph) before the build and coordinate ownership of those sibling
+checkouts. A stable, intentional dependency diff is a valid input and must be
+recorded; a sibling that another agent or process is still changing is not yet
+a defined artifact input. Wait for that edit to settle, then record the base,
+tracked diff, and participating untracked bytes for the primary repository and
+each local replacement. Do not infer dependency cleanliness from the primary
+binary's `vcs.modified` bit: Go reports that bit for the main module, while code
+from a dirty local replacement can still be compiled into the service. This is
+coordination and evidence for the existing local-checkout workflow, not a
+Warpctl clean-worktree gate or a replacement build design.
 The exact local `warpctl` resolved for the build and every installed
 managed-host copy must expose a parseable full Go VCS base revision and Boolean
 modified bit; `modified=true` is context, not a fault. A desired version label,
