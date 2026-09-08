@@ -101,6 +101,7 @@ func NewSignals() []Signal {
 		NewKeyPublicationSignal(),
 		NewSubtensorSignal(),
 		NewSubtensorConvergenceSignal(),
+		NewPointsReadinessSignal(),
 		NewEdgeIPv6Signal(),
 		NewTLSExpirySignal(),
 		NewGrafanaDatasourcesSignal(),

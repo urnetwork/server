@@ -216,6 +216,13 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		home = "."
 	}
+	stEnabled := controller.StEnabled()
+	stDeploymentKey := ""
+	if stEnabled {
+		if key, ok := controller.StDeploymentKey(); ok {
+			stDeploymentKey = string(key)
+		}
+	}
 	settings := SignalSettings{
 		Environment:         env,
 		PublicDomain:        strings.TrimSpace(services.Domain),
@@ -223,7 +230,8 @@ func LoadSignalSettings() (SignalSettings, error) {
 		ManagerHostname:     activeManagerHostnameFromServices(services),
 		LogServices:         logServices,
 		LogServiceBlocks:    logServiceBlocks,
-		VerificationEnabled: controller.StEnabled(),
+		VerificationEnabled: stEnabled,
+		STDeploymentKey:     stDeploymentKey,
 		SSHUser:             y.Ssh.User,
 		SSHDevUser:          y.Ssh.DevUser,
 		SSHKeyPaths:         append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),

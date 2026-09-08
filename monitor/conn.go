@@ -158,6 +158,7 @@ type monitorConfig struct {
 	logServices         []string            // active services.yml service inventory
 	logServiceBlocks    map[string][]string // active per-service block inventory
 	verificationEnabled bool
+	stDeploymentKey     string
 
 	sshUser     string // deployed login user
 	sshDevUser  string // login user for local dev over the overlay

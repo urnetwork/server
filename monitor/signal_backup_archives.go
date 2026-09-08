@@ -30,13 +30,14 @@ github_result=$(systemctl show github-backup-archive.service -p Result --value 2
 github_exit_status=$(systemctl show github-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
 github_invocation_id=$(systemctl show github-backup-archive.service -p InvocationID --value 2>/dev/null || true)
 github_exec_start_monotonic=$(systemctl show github-backup-archive.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || true)
+github_exec_start=$(systemctl show github-backup-archive.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
+github_exec_start_epoch=$(date -d "${github_exec_start}" +%s 2>/dev/null || true)
 github_timer_state=$(systemctl show github-backup-archive.timer -p ActiveState --value 2>/dev/null || true)
 github_timer_unit_file_state=$(systemctl show github-backup-archive.timer -p UnitFileState --value 2>/dev/null || true)
 github_timer_next=$(systemctl show github-backup-archive.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
 github_timer_next_epoch=$(date -d "${github_timer_next}" +%s 2>/dev/null || true)
-github_environment=$(systemctl show github-backup-archive.service -p Environment --value 2>/dev/null || true)
-github_archive_path=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PATH=//p' | tail -n 1)
-github_archive_mount=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_MOUNT=//p' | tail -n 1)
+github_timer_last=$(systemctl show github-backup-archive.timer -p LastTriggerUSec --value 2>/dev/null || true)
+github_timer_last_epoch=$(date -d "${github_timer_last}" +%s 2>/dev/null || true)
 remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
 remote_unit_substate=$(systemctl show remote-backup-archive.service -p SubState --value 2>/dev/null || true)
 remote_main_pid=$(systemctl show remote-backup-archive.service -p MainPID --value 2>/dev/null || true)
@@ -46,10 +47,14 @@ remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUS
 remote_exit_status=$(systemctl show remote-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
 remote_invocation_id=$(systemctl show remote-backup-archive.service -p InvocationID --value 2>/dev/null || true)
 remote_exec_start_monotonic=$(systemctl show remote-backup-archive.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || true)
+remote_exec_start=$(systemctl show remote-backup-archive.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
+remote_exec_start_epoch=$(date -d "${remote_exec_start}" +%s 2>/dev/null || true)
 remote_timer_state=$(systemctl show remote-backup-archive.timer -p ActiveState --value 2>/dev/null || true)
 remote_timer_unit_file_state=$(systemctl show remote-backup-archive.timer -p UnitFileState --value 2>/dev/null || true)
 remote_timer_next=$(systemctl show remote-backup-archive.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
 remote_timer_next_epoch=$(date -d "${remote_timer_next}" +%s 2>/dev/null || true)
+remote_timer_last=$(systemctl show remote-backup-archive.timer -p LastTriggerUSec --value 2>/dev/null || true)
+remote_timer_last_epoch=$(date -d "${remote_timer_last}" +%s 2>/dev/null || true)
 remote_boot_epoch=$(awk '$1 == "btime" {print $2}' /proc/stat 2>/dev/null)
 remote_environment=$(systemctl show remote-backup-archive.service -p Environment --value 2>/dev/null || true)
 remote_archive_path=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PATH=//p' | tail -n 1)
@@ -63,6 +68,9 @@ remote_mount_source=unknown
 remote_mount_fstype=unknown
 remote_mount_options=unknown
 remote_mount_lineage=unknown
+archive_root_observation=unobservable
+github_archive_path_state=unknown
+remote_archive_path_state=unknown
 archive_paths_match=0
 archive_mounts_match=0
 archive_paths_on_mount=0
@@ -76,41 +84,32 @@ if test -n "${remote_mount}" && mountpoint -q -- "${remote_mount}"; then
 	remote_mount_lineage=$(lsblk -srno KNAME -- "${remote_mount_source}" 2>/dev/null |
 		awk '$1 ~ /^[A-Za-z0-9._+-]+$/ && !seen[$1]++ {if (out != "") out=out ","; out=out $1} END {print out}')
 fi
-archive_path_state() {
-	case "$1" in
-		/*)
-			if test -d "$1"; then
-				printf directory
-			elif test -e "$1" || test -L "$1"; then
-				printf non-directory
-			else
-				printf missing
-			fi
-			;;
-		*) printf invalid ;;
-	esac
-}
-github_archive_path_state=$(archive_path_state "${github_archive_path}")
-remote_archive_path_state=$(archive_path_state "${remote_archive_path}")
-if test -n "${github_archive_path}" && test "${github_archive_path}" = "${remote_archive_path}"; then
-	archive_paths_match=1
-fi
-if test -n "${github_archive_mount}" && test "${github_archive_mount}" = "${remote_mount}"; then
-	archive_mounts_match=1
-fi
-if test "${github_archive_path_state}" = directory &&
-	test "${remote_archive_path_state}" = directory &&
-	test "${archive_mounts_match}" = 1; then
-	github_archive_path_mount=$(findmnt -rn -T "${github_archive_path}" -o TARGET 2>/dev/null | head -n 1)
-	remote_archive_path_mount=$(findmnt -rn -T "${remote_archive_path}" -o TARGET 2>/dev/null | head -n 1)
-	if test "${github_archive_path_mount}" = "${remote_mount}" &&
-		test "${remote_archive_path_mount}" = "${remote_mount}"; then
-		archive_paths_on_mount=1
+if archive_root_status=$(sudo -n /var/bringyour/backup/archive-write-clearance.sh --root-status 2>/dev/null); then
+	archive_root_line_count=$(printf '%s\n' "${archive_root_status}" | awk 'END {print NR}')
+	if test "${archive_root_line_count}" = 6; then
+		github_archive_path_state_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^github_archive_path_state=//p')
+		remote_archive_path_state_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^remote_archive_path_state=//p')
+		archive_paths_match_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^archive_paths_match=//p')
+		archive_mounts_match_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^archive_mounts_match=//p')
+		archive_paths_on_mount_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^archive_paths_on_mount=//p')
+		archive_path_permissions_secure_candidate=$(printf '%s\n' "${archive_root_status}" | sed -n 's/^archive_path_permissions_secure=//p')
+		archive_root_values_valid=1
+		case "${github_archive_path_state_candidate}" in directory|missing|non-directory|invalid) ;; *) archive_root_values_valid=0 ;; esac
+		case "${remote_archive_path_state_candidate}" in directory|missing|non-directory|invalid) ;; *) archive_root_values_valid=0 ;; esac
+		case "${archive_paths_match_candidate}" in true|false) ;; *) archive_root_values_valid=0 ;; esac
+		case "${archive_mounts_match_candidate}" in true|false) ;; *) archive_root_values_valid=0 ;; esac
+		case "${archive_paths_on_mount_candidate}" in true|false) ;; *) archive_root_values_valid=0 ;; esac
+		case "${archive_path_permissions_secure_candidate}" in true|false) ;; *) archive_root_values_valid=0 ;; esac
+		if test "${archive_root_values_valid}" = 1; then
+			archive_root_observation=observable
+			github_archive_path_state=${github_archive_path_state_candidate}
+			remote_archive_path_state=${remote_archive_path_state_candidate}
+			archive_paths_match=${archive_paths_match_candidate}
+			archive_mounts_match=${archive_mounts_match_candidate}
+			archive_paths_on_mount=${archive_paths_on_mount_candidate}
+			archive_path_permissions_secure=${archive_path_permissions_secure_candidate}
+		fi
 	fi
-fi
-if test "${archive_paths_match}" = 1 && test "${remote_archive_path_state}" = directory &&
-	test "$(stat -c '%u:%g:%a' -- "${remote_archive_path}" 2>/dev/null || true)" = 0:0:700; then
-	archive_path_permissions_secure=1
 fi
 case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
 case "${github_unit_substate}" in '') github_unit_substate=unknown ;; esac
@@ -122,9 +121,11 @@ case "${github_invocation_id}" in
 	*) github_invocation_id=present ;;
 esac
 case "${github_exec_start_monotonic}" in ''|*[!0-9]*) github_exec_start_monotonic=0 ;; esac
+case "${github_exec_start_epoch}" in ''|*[!0-9]*) github_exec_start_epoch=0 ;; esac
 case "${github_timer_state}" in '') github_timer_state=unknown ;; esac
 case "${github_timer_unit_file_state}" in '') github_timer_unit_file_state=unknown ;; esac
 case "${github_timer_next_epoch}" in ''|*[!0-9]*) github_timer_next_epoch=0 ;; esac
+case "${github_timer_last_epoch}" in ''|*[!0-9]*) github_timer_last_epoch=0 ;; esac
 case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
 case "${remote_unit_substate}" in '') remote_unit_substate=unknown ;; esac
 case "${remote_main_pid}" in ''|*[!0-9]*) remote_main_pid=0 ;; esac
@@ -137,9 +138,11 @@ case "${remote_invocation_id}" in
 	*) remote_invocation_id=present ;;
 esac
 case "${remote_exec_start_monotonic}" in ''|*[!0-9]*) remote_exec_start_monotonic=0 ;; esac
+case "${remote_exec_start_epoch}" in ''|*[!0-9]*) remote_exec_start_epoch=0 ;; esac
 case "${remote_timer_state}" in '') remote_timer_state=unknown ;; esac
 case "${remote_timer_unit_file_state}" in '') remote_timer_unit_file_state=unknown ;; esac
 case "${remote_timer_next_epoch}" in ''|*[!0-9]*) remote_timer_next_epoch=0 ;; esac
+case "${remote_timer_last_epoch}" in ''|*[!0-9]*) remote_timer_last_epoch=0 ;; esac
 case "${remote_boot_epoch}" in ''|*[!0-9]*) remote_boot_epoch=0 ;; esac
 case "${remote_pg_source}" in '') remote_pg_source=unknown ;; esac
 case "${remote_pg_port}" in ''|*[!0-9]*) remote_pg_port=0 ;; esac
@@ -170,9 +173,12 @@ printf 'github_result=%s\n' "${github_result}"
 printf 'github_exit_status=%s\n' "${github_exit_status}"
 printf 'github_invocation_id=%s\n' "${github_invocation_id}"
 printf 'github_exec_start_monotonic=%s\n' "${github_exec_start_monotonic}"
+printf 'github_exec_start_epoch=%s\n' "${github_exec_start_epoch}"
 printf 'github_timer_state=%s\n' "${github_timer_state}"
 printf 'github_timer_unit_file_state=%s\n' "${github_timer_unit_file_state}"
 printf 'github_timer_next_epoch=%s\n' "${github_timer_next_epoch}"
+printf 'github_timer_last_epoch=%s\n' "${github_timer_last_epoch}"
+printf 'archive_root_observation=%s\n' "${archive_root_observation}"
 printf 'github_archive_path_state=%s\n' "${github_archive_path_state}"
 printf 'remote_archive_path_state=%s\n' "${remote_archive_path_state}"
 printf 'archive_paths_match=%s\n' "${archive_paths_match}"
@@ -188,9 +194,11 @@ printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
 printf 'remote_exit_status=%s\n' "${remote_exit_status}"
 printf 'remote_invocation_id=%s\n' "${remote_invocation_id}"
 printf 'remote_exec_start_monotonic=%s\n' "${remote_exec_start_monotonic}"
+printf 'remote_exec_start_epoch=%s\n' "${remote_exec_start_epoch}"
 printf 'remote_timer_state=%s\n' "${remote_timer_state}"
 printf 'remote_timer_unit_file_state=%s\n' "${remote_timer_unit_file_state}"
 printf 'remote_timer_next_epoch=%s\n' "${remote_timer_next_epoch}"
+printf 'remote_timer_last_epoch=%s\n' "${remote_timer_last_epoch}"
 printf 'remote_boot_epoch=%s\n' "${remote_boot_epoch}"
 printf 'remote_pg_source=%s\n' "${remote_pg_source}"
 printf 'remote_pg_port=%s\n' "${remote_pg_port}"
@@ -316,9 +324,12 @@ type backupArchiveWriterObservation struct {
 	exitStatus                   int64
 	invocationID                 string
 	execStart                    int64
+	execStartAt                  time.Time
 	timerState                   string
 	timerUnitFileState           string
 	timerNext                    time.Time
+	timerLast                    time.Time
+	archiveRootObservation       string
 	githubArchivePathState       string
 	remoteArchivePathState       string
 	archivePathsMatch            bool
@@ -334,9 +345,11 @@ type backupArchiveWriterObservation struct {
 	remoteExitStatus             int64
 	remoteInvocationID           string
 	remoteExecStart              int64
+	remoteExecStartAt            time.Time
 	remoteTimerState             string
 	remoteTimerUnitFileState     string
 	remoteTimerNext              time.Time
+	remoteTimerLast              time.Time
 	remoteBoot                   time.Time
 	remotePGSource               string
 	remotePGPort                 int64
@@ -520,6 +533,7 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveVolume(writers[host.name]))
+		findings = append(findings, evaluateBackupArchiveRootObservation(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRoot(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveVolumeRecovery(now, writers[host.name])...)
 		findings = append(findings, evaluateBackupArchiveUnsafeActiveWriter(now, writers[host.name]))
@@ -663,9 +677,12 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_exit_status",
 		"github_invocation_id",
 		"github_exec_start_monotonic",
+		"github_exec_start_epoch",
 		"github_timer_state",
 		"github_timer_unit_file_state",
 		"github_timer_next_epoch",
+		"github_timer_last_epoch",
+		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
 		"archive_paths_match",
@@ -681,9 +698,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_exit_status",
 		"remote_invocation_id",
 		"remote_exec_start_monotonic",
+		"remote_exec_start_epoch",
 		"remote_timer_state",
 		"remote_timer_unit_file_state",
 		"remote_timer_next_epoch",
+		"remote_timer_last_epoch",
 		"remote_boot_epoch",
 		"remote_pg_source",
 		"remote_pg_port",
@@ -723,13 +742,23 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
 		}
 	}
+	if matched, _ := regexp.MatchString(`^(observable|unobservable)$`, values["archive_root_observation"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf(
+			"invalid archive_root_observation %q",
+			values["archive_root_observation"],
+		)
+	}
 	for _, key := range []string{
 		"github_archive_path_state",
 		"remote_archive_path_state",
 	} {
-		if matched, _ := regexp.MatchString(`^(directory|missing|non-directory|invalid)$`, values[key]); !matched {
+		if matched, _ := regexp.MatchString(`^(directory|missing|non-directory|invalid|unknown)$`, values[key]); !matched {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
 		}
+	}
+	if values["archive_root_observation"] == "observable" &&
+		(values["github_archive_path_state"] == "unknown" || values["remote_archive_path_state"] == "unknown") {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid archive path state for observable archive root")
 	}
 	if matched, _ := regexp.MatchString(`^(unknown|(?:/[A-Za-z0-9._-]+)+/?)$`, values["remote_mount"]); !matched {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount %q", values["remote_mount"])
@@ -779,9 +808,23 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
+	githubExecStartEpoch, err := parseBackupArchiveNonnegativeInt64(
+		"github_exec_start_epoch",
+		values["github_exec_start_epoch"],
+	)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
 	githubTimerNextEpoch, err := parseBackupArchiveNonnegativeInt64(
 		"github_timer_next_epoch",
 		values["github_timer_next_epoch"],
+	)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	githubTimerLastEpoch, err := parseBackupArchiveNonnegativeInt64(
+		"github_timer_last_epoch",
+		values["github_timer_last_epoch"],
 	)
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
@@ -799,6 +842,15 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		}
 		archivePathBools[key] = value
 	}
+	if values["archive_root_observation"] == "unobservable" &&
+		(values["github_archive_path_state"] != "unknown" ||
+			values["remote_archive_path_state"] != "unknown" ||
+			archivePathBools["archive_paths_match"] ||
+			archivePathBools["archive_mounts_match"] ||
+			archivePathBools["archive_paths_on_mount"] ||
+			archivePathBools["archive_path_permissions_secure"]) {
+		return backupArchiveWriterObservation{}, fmt.Errorf("archive root state is populated while observation is unobservable")
+	}
 	remoteMainPID, err := strconv.ParseInt(values["remote_main_pid"], 10, 64)
 	if err != nil || remoteMainPID < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote main PID %q", values["remote_main_pid"])
@@ -814,7 +866,15 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
+	remoteExecStartEpoch, err := parseBackupArchiveNonnegativeInt64("remote_exec_start_epoch", values["remote_exec_start_epoch"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
 	remoteTimerNextEpoch, err := parseBackupArchiveNonnegativeInt64("remote_timer_next_epoch", values["remote_timer_next_epoch"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	remoteTimerLastEpoch, err := parseBackupArchiveNonnegativeInt64("remote_timer_last_epoch", values["remote_timer_last_epoch"])
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
@@ -844,9 +904,12 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		exitStatus:                   githubExitStatus,
 		invocationID:                 values["github_invocation_id"],
 		execStart:                    githubExecStart,
+		execStartAt:                  unixIntegerTime(githubExecStartEpoch),
 		timerState:                   values["github_timer_state"],
 		timerUnitFileState:           values["github_timer_unit_file_state"],
 		timerNext:                    unixIntegerTime(githubTimerNextEpoch),
+		timerLast:                    unixIntegerTime(githubTimerLastEpoch),
+		archiveRootObservation:       values["archive_root_observation"],
 		githubArchivePathState:       values["github_archive_path_state"],
 		remoteArchivePathState:       values["remote_archive_path_state"],
 		archivePathsMatch:            archivePathBools["archive_paths_match"],
@@ -862,9 +925,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteExitStatus:             remoteExitStatus,
 		remoteInvocationID:           values["remote_invocation_id"],
 		remoteExecStart:              remoteExecStart,
+		remoteExecStartAt:            unixIntegerTime(remoteExecStartEpoch),
 		remoteTimerState:             values["remote_timer_state"],
 		remoteTimerUnitFileState:     values["remote_timer_unit_file_state"],
 		remoteTimerNext:              unixIntegerTime(remoteTimerNextEpoch),
+		remoteTimerLast:              unixIntegerTime(remoteTimerLastEpoch),
 		remoteBoot:                   unixIntegerTime(remoteBootEpoch),
 		remotePGSource:               values["remote_pg_source"],
 		remotePGPort:                 remotePGPort,
@@ -963,13 +1028,45 @@ func backupArchiveMountState(configuredMount string, present bool, options strin
 	return "unknown"
 }
 
+// Keeps a missing privileged inspector distinct from a missing root. The
+// monitor login deliberately cannot traverse the root-only archive directory.
+func evaluateBackupArchiveRootObservation(observation backupArchiveWriterObservation) finding {
+	const class = "backup-archive-root-unobservable"
+	target := observation.host + "/archive-root"
+	if observation.remoteMountState != "read-write" || observation.archiveRootObservation == "observable" {
+		return healthyFinding("observability/backup-archives", tierWarn, class, target)
+	}
+
+	return finding{
+		probeId: "observability/backup-archives", tier: tierWarn,
+		class: class, target: target,
+		frame: "privileged-root-inspection", sustain: 2,
+		symptom: fmt.Sprintf(
+			"%s archive root cannot be observed through its privacy-reduced privileged inspector",
+			observation.host,
+		),
+		mechanism: "The archive root is intentionally root-only, so the monitor login cannot distinguish permission denial from absence with test or stat. The exact allowlisted helper was unavailable or returned an incomplete or invalid reduced contract; treating that as a missing directory would be a false physical-state claim.",
+		baseline:  "The installed root-owned helper and exact sudoers rule return one validated six-field reduction of both effective writer destinations, mount membership, and root:root mode 0700 without revealing a path.",
+		observed: fmt.Sprintf(
+			"archive_root_observation=%s mount_state=%s",
+			observation.archiveRootObservation,
+			observation.remoteMountState,
+		),
+		evidence: "The monitor accepts only fixed directory-state and Boolean fields from the exact helper command. Helper stderr, effective environments, configured paths, and directory contents are discarded on the host.",
+		context:  "This is UNKNOWN root state, not proof that the directory is missing or unsafe. The volume, storage-recovery, writer, timer, and artifact-age checks remain independent.",
+		action:   "Deploy the current Planetoid archive helper and its exact --root-status sudoers rule, then rerun this signal. Do not create a directory, stop a writer, relax root-only permissions, or infer an absent mount from this observation failure.",
+		verify:   "Two consecutive direct observations report archive_root_observation=observable. Then evaluate backup-archive-root-unavailable from the reduced destination states; do not treat restoration of visibility alone as proof of a valid recovery point.",
+		playbook: "SIGNALS.md §11.22",
+	}
+}
+
 // Validates the effective writer destination after the removable filesystem
 // is mounted. A healthy mount alone does not recreate its root-only archive
 // directory after filesystem repair or volume replacement.
 func evaluateBackupArchiveRoot(observation backupArchiveWriterObservation) finding {
 	const class = "backup-archive-root-unavailable"
 	target := observation.host + "/archive-root"
-	if observation.remoteMountState != "read-write" {
+	if observation.remoteMountState != "read-write" || observation.archiveRootObservation != "observable" {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
 	}
 	if observation.githubArchivePathState == "directory" &&
@@ -1169,14 +1266,22 @@ func evaluateBackupArchiveVolumeRecovery(
 		deviceNames = append(deviceNames, device)
 	}
 	sort.Strings(deviceNames)
+	frame := "recent-storage-fault"
+	contextText := "A match to a current kernel name excludes an unrelated currently named device, but kernel names are mutable across detach/re-enumeration. Confirm the stable LUKS UUID and physical serial before replacing hardware. This page intentionally remains active for the full 30-day evidence window when repaired hardware retains the same kernel lineage. The 30-minute fault-free interval is only the minimum probation before a catch-up attempt, not an automated alert-clear condition; expiry of the bounded journal window is not a repair certificate."
+	action := "Keep both archive writers stopped. With explicit operator authorization, bind the mounted mapper to the stable LUKS UUID and physical device, collect SMART/media evidence if the bridge supports it, and isolate or replace the proven cable, port, enclosure, bridge, or SSD fault. Unmount and run a full offline e2fsck; a boot-time journal replay is insufficient. After mounting normally, perform a bounded write/read/delete check before authorizing exactly one catch-up writer."
+	if observation.clearanceState == "valid" {
+		frame = "cleared-recovery-history"
+		contextText = "The exact installed clearance helper proves that the current stable archive identity passed the offline-filesystem and mounted write/read/delete gates and has no later lineage-bound fault. This page intentionally retains the older event for the full 30-day evidence window when repaired hardware keeps the same lineage. It is historical risk context, not a request to interrupt a clearance-authorized writer; expiry of the bounded journal window is not a repair certificate."
+		action = "Do not stop, restart, or duplicate a currently active clearance-authorized writer solely because this retained historical page remains. Preserve the single-writer boundary and watch for any post-clearance lineage-bound fault. If both writers are idle, use the ordinary authorized schedule; repeat hardware isolation or offline e2fsck only if new evidence invalidates the current clearance."
+	}
 	return []finding{visibility, {
 		probeId: "observability/backup-archives", tier: tierPage,
-		class: recoveryClass, target: target, frame: "recent-storage-fault", sustain: 1,
+		class: recoveryClass, target: target, frame: frame, sustain: 1,
 		symptom:   fmt.Sprintf("%s archive volume is read-write after recent storage-path failures", observation.host),
 		mechanism: "The bounded kernel history contains USB/UAS transport, direct block-I/O, or ext4/JBD2 failure evidence naming a device in the currently mounted archive mapper/backing-device lineage. Journal replay and a fresh read-write mount restore present access; they do not prove an offline full-filesystem check or repair the cable, port, enclosure, bridge, or SSD that caused the I/O loss.",
 		baseline:  "The archive volume has no lineage-bound transport, block-I/O, journal-abort, emergency-read-only, or read-only-remount event in the bounded 30-day evidence window.",
 		observed: fmt.Sprintf(
-			"mount=%s mount_state=%s source=%s lineage=%s matched_devices=%s transport_events=%d block_io_events=%d journal_events=%d latest_event=%s lookback=%s",
+			"mount=%s mount_state=%s source=%s lineage=%s matched_devices=%s transport_events=%d block_io_events=%d journal_events=%d latest_event=%s lookback=%s clearance_state=%s",
 			observation.remoteMount,
 			observation.remoteMountState,
 			observation.remoteMountSource,
@@ -1187,10 +1292,11 @@ func evaluateBackupArchiveVolumeRecovery(
 			counts["journal"],
 			latest.Format(time.RFC3339),
 			backupArchiveStorageLookback,
+			observation.clearanceState,
 		),
 		evidence: "The probe resolves the configured mount through its current lsblk -s kernel lineage and joins only exact device tokens to normalized event type/device/time triples. Raw kernel text stays on the host; events naming other block devices are excluded.",
-		context:  "A match to a current kernel name excludes an unrelated currently named device, but kernel names are mutable across detach/re-enumeration. Confirm the stable LUKS UUID and physical serial before replacing hardware. This page intentionally remains active for the full 30-day evidence window when repaired hardware retains the same kernel lineage. The 30-minute fault-free interval is only the minimum probation before a catch-up attempt, not an automated alert-clear condition; expiry of the bounded journal window is not a repair certificate.",
-		action:   "Keep both archive writers stopped. With explicit operator authorization, bind the mounted mapper to the stable LUKS UUID and physical device, collect SMART/media evidence if the bridge supports it, and isolate or replace the proven cable, port, enclosure, bridge, or SSD fault. Unmount and run a full offline e2fsck; a boot-time journal replay is insufficient. After mounting normally, perform a bounded write/read/delete check before authorizing exactly one catch-up writer.",
+		context:  contextText,
+		action:   action,
 		verify:   "Operational closure requires the stable LUKS-backed volume to pass a full offline filesystem check, three consecutive one-minute read-write observations, a bounded write/read/delete check, and 30 minutes with no new lineage-bound transport, block-I/O, journal-abort, emergency-read-only, or remount event. Then require one single-writer generation to complete, validate its artifact and manifest, and publish the same new generation on two direct Mimir reads. The page deliberately retains the event until it leaves the 30-day window (or a proven replacement has a distinct lineage); neither alert disappearance nor the 30-minute probation alone is closure.",
 		playbook: "SIGNALS.md §11.22",
 	}}
@@ -1450,6 +1556,45 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 	}
 }
 
+// Accepts either a future calendar event or the timer-linked oneshot which is
+// still consuming its elapsed event. The latter is transiently schedule-safe:
+// systemd does not expose a later event until this activation boundary clears.
+func backupArchiveTimerScheduled(
+	now time.Time,
+	timerState string,
+	timerUnitFileState string,
+	timerNext time.Time,
+	timerLast time.Time,
+	writerState string,
+	writerMainPID int64,
+	writerStart time.Time,
+) bool {
+	if timerState != "active" || timerUnitFileState != "enabled" {
+		return false
+	}
+	if !timerNext.IsZero() && !timerNext.Before(now.Add(-backupArchiveFutureTolerance)) {
+		return true
+	}
+	switch writerState {
+	case "active", "activating", "reloading":
+	default:
+		return false
+	}
+	if writerMainPID <= 0 || timerLast.IsZero() || writerStart.IsZero() ||
+		timerLast.After(now.Add(backupArchiveFutureTolerance)) ||
+		writerStart.After(now.Add(backupArchiveFutureTolerance)) {
+		return false
+	}
+	return !timerLast.Before(writerStart.Add(-backupArchiveFutureTolerance))
+}
+
+func backupArchiveTimeText(value time.Time) string {
+	if value.IsZero() {
+		return "missing"
+	}
+	return value.Format(time.RFC3339)
+}
+
 // Requires the code-backup calendar owner to survive beyond the current
 // oneshot. An enabled-but-inactive timer is not a durable future trigger.
 func evaluateBackupArchiveGitHubTimer(
@@ -1458,16 +1603,19 @@ func evaluateBackupArchiveGitHubTimer(
 ) finding {
 	const class = "backup-archive-timer-unscheduled"
 	target := writer.host + "/github"
-	if writer.timerState == "active" && writer.timerUnitFileState == "enabled" &&
-		!writer.timerNext.IsZero() &&
-		!writer.timerNext.Before(now.Add(-backupArchiveFutureTolerance)) {
+	if backupArchiveTimerScheduled(
+		now,
+		writer.timerState,
+		writer.timerUnitFileState,
+		writer.timerNext,
+		writer.timerLast,
+		writer.unitState,
+		writer.mainPID,
+		writer.execStartAt,
+	) {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
 	}
 
-	nextTrigger := "missing"
-	if !writer.timerNext.IsZero() {
-		nextTrigger = writer.timerNext.Format(time.RFC3339)
-	}
 	return finding{
 		probeId: "observability/backup-archives", tier: tierPage,
 		class: class, target: target,
@@ -1476,18 +1624,21 @@ func evaluateBackupArchiveGitHubTimer(
 			"%s has no proven durable future code-backup trigger",
 			target,
 		),
-		mechanism: "The GitHub archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or lacks a current/future NextElapse cannot launch the next archive generation; a previous generation may remain under five days old while the recovery schedule is already broken.",
-		baseline:  "github-backup-archive.timer is ActiveState=active, UnitFileState=enabled, and exposes a current or future NextElapseUSecRealtime for its persistent daily schedule.",
+		mechanism: "The GitHub archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or has neither a current/future NextElapse nor an exact timer-linked running activation cannot launch the next archive generation; a previous generation may remain under five days old while the recovery schedule is already broken.",
+		baseline:  "github-backup-archive.timer is active and enabled, with either a current/future NextElapseUSecRealtime or a nonfuture LastTriggerUSec that is no earlier than the start of its still-running writer.",
 		observed: fmt.Sprintf(
-			"timer_state=%s timer_unit_file_state=%s timer_next=%s writer_state=%s writer_result=%s writer_exit_status=%d",
+			"timer_state=%s timer_unit_file_state=%s timer_next=%s timer_last=%s writer_state=%s writer_main_pid_present=%t writer_start=%s writer_result=%s writer_exit_status=%d",
 			writer.timerState,
 			writer.timerUnitFileState,
-			nextTrigger,
+			backupArchiveTimeText(writer.timerNext),
+			backupArchiveTimeText(writer.timerLast),
 			writer.unitState,
+			writer.mainPID > 0,
+			backupArchiveTimeText(writer.execStartAt),
 			writer.result,
 			writer.exitStatus,
 		),
-		evidence: "The timer's ActiveState, UnitFileState, and reduced next-trigger epoch come directly from systemd on the configured backup host. No calendar expression, path, credential, or journal text is returned.",
+		evidence: "The timer's ActiveState, UnitFileState, reduced next/last-trigger epochs, and the writer's state, PID presence, and reduced realtime start epoch come directly from systemd on the configured backup host. No calendar expression, path, credential, raw PID, or journal text is returned.",
 		context:  "The offline archive-repair workflow intentionally stops both timers, but completing filesystem clearance does not automatically prove that scheduling was restored. This is an operations/configuration closure; software cannot attach or repair the external archive device, and an active timer does not prove the prior failed invocation succeeded.",
 		action:   "Confirm that no offline storage repair or archive writer is still in progress and resolve any writer-failed alert first. With valid stable-device clearance and explicit operator authorization, apply the current Planetoid playbook or enable and start only the intended timer. Do not manually start the archive service merely to clear this scheduling alert; a persistent missed trigger may immediately create a catch-up invocation after the timer is started.",
 		verify:   "Two direct observations show the timer active and durably enabled with a future next trigger. Its next due invocation starts exactly once, passes archive clearance, exits successfully, validates both code artifacts and manifests, and publishes both new generations on two direct Mimir reads without overlapping the data writer.",
@@ -1504,16 +1655,19 @@ func evaluateBackupArchiveDataTimer(
 ) finding {
 	const class = "backup-archive-timer-unscheduled"
 	target := writer.host + "/remote"
-	if writer.remoteTimerState == "active" && writer.remoteTimerUnitFileState == "enabled" &&
-		!writer.remoteTimerNext.IsZero() &&
-		!writer.remoteTimerNext.Before(now.Add(-backupArchiveFutureTolerance)) {
+	if backupArchiveTimerScheduled(
+		now,
+		writer.remoteTimerState,
+		writer.remoteTimerUnitFileState,
+		writer.remoteTimerNext,
+		writer.remoteTimerLast,
+		writer.remoteUnitState,
+		writer.remoteMainPID,
+		writer.remoteExecStartAt,
+	) {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
 	}
 
-	nextTrigger := "missing"
-	if !writer.remoteTimerNext.IsZero() {
-		nextTrigger = writer.remoteTimerNext.Format(time.RFC3339)
-	}
 	return finding{
 		probeId: "observability/backup-archives", tier: tierPage,
 		class: class, target: target,
@@ -1522,18 +1676,21 @@ func evaluateBackupArchiveDataTimer(
 			"%s has no proven durable future PostgreSQL/Redis backup trigger",
 			target,
 		),
-		mechanism: "The PostgreSQL/Redis archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or lacks a current/future NextElapse cannot launch the next data generation; valid latest/weekly/monthly artifacts can therefore hide a broken future schedule until the five-day recovery objective is breached.",
-		baseline:  "remote-backup-archive.timer is ActiveState=active, UnitFileState=enabled, and exposes a current or future NextElapseUSecRealtime for its persistent daily schedule.",
+		mechanism: "The PostgreSQL/Redis archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or has neither a current/future NextElapse nor an exact timer-linked running activation cannot launch the next data generation; valid latest/weekly/monthly artifacts can therefore hide a broken future schedule until the five-day recovery objective is breached.",
+		baseline:  "remote-backup-archive.timer is active and enabled, with either a current/future NextElapseUSecRealtime or a nonfuture LastTriggerUSec that is no earlier than the start of its still-running writer.",
 		observed: fmt.Sprintf(
-			"timer_state=%s timer_unit_file_state=%s timer_next=%s writer_state=%s writer_result=%s writer_exit_status=%d",
+			"timer_state=%s timer_unit_file_state=%s timer_next=%s timer_last=%s writer_state=%s writer_main_pid_present=%t writer_start=%s writer_result=%s writer_exit_status=%d",
 			writer.remoteTimerState,
 			writer.remoteTimerUnitFileState,
-			nextTrigger,
+			backupArchiveTimeText(writer.remoteTimerNext),
+			backupArchiveTimeText(writer.remoteTimerLast),
 			writer.remoteUnitState,
+			writer.remoteMainPID > 0,
+			backupArchiveTimeText(writer.remoteExecStartAt),
 			writer.remoteResult,
 			writer.remoteExitStatus,
 		),
-		evidence: "The timer's ActiveState, UnitFileState, and reduced next-trigger epoch come directly from systemd on the configured backup host. No calendar expression, path, credential, source endpoint, or journal text is returned.",
+		evidence: "The timer's ActiveState, UnitFileState, reduced next/last-trigger epochs, and the writer's state, PID presence, and reduced realtime start epoch come directly from systemd on the configured backup host. No calendar expression, path, credential, source endpoint, raw PID, or journal text is returned.",
 		context:  "This is the durable schedule shared by PostgreSQL and Redis archives, independent of code-backup scheduling, artifact freshness, and an individual writer result. Files already promoted into latest/weekly/monthly retention do not create a future invocation. Software also cannot attach or repair the external archive device.",
 		action:   "Confirm that no offline storage repair or archive writer is still in progress and resolve any data writer, mount, or archive-root failure first. With valid stable-device clearance and explicit operator authorization, apply the current Planetoid playbook or enable and start only the intended timer. Do not manually start the service merely to clear this scheduling alert; a persistent missed trigger may immediately create a catch-up invocation.",
 		verify:   "Two direct observations show the timer active and durably enabled with a future next trigger. Its next due invocation starts exactly once, pulls PostgreSQL and Redis through their dedicated direct SSH endpoints, validates both artifacts and manifests, publishes both new generations on two direct Mimir reads, and retains the latest/weekly/monthly schedule without overlapping the code writer.",

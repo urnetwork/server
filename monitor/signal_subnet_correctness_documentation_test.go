@@ -42,7 +42,8 @@ func TestSubnetCorrectnessDocumentationCoversRequiredAlertClasses(t *testing.T) 
 		"subnet-weight-vector", "subnet-crv4-lifecycle", "subnet-consensus-divergence", "subnet-validator-native-payout",
 		"subnet-epoch-progress", "subnet-capture-delta", "subnet-payout-root", "subnet-claim-correctness", "subnet-claim-credit-payment", "subnet-carry-isolation", "subnet-vault-conservation",
 		"subnet-artifact-integrity", "subnet-evidence-anchor", "subnet-history-availability", "subnet-audit-replay-gap",
-		"subnet-runtime-liveness", "subnet-state-durability", "subnet-capacity-margin", "subnet-writer-funding", "subnet-adversarial-resilience", "subnet-monitor-coverage",
+		"subnet-runtime-liveness", "subnet-state-durability", "subnet-capacity-margin", "subnet-rpc-read-ownership", "subnet-observation-quota", "subnet-evidence-stream-capacity",
+		"subnet-writer-funding", "subnet-adversarial-resilience", "subnet-monitor-coverage",
 	}
 	rowPattern := regexp.MustCompile("(?m)^\\| `(subnet-[a-z0-9]+(?:-[a-z0-9]+)*)` \\| ([^|]+) \\| ([^|]+) \\|$")
 	// Numeric segments are valid registry keys; empty segments, aliases and

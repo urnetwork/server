@@ -270,6 +270,11 @@ type SignalSettings struct {
 	// from a stale recurring chain that must not exist while the subsystem is
 	// disabled.
 	VerificationEnabled bool
+	// STDeploymentKey is the exact active chain/coordinator namespace used by
+	// the ST mirror. It is compared in memory and must never be rendered into
+	// alerts; an empty value keeps missing or disabled configuration distinct
+	// from a deployment that legitimately finalized epoch zero.
+	STDeploymentKey string
 
 	SSHUser     string
 	SSHDevUser  string
@@ -442,6 +447,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		logServices:          append([]string(nil), settings.LogServices...),
 		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
 		verificationEnabled:  settings.VerificationEnabled,
+		stDeploymentKey:      settings.STDeploymentKey,
 		sshUser:              settings.SSHUser,
 		sshDevUser:           settings.SSHDevUser,
 		sshKeyPaths:          append([]string(nil), settings.SSHKeyPaths...),

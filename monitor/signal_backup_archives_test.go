@@ -29,9 +29,12 @@ type backupArchiveWriterFixture struct {
 	exitStatus                   int64
 	invocationID                 string
 	execStart                    int64
+	execStartEpoch               int64
 	timerState                   string
 	timerUnitFileState           string
 	timerNext                    *int64
+	timerLast                    int64
+	archiveRootObservation       string
 	githubArchivePathState       string
 	remoteArchivePathState       string
 	archivePathsMatch            *bool
@@ -47,9 +50,11 @@ type backupArchiveWriterFixture struct {
 	remoteExitStatus             int64
 	remoteInvocationID           string
 	remoteExecStart              int64
+	remoteExecStartEpoch         int64
 	remoteTimerState             string
 	remoteTimerUnitFileState     string
 	remoteTimerNext              int64
+	remoteTimerLast              int64
 	remoteBoot                   int64
 	remotePGSource               string
 	remotePGPort                 int64
@@ -238,6 +243,64 @@ func TestBackupArchivesSignalSyntheticDetectsUnscheduledDataTimer(t *testing.T) 
 	}
 }
 
+// A persistent timer can retain its elapsed NextElapse while the oneshot it
+// triggered is still running. Exact LastTrigger/start ownership keeps that
+// active invocation from becoming a false scheduling page.
+func TestBackupArchivesSignalSyntheticRunningTimerOwnedGitHubWriterIsScheduled(t *testing.T) {
+	now := time.Date(2026, 9, 8, 21, 0, 0, 0, time.UTC)
+	pastNext := now.Add(-14 * time.Hour).Unix()
+	start := now.Add(-30 * time.Minute).Unix()
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState:      "activating",
+		mainPID:        231,
+		execStartEpoch: start,
+		timerNext:      &pastNext,
+		timerLast:      start,
+	})
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-timer-unscheduled", "backup-1/github"); alert != nil {
+		t.Fatalf("timer-owned running GitHub writer was marked unscheduled: %+v", *alert)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticManualGitHubWriterDoesNotHideUnscheduledTimer(t *testing.T) {
+	now := time.Date(2026, 9, 8, 21, 1, 0, 0, time.UTC)
+	pastNext := now.Add(-14 * time.Hour).Unix()
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState:      "activating",
+		mainPID:        232,
+		execStartEpoch: now.Add(-30 * time.Minute).Unix(),
+		timerNext:      &pastNext,
+		timerLast:      now.Add(-24 * time.Hour).Unix(),
+	})
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-timer-unscheduled", "backup-1/github")
+	for _, want := range []string{
+		"timer_next=2026-09-08T07:01:00Z",
+		"timer_last=2026-09-07T21:01:00Z",
+		"writer_main_pid_present=true",
+		"writer_start=2026-09-08T20:31:00Z",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("manual-writer timer alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestBackupArchivesSignalSyntheticRunningTimerOwnedDataWriterIsScheduled(t *testing.T) {
+	now := time.Date(2026, 9, 8, 21, 2, 0, 0, time.UTC)
+	start := now.Add(-time.Hour).Unix()
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:      "activating",
+		remoteUnitSubstate:   "start",
+		remoteMainPID:        233,
+		remoteExecStartEpoch: start,
+		remoteTimerNext:      now.Add(-10 * time.Hour).Unix(),
+		remoteTimerLast:      start,
+	})
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-timer-unscheduled", "backup-1/remote"); alert != nil {
+		t.Fatalf("timer-owned running data writer was marked unscheduled: %+v", *alert)
+	}
+}
+
 // A repaired and mounted external filesystem can still lack the configured
 // root directory. Both writers intentionally refuse that state rather than
 // falling through to a similarly named directory on the system disk.
@@ -289,6 +352,40 @@ func TestBackupArchivesSignalSyntheticDetectsMissingEffectiveArchiveRoot(t *test
 		"backup-1/archive-volume",
 	); unexpected != nil {
 		t.Fatalf("healthy mounted volume was conflated with its missing root: %+v", *unexpected)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticArchiveRootObservationLossIsNotMissingRoot(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 32, 30, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		archiveRootObservation: "unobservable",
+	})
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-root-unobservable",
+		"backup-1/archive-root",
+	)
+	if alert.Sustain != 2 || alert.Severity != SeverityWarn {
+		t.Fatalf("archive-root visibility urgency=%s/%d, want warn/2", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"archive_root_observation=unobservable",
+		"permission denial from absence",
+		"UNKNOWN root state",
+		"exact --root-status sudoers rule",
+		"Do not create a directory",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("archive-root visibility alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if unexpected := findBackupArchiveAlert(
+		alerts,
+		"backup-archive-root-unavailable",
+		"backup-1/archive-root",
+	); unexpected != nil {
+		t.Fatalf("unobservable root was misclassified as unavailable: %+v", *unexpected)
 	}
 }
 
@@ -703,7 +800,21 @@ func TestBackupArchivesSignalSyntheticClearedActiveWriterIsNotUnsafe(t *testing.
 	if alert := findBackupArchiveAlert(alerts, "backup-archive-writer-active-during-recovery", "backup-1/archive-volume"); alert != nil {
 		t.Fatalf("valid stable-identity clearance was still marked unsafe: %+v", *alert)
 	}
-	requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+	recovery := requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+	for _, want := range []string{
+		"cleared-recovery-history",
+		"clearance_state=valid",
+		"Do not stop, restart, or duplicate",
+		"retained historical page",
+		"repeat hardware isolation or offline e2fsck only if new evidence",
+	} {
+		if !strings.Contains(recovery.Markdown(), want) {
+			t.Fatalf("cleared recovery guidance missing %q:\n%s", want, recovery.Markdown())
+		}
+	}
+	if strings.Contains(recovery.Action, "Keep both archive writers stopped") {
+		t.Fatalf("cleared recovery guidance still asks to stop the active writer:\n%s", recovery.Markdown())
+	}
 }
 
 func TestBackupArchivesSignalSyntheticStoppedWritersAreSafeDuringRecoveryGate(t *testing.T) {
@@ -795,13 +906,16 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 		"remote_mount_options",
 		"InvocationID",
 		"NextElapseUSecRealtime",
+		"LastTriggerUSec",
+		"ExecMainStartTimestamp",
 		"UnitFileState",
 		"github_result",
+		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
 		"archive_paths_on_mount",
 		"archive_path_permissions_secure",
-		"stat -c '%u:%g:%a'",
+		"sudo -n /var/bringyour/backup/archive-write-clearance.sh --root-status",
 		"remote_timer_unit_file_state",
 		"remote_mount_lineage",
 		"lsblk -srno KNAME",
@@ -819,6 +933,9 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 		"printf 'remote_archive_path=%s",
 		"printf 'github_environment=%s",
 		"printf 'remote_environment=%s",
+		"stat -c '%u:%g:%a'",
+		"test -d \"${github_archive_path}\"",
+		"test -d \"${remote_archive_path}\"",
 	} {
 		if strings.Contains(backupArchiveWriterCommand, forbidden) {
 			t.Fatalf("writer observation command emits private effective value %q", forbidden)
@@ -916,14 +1033,14 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 41 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 46 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
 		{name: "github exit", output: strings.Replace(valid, "github_exit_status=0", "github_exit_status=nope", 1), want: "invalid GitHub exit status"},
 		{name: "github invocation", output: strings.Replace(valid, "github_invocation_id=present", "github_invocation_id=not-a-state", 1), want: "invalid github_invocation_id"},
 		{name: "github timer epoch", output: strings.Replace(valid, "github_timer_next_epoch=2000000000", "github_timer_next_epoch=tomorrow", 1), want: "invalid github_timer_next_epoch"},
-		{name: "archive path state", output: strings.Replace(valid, "github_archive_path_state=directory", "github_archive_path_state=unknown", 1), want: "invalid github_archive_path_state"},
+		{name: "archive path state", output: strings.Replace(valid, "github_archive_path_state=directory", "github_archive_path_state=unsafe", 1), want: "invalid github_archive_path_state"},
 		{name: "archive path mount", output: strings.Replace(valid, "archive_paths_on_mount=true", "archive_paths_on_mount=maybe", 1), want: "invalid archive_paths_on_mount"},
 		{name: "data timer unit file", output: strings.Replace(valid, "remote_timer_unit_file_state=enabled", "remote_timer_unit_file_state=ENABLED", 1), want: "invalid remote_timer_unit_file_state"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
@@ -1259,23 +1376,47 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		timerNext := int64(2_000_000_000)
 		fixture.timerNext = &timerNext
 	}
-	if fixture.githubArchivePathState == "" {
-		fixture.githubArchivePathState = "directory"
+	if fixture.archiveRootObservation == "" {
+		fixture.archiveRootObservation = "observable"
 	}
-	if fixture.remoteArchivePathState == "" {
-		fixture.remoteArchivePathState = "directory"
-	}
-	if fixture.archivePathsMatch == nil {
-		fixture.archivePathsMatch = boolPointer(true)
-	}
-	if fixture.archiveMountsMatch == nil {
-		fixture.archiveMountsMatch = boolPointer(true)
-	}
-	if fixture.archivePathsOnMount == nil {
-		fixture.archivePathsOnMount = boolPointer(true)
-	}
-	if fixture.archivePathPermissionsSecure == nil {
-		fixture.archivePathPermissionsSecure = boolPointer(true)
+	if fixture.archiveRootObservation == "unobservable" {
+		if fixture.githubArchivePathState == "" {
+			fixture.githubArchivePathState = "unknown"
+		}
+		if fixture.remoteArchivePathState == "" {
+			fixture.remoteArchivePathState = "unknown"
+		}
+		if fixture.archivePathsMatch == nil {
+			fixture.archivePathsMatch = boolPointer(false)
+		}
+		if fixture.archiveMountsMatch == nil {
+			fixture.archiveMountsMatch = boolPointer(false)
+		}
+		if fixture.archivePathsOnMount == nil {
+			fixture.archivePathsOnMount = boolPointer(false)
+		}
+		if fixture.archivePathPermissionsSecure == nil {
+			fixture.archivePathPermissionsSecure = boolPointer(false)
+		}
+	} else {
+		if fixture.githubArchivePathState == "" {
+			fixture.githubArchivePathState = "directory"
+		}
+		if fixture.remoteArchivePathState == "" {
+			fixture.remoteArchivePathState = "directory"
+		}
+		if fixture.archivePathsMatch == nil {
+			fixture.archivePathsMatch = boolPointer(true)
+		}
+		if fixture.archiveMountsMatch == nil {
+			fixture.archiveMountsMatch = boolPointer(true)
+		}
+		if fixture.archivePathsOnMount == nil {
+			fixture.archivePathsOnMount = boolPointer(true)
+		}
+		if fixture.archivePathPermissionsSecure == nil {
+			fixture.archivePathPermissionsSecure = boolPointer(true)
+		}
 	}
 	if fixture.remoteUnitState == "" {
 		fixture.remoteUnitState = "inactive"
@@ -1354,9 +1495,12 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"github_exit_status=%d\n"+
 			"github_invocation_id=%s\n"+
 			"github_exec_start_monotonic=%d\n"+
+			"github_exec_start_epoch=%d\n"+
 			"github_timer_state=%s\n"+
 			"github_timer_unit_file_state=%s\n"+
 			"github_timer_next_epoch=%d\n"+
+			"github_timer_last_epoch=%d\n"+
+			"archive_root_observation=%s\n"+
 			"github_archive_path_state=%s\n"+
 			"remote_archive_path_state=%s\n"+
 			"archive_paths_match=%t\n"+
@@ -1372,9 +1516,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_exit_status=%d\n"+
 			"remote_invocation_id=%s\n"+
 			"remote_exec_start_monotonic=%d\n"+
+			"remote_exec_start_epoch=%d\n"+
 			"remote_timer_state=%s\n"+
 			"remote_timer_unit_file_state=%s\n"+
 			"remote_timer_next_epoch=%d\n"+
+			"remote_timer_last_epoch=%d\n"+
 			"remote_boot_epoch=%d\n"+
 			"remote_pg_source=%s\n"+
 			"remote_pg_port=%d\n"+
@@ -1395,9 +1541,12 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.exitStatus,
 		fixture.invocationID,
 		fixture.execStart,
+		fixture.execStartEpoch,
 		fixture.timerState,
 		fixture.timerUnitFileState,
 		*fixture.timerNext,
+		fixture.timerLast,
+		fixture.archiveRootObservation,
 		fixture.githubArchivePathState,
 		fixture.remoteArchivePathState,
 		*fixture.archivePathsMatch,
@@ -1413,9 +1562,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteExitStatus,
 		fixture.remoteInvocationID,
 		fixture.remoteExecStart,
+		fixture.remoteExecStartEpoch,
 		fixture.remoteTimerState,
 		fixture.remoteTimerUnitFileState,
 		fixture.remoteTimerNext,
+		fixture.remoteTimerLast,
 		fixture.remoteBoot,
 		fixture.remotePGSource,
 		fixture.remotePGPort,

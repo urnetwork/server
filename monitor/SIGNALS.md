@@ -4519,6 +4519,38 @@ intentional current source graph containing those commits before deploying
 them for attribution. A tag, staged module, or desired config alone is not
 evidence that the running API can emit the cohort.
 
+The 2026-09-08 21:47:32Z current control made that attribution observable and
+showed why correctness protection alone does not close the client recovery
+path. The complete 12-series detail family reconciled to 3,750.559 rejected
+inactive destinations per minute: 338.934/min original non-companion and
+3,411.625/min original companion. One bounded cohort accounted for 88.0%
+(3,300.964/min): `request_companion=true`, `sender_role=absent`,
+`resolution=rejected`, `relationship=public`, `source_lifecycle=active_top`,
+and `destination_lifecycle=inactive_derived`. `sender_role=absent` proves only
+that the optional lane field was not present; it does not identify an old app,
+device, or artifact. A simultaneous full monitor snapshot emitted no §2.20
+success-side violation, so the API guard continued preventing dead-route
+creation while callers repeatedly offered those routes.
+
+All 20 sampled API and Connect blocks reported service/config version
+`2026.9.8+1040779940`. The exact reproducible source snapshot for that version
+contains the earlier API guard, `f8b1b60` sender-role instrumentation, and
+`5b33c91` window retirement, but its Connect source predates and does not
+contain source-only commits `ec34ce1` and `55daddb`. Version labels alone were
+not used for that ancestry decision. `ec34ce1` makes one Reliability result one
+channel transition, installs exclusion before waking resize, and bounds runtime
+discovery exclusions with oldest-first recovery. `55daddb` propagates the
+retirement into the shared provider-source owner: it tombstones the exact
+source across UDP, TCP, ICMP, queued dispatch, and live flow generations and
+waits for admitted operations to release, with multi-generation ownership so
+one retiring generation cannot resurrect a sibling's source. Their extensive
+deterministic lifecycle/race tests are source-ready, but neither commit is in
+the deployed build above. Do not call the live rate fixed until affected
+Connect-bearing service and SDK-derived client artifacts include both commits,
+then the complete detail rate remains at or below 50/min for two five-minute
+windows after the maximum old-client/window lifetime. An API-only redeploy
+cannot force already-installed clients to adopt this recovery behavior.
+
 This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
 signal. More Proxy hosts raise the active-client ceiling but do not make an
 inactive destination contractible.
@@ -7406,6 +7438,25 @@ expected MESSAGE-bearing JSON framing. A failed or noisy baseline/preflight,
 malformed or partial combined output, or any other status remains
 `cannot-observe`. This in-memory reduction creates no remote file, and raw
 journal errors are not copied into alert evidence.
+
+The 2026-09-08 edge-3 maintenance control found a second query-shape boundary
+after the one-hour/100 GiB journal policy landed. The current boot occupied
+6.1 GiB in 520 journal files. The zero-row readability baseline returned
+immediately, but both unit-only message-regex queries exceeded their 15-second
+deadline. Removing the regex completed in two to five seconds yet reached the
+2,001-row completeness sentinel, so neither a larger timeout nor accepting the
+suffix was a sound repair. Metadata proved that `docker.service` also owned
+high-rate container stdout and the Warp units included both `sudo` audit rows
+and Warpctl polling. Exact indexed identity was the discriminator: selecting
+`SYSLOG_IDENTIFIER=dockerd|containerd` reduced a 24-hour daemon census to 16
+rows without scanning application output, while `_COMM=warpctl` followed by
+the bounded lifecycle regex completed in about six seconds. XOps now applies
+those indexed selectors before `--grep`; the unchanged-version rerun passed
+with matching Docker/containerd pairs, zero native protocol errors, and
+complete empty Warp failure/success windows. Synthetic coverage makes the old
+broad grep time out while the indexed query remains observable. This was a
+maintenance-probe false gate, not evidence of a daemon mismatch, and required
+no runtime restart or reboot.
 
 Every probe journal read is hard-capped at one sentinel entry beyond those
 limits. Reaching a cap emits `cannot-observe`; any TTRPC or Warp start failure
@@ -14800,6 +14851,68 @@ stuck process in that window; it localized that ceiling to serial historical
 block verification/import. Keep this hardware/headroom class distinct from
 the later target-fallback observation error. Current capacity decisions need
 a new qualified one-hour window, not the historical 35-day estimate.
+
+### 17.6 Points leaderboard finalized-epoch readiness
+
+Probe: `points-readiness`
+
+The all-time points leaderboard has two independent input planes. Total points
+come from `account_point`; Blocks, current Streak, Longest Streak, and their
+ranks come only from **finalized epochs for the exact active ST deployment**.
+An hourly snapshot rebuild can therefore succeed and publish valid total-point
+ranks while the epoch-derived plane is unavailable. An open epoch, a finalized
+row from a retired deployment, or a legacy payout period is not a substitute.
+
+Read the latest `network_points_leaderboard_snapshot` header and its exact
+ranked-row census in one bounded PostgreSQL statement. Require header
+`total_ranked` to equal its snapshot row count and age to be at most two hours;
+epoch finalization and point writes trigger rebuilds, with an hourly fallback.
+Independently enumerate the bounded `st_epoch` deployment census, then compare
+the configured deployment key in memory. Never render that key, contract
+address, network identity, or any ranked network identifier into an alert.
+
+Availability is not encoded by `latest_epoch != 0`: epoch zero is a legitimate
+finalized epoch. It is available when the configured ST subsystem is enabled,
+the exact configured deployment has at least one finalized row, and the
+snapshot's latest epoch equals that deployment's maximum finalized epoch. Once
+that condition is true, zero Blocks or Streak can be a meaningful measurement
+for a network and must not alert merely for being zero.
+
+- `points-leaderboard-unavailable` warns immediately when no snapshot exists.
+- `points-leaderboard-incomplete` pages immediately when the latest header and
+  ranked-row census disagree; snapshot publication is intended to be atomic.
+- `points-leaderboard-stale` warns after two consecutive observations when the
+  latest snapshot is future-dated or older than two hours.
+- `points-epoch-metrics-unavailable` warns immediately when ranked total points
+  exist but the ST subsystem/deployment/finalized-epoch source is unavailable.
+  This is not evidence that every network measured zero Blocks or Streak.
+- `points-epoch-snapshot-drift` pages immediately when a configured deployment
+  has finalized rows but its maximum epoch differs from the snapshot header.
+
+The unavailable class has separate closures. The software correction is a
+snapshot-consistent availability or finalized-count field carried through the
+Server API, shared SDK, and every app. Clients label or hide Blocks, Streak,
+Longest Streak, and their ranks until it is true while preserving usable total
+points. Do not use `latest_epoch == 0` as a sentinel. The operational closure is
+the reviewed Main ST deployment, caught-up node path, contract/policy identity,
+keys, funding, migrations, and at least one legitimately finalized epoch. A
+Server/API/Taskworker deployment cannot invent that history; do not enable an
+unready deployment or insert synthetic `st_epoch` rows to silence the signal.
+This can require operator, finance, network, or additional node hardware work
+that software alone cannot provide.
+
+On 2026-09-08 the public API and direct database snapshot agreed: the latest
+snapshot contained 25,708 ranked networks with populated positive total points,
+`latest_epoch=0`, and zero positive Blocks, Streak, or Longest Streak rows. All
+25 retained hourly rebuild tasks had succeeded, and `account_point` remained
+populated, ruling out a rebuild failure or lost point producers. The global
+`st_epoch` census contained zero rows, while Main's selected ST configuration
+was disabled and its deployment block/netuid remained unset. The pure compute
+path intentionally maps an empty epoch-window list to numeric zeros, with a
+deterministic pre-existing regression. Thus the immediate cause was absent
+finalized-epoch input, and the correctness defect was representing unavailable
+data as measured zero. Main's Subtensor nodes were still syncing and not
+cutover-ready, so enabling ST was not an appropriate repair.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
