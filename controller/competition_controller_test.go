@@ -3474,6 +3474,12 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := validSettings()
+		settings.ArtifactRoot = t.TempDir()
+		settings.SimulatorCommand = "/evaluator-host-only/sim-latency"
+		settings.workloadGenerator = nil
+		settings.artifactArchive = &blobArtifactArchive{
+			store: server.NewLocalBlobStore(t.TempDir(), "competition").(server.RetainedBlobStore),
+		}
 		settings.CompetitionId += "-staging-discard"
 		currentTime := server.NowUtc()
 		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)

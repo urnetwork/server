@@ -48,6 +48,7 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 )
 
 func main() {
@@ -256,12 +257,13 @@ func runInit(opts docopt.Opts) {
 }
 
 func generatedConfig(seed int64, count int, clients int, rate float64, qualityWindow int) (*Config, error) {
-	config := defaultConfig(seed, count, clients, rate)
-	config.Clients.QualityWindowSize = qualityWindow
-	// validate requires the sampled fleet to be present. Generate it first, then
-	// validate the complete artifact that will actually be written.
-	if err := generateFleet(config); err != nil {
-		return nil, fmt.Errorf("generate fleet: %w", err)
+	configBytes, err := controller.GenerateSimLatencyWorkload(seed, count, clients, rate, qualityWindow)
+	if err != nil {
+		return nil, fmt.Errorf("generate workload: %w", err)
+	}
+	config, err := decodeConfig(configBytes)
+	if err != nil {
+		return nil, fmt.Errorf("decode generated workload: %w", err)
 	}
 	if err := config.validate(); err != nil {
 		return nil, err

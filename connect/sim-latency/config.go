@@ -22,13 +22,6 @@ type Range struct {
 	Max float64 `yaml:"max"`
 }
 
-func (self Range) sample(r *rng) float64 {
-	if self.Max <= self.Min {
-		return self.Min
-	}
-	return self.Min + r.float64()*(self.Max-self.Min)
-}
-
 // MixtureComponent is one mode of the provider population: a weighted region
 // of the network-condition parameter space. A provider is assigned a
 // component by weight, then its concrete parameters are sampled from the
@@ -169,6 +162,11 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeConfig(configBytes)
+}
+
+// Decodes one generated or retained workload artifact.
+func decodeConfig(configBytes []byte) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(configBytes, &config); err != nil {
 		return nil, err
