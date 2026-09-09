@@ -1299,8 +1299,9 @@ func TestTailerOversizedLineDoesNotWedge(t *testing.T) {
 	// one classifiable line, then a ~2MB single line (overflowing the 1MB
 	// scanner buffer), then the child keeps the pipe open forever — the wedge
 	// shape.
-	tailer.stream = fakeStream(
-		`echo "short line"; head -c 2097152 /dev/zero | tr '\0' 'a'; echo; sleep 3600`)
+	// One Go child owns both the oversized write and the open pipe; a shell
+	// pipeline leaves grandchildren outside the command's cancellation owner.
+	tailer.stream = tailerFixtureProcessStream("oversized")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1308,8 +1309,17 @@ func TestTailerOversizedLineDoesNotWedge(t *testing.T) {
 	type result struct{ err error }
 	done := make(chan result, 1)
 	go func() {
+		defer close(done)
 		done <- result{err: tailer.tailOnce(ctx)}
 	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("oversized stream owner did not join after cancellation")
+		}
+	})
 
 	select {
 	case r := <-done:

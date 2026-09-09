@@ -99,6 +99,10 @@ func TestEscrow(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			sourceId:      sourceNetworkId,
+			destinationId: destinationNetworkId,
+		})
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -350,6 +354,10 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			sourceId:      sourceNetworkId,
+			destinationId: destinationNetworkId,
+		})
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -744,6 +752,10 @@ func TestClosePartialContract(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 
@@ -868,6 +880,10 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 
@@ -973,6 +989,10 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 
@@ -1105,6 +1125,10 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 
@@ -1296,6 +1320,10 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			sourceId:      sourceNetworkId,
+			destinationId: destinationNetworkId,
+		})
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -1508,6 +1536,10 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 		for _, networkId := range []server.Id{networkIdA, networkIdB} {
@@ -1586,6 +1618,10 @@ func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 		for _, networkId := range []server.Id{networkIdA, networkIdB} {
@@ -1633,6 +1669,10 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 		for _, networkId := range []server.Id{networkIdA, networkIdB} {
@@ -1721,6 +1761,10 @@ func TestForceCloseOneSidedCheckpointFinalizesBothOrientations(t *testing.T) {
 		clientIdB := server.NewId()
 		Testing_CreateNetwork(ctx, networkIdA, "a", server.NewId())
 		Testing_CreateNetwork(ctx, networkIdB, "b", server.NewId())
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		const initialTransferBalance = ByteCount(30 * 1024 * 1024 * 1024)
 		const usedTransferByteCount = ByteCount(512 * 1024)
@@ -1792,6 +1836,10 @@ func TestForceCloseDisputedContract(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
 		AddBasicTransferBalance(
@@ -1864,6 +1912,10 @@ func TestForceCloseDirectSettlementRemovesStream(t *testing.T) {
 		clientIdB := server.NewId()
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		contractId, err := CreateContractNoEscrow(
 			ctx,
@@ -1924,6 +1976,10 @@ func TestForceCloseMalformedContractRemovesStreamAndReturnsError(t *testing.T) {
 		clientIdB := server.NewId()
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientIdA: networkIdA,
+			clientIdB: networkIdB,
+		})
 
 		const escrowByteCount = ByteCount(1024)
 		AddBasicTransferBalance(
@@ -1984,6 +2040,10 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkId, "a", userId)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientId:  networkId,
+			clientIdB: networkIdB,
+		})
 
 		initialBalance := ByteCount(10 * 1024 * 1024 * 1024)
 		AddBasicTransferBalance(ctx, networkId, initialBalance, server.NowUtc(), server.NowUtc().Add(30*24*time.Hour))
@@ -2055,6 +2115,10 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 
 		Testing_CreateNetwork(ctx, networkId, "a", userId)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			clientId:  networkId,
+			clientIdB: networkIdB,
+		})
 
 		day := 24 * time.Hour
 		initialBalanceA := ByteCount(10 * 1024 * 1024 * 1024)
@@ -2159,6 +2223,10 @@ func TestNetEscrowLongLivedBalanceTtlIsCapped(t *testing.T) {
 		destinationClientId := server.NewId()
 		Testing_CreateNetwork(ctx, sourceNetworkId, "long-source", sourceUserId)
 		Testing_CreateNetwork(ctx, destinationNetworkId, "long-destination", destinationUserId)
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			sourceClientId:      sourceNetworkId,
+			destinationClientId: destinationNetworkId,
+		})
 
 		err := AddBasicTransferBalance(
 			ctx,
@@ -2206,6 +2274,10 @@ func TestCompanionPairsToRecentlyClosedOrigin(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			sourceId:      sourceNetworkId,
+			destinationId: destinationNetworkId,
+		})
 
 		// fund the destination network so the origin escrow can be created
 		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 365*24*time.Hour, 2*netRevenue, "", "", "")
