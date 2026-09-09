@@ -320,7 +320,15 @@ func verifyRemoteSourceEpochMode(
 			return fmt.Errorf("repository %s origin: %w", repositoryName, err)
 		}
 		cloneRoot := filepath.Join(temporaryRoot, repositoryName+".git")
-		command := exec.Command("git", "clone", "--quiet", "--bare", "--single-branch", "--branch", branch, origin, cloneRoot)
+		cloneArgs := []string{"clone", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch}
+		// An exact-head check needs only the advertised tip. History remains
+		// mandatory for the non-head mode because it proves older checkpoints
+		// are reachable from the production branch.
+		if requireExactHead {
+			cloneArgs = append(cloneArgs, "--depth=1")
+		}
+		cloneArgs = append(cloneArgs, origin, cloneRoot)
+		command := exec.Command("git", cloneArgs...)
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("clone repository %s competition branch: %s", repositoryName, strings.TrimSpace(string(output)))
 		}
