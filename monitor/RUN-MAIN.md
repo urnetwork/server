@@ -529,6 +529,18 @@ default zsh, and launch the test from that same shell so the verified resource
 exports reach it. Stop immediately if preflight fails. Use `exec` for the final
 test command or explicitly propagate its captured status; a later successful
 status message must never turn a failed preflight or test into a passing gate.
+If preflight finds a launcher lock without a readable current attestation, do
+not delete the lock, rewrite `/etc/hosts`, or stop an owner merely because it is
+old. Follow `local/README.md`: first prove whether a live `run-local.sh` and its
+children still own the exact healthy repository Compose services. When they
+do, preserve that launcher and run `local/run-suite-proxy.sh` in a durable
+primary-agent-owned session, with an absent private state path under
+`$BRINGYOUR_HOME/monitor` and explicit complete Vault and Config roots. Keep
+that proxy owner live through every test, revalidate its attestation before and
+after the gate, and stop it gracefully only after the last consumer exits. If
+there is no live owner, use the stale-state procedure in `local/README.md` rather
+than synthesizing readiness. A direct test that happened to pass without this
+preflight remains diagnostic evidence, not a formal gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 
