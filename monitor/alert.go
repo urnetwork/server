@@ -32,6 +32,9 @@ type Alert struct {
 	Environment  string    `json:"environment"`
 	ObservedAt   time.Time `json:"observed_at"`
 	Sustain      int       `json:"sustain,omitempty"`
+	// PageSustain promotes an initially warning alert to PAGE after this many
+	// consecutive failing cadences. It does not participate in Identity.
+	PageSustain int `json:"page_sustain,omitempty"`
 
 	Symptom   string `json:"symptom"`
 	Mechanism string `json:"mechanism"`

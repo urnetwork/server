@@ -74,7 +74,11 @@ func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
 			sustain = 1
 		}
 		if streaks[identity] >= sustain {
-			ready = append(ready, alert)
+			readyAlert := alert
+			if 0 < alert.PageSustain && alert.PageSustain <= streaks[identity] {
+				readyAlert.Severity = SeverityPage
+			}
+			ready = append(ready, readyAlert)
 		}
 	}
 	for identity := range streaks {

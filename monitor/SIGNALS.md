@@ -14910,6 +14910,14 @@ samples with two peers and `isSyncing=true`, while the head advanced from
 701,762 to 733,678. Never turn a zero-peer `isSyncing=false` sample into a ready
 signal.
 
+The `subtensor-progress` finding therefore carries a three-cadence warning
+threshold and a five-cadence page threshold. The scheduler promotes the copied
+alert at the fifth consecutive failure without changing its
+`(signal_id,class,target,frame)` identity; one healthy cadence resets both
+thresholds. Implementation: SIGNALS.md §17.2 (`subtensor`) maps to
+`signal_subtensor.go` and `signal_subtensor_test.go`, with the generic stable-
+identity escalation contract pinned in `run_test.go`.
+
 On 2026-09-08, the lightnode again held zero peers for more than three monitor
 samples and reported `isSyncing=false` with its target equal to its own stale
 head. Its small continuing head movement during that interval was queued import
