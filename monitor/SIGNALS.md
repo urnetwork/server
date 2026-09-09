@@ -5641,7 +5641,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
-| `[rel] event=window_stall ... failed=0` (`window-stall`) or `failed=1` (`window-stall-terminal`) | Connect emits one structured transition when a provider window's bounded reason or terminal bit changes. `failed=0` explicitly means the window is still trying; at 20/min it is diagnostic churn, not twenty failed windows. `failed=1` means that window crossed both outcome deadlines with no provider added and warns on the first line. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel` because generic error detection matched the field name `failed`; exact 0/1 classes now preserve the distinction, while any unknown flag spelling remains novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer terminal impact, restart Taskworker, or deploy a transport change from `failed=0`; do not infer a root cause from `failed=1` alone. Require nonterminal churn below 20/min and no terminal transition for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
+| `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly; that dispatch does not normally produce `window_stall failed=1`, which remains accepted only as a compatibility shape. The terminal event warns on its first line. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for the normally absent `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer terminal impact, restart Taskworker, or deploy a transport change from `failed=0`; do not infer a root cause from `window_failed` or compatible `failed=1` alone. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
@@ -12710,6 +12710,52 @@ generator error remains visible and provider windows still reach their
 configured minimum. Do not group this with the monitor host's contemporaneous
 IPv6 default-router loss: that observer-local event began later and cannot
 generate application logs inside Taskworker.
+
+**Terminal-window compatibility and evaluation-epoch attribution:** the
+post-promotion watcher observed two authoritative
+`event=window_failed window=quality reason=providers-unresponsive` lines from
+one Taskworker at `2026-09-09T08:12:51Z`, with exact `after` values of 45,039
+and 45,076 milliseconds. Current Connect
+`failOutcome` logs that event after the second zero-provider deadline, then
+calls `SetStallStatus(reason, true)` directly. It therefore does not normally
+pass through the separate transition logger that emits `event=window_stall
+... failed=1`. The standing tailer previously recognized only that normally
+absent compatibility shape and left the real terminal event unclassified.
+`window-stall-terminal` now accepts both exact structured forms at 1/min
+without changing ticket identity; malformed durations, reasons, or field order
+remain in the generic novelty safety net rather than being silently treated as
+terminal.
+
+The bounded same-emitter cohort distinguishes the terminal fact from its
+reason: it had zero exits, proven providers, or flows, repeated candidate
+transport-down/restored churn, and no later `window_recovered`. Its fixed
+ProviderEgressProbe workload attempted all eight due measurements, submitted
+none, and failed all eight; its aggregate was `blackhole_due=250`,
+`checked=250`, and `dark=196`, while `tunnel_failed` remained zero. The four
+preceding evaluation-ping errors all returned `context canceled` and
+co-occurred with four rebuilds and four nonterminal
+`providers-unresponsive` transitions, with no `Send sequence closed` control.
+`rebuildWindow` cancels the current
+`evalEpochCtx`, and each candidate channel is parented on that context, but the
+ping-result callback previously checked only the window-parented `pingDone`
+before logging and recording a provider failure. Thus a locally canceled old
+epoch could contaminate the dominant reason as `providers-unresponsive`.
+Current Connect suppresses a ping error only when the owning evaluation
+context is already done and the returned error matches that exact context
+outcome; the immediate-send and timeout branches apply the same ownership
+boundary. An identically worded error while the evaluation context is live,
+or a nonmatching error after cancellation, remains provider evidence.
+
+This correction does not acquit the terminal outcome. The window still reached
+its second deadline with zero providers, and the failed fixed measurement
+workload is not evidence of a fleet or customer outage. Prove the emitting
+Taskworker's embedded Connect ancestry under §8.12 before deploying the
+evaluation-epoch guard. After rollout, require zero rebuild-owned ping-error
+diagnostics and zero canceled-ping contributions to the stall reason for ten
+minutes through comparable rebuilds. Any later `window_failed` remains
+actionable: correlate its independently derived reason with provider progress
+and the fixed measurement workload, and require a real provider addition or
+`window_recovered` before declaring recovery.
 
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy

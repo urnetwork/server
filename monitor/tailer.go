@@ -117,12 +117,14 @@ type logReconcileQuery func(ctx context.Context, start time.Time, blocks []strin
 
 var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
 
-// Connect's relEvent grammar renders booleans as 0/1. Keep the nonterminal
-// and terminal window-stall states separate: the generic novel detector sees
-// the word "failed" even when the structured value is zero.
+// Connect's relEvent grammar renders booleans as 0/1 and durations as integer
+// milliseconds. Keep nonterminal transitions separate from terminal outcomes:
+// failOutcome logs window_failed and then calls SetStallStatus directly, so it
+// does not normally emit a window_stall failed=1 line. Retain failed=1 as a
+// compatibility shape, and keep both out of the generic novel detector.
 var (
 	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
-	windowStallTerminalRe     = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1(?:[[:space:]]|$)`)
+	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
 	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
 	windowGeneratorCanceledRe = regexp.MustCompile(
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
@@ -131,6 +133,10 @@ var (
 
 func windowStallLogSample(line string) string {
 	return strings.TrimSpace(windowStallEventRe.FindString(line))
+}
+
+func windowTerminalLogSample(line string) string {
+	return strings.TrimSpace(windowTerminalRe.FindString(line))
 }
 
 // Drops the Warp identity while retaining the complete exact diagnostic.
@@ -431,14 +437,14 @@ var logClasses = []logClass{
 		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
 		redactIDs: true,
 	},
-	{name: "window-stall-terminal", re: windowStallTerminalRe,
-		sample:        windowStallLogSample,
+	{name: "window-stall-terminal", re: windowTerminalRe,
+		sample:        windowTerminalLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; failed=1 is terminal for that window but does not identify the underlying failure branch",
-		mechanism: "The Connect window watchdog publishes one structured window_stall transition whenever its reason or terminal bit changes. A value of failed=1 is authoritative terminal state for that window; reason names the current diagnostic branch, not a proven transport root cause.",
-		context:   "Keep this distinct from failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
+		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state for that window but does not identify the underlying failure branch",
+		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch updates the UI-facing terminal latch but does not normally emit window_stall failed=1; the latter remains an accepted compatibility shape. The reason names the current diagnostic branch, not a proven transport root cause.",
+		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
 		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
-		verify:    "No failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
+		verify:    "No window_failed event or compatible failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
 	},
 	{name: "window-stall", re: windowStallNonterminalRe,
 		sample:        windowStallLogSample,
@@ -484,7 +490,7 @@ var logClasses = []logClass{
 
 // errorShaped marks lines that count toward the novel class when no taxonomy
 // row matches.
-var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b`)
+var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b`)
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.

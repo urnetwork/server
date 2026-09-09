@@ -1646,6 +1646,75 @@ func TestWindowStallStructuredStatesStayOutOfNovel(t *testing.T) {
 	}
 }
 
+// Connect's terminal outcome has its own event name. failOutcome logs this
+// line and calls SetStallStatus directly, so a window_stall failed=1 line is
+// not required for the terminal condition to remain visible.
+func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	line := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=window_failed window=quality reason=providers-unresponsive after=45000"
+
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify(line)
+	findings := tailer.drainWindow()
+	terminal := findingByClass(t, findings, "window-stall-terminal")
+	if terminal.healthy {
+		t.Fatal("authoritative window_failed event was hidden")
+	}
+	if nonterminal := findingByClass(t, findings, "window-stall"); !nonterminal.healthy {
+		t.Fatalf("terminal outcome was also counted as nonterminal: %+v", nonterminal)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified terminal outcome also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", terminal,
+	).Markdown()
+	for _, want := range []string{
+		"event=window_failed window=quality reason=providers-unresponsive after=45000",
+		"window_failed is authoritative terminal state",
+		"calls SetStallStatus directly",
+		"does not normally emit window_stall failed=1",
+		"do not restart or deploy from the terminal bit alone",
+		"No window_failed event or compatible failed=1 transition recurs",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("window_failed finding lacks %q: %+v", want, terminal)
+		}
+	}
+	for _, private := range []string{"synthetic-host", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("window_failed alert retained private value %q", private)
+		}
+	}
+
+	// A recovery event is healthy context, not a terminal or generic error.
+	recovered := newLogTailer("taskworker", nil)
+	recovered.classify("[I][2000-01-01T00:00:01Z][synthetic.go:2][rel] event=window_recovered window=quality after=46000")
+	recoveredFindings := recovered.drainWindow()
+	if terminal := findingByClass(t, recoveredFindings, "window-stall-terminal"); !terminal.healthy {
+		t.Fatalf("window recovery was classified as terminal: %+v", terminal)
+	}
+	if novel := findingByClass(t, recoveredFindings, "novel"); !novel.healthy {
+		t.Fatalf("window recovery became novel: %+v", novel)
+	}
+
+	// Unknown duration syntax is schema drift. The terminal matcher must not
+	// accept it merely because the event name contains the word failed.
+	malformed := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		malformed.classify("[I][2000-01-01T00:00:02Z][synthetic.go:3][rel] event=window_failed window=quality reason=providers-unresponsive after=unknown")
+	}
+	malformedFindings := malformed.drainWindow()
+	if terminal := findingByClass(t, malformedFindings, "window-stall-terminal"); !terminal.healthy {
+		t.Fatalf("malformed window_failed event was accepted as terminal: %+v", terminal)
+	}
+	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
+		t.Fatal("malformed window_failed event disappeared from the novelty safety net")
+	}
+}
+
 // The exact canceled-generator shapes belong to an artifact-bounded class,
 // not generic novelty. One line stays quiet; the production-rate population
 // remains paired with its independently structured nonterminal stall signal.
