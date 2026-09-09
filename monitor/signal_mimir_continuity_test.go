@@ -159,7 +159,8 @@ func TestMimirContinuitySignalClassifiesMovingLeftEdgePastDefaultBoundaryAsQuery
 	for _, want := range []string{
 		"classification=query-store-recovering",
 		"observed boundary movement=30m0s over elapsed=30m0s",
-		"right edge stayed fixed while its left edge advanced with wall clock",
+		"right edge stayed fixed while its left edge advanced between observations",
+		"individual movement need not match wall clock",
 		"not permanent raw-sample loss",
 		"operator architecture decision",
 		"SIGNALS.md §11.20",
@@ -169,6 +170,135 @@ func TestMimirContinuitySignalClassifiesMovingLeftEdgePastDefaultBoundaryAsQuery
 		}
 	}
 	requireAlertOmits(t, alert, "must-not-cross-the-monitor-boundary")
+}
+
+func TestMimirContinuitySignalClassifiesBatchedVisibilityAdvanceAndOmitsPrivateLabels(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	firstNow := time.Date(2099, 1, 8, 12, 0, 0, 0, time.UTC)
+	firstMissingStart := time.Date(2099, 1, 7, 0, 0, 0, 0, time.UTC)
+	missingEnd := time.Date(2099, 1, 7, 6, 0, 0, 0, time.UTC)
+	privateMarker := "synthetic-private-label-must-not-cross-boundary"
+	run := func(now, missingStart time.Time) []Alert {
+		t.Helper()
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t,
+			signal,
+			now,
+			mimirContinuityTimes(
+				now.Add(-mimirContinuityWindow), now,
+				mimirContinuityOmitRange(missingStart, missingEnd),
+			),
+			map[string]string{"synthetic_private_label": privateMarker},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+
+	first := requireAlertClass(t, run(firstNow, firstMissingStart), "mimir-continuity-gap-unclassified")
+	requireAlertOmits(t, first, privateMarker)
+
+	alerts := run(firstNow.Add(mimirContinuityStep), firstMissingStart.Add(4*mimirContinuityStep))
+	alert := requireAlertClass(t, alerts, "mimir-query-store-visibility-gap")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"classification=query-store-recovering",
+		"observed boundary movement=20m0s over elapsed=5m0s",
+		"Query/store discovery can expose several steps in one batch",
+		"individual movement need not match wall clock",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("batched continuity alert lacks %q: %s", want, markdown)
+		}
+	}
+	requireAlertOmits(t, alert, privateMarker)
+}
+
+func TestMimirContinuityAnyLaterForwardMovementIsRecovery(t *testing.T) {
+	baseNow := time.Date(2099, 2, 3, 12, 0, 0, 0, time.UTC)
+	missingStart := time.Date(2099, 2, 2, 1, 0, 0, 0, time.UTC)
+	missingEnd := time.Date(2099, 2, 2, 4, 0, 0, 0, time.UTC)
+	gap := func(start, end time.Time) mimirContinuityGap {
+		return mimirContinuityGap{
+			previous: start.Add(-mimirContinuityStep),
+			resumed:  end.Add(mimirContinuityStep),
+			missing:  int(end.Sub(start)/mimirContinuityStep) + 1,
+		}
+	}
+
+	for _, test := range []struct {
+		name         string
+		elapsed      time.Duration
+		movement     time.Duration
+		wantMovement time.Duration
+		wantElapsed  time.Duration
+	}{
+		{name: "faster batch", elapsed: mimirContinuityStep, movement: 4 * mimirContinuityStep, wantMovement: 4 * mimirContinuityStep, wantElapsed: mimirContinuityStep},
+		{name: "slower discovery", elapsed: 4 * mimirContinuityStep, movement: mimirContinuityStep, wantMovement: mimirContinuityStep, wantElapsed: 4 * mimirContinuityStep},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &mimirContinuityProbe{}
+			first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
+			if first[0].classification != mimirContinuityUnclassified {
+				t.Fatalf("first observation = %s, want unclassified", first[0].classification)
+			}
+			second := probe.observeGaps(
+				baseNow.Add(test.elapsed),
+				[]mimirContinuityGap{gap(missingStart.Add(test.movement), missingEnd)},
+			)
+			if second[0].classification != mimirContinuityRecovering {
+				t.Fatalf("later forward observation = %s, want recovering", second[0].classification)
+			}
+			if second[0].recoveryMovement != test.wantMovement || second[0].recoveryElapsed != test.wantElapsed {
+				t.Fatalf(
+					"recovery movement/elapsed = %s/%s, want %s/%s",
+					second[0].recoveryMovement, second[0].recoveryElapsed,
+					test.wantMovement, test.wantElapsed,
+				)
+			}
+		})
+	}
+}
+
+func TestMimirContinuityGapIdentityChangesResetRecovery(t *testing.T) {
+	baseNow := time.Date(2099, 3, 4, 12, 0, 0, 0, time.UTC)
+	missingStart := time.Date(2099, 3, 3, 1, 0, 0, 0, time.UTC)
+	missingEnd := time.Date(2099, 3, 3, 4, 0, 0, 0, time.UTC)
+	gap := func(start, end time.Time) mimirContinuityGap {
+		return mimirContinuityGap{
+			previous: start.Add(-mimirContinuityStep),
+			resumed:  end.Add(mimirContinuityStep),
+			missing:  int(end.Sub(start)/mimirContinuityStep) + 1,
+		}
+	}
+
+	for _, test := range []struct {
+		name  string
+		third mimirContinuityGap
+	}{
+		{name: "left edge regression", third: gap(missingStart, missingEnd)},
+		{name: "new right edge", third: gap(missingStart.Add(2*mimirContinuityStep), missingEnd.Add(mimirContinuityStep))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &mimirContinuityProbe{}
+			first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
+			if first[0].classification != mimirContinuityUnclassified {
+				t.Fatalf("first observation = %s, want unclassified", first[0].classification)
+			}
+			second := probe.observeGaps(
+				baseNow.Add(mimirContinuityStep),
+				[]mimirContinuityGap{gap(missingStart.Add(mimirContinuityStep), missingEnd)},
+			)
+			if second[0].classification != mimirContinuityRecovering {
+				t.Fatalf("second observation = %s, want recovering", second[0].classification)
+			}
+			third := probe.observeGaps(baseNow.Add(2*mimirContinuityStep), []mimirContinuityGap{test.third})
+			if third[0].classification != mimirContinuityUnclassified {
+				t.Fatalf("changed gap observation = %s, want unclassified", third[0].classification)
+			}
+		})
+	}
 }
 
 func TestMimirContinuitySignalClassifiesFixedPostBoundaryGapAsLoss(t *testing.T) {

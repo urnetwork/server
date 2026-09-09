@@ -7270,7 +7270,7 @@ Tier-1 (warn):
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
-| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, wall-clock-moving left edge is temporary store visibility, repeated fixed post-boundary gap is loss |
+| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, a strictly advancing left edge on the same fixed-right-edge gap is temporary store visibility even when discovery is batched, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
@@ -9942,14 +9942,18 @@ Leading and trailing absence is ignored because it can describe a new
 environment or normal ingestion delay; one or two isolated missing evaluations
 are tolerated. Three or more missing evaluations inside two present samples
 first emit `mimir-continuity-gap-unclassified`, preserving all gap ranges and
-the serving gateway. On later watcher observations, a fixed right edge whose
-left edge advances approximately with wall clock becomes
-`mimir-query-store-visibility-gap`: old timestamps became readable without
-producer backfill, the deterministic recent-store cutoff signature. A gap that
-stays fixed on consecutive observations after its right edge is older than the
-current Mimir 3.1.1 `query_store_after=12h` default plus two evaluation steps
-becomes `mimir-ingestion-gap`. Healthy findings cover all three stable classes,
-so reclassification or complete recovery resolves the previous identity.
+the serving gateway. On a later observation of the same fixed-right-edge gap,
+any strictly advancing left edge becomes `mimir-query-store-visibility-gap`:
+old timestamps became readable without producer backfill. Query/store
+discovery may expose several five-minute evaluations in one batch, so an
+individual step need not match elapsed wall clock. Approximately wall-clock
+movement across the series remains the stronger recent-store cutoff signature.
+A left-edge regression or a changed right edge starts new unclassified history.
+A gap that stays fixed on consecutive observations after its right edge is
+older than the current Mimir 3.1.1 `query_store_after=12h` default plus two
+evaluation steps becomes `mimir-ingestion-gap`. Healthy findings cover all
+three stable classes, so reclassification or complete recovery resolves the
+previous identity.
 
 On 2026-09-03, the newest global gap was `12:35Z` through `20:00Z`. Across
 repeated absolute-window reads its left edge advanced from `08:35Z` to
