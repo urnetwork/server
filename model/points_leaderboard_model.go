@@ -622,6 +622,66 @@ func GetPointsLeaderboardPage(
 	return
 }
 
+// GetPointsLeaderboardPageBefore lists the rows of a snapshot before
+// `beforePosition` in the given sort, the `limit` closest ones, returned in
+// ascending position order (the caller pages backward from a jumped-to
+// window; see GetPointsLeaderboardPageFrom).
+func GetPointsLeaderboardPageBefore(
+	ctx context.Context,
+	snapshotId server.Id,
+	sortBy string,
+	beforePosition int64,
+	limit int,
+) (rows []*PointsLeaderboardRow) {
+	rows = []*PointsLeaderboardRow{}
+	column, ok := pointsLeaderboardPositionColumn(sortBy)
+	if !ok || limit <= 0 || beforePosition <= 1 {
+		return
+	}
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			pointsLeaderboardRowSelect+`
+				WHERE
+					network_points_leaderboard.snapshot_id = $1 AND
+					network_points_leaderboard.`+column+` < $2
+				ORDER BY network_points_leaderboard.`+column+` DESC
+				LIMIT $3
+			`,
+			snapshotId,
+			beforePosition,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				rows = append(rows, scanPointsLeaderboardRow(result))
+			}
+		})
+	})
+	// the query walked backward; hand the rows back in list order
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return
+}
+
+// GetPointsLeaderboardPageFrom lists the rows of a snapshot from
+// `fromPosition` (inclusive) in the given sort, at most `limit` rows: the
+// page a seek to that position lands on.
+func GetPointsLeaderboardPageFrom(
+	ctx context.Context,
+	snapshotId server.Id,
+	sortBy string,
+	fromPosition int64,
+	limit int,
+) (rows []*PointsLeaderboardRow) {
+	if fromPosition < 1 {
+		fromPosition = 1
+	}
+	return GetPointsLeaderboardPage(ctx, snapshotId, sortBy, fromPosition-1, limit)
+}
+
 // GetPointsLeaderboardNetworkRow is the network's own row in the snapshot;
 // nil when the network has no points.
 func GetPointsLeaderboardNetworkRow(
