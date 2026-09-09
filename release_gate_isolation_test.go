@@ -77,6 +77,7 @@ type releaseGateServicesFixture struct {
 	docker    string
 	lock      string
 	probe     string
+	generator string
 }
 
 // macOS exposes its temporary directory through /var even though the physical
@@ -107,6 +108,16 @@ func newReleaseGateServicesFixture(t *testing.T) *releaseGateServicesFixture {
 		t.Fatal(err)
 	}
 	self.helper = filepath.Join(server, "local", "release-gate-services.sh")
+	// Build the actual stdlib-only generator outside each bounded Docker
+	// ownership script; no authentication or resource result is doubled.
+	self.generator = filepath.Join(releaseGateCanonicalTempDir(t), "server-fixture")
+	buildCtx, buildCancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer buildCancel()
+	build := exec.CommandContext(buildCtx, "go", "build", "-o", self.generator, "./scripts/server-fixture")
+	build.Dir = filepath.Join(server, "..", "sn")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build exact private suite generator: %v\n%s", err, output)
+	}
 	if err := os.Symlink(server, filepath.Join(self.workspace, "server")); err != nil {
 		t.Fatal(err)
 	}
@@ -149,12 +160,14 @@ func (self *releaseGateServicesFixture) run(t *testing.T, body string) ([]byte, 
 trap 'exit 143' TERM
 source "$HELPER"
 release_gate_service_docker() { "$FAKE_DOCKER" "$@"; }
+release_gate_service_fixture() { shift 2; "$FIXTURE_GENERATOR" "$@"; }
 `+body)
 	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
 	command.WaitDelay = 10 * time.Second
 	command.Env = testCommandEnvironment(map[string]string{
 		"HELPER": self.helper, "FAKE_DOCKER": self.docker, "FAKE_STATE": self.state,
-		"GATE_ROOT": self.root, "FIXTURE_WORKSPACE": self.workspace, "FIXTURE_LOCK": self.lock,
+		"FIXTURE_GENERATOR": self.generator,
+		"GATE_ROOT":         self.root, "FIXTURE_WORKSPACE": self.workspace, "FIXTURE_LOCK": self.lock,
 		"FAKE_PG_PORT": "35431", "FAKE_REDIS_PORT": "36371",
 		"APEX_CONTAINER_EVALUATION": "", "FAKE_FAIL_CREATE": "",
 		"PRIVATE_PROBE": self.probe, "WARP_ENV": "local",
@@ -175,7 +188,9 @@ source "$release_gate_service_root/environment.sh"
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg_maintenance.yml"
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/config/db.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/config/db_maintenance.yml"
 [[ "$(< "$WARP_TEST_ENV_PORTABLE_ROOT/config/settings.yml")" == 'all: {}' ]]
-[[ -d "$WARP_SITE_HOME" && -L "$WARP_TEST_ENV_PORTABLE_ROOT/vault/local" ]]
+[[ -d "$WARP_SITE_HOME" && ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/local" ]]
+[[ -f "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" && ! -L "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" ]]
+[[ ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/nonservice.yml" ]]
 for service in postgres redis; do
   id="$(< "$release_gate_service_root/$service.cid")"
   [[ "$(< "$FAKE_STATE/$id.args")" == *--restart=no* ]]
@@ -303,6 +318,9 @@ SECONDS=10
 release_gate_service_deadline=9
 status=0; release_gate_service_docker create || status=$?
 [[ "$status" == 124 ]]
+release_gate_service_fixture() { printf 'unexpected generator\n' > "$FAKE_STATE/fixture-called"; return 93; }
+status=0; release_gate_service_resources "$FIXTURE_WORKSPACE" || status=$?
+[[ "$status" == 124 && ! -e "$FAKE_STATE/fixture-called" ]]
 `)
 	if err != nil {
 		t.Fatalf("expired service admission: %v\n%s", err, output)
@@ -387,6 +405,7 @@ func TestTestEnvironmentPrivatePortableShellProfileProbesOnlyOwnedEndpoints(t *t
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 source "$FIXTURE_WORKSPACE/server/test-env.sh"
+test_env_validate_suite_resource_manifest "$TEST_ENV_SUITE_RESOURCE_MANIFEST" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"
 [[ "$BRINGYOUR_POSTGRES_HOSTNAME" == 127.0.0.1 && "$BRINGYOUR_REDIS_HOSTNAME" == 127.0.0.1 ]]
 [[ "$WARP_SITE_HOME" == "$WARP_TEST_ENV_PORTABLE_ROOT/site" ]]
 `)
@@ -396,6 +415,40 @@ source "$FIXTURE_WORKSPACE/server/test-env.sh"
 	probes, err := os.ReadFile(filepath.Join(self.root, "probes"))
 	if err != nil || string(probes) != "postgres 127.0.0.1 35431\nredis 127.0.0.1 36371\n" {
 		t.Fatalf("private shell probes=%q error=%v", probes, err)
+	}
+}
+
+// The adapter must satisfy the complete unchanged guard, not only the four
+// service resources. Removing auth reproduces the original pre-body refusal.
+func TestReleaseGateServicesSuiteManifestRejectsMissingAuth(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, releaseGatePrivateShellProfile+`
+source "$FIXTURE_WORKSPACE/server/test-env.sh"
+test_env_validate_suite_resource_manifest "$TEST_ENV_SUITE_RESOURCE_MANIFEST" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"
+mv "$WARP_VAULT_HOME/auth.yml" "$WARP_VAULT_HOME/auth.retained"
+if test_env_validate_suite_resource_manifest "$TEST_ENV_SUITE_RESOURCE_MANIFEST" "$WARP_VAULT_HOME" "$WARP_CONFIG_HOME"; then exit 90; fi
+`)
+	if err != nil || !strings.Contains(string(output), "required resource is missing:") || !strings.Contains(string(output), "auth.yml") {
+		t.Fatalf("complete private suite guard did not retain missing-auth refusal: %v\n%s", err, output)
+	}
+}
+
+// A failed real-generator command cannot publish an environment pointing at
+// incomplete resources; the existing owner still cleans both private services.
+func TestReleaseGateServicesFixtureFailureRetainsRefusalAndCleansPair(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+release_gate_service_fixture() { printf 'fixture command refused\n' >&2; return 37; }
+trap 'release_gate_services_cleanup' EXIT
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+[[ ! -e "$release_gate_service_root/environment.sh" ]]
+`)
+	if err != nil || !strings.Contains(string(output), "fixture command refused") {
+		t.Fatalf("fixture command refusal lost: %v\n%s", err, output)
+	}
+	removed, err := os.ReadFile(filepath.Join(self.state, "removed"))
+	if err != nil || len(strings.Fields(string(removed))) != 2 {
+		t.Fatalf("fixture failure leaked its service pair: %v", err)
 	}
 }
 
@@ -451,7 +504,7 @@ func TestTestEnvironmentPrivatePortableShellRejectsAncestorAlias(t *testing.T) {
 	self := newReleaseGateServicesFixture(t)
 	output, err := self.run(t, releaseGatePrivateShellProfile+`
 ln -s "$GATE_ROOT" "$GATE_ROOT/alias"
-export WARP_TEST_ENV_PORTABLE_ROOT="$GATE_ROOT/alias/services/resources"
+export WARP_TEST_ENV_PORTABLE_ROOT="$GATE_ROOT/alias${WARP_TEST_ENV_PORTABLE_ROOT#"$GATE_ROOT"}"
 set +e
 source "$FIXTURE_WORKSPACE/server/test-env.sh"
 source_status=$?

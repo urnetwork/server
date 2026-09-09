@@ -53,20 +53,18 @@ func TestStConfigRejectsInvalidDepositTierSchedules(t *testing.T) {
 		name  string
 		tiers []StDepositTier
 	}{
-		{"missing zero baseline", []StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}},
-		{"duplicate threshold", []StDepositTier{{RateNumerator: 1, RateDenominator: 1}, {RateNumerator: 1, RateDenominator: 1}}},
-		{"zero numerator", []StDepositTier{{RateNumerator: 0, RateDenominator: 1}}},
-		{"zero denominator", []StDepositTier{{RateNumerator: 1, RateDenominator: 0}}},
-		{"rate increases", []StDepositTier{{RateNumerator: 1, RateDenominator: 2}, {MinConvictionRao: 1, RateNumerator: 2, RateDenominator: 3}}},
+		{name: "missing zero baseline", tiers: []StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}},
+		{name: "duplicate threshold", tiers: []StDepositTier{{RateNumerator: 1, RateDenominator: 1}, {RateNumerator: 1, RateDenominator: 1}}},
+		{name: "zero numerator", tiers: []StDepositTier{{RateNumerator: 0, RateDenominator: 1}}},
+		{name: "zero denominator", tiers: []StDepositTier{{RateNumerator: 1, RateDenominator: 0}}},
+		{name: "rate increases", tiers: []StDepositTier{{RateNumerator: 1, RateDenominator: 2}, {MinConvictionRao: 1, RateNumerator: 2, RateDenominator: 3}}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			f := releaseStVaultFile()
-			f.TestnetDepositTiers = test.tiers
-			if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
-				t.Fatal("invalid deposit tier schedule accepted")
-			}
-		})
+		f := releaseStVaultFile()
+		f.TestnetDepositTiers = test.tiers
+		if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+			t.Fatalf("%s: invalid deposit tier schedule accepted", test.name)
+		}
 	}
 }
 

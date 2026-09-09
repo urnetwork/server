@@ -13,8 +13,8 @@ import (
 // Client identity-key model: long-lived Ed25519 public keys published by
 // clients via the `ClientKey` control message, one per `client_id`.
 //
-// Redis is the source of truth (no SQL table): the string key `ckey_<clientId>`
-// holds the raw 32-byte key with no TTL, so entries persist until removed.
+// Legacy clients retain their Redis source. Once signed operator history is
+// present, its durable SQL head is authoritative and Redis is only projection.
 
 func clientPublicKeyRedisKey(clientId server.Id) string {
 	return fmt.Sprintf("ckey_%s", clientId)
@@ -25,6 +25,9 @@ func GetClientPublicKey(
 	ctx context.Context,
 	clientId server.Id,
 ) (publicKey []byte, returnErr error) {
+	if key, found, err := stClientKeyCurrent(ctx, clientId); err != nil || found {
+		return key, err
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		bytes, err := r.Get(ctx, clientPublicKeyRedisKey(clientId)).Bytes()
 		if err == nil {
@@ -45,6 +48,9 @@ func SetClientPublicKey(
 	clientId server.Id,
 	publicKey []byte,
 ) {
+	if _, found, err := stClientKeyCurrent(ctx, clientId); err != nil || found {
+		server.Raise(errors.Join(errors.New("signed client-key history requires the authenticated operator registration path"), err))
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		// redis is the source of truth for ckeys (accepted posture: an
 		// unrouteable resident gets a new one nominated), so a failed publish
@@ -65,7 +71,8 @@ func RemoveClientPublicKey(
 	ctx context.Context,
 	clientId server.Id,
 ) {
+	retireStClientKeyHistory(ctx, clientId)
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.Del(ctx, clientPublicKeyRedisKey(clientId))
+		server.Raise(r.Del(ctx, clientPublicKeyRedisKey(clientId)).Err())
 	})
 }

@@ -78,32 +78,32 @@ release_gate_service_endpoint() {
   RELEASE_GATE_SERVICE_ENDPOINT="$binding"
 }
 
-# Preserve read-only references to frozen local resources. Service credentials,
-# maintenance routing, and startup settings are direct private resources so
-# inherited host/site settings cannot replace the daemon-assigned endpoints.
+# The exact frozen Go fixture owns synthetic resources; this command boundary
+# is separate from Docker so tests can run its real prebuilt executable.
+release_gate_service_fixture() (
+  local remaining="$1" workspace="$2"
+  shift 2
+  cd "$workspace/sn" || return 1
+  # Timeout owns the compiler/executable command group; the existing finite
+  # service deadline includes both compilation and generation.
+  exec timeout "$remaining" go run ./scripts/server-fixture "$@"
+)
+
+# Generate the complete strict suite resource census under this private owner.
+# Ambient workspace vault/config entries are never linked into qualification.
 release_gate_service_resources() (
   umask 077
-  local workspace="$1" root="$release_gate_service_root/resources" kind entry name
-  mkdir -m 700 "$root" "$root/vault" "$root/config" "$root/site" || return 1
-  for kind in vault config; do
-    for entry in "$workspace/$kind"/*; do
-      [[ -e "$entry" ]] || continue
-      name="${entry##*/}"
-      case "$kind/$name" in
-        vault/pg.yml | vault/pg_maintenance.yml | vault/redis.yml | config/settings.yml | config/db.yml | config/db_maintenance.yml | config/redis.yml) continue ;;
-      esac
-      ln -s -- "$entry" "$root/$kind/$name" || return 1
-    done
-  done
-  printf 'authority: "%s"\nuser: "bringyour"\npassword: "urnetwork-local-test"\ndb: "bringyour"\n' \
-    "$release_gate_postgres_endpoint" > "$root/vault/pg.yml" || return 1
-  cp -- "$root/vault/pg.yml" "$root/vault/pg_maintenance.yml" || return 1
-  printf 'authority: "%s"\npassword: ""\ndb: 0\ncluster: false\n' \
-    "$release_gate_redis_endpoint" > "$root/vault/redis.yml" || return 1
-  cp -- "$workspace/server/local/testdata/config/local/db.yml" "$root/config/db.yml" || return 1
-  cp -- "$root/config/db.yml" "$root/config/db_maintenance.yml" || return 1
-  cp -- "$workspace/server/local/testdata/config/local/redis.yml" "$root/config/redis.yml" || return 1
-  printf 'all: {}\n' > "$root/config/settings.yml" || return 1
+  local workspace="$1" root server remaining=120
+  server="$(cd "$workspace/server" && pwd -P)" || return 1
+  if (( ${release_gate_service_deadline:-0} > 0 )); then
+    remaining=$((release_gate_service_deadline - SECONDS))
+    (( remaining > 0 )) || return 124
+  fi
+  root="$(release_gate_service_fixture "$remaining" "$workspace" \
+    --suite --parent "$release_gate_service_root" --server "$server" \
+    --postgres-authority "$release_gate_postgres_endpoint" --redis-authority "$release_gate_redis_endpoint" --path-only)" || return $?
+  [[ "$root" == "$release_gate_service_root"/server-fixture-* && -d "$root" && ! -L "$root" ]] || return 1
+  [[ "$(cd "$root" && pwd -P)" == "$root" && "$(stat -c '%a' "$root")" == 700 ]] || return 1
   {
     printf 'export WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1\nexport WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES=1\n'
     printf 'export WARP_TEST_ENV_PORTABLE_ROOT=%q\n' "$root"

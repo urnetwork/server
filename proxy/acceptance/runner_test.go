@@ -351,10 +351,7 @@ func TestCancellationDuringProvisionStillCapturesAndRemovesClient(t *testing.T) 
 	}
 }
 
-// A server-declared failure is terminal and remains part of every protocol
-// result instead of being mistaken for a retryable transport failure.
 func TestCleanupFailureFailsOtherwisePassingProtocols(t *testing.T) {
-	cleanupAttempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
@@ -363,7 +360,6 @@ func TestCleanupFailureFailsOtherwisePassingProtocols(t *testing.T) {
 		case "/network/auth-client":
 			_, _ = w.Write([]byte(`{"client_id":"client","proxy_config_result":{"auth_token":"token"}}`))
 		case "/network/remove-client":
-			cleanupAttempts++
 			_, _ = w.Write([]byte(`{"error":{"message":"cleanup failed"}}`))
 		default:
 			http.NotFound(w, request)
@@ -385,95 +381,6 @@ func TestCleanupFailureFailsOtherwisePassingProtocols(t *testing.T) {
 		if !strings.Contains(result.Detail, "cleanup failed") {
 			t.Fatalf("%s detail did not report cleanup: %q", name, result.Detail)
 		}
-	}
-	if cleanupAttempts != 1 {
-		t.Fatalf("semantic cleanup attempts = %d, want 1", cleanupAttempts)
-	}
-}
-
-// A transient resolver failure happens before remove-client reaches the
-// server. The provisioned client must remain owned until a bounded retry has
-// deactivated it, or an otherwise passing campaign leaks its temporary row.
-func TestRunRetriesTransientDNSFailureWhileRemovingClient(t *testing.T) {
-	cleanupAttempts := 0
-	removed := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch request.URL.Path {
-		case "/auth/login-with-password":
-			_, _ = w.Write([]byte(`{"network":{"by_jwt":"jwt"}}`))
-		case "/network/auth-client":
-			_, _ = w.Write([]byte(`{"client_id":"client","proxy_config_result":{"auth_token":"token"}}`))
-		case "/network/remove-client":
-			removed = true
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			http.NotFound(w, request)
-		}
-	}))
-	defer server.Close()
-	transport := runnerRoundTripper(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path == "/network/remove-client" {
-			cleanupAttempts++
-			if cleanupAttempts == 1 {
-				_ = request.Body.Close()
-				return nil, &net.DNSError{
-					Err:        "no such host",
-					Name:       "api.example",
-					IsNotFound: true,
-				}
-			}
-		}
-		return server.Client().Transport.RoundTrip(request)
-	})
-	passing := func(context.Context) error { return nil }
-
-	results := runWithDependencies(context.Background(), Options{
-		APIURL: server.URL, TargetURL: server.URL + "/target", CredentialsPath: "injected", Repeat: 1,
-	}, runDependencies{
-		credentials: &credentials{user: "user", password: "password"},
-		httpClient:  &http.Client{Transport: transport},
-		probes: func(*proxyConfigResult) map[string]protocolProbe {
-			return map[string]protocolProbe{"socks": passing, "http": passing, "wireguard": passing}
-		},
-	})
-	if cleanupAttempts != 2 {
-		t.Fatalf("cleanup attempts = %d, want one transient failure and one retry", cleanupAttempts)
-	}
-	if !removed {
-		t.Fatal("temporary client remained active after a transient cleanup DNS failure")
-	}
-	for _, name := range protocolNames {
-		assertResult(t, results, name, "PASS")
-	}
-}
-
-// Cancellation ends the retry wait and preserves both the lifecycle boundary
-// and the last transport cause without sending another mutation.
-func TestCleanupRetryStopsAfterCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cleanupAttempts := 0
-	transport := runnerRoundTripper(func(request *http.Request) (*http.Response, error) {
-		cleanupAttempts++
-		cancel()
-		_ = request.Body.Close()
-		return nil, &net.DNSError{
-			Err:        "no such host",
-			Name:       "api.example",
-			IsNotFound: true,
-		}
-	})
-	runner := &runner{api: &apiClient{
-		baseURL: "https://api.example",
-		client:  &http.Client{Transport: transport},
-	}}
-
-	err := runner.remove(ctx, "jwt", "client")
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("cleanup error = %v, want context cancellation", err)
-	}
-	if cleanupAttempts != 1 {
-		t.Fatalf("cleanup attempts after cancellation = %d, want 1", cleanupAttempts)
 	}
 }
 

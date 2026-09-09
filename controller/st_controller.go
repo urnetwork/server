@@ -134,6 +134,8 @@ const (
 type StConfig struct {
 	Profile                string
 	Enabled                bool
+	AttemptUploadBudget    model.StAttemptUploadBudget
+	ReservedAttemptUpload  *StReservedAttemptUploadConfig
 	WalletAllowUnsigned    bool
 	PublicRpcUrl           string
 	RpcUrls                []string
@@ -203,59 +205,63 @@ type stVaultFile struct {
 	// Published through GET /sn/epoch as rpc_url when set.
 	PublicRpcUrl string `yaml:"public_rpc_url"`
 
-	Enabled                bool            `yaml:"enabled"`
-	RpcUrls                []string        `yaml:"rpc_urls"`
-	ChainId                uint64          `yaml:"chain_id"`
-	GenesisHash            string          `yaml:"genesis_hash"`
-	DeploymentId           string          `yaml:"deployment_id"`
-	PolicyHash             string          `yaml:"policy_hash"`
-	ContractAddress        string          `yaml:"coordinator_address"`
-	LegacyContractAddress  string          `yaml:"contract_address"`
-	SettlementVault        string          `yaml:"settlement_vault_address"`
-	ReserveSink            string          `yaml:"reserve_sink_address"`
-	Netuid                 uint64          `yaml:"netuid"`
-	NoId                   uint64          `yaml:"no_id"`
-	TreasuryHotkey         string          `yaml:"treasury_hotkey"`
-	DepositHotkey          string          `yaml:"deposit_hotkey"`
-	DepositKey             string          `yaml:"deposit_key"`
-	OpsKey                 string          `yaml:"ops_key"`
-	RootKey                string          `yaml:"root_key"`
-	ArtifactKey            string          `yaml:"artifact_key"`
-	DepositAlphaRaoPerGib  uint64          `yaml:"deposit_alpha_rao_per_gib"`
-	DepositRateNumerator   uint64          `yaml:"deposit_rate_numerator_rao_per_gib"`
-	DepositRateDenominator uint64          `yaml:"deposit_rate_denominator"`
-	DepositTiers           []StDepositTier `yaml:"deposit_tiers"`
-	DepositEpochCapRao     uint64          `yaml:"deposit_epoch_cap_rao"`
-	ReliabilityAMin        int64           `yaml:"reliability_a_min"`
-	BlockSeconds           int64           `yaml:"block_seconds"`
-	DeployBlock            uint64          `yaml:"deploy_block"`
+	Enabled                bool                           `yaml:"enabled"`
+	AttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"attempt_upload"`
+	ReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"reserved_attempt_upload"`
+	RpcUrls                []string                       `yaml:"rpc_urls"`
+	ChainId                uint64                         `yaml:"chain_id"`
+	GenesisHash            string                         `yaml:"genesis_hash"`
+	DeploymentId           string                         `yaml:"deployment_id"`
+	PolicyHash             string                         `yaml:"policy_hash"`
+	ContractAddress        string                         `yaml:"coordinator_address"`
+	LegacyContractAddress  string                         `yaml:"contract_address"`
+	SettlementVault        string                         `yaml:"settlement_vault_address"`
+	ReserveSink            string                         `yaml:"reserve_sink_address"`
+	Netuid                 uint64                         `yaml:"netuid"`
+	NoId                   uint64                         `yaml:"no_id"`
+	TreasuryHotkey         string                         `yaml:"treasury_hotkey"`
+	DepositHotkey          string                         `yaml:"deposit_hotkey"`
+	DepositKey             string                         `yaml:"deposit_key"`
+	OpsKey                 string                         `yaml:"ops_key"`
+	RootKey                string                         `yaml:"root_key"`
+	ArtifactKey            string                         `yaml:"artifact_key"`
+	DepositAlphaRaoPerGib  uint64                         `yaml:"deposit_alpha_rao_per_gib"`
+	DepositRateNumerator   uint64                         `yaml:"deposit_rate_numerator_rao_per_gib"`
+	DepositRateDenominator uint64                         `yaml:"deposit_rate_denominator"`
+	DepositTiers           []StDepositTier                `yaml:"deposit_tiers"`
+	DepositEpochCapRao     uint64                         `yaml:"deposit_epoch_cap_rao"`
+	ReliabilityAMin        int64                          `yaml:"reliability_a_min"`
+	BlockSeconds           int64                          `yaml:"block_seconds"`
+	DeployBlock            uint64                         `yaml:"deploy_block"`
 
-	TestnetEnabled                bool            `yaml:"testnet-enabled"`
-	TestnetWalletAllowUnsigned    bool            `yaml:"testnet-wallet-allow-unsigned"`
-	TestnetPublicRpcUrl           string          `yaml:"testnet-public-rpc-url"`
-	TestnetRpcUrls                []string        `yaml:"testnet-rpc-urls"`
-	TestnetChainId                uint64          `yaml:"testnet-chain-id"`
-	TestnetGenesisHash            string          `yaml:"testnet-genesis-hash"`
-	TestnetDeploymentId           string          `yaml:"testnet-deployment-id"`
-	TestnetPolicyHash             string          `yaml:"testnet-policy-hash"`
-	TestnetContractAddress        string          `yaml:"testnet-coordinator-address"`
-	TestnetSettlementVault        string          `yaml:"testnet-settlement-vault-address"`
-	TestnetReserveSink            string          `yaml:"testnet-reserve-sink-address"`
-	TestnetNetuid                 uint64          `yaml:"testnet-netuid"`
-	TestnetNoId                   uint64          `yaml:"testnet-no-id"`
-	TestnetTreasuryHotkey         string          `yaml:"testnet-treasury-hotkey"`
-	TestnetDepositHotkey          string          `yaml:"testnet-deposit-hotkey"`
-	TestnetDepositKey             string          `yaml:"testnet-deposit-key"`
-	TestnetRootKey                string          `yaml:"testnet-root-key"`
-	TestnetArtifactKey            string          `yaml:"testnet-artifact-key"`
-	TestnetDepositAlphaRaoPerGib  uint64          `yaml:"testnet-deposit-alpha-rao-per-gib"`
-	TestnetDepositRateNumerator   uint64          `yaml:"testnet-deposit-rate-numerator-rao-per-gib"`
-	TestnetDepositRateDenominator uint64          `yaml:"testnet-deposit-rate-denominator"`
-	TestnetDepositTiers           []StDepositTier `yaml:"testnet-deposit-tiers"`
-	TestnetDepositEpochCapRao     uint64          `yaml:"testnet-deposit-epoch-cap-rao"`
-	TestnetReliabilityAMin        int64           `yaml:"testnet-reliability-a-min"`
-	TestnetBlockSeconds           int64           `yaml:"testnet-block-seconds"`
-	TestnetDeployBlock            uint64          `yaml:"testnet-deploy-block"`
+	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
+	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
+	TestnetReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"testnet-reserved-attempt-upload"`
+	TestnetWalletAllowUnsigned    bool                           `yaml:"testnet-wallet-allow-unsigned"`
+	TestnetPublicRpcUrl           string                         `yaml:"testnet-public-rpc-url"`
+	TestnetRpcUrls                []string                       `yaml:"testnet-rpc-urls"`
+	TestnetChainId                uint64                         `yaml:"testnet-chain-id"`
+	TestnetGenesisHash            string                         `yaml:"testnet-genesis-hash"`
+	TestnetDeploymentId           string                         `yaml:"testnet-deployment-id"`
+	TestnetPolicyHash             string                         `yaml:"testnet-policy-hash"`
+	TestnetContractAddress        string                         `yaml:"testnet-coordinator-address"`
+	TestnetSettlementVault        string                         `yaml:"testnet-settlement-vault-address"`
+	TestnetReserveSink            string                         `yaml:"testnet-reserve-sink-address"`
+	TestnetNetuid                 uint64                         `yaml:"testnet-netuid"`
+	TestnetNoId                   uint64                         `yaml:"testnet-no-id"`
+	TestnetTreasuryHotkey         string                         `yaml:"testnet-treasury-hotkey"`
+	TestnetDepositHotkey          string                         `yaml:"testnet-deposit-hotkey"`
+	TestnetDepositKey             string                         `yaml:"testnet-deposit-key"`
+	TestnetRootKey                string                         `yaml:"testnet-root-key"`
+	TestnetArtifactKey            string                         `yaml:"testnet-artifact-key"`
+	TestnetDepositAlphaRaoPerGib  uint64                         `yaml:"testnet-deposit-alpha-rao-per-gib"`
+	TestnetDepositRateNumerator   uint64                         `yaml:"testnet-deposit-rate-numerator-rao-per-gib"`
+	TestnetDepositRateDenominator uint64                         `yaml:"testnet-deposit-rate-denominator"`
+	TestnetDepositTiers           []StDepositTier                `yaml:"testnet-deposit-tiers"`
+	TestnetDepositEpochCapRao     uint64                         `yaml:"testnet-deposit-epoch-cap-rao"`
+	TestnetReliabilityAMin        int64                          `yaml:"testnet-reliability-a-min"`
+	TestnetBlockSeconds           int64                          `yaml:"testnet-block-seconds"`
+	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -314,6 +320,8 @@ var stConfigFromVault = sync.OnceValue(func() (cfg *StConfig) {
 })
 
 type stSelectedConfig struct {
+	AttemptUploadBudget                                                                                            model.StAttemptUploadBudget
+	ReservedAttemptUpload                                                                                          *StReservedAttemptUploadConfig
 	WalletAllowUnsigned                                                                                            bool
 	Enabled                                                                                                        bool
 	ChainId, Netuid, NoId, DepositAlphaRaoPerGib, DepositRateNumerator, DepositRateDenominator, DepositEpochCapRao uint64
@@ -331,7 +339,9 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 	case stconn.ProfileTestnet:
 		return stSelectedConfig{
 			Enabled: f.TestnetEnabled, WalletAllowUnsigned: f.TestnetWalletAllowUnsigned,
-			PublicRpcUrl: f.TestnetPublicRpcUrl, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
+			AttemptUploadBudget:   f.TestnetAttemptUploadBudget,
+			ReservedAttemptUpload: f.TestnetReservedAttemptUpload.clone(),
+			PublicRpcUrl:          f.TestnetPublicRpcUrl, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
 			DeploymentId: f.TestnetDeploymentId, PolicyHash: f.TestnetPolicyHash,
 			ContractAddress: f.TestnetContractAddress, SettlementVault: f.TestnetSettlementVault,
 			ReserveSink: f.TestnetReserveSink, Netuid: f.TestnetNetuid, NoId: f.TestnetNoId,
@@ -347,7 +357,9 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
 			Enabled: f.Enabled, WalletAllowUnsigned: f.WalletAllowUnsigned,
-			PublicRpcUrl: f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
+			AttemptUploadBudget:   f.AttemptUploadBudget,
+			ReservedAttemptUpload: f.ReservedAttemptUpload.clone(),
+			PublicRpcUrl:          f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
 			DeploymentId: f.DeploymentId, PolicyHash: f.PolicyHash,
 			ContractAddress: f.ContractAddress, SettlementVault: f.SettlementVault, ReserveSink: f.ReserveSink,
 			Netuid: f.Netuid, NoId: f.NoId, TreasuryHotkey: f.TreasuryHotkey,
@@ -369,7 +381,8 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		return nil, err
 	}
 	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: s.WalletAllowUnsigned, PublicRpcUrl: s.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
-		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId,
+		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId, AttemptUploadBudget: s.AttemptUploadBudget,
+		ReservedAttemptUpload: s.ReservedAttemptUpload.clone(),
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
 		DepositTiers:    append([]StDepositTier(nil), s.DepositTiers...),
@@ -431,6 +444,11 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	}
 	if cfg.PolicyHash, err = stParseHex32(s.PolicyHash); err != nil {
 		return nil, fmt.Errorf("st.yml policy_hash: %w", err)
+	}
+	if cfg.ReservedAttemptUpload != nil {
+		if err := cfg.ReservedAttemptUpload.Validate(cfg); err != nil {
+			return nil, fmt.Errorf("st.yml reserved staging: %w", err)
+		}
 	}
 	if s.TreasuryHotkey != "" {
 		if cfg.TreasuryHotkey, err = stParseHex32(s.TreasuryHotkey); err != nil {
@@ -688,6 +706,8 @@ type CoreStClient struct {
 	stateLock sync.Mutex
 	// clients caches one dialed (chain-id-verified) client per rpc url
 	clients map[string]*ethclient.Client
+	// One bounded registration owner is reused by every authenticated dispatch.
+	clientKeyRegistrations *stClientKeyRegistrationCohorts
 }
 
 // client returns a dialed, chain-id-verified client for one rpc url.
@@ -1093,7 +1113,12 @@ func (self *CoreStClient) observeTransactionAttempts(
 			lastErr = err
 			continue
 		}
-		receiptPending = true
+		// An RPC receipt lookup does not authenticate the returned transaction
+		// hash. Refuse malformed/transplanted observations before durable writes.
+		if receipt == nil || receipt.TxHash != hash || receipt.BlockHash == (common.Hash{}) || receipt.BlockNumber == nil || !receipt.BlockNumber.IsInt64() || receipt.BlockNumber.Sign() <= 0 {
+			lastErr = fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash)
+			continue
+		}
 		model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 			receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()))
 		inclusionBlock := receipt.BlockNumber.Uint64()
@@ -1101,10 +1126,17 @@ func (self *CoreStClient) observeTransactionAttempts(
 		attempt.Status, attempt.InclusionBlock, attempt.InclusionHash = model.StTxMined, &inclusionBlock, &inclusionHash
 		finalized, err := self.finalizedBlock(ctx)
 		if err != nil {
+			receiptPending = true
 			lastErr = err
 			continue
 		}
+		if finalized.Number > math.MaxInt64 {
+			receiptPending = true
+			lastErr = errors.New("st: finalized transaction boundary exceeds postgres bigint")
+			continue
+		}
 		if finalized.Number < receipt.BlockNumber.Uint64() {
+			receiptPending = true
 			continue
 		}
 		canonicalNumber := receipt.BlockNumber.Uint64()
@@ -1112,6 +1144,7 @@ func (self *CoreStClient) observeTransactionAttempts(
 		canonical, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(canonicalNumber), &canonicalNumber)
 		cancel()
 		if err != nil {
+			receiptPending = true
 			lastErr = err
 			continue
 		}
@@ -1119,7 +1152,10 @@ func (self *CoreStClient) observeTransactionAttempts(
 			err = fmt.Errorf("st: receipt %s was orphaned before finality", attempt.TxHash)
 			model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()), err)
-			return false, false, attempt.TxHash, err
+			attempt.Status = model.StTxUncertain
+			attempt.InclusionBlock, attempt.InclusionHash = nil, nil
+			lastErr = err
+			continue
 		}
 		finalizedHash := strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex())
 		if attempt.Kind == model.StTxAttemptCancellation {
@@ -1133,7 +1169,7 @@ func (self *CoreStClient) observeTransactionAttempts(
 		}
 		if attempt.Kind != model.StTxAttemptExecution {
 			err = fmt.Errorf("st: stored transaction %s has unknown attempt kind %q", attempt.TxHash, attempt.Kind)
-			return false, false, attempt.TxHash, err
+			return false, true, attempt.TxHash, err
 		}
 		if receipt.Status != types.ReceiptStatusSuccessful {
 			err = fmt.Errorf("st: finalized transaction %s reverted", attempt.TxHash)

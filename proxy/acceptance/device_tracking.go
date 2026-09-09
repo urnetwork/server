@@ -58,9 +58,6 @@ type sdkHostedDeviceTracker struct {
 type hostedDevicePacketState struct {
 	initialized         bool
 	lastStats           sdk.PacketStats
-	lastRemoteEgressAt  time.Time
-	lastRemoteEgressN   int64
-	lastRemoteEgressB   sdk.ByteCount
 	lastRemoteIngressAt time.Time
 	lastRemoteIngressN  int64
 	lastRemoteIngressB  sdk.ByteCount
@@ -588,35 +585,25 @@ func (self *sdkHostedDeviceTracker) recordExitTransitions(now time.Time, exits *
 	}
 }
 
-// summary retains the most recent remote-egress and remote-ingress transitions
-// across quiet polls. Acceptance failures are formatted many seconds after a
-// missing response; plain per-poll deltas would return to zero and erase the
-// boundaries needed to separate public-path loss from downstream loss.
+// summary retains the most recent remote-ingress transition across quiet
+// polls. Acceptance failures are formatted many seconds after the missing
+// response; a plain per-poll delta would have returned to zero and erased the
+// evidence needed to join the DeviceLocal boundary to the origin LB log.
 func (self *hostedDevicePacketState) summary(now time.Time, stats *sdk.PacketStats) string {
 	if stats == nil {
 		return "unavailable"
 	}
 	if self.initialized {
-		egressPacketDelta := stats.RemoteEgressPacketCount - self.lastStats.RemoteEgressPacketCount
-		egressByteDelta := stats.RemoteEgressByteCount - self.lastStats.RemoteEgressByteCount
-		if 0 < egressPacketDelta && 0 <= egressByteDelta {
-			self.lastRemoteEgressAt = now
-			self.lastRemoteEgressN = egressPacketDelta
-			self.lastRemoteEgressB = egressByteDelta
-		} else if egressPacketDelta < 0 || egressByteDelta < 0 {
-			// A DeviceLocal generation reset makes cumulative counters move
-			// backward. Rebase each direction without erasing the other one.
-			self.lastRemoteEgressAt = time.Time{}
-			self.lastRemoteEgressN = 0
-			self.lastRemoteEgressB = 0
-		}
-		ingressPacketDelta := stats.RemoteIngressPacketCount - self.lastStats.RemoteIngressPacketCount
-		ingressByteDelta := stats.RemoteIngressByteCount - self.lastStats.RemoteIngressByteCount
-		if 0 < ingressPacketDelta && 0 <= ingressByteDelta {
+		packetDelta := stats.RemoteIngressPacketCount - self.lastStats.RemoteIngressPacketCount
+		byteDelta := stats.RemoteIngressByteCount - self.lastStats.RemoteIngressByteCount
+		if 0 < packetDelta && 0 <= byteDelta {
 			self.lastRemoteIngressAt = now
-			self.lastRemoteIngressN = ingressPacketDelta
-			self.lastRemoteIngressB = ingressByteDelta
-		} else if ingressPacketDelta < 0 || ingressByteDelta < 0 {
+			self.lastRemoteIngressN = packetDelta
+			self.lastRemoteIngressB = byteDelta
+		} else if packetDelta < 0 || byteDelta < 0 {
+			// A DeviceLocal generation reset makes the cumulative counters move
+			// backward. Do not mislabel its existing totals as fresh response
+			// traffic; subsequent positive deltas establish a new timestamp.
 			self.lastRemoteIngressAt = time.Time{}
 			self.lastRemoteIngressN = 0
 			self.lastRemoteIngressB = 0
@@ -626,15 +613,6 @@ func (self *hostedDevicePacketState) summary(now time.Time, stats *sdk.PacketSta
 	}
 	self.lastStats = *stats
 
-	lastEgress := "none"
-	if !self.lastRemoteEgressAt.IsZero() {
-		lastEgress = fmt.Sprintf(
-			"%s(+%d/%dB)",
-			self.lastRemoteEgressAt.UTC().Format("15:04:05.000Z"),
-			self.lastRemoteEgressN,
-			self.lastRemoteEgressB,
-		)
-	}
 	lastIngress := "none"
 	if !self.lastRemoteIngressAt.IsZero() {
 		lastIngress = fmt.Sprintf(
@@ -645,12 +623,11 @@ func (self *hostedDevicePacketState) summary(now time.Time, stats *sdk.PacketSta
 		)
 	}
 	return fmt.Sprintf(
-		"out=%d/%dB in=%d/%dB last_out=%s last_in=%s",
+		"out=%d/%dB in=%d/%dB last_in=%s",
 		stats.RemoteEgressPacketCount,
 		stats.RemoteEgressByteCount,
 		stats.RemoteIngressPacketCount,
 		stats.RemoteIngressByteCount,
-		lastEgress,
 		lastIngress,
 	)
 }

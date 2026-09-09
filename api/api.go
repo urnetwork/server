@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/urnetwork/server/api/handlers"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 )
@@ -17,6 +18,12 @@ import (
 // service; the routes themselves are path-matched, so they answer on either
 // host. The issuer published in the discovery documents is what clients use.
 func Routes() []*router.Route {
+	return routesWithReservedAttemptUpload(nil)
+}
+
+// Only the API lifecycle supplies this authenticated cache; the route never
+// starts a background owner or dials a provider on an upload request.
+func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload) []*router.Route {
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
@@ -196,6 +203,8 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/device/set-name", handlers.DeviceSetName), router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
 		// Unauthenticated public-key lookup; see handlers.GetClientKey.
 		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
+		router.NewRoute("POST", "/sn/client-key/observation", handlers.SnClientKeyObservation),
+		router.NewRoute("POST", "/sn/client-key/observations", handlers.SnClientKeyObservations),
 		// routing verification (sn/VALIDATOR.md); auth is the protocol's own
 		// Ed25519 signatures, not a JWT — see handlers.Verify
 		router.NewRoute("POST", "/verify", handlers.Verify),
@@ -212,6 +221,7 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
+		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
 		router.NewRoute("GET", "/sn/evidence", handlers.SnEvidence),
 		router.NewRoute("POST", "/sn/evidence", handlers.SnEvidence),

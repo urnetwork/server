@@ -80,8 +80,8 @@ func validateEvidenceIdentity(e *EvidenceEnvelope) error {
 }
 
 func SignEvidence(e *EvidenceEnvelope, key *ecdsa.PrivateKey) error {
-	if key == nil {
-		return errors.New("evidence signer is nil")
+	if key == nil || e == nil {
+		return errors.New("evidence signer or envelope is nil")
 	}
 	e.Schema = EvidenceSchema
 	e.GenesisHash = strings.ToLower(e.GenesisHash)
@@ -89,11 +89,10 @@ func SignEvidence(e *EvidenceEnvelope, key *ecdsa.PrivateKey) error {
 	if err := validateEvidenceIdentity(e); err != nil {
 		return err
 	}
-	b, err := evidenceUnsignedBytes(e)
+	h, err := evidenceDigestFromValidatedPayload(e)
 	if err != nil {
 		return err
 	}
-	h := sha256.Sum256(b)
 	sig, err := crypto.Sign(h[:], key)
 	if err != nil {
 		return err
@@ -107,11 +106,15 @@ func VerifyEvidence(e *EvidenceEnvelope) error {
 	if err := validateEvidenceIdentity(e); err != nil {
 		return err
 	}
-	b, err := evidenceUnsignedBytes(e)
+	h, err := evidenceDigestFromValidatedPayload(e)
 	if err != nil {
 		return err
 	}
-	h := sha256.Sum256(b)
+	return verifyEvidenceSignature(e, h)
+}
+
+// Every caller supplies a fresh digest from its own validated payload.
+func verifyEvidenceSignature(e *EvidenceEnvelope, h [sha256.Size]byte) error {
 	if e.ContentHash != "sha256:"+hex.EncodeToString(h[:]) {
 		return errors.New("evidence content hash mismatch")
 	}
@@ -127,10 +130,10 @@ func VerifyEvidence(e *EvidenceEnvelope) error {
 }
 
 func EvidenceBytes(e *EvidenceEnvelope) ([]byte, error) {
-	if err := VerifyEvidence(e); err != nil {
+	if err := validateEvidenceIdentity(e); err != nil {
 		return nil, err
 	}
-	return json.Marshal(e)
+	return evidenceBytesFromValidatedPayload(e)
 }
 
 func EvidenceContentKey(store server.BlobStore, hash string) (string, error) {
@@ -187,27 +190,9 @@ func PublishEvidence(ctx context.Context, store server.BlobStore, e *EvidenceEnv
 	if store == nil {
 		return nil, errors.New("server/blob store is unavailable")
 	}
-	b, err := EvidenceBytes(e)
+	prepared, err := PrepareEvidence(e)
 	if err != nil {
 		return nil, err
 	}
-	contentKey, err := EvidenceContentKey(store, e.ContentHash)
-	if err != nil {
-		return nil, err
-	}
-	run := e.RunID
-	if run == "" {
-		run = EvidenceDeploymentHistoryRunID
-	}
-	historyKey, err := EvidenceHistoryKey(store, e.DeploymentID, e.Netuid, e.Kind, run, e.ContentHash)
-	if err != nil {
-		return nil, err
-	}
-	if err := putImmutable(ctx, store, contentKey, b); err != nil {
-		return nil, err
-	}
-	if err := putImmutable(ctx, store, historyKey, b); err != nil {
-		return nil, err
-	}
-	return &Published{ContentHash: e.ContentHash, ContentKey: contentKey, HistoryKey: historyKey, Bucket: store.Bucket()}, nil
+	return prepared.Publish(ctx, store)
 }

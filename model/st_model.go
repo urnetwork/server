@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -2033,6 +2034,7 @@ func GetStContributingClientCkeys(ctx context.Context, clientIds []server.Id) ma
 	if len(clientIds) == 0 {
 		return ckeys
 	}
+	clientIds = slices.Clone(clientIds)
 	server.Redis(ctx, func(r server.RedisClient) {
 		cmds := make([]*redis.StringCmd, len(clientIds))
 		// the aggregate error is ignored deliberately: it is the FIRST
@@ -2064,5 +2066,6 @@ func GetStContributingClientCkeys(ctx context.Context, clientIds []server.Id) ma
 			ckeys[clientIds[i]] = ckey
 		}
 	})
+	overlayStClientKeyCurrent(ctx, clientIds, ckeys)
 	return ckeys
 }

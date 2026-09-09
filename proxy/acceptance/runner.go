@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -36,8 +35,6 @@ const (
 	defaultSoakDuration    = 5 * time.Minute
 	defaultSoakInterval    = 5 * time.Second
 	readinessRetryInterval = 2 * time.Second
-	cleanupRetryInterval   = 1 * time.Second
-	cleanupMaxAttempts     = 3
 	maxAPIResponseBytes    = 1024 * 1024
 	maxProbeResponseBytes  = 64 * 1024
 	localNetworkLogTimeout = 5 * time.Second
@@ -1069,37 +1066,15 @@ func (r *runner) provision(ctx context.Context, jwt string) (provisionResult, er
 	return result, nil
 }
 
-// Deactivates one acceptance-owned client, retrying only bounded transport
-// failures while the cleanup context remains live.
 func (r *runner) remove(ctx context.Context, jwt, clientID string) error {
-	var cleanupErr error
-	for attempt := 1; attempt <= cleanupMaxAttempts; attempt++ {
-		var result removeResult
-		cleanupErr = r.api.post(ctx, "/network/remove-client", map[string]any{"client_id": clientID}, jwt, &result)
-		if cleanupErr == nil {
-			if result.Error != nil && result.Error.Message != "Client does not exist." {
-				return errors.New(result.Error.Message)
-			}
-			return nil
-		}
-		if ctx.Err() != nil {
-			return errors.Join(ctx.Err(), cleanupErr)
-		}
-		var networkErr net.Error
-		if !errors.As(cleanupErr, &networkErr) || attempt == cleanupMaxAttempts {
-			return cleanupErr
-		}
-
-		// Earlier control-plane calls proved this host valid, so even a false
-		// "no such host" is transient here. The endpoint is idempotent: a retry
-		// after an ambiguous response treats "Client does not exist" as success.
-		select {
-		case <-ctx.Done():
-			return errors.Join(ctx.Err(), cleanupErr)
-		case <-time.After(cleanupRetryInterval):
-		}
+	var result removeResult
+	if err := r.api.post(ctx, "/network/remove-client", map[string]any{"client_id": clientID}, jwt, &result); err != nil {
+		return err
 	}
-	return cleanupErr
+	if result.Error != nil && result.Error.Message != "Client does not exist." {
+		return errors.New(result.Error.Message)
+	}
+	return nil
 }
 
 func (a *apiClient) post(ctx context.Context, path string, body any, jwt string, output any) error {

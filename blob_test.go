@@ -340,7 +340,7 @@ func TestLocalBlobStorePutIfAbsentIsAtomicAcrossInstances(t *testing.T) {
 	release := make(chan struct{})
 	for i, store := range stores {
 		writerIndex := i
-		store.beforeCreateCommitForTest = func() {
+		store.beforeCapacityLockForTest = func() {
 			entered <- writerIndex
 			select {
 			case <-release:
@@ -405,7 +405,7 @@ func TestLocalBlobStorePutIfAbsentIsAtomicAcrossInstances(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if !info.IsDir() && strings.HasSuffix(filePath, blobPartialSuffix) {
+		if !info.IsDir() && strings.HasSuffix(filePath, blobPartialSuffix) && filePath != filepath.Join(root, localBlobCapacityLockName) {
 			partialPaths = append(partialPaths, filePath)
 		}
 		return nil
@@ -810,7 +810,9 @@ func TestLocalBlobStoreReaper(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	store.reapPass()
+	if err := store.reapPass(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := os.Stat(store.pathFor(expiredKey)); !os.IsNotExist(err) {
 		t.Fatalf("expired findproviders2 object should be deleted (err=%v)", err)

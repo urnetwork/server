@@ -75,7 +75,7 @@ if ! "$network_test_gate" --verify-held main-acceptance; then
   exit 70
 fi
 
-for command_name in go mkfifo timeout tee; do
+for command_name in go timeout tee; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "[proxy acceptance] missing prerequisite: $command_name" >&2
     exit 1
@@ -102,44 +102,14 @@ run_dir="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-proxy-acceptance.XXXXXX")"
 mkdir -p "$artifacts" "$(dirname "$binary")"
 chmod 700 "$artifacts" "$run_dir"
 credentials="$run_dir/credentials"
-runner_output_pipe="$run_dir/runner-output"
-runner_pid=""
-runner_active=0
-managed_run=0
-pending_signal=""
-signal_status=0
 cleanup() {
   exit_status=$?
-  rm -f "$credentials" "$runner_output_pipe"
+  rm -f "$credentials"
   rmdir "$run_dir" 2>/dev/null || true
   exit "$exit_status"
 }
-forward_signal() {
-  local signal_name="$1"
-  signal_status=130
-  if [ "$managed_run" -ne 1 ]; then
-    exit "$signal_status"
-  fi
-  if [ "$runner_active" -eq 1 ]; then
-    kill "-$signal_name" "$runner_pid" 2>/dev/null || true
-  elif [ -z "$pending_signal" ]; then
-    pending_signal="$signal_name"
-  fi
-}
-wait_for_process() {
-  local process_pid="$1"
-  local process_status
-  while true; do
-    wait "$process_pid"
-    process_status=$?
-    if ! kill -0 "$process_pid" 2>/dev/null; then
-      return "$process_status"
-    fi
-  done
-}
 trap cleanup EXIT
-trap 'forward_signal INT' INT
-trap 'forward_signal TERM' TERM
+trap 'exit 130' INT TERM
 
 acc_user="$(UR_ACCEPT_VAULT="$vault" "$config_reader" get data_plane_account.email)"
 acc_pass="$(UR_ACCEPT_VAULT="$vault" "$config_reader" get data_plane_account.password)"
@@ -162,20 +132,11 @@ if [ -z "$result_file" ]; then
 fi
 echo "[proxy acceptance] running $repeat_count complete repetition(s) against main"
 echo "[proxy acceptance] sustained campaign: $soak_duration per protocol at $soak_interval intervals"
-mkfifo "$runner_output_pipe"
 set +e
 # Keep the runner in this foreground process group. The root suite applies its
 # own deadline around this script; without --foreground, terminating the outer
 # shell can orphan this timeout and its child while both tee processes keep the
 # root pipeline open.
-managed_run=1
-(
-  # A terminal interrupt also targets the foreground log consumer. Keep it
-  # alive until the canceled runner has emitted cleanup and result diagnostics.
-  trap '' INT TERM
-  tee "$artifacts/run.log" <"$runner_output_pipe"
-) &
-tee_pid=$!
 timeout --foreground --signal=TERM --kill-after=60s "$runner_timeout" \
   "$binary" \
     --credentials="$credentials" \
@@ -186,30 +147,8 @@ timeout --foreground --signal=TERM --kill-after=60s "$runner_timeout" \
     --soak-duration="$soak_duration" \
     --soak-interval="$soak_interval" \
     --overlap-protocols="$overlap_protocols" \
-  >"$runner_output_pipe" 2>&1 &
-runner_pid=$!
-runner_active=1
-if [ -n "$pending_signal" ]; then
-  kill "-$pending_signal" "$runner_pid" 2>/dev/null || true
-  pending_signal=""
-fi
-runner_status=0
-wait_for_process "$runner_pid" || runner_status=$?
-runner_active=0
-logger_status=0
-wait_for_process "$tee_pid" || logger_status=$?
-runner_pid=""
-managed_run=0
-status="$runner_status"
-if [ "$logger_status" -ne 0 ]; then
-  echo "[proxy acceptance] output logger failed with status $logger_status" >&2
-  if [ "$status" -eq 0 ]; then
-    status="$logger_status"
-  fi
-fi
-if [ "$signal_status" -ne 0 ]; then
-  status="$signal_status"
-fi
+  2>&1 | tee "$artifacts/run.log"
+status=${PIPESTATUS[0]}
 set -e
 
 echo "[proxy acceptance] artifacts: $artifacts"

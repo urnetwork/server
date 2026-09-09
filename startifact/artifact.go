@@ -4,7 +4,6 @@
 package startifact
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -130,15 +129,12 @@ func putImmutable(ctx context.Context, store server.BlobStore, key string, b []b
 	if err != nil {
 		return err
 	}
-	existing, readErr := io.ReadAll(io.LimitReader(reader, int64(len(b)+1)))
+	equal, readErr := compareArtifactReader(ctx, reader, b)
 	closeErr := reader.Close()
-	if readErr != nil {
-		return readErr
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return err
 	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if !bytes.Equal(existing, b) {
+	if !equal {
 		return fmt.Errorf("immutable artifact key %s already contains different bytes", key)
 	}
 	return nil

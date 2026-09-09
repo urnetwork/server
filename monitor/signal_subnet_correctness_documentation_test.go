@@ -72,11 +72,23 @@ func TestSubnetCorrectnessDocumentationCoversRequiredAlertClasses(t *testing.T) 
 		t.Fatalf("subnet alert rows=%d, want %d complete rows", len(rows), len(classes))
 	}
 	seen := map[string]bool{}
+	// Each newly reserved class must keep its own authority/resource distinction;
+	// a generic nonempty row or a phrase in another class cannot satisfy it.
+	requiredRules := map[string][]string{
+		"subnet-rpc-read-ownership":       {"same deployment, runtime, transport and exact finalized block hash", "Every client's nonce, signature and complete history", "Http admissions, logical methods", "not fabricated empty history"},
+		"subnet-observation-quota":        {"full configured client population", "Every plural member is charged independently", "including failed initial admission", "batching is not one logical reservation"},
+		"subnet-evidence-stream-capacity": {"both configured content/history replicas", "data, control/graph metadata and active body/reader ownership separately bounded", "must not become a whole-corpus allocation", "never truncate it to clear the alert"},
+	}
 	for _, row := range rows {
 		if seen[row[1]] {
 			t.Errorf("duplicate alert class %s", row[1])
 		}
 		seen[row[1]] = true
+		for _, required := range requiredRules[row[1]] {
+			if !strings.Contains(row[2]+" "+row[3], required) {
+				t.Errorf("alert %s lost its own required rule %q", row[1], required)
+			}
+		}
 		if strings.TrimSpace(row[2]) == "" || strings.TrimSpace(row[3]) == "" ||
 			!(strings.Contains(row[3], "Page") || strings.Contains(row[3], "Warn")) {
 			t.Errorf("alert %s lacks a trip condition/severity/action", row[1])

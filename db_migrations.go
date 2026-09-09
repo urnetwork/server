@@ -7232,4 +7232,8 @@ var migrations = []any{
 				autovacuum_analyze_threshold = 1000000
 			)
 	`),
+
+	// Preserve operator-signed key history independently of mutable Redis
+	// projection and retire current access atomically with client deletion.
+	newSqlMigration(clientKeyHistorySchemaSQL),
 }

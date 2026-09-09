@@ -40,7 +40,7 @@ func TestHostedDeviceStateUsesProviderAliases(t *testing.T) {
 	summary := formatHostedDeviceState(
 		&sdk.WindowStatus{TargetSize: 4, ProviderStateAdded: 4, MinSatisfied: true},
 		&sdk.ReliabilityMetrics{FlowsOpened: 3, DialFailuresIntercepted: 1, FlowsReraced: 1},
-		"out=2/200B in=3/300B last_out=04:59:59.000Z(+1/100B) last_in=05:00:00.000Z(+1/100B)",
+		"out=2/200B in=3/300B last_in=05:00:00.000Z(+1/100B)",
 		exits,
 		destinations,
 		map[string]string{},
@@ -57,45 +57,11 @@ func TestHostedDeviceStateUsesProviderAliases(t *testing.T) {
 		"blocks=7/3 seq=9 build=2026.8.29_test",
 		"flows=3",
 		"dial=1 reraced=1",
-		"last_out=04:59:59.000Z(+1/100B)",
 		"last_in=05:00:00.000Z(+1/100B)",
 	} {
 		if !strings.Contains(summary, expected) {
 			t.Fatalf("diagnostics %q do not contain %q", summary, expected)
 		}
-	}
-}
-
-func TestHostedDevicePacketStateRetainsLastRemoteEgress(t *testing.T) {
-	state := &hostedDevicePacketState{}
-	start := time.Date(2026, 8, 29, 6, 9, 38, 0, time.UTC)
-	initial := state.summary(start, &sdk.PacketStats{
-		RemoteEgressPacketCount:  10,
-		RemoteEgressByteCount:    1000,
-		RemoteIngressPacketCount: 12,
-		RemoteIngressByteCount:   1200,
-	})
-	if !strings.Contains(initial, "last_out=none") {
-		t.Fatalf("initial packet summary = %q", initial)
-	}
-	requestAt := start.Add(3 * time.Second)
-	request := state.summary(requestAt, &sdk.PacketStats{
-		RemoteEgressPacketCount:  13,
-		RemoteEgressByteCount:    1450,
-		RemoteIngressPacketCount: 12,
-		RemoteIngressByteCount:   1200,
-	})
-	if !strings.Contains(request, "last_out=06:09:41.000Z(+3/450B)") {
-		t.Fatalf("request packet summary = %q", request)
-	}
-	quiet := state.summary(requestAt.Add(20*time.Second), &sdk.PacketStats{
-		RemoteEgressPacketCount:  13,
-		RemoteEgressByteCount:    1450,
-		RemoteIngressPacketCount: 14,
-		RemoteIngressByteCount:   2650,
-	})
-	if !strings.Contains(quiet, "last_out=06:09:41.000Z(+3/450B)") {
-		t.Fatalf("quiet packet summary erased the last egress: %q", quiet)
 	}
 }
 
@@ -129,44 +95,6 @@ func TestHostedDevicePacketStateRetainsLastRemoteIngress(t *testing.T) {
 	})
 	if !strings.Contains(quiet, "last_in=06:09:41.000Z(+2/1450B)") {
 		t.Fatalf("quiet packet summary erased the last ingress: %q", quiet)
-	}
-}
-
-func TestHostedDevicePacketStateRebasesRemoteEgressAfterCounterRegression(t *testing.T) {
-	state := &hostedDevicePacketState{}
-	start := time.Date(2026, 9, 6, 17, 12, 0, 0, time.UTC)
-	state.summary(start, &sdk.PacketStats{
-		RemoteEgressPacketCount:  20,
-		RemoteEgressByteCount:    2000,
-		RemoteIngressPacketCount: 30,
-		RemoteIngressByteCount:   3000,
-	})
-	state.summary(start.Add(time.Second), &sdk.PacketStats{
-		RemoteEgressPacketCount:  23,
-		RemoteEgressByteCount:    2450,
-		RemoteIngressPacketCount: 32,
-		RemoteIngressByteCount:   3350,
-	})
-	reset := state.summary(start.Add(2*time.Second), &sdk.PacketStats{
-		RemoteEgressPacketCount:  2,
-		RemoteEgressByteCount:    200,
-		RemoteIngressPacketCount: 32,
-		RemoteIngressByteCount:   3350,
-	})
-	if !strings.Contains(reset, "last_out=none") {
-		t.Fatalf("counter regression retained stale egress: %q", reset)
-	}
-	if !strings.Contains(reset, "last_in=17:12:01.000Z(+2/350B)") {
-		t.Fatalf("egress regression erased independent ingress evidence: %q", reset)
-	}
-	rebased := state.summary(start.Add(3*time.Second), &sdk.PacketStats{
-		RemoteEgressPacketCount:  4,
-		RemoteEgressByteCount:    575,
-		RemoteIngressPacketCount: 32,
-		RemoteIngressByteCount:   3350,
-	})
-	if !strings.Contains(rebased, "last_out=17:12:03.000Z(+2/375B)") {
-		t.Fatalf("post-reset egress did not establish a new boundary: %q", rebased)
 	}
 }
 
@@ -383,7 +311,7 @@ func TestHostedDeviceDiagnosticRetainsBoundaryAndRouteBeforeTruncation(t *testin
 	// continues to exercise truncation when the private diagnostic budget grows.
 	longProviderDetail := strings.Repeat("p1(flow=1 warn=false),", 240)
 	tracker.record(start, fmt.Sprintf(
-		"remote=connected window={9/11 min=true} packets={out=1/40B in=2/80B last_out=04:59:59.000Z(+1/40B) last_in=05:00:00.000Z(+1/40B)} destinations=[65.49.70.84->p1(1)] active=[%s] reliability={flows=275 exit_loss=21 lost=16 recovery=3/1 pending=1} exits=11",
+		"remote=connected window={9/11 min=true} packets={out=1/40B in=2/80B last_in=05:00:00.000Z(+1/40B)} destinations=[65.49.70.84->p1(1)] active=[%s] reliability={flows=275 exit_loss=21 lost=16 recovery=3/1 pending=1} exits=11",
 		longProviderDetail,
 	))
 
@@ -391,7 +319,7 @@ func TestHostedDeviceDiagnosticRetainsBoundaryAndRouteBeforeTruncation(t *testin
 	if len(diagnostic) != hostedDeviceDiagnosticMaxSize+3 {
 		t.Fatalf("truncated diagnostic length = %d, want %d", len(diagnostic), hostedDeviceDiagnosticMaxSize+3)
 	}
-	for _, expected := range []string{"window={9/11 min=true}", "last_out=04:59:59.000Z", "last_in=05:00:00.000Z", "65.49.70.84->p1(1)", "active=[p1(flow=1"} {
+	for _, expected := range []string{"window={9/11 min=true}", "last_in=05:00:00.000Z", "65.49.70.84->p1(1)", "active=[p1(flow=1"} {
 		if !strings.Contains(diagnostic, expected) {
 			t.Fatalf("truncated diagnostic %q does not contain boundary %q", diagnostic, expected)
 		}
@@ -411,7 +339,7 @@ func TestHostedDeviceDiagnosticRetainsPacketBoundaryAfterLongCausalHistory(t *te
 	}
 	tracker.stateLock.Unlock()
 	tracker.record(start.Add(10*time.Second), fmt.Sprintf(
-		"remote=connected window={9/9 min=true} packets={out=60/3820B in=0/0B last_out=07:30:09.000Z(+1/262B) last_in=07:29:59.000Z(+0/0B)} destinations=[142.250.189.131->p7(1)] active=[%s] reliability={%s} exits=9",
+		"remote=connected window={9/9 min=true} packets={out=60/3820B in=0/0B last_in=07:29:59.000Z(+0/0B)} destinations=[142.250.189.131->p7(1)] active=[%s] reliability={%s} exits=9",
 		strings.Repeat("p7(flow=16 warn=true),", 30),
 		strings.Repeat("flows=999 exit_loss=99 lost=999 recovery=99/99 pending=9 ", 3),
 	))
@@ -420,7 +348,7 @@ func TestHostedDeviceDiagnosticRetainsPacketBoundaryAfterLongCausalHistory(t *te
 	for _, want := range []string{
 		"events=[",
 		"window={9/9 min=true}",
-		"packets={out=60/3820B in=0/0B last_out=07:30:09.000Z(+1/262B) last_in=07:29:59.000Z",
+		"packets={out=60/3820B in=0/0B last_in=07:29:59.000Z",
 		"active=[p7(flow=16 warn=true)",
 	} {
 		if !strings.Contains(diagnostic, want) {

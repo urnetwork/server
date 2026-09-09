@@ -1179,8 +1179,14 @@ func SetClientKey(
 	clientId server.Id,
 	clientKey *protocol.ClientKey,
 ) error {
+	if clientKey == nil {
+		return errors.New("client public key message is missing")
+	}
 	if len(clientKey.PublicKey) != 0 && len(clientKey.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("Invalid client public key length: %d (expected %d)", len(clientKey.PublicKey), ed25519.PublicKeySize)
+	}
+	if StEnabled() {
+		return StRegisterClientKey(ctx, clientId, clientKey.PublicKey)
 	}
 	model.SetClientPublicKey(ctx, clientId, clientKey.PublicKey)
 	return nil

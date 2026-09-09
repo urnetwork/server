@@ -125,6 +125,7 @@ func runWithDependencies(
 	})
 
 	var statsHandle *stats.Stats
+	admitted := false
 	flushStats := func() {}
 	if err := activateAfterReadiness(ctx, readiness, func() {
 		server.Warmup(apiWarmupTargets()...)
@@ -139,6 +140,7 @@ func runWithDependencies(
 		router.SetWarpStatusNotReady(err)
 		readyGauge.Set(0)
 	} else if ctx.Err() == nil {
+		admitted = true
 		router.SetWarpStatusReady()
 		readyGauge.Set(1)
 		// Rejected candidates keep /status and logs, but must not allocate a
@@ -155,11 +157,23 @@ func runWithDependencies(
 	if statsHandle != nil {
 		defer statsHandle.Close()
 	}
+	// This bounded cache is separate from mutable JWT account authentication.
+	// It owns its real refresh loop before the route is exposed; HTTP drain
+	// completes before the deferred close joins leases and closes RPC clients.
+	var reservedUpload *controller.StReservedAttemptUpload
+	var err error
+	if admitted {
+		reservedUpload, err = controller.NewStReservedAttemptUpload(ctx)
+		if err != nil {
+			return fmt.Errorf("reserved validator staging startup: %w", err)
+		}
+	}
+	defer reservedUpload.Close()
 
 	glog.Infof("[api]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
-	apiRouter := router.NewRouter(processCtx, Routes())
-	err := listenAndServe(
+	apiRouter := router.NewRouter(processCtx, routesWithReservedAttemptUpload(reservedUpload))
+	err = listenAndServe(
 		serveCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
 		apiRouter,

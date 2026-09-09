@@ -85,17 +85,15 @@ func TestValidateMigrationHead(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := validateMigrationHead(test.databaseVersion, test.requiredVersion)
-			if test.wantError {
-				if err == nil || !strings.Contains(err.Error(), "database migration head") {
-					t.Fatalf("validateMigrationHead(%d, %d) = %v, want migration-head error", test.databaseVersion, test.requiredVersion, err)
-				}
-				return
+		err := validateMigrationHead(test.databaseVersion, test.requiredVersion)
+		if test.wantError {
+			if err == nil || !strings.Contains(err.Error(), "database migration head") {
+				t.Errorf("%s: validateMigrationHead(%d, %d) = %v, want migration-head error", test.name, test.databaseVersion, test.requiredVersion, err)
 			}
-			if err != nil {
-				t.Fatalf("validateMigrationHead(%d, %d) = %v, want nil", test.databaseVersion, test.requiredVersion, err)
-			}
-		})
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: validateMigrationHead(%d, %d) = %v, want nil", test.name, test.databaseVersion, test.requiredVersion, err)
+		}
 	}
 }

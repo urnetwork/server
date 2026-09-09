@@ -28,7 +28,9 @@ var (
 	// The auth wrappers tag impl errors with one or more "[implName]" prefixes
 	// (see WrapRequireAuth), so the code may follow bracketed tags; without
 	// peeling them every tagged "%d message" error would surface as a 500.
-	httpErrorCodeRegex = regexp.MustCompile("^((?:\\[[^\\]]*\\])*)\\s*(\\d+)\\s+(.*)$")
+	// Only the first line can select a canonical error status. Joined causes
+	// belong to the message tail, not to the tag/status parsing grammar.
+	httpErrorCodeRegex = regexp.MustCompile(`^((?:\[[^\]\r\n]*\])*)[ \t]*([45][0-9]{2})[ \t]+(?s:(.*))$`)
 )
 
 // This matches the existing public load-balancer cap. Enforcing it again at
@@ -424,8 +426,8 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 
-	// error messages that start with <number><space>, optionally preceded by
-	// "[tag]" prefixes, have the number peeled off and converted to the
+	// Error messages that start with <400..599><horizontal space>, optionally
+	// preceded by "[tag]" prefixes, have the number converted to the
 	// status code. The tags are dropped from the client-facing message.
 	if groups := httpErrorCodeRegex.FindStringSubmatch(message); groups != nil {
 		statusCode, _ = strconv.Atoi(groups[2])
@@ -438,7 +440,7 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	// through a one-method interface so the direction of the import stays as it
 	// is: model does not import the router.
 	var retryAfter interface{ RetryAfterSeconds() int }
-	if errors.As(err, &retryAfter) {
+	if statusError && errors.As(err, &retryAfter) {
 		if seconds := retryAfter.RetryAfterSeconds(); 0 < seconds {
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))
 		}

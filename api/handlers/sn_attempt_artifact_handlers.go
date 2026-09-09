@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
 )
 
@@ -16,8 +17,8 @@ import (
 // campaign population never increases one object or ordinary evidence limits.
 const (
 	maximumSnAttemptMetadataBytes = 2 * 1024 * 1024
-	maximumSnAttemptRecordBytes   = 32 * 1024 * 1024
-	maximumSnAttemptProofBytes    = 32 * 1024 * 1024
+	maximumSnAttemptRecordBytes   = model.StAttemptUploadMaximumObjectBytes
+	maximumSnAttemptProofBytes    = model.StAttemptUploadMaximumObjectBytes
 	maximumSnAttemptReaders       = 16
 )
 
