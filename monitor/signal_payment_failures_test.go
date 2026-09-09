@@ -97,6 +97,11 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 		"deleted_owner_count=2",
 		"oldest_renewal_start_age_seconds=5400",
 		"provider-side disposition",
+		"network-row deletion/credit fence",
+		"provider-confirmed cancellation-before-delete",
+		"missing active local renewal metadata remain a separate discovery gap",
+		"Apple and Google disposition is separate policy",
+		"Alert disappearance from natural expiry alone is not causal closure",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("orphan renewal alert missing %q:\n%s", want, rendered)

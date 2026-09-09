@@ -187,6 +187,8 @@ func TestNetEscrowMirrorSurvivesCallerCancel(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		balanceCode, err := CreateBalanceCode(
 			ctx,
@@ -198,11 +200,7 @@ func TestNetEscrowMirrorSurvivesCallerCancel(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		_, err = RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, ctx)
-		connect.AssertEqual(t, err, nil)
+		testingRedeemPaymentBalanceCode(t, ctx, sourceNetworkId, balanceCode.Secret)
 
 		// the caller goes away as soon as the request returns: the contract is
 		// committed, the mirror update is still outstanding

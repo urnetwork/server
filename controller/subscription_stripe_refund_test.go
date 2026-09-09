@@ -321,6 +321,7 @@ func TestStripeDataPackRefundVoidsUnredeemedCode(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 
 		redeemNetworkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, redeemNetworkId)
 		redeemResult, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: redeemNetworkId,

@@ -1298,7 +1298,7 @@ func appleReconcileCreditTransaction(
 			return
 		}
 		credited = appleCreditSubscriptionTransactionInTx(tx, ctx, server.NewId(), transaction)
-	})
+	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return false, networkId, returnErr
 	}

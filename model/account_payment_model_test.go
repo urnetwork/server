@@ -28,6 +28,8 @@ func TestCancelAccountPayment(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -51,10 +53,7 @@ func TestCancelAccountPayment(t *testing.T) {
 		)
 
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
 		connect.AssertEqual(t, err, nil)
@@ -150,6 +149,8 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -162,10 +163,7 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 
 		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 365*24*time.Hour, netRevenue, "", "", "")
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
 			NetworkId:        destinationNetworkId,
@@ -328,6 +326,8 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -340,10 +340,7 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 
 		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 365*24*time.Hour, netRevenue, "", "", "")
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
 			NetworkId:        destinationNetworkId,
@@ -490,6 +487,8 @@ func TestPlanPaymentsDryRun(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -512,10 +511,7 @@ func TestPlanPaymentsDryRun(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		destinationWalletAddress := "0x1234567890"
 		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
@@ -600,6 +596,8 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -625,10 +623,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		// create a wallet to receive the payout
 		args := &CreateAccountWalletExternalArgs{
@@ -736,6 +731,8 @@ func TestPlanPaymentsNeverAssignsForeignWallet(t *testing.T) {
 		destinationId := server.NewId()
 		foreignNetworkId := server.NewId()
 		foreignClientId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -760,10 +757,7 @@ func TestPlanPaymentsNeverAssignsForeignWallet(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		// the destination owns an active wallet and sets it for payout
 		destinationWalletAddress := "0xdddd"
@@ -863,6 +857,10 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 		providerAClientId := server.NewId()
 		providerBNetworkId := server.NewId()
 		providerBClientId := server.NewId()
+		testingCreatePaymentClient(ctx, paidPayerNetworkId, paidPayerClientId)
+		testingCreatePaymentClient(ctx, freePayerNetworkId, freePayerClientId)
+		testingCreatePaymentClient(ctx, providerANetworkId, providerAClientId)
+		testingCreatePaymentClient(ctx, providerBNetworkId, providerBClientId)
 
 		paidPayerSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: paidPayerNetworkId,
@@ -888,10 +886,7 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: paidPayerNetworkId,
-		}, paidPayerSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, paidPayerSession.Ctx, paidPayerNetworkId, balanceCode.Secret)
 
 		// the free payer gets a no-cost balance (free traffic)
 		err = AddBasicTransferBalance(
@@ -1000,6 +995,8 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		// add subscription to both source and destination
 		AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
@@ -1048,10 +1045,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)

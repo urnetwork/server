@@ -25,6 +25,8 @@ func TestSweepDestinationIdDenormalization(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -34,10 +36,7 @@ func TestSweepDestinationIdDenormalization(t *testing.T) {
 		// fund the source network
 		balanceCode, err := CreateBalanceCode(ctx, ByteCount(1024*1024), 365*24*time.Hour, UsdToNanoCents(10.00), "", "", "")
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceNetworkId, balanceCode.Secret)
 
 		// settle a contract -> settleEscrowInTx creates a sweep
 		usedTransferByteCount := ByteCount(1024)

@@ -314,6 +314,17 @@ var logClasses = []logClass{
 		action:    "Run §1.3a through direct 5432 and split active, young idle-in-transaction, idle, and starting owners. Correlate them with wait events, completed PostgreSQL COMMIT latency, and PgBouncer connection logs or SHOW POOLS where permitted. If db-maintenance-legacy-reindex is present, wait for pg_stat_progress_create_index to become empty, then deploy a clean Taskworker containing current-main commits 908a8b2c and d8392c83; do not interrupt a live rebuild implicitly. Remove the proved upstream stall or leak before tuning pools. Do not raise max_connections first, restart PostgreSQL/PgBouncer, or mass-terminate sessions; this host's large work_mem makes a blind slot increase a memory-risk change.",
 		verify:    "For ten minutes through the workload that triggered the burst, normal-role connection headroom stays above 25%, direct 5432 remains available, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs. Correlate unique request failures separately from diagnostic lines.",
 	},
+	{name: "payment-balance-code-undelivered", re: regexp.MustCompile(`automatic balance-code delivery failed without email recovery(?:[^\r\n]*)$`),
+		sample: func(string) string {
+			return "automatic balance-code delivery failed without email recovery: details omitted"
+		},
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5 and §2.22", redactIDs: true,
+		meaning:   "a paid balance code was durably created, automatic redemption failed, and the purchase has no email delivery fallback",
+		mechanism: "The paid Stripe or Coinbase fulfillment path created its idempotent balance-code evidence, but the destination-network check or another redemption step failed before consuming the code. Because the purchase carried no email address, returning success would leave no delivery channel; the corrected path returns this error so the provider webhook remains visibly retryable.",
+		context:   "This exact error is emitted only for failed automatic delivery without email recovery. Intentional operator-issued, no-email, unredeemed codes do not emit it and cannot be distinguished safely from database columns alone. An emailed code remains recoverable and therefore does not use this class when only its optional automatic application fails.",
+		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
+		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
+	},
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning: "panic stack — the innermost app frame identifies the load-bearing call path"},

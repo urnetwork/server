@@ -727,6 +727,12 @@ func x402GrantProMonth(
 
 	granted := false
 	server.Tx(ctx, func(tx server.PgTx) {
+		granted = false
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+			returnErr = err
+			return
+		}
 		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
 			// this settle tx already granted -- an agent retry, not a new purchase
 			glog.Infof(
@@ -761,7 +767,7 @@ func x402GrantProMonth(
 		if returnErr == nil {
 			granted = true
 		}
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
@@ -789,7 +795,13 @@ func x402GrantData(
 	startTime := server.NowUtc()
 	endTime := startTime.Add(model.Pro().DataCodeDuration)
 
+	var returnErr error
 	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+			returnErr = err
+			return
+		}
 		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
 			glog.Infof(
 				"[x402]tx %s already granted for network %s; ignoring retry\n",
@@ -807,9 +819,9 @@ func x402GrantData(
 			NetRevenue:            netRevenue,
 			PurchaseToken:         settleResponse.Transaction,
 		})
-	})
+	}, server.TxReadCommitted)
 
-	return nil
+	return returnErr
 }
 
 // x402SendReceipt emails a receipt for a settled purchase, through the normal

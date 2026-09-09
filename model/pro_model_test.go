@@ -20,6 +20,7 @@ func TestDataCodeIsNotPro(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, networkId)
 
 		// no balances at all -> not pro
 		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
@@ -35,11 +36,7 @@ func TestDataCodeIsNotPro(t *testing.T) {
 		)
 		connect.AssertEqual(t, err, nil)
 
-		_, err = RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: networkId,
-		}, ctx)
-		connect.AssertEqual(t, err, nil)
+		testingRedeemPaymentBalanceCode(t, ctx, networkId, balanceCode.Secret)
 
 		// the data landed...
 		transferBalances := GetActiveTransferBalances(ctx, networkId)

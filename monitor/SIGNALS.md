@@ -1006,6 +1006,14 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+An exact `automatic balance-code delivery failed without email recovery` line
+is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
+fulfillment retained its durable balance code, automatic redemption failed,
+and no email delivery fallback exists. The class uses a fixed redacted sample.
+Intentional no-email codes printed by `bringyourctl` do not emit this line, and
+the same database row shape cannot safely establish delivery failure; follow
+the recovery and verification boundary in §2.22.
+
 An exact `Stats push rejected (400): ... per-user series limit` line is
 `mimir-series-limit`: PAGE on the first one-minute window containing at least
 one rejection, with sustain 1. This is affirmative series-admission failure,
@@ -4911,7 +4919,12 @@ establish:
   supporter purchase is a prepaid, fixed-window on-chain entitlement, not a
   cancellable recurring provider subscription, and its inert row after account
   deletion is retained payment history rather than evidence of missed
-  provider cancellation.
+  provider cancellation. For a revision carrying the deletion/credit fence,
+  verify every paid writer locks an existing network before consuming its
+  idempotency ledger or payment intent. Stripe deletion additionally requires
+  provider-confirmed cancellation before local deletion and propagates every
+  provider/local-close failure. Apple and Google deletion disposition remains
+  separate product policy; the Stripe workflow does not settle it.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -4921,6 +4934,11 @@ establish:
 - `payment-identity-fallback` (WARN): a Stripe credit used the legacy customer
   email fallback because immutable network metadata was missing. The credit is
   retained, but the checkout producer must be corrected.
+- `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
+  fulfillment durably created a balance code, automatic redemption failed,
+  and no email recovery channel exists. Preserve the code and provider ledger;
+  retry idempotently to a verified destination or record an authorized support
+  or refund disposition. Do not infer this failure from balance-code rows.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
@@ -4944,6 +4962,49 @@ deletion. The single Solana row represented prepaid fixed-window history and
 was not a provider-cancellation failure; it is no longer emitted as
 `payment-renewal-orphan`. The controller's candidate query independently keeps
 all deleted owners outside provider calls and metadata repair.
+
+The deletion-path audit found an architecture-preserving correctness defect.
+`NetworkRemove` deleted the network before asking Stripe to cancel, while
+`UnsubscribeStripe` logged and swallowed provider and local-close failures; the
+direct CLI bypassed cancellation entirely. Paid writers could also consume a
+Stripe ledger, Apple ledger, Google renewal, Solana intent, x402 grant, or paid
+Stripe/Coinbase balance code after the owner had already been deleted. The
+correction preauthorizes the request, cancels each locally discovered active
+Stripe subscription before deletion, requires the returned object to name the
+requested subscription with `status=canceled`, closes only that confirmed
+local renewal, and stops on every failure. A canceled status returned by the
+invoice lookup makes a retry idempotent; a bare DELETE 404 does not.
+
+The database boundary is a network-row `FOR UPDATE` deletion lock paired with
+`FOR KEY SHARE` in the corrected payment-ingestion writers, taken before
+consuming a Stripe or Apple ledger, Google renewal, Solana intent, x402 grant,
+or balance code and before writing an entitlement or data balance. Both sides
+use Read Committed. A writer waiting behind a committed delete observes no
+network and fails without consuming payment evidence. A delete waiting behind
+a Stripe credit sees its newly committed active renewal and refuses deletion,
+including a future/queued renewal whose start has not arrived. This Stripe
+guard also makes the direct CLI fail closed. If an Apple, Google, Solana, or
+x402 credit wins first, its post-credit deletion disposition remains the
+owning product policy rather than being silently treated as Stripe
+cancellation.
+
+Automatic balance-code fulfillment now exposes both recovery outcomes. With a
+purchase email, a failed optional auto-application still sends the durable
+code. Without an email, the handler returns the exact §1.5 error and leaves the
+code unredeemed for idempotent retry or authorized disposition. A durable
+database signal would require an explicit delivery-mode or failure marker;
+querying for paid, no-email, unredeemed rows would also page on intentional
+`bringyourctl` codes and is therefore prohibited.
+
+One Stripe boundary remains open: cancellation discovery still starts from
+active local renewal rows. A provider subscription whose local renewal metadata
+is missing or already expired can therefore escape this deletion workflow.
+Before calling that case closed, compare authorized provider-side customer
+subscriptions with local renewal discovery; a later bounded change may reuse
+the existing Stripe customer-subscription listing path. Do not broaden an
+incident repair from local history or call Stripe without explicit authority.
+Historical orphan rows cannot be assigned to the old swallowed-error path,
+direct deletion, or a delayed credit from the aggregate alone.
 
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic

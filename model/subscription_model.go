@@ -4193,7 +4193,42 @@ type SubscriptionRenewal struct {
 	TransactionId      string             // for tracking on Google Play or Apple App Store
 }
 
+var ErrPaymentNetworkNotFound = errors.New("payment network does not exist")
+
+// LockPaymentNetworkInTx establishes the deletion/credit ordering boundary for
+// every paid entitlement and data writer. A network delete takes FOR UPDATE on
+// the same row. At ReadCommitted, whichever operation gets the row first wins:
+// a credit that wins is visible to the delete's later active-renewal check,
+// while a credit waiting behind a committed delete observes no row and stops
+// before consuming an idempotency ledger or payment intent.
+func LockPaymentNetworkInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+) error {
+	var lockedNetworkId server.Id
+	err := tx.QueryRow(
+		ctx,
+		`
+			/* payment-network-credit-lock */
+			SELECT network_id
+			FROM network
+			WHERE network_id = $1
+			FOR KEY SHARE
+		`,
+		networkId,
+	).Scan(&lockedNetworkId)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrPaymentNetworkNotFound
+	}
+	return err
+}
+
 func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *SubscriptionRenewal) (returnErr error) {
+	if err := LockPaymentNetworkInTx(tx, ctx, renewal.NetworkId); err != nil {
+		return err
+	}
+
 	_, err := tx.Exec(
 		ctx,
 		`
@@ -4236,7 +4271,7 @@ func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) (
 
 		returnErr = AddSubscriptionRenewalInTx(tx, ctx, renewal)
 
-	})
+	}, server.TxReadCommitted)
 
 	return
 }

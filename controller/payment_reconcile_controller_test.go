@@ -1072,16 +1072,28 @@ func TestPaymentReconcileDeletedNetworkMakesNoProviderStatusRequest(t *testing.T
 		stripeEnv := newStripeReconcileTestEnv(t)
 		now := server.NowUtc()
 		orphanNetworkId := server.NewId()
-		err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
-			NetworkId:          orphanNetworkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          now.Add(-24 * time.Hour),
-			EndTime:            now.Add(29 * 24 * time.Hour),
-			NetRevenue:         model.UsdToNanoCents(7.0),
-			SubscriptionMarket: model.SubscriptionMarketStripe,
-			TransactionId:      "in_reconcile_deleted_network_1",
+		// Seed retained historical evidence directly. The production renewal
+		// writer now rejects a missing network, but the reconciler must continue
+		// to exclude orphan rows created before that invariant was enforced.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO subscription_renewal (
+						network_id, subscription_type, start_time, end_time,
+						net_revenue_nano_cents, market, transaction_id
+					)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+				`,
+				orphanNetworkId,
+				model.SubscriptionTypeSupporter,
+				now.Add(-24*time.Hour),
+				now.Add(29*24*time.Hour),
+				model.UsdToNanoCents(7.0),
+				model.SubscriptionMarketStripe,
+				"in_reconcile_deleted_network_1",
+			))
 		})
-		connect.AssertEqual(t, err, nil)
 
 		result, err := RunPaymentReconciliationWithOptions(
 			reconcileTestSession(t, ctx),

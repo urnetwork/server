@@ -45,11 +45,18 @@ type RedeemBalanceCodeError struct {
 	Message string `json:"message"`
 }
 
+// RedeemBalanceCodeInTx consumes one code only after locking its destination
+// network against concurrent deletion.
 func RedeemBalanceCodeInTx(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
 	ctx context.Context,
 	tx server.PgTx,
 ) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
+	redeemBalanceCodeResult = nil
+	returnErr = LockPaymentNetworkInTx(tx, ctx, redeemBalanceCode.NetworkId)
+	if returnErr != nil {
+		return
+	}
 
 	result, err := tx.Query(
 		ctx,
@@ -186,7 +193,7 @@ func RedeemBalanceCode(
 			ctx,
 			tx,
 		)
-	})
+	}, server.TxReadCommitted)
 
 	return
 }

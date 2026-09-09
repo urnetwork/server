@@ -99,10 +99,8 @@ func TestEscrow(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
-		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
-			sourceId:      sourceNetworkId,
-			destinationId: destinationNetworkId,
-		})
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -138,10 +136,7 @@ func TestEscrow(t *testing.T) {
 		)
 
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -354,10 +349,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
-		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
-			sourceId:      sourceNetworkId,
-			destinationId: destinationNetworkId,
-		})
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -393,10 +386,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		)
 
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: destinationSession.ByJwt.NetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, destinationSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -1320,10 +1310,8 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
-		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
-			sourceId:      sourceNetworkId,
-			destinationId: destinationNetworkId,
-		})
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -1343,10 +1331,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		)
 
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		paid := NanoCents(0)
 		paidByteCount := ByteCount(0)
@@ -2274,18 +2259,13 @@ func TestCompanionPairsToRecentlyClosedOrigin(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
-		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
-			sourceId:      sourceNetworkId,
-			destinationId: destinationNetworkId,
-		})
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		// fund the destination network so the origin escrow can be created
 		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 365*24*time.Hour, 2*netRevenue, "", "", "")
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: destinationNetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, destinationNetworkId, balanceCode.Secret)
 
 		// origin contract in the destination->source direction, then close it so
 		// it is matched only by the closed branch of the companion lookup

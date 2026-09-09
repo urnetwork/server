@@ -1813,6 +1813,52 @@ func TestWindowGeneratorCancellationNearMissRemainsNovel(t *testing.T) {
 	}
 }
 
+// TestAutomaticBalanceCodeDeliveryFailurePagesPrivately pins the exact paid,
+// no-recovery error without retaining its provider or account details.
+func TestAutomaticBalanceCodeDeliveryFailurePagesPrivately(t *testing.T) {
+	line := "[synthetic-host][api][synthetic-generation][cid:synthetic-private]" +
+		"[E][2000-01-01T00:00:00Z][synthetic.go:1] Unexpected error: " +
+		"automatic balance-code delivery failed without email recovery: " +
+		"payment network does not exist id=00000000-0000-0000-0000-000000000001 " +
+		"secret=synthetic-code-secret email=synthetic@example.invalid"
+	tailer := newLogTailer("api", nil)
+	tailer.classify(line)
+	findings := tailer.drainWindow()
+	finding := findingByClass(t, findings, "payment-balance-code-undelivered")
+	if finding.healthy || finding.tier != tierPage {
+		t.Fatalf("undelivered balance-code finding = %+v", finding)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified balance-code failure also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", finding,
+	).Markdown()
+	for _, want := range []string{
+		"paid balance code was durably created",
+		"no email delivery fallback",
+		"Intentional operator-issued",
+		"privileged payment tooling",
+		"consumed at most once",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("undelivered balance-code alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{
+		"synthetic-host",
+		"synthetic-private",
+		"00000000-0000-0000-0000-000000000001",
+		"synthetic-code-secret",
+		"synthetic@example.invalid",
+	} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("undelivered balance-code alert retained %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
 func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
 	const entityID = "raw-customer-correlation"
 	line := "[edge-private][taskworker][g2][cid:" + entityID + "] providertunnel: tun read error: Done"
