@@ -26,6 +26,13 @@ type validatedAppleTransaction struct {
 	purchaseTime  time.Time
 	expiresTime   time.Time
 	netRevenue    model.NanoCents
+	// storefront is the App Store storefront (ISO alpha-3), which prices the
+	// regional tier; the offer fields say whether the purchase used an offer
+	// (offerType 3 = offer code) and which one
+	storefront        string
+	offerType         int64
+	offerIdentifier   string
+	offerDiscountType string
 }
 
 // Returns true only when this call committed a new entitlement. Valid retries
@@ -127,7 +134,7 @@ func ProcessAppleNotification(
 		}
 
 		processed = appleCreditSubscriptionTransactionInTx(tx, ctx, notificationId, transaction)
-	})
+	}, server.TxReadCommitted)
 
 	if processed {
 		model.UpdateProNetwork(ctx, transaction.networkId)
@@ -141,14 +148,12 @@ func ProcessAppleNotification(
 }
 
 func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId server.Id) bool {
-	var networkExists bool
-	result, err := tx.Query(ctx, `SELECT EXISTS (SELECT 1 FROM network WHERE network_id = $1)`, networkId)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&networkExists))
-		}
-	})
-	return networkExists
+	err := model.LockPaymentNetworkInTx(tx, ctx, networkId)
+	if errors.Is(err, model.ErrPaymentNetworkNotFound) {
+		return false
+	}
+	server.Raise(err)
+	return true
 }
 
 // appleCreditSubscriptionTransactionInTx is the ONE place a verified App Store
@@ -202,6 +207,9 @@ func appleCreditSubscriptionTransactionInTx(
 		TransactionId:      transaction.transactionId,
 	}
 	server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
+	// the regional price tier (from the storefront) and the welcome offer (an
+	// offer-code purchase)
+	appleRecordOnboardingInTx(tx, ctx, transaction)
 
 	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
 		NetworkId:             transaction.networkId,
@@ -256,6 +264,10 @@ func validateAppleTransaction(
 		transactionId: transactionId,
 		productId:     productId,
 	}
+	validated.storefront, _ = appleControllerStringClaim(transactionClaims, "storefront")
+	validated.offerType, _ = appleControllerInt64Claim(transactionClaims, "offerType")
+	validated.offerIdentifier, _ = appleControllerStringClaim(transactionClaims, "offerIdentifier")
+	validated.offerDiscountType, _ = appleControllerStringClaim(transactionClaims, "offerDiscountType")
 	if !requireEntitlementFields {
 		return validated, nil
 	}

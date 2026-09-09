@@ -36,6 +36,24 @@ func AccountPreferencesSet(
 	return result, nil
 }
 
+// AccountPreferencesSetForNetwork writes the product-updates preference for a
+// network with no session (a sign-up that still awaits verification has no jwt
+// yet). The Brevo sync is scheduled by the controller once the network can act.
+func AccountPreferencesSetForNetwork(ctx context.Context, networkId server.Id, productUpdates bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO account_preferences (network_id, product_updates)
+				VALUES ($1, $2)
+				ON CONFLICT (network_id) DO UPDATE SET product_updates = $2
+			`,
+			networkId,
+			productUpdates,
+		))
+	})
+}
+
 func AccountProductUpdatesSetForEmail(ctx context.Context, userEmail string, productUpdates bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(

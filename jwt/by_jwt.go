@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -118,6 +119,27 @@ var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
 	}
 	return keys
 })
+
+// DerivedKeys returns one 32-byte HMAC key per loaded signing key, bound to a
+// purpose label, for signed tokens that must not need a vault secret of their own
+// (the onboarding landing/feedback tokens). Sign with the first; verify against
+// each, so a token outlives a key rotation exactly as a jwt does. The derivation
+// is HMAC-SHA256 over the purpose keyed by the private key's PKCS#8 encoding, so
+// the private key itself never leaves this package.
+func DerivedKeys(purpose string) [][]byte {
+	keys := byPrivateKeys()
+	derived := make([][]byte, 0, len(keys))
+	for _, key := range keys {
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			continue
+		}
+		mac := hmac.New(sha256.New, der)
+		mac.Write([]byte(purpose))
+		derived = append(derived, mac.Sum(nil))
+	}
+	return derived
+}
 
 func byRsaSigningKey() *rsa.PrivateKey {
 	for _, key := range byPrivateKeys() {

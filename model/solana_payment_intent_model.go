@@ -15,6 +15,9 @@ import (
 const (
 	SolanaPlanMonthly = "monthly"
 	SolanaPlanYearly  = "yearly"
+	// the welcome offer: a year at the tier's yearly price less the onboarding
+	// discount, plus the 14-day trial, only while the network's offer is redeemable
+	SolanaPlanYearlyOnboarding = "yearly_onboarding"
 )
 
 // CreateSolanaPaymentIntent records what the customer was QUOTED: the price shown to

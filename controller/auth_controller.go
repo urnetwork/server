@@ -226,9 +226,16 @@ func AuthVerify(
 
 		byJwt, err := jwt.ParseByJwt(session.Ctx, result.Network.ByJwt)
 		if err == nil {
+			// the preference the sign-up form asked for was persisted by
+			// NetworkCreate; completing verification syncs it, it never
+			// overrides an opt-out with a default
+			productUpdates := true
+			if preferences := model.AccountPreferencesGet(session.WithByJwt(byJwt)); preferences != nil {
+				productUpdates = preferences.ProductUpdates
+			}
 			AccountPreferencesSet(
 				&model.AccountPreferencesSetArgs{
-					ProductUpdates: true,
+					ProductUpdates: productUpdates,
 				},
 				session.WithByJwt(byJwt),
 			)

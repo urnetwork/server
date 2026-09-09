@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,12 +30,20 @@ type proPriceYaml struct {
 	Yearly  float64 `yaml:"yearly"`
 }
 
+type proPriceTierYaml struct {
+	Name       string   `yaml:"name"`
+	YearlyUsd  float64  `yaml:"yearly_usd"`
+	MonthlyUsd float64  `yaml:"monthly_usd"`
+	Countries  []string `yaml:"countries"`
+}
+
 type proTierYaml struct {
-	ConcurrentClients int             `yaml:"concurrent_clients"`
-	Data              string          `yaml:"data"`
-	DataPeriod        string          `yaml:"data_period"`
-	PriceUsd          proPriceYaml    `yaml:"price_usd"`
-	Features          proFeaturesYaml `yaml:"features"`
+	ConcurrentClients int                `yaml:"concurrent_clients"`
+	Data              string             `yaml:"data"`
+	DataPeriod        string             `yaml:"data_period"`
+	PriceUsd          proPriceYaml       `yaml:"price_usd"`
+	PriceTiers        []proPriceTierYaml `yaml:"price_tiers"`
+	Features          proFeaturesYaml    `yaml:"features"`
 }
 
 type proReferralYaml struct {
@@ -89,6 +98,50 @@ type ProDataCodeSku struct {
 	PriceUsd float64
 }
 
+// ProPriceTier is one regional price tier of the Pro subscription (pro.yml
+// pro.price_tiers). The prices are in USD; the stores and Stripe derive the local
+// currency figure themselves. Countries are upper-case ISO 3166-1 alpha-2; a tier
+// with no countries is the catch-all for every country no other tier names.
+type ProPriceTier struct {
+	Name       string
+	YearlyUsd  float64
+	MonthlyUsd float64
+	Countries  []string
+	countries  map[string]bool
+}
+
+// Plan names shared by every purchase path.
+const (
+	PlanYearly  = "yearly"
+	PlanMonthly = "monthly"
+)
+
+// PriceTierCurrency is the currency every tier price is quoted in.
+const PriceTierCurrency = "USD"
+
+// PriceUsd is the tier's price for a plan (PlanYearly or PlanMonthly); 0 for an
+// unknown plan, which no purchase path will sell.
+func (t *ProPriceTier) PriceUsd(plan string) float64 {
+	switch plan {
+	case PlanYearly:
+		return t.YearlyUsd
+	case PlanMonthly:
+		return t.MonthlyUsd
+	default:
+		return 0
+	}
+}
+
+// CatchAll reports whether the tier applies to every country not named by
+// another tier.
+func (t *ProPriceTier) CatchAll() bool {
+	return len(t.Countries) == 0
+}
+
+func (t *ProPriceTier) hasCountry(countryCode string) bool {
+	return t.countries[countryCode]
+}
+
 // ProConfig is the parsed product spec.
 //
 // ABSENT pro.yml -> every field here is its ZERO value, and that is a defined, safe
@@ -118,6 +171,13 @@ type ProConfig struct {
 
 	Free ProTier
 	Pro  ProTier
+
+	// priceTiers are the regional Pro price tiers in pro.yml order (the first is
+	// the default). Read through PriceTiers/PriceTierForCountry, which synthesize a
+	// single "standard" tier from Pro.PriceYearlyUsd/PriceMonthlyUsd when pro.yml
+	// predates tiers (and a zero-price tier when pro.yml is absent, which no
+	// purchase path will sell).
+	priceTiers []*ProPriceTier
 
 	ReferralBonus  ByteCount
 	ReferredBonus  ByteCount
@@ -172,6 +232,56 @@ func parseProTier(y proTierYaml) ProTier {
 	}
 }
 
+// NormalizeCountryCode canonicalizes an ISO 3166-1 alpha-2 country code for tier
+// lookup: trimmed and upper-cased, and "" for anything that is not two ASCII
+// letters (the ip database, Apple storefronts and Stripe billing addresses all
+// disagree on case; a three-letter or garbage value must not silently match).
+func NormalizeCountryCode(countryCode string) string {
+	code := strings.ToUpper(strings.TrimSpace(countryCode))
+	if len(code) != 2 {
+		return ""
+	}
+	for _, c := range code {
+		if c < 'A' || 'Z' < c {
+			return ""
+		}
+	}
+	return code
+}
+
+func parseProPriceTiers(ys []proPriceTierYaml) []*ProPriceTier {
+	tiers := make([]*ProPriceTier, 0, len(ys))
+	seen := map[string]bool{}
+	for _, y := range ys {
+		name := strings.TrimSpace(y.Name)
+		if name == "" {
+			panic(fmt.Errorf("pro.yml: price tier without a name"))
+		}
+		if seen[name] {
+			panic(fmt.Errorf("pro.yml: duplicate price tier %q", name))
+		}
+		seen[name] = true
+		tier := &ProPriceTier{
+			Name:       name,
+			YearlyUsd:  y.YearlyUsd,
+			MonthlyUsd: y.MonthlyUsd,
+			countries:  map[string]bool{},
+		}
+		for _, country := range y.Countries {
+			code := NormalizeCountryCode(country)
+			if code == "" {
+				panic(fmt.Errorf("pro.yml: price tier %q has an invalid country code %q", name, country))
+			}
+			if !tier.countries[code] {
+				tier.countries[code] = true
+				tier.Countries = append(tier.Countries, code)
+			}
+		}
+		tiers = append(tiers, tier)
+	}
+	return tiers
+}
+
 var proConfig = sync.OnceValue(func() *ProConfig {
 	// OPTIONAL. An environment without pro.yml must not fail to boot — a partial deploy
 	// or an env that has not been updated should degrade to "nothing is enforced", not
@@ -191,6 +301,19 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 	var y proConfigYaml
 	resource.UnmarshalYaml(&y)
 
+	priceTiers := parseProPriceTiers(y.Pro.PriceTiers)
+	if 0 < len(priceTiers) {
+		// the default tier IS pro.price_usd (see PriceTiers); a pro.yml where the
+		// two disagree would quote one price and charge another
+		if priceTiers[0].YearlyUsd != y.Pro.PriceUsd.Yearly || priceTiers[0].MonthlyUsd != y.Pro.PriceUsd.Monthly {
+			panic(fmt.Errorf(
+				"pro.yml: price_tiers[0] (%s: %g/%g) must equal pro.price_usd (%g/%g)",
+				priceTiers[0].Name, priceTiers[0].YearlyUsd, priceTiers[0].MonthlyUsd,
+				y.Pro.PriceUsd.Yearly, y.Pro.PriceUsd.Monthly,
+			))
+		}
+	}
+
 	skus := make([]ProDataCodeSku, 0, len(y.DataCode.Skus))
 	for _, s := range y.DataCode.Skus {
 		skus = append(skus, ProDataCodeSku{Data: mustParseByteCount(s.Data), PriceUsd: s.PriceUsd})
@@ -201,6 +324,7 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		EnforceFeatures:          y.EnforceFeatures,
 		Free:                     parseProTier(y.Free),
 		Pro:                      parseProTier(y.Pro),
+		priceTiers:               priceTiers,
 		ReferralBonus:            mustParseByteCount(y.Referral.BonusPerReferral),
 		ReferredBonus:            parseByteCountOrZero(y.Referral.ReferredBonus),
 		ReferralPeriod:           mustParseDuration(y.Referral.Period),
@@ -296,6 +420,76 @@ func (c *ProConfig) PriceMonthlyUsd() float64 {
 
 func (c *ProConfig) PriceYearlyUsd() float64 {
 	return c.Pro.PriceYearlyUsd
+}
+
+// PriceTiers returns the regional Pro price tiers in pro.yml order; the first is
+// the default. A pro.yml without price_tiers yields one "standard" tier priced at
+// pro.price_usd, so every caller can assume at least one tier. With no pro.yml at
+// all that tier is priced at zero -- and a zero price is never sellable (see the
+// ProConfig doc).
+//
+// The DEFAULT tier's prices are pro.price_usd itself (pro.yml requires the two to
+// agree), read live from Pro.PriceYearlyUsd/PriceMonthlyUsd -- so the legacy
+// accessors, the tier and the Testing_ overrides on those fields never disagree.
+func (c *ProConfig) PriceTiers() []*ProPriceTier {
+	if len(c.priceTiers) == 0 {
+		return []*ProPriceTier{{
+			Name:       PriceTierStandard,
+			YearlyUsd:  c.Pro.PriceYearlyUsd,
+			MonthlyUsd: c.Pro.PriceMonthlyUsd,
+			countries:  map[string]bool{},
+		}}
+	}
+	tiers := make([]*ProPriceTier, len(c.priceTiers))
+	copy(tiers, c.priceTiers)
+	first := *c.priceTiers[0]
+	first.YearlyUsd = c.Pro.PriceYearlyUsd
+	first.MonthlyUsd = c.Pro.PriceMonthlyUsd
+	tiers[0] = &first
+	return tiers
+}
+
+// PriceTierStandard is the name of the developed-country tier, which is also the
+// tier used when the country is unknown: an unresolvable country must never
+// quote the cheaper price.
+const PriceTierStandard = "standard"
+
+// DefaultPriceTier is the tier for an unknown country: the first configured tier.
+func (c *ProConfig) DefaultPriceTier() *ProPriceTier {
+	return c.PriceTiers()[0]
+}
+
+// PriceTierForCountry resolves the tier for an ISO 3166-1 alpha-2 country code.
+// A tier that names the country wins; otherwise the catch-all tier (the one with
+// no countries); otherwise the default tier. An empty or malformed code is
+// "unknown" and gets the default tier, never the catch-all.
+func (c *ProConfig) PriceTierForCountry(countryCode string) *ProPriceTier {
+	code := NormalizeCountryCode(countryCode)
+	tiers := c.PriceTiers()
+	if code == "" {
+		return tiers[0]
+	}
+	for _, tier := range tiers {
+		if tier.hasCountry(code) {
+			return tier
+		}
+	}
+	for _, tier := range tiers {
+		if tier.CatchAll() {
+			return tier
+		}
+	}
+	return tiers[0]
+}
+
+// PriceTierByName returns the named tier, or nil.
+func (c *ProConfig) PriceTierByName(name string) *ProPriceTier {
+	for _, tier := range c.PriceTiers() {
+		if tier.Name == name {
+			return tier
+		}
+	}
+	return nil
 }
 
 // referralPeriodFallback is how often the referral task wakes when pro.yml gives no

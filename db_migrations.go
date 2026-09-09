@@ -7375,4 +7375,98 @@ var migrations = []any{
 		END
 		$competition_epoch_lifecycle_guard$;
 	`),
+
+	// ----- onboarding program (mmm/onboarding/PLAN.md) -----
+
+	// The welcome offer: one row per network, issued once, never re-issued.
+	// expires_at = issued_at + onboarding.yml offer.validity_days. The purchase
+	// paths stamp redeemed_at + store; the per-store redemption handles are fixed
+	// at issue time.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_offer (
+			network_id uuid NOT NULL,
+			issued_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL,
+			issued_by varchar(16) NOT NULL,
+			surface varchar(32) NOT NULL DEFAULT '',
+			tier varchar(32) NOT NULL DEFAULT '',
+			percent_off int NOT NULL,
+			months_free int NOT NULL,
+			redeemed_at timestamp NULL,
+			store varchar(16) NULL,
+			stripe_coupon_id varchar(64) NULL,
+			apple_offer_code varchar(64) NULL,
+			play_offer_tag varchar(64) NULL,
+
+			PRIMARY KEY (network_id)
+		)
+	`),
+
+	// App Store Connect one-time offer code pool: loaded from the configured batch
+	// csv (and, later, from App Store Connect batch generation), one code handed
+	// to each issued offer.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_apple_offer_code (
+			code varchar(64) NOT NULL,
+			expires_at timestamp NOT NULL,
+			network_id uuid NULL,
+			assigned_at timestamp NULL,
+
+			PRIMARY KEY (code)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_apple_offer_code_available
+		ON network_onboarding_apple_offer_code (expires_at, code)
+		WHERE network_id IS NULL
+	`),
+
+	// Product events: POST /client/events (closed schema) plus the server-written
+	// attribution and outcome events. props is the closed per-name prop set.
+	// RETENTION: 400 days (model.OnboardingEventRetention); rows older than that
+	// are pruned by the nightly results job.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_event (
+			event_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			name varchar(64) NOT NULL,
+			at timestamp NOT NULL,
+			received_at timestamp NOT NULL,
+			platform varchar(16) NOT NULL DEFAULT '',
+			app_version varchar(64) NOT NULL DEFAULT '',
+			locale varchar(32) NOT NULL DEFAULT '',
+			tier varchar(32) NOT NULL DEFAULT '',
+			path varchar(8) NOT NULL DEFAULT '',
+			experiment varchar(64) NOT NULL DEFAULT '',
+			variant varchar(64) NOT NULL DEFAULT '',
+			session varchar(64) NOT NULL DEFAULT '',
+			props jsonb NULL,
+
+			PRIMARY KEY (event_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_event_network_id_at
+		ON network_onboarding_event (network_id, at)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_event_name_at
+		ON network_onboarding_event (name, at)
+	`),
+
+	// The regional price tier a subscription row was sold at (pro.yml
+	// pro.price_tiers name), recorded by every purchase path from now on.
+	newSqlMigration(`
+		ALTER TABLE subscription_renewal ADD COLUMN price_tier varchar(32) NULL
+	`),
+
+	// The Stripe customer's billing country (upper-case ISO alpha-2), cached from
+	// the card's billing details so the plan response resolves the price tier
+	// without a Stripe API call.
+	newSqlMigration(`
+		ALTER TABLE stripe_customer ADD COLUMN billing_country varchar(2) NULL
+	`),
 }

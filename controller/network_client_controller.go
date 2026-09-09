@@ -29,6 +29,11 @@ func AuthNetworkClient(
 		verifySettings = VerifySettings()
 	}
 	result, err := model.AuthNetworkClient(authClient, clientSession)
+	if err == nil && result != nil && result.ClientId != nil && clientSession.ByJwt != nil {
+		// onboarding attribution: an app open that follows a campaign landing
+		// click within 48h (one cheap query, never fails the caller)
+		AttributeAppOpen(clientSession, clientSession.ByJwt.NetworkId)
+	}
 	if err != nil || result == nil || verifySettings == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil {
 		return result, err
 	}

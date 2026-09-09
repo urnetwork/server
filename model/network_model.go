@@ -87,6 +87,10 @@ type NetworkCreateArgs struct {
 	ReferralCode     *string         `json:"referral_code,omitempty"`
 	BalanceCode      *string         `json:"balance_code,omitempty"`
 	WalletAuth       *WalletAuthArgs `json:"wallet_auth,omitempty"`
+	// ProductUpdates is the sign-up form's "Periodic product updates" line.
+	// Absent = on (the line ships ticked); false turns the preference off from
+	// the first moment, before any campaign mail can go out.
+	ProductUpdates *bool `json:"product_updates,omitempty"`
 }
 
 type NetworkCreateResult struct {
