@@ -44,10 +44,11 @@ type PointsEpochWindow struct {
 }
 
 type PointsLeaderboardSnapshot struct {
-	SnapshotId  server.Id `json:"snapshot_id"`
-	CreateTime  time.Time `json:"create_time"`
-	LatestEpoch uint64    `json:"latest_epoch"`
-	TotalRanked int64     `json:"total_ranked"`
+	SnapshotId            server.Id `json:"snapshot_id"`
+	CreateTime            time.Time `json:"create_time"`
+	LatestEpoch           uint64    `json:"latest_epoch"`
+	TotalRanked           int64     `json:"total_ranked"`
+	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
 }
 
 // PointsLeaderboardEntry is one stored row. rank_* is the competition rank
@@ -211,10 +212,11 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
 
 	snapshot := &PointsLeaderboardSnapshot{
-		SnapshotId:  server.NewId(),
-		CreateTime:  server.NowUtc(),
-		LatestEpoch: latestEpoch,
-		TotalRanked: int64(len(entries)),
+		SnapshotId:            server.NewId(),
+		CreateTime:            server.NowUtc(),
+		LatestEpoch:           latestEpoch,
+		TotalRanked:           int64(len(entries)),
+		EpochMetricsAvailable: 0 < len(windows),
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -226,13 +228,14 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 			ctx,
 			`
 				INSERT INTO network_points_leaderboard_snapshot
-				(snapshot_id, create_time, latest_epoch, total_ranked)
-				VALUES ($1, $2, $3, $4)
+				(snapshot_id, create_time, latest_epoch, total_ranked, epoch_metrics_available)
+				VALUES ($1, $2, $3, $4, $5)
 			`,
 			snapshot.SnapshotId,
 			snapshot.CreateTime,
 			int64(snapshot.LatestEpoch),
 			snapshot.TotalRanked,
+			snapshot.EpochMetricsAvailable,
 		))
 		const chunkSize = 5000
 		for start := 0; start < len(entries); start += chunkSize {
@@ -456,7 +459,7 @@ func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (
 }
 
 const pointsLeaderboardSnapshotSelect = `
-	SELECT snapshot_id, create_time, latest_epoch, total_ranked
+	SELECT snapshot_id, create_time, latest_epoch, total_ranked, epoch_metrics_available
 	FROM network_points_leaderboard_snapshot
 `
 
@@ -468,6 +471,7 @@ func scanPointsLeaderboardSnapshot(result server.PgResult) *PointsLeaderboardSna
 		&snapshot.CreateTime,
 		&latestEpoch,
 		&snapshot.TotalRanked,
+		&snapshot.EpochMetricsAvailable,
 	))
 	snapshot.LatestEpoch = uint64(latestEpoch)
 	return snapshot

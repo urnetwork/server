@@ -86,12 +86,13 @@ type PointsLeaderboardResult struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 	// Restart is true when the cursor's snapshot is gone; the client reloads
 	// from the top.
-	Restart      bool                    `json:"restart,omitempty"`
-	TotalRanked  int64                   `json:"total_ranked"`
-	SnapshotTime *time.Time              `json:"snapshot_time,omitempty"`
-	LatestEpoch  uint64                  `json:"latest_epoch"`
-	Me           *PointsLeaderboardMe    `json:"me,omitempty"`
-	Error        *PointsLeaderboardError `json:"error,omitempty"`
+	Restart               bool                    `json:"restart,omitempty"`
+	TotalRanked           int64                   `json:"total_ranked"`
+	SnapshotTime          *time.Time              `json:"snapshot_time,omitempty"`
+	LatestEpoch           uint64                  `json:"latest_epoch"`
+	EpochMetricsAvailable bool                    `json:"epoch_metrics_available"`
+	Me                    *PointsLeaderboardMe    `json:"me,omitempty"`
+	Error                 *PointsLeaderboardError `json:"error,omitempty"`
 }
 
 type PointsLeaderboardError struct {
@@ -226,10 +227,14 @@ func GetPointsLeaderboard(
 		result.Me = pointsLeaderboardMe(ctx, nil, clientSession)
 		return result, nil
 	}
+	if sortBy != model.PointsLeaderboardSortPoints && !snapshot.EpochMetricsAvailable {
+		return pointsLeaderboardError("Finalized epoch metrics are not available yet."), nil
+	}
 	result.TotalRanked = snapshot.TotalRanked
 	snapshotTime := snapshot.CreateTime
 	result.SnapshotTime = &snapshotTime
 	result.LatestEpoch = snapshot.LatestEpoch
+	result.EpochMetricsAvailable = snapshot.EpochMetricsAvailable
 
 	// one extra row tells whether there is a next page
 	rows := model.GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, sortBy, afterPosition, limit+1)
@@ -357,9 +362,10 @@ type RebuildPointsLeaderboardArgs struct {
 }
 
 type RebuildPointsLeaderboardResult struct {
-	SnapshotId  server.Id `json:"snapshot_id"`
-	TotalRanked int64     `json:"total_ranked"`
-	LatestEpoch uint64    `json:"latest_epoch"`
+	SnapshotId            server.Id `json:"snapshot_id"`
+	TotalRanked           int64     `json:"total_ranked"`
+	LatestEpoch           uint64    `json:"latest_epoch"`
+	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
 }
 
 const (
@@ -421,16 +427,18 @@ func RebuildPointsLeaderboard(
 		return nil, err
 	}
 	glog.Infof(
-		"[points]leaderboard snapshot %s: %d ranked networks, %d finalized epochs, latest epoch %d\n",
+		"[points]leaderboard snapshot %s: %d ranked networks, %d finalized epochs, latest epoch %d, epoch metrics available %t\n",
 		snapshot.SnapshotId,
 		snapshot.TotalRanked,
 		len(windows),
 		snapshot.LatestEpoch,
+		snapshot.EpochMetricsAvailable,
 	)
 	return &RebuildPointsLeaderboardResult{
-		SnapshotId:  snapshot.SnapshotId,
-		TotalRanked: snapshot.TotalRanked,
-		LatestEpoch: snapshot.LatestEpoch,
+		SnapshotId:            snapshot.SnapshotId,
+		TotalRanked:           snapshot.TotalRanked,
+		LatestEpoch:           snapshot.LatestEpoch,
+		EpochMetricsAvailable: snapshot.EpochMetricsAvailable,
 	}, nil
 }
 

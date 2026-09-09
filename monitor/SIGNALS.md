@@ -15419,6 +15419,19 @@ unready deployment or insert synthetic `st_epoch` rows to silence the signal.
 This can require operator, finance, network, or additional node hardware work
 that software alone cannot provide.
 
+The implemented software contract persists the snapshot-level
+`epoch_metrics_available` bit from the actual finalized-window input, returns
+it from both rebuild and read APIs, and rejects Blocks/Streak paging while it
+is false. The shared SDK preserves total points, renders every epoch-derived
+value and rank as unavailable, rejects those two sort changes, and re-emits
+authoritative state so optimistic native adapters return to Points. Android,
+Apple, Windows, and `mmm/ur.io` consume those preformatted SDK fields; Linux
+does not currently expose this points board. Synthetic Server tests distinguish
+missing history from a legitimate zero on an available epoch, and the shared
+SDK test covers unavailable presentation, sort rejection, and later recovery.
+Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
+`signal_points_readiness.go` and `signal_points_readiness_test.go`.
+
 On 2026-09-08 the public API and direct database snapshot agreed: the latest
 snapshot contained 25,708 ranked networks with populated positive total points,
 `latest_epoch=0`, and zero positive Blocks, Streak, or Longest Streak rows. All

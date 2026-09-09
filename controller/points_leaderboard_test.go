@@ -166,6 +166,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, rebuilt.TotalRanked, int64(5))
 		connect.AssertEqual(t, rebuilt.LatestEpoch, uint64(5))
+		connect.AssertEqual(t, rebuilt.EpochMetricsAvailable, true)
 
 		// networks 0 and 1 show their names; the others stay anonymous.
 		// network 3 makes its name public on the DATA leaderboard, which must
@@ -205,6 +206,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, page.Me, (*PointsLeaderboardMe)(nil))
 		connect.AssertEqual(t, page.TotalRanked, int64(5))
 		connect.AssertEqual(t, page.LatestEpoch, uint64(5))
+		connect.AssertEqual(t, page.EpochMetricsAvailable, true)
 		connect.AssertEqual(t, len(page.Rows), 2)
 		// points order is (points, streak, blocks): n2 (90) is rank 1 and
 		// anonymous; n1 and n3 tie at 80 and streak 0, and the blocks
@@ -354,5 +356,45 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(fresh.Rows), 5)
 		connect.AssertEqual(t, fresh.NextCursor, "")
+	})
+}
+
+// Missing ST deployment/finalized epochs must not turn its structurally valid
+// zero values into measured zeroes. Total-points paging remains available,
+// while epoch-derived sorts fail explicitly. The main integration test above
+// is the available control, including networks with legitimate zero streaks.
+func TestPointsLeaderboardUnavailableEpochMetrics(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "points_unavailable", server.NewId())
+		model.Testing_InsertAccountPoint(ctx, networkId, model.PointsToNanoPoints(2), server.NowUtc())
+		anonymous := session.NewLocalClientSession(ctx, "source.invalid:0", nil)
+		defer anonymous.Cancel()
+
+		pointsLeaderboardDeploymentKeyFunc = func() (model.StDeploymentKey, bool) {
+			return "", false
+		}
+		defer func() { pointsLeaderboardDeploymentKeyFunc = StDeploymentKey }()
+
+		rebuilt, err := RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, rebuilt.TotalRanked, int64(1))
+		connect.AssertEqual(t, rebuilt.LatestEpoch, uint64(0))
+		connect.AssertEqual(t, rebuilt.EpochMetricsAvailable, false)
+
+		points, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: model.PointsLeaderboardSortPoints}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, points.Error, (*PointsLeaderboardError)(nil))
+		connect.AssertEqual(t, len(points.Rows), 1)
+		connect.AssertEqual(t, points.Rows[0].TotalPoints, 2.0)
+		connect.AssertEqual(t, points.EpochMetricsAvailable, false)
+
+		for _, unavailableSort := range []string{model.PointsLeaderboardSortBlocks, model.PointsLeaderboardSortStreak} {
+			result, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: unavailableSort}, anonymous)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertNotEqual(t, result.Error, (*PointsLeaderboardError)(nil))
+			connect.AssertEqual(t, len(result.Rows), 0)
+		}
 	})
 }

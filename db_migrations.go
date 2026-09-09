@@ -7582,4 +7582,12 @@ var migrations = []any{
 		CREATE INDEX network_onboarding_created_at
 		ON network_onboarding (created_at)
 	`),
+
+	// A zero blocks/streak value is meaningful only after at least one finalized
+	// ST epoch was available to the rebuild. Keep that availability on the
+	// snapshot so API clients never render missing chain history as real zeroes.
+	newSqlMigration(`
+		ALTER TABLE network_points_leaderboard_snapshot
+		ADD COLUMN epoch_metrics_available boolean NOT NULL DEFAULT false
+	`),
 }
