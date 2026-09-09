@@ -608,6 +608,13 @@ func TestSpecRoutesImplemented(t *testing.T) {
 			key := strings.ToUpper(method) + " " + normalizePath(path)
 			specKeys[key] = true
 			if !implKeys[key] {
+				// An operation the spec marks `x-status: planned` documents a
+				// route that a later change lands; it is logged, not failed,
+				// so the spec can lead the implementation by one deploy.
+				if asMap(asMap(methodsAny)[method])["x-status"] == "planned" {
+					t.Logf("spec endpoint %q is planned (x-status) and not yet in Routes()", key)
+					continue
+				}
 				missing = append(missing, key)
 			}
 		}
