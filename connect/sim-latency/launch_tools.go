@@ -261,19 +261,47 @@ func executeLaunchPreflight(ctx context.Context, config *launchPreflightConfig) 
 }
 
 func verifyRemoteSourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRoot string) error {
-	return verifyRemoteSourceEpochMode(manifest, epochNumber, repositoriesRoot, false)
+	return verifyRemoteSourceEpochMode(
+		manifest,
+		epochNumber,
+		repositoriesRoot,
+		manifest.EvaluationSource.Branch,
+		false,
+	)
 }
 
 // verifyRemoteSourceEpochHead rejects the partial-promotion interval where a
 // product branch advanced but the config ledger was not activated last.
 func verifyRemoteSourceEpochHead(manifest *sourceManifest, epochNumber int, repositoriesRoot string) error {
-	return verifyRemoteSourceEpochMode(manifest, epochNumber, repositoriesRoot, true)
+	return verifyRemoteSourceEpochMode(
+		manifest,
+		epochNumber,
+		repositoriesRoot,
+		manifest.EvaluationSource.Branch,
+		true,
+	)
+}
+
+// verifyRemoteSourceEpochBranchHead proves that a named era branch is an
+// exact alias of one configured checkpoint. Unlike production history checks,
+// staging aliases are never allowed to advance past the frozen baseline.
+func verifyRemoteSourceEpochBranchHead(
+	manifest *sourceManifest,
+	epochNumber int,
+	repositoriesRoot string,
+	branch string,
+) error {
+	if branch != stagingEvaluationSourceBranch {
+		return fmt.Errorf("unsupported staging source branch %q", branch)
+	}
+	return verifyRemoteSourceEpochMode(manifest, epochNumber, repositoriesRoot, branch, true)
 }
 
 func verifyRemoteSourceEpochMode(
 	manifest *sourceManifest,
 	epochNumber int,
 	repositoriesRoot string,
+	branch string,
 	requireExactHead bool,
 ) error {
 	epoch, err := manifest.epoch(epochNumber)
@@ -292,7 +320,7 @@ func verifyRemoteSourceEpochMode(
 			return fmt.Errorf("repository %s origin: %w", repositoryName, err)
 		}
 		cloneRoot := filepath.Join(temporaryRoot, repositoryName+".git")
-		command := exec.Command("git", "clone", "--quiet", "--bare", "--single-branch", "--branch", manifest.EvaluationSource.Branch, origin, cloneRoot)
+		command := exec.Command("git", "clone", "--quiet", "--bare", "--single-branch", "--branch", branch, origin, cloneRoot)
 		if output, err := command.CombinedOutput(); err != nil {
 			return fmt.Errorf("clone repository %s competition branch: %s", repositoryName, strings.TrimSpace(string(output)))
 		}

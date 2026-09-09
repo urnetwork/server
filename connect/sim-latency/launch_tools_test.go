@@ -53,6 +53,45 @@ func TestLaunchPreflightVerifiesRemoteEpochWithoutChangingWorkingTrees(t *testin
 	}
 }
 
+func TestStagingSourceBranchesExactlyAliasBaseline(t *testing.T) {
+	repositoriesRoot := t.TempDir()
+	repositoryCommits := map[string]string{}
+	for _, repositoryName := range sourceRepositoryNames() {
+		commit := sourceTestRepository(t, repositoriesRoot, repositoryName)
+		repositoryCommits[repositoryName] = commit
+		localRoot := filepath.Join(repositoriesRoot, repositoryName)
+		remoteRoot := filepath.Join(t.TempDir(), repositoryName+".git")
+		sourceTestGit(t, repositoriesRoot, "clone", "--quiet", "--bare", localRoot, remoteRoot)
+		sourceTestGit(t, localRoot, "remote", "add", "origin", remoteRoot)
+		sourceTestGit(t, localRoot, "push", "--quiet", "origin", commit+":refs/heads/"+stagingEvaluationSourceBranch)
+	}
+	manifest := sourceTestManifest(repositoryCommits)
+	if err := verifyRemoteSourceEpochBranchHead(
+		manifest,
+		0,
+		repositoriesRoot,
+		stagingEvaluationSourceBranch,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	serverRoot := filepath.Join(repositoriesRoot, "server")
+	if err := os.WriteFile(filepath.Join(serverRoot, "staging-drift.txt"), []byte("drift\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceTestGit(t, serverRoot, "add", "staging-drift.txt")
+	sourceTestGit(t, serverRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "staging drift")
+	sourceTestGit(t, serverRoot, "push", "--quiet", "origin", "HEAD:refs/heads/"+stagingEvaluationSourceBranch)
+	if err := verifyRemoteSourceEpochBranchHead(
+		manifest,
+		0,
+		repositoriesRoot,
+		stagingEvaluationSourceBranch,
+	); err == nil || !strings.Contains(err.Error(), "does not match active epoch commit") {
+		t.Fatalf("advanced staging branch was accepted: %v", err)
+	}
+}
+
 func TestLaunchPreflightChecksGrafanaRoutingAndLiveMetrics(t *testing.T) {
 	metricQueries := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

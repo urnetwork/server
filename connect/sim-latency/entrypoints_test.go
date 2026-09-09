@@ -193,6 +193,15 @@ func TestRunMainAdvancesAndExplicitlyReplacesStagingRounds(t *testing.T) {
 		if err := os.WriteFile(sourceConfigPath, []byte("epochs:\n  - epoch: 0\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		binaryPath := filepath.Join(t.TempDir(), "sim-latency")
+		binaryFixture := `#!/usr/bin/env bash
+set -euo pipefail
+[[ ${1:-} == staging-source-check ]]
+printf '%s\n' '{"schema":1,"epoch":0,"branch":"sim-latency-staging","repositories":{"server":"a","connect":"b","sdk":"c","proxy":"d","glog":"e","goidenticons":"f","userwireguard":"g","sn":"h"}}'
+`
+		if err := os.WriteFile(binaryPath, []byte(binaryFixture), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		arguments := []string{"./run-main.sh", "staging"}
 		if c.replaceCurrent {
 			arguments = append(arguments, "--replace-current")
@@ -202,6 +211,7 @@ func TestRunMainAdvancesAndExplicitlyReplacesStagingRounds(t *testing.T) {
 			"SIM_LATENCY_API_URL="+apiServer.URL,
 			"SIM_LATENCY_OPERATOR_TOKEN_FILE="+tokenPath,
 			"SIM_LATENCY_SOURCE_CONFIG="+sourceConfigPath,
+			"SIM_LATENCY_BINARY="+binaryPath,
 			"SIM_LATENCY_STATE_DIR="+t.TempDir(),
 			"SIM_LATENCY_STAGING_WINDOW_SECONDS=120",
 		)

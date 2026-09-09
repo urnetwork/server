@@ -6,6 +6,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 server_root=$(cd -- "$script_dir/../.." && pwd -P)
 workspace_root=$(cd -- "$server_root/.." && pwd -P)
 source_config=${SIM_LATENCY_SOURCE_CONFIG:-$workspace_root/config/main/sim-latency.yml}
+sim_latency_binary=${SIM_LATENCY_BINARY:-}
 api_url=${SIM_LATENCY_API_URL:-https://api.bringyour.com}
 state_dir=${SIM_LATENCY_STATE_DIR:-$workspace_root/.sim-latency-state}
 operator_token_file=${SIM_LATENCY_OPERATOR_TOKEN_FILE:-}
@@ -18,6 +19,7 @@ usage() {
     cat <<'EOF'
 Usage:
   run-main.sh staging [--replace-current]
+  run-main.sh advance-staging
   run-main.sh staging-worker
   run-main.sh run
   run-main.sh status [--epoch N]
@@ -37,6 +39,7 @@ Also required for production run/review:
 Optional environment:
   SIM_LATENCY_API_URL              defaults to https://api.bringyour.com
   SIM_LATENCY_SOURCE_CONFIG        defaults to config/main/sim-latency.yml
+  SIM_LATENCY_BINARY               optional absolute prebuilt harness binary
   SIM_LATENCY_STATE_DIR            defaults outside the repositories at
                                     WORKSPACE/.sim-latency-state
   SIM_LATENCY_FIRST_OPENS_AT       RFC3339 start for epoch 1; default is now
@@ -97,6 +100,12 @@ main_environment() {
 
 sim_binary() {
     local goos goarch binary
+    if [[ -n $sim_latency_binary ]]; then
+        [[ $sim_latency_binary == /* && -f $sim_latency_binary && ! -L $sim_latency_binary && -x $sim_latency_binary ]] ||
+            fail "SIM_LATENCY_BINARY must be an absolute regular executable"
+        printf '%s\n' "$sim_latency_binary"
+        return
+    fi
     goos=$(go env GOOS)
     goarch=$(go env GOARCH)
     binary=$script_dir/build/$goos/$goarch/sim-latency
@@ -104,6 +113,16 @@ sim_binary() {
         make -C "$script_dir" build >&2
     fi
     printf '%s\n' "$binary"
+}
+
+verify_staging_source() {
+    local record
+    record=$("$(sim_binary)" staging-source-check --epoch=0 \
+        --source-config="$source_config" --repos-root="$workspace_root")
+    jq -e '.schema == 1 and .epoch == 0 and .branch == "sim-latency-staging" and
+        (.repositories | type == "object" and length == 8)' <<<"$record" >/dev/null ||
+        fail "staging source check returned an invalid identity"
+    write_evidence "staging-source.json" "$record"
 }
 
 latest_source_epoch() {
@@ -148,6 +167,18 @@ write_evidence() {
     mv -f -- "$temporary" "$path"
 }
 
+wait_until() {
+    local target=$1 target_seconds now_seconds delay
+    target_seconds=$(date -u -d "$target" '+%s') || fail "invalid wait timestamp: $target"
+    while true; do
+        now_seconds=$(date -u '+%s')
+        (( now_seconds >= target_seconds )) && return
+        delay=$((target_seconds - now_seconds))
+        (( delay > 30 )) && delay=30
+        sleep "$delay"
+    done
+}
+
 create_round() {
     local epoch=$1
     local opens_at closes_at request response
@@ -174,6 +205,7 @@ create_round() {
 staging_round() {
     local replace_current=$1
     local info response status request epoch
+    verify_staging_source
     info=$(api_request GET /competition/info)
     if [[ $(jq -r '.active_round.epoch // 0' <<<"$info") != 0 ]]; then
         fail "the production season has started; staging is no longer available"
@@ -225,6 +257,39 @@ run_staging_worker() {
     info=$(api_request GET /competition/info)
     [[ $(jq -r '.staging_round.status // empty' <<<"$info") == finalized ]] ||
         fail "staging worker exited before the epoch finalized"
+}
+
+close_staging_round() {
+    local info response status opens_at
+    info=$(api_request GET /competition/info)
+    [[ $(jq -r '.active_round // empty' <<<"$info") == "" ]] ||
+        fail "the production era has started; staging cannot be advanced"
+    status=$(jq -er '.staging_round.status' <<<"$info") || fail "there is no current staging epoch"
+    if [[ $status == scheduled ]]; then
+        opens_at=$(jq -er '.staging_round.opens_at' <<<"$info")
+        wait_until "$opens_at"
+        status=open
+    fi
+    case $status in
+        open)
+            response=$(api_request POST /competition/close-staging-round)
+            ;;
+        grading|finalized)
+            response=$(jq -c '.staging_round' <<<"$info")
+            ;;
+        *)
+            fail "current staging epoch cannot be closed from status: $status"
+            ;;
+    esac
+    jq -e '.staging == true and (.status == "grading" or .status == "finalized")' \
+        <<<"$response" >/dev/null || fail "close-staging-round returned an invalid state"
+    write_evidence "staging-close.json" "$response"
+}
+
+advance_staging() {
+    close_staging_round
+    run_staging_worker
+    staging_round false
 }
 
 review_json() {
@@ -415,6 +480,11 @@ case $command in
     staging-worker)
         [[ $# == 0 ]] || fail "staging-worker takes no arguments"
         run_staging_worker
+        ;;
+    advance-staging)
+        [[ $# == 0 ]] || fail "advance-staging takes no arguments"
+        verify_staging_source
+        advance_staging
         ;;
     run)
         [[ $# == 0 ]] || fail "run takes no arguments"

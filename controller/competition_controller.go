@@ -1712,6 +1712,25 @@ func GenerateStagingRoundHandler(w http.ResponseWriter, r *http.Request) {
 	writeCompetitionJson(w, http.StatusCreated, result)
 }
 
+// CloseStagingRoundHandler stops new staging admissions without canceling any
+// accepted work. The worker remains responsible for draining and finalizing.
+func CloseStagingRoundHandler(w http.ResponseWriter, r *http.Request) {
+	service := DefaultService()
+	if _, ok := requirePrincipal(w, r, service, true); !ok {
+		return
+	}
+	result, evalError := service.CloseStagingRound(r.Context())
+	if evalError != nil {
+		status := http.StatusConflict
+		if evalError.Kind == "infrastructure" {
+			status = http.StatusServiceUnavailable
+		}
+		writeCompetitionJson(w, status, evalError)
+		return
+	}
+	writeCompetitionJson(w, http.StatusOK, result)
+}
+
 func SubmitScoreHandler(w http.ResponseWriter, r *http.Request) {
 	service := DefaultService()
 	principal, ok := requirePrincipal(w, r, service, false)
@@ -2689,7 +2708,8 @@ func submissionError(code, message string) *CompetitionError {
 // shared by API admission and durable queue defenses so boundary behavior
 // cannot drift between them.
 func submissionWithinEpoch(round *roundRecord, submittedAt time.Time) bool {
-	return round != nil && !submittedAt.Before(round.OpensAt) && submittedAt.Before(round.ClosesAt)
+	return round != nil && round.AdmissionClosedAt == nil &&
+		!submittedAt.Before(round.OpensAt) && submittedAt.Before(round.ClosesAt)
 }
 
 // PostgreSQL remains the authority for job state, FIFO order, leases, and
@@ -3053,6 +3073,26 @@ func (self *Service) GenerateStagingRound(
 	return &round.RoundResult, nil
 }
 
+// CloseStagingRound atomically closes staging admission while preserving its
+// FIFO. It is idempotent once a round is grading or finalized.
+func (self *Service) CloseStagingRound(ctx context.Context) (*RoundResult, *CompetitionError) {
+	settings, err := self.Settings()
+	if err != nil {
+		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
+	}
+	round, err := self.store.CloseStagingRound(ctx, settings)
+	if errors.Is(err, ErrNotFound) {
+		return nil, submissionError("staging_round_not_found", "there is no current staging round")
+	}
+	if errors.Is(err, ErrRoundNotOpen) {
+		return nil, submissionError("staging_round_not_open", "the current staging round has not opened")
+	}
+	if err != nil {
+		return nil, infrastructureError("staging_round_close_failed", "staging admission could not be closed")
+	}
+	return &round.RoundResult, nil
+}
+
 // Applies the staging-era timing policy without weakening the frozen
 // seven-day production cadence. Caller-selected staging windows are bounded so
 // a forgotten test round cannot outlive one production admission window.
@@ -3248,7 +3288,13 @@ func (self *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionEr
 }
 
 func roundPublished(round *roundRecord, now time.Time) bool {
-	return round.FinalizedAt != nil && !now.Before(round.RevealAt)
+	if round.FinalizedAt == nil {
+		return false
+	}
+	if round.Staging && round.AdmissionClosedAt != nil {
+		return !now.Before(*round.AdmissionClosedAt)
+	}
+	return !now.Before(round.RevealAt)
 }
 
 func scoreJobStateView(state string, published bool, principal *Principal) string {
@@ -3403,6 +3449,7 @@ var (
 	ErrNotFound          = errors.New("competition object not found")
 	ErrConflict          = errors.New("competition state conflict")
 	ErrRoundClosed       = errors.New("competition round is not open")
+	ErrRoundNotOpen      = errors.New("competition round has not opened")
 	ErrLeaseLost         = errors.New("competition worker lease lost")
 	ErrSeasonComplete    = errors.New("competition season is complete")
 	ErrSeasonStarted     = errors.New("competition season already started")
@@ -3417,6 +3464,7 @@ type Store interface {
 	CreateRound(context.Context, *Settings, GenerateRoundArgs) (*roundRecord, error)
 	CurrentRound(context.Context, *Settings) (*roundRecord, error)
 	CurrentStagingRound(context.Context, *Settings) (*roundRecord, error)
+	CloseStagingRound(context.Context, *Settings) (*roundRecord, error)
 	FinalizeStagingRound(context.Context, *Settings, int) (*roundRecord, error)
 	GetRound(context.Context, *Settings, server.Id) (*roundRecord, error)
 	PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error)
@@ -3823,7 +3871,7 @@ func (self PostgresStore) CurrentRound(ctx context.Context, settings *Settings) 
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 				FROM competition_round
 				WHERE competition_id = $1 AND canceled = false AND staging = false
 				ORDER BY epoch_number DESC
@@ -3853,7 +3901,7 @@ func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Set
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 				FROM competition_round
 				WHERE competition_id = $1 AND canceled = false AND staging = true
 				  AND NOT EXISTS (
@@ -3872,6 +3920,67 @@ func (self PostgresStore) CurrentStagingRound(ctx context.Context, settings *Set
 	})
 	if err == nil && round != nil {
 		setRoundStatus(round, self.nowUtc())
+	}
+	return round, err
+}
+
+// CloseStagingRound serializes with admission and moves the current open
+// staging epoch into grading without canceling or rewriting a queued job. The
+// operation is idempotent after its first successful close.
+func (self PostgresStore) CloseStagingRound(
+	ctx context.Context,
+	settings *Settings,
+) (round *roundRecord, err error) {
+	now := self.nowUtc()
+	closed := false
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
+			var scanErr error
+			round, scanErr = scanRound(tx.QueryRow(ctx, `
+				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
+				       seed_ciphertext, providers_sha256, providers_path,
+				       policy_json, opens_at, closes_at, reveal_at,
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+				FROM competition_round
+				WHERE competition_id = $1 AND staging = true AND canceled = false
+				  AND NOT EXISTS (
+				      SELECT 1 FROM competition_round AS production
+				      WHERE production.competition_id = $1 AND production.staging = false
+				  )
+				ORDER BY epoch_number DESC
+				LIMIT 1 FOR UPDATE
+			`, settings.CompetitionId))
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				stateErr = ErrNotFound
+				return
+			}
+			server.Raise(scanErr)
+			if round.FinalizedAt != nil || round.AdmissionClosedAt != nil || !now.Before(round.ClosesAt) {
+				return
+			}
+			if now.Before(round.OpensAt) {
+				stateErr = ErrRoundNotOpen
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE competition_round
+				SET admission_closed_at = $2
+				WHERE round_id = $1 AND staging = true AND finalized_at IS NULL
+			`, round.RoundId, now))
+			round.AdmissionClosedAt = &now
+			closed = true
+		})
+	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
+	if err == nil && round != nil {
+		setRoundStatus(round, now)
+	}
+	if err == nil && closed {
+		competitionRoundEvents.WithLabelValues("staging_closed").Inc()
 	}
 	return round, err
 }
@@ -3895,7 +4004,7 @@ func (self PostgresStore) FinalizeStagingRound(
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 				FROM competition_round
 				WHERE competition_id = $1 AND epoch_number = $2
 				  AND canceled = false AND staging = true
@@ -3906,7 +4015,8 @@ func (self PostgresStore) FinalizeStagingRound(
 				return
 			}
 			server.Raise(scanErr)
-			if round.FinalizedAt != nil || now.Before(round.ClosesAt) {
+			if round.FinalizedAt != nil ||
+				(round.AdmissionClosedAt == nil && now.Before(round.ClosesAt)) {
 				return
 			}
 			var active int
@@ -3946,7 +4056,7 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 				FROM competition_round
 				WHERE round_id = $1 AND competition_id = $2
 			`, roundId, settings.CompetitionId))
@@ -4076,7 +4186,7 @@ func loadCandidateReviewRound(
 		SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 		       seed_ciphertext, providers_sha256, providers_path,
 		       policy_json, opens_at, closes_at, reveal_at,
-		       created_at, canceled, finalized_at, winner_job_id
+		       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 		FROM competition_round
 		WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false AND staging = false
 		FOR UPDATE
@@ -4392,7 +4502,7 @@ func scanRound(row pgx.Row) (*roundRecord, error) {
 		&round.SeedNonce, &round.SeedCiphertext, &round.ProvidersSha256,
 		&round.ProvidersPath, &policy, &round.OpensAt,
 		&round.ClosesAt, &round.RevealAt, &round.CreatedAt, &round.Canceled,
-		&round.FinalizedAt, &round.WinnerJobId,
+		&round.FinalizedAt, &round.WinnerJobId, &round.AdmissionClosedAt,
 	)
 	round.PolicyJson = policy
 	round.ScoreSchema = ScoreSchema
@@ -4405,7 +4515,7 @@ func setRoundStatus(round *roundRecord, now time.Time) {
 		round.Status = "canceled"
 	case now.Before(round.OpensAt):
 		round.Status = "scheduled"
-	case now.Before(round.ClosesAt):
+	case round.AdmissionClosedAt == nil && now.Before(round.ClosesAt):
 		round.Status = "open"
 	case round.FinalizedAt == nil:
 		round.Status = "grading"
@@ -4447,7 +4557,7 @@ func (self PostgresStore) Enqueue(
 				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
 				       seed_ciphertext, providers_sha256, providers_path,
 				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
+			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
 				FROM competition_round WHERE round_id = $1 FOR SHARE
 			`, roundId))
 			if errors.Is(scanErr, pgx.ErrNoRows) || round.CompetitionId != settings.CompetitionId {
@@ -4513,7 +4623,7 @@ const jobSelect = `
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
 	       r.reveal_at, r.created_at, r.canceled, r.epoch_number,
-	       r.staging, r.finalized_at, r.winner_job_id
+	       r.staging, r.finalized_at, r.winner_job_id, r.admission_closed_at
 	FROM competition_job j JOIN competition_round r ON r.round_id = j.round_id
 `
 
@@ -4531,7 +4641,7 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 		&job.Round.ProvidersPath, &policyJson, &job.Round.OpensAt,
 		&job.Round.ClosesAt, &job.Round.RevealAt, &job.Round.CreatedAt,
 		&job.Round.Canceled, &job.Round.Epoch, &job.Round.Staging, &job.Round.FinalizedAt,
-		&job.Round.WinnerJobId,
+		&job.Round.WinnerJobId, &job.Round.AdmissionClosedAt,
 	)
 	if err != nil {
 		return nil, err

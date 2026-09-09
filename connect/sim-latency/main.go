@@ -26,6 +26,8 @@ package main
 //             verify one frozen source epoch against the measured repositories
 //   source-record
 //             verify and print one epoch from the remote competition branches
+//   staging-source-check
+//             verify immutable staging branches alias frozen baseline source
 //   epoch-review
 //             enumerate, reject, or approve ranked significant candidates
 //   promote   publish a significant winner or no-winner source transition
@@ -72,6 +74,7 @@ Usage:
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
   sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> reject --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path> [--out-dir=<dir>]
@@ -210,6 +213,8 @@ Options:
 		runSourceCheck(opts)
 	case optBool(opts, "source-record"):
 		runSourceRecord(opts)
+	case optBool(opts, "staging-source-check"):
+		runStagingSourceCheck(opts)
 	case optBool(opts, "epoch-review"):
 		requireMainEnvironment("epoch-review")
 		runEpochReview(opts)

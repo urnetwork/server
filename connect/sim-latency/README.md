@@ -186,12 +186,14 @@ rows, honesty-review candidates, source promotion, or a production winner.
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and
-`./run-main.sh staging-worker` evaluates it through finalization. Calling
-`staging` again then creates the next epoch. `staging --replace-current` is an
-explicit reset that refuses to run while an evaluation is active. Committing
-production epoch 1 atomically ends the staging era and cancels queued staging
-work while retaining its audit evidence; transition refuses to race a running
-staging evaluation.
+`./run-main.sh advance-staging` closes admission, evaluates every accepted FIFO
+submission through finalization and reveal, then creates the next open epoch.
+Its source preflight requires all eight remote `sim-latency-staging` branches
+to exactly alias the frozen epoch-zero commits. `staging-worker` remains the
+natural-window variant. `staging --replace-current` is an explicit reset that
+refuses to run while an evaluation is active. Committing production epoch 1
+atomically ends the staging era and cancels queued staging work while retaining
+its audit evidence; transition refuses to race a running staging evaluation.
 
 Submissions are admitted throughout each seven-day window and evaluated as
 soon as possible in exact FIFO order. Closing an epoch stops admission but does

@@ -37,6 +37,11 @@ func CompetitionGenerateStagingRound(w http.ResponseWriter, r *http.Request) {
 	controller.GenerateStagingRoundHandler(w, r)
 }
 
+// CompetitionCloseStagingRound closes admission while preserving its FIFO.
+func CompetitionCloseStagingRound(w http.ResponseWriter, r *http.Request) {
+	controller.CloseStagingRoundHandler(w, r)
+}
+
 func CompetitionSubmitScore(w http.ResponseWriter, r *http.Request) {
 	controller.SubmitScoreHandler(w, r)
 }

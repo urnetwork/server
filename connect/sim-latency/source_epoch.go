@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	maximumCompetitionEpoch  = 6
-	maximumSourceConfigBytes = 1024 * 1024
+	maximumCompetitionEpoch       = 6
+	maximumSourceConfigBytes      = 1024 * 1024
+	stagingEvaluationSourceBranch = "sim-latency-staging"
 )
 
 var sourceGitShaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -610,6 +611,51 @@ func runSourceRecord(opts docopt.Opts) {
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		fatalf("encode source record: %s", err)
+	}
+	fmt.Printf("%s\n", encoded)
+}
+
+// runStagingSourceCheck proves that every pre-production source branch is an
+// exact immutable alias of baseline epoch zero. It reads remote refs without
+// requiring or modifying any long-lived operator checkout.
+func runStagingSourceCheck(opts docopt.Opts) {
+	epochNumber, err := configuredEpoch(opts)
+	if err != nil || epochNumber != 0 {
+		fatalf("staging source epoch must be 0")
+	}
+	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePaths(opts)
+	if err != nil {
+		fatalf("staging source paths: %s", err)
+	}
+	if sourceLock != "" {
+		fatalf("staging source check is host-only and cannot use an evaluator source lock")
+	}
+	manifest, err := loadSourceManifest(sourceConfig)
+	if err != nil {
+		fatalf("staging source config: %s", err)
+	}
+	if err := verifyRemoteSourceEpochBranchHead(
+		manifest,
+		epochNumber,
+		repositoriesRoot,
+		stagingEvaluationSourceBranch,
+	); err != nil {
+		fatalf("staging source remote verification: %s", err)
+	}
+	epoch, err := manifest.epoch(epochNumber)
+	if err != nil {
+		fatalf("staging source config: %s", err)
+	}
+	result := sourceRecord{
+		Schema:                        1,
+		Epoch:                         epochNumber,
+		Branch:                        stagingEvaluationSourceBranch,
+		SignificantImprovementPercent: epoch.SignificantImprovementPercent,
+		Repositories:                  epoch.Repositories.commits(),
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fatalf("encode staging source record: %s", err)
 	}
 	fmt.Printf("%s\n", encoded)
 }

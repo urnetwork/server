@@ -28,13 +28,14 @@ zero. After close and complete drain, it finalizes automatically with no winner
 and makes each job's score or typed failure visible through its status URL. It
 does not create a production leaderboard row, candidate review, or promotion.
 
-UR creates or retrieves each identity with `run-main.sh staging` and runs it
-with `run-main.sh staging-worker`; the operator token stays inside UR. Apex
-receives the public `round_id` and uses its normal submitter token for
-`POST /competition/score` and subsequent status polling. Apex must prefer an
-open `active_round` once production exists. Creating production epoch 1 ends
-the staging era and cancels queued staging work; it refuses to race a running
-evaluation.
+UR creates or retrieves each identity with `run-main.sh staging`, then uses
+`run-main.sh advance-staging` to stop admission, drain all accepted work,
+publish the completed epoch, and create its successor; the operator token stays
+inside UR. Apex receives the public `round_id` and uses its normal submitter
+token for `POST /competition/score` and subsequent status polling. Apex must
+prefer an open `active_round` once production exists. Creating production
+epoch 1 ends the staging era and cancels queued staging work; it refuses to
+race a running evaluation.
 
 ## Authentication and API flow
 

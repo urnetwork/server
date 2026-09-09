@@ -38,6 +38,12 @@ that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
+Before staging, each repository must also expose a `sim-latency-staging` branch
+whose head exactly equals its epoch-zero commit. The harness verifies all eight
+remote aliases before it creates, evaluates, or advances a staging epoch.
+Staging branches never advance or receive a winner; they isolate the name used
+for pre-production coordination while retaining the exact frozen baseline
+source content and evaluator protocol.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -60,7 +66,7 @@ Run launch preflight and retain its passing JSON before the first epoch. Then:
 ```sh
 cd /home/by/urnetwork/server/connect/sim-latency
 ./run-main.sh staging
-./run-main.sh staging-worker
+./run-main.sh advance-staging
 ```
 
 The staging era can contain any number of sequential epochs, beginning at
@@ -77,9 +83,14 @@ score bundle, but it does not require the separately promoted host rebaseline
 identity used as a production launch gate. Production retains that exact-round
 requirement.
 
-After `staging-worker` exits, run `staging` again to activate the next staging
-epoch. Set `SIM_LATENCY_STAGING_WINDOW_SECONDS` to 60 through 604800 seconds
-when a different test window is needed. `staging --replace-current` explicitly
+`advance-staging` is the ordinary staging handoff. It atomically closes new
+admission without rewriting the published schedule or canceling accepted work,
+runs the worker until every FIFO submission is terminal, finalizes and reveals
+the round with no winner, and creates the next open staging epoch. The command
+returns only after the next `round_id` is ready to share. `staging-worker`
+remains available when the original admission window should run to its natural
+end. Set `SIM_LATENCY_STAGING_WINDOW_SECONDS` to 60 through 604800 seconds when
+a different test window is needed. `staging --replace-current` explicitly
 cancels a legacy or unwanted current staging epoch and its queued jobs before
 creating the next one; it fails closed if any job is running. Starting
 production epoch 1 ends the staging era and atomically cancels queued staging

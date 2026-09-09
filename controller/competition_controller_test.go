@@ -718,6 +718,24 @@ func TestGenerateStagingRoundRejectsPartialOrOversizedWindow(t *testing.T) {
 	}
 }
 
+func TestCloseStagingRoundPreservesStoreResult(t *testing.T) {
+	settings := validSettings()
+	round := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 0, Staging: true, Status: "grading",
+	}}
+	service := newServiceWithImageDigest(settings, &fakeStore{closeStaging: round}, testApiImageDigest(), nil)
+	result, evalError := service.CloseStagingRound(context.Background())
+	if evalError != nil || result == nil || result.RoundId != round.RoundId || result.Status != "grading" {
+		t.Fatalf("closed staging round = %#v, %#v", result, evalError)
+	}
+
+	service = newServiceWithImageDigest(settings, &fakeStore{closeStageErr: ErrRoundNotOpen}, testApiImageDigest(), nil)
+	if result, evalError := service.CloseStagingRound(context.Background()); result != nil ||
+		evalError == nil || evalError.Code != "staging_round_not_open" {
+		t.Fatalf("scheduled staging close = %#v, %#v", result, evalError)
+	}
+}
+
 func TestProductionAdmissionStillFailsClosedWithoutEvaluator(t *testing.T) {
 	settings := validSettings()
 	roundId := server.NewId()
@@ -918,6 +936,8 @@ type fakeStore struct {
 	stagingReplace   []bool
 	finalizeStaging  *roundRecord
 	finalizeStageErr error
+	closeStaging     *roundRecord
+	closeStageErr    error
 	enqueueJob       *queuedJob
 	enqueueHit       bool
 	enqueueErr       error
@@ -943,6 +963,10 @@ func (f *fakeStore) CurrentRound(context.Context, *Settings) (*roundRecord, erro
 
 func (f *fakeStore) CurrentStagingRound(context.Context, *Settings) (*roundRecord, error) {
 	return f.stagingRound, nil
+}
+
+func (f *fakeStore) CloseStagingRound(context.Context, *Settings) (*roundRecord, error) {
+	return f.closeStaging, f.closeStageErr
 }
 
 func (f *fakeStore) FinalizeStagingRound(context.Context, *Settings, int) (*roundRecord, error) {
@@ -3472,6 +3496,31 @@ func TestSubmissionWindowIsStartInclusiveAndEndExclusive(t *testing.T) {
 	}
 }
 
+func TestStagingAdmissionCloseControlsAdmissionAndRevealWithoutChangingSchedule(t *testing.T) {
+	start := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	end := start.Add(48 * time.Hour)
+	closedAt := start.Add(time.Hour)
+	round := &roundRecord{RoundResult: RoundResult{
+		Staging: true, OpensAt: start, ClosesAt: end, RevealAt: end,
+		AdmissionClosedAt: &closedAt,
+	}}
+
+	if submissionWithinEpoch(round, closedAt.Add(-time.Nanosecond)) {
+		t.Fatal("early-closed staging round accepted a new submission")
+	}
+	setRoundStatus(round, closedAt)
+	if round.Status != "grading" || !round.ClosesAt.Equal(end) || !round.RevealAt.Equal(end) {
+		t.Fatalf("closed staging state = %#v", round.RoundResult)
+	}
+	if roundPublished(round, closedAt) {
+		t.Fatal("unfinalized staging round published")
+	}
+	round.FinalizedAt = &closedAt
+	if !roundPublished(round, closedAt) {
+		t.Fatal("drained staging round did not publish after early close")
+	}
+}
+
 func TestApexAdapterRejectsTrailingApiJson(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -3935,6 +3984,21 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err != nil || hit || job == nil {
 			t.Fatalf("staging enqueue = %#v, hit=%t, err=%v", job, hit, err)
 		}
+		closed, err := store.CloseStagingRound(ctx, settings)
+		if err != nil || closed.RoundId != first.RoundId || closed.Status != "grading" ||
+			closed.AdmissionClosedAt == nil || !closed.AdmissionClosedAt.Equal(currentTime) ||
+			!closed.ClosesAt.Equal(first.ClosesAt) || !closed.RevealAt.Equal(first.RevealAt) {
+			t.Fatalf("closed staging admission = %#v, %v", closed, err)
+		}
+		closedAgain, err := store.CloseStagingRound(ctx, settings)
+		if err != nil || closedAgain.AdmissionClosedAt == nil ||
+			!closedAgain.AdmissionClosedAt.Equal(currentTime) {
+			t.Fatalf("idempotent staging close = %#v, %v", closedAgain, err)
+		}
+		preserved, err := store.GetJob(ctx, settings, job.JobId, &Principal{Id: "macrocosmos-stage", Role: "submitter"})
+		if err != nil || preserved.State != "queued" || preserved.EvalError != nil {
+			t.Fatalf("staging close changed queued job = %#v, %v", preserved, err)
+		}
 		claimed, err := store.Claim(ctx, settings, "staging-worker", testWorkerImageDigest())
 		if err != nil || claimed == nil || claimed.JobId != job.JobId || !claimed.Staging {
 			t.Fatalf("staging claim = %#v, %v", claimed, err)
@@ -3951,7 +4015,6 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err != nil {
 			t.Fatalf("complete staging evaluation: %v", err)
 		}
-		currentTime = first.ClosesAt.Add(time.Second)
 		finalized, err := store.FinalizeStagingRound(ctx, settings, first.Epoch)
 		if err != nil || finalized.FinalizedAt == nil || finalized.WinnerJobId != nil || finalized.Status != "finalized" {
 			t.Fatalf("finalized staging epoch = %#v, %v", finalized, err)

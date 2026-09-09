@@ -113,6 +113,7 @@ type CompetitionRoundResult struct {
 	ClosesAt           time.Time  `json:"closes_at"`
 	RevealAt           time.Time  `json:"reveal_at"`
 	CreatedAt          time.Time  `json:"created_at"`
+	AdmissionClosedAt  *time.Time `json:"admission_closed_at,omitempty"`
 	FinalizedAt        *time.Time `json:"finalized_at,omitempty"`
 	WinnerJobId        *server.Id `json:"winner_job_id,omitempty"`
 	RevealedSeed       *string    `json:"revealed_seed,omitempty"`
