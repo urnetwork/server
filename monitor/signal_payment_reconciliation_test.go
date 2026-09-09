@@ -103,7 +103,7 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 		[]Row{
 			{"apple", "credited", "1", "120"},
 			{"google", "entitlement_repaired", "1", "180"},
-			{"stripe", "ended", "2", "240"},
+			{"stripe", "credited", "2", "240"},
 		},
 	)
 	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
@@ -122,8 +122,59 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 				t.Fatalf("repair alert omits %q:\n%s", expected, alert.Markdown())
 			}
 		}
+		if strings.Contains(alert.Markdown(), "no real-time subscription-lifecycle consumer") {
+			t.Fatalf("generic repair received Stripe-ended semantics:\n%s", alert.Markdown())
+		}
 		requireAlertOmits(t, alert, "synthetic-run-id", "synthetic-account-id", "synthetic-transaction-id")
 	}
+}
+
+func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		[]Row{{"stripe", "ended", "2", "240"}},
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("Stripe ended alerts = %d, want 1: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-repair")
+	if alert.Target != "stripe" || alert.Frame != "action=ended" || alert.Severity != SeverityWarn {
+		t.Fatalf("Stripe ended alert identity changed: %+v", alert)
+	}
+	rendered := alert.Markdown()
+	for _, expected := range []string{
+		"first applied 2 terminal Stripe subscription state(s)",
+		"no real-time subscription-lifecycle consumer",
+		"first implemented application path",
+		"does not prove a lost delivery from an implemented handler",
+		"idempotency ledger that does not exist",
+		"Stripe still reports the subscription as terminal",
+		"local renewal and matching Pro entitlement are ended",
+		"no new stripe/ended repair",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("Stripe ended alert omits %q:\n%s", expected, rendered)
+		}
+	}
+	for _, unsupported := range []string{
+		"repaired 2 missed stripe ended event(s)",
+		"later notifications apply normally",
+		"trace the provider notification, verification, idempotency ledger",
+	} {
+		if strings.Contains(rendered, unsupported) {
+			t.Fatalf("Stripe ended alert retains unsupported claim %q:\n%s", unsupported, rendered)
+		}
+	}
+	requireAlertOmits(t, alert, "synthetic-run-id", "synthetic-account-id", "synthetic-transaction-id")
 }
 
 func TestPaymentReconciliationRejectsIncompleteOrUnknownAggregate(t *testing.T) {

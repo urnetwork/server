@@ -4853,11 +4853,20 @@ Pro metadata. The repair adds only a zero-byte, zero-revenue Pro marker for the
 same window, rechecks the live network and renewal under a transaction lock,
 refreshes the Pro cache after commit, and is idempotent. It never trusts a
 local renewal by itself and never duplicates purchased data or revenue. The
-account is protected, but every repair proves the ordinary
+account is protected, but every generic repair proves the ordinary
 notification/verification/idempotency path missed authoritative provider
-state or its metadata. Trace and fix that earlier stage. The query never
-returns run IDs, network IDs, transaction IDs, evidence, details, or credential
-values.
+state or its metadata. Trace and fix that earlier stage.
+
+Stripe `ended` is a distinct source boundary. At the revision described here,
+the Stripe webhook handles invoice credits, refunds, and disputes but has no
+real-time subscription-lifecycle consumer. A `store=stripe, action=ended`
+repair therefore means reconciliation first applied Stripe's terminal state to
+the local renewal and matching Pro entitlement; it does not prove delivery was
+lost from an implemented lifecycle handler, and there is no lifecycle
+idempotency ledger to inspect. Confirm the provider remains terminal and the
+local entitlement ended, then require no repeat through two complete
+reconciliation windows. The query never returns run IDs, network IDs,
+transaction IDs, evidence, details, or credential values.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
