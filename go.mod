@@ -6,6 +6,7 @@ require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
 	github.com/TwiN/go-away v1.8.0
 	github.com/aws/aws-sdk-go v1.55.8
+	github.com/centrifuge/go-substrate-rpc-client/v4 v4.2.2-0.20240919131012-e3b938563803
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/coreos/go-semver v0.3.1
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
@@ -61,7 +62,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
-	github.com/centrifuge/go-substrate-rpc-client/v4 v4.2.2-0.20240919131012-e3b938563803 // indirect
 	github.com/consensys/gnark-crypto v0.20.1 // indirect
 	github.com/cosmos/go-bip39 v1.0.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
@@ -159,6 +159,7 @@ require (
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
+	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
