@@ -5633,6 +5633,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | `[rel] event=window_stall ... failed=0` (`window-stall`) or `failed=1` (`window-stall-terminal`) | Connect emits one structured transition when a provider window's bounded reason or terminal bit changes. `failed=0` explicitly means the window is still trying; at 20/min it is diagnostic churn, not twenty failed windows. `failed=1` means that window crossed both outcome deadlines with no provider added and warns on the first line. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel` because generic error detection matched the field name `failed`; exact 0/1 classes now preserve the distinction, while any unknown flag spelling remains novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer terminal impact, restart Taskworker, or deploy a transport change from `failed=0`; do not infer a root cause from `failed=1` alone. Require nonterminal churn below 20/min and no terminal transition for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
+| `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
@@ -7107,6 +7108,36 @@ paths after that process start, one sub-120-second run, and zero negative lines
 through the next balance-expiry/close boundary. Do not manually replay an
 `INCRBY`: a pipeline error can follow partial application and blind replay can
 double-reserve.
+
+A current-artifact recurrence at `04:07:03Z` on 2026-09-09 proves that the
+fast unsettled-partial path narrows, but does not close, the cross-store race.
+A bounded reservation cohort on one still-current balance was created while
+the preceding 20.9-second reconciliation was live, after its PostgreSQL page
+snapshot had become fixed. The cohort's durable releases exceeded the absolute
+negative settlement diagnostics by exactly the positive Redis mirror remainder
+observed at close; all but one settlement result matched its release exactly,
+and every line reported `clamped_to=0`. The balance remained unexpired beyond
+the incident, no mirror-write error was present in the bounded precursor
+window, and the adjacent reconciliations were ordinary passes. This rules out
+rounding, the ended-balance blind spot, the legacy fleet writer, and a missing
+clamp. The page-local correction read Redis after those reservations' posts but
+corrected toward the older PostgreSQL snapshot; settlement exposed the
+resulting short mirror.
+
+A Redis value CAS or simple operation reordering is not a correctness fix.
+For settlement, reconciliation can observe old Redis value `O`, a PostgreSQL
+outcome can commit, the fixed snapshot can omit release `d`, and CAS can then
+change `O` to `O-d`; the delayed mirror release applies another `-d`. Creation
+has the symmetric double-increment interleaving. Value equality cannot tell a
+committed-but-not-yet-mirrored mutation from the state represented by the
+snapshot. Closing this gap requires a durable per-balance mutation sequence,
+outbox, or equivalent fence that spans PostgreSQL commit, Redis posting, and
+reconciliation. That changes the cross-store protocol and needs an explicit
+design/schema decision; do not ship a partial CAS as a monitor repair. The
+atomic clamp contains each negative result, but this boundary remains open
+until that durable protocol is deployed and a subsequent scheduled reconcile
+plus full natural close/expiry interval remain free of all three emitters'
+negative lines after ingestion delay.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
@@ -12629,6 +12660,48 @@ then loses WireGuard and SOCKS returns with the hosted device still connected
 and its exit window ready. Isolated green results therefore do not disprove
 the stale-artifact diagnosis; require the simultaneous three-protocol soak.
 
+**Window-teardown false platform attribution:** a post-promotion observation
+beginning near `04:17Z` on 2026-09-09 reached 20--34 taskworker
+`window-stall` lines/minute. Every structured sample was
+`window=quality reason=platform-unreachable failed=0`; all 220 enumeration
+errors in the same bounded thirty-minute source slice ended exactly in
+`generator call canceled`, with zero true generator abandonments or other
+suffixes and no `failed=1` class. On the legacy ordering, this population is
+consistent with local lifecycle churn, not sufficient evidence that the
+platform was unreachable. The exact suffix alone cannot prove outer-window
+cancellation because an inner generator can return the identical text while
+the outer context is live. The published Server module tag corresponding to
+the displayed release label requires Connect module
+`v2026.9.8-1040985530`; its exact tagged source records the enumeration failure
+and publishes the stall before checking the owning window context, and the
+sibling client-args branch
+has the same ordering. That is staged-source evidence, not runtime dependency
+provenance: the sampled Taskworker exposes no Connect revision or image digest,
+and its proved Server source uses an unpinned local Connect replacement. Do not
+assign the running binary a Connect SHA without extracted executable metadata
+or the recorded build-input tree required by §8.12.
+
+The dedicated `window-generator-canceled` class removes only the two exact
+terminal shapes from generic novelty at 20/min and leaves abandonment and
+every other suffix visible. It is artifact-bounded: current Connect checks the
+authoritative window context immediately after each generator error and
+returns before logging, recording a failure, publishing a stall reason, or
+entering backoff when that context is done. It deliberately does not suppress
+an identically worded inner error while the outer context is live, so a
+recurrence on a proved fixed artifact instead establishes that this live inner
+error reached the guard and requires diagnosis there. Deterministic barrier
+tests force cancellation inside both the enumeration and client-args calls,
+then release the abandoned call; separate live-context errors remain recorded
+as `platform-unreachable`. Rebuild and deploy the emitting Taskworker from a
+Connect revision containing this ordering fix after proving the current
+artifact lacks it. Verification is zero new `generator call canceled` failure
+lines and cancellation-derived `window_stall` transitions for ten minutes
+through comparable window teardown, while a synthetic or observed genuine
+generator error remains visible and provider windows still reach their
+configured minimum. Do not group this with the monitor host's contemporaneous
+IPv6 default-router loss: that observer-local event began later and cannot
+generate application logs inside Taskworker.
+
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
 RPC/API access, H1 correctly pinned, and fill retries still running. The
@@ -15390,6 +15463,25 @@ window. A later bounded enabled-host cross-control found a valid source route
 for all eight pairs but completed API and manager TLS on only two, so local
 observer recovery and host self-probes still cannot replace an independent
 externally routed closure check.
+
+The late-2026-09-08 local recurrence supplied a longer same-host control. The
+monitor recorded five `en0` default-router lifetime expirations at 23:18:34,
+23:18:58, 23:19:28, 23:25:28, and 23:31:06; every expiry was followed within
+milliseconds by an IPv6-absent network state. The third and fourth losses
+remained active for about five minutes, so the 23:20 and 23:30 edge/TLS
+cadences each found all eight configured targets failing locally with
+no-route while target identity, host-local HTTPS, and exact source-route
+controls remained available. Eight independent standing service tails also
+reconnected through the first route-loss wave while all tail processes
+survived. A new Wi-Fi association began only at 23:31:20, after the fifth
+expiry, and IPv6 returned by 23:31:24; that link change is a recovery boundary,
+not the cause of any preceding expiration. The bounded log still contains
+no distinct `ignoring RA (lifetime zero)` diagnostic. A later read found the
+default router present with a refreshed multi-hour lifetime and no further
+expiry through 00:15, which proves current recovery but not closure of the RA
+source/delivery defect. Keep the type-134 capture prerequisite: without it,
+source withdrawal and missed/late refresh delivery remain unresolved and no
+router or local-network configuration change is justified.
 
 Restore the observer's IPv6/default-router path without changing an edge, then
 require an unrelated IPv6 prefix and every exact edge from a genuinely routed

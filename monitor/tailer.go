@@ -121,13 +121,21 @@ var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: ba
 // and terminal window-stall states separate: the generic novel detector sees
 // the word "failed" even when the structured value is zero.
 var (
-	windowStallNonterminalRe = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
-	windowStallTerminalRe    = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1(?:[[:space:]]|$)`)
-	windowStallEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
+	windowStallTerminalRe     = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1(?:[[:space:]]|$)`)
+	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+	windowGeneratorCanceledRe = regexp.MustCompile(
+		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
+	)
 )
 
 func windowStallLogSample(line string) string {
 	return strings.TrimSpace(windowStallEventRe.FindString(line))
+}
+
+// Drops the Warp identity while retaining the complete exact diagnostic.
+func windowGeneratorCanceledLogSample(line string) string {
+	return strings.TrimSpace(windowGeneratorCanceledRe.FindString(line))
 }
 
 // the §4 taxonomy. Order matters: first match wins.
@@ -412,6 +420,16 @@ var logClasses = []logClass{
 		context:   "The 2026-09-04 authoritative Taskworker tail reported this exact normalized shape at about 65/min, but the line and the locally inspected release tag do not prove which artifact emitted it. A separate monitor defect could pair a novel alert's top shape with the first sample from another shape; this dedicated class and the shape-keyed novel samples prevent that misleading evidence. Do not generalize this classification to any other TUN read error.",
 		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
 		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
+	},
+	{name: "window-generator-canceled", re: windowGeneratorCanceledRe,
+		sample:        windowGeneratorCanceledLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "an exact generator-canceled diagnostic whose interpretation depends on the emitting artifact and owning-window context; on a proven legacy ordering it is consistent with teardown being falsely recorded as a platform error",
+		mechanism: "The deadline wrapper returns `generator call canceled` when its owning window is canceled, but an inner generator can return the identical text while that outer context remains live. Legacy enumerate and client-args branches logged and recorded every returned error before checking the window context, so ordinary teardown could publish platform-unreachable failed=0; current Connect suppresses only errors observed after authoritative outer cancellation.",
+		context:   "The line alone cannot prove outer-window cancellation. On an artifact proven to have the legacy log-before-context ordering, a population paired with nonterminal platform-unreachable stalls is consistent with one teardown boundary rather than a second Taskworker/platform failure. On a proved fixed artifact, the guard establishes that an inner generator returned the identical error while the outer context was live. Keep `generator call abandoned after ...` and all other generator errors distinct. A displayed release label or module tag is not proof of the Connect bytes embedded in the running Taskworker.",
+		action:    "Use §8.12 to prove the emitting artifact's recorded Connect build input. If it has the legacy ordering, rebuild and deploy the emitting service from a Connect revision that checks authoritative window cancellation before logging, recording, publishing, or backing off. If it contains that fix, diagnose the preserved live inner error instead. Do not restart Taskworker or deploy a transport change from this line alone.",
+		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
+		redactIDs: true,
 	},
 	{name: "window-stall-terminal", re: windowStallTerminalRe,
 		sample:        windowStallLogSample,

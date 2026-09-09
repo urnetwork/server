@@ -1646,6 +1646,104 @@ func TestWindowStallStructuredStatesStayOutOfNovel(t *testing.T) {
 	}
 }
 
+// The exact canceled-generator shapes belong to an artifact-bounded class,
+// not generic novelty. One line stays quiet; the production-rate population
+// remains paired with its independently structured nonterminal stall signal.
+func TestWindowGeneratorCanceledUsesArtifactBoundedClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	lines := []string{
+		"[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+			"[I][2000-01-01T00:00:00Z][synthetic.go:1][multi]window enumerate error timeout = generator call canceled",
+		"[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+			"[I][2000-01-01T00:00:01Z][synthetic.go:2][multi]create client args error = generator call canceled",
+	}
+	stallLine := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:02Z][synthetic.go:3][rel] event=window_stall window=quality reason=platform-unreachable failed=0"
+
+	quiet := newLogTailer("taskworker", nil)
+	quiet.classify(lines[0])
+	quietFindings := quiet.drainWindow()
+	if finding := findingByClass(t, quietFindings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("one canceled-generator diagnostic crossed the rate threshold: %+v", finding)
+	}
+	if finding := findingByClass(t, quietFindings, "novel"); !finding.healthy {
+		t.Fatalf("one classified canceled-generator diagnostic became novel: %+v", finding)
+	}
+
+	atRate := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		atRate.classify(lines[i%len(lines)])
+		atRate.classify(stallLine)
+	}
+	findings := atRate.drainWindow()
+	canceled := findingByClass(t, findings, "window-generator-canceled")
+	if canceled.healthy {
+		t.Fatal("canceled-generator diagnostics at rate were hidden")
+	}
+	if stall := findingByClass(t, findings, "window-stall"); stall.healthy {
+		t.Fatal("paired structured nonterminal stalls at rate were hidden")
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified cancellation and stall lines also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", canceled,
+	).Markdown()
+	for _, want := range []string{
+		"[multi]window enumerate error timeout = generator call canceled",
+		"line alone cannot prove outer-window cancellation",
+		"legacy log-before-context ordering",
+		"proved fixed artifact",
+		"outer context was live",
+		"recorded Connect build input",
+		"one teardown boundary",
+		"ten minutes",
+		"identical text is still logged and classified",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("canceled-generator finding lacks %q: %+v", want, canceled)
+		}
+	}
+	for _, private := range []string{"synthetic-host", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("canceled-generator alert retained private value %q", private)
+		}
+	}
+}
+
+// A wrapper abandonment is affirmative hung/deadline evidence and must never
+// be swallowed by the narrower exact canceled-generator class.
+func TestWindowGeneratorAbandonmentRemainsNovel(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify("[multi]window enumerate error timeout = generator call abandoned after 20s")
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("generator abandonment was mislabeled cancellation: %+v", finding)
+	}
+	if finding := findingByClass(t, findings, "novel"); finding.healthy {
+		t.Fatal("generator abandonment disappeared from the novelty safety net")
+	}
+}
+
+// A near-miss cancellation suffix can be a genuine inner/platform error. It
+// remains visible to generic novelty rather than being broadly suppressed.
+func TestWindowGeneratorCancellationNearMissRemainsNovel(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify("[multi]create client args error = generator call canceled by synthetic platform")
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("non-exact inner error was mislabeled exact cancellation: %+v", finding)
+	}
+	if finding := findingByClass(t, findings, "novel"); finding.healthy {
+		t.Fatal("non-exact inner error disappeared from the novelty safety net")
+	}
+}
+
 func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
 	const entityID = "raw-customer-correlation"
 	line := "[edge-private][taskworker][g2][cid:" + entityID + "] providertunnel: tun read error: Done"
