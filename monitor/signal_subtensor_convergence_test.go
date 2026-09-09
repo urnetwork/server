@@ -62,6 +62,44 @@ func TestSubtensorConvergenceSignalSyntheticDetectsSlowSerialImport(t *testing.T
 	}
 }
 
+func TestSubtensorSlowConvergenceDoesNotClaimCurrentProgressAcrossStaticHead(t *testing.T) {
+	now := time.Date(2026, 9, 8, 22, 36, 0, 0, time.UTC)
+	alerts, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+		lag: 491_951, netRate: 0.292253, targetRate: 0.083160,
+		importRate: 0.473083, importSeconds: 0.714288,
+		queuedBlocks: 0, sampleCount: 240, sampleAge: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convergence := requireAlertClass(t, alerts, "subtensor-slow-convergence")
+
+	target := &host{name: "snow", subtensor: &SubtensorHostSettings{WarpMaxLag: 4096}}
+	configured := SubtensorNodeSettings{Name: "lightnode", SyncMode: "warp"}
+	node := healthySubtensorNode("lightnode", "warp", 9947, 9946, 7_473_275, 7_473_275)
+	current := findingByClass(t, evaluateSubtensorNode(target, configured, node, 7_965_223, nil), "subtensor-progress")
+	if current.healthy {
+		t.Fatal("equal current heads did not produce the current-progress control")
+	}
+
+	markdown := convergence.Markdown()
+	for _, want := range []string{
+		"trailing-one-hour best-head slope remains positive",
+		"does not prove the current head is advancing",
+		"co-resident subtensor-progress finding is the stronger current-state signal",
+		"follow that current static-head boundary first",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("slow-convergence alert missing current-progress precedence %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{"The node head is advancing", "Preserve the progressing generation"} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("slow-convergence alert claimed current progress with a static control %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
 func TestSubtensorConvergenceSignalSyntheticDetectsAdvancingButDivergingNode(t *testing.T) {
 	now := time.Date(2026, 9, 3, 6, 35, 0, 0, time.UTC)
 	alerts, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{

@@ -4890,11 +4890,19 @@ establish:
   “paying but shown as free” invariant. The check uses entitlement time, not
   remaining bytes. Reconciliation may repair it only after that provider
   independently confirms the renewal remains entitled.
-- `payment-renewal-orphan` (WARN): an in-window local supporter renewal belongs
-  to a deleted network. It is deliberately excluded from paying-account and
-  Pro-repair counts: recreating a deleted account from financial history would
-  be unsafe. Verify provider-side cancellation and repair the account-deletion
-  lifecycle while retaining financial audit history.
+- `payment-renewal-orphan` (WARN): an in-window Apple, Google, or Stripe
+  supporter renewal belongs to a deleted network. The count is distinct
+  deleted owners, not physical renewal rows; sequential windows for one owner
+  remain one lifecycle boundary. It is deliberately excluded from
+  paying-account and Pro-repair counts: recreating a deleted account from
+  financial history would be unsafe. Local history alone does not prove
+  current billing, so use authorized provider tooling to establish the
+  provider-side disposition and repair the account-deletion lifecycle while
+  retaining financial audit history. Solana is excluded from this class: its
+  supporter purchase is a prepaid, fixed-window on-chain entitlement, not a
+  cancellable recurring provider subscription, and its inert row after account
+  deletion is retained payment history rather than evidence of missed
+  provider cancellation.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -4905,21 +4913,28 @@ establish:
   email fallback because immutable network metadata was missing. The credit is
   retained, but the checkout producer must be corrected.
 
-All rows are aggregated to kind, store/reason, count, and oldest/newest age.
-No account, email, network, payment reference, signature, provider object,
-stored details, or credential may enter an alert. A payment received but not
-fulfilled can require an **authorized financial/operations decision** (for
-example a verified refund when an underpayment cannot be credited); software
-must preserve the evidence and idempotency boundary but cannot choose or
-authorize that disposition.
+Findings are aggregated to kind, store/reason, count, and oldest/newest age;
+the orphan-renewal count is distinct deleted owners and its ages are renewal
+start ages, not inferred deletion times. No account, email, network, payment
+reference, signature, provider object, stored details, or credential may enter
+an alert. A payment received but not fulfilled can require an **authorized
+financial/operations decision** (for example a verified refund when an
+underpayment cannot be credited); software must preserve the evidence and
+idempotency boundary but cannot choose or authorize that disposition.
 
 The 2026-09-08 Main split of the original entitlement alert found zero affected
-existing networks: all five local rows were orphan renewals for deleted
-networks (four Stripe, one Solana). Treating those rows as paying accounts was a
-probe defect and would have made an automatic Pro backfill unsafe. The probe
-now separates them into `payment-renewal-orphan`; the controller's candidate
-query applies the same existing-network boundary before it contacts a provider
-or repairs metadata.
+existing networks. Its missing-Pro denominator contained four deleted Stripe
+owners and one deleted Solana owner. Treating them as paying accounts was a
+probe defect and would have made an automatic Pro backfill unsafe. A later
+orphan-only census found five distinct deleted Stripe owners across six active
+renewal rows: one additional owner still had an in-window Pro row and was
+therefore correctly absent from the original missing-Pro denominator. No
+matching owner had entered through a deletion in the preceding 24 hours, so
+the four-to-five change was a denominator change, not evidence of a new
+deletion. The single Solana row represented prepaid fixed-window history and
+was not a provider-cancellation failure; it is no longer emitted as
+`payment-renewal-orphan`. The controller's candidate query independently keeps
+all deleted owners outside provider calls and metadata repair.
 
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
@@ -5617,6 +5632,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
+| `[rel] event=window_stall ... failed=0` (`window-stall`) or `failed=1` (`window-stall-terminal`) | Connect emits one structured transition when a provider window's bounded reason or terminal bit changes. `failed=0` explicitly means the window is still trying; at 20/min it is diagnostic churn, not twenty failed windows. `failed=1` means that window crossed both outcome deadlines with no provider added and warns on the first line. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel` because generic error detection matched the field name `failed`; exact 0/1 classes now preserve the distinction, while any unknown flag spelling remains novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer terminal impact, restart Taskworker, or deploy a transport change from `failed=0`; do not infer a root cause from `failed=1` alone. Require nonterminal churn below 20/min and no terminal transition for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
@@ -7730,11 +7746,16 @@ collectors, subscription/payment providers (Apple, Google Play, Stripe,
 Solana/Helius, Coinbase, Circle), client-address privacy hashing, WireGuard
 handoff, hosted Proxy, object storage, account/product email, provider-egress
 ingestion, public-stats integrity, WalletConnect, IP geolocation, and any active
-MCP provider. Subnet signing/artifact/deposit and route-verification credentials
-become required only when the subnet is enabled. Keep this inventory
-synchronized whenever a new runtime credential is introduced; a code path that
-calls `RequireSimpleResource` without either an inventory requirement or an
-explicit feature gate is incomplete.
+MCP provider. When API is active, the inventory separately requires Apple and
+Google sign-in audience IDs and the Google browser authorization-code client's
+ID and secret. These are not interchangeable with the Play payment OAuth
+client: a missing `sign_in_oauth` section makes the Windows/Linux browser
+callback return `not_configured` even while native Android sign-in and Play
+reconciliation work. Subnet signing/artifact/deposit and route-verification
+credentials become required only when the subnet is enabled. Keep this
+inventory synchronized whenever a new runtime credential is introduced; a
+code path that calls `RequireSimpleResource` without either an inventory
+requirement or an explicit feature gate is incomplete.
 
 The 2026-09-08 secret-free Main snapshot found two incomplete enabled
 integrations: `apple.yml` lacked `app_store_server_api_key_id`, `issuer_id`, and
@@ -7746,6 +7767,24 @@ credential page. An explicitly empty Redis password is likewise a supported
 private-network configuration and is not mislabeled as a missing secret;
 network exposure and authentication policy belong to their own security
 signal.
+
+The same audit found `google.yml` had no `sign_in_oauth.client_id` or
+`sign_in_oauth.client_secret`. That is an independent enabled-API setup failure,
+not a Google Play payment failure. The inventory now keeps `google-sign-in` and
+`google-payment` as separate identities and also requires each provider's
+top-level `client_id` audience allowlist while API is active. Closure requires a
+Vault rollout, a fresh API process, and a state/nonce/audience-checked browser
+round trip; `/hello` and a successful native mobile login are not controls for
+the browser code-exchange path.
+
+Coinbase readiness follows the fields current Server code actually consumes.
+The exchange-rate client reads `api.host` for its unauthenticated public request,
+and webhook verification reads `webhook.shared_secret`. The retained
+`api.account_id`, `api.key_name`, and `api.private_key` fields have no non-test
+Server consumer and are not credential prerequisites; their absence must not
+page, and their presence cannot substitute for a missing host or webhook
+secret. Reintroducing an authenticated Coinbase API call requires adding its
+exact fields to this inventory with the owning runtime change.
 
 Apple and Google crash-report credentials remain optional by the §20 contract.
 An absent optional resource is a graceful no-op. A resource that is present but
@@ -14944,7 +14983,11 @@ environment, host, and chain, preserve host/chain in aggregation, and show
 - HEALTHY BOOTSTRAP: a node outside its readiness band has positive net
   catch-up and `lag / net_rate <= 14 days`.
 - `subtensor-slow-convergence`: positive net catch-up implies an ETA above 14
-  days for three consecutive one-minute cadences.
+  days for three consecutive one-minute cadences. This is explicitly a
+  trailing-one-hour statement, not proof that the head is advancing now. If
+  `subtensor-progress` is also active for the same host/node, its bounded
+  static-head observation is the stronger current-state evidence; preserve the
+  generation and follow that stall boundary first.
 - `subtensor-nonconverging`: the target head grows at least as fast as the
   local best head, also sustained for three cadences. A rising best height is
   not recovery when lag is flat or growing.

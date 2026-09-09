@@ -64,8 +64,11 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 }
 
 func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'solana', 'stripe')") != 2 {
-		t.Fatal("payment failures query does not limit both renewal classes to authoritative provider markets")
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'solana', 'stripe')") != 1 {
+		t.Fatal("payment failures query does not limit entitlement checks to authoritative provider markets")
+	}
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'stripe')") != 1 {
+		t.Fatal("payment failures query does not limit orphan-renewal checks to recurring provider markets")
 	}
 	if !strings.Contains(paymentFailuresQuery, "AND EXISTS (\n          SELECT 1 FROM network") {
 		t.Fatal("payment failures query does not require an existing network for entitlement repair")
@@ -73,6 +76,31 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	if !strings.Contains(paymentFailuresQuery, "AND NOT EXISTS (\n          SELECT 1 FROM network") ||
 		!strings.Contains(paymentFailuresQuery, "'orphan_renewal'") {
 		t.Fatal("payment failures query does not retain deleted-network renewals as a separate aggregate")
+	}
+	if _, err := paymentFailureFinding("orphan_renewal", "solana", 1, 10, 5); err == nil {
+		t.Fatal("prepaid Solana history was accepted as a recurring-subscription orphan")
+	}
+	orphan, err := paymentFailureFinding("orphan_renewal", "stripe", 2, 5400, 1200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := alertFromFinding(
+		syntheticSettings(&syntheticSource{}),
+		"2.22",
+		"payment-failures",
+		"Durable payment and entitlement failures",
+		orphan,
+	).Markdown()
+	for _, want := range []string{
+		"2 deleted account(s)",
+		"distinct deleted owners rather than renewal rows",
+		"deleted_owner_count=2",
+		"oldest_renewal_start_age_seconds=5400",
+		"provider-side disposition",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("orphan renewal alert missing %q:\n%s", want, rendered)
+		}
 	}
 }
 
@@ -84,6 +112,7 @@ func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 		{name: "unknown kind", row: Row{"synthetic_unknown", "stripe", "1", "10", "5"}},
 		{name: "unknown market", row: Row{"entitlement_missing", "synthetic_market", "1", "10", "5"}},
 		{name: "unknown orphan market", row: Row{"orphan_renewal", "synthetic_market", "1", "10", "5"}},
+		{name: "prepaid market is not recurring orphan", row: Row{"orphan_renewal", "solana", "1", "10", "5"}},
 		{name: "unknown Solana reason", row: Row{"solana_unfulfilled", "synthetic_reason", "1", "10", "5"}},
 		{name: "nonpositive count", row: Row{"refund_unmatched", "stripe", "0", "10", "5"}},
 		{name: "inverted age", row: Row{"email_fallback", "stripe", "1", "5", "10"}},

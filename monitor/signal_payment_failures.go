@@ -42,7 +42,7 @@ WITH active_supporter AS (
            extract(epoch FROM now() - max(renewal.start_time))::bigint AS newest_age
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market IN ('apple', 'google', 'solana', 'stripe')
+      AND renewal.market IN ('apple', 'google', 'stripe')
       AND renewal.start_time <= now()
       AND now() < renewal.end_time
       AND NOT EXISTS (
@@ -157,15 +157,16 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.action = "Confirm this store's reconciliation credentials and authoritative lookup are healthy, then allow the ordinary reconciler to validate the exact renewal and restore only its missing Pro metadata. Trace and fix the earlier write-path loss. Never grant from the local renewal alone or expose account identifiers in the alert."
 		common.verify = "The provider-confirmed reconciliation records one entitlement_repaired event, the Pro cache and a refreshed client JWT report Pro, and the aggregate remains zero through two later reconciliation runs without changing purchased bytes or revenue."
 	case "orphan_renewal":
-		if !map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true}[target] {
+		if !map[string]bool{"apple": true, "google": true, "stripe": true}[target] {
 			return finding{}, fmt.Errorf("payment failures returned an unknown orphan-renewal market")
 		}
 		common.tier = tierWarn
 		common.class = "payment-renewal-orphan"
-		common.symptom = fmt.Sprintf("%d active %s renewal record(s) belong to deleted accounts", count, target)
-		common.mechanism = "Account deletion removed the owning network but retained an in-window local renewal. This is not a paying account eligible for Pro repair; it is stale lifecycle metadata and may also indicate that provider-side cancellation was not completed."
-		common.action = "Verify cancellation against the authoritative provider using privileged tooling, then repair the account-deletion and retention workflow. Do not recreate the deleted network, grant Pro, erase financial history, or infer that the provider is still charging from this local row alone."
-		common.verify = "Deleted accounts have no active provider subscription requiring action, future deletions cancel every active market before completion, and no new orphan renewal appears through two reconciliation windows."
+		common.symptom = fmt.Sprintf("%d deleted account(s) retain an active %s renewal", count, target)
+		common.mechanism = "Account deletion removed the owning network but retained one or more in-window local rows for a recurring subscription market. This is not a paying account eligible for Pro repair. The aggregate counts distinct deleted owners rather than renewal rows, and local history alone cannot prove whether provider-side cancellation completed."
+		common.observed = fmt.Sprintf("kind=%s target=%s deleted_owner_count=%d oldest_renewal_start_age_seconds=%d newest_renewal_start_age_seconds=%d", kind, target, count, oldestAge, newestAge)
+		common.action = "Using authorized provider tooling, determine whether each deleted owner's provider subscription remains active. Complete the supported cancellation or support workflow where required, then repair the account-deletion lifecycle so future recurring subscriptions are handled before deletion completes. Retain financial history; do not recreate the deleted network, grant Pro, or infer current billing from the local row alone."
+		common.verify = "Every affected deleted owner has a provider-side disposition, future deletions handle every active recurring market before completion, and no new deleted owner enters this aggregate through two reconciliation windows."
 	case "solana_unfulfilled":
 		if target != "no_intent" && target != "underpaid" {
 			return finding{}, fmt.Errorf("payment failures returned an unknown Solana reason")

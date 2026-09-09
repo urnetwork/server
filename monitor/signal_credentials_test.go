@@ -166,3 +166,113 @@ sites:
 		t.Fatalf("credential fields = %+v, want none", fields)
 	}
 }
+
+func TestCoinbaseCredentialRequirementsMatchRuntimeConsumers(t *testing.T) {
+	t.Setenv("WARP_ENV", "main")
+	t.Setenv("WARP_VAULT_HOME", t.TempDir())
+	t.Setenv("WARP_CONFIG_HOME", t.TempDir())
+
+	popLegacy := server.Vault.PushSimpleResource("coinbase.yml", []byte(`
+api:
+  account_id: retained-legacy-account
+  key_name: retained-legacy-key
+  private_key: retained-legacy-private-key
+`))
+	requirements := loadCredentialRequirements("main", false, nil)
+	popLegacy()
+	coinbase := credentialRequirementByKey(t, requirements, "coinbase-payment")
+	wantMissing := []string{"api.host", "webhook.shared_secret"}
+	if !reflect.DeepEqual(coinbase.MissingFields, wantMissing) {
+		t.Fatalf("legacy-only Coinbase missing fields = %v, want %v", coinbase.MissingFields, wantMissing)
+	}
+
+	popRuntime := server.Vault.PushSimpleResource("coinbase.yml", []byte(`
+api:
+  host: exchange.synthetic.invalid
+webhook:
+  shared_secret: synthetic-webhook-secret
+`))
+	requirements = loadCredentialRequirements("main", false, nil)
+	popRuntime()
+	if missing := credentialRequirementByKey(t, requirements, "coinbase-payment").MissingFields; len(missing) != 0 {
+		t.Fatalf("runtime-complete Coinbase missing fields = %v", missing)
+	}
+}
+
+func TestMainSignInCredentialRequirementsFollowActiveAPI(t *testing.T) {
+	t.Setenv("WARP_ENV", "main")
+	t.Setenv("WARP_VAULT_HOME", t.TempDir())
+	t.Setenv("WARP_CONFIG_HOME", t.TempDir())
+
+	popApple := server.Vault.PushSimpleResource("apple.yml", []byte(`
+app_store_notifications:
+  bundle_id: app.synthetic.invalid
+  app_apple_id: 123
+  environments: [synthetic]
+  product_ids: [synthetic-product]
+app_store_server_api_key_id: synthetic-payment-key
+issuer_id: synthetic-payment-issuer
+private_key: synthetic-payment-private-key
+`))
+	defer popApple()
+	popGoogle := server.Vault.PushSimpleResource("google.yml", []byte(`
+webhook:
+  publisher_email: publisher@example.invalid
+  package_name: app.synthetic.invalid
+oauth:
+  client_id: synthetic-payment-client
+  client_secret: synthetic-payment-secret
+  refresh_token: synthetic-payment-refresh
+`))
+	defer popGoogle()
+
+	requirements := loadCredentialRequirements("main", false, []string{"api"})
+	apple := credentialRequirementByKey(t, requirements, "apple-sign-in")
+	if !reflect.DeepEqual(apple.MissingFields, []string{"client_id"}) {
+		t.Fatalf("Apple sign-in missing fields = %v", apple.MissingFields)
+	}
+	google := credentialRequirementByKey(t, requirements, "google-sign-in")
+	wantGoogle := []string{"client_id", "sign_in_oauth.client_id", "sign_in_oauth.client_secret"}
+	if !reflect.DeepEqual(google.MissingFields, wantGoogle) {
+		t.Fatalf("Google sign-in missing fields = %v, want %v", google.MissingFields, wantGoogle)
+	}
+
+	popCompleteApple := server.Vault.PushSimpleResource("apple.yml", []byte(`
+client_id: [synthetic-apple-client]
+`))
+	defer popCompleteApple()
+	popCompleteGoogle := server.Vault.PushSimpleResource("google.yml", []byte(`
+client_id: [synthetic-google-client]
+sign_in_oauth:
+  client_id: synthetic-browser-client
+  client_secret: synthetic-browser-secret
+`))
+	defer popCompleteGoogle()
+	requirements = loadCredentialRequirements("main", false, []string{"api"})
+	if missing := credentialRequirementByKey(t, requirements, "apple-sign-in").MissingFields; len(missing) != 0 {
+		t.Fatalf("complete Apple sign-in missing fields = %v", missing)
+	}
+	if missing := credentialRequirementByKey(t, requirements, "google-sign-in").MissingFields; len(missing) != 0 {
+		t.Fatalf("complete Google sign-in missing fields = %v", missing)
+	}
+
+	requirements = loadCredentialRequirements("main", false, []string{"taskworker"})
+	for _, key := range []string{"apple-sign-in", "google-sign-in"} {
+		for _, requirement := range requirements {
+			if requirement.Key == key {
+				t.Fatalf("inactive API retained %s requirement", key)
+			}
+		}
+	}
+}
+
+func credentialRequirementByKey(t *testing.T, requirements []CredentialRequirement, key string) CredentialRequirement {
+	t.Helper()
+	for _, requirement := range requirements {
+		if requirement.Key == key {
+			return requirement
+		}
+	}
+	t.Fatalf("credential requirement %q not found", key)
+	return CredentialRequirement{}
+}

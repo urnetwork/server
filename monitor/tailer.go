@@ -117,6 +117,19 @@ type logReconcileQuery func(ctx context.Context, start time.Time, blocks []strin
 
 var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
 
+// Connect's relEvent grammar renders booleans as 0/1. Keep the nonterminal
+// and terminal window-stall states separate: the generic novel detector sees
+// the word "failed" even when the structured value is zero.
+var (
+	windowStallNonterminalRe = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
+	windowStallTerminalRe    = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1(?:[[:space:]]|$)`)
+	windowStallEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+)
+
+func windowStallLogSample(line string) string {
+	return strings.TrimSpace(windowStallEventRe.FindString(line))
+}
+
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
 	// A Mimir rejection body can contain arbitrary series labels, including
@@ -399,6 +412,24 @@ var logClasses = []logClass{
 		context:   "The 2026-09-04 authoritative Taskworker tail reported this exact normalized shape at about 65/min, but the line and the locally inspected release tag do not prove which artifact emitted it. A separate monitor defect could pair a novel alert's top shape with the first sample from another shape; this dedicated class and the shape-keyed novel samples prevent that misleading evidence. Do not generalize this classification to any other TUN read error.",
 		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
 		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
+	},
+	{name: "window-stall-terminal", re: windowStallTerminalRe,
+		sample:        windowStallLogSample,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; failed=1 is terminal for that window but does not identify the underlying failure branch",
+		mechanism: "The Connect window watchdog publishes one structured window_stall transition whenever its reason or terminal bit changes. A value of failed=1 is authoritative terminal state for that window; reason names the current diagnostic branch, not a proven transport root cause.",
+		context:   "Keep this distinct from failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
+		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
+		verify:    "No failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
+	},
+	{name: "window-stall", re: windowStallNonterminalRe,
+		sample:        windowStallLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a provider window changed stall diagnosis while it was still trying; failed=0 is explicitly nonterminal",
+		mechanism: "The Connect window watchdog emits this structured transition once per reason/state change. At rate, failed=0 measures provider-window diagnostic churn; it is neither a count of failed windows nor an unclassified error merely because the field name contains the word failed.",
+		context:   "Reason is a bounded discriminator, not root-cause proof. Correlate platform-unreachable with explicit carrier/framer/reachability evidence and treat providers-unresponsive, rate-limited, and auth-failing as separate branches. One isolated nonterminal transition stays below the alert threshold.",
+		action:    "Use the structured reason and window to select the matching bounded controls, then repair only a corroborated transport, provider, rate-limit, or authentication boundary. Do not infer terminal user failure, restart Taskworker, or deploy a transport change from failed=0 alone.",
+		verify:    "The class remains below 20 transitions/minute for ten minutes under comparable traffic, terminal window-stall remains zero, and provider windows continue to reach their configured minimum.",
 	},
 	{name: "db-maintenance-legacy-reindex", re: dbMaintenanceLegacyReindexRe,
 		groupBy:       dbMaintenanceLegacyReindexLogGroup,

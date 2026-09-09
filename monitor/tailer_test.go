@@ -1573,6 +1573,79 @@ func TestNovelSampleBelongsToTopShapeAndRedactsID(t *testing.T) {
 	}
 }
 
+func TestWindowStallStructuredStatesStayOutOfNovel(t *testing.T) {
+	const privateCorrelation = "private-correlation-value"
+	nonterminalLine := "[edge-private][taskworker][g1][cid:" + privateCorrelation + "]" +
+		"[I][2026-09-08T21:56:22Z][ip_remote_multi_client_outcome.go:374][rel] event=window_stall window=quality reason=platform-unreachable failed=0"
+
+	quiet := newLogTailer("taskworker", nil)
+	quiet.classify(nonterminalLine)
+	quietFindings := quiet.drainWindow()
+	if finding := findingByClass(t, quietFindings, "window-stall"); !finding.healthy {
+		t.Fatalf("one nonterminal transition crossed the rate threshold: %+v", finding)
+	}
+	if novel := findingByClass(t, quietFindings, "novel"); !novel.healthy {
+		t.Fatalf("failed=0 became a generic novel error: %+v", novel)
+	}
+
+	atRate := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		atRate.classify(nonterminalLine)
+	}
+	atRateFindings := atRate.drainWindow()
+	stall := findingByClass(t, atRateFindings, "window-stall")
+	if stall.healthy {
+		t.Fatal("nonterminal window-stall transitions at rate were hidden")
+	}
+	for _, want := range []string{
+		"failed=0 is explicitly nonterminal",
+		"neither a count of failed windows nor an unclassified error",
+		"event=window_stall window=quality reason=platform-unreachable failed=0",
+		"Do not infer terminal user failure",
+	} {
+		if !strings.Contains(stall.evidence+stall.mechanism+stall.action, want) {
+			t.Fatalf("nonterminal window-stall finding lacks %q: %+v", want, stall)
+		}
+	}
+	if strings.Contains(stall.evidence, privateCorrelation) || strings.Contains(stall.evidence, "edge-private") {
+		t.Fatalf("window-stall sample retained private prefix: %q", stall.evidence)
+	}
+	if novel := findingByClass(t, atRateFindings, "novel"); !novel.healthy {
+		t.Fatalf("classified nonterminal transitions also became novel: %+v", novel)
+	}
+
+	terminal := newLogTailer("taskworker", nil)
+	terminal.classify(strings.Replace(nonterminalLine, "failed=0", "failed=1", 1))
+	terminalFindings := terminal.drainWindow()
+	terminalStall := findingByClass(t, terminalFindings, "window-stall-terminal")
+	if terminalStall.healthy || !strings.Contains(terminalStall.evidence, "failed=1") {
+		t.Fatalf("terminal window-stall state was not visible: %+v", terminalStall)
+	}
+	if nonterminal := findingByClass(t, terminalFindings, "window-stall"); !nonterminal.healthy {
+		t.Fatalf("terminal state was also counted as nonterminal: %+v", nonterminal)
+	}
+	if novel := findingByClass(t, terminalFindings, "novel"); !novel.healthy {
+		t.Fatalf("classified terminal transition also became novel: %+v", novel)
+	}
+
+	// Unknown flag values are schema drift, not a state the classifier may
+	// silently reinterpret. They remain in the generic novelty safety net.
+	ambiguous := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		ambiguous.classify(strings.Replace(nonterminalLine, "failed=0", "failed=unknown", 1))
+	}
+	ambiguousFindings := ambiguous.drainWindow()
+	if finding := findingByClass(t, ambiguousFindings, "window-stall"); !finding.healthy {
+		t.Fatalf("ambiguous state was classified as nonterminal: %+v", finding)
+	}
+	if finding := findingByClass(t, ambiguousFindings, "window-stall-terminal"); !finding.healthy {
+		t.Fatalf("ambiguous state was classified as terminal: %+v", finding)
+	}
+	if novel := findingByClass(t, ambiguousFindings, "novel"); novel.healthy {
+		t.Fatal("ambiguous window-stall schema drift disappeared from the novelty safety net")
+	}
+}
+
 func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
 	const entityID = "raw-customer-correlation"
 	line := "[edge-private][taskworker][g2][cid:" + entityID + "] providertunnel: tun read error: Done"
