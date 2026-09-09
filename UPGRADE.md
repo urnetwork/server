@@ -502,6 +502,10 @@ in both directions.
    checks. This is why reconciliation lands after the S1–S5 fixes.
 2. **Both directions.**
    - Store paid, server missing → credit (the lost-webhook repair).
+   - Store affirmatively entitled, renewal present, Pro metadata missing →
+     restore an exact-window, zero-byte/zero-revenue Pro marker after an
+     in-transaction network/renewal recheck. This is metadata repair, not a
+     second credit; it never trusts the local renewal without provider truth.
    - Store cancelled/refunded/expired, server active → end the entitlement
      (adjust `end_time`, refresh pro state). This delivers the recurring
      half of S7 clawback as a side effect: an hourly sweep against store
@@ -538,10 +542,10 @@ in both directions.
   with `RunOnce("payment_reconciliation")`), cadence 1 h. One run at a
   time by construction (tasks are singletons).
 - New table `payment_reconciliation_event` (migration): run id, store,
-  network_id NULL-able, action (`credited` / `ended` / `skipped_store` /
-  `heartbeat` / `error`), evidence (store object id), details json,
-  event_time. Plus a per-store watermark for the incremental store-side
-  listing.
+  network_id NULL-able, action (`credited` / `ended` /
+  `entitlement_repaired` / `skipped_store` / `heartbeat` / `error`), evidence
+  (store object id), details json, event_time. Plus a per-store watermark for
+  the incremental store-side listing.
 - Apple/Google are per-transaction lookups — iterate our ledger rows, not
   store-wide listings. Stripe supports listing by created/current-period
   windows. Solana reconciles from our intent + unmatched tables against
@@ -557,7 +561,8 @@ in both directions.
   entitlement, no unfulfilled-record clearing, no watermark advance — a
   dry run must not eat the incremental window a later real run needs),
   and each suppressed repair is recorded BOTH as a printed line and as a
-  durable `would_credit`/`would_end` audit row tagged `dry_run = true`
+  durable `would_credit`/`would_end`/`would_repair_entitlement` audit row
+  tagged `dry_run = true`
   (column added by migration, default false, so existing
   heartbeat/error/repair queries exclude dry runs unchanged). Mutual
   exclusion: every real run — task or CLI — holds a run-level session

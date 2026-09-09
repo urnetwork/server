@@ -100,14 +100,18 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
-		[]Row{{"apple", "credited", "1", "120"}, {"stripe", "ended", "2", "240"}},
+		[]Row{
+			{"apple", "credited", "1", "120"},
+			{"google", "entitlement_repaired", "1", "180"},
+			{"stripe", "ended", "2", "240"},
+		},
 	)
 	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 2 {
-		t.Fatalf("repair alerts = %d, want 2: %+v", len(alerts), alerts)
+	if len(alerts) != 3 {
+		t.Fatalf("repair alerts = %d, want 3: %+v", len(alerts), alerts)
 	}
 	for _, alert := range alerts {
 		if alert.Class != "payment-reconciliation-repair" {

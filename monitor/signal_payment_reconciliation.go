@@ -66,7 +66,7 @@ SELECT event.store,
        extract(epoch FROM now() - max(event.event_time))::bigint
 FROM payment_reconciliation_event event
 INNER JOIN reconciliation_run ON reconciliation_run.run_id = event.run_id
-WHERE event.action IN ('credited', 'ended')
+WHERE event.action IN ('credited', 'ended', 'entitlement_repaired')
   AND NOT event.dry_run
   AND event.event_time >= now() - interval '24 hours'
 GROUP BY event.store, event.action
@@ -255,7 +255,7 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 
 func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 	allowedStores := map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true}
-	allowedActions := map[string]bool{"credited": true, "ended": true}
+	allowedActions := map[string]bool{"credited": true, "ended": true, "entitlement_repaired": true}
 	findings := make([]finding, 0, len(rows))
 	seen := map[string]bool{}
 	for _, row := range rows {
@@ -282,8 +282,8 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 		findings = append(findings, finding{
 			probeId: "pg/payment-reconciliation", tier: tierWarn, class: "payment-reconciliation-repair", target: store, frame: "action=" + action, sustain: 1,
 			symptom:   fmt.Sprintf("The payment reconciler repaired %d missed %s %s event(s) in 24 hours", count, store, action),
-			mechanism: "The hourly safety net found authoritative store state that the ordinary notification/task path had not applied. The repair protects the account, but its existence is evidence of a lost, rejected, or incorrectly handled payment lifecycle event.",
-			baseline:  "Zero reconciler-originated credited or ended repairs; ordinary provider notifications apply each lifecycle event idempotently before reconciliation is needed.",
+			mechanism: "The hourly safety net found authoritative store state that the ordinary notification/task path had not applied. The repair protects the account, but its existence is evidence of a lost, rejected, or incorrectly handled payment lifecycle event or missing Pro metadata.",
+			baseline:  "Zero reconciler-originated credited, ended, or entitlement-metadata repairs; ordinary provider notifications apply each lifecycle event and its Pro metadata idempotently before reconciliation is needed.",
 			observed:  fmt.Sprintf("store=%s action=%s repairs_24h=%d latest_age_seconds=%d", store, action, count, age),
 			evidence:  "The query joins only run IDs that emitted a reconciliation heartbeat, then returns aggregate store/action counts and age. Run IDs, accounts, provider evidence, details, and credentials are excluded.",
 			action:    "Validate the repaired account state, then trace the provider notification, verification, idempotency ledger, task, and database path for the same bounded time window. Keep the safety-net repair and fix the earlier missing stage rather than replaying provider events manually.",

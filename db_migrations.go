@@ -4780,12 +4780,14 @@ var migrations = []any{
 
 	// Audit trail for the hourly payment reconciliation task (UPGRADE.md §8).
 	// Every repair the reconciler makes -- a credit for a lost webhook, an
-	// entitlement ended because the store says it is already over -- is a row
-	// here, with the store evidence id it acted on. Operator visibility is the
-	// point: a spike in repair counts IS the alarm that webhooks are broken. A
+	// entitlement ended because the store says it is already over, or an exact
+	// provider-confirmed Pro-metadata restoration -- is a row here, with the
+	// store evidence id it acted on. Operator visibility is the point: a spike
+	// in repair counts IS the alarm that webhooks are broken. A
 	// run that repairs nothing writes only a heartbeat row (store = 'all'),
 	// and a store skipped for missing credentials writes a skipped_store row.
-	// action: credited | ended | skipped_store | heartbeat | error.
+	// action: credited | ended | entitlement_repaired | skipped_store |
+	// heartbeat | error.
 	newSqlMigration(`
 		CREATE TABLE payment_reconciliation_event (
 			event_id uuid NOT NULL PRIMARY KEY,
@@ -4822,8 +4824,9 @@ var migrations = []any{
 
 	// Dry-run audit support for manual reconciliation runs (bringyourctl
 	// payments reconcile --dry-run). A dry run records would_credit /
-	// would_end events -- the same evidence and details the real repair would
-	// carry -- plus its own heartbeat/error rows, all tagged dry_run = true.
+	// would_end / would_repair_entitlement events -- the same evidence and
+	// details the real repair would carry -- plus its own heartbeat/error rows,
+	// all tagged dry_run = true.
 	// The default false keeps every existing query correct: operator queries
 	// over real repairs, heartbeats, and errors exclude dry runs without
 	// changing.

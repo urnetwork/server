@@ -1465,12 +1465,12 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 // hand -- the same controller orchestrator the hourly task runs, never a
 // separate implementation. --dry-run audits what a real run WOULD repair
 // without changing anything: store reads happen for real, every write
-// (credit, ended entitlement, unfulfilled-record clearing, watermark advance)
-// is suppressed, and each suppressed repair is a would_credit/would_end audit
-// row tagged dry_run. A real run holds the same run-level advisory lock the
-// task path holds, so a CLI run and the hourly task can never interleave --
-// whichever starts second reports busy and exits. Exits non-zero if any store
-// errored.
+// (credit, ended entitlement, Pro-metadata repair, unfulfilled-record
+// clearing, watermark advance) is suppressed, and each suppressed repair is a
+// would_credit/would_end/would_repair_entitlement audit row tagged dry_run. A
+// real run holds the same run-level advisory lock the task path holds, so a CLI
+// run and the hourly task can never interleave -- whichever starts second
+// reports busy and exits. Exits non-zero if any store errored.
 func paymentsReconcile(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -1512,13 +1512,13 @@ func paymentsReconcile(opts docopt.Opts) {
 		fmt.Printf("payment reconciliation run %s\n", result.RunId)
 	}
 
-	creditLabel, endLabel := "credited", "ended"
+	creditLabel, endLabel, repairLabel := "credited", "ended", "repaired"
 	if result.DryRun {
-		creditLabel, endLabel = "would-credit", "would-end"
+		creditLabel, endLabel, repairLabel = "would-credit", "would-end", "would-repair"
 	}
 	fmt.Println()
-	fmt.Printf("%-8s %9s %13s %10s %7s  %s\n", "store", "examined", creditLabel, endLabel, "errors", "notes")
-	fmt.Println(strings.Repeat("-", 78))
+	fmt.Printf("%-8s %9s %13s %10s %14s %7s  %s\n", "store", "examined", creditLabel, endLabel, repairLabel, "errors", "notes")
+	fmt.Println(strings.Repeat("-", 93))
 	for _, store := range stores {
 		summary := result.StoreResults[store]
 		if summary == nil {
@@ -1535,8 +1535,8 @@ func paymentsReconcile(opts docopt.Opts) {
 			notes = append(notes, fmt.Sprintf("email fallbacks: %d", summary.EmailFallbacks))
 		}
 		fmt.Printf(
-			"%-8s %9d %13d %10d %7d  %s\n",
-			store, summary.Examined, summary.Credited, summary.Ended, summary.Errors,
+			"%-8s %9d %13d %10d %14d %7d  %s\n",
+			store, summary.Examined, summary.Credited, summary.Ended, summary.EntitlementsRepaired, summary.Errors,
 			strings.Join(notes, "; "),
 		)
 	}
@@ -1597,8 +1597,8 @@ func paymentsReconcile(opts docopt.Opts) {
 
 	fmt.Println()
 	fmt.Printf(
-		"%s %d, %s %d, errors %d, skipped %v\n",
-		creditLabel, result.Credited, endLabel, result.Ended, result.Errors, result.SkippedStores,
+		"%s %d, %s %d, %s %d, errors %d, skipped %v\n",
+		creditLabel, result.Credited, endLabel, result.Ended, repairLabel, result.EntitlementsRepaired, result.Errors, result.SkippedStores,
 	)
 	if 0 < result.Errors {
 		os.Exit(1)

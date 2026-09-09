@@ -4832,8 +4832,9 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
 - one successful watermark per expected store no more than three hours old;
   more than six hours or no watermark is PAGE;
 - zero `skipped_store` and `error` rows per store in the last three hours;
-- every safety-net-originated `credited` or `ended` repair in the last 24
-  hours, grouped only by store/action.
+- every safety-net-originated `credited`, `ended`, or
+  `entitlement_repaired` repair in the last 24 hours, grouped only by
+  store/action.
 
 `payment-reconciliation-store-skipped` is PAGE immediately. Missing credentials
 are not a healthy local-environment convenience on Main: they disable that
@@ -4844,12 +4845,19 @@ more in three hours. Authentication, provider availability, schema validation,
 budget exhaustion, and local persistence are separate discriminators; never
 advance a watermark merely to clear the alert.
 
-`payment-reconciliation-repair` warns on every real `credited`/`ended` repair
-whose run also emitted a reconciliation heartbeat. The account is protected,
-but the repair proves the ordinary notification/verification/idempotency path
-missed authoritative provider state. Trace and fix that earlier stage. The
-query never returns run IDs, network IDs, transaction IDs, evidence, details,
-or credential values.
+`payment-reconciliation-repair` warns on every real `credited`/`ended`/
+`entitlement_repaired` repair whose run also emitted a reconciliation
+heartbeat. `entitlement_repaired` means the provider affirmatively reported an
+existing account's exact renewal as entitled, but that renewal had no matching
+Pro metadata. The repair adds only a zero-byte, zero-revenue Pro marker for the
+same window, rechecks the live network and renewal under a transaction lock,
+refreshes the Pro cache after commit, and is idempotent. It never trusts a
+local renewal by itself and never duplicates purchased data or revenue. The
+account is protected, but every repair proves the ordinary
+notification/verification/idempotency path missed authoritative provider
+state or its metadata. Trace and fix that earlier stage. The query never
+returns run IDs, network IDs, transaction IDs, evidence, details, or credential
+values.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
@@ -4877,9 +4885,16 @@ This probe checks business outcomes that ordinary API/process liveness cannot
 establish:
 
 - `payment-entitlement-missing` (PAGE): an in-window supporter renewal exists
-  for Apple, Google, Stripe, or Solana, but the same network has no in-window
-  `transfer_balance.pro=true`. This is the exact “paying but shown as free”
-  invariant. The check uses entitlement time, not remaining bytes.
+  for Apple, Google, Stripe, or Solana on an existing network, but the same
+  network has no in-window `transfer_balance.pro=true`. This is the exact
+  “paying but shown as free” invariant. The check uses entitlement time, not
+  remaining bytes. Reconciliation may repair it only after that provider
+  independently confirms the renewal remains entitled.
+- `payment-renewal-orphan` (WARN): an in-window local supporter renewal belongs
+  to a deleted network. It is deliberately excluded from paying-account and
+  Pro-repair counts: recreating a deleted account from financial history would
+  be unsafe. Verify provider-side cancellation and repair the account-deletion
+  lifecycle while retaining financial audit history.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -4897,6 +4912,14 @@ fulfilled can require an **authorized financial/operations decision** (for
 example a verified refund when an underpayment cannot be credited); software
 must preserve the evidence and idempotency boundary but cannot choose or
 authorize that disposition.
+
+The 2026-09-08 Main split of the original entitlement alert found zero affected
+existing networks: all five local rows were orphan renewals for deleted
+networks (four Stripe, one Solana). Treating those rows as paying accounts was a
+probe defect and would have made an automatic Pro backfill unsafe. The probe
+now separates them into `payment-renewal-orphan`; the controller's candidate
+query applies the same existing-network boundary before it contacts a provider
+or repairs metadata.
 
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic

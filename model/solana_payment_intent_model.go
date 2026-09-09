@@ -346,6 +346,35 @@ func GetSolanaPaymentIntentSignature(
 	return
 }
 
+// GetSolanaPaymentIntentCompletion returns the immutable local owner and chain
+// signature of a consumed intent. Reconciliation uses both fields before a
+// provider verdict can repair entitlement metadata; a valid signature owned
+// by a different network is never authority for this renewal.
+func GetSolanaPaymentIntentCompletion(
+	ctx context.Context,
+	reference string,
+) (networkId server.Id, signature string, ok bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT network_id, tx_signature
+			FROM solana_payment_intent
+			WHERE payment_reference = $1
+			  AND tx_signature IS NOT NULL
+			`,
+			reference,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId, &signature))
+				ok = true
+			}
+		})
+	})
+	return
+}
+
 // GetUnfulfilledSolanaPayment reads one recorded payment back by signature.
 func GetUnfulfilledSolanaPayment(
 	ctx context.Context,

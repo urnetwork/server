@@ -28,6 +28,7 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 		return []Row{
 			{"email_fallback", "stripe", "2", "900", "300"},
 			{"entitlement_missing", "apple", "1", "7200", "7200"},
+			{"orphan_renewal", "google", "2", "5400", "1200"},
 			{"refund_unmatched", "stripe", "3", "3600", "60"},
 			{"solana_unfulfilled", "no_intent", "4", "1800", "120"},
 			{"solana_unfulfilled", "underpaid", "1", "600", "600"},
@@ -39,6 +40,7 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 	}
 	for _, class := range []string{
 		"payment-entitlement-missing",
+		"payment-renewal-orphan",
 		"payment-refund-unmatched",
 		"payment-solana-unfulfilled",
 		"payment-identity-fallback",
@@ -56,6 +58,22 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 	if entitlement := requireAlertClass(t, alerts, "payment-entitlement-missing"); entitlement.Severity != SeverityPage {
 		t.Fatalf("entitlement severity = %s, want page", entitlement.Severity)
 	}
+	if orphan := requireAlertClass(t, alerts, "payment-renewal-orphan"); orphan.Severity != SeverityWarn {
+		t.Fatalf("orphan renewal severity = %s, want warn", orphan.Severity)
+	}
+}
+
+func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'solana', 'stripe')") != 2 {
+		t.Fatal("payment failures query does not limit both renewal classes to authoritative provider markets")
+	}
+	if !strings.Contains(paymentFailuresQuery, "AND EXISTS (\n          SELECT 1 FROM network") {
+		t.Fatal("payment failures query does not require an existing network for entitlement repair")
+	}
+	if !strings.Contains(paymentFailuresQuery, "AND NOT EXISTS (\n          SELECT 1 FROM network") ||
+		!strings.Contains(paymentFailuresQuery, "'orphan_renewal'") {
+		t.Fatal("payment failures query does not retain deleted-network renewals as a separate aggregate")
+	}
 }
 
 func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
@@ -65,6 +83,7 @@ func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 	}{
 		{name: "unknown kind", row: Row{"synthetic_unknown", "stripe", "1", "10", "5"}},
 		{name: "unknown market", row: Row{"entitlement_missing", "synthetic_market", "1", "10", "5"}},
+		{name: "unknown orphan market", row: Row{"orphan_renewal", "synthetic_market", "1", "10", "5"}},
 		{name: "unknown Solana reason", row: Row{"solana_unfulfilled", "synthetic_reason", "1", "10", "5"}},
 		{name: "nonpositive count", row: Row{"refund_unmatched", "stripe", "0", "10", "5"}},
 		{name: "inverted age", row: Row{"email_fallback", "stripe", "1", "5", "10"}},
