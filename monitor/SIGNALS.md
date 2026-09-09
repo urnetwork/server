@@ -4950,6 +4950,108 @@ Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 tests cover every durable class, healthy zero rows, strict allowlists and
 numeric validation, privacy boundaries, severity, and Markdown rendering.
 
+### 2.23 Provider egress probe outcome distribution
+Probe: `egress-outcomes`
+
+The provider-egress attempt table cannot be diagnosed as a raw time cohort.
+Failed providers retry after six hours, successful locations are not normally
+due again until 84 hours, attempt rows are retained only about 24 hours, and a
+successful location remains trusted for seven days. Filtering attempts to the
+last six hours therefore preferentially retains failures and can manufacture a
+fleet-wide incident in healthy steady state. This probe instead reconstructs
+one state for every **currently eligible** provider using the same population
+contract as §2.19:
+
+- the client is active and top-level;
+- its location-reliability row is connected and valid; and
+- it holds a Public provide key (`provide_mode=3`), tested with `EXISTS` so
+  multiple keys cannot duplicate the denominator.
+
+The query joins each eligible provider to its single location and attempt rows,
+then emits only one fixed aggregate. A nonempty attempt inside the six-hour
+retry window is a current failure when there is no trusted location or its
+server-written update time is later than the location update. A trusted
+location is success only when no retained attempt exists or the retained
+attempt itself reports success. A retained nonempty failure older than six
+hours is `unobserved`, not permission to resurrect an older success. A current
+success attempt without a trusted location is `inconsistent`.
+
+Location `update_time` is deliberately one-way evidence. Client-verdict quorum
+handling can reprioritize a location by backdating `observed_at` and writing a
+new `update_time` without running a successful probe. A location update newer
+than a nonempty attempt is therefore ambiguous and becomes `unobserved`; it
+must never be treated as recovery. `observed_at` is used only for the seven-day
+trust bound. Exact success/failure ordering would require a distinct immutable
+successful-ingest timestamp; do not infer it from this overloaded column.
+
+The only exported outcome vocabulary is success, `tunnel_failed`, legacy
+`contract_failed`, `no_consensus`, `locate_failed`, `not_confident`,
+`submit_failed`, `unknown_failure`, `inconsistent`, and `unobserved`. Raw
+failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
+the total failure share but can never become the dominant common class because
+several distinct raw values may have collapsed into that one redacted bucket.
+No client ID, raw class, location, endpoint, credential, task ID, or payload
+leaves PostgreSQL.
+
+Taskworker metrics mirror the same classifier but are process-local snapshots.
+Each completed refresh publishes a snapshot timestamp, including idle passes;
+the Grafana fleet panels select exactly one most-recent Taskworker instance and
+go no-data when no snapshot completed in 15 minutes. They must never sum
+whole-fleet gauges across Taskworkers or render absent telemetry as zero. The
+direct PostgreSQL signal in this section remains authoritative for alerts.
+
+Thresholds use the complete eligible population as the denominator and require
+at least 20 actually observed success/failure outcomes. Unobserved and
+inconsistent providers remain in the denominator but cannot satisfy that
+evidence floor:
+
+- `egress-common-mode` (PAGE): one known current failure class covers at least
+  90% of all eligible providers. Inspect the shared prober path before
+  individual providers. For `no_consensus`, `tunnel_failed`, or
+  `contract_failed`, inspect the persisted `prober_identity` singleton's client
+  credential/mint readiness, the `ProberBootstrap` task, and the prober
+  network's transfer balance first; then verify Taskworker platform/API
+  reachability and egress confinement. Never print the stored token or
+  reintroduce the retired environment-token design.
+- `egress-mixed-failure` (WARN after two samples): total current failures cover
+  at least 90% of eligible providers, but no one known class does. This proves
+  broad degradation, not a credential cause. Split task, API, tunnel,
+  geolocation-source, and submission evidence before acting.
+- `egress-outcome-inconsistent` (WARN after two samples): a current attempt
+  says success but no trusted location exists. Trace submission/report ordering,
+  monotonic upserts, retention, and direct mutations; never create a location
+  or delete an attempt to clear the alert.
+- `egress-outcome-unknown` (WARN after two samples): the producer and reader
+  failure vocabularies differ or an invalid class was stored. Compare exact
+  artifacts and add a reviewed bounded class when intentional; the raw value
+  remains private.
+
+Low current-attempt volume and an unobserved population are not independent
+faults: successful providers legitimately probe less often. Use §2.19 for
+durable shard geometry, due work, and advancement. Likewise, alert absence is
+not sufficient recovery: failed rows legitimately remain deferred for six
+hours, while simply aging past that backoff can turn them into `unobserved`.
+The next applicable due cycle is six hours for an absent or stale location, but
+can be as late as the 12-hour health due age when a failed full-probe pass
+refreshed health without replacing a still-fresh location. After repairing the
+proved shared boundary, require §2.19 to keep advancing through that applicable
+due cycle plus configured shard `max_time`, `idle_delay`, and one monitor
+cadence, and require replacement success/current evidence. Keep the
+reconstructed distribution healthy for two later cadences and never delete or
+rewrite attempts to manufacture recovery.
+
+This is a **software/operational common-path and data-integrity** signal. It is
+not resolved by adding Proxy hardware. Hardware raises the independent active
+client ceiling but cannot repair a prober credential, balance, API path,
+classifier, or persistence invariant.
+
+Implementation convention: SIGNALS.md §2.23 (`egress-outcomes`) maps to
+`signal_egress_outcomes.go` and `signal_egress_outcomes_test.go`. Synthetic
+tests cover the exact 90%/20-observation boundaries, survivor-bias controls,
+mixed failures without credential attribution, unknown-class non-dominance,
+reprioritization after a current failure, stale-failure ambiguity, inconsistent
+success, strict aggregate rejection, query privacy, and detailed Markdown.
+
 ---
 
 ## 3. redis signal catalog

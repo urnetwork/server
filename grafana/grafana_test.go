@@ -15,11 +15,12 @@ import (
 )
 
 type testDashboard struct {
-	Uid        string              `json:"uid"`
-	Title      string              `json:"title"`
-	Tags       []string            `json:"tags"`
-	Links      []testDashboardLink `json:"links"`
-	Templating struct {
+	Uid         string              `json:"uid"`
+	Title       string              `json:"title"`
+	Description string              `json:"description"`
+	Tags        []string            `json:"tags"`
+	Links       []testDashboardLink `json:"links"`
+	Templating  struct {
 		List []any `json:"list"`
 	} `json:"templating"`
 	Panels []testPanel `json:"panels"`
@@ -36,6 +37,7 @@ type testPanel struct {
 	Id          int    `json:"id"`
 	Type        string `json:"type"`
 	Title       string `json:"title"`
+	Description string `json:"description"`
 	FieldConfig struct {
 		Defaults struct {
 			Thresholds struct {
@@ -75,6 +77,84 @@ type testPanel struct {
 		} `json:"layers"`
 	} `json:"options"`
 	Targets []testTarget `json:"targets"`
+}
+
+func TestEgressProbeDashboardUsesPopulationAwareOutcomeClasses(t *testing.T) {
+	dashboard := readTestDashboard(t, "egress-probes.json")
+	failures := dashboardPanelById(dashboard, 8)
+	if failures == nil || len(failures.Targets) != 1 {
+		t.Fatal("egress current-failure panel is missing")
+	}
+	if failures.Title != "current proved failures" {
+		t.Fatalf("egress failure panel title = %q", failures.Title)
+	}
+	expression := failures.Targets[0].Expr
+	for _, class := range []string{
+		"tunnel_failed", "contract_failed", "no_consensus", "locate_failed",
+		"not_confident", "submit_failed", "unknown_failure",
+	} {
+		if !strings.Contains(expression, class) {
+			t.Errorf("egress failure expression omits %q: %s", class, expression)
+		}
+	}
+	for _, neutral := range []string{"unobserved", "inconsistent", `result!="ok"`} {
+		if strings.Contains(expression, neutral) {
+			t.Errorf("egress failure expression counts neutral state %q: %s", neutral, expression)
+		}
+	}
+	if strings.Contains(expression, "vector(0)") {
+		t.Errorf("egress failure stat hides an absent exporter as zero: %s", expression)
+	}
+	if !strings.Contains(expression, "fleet_snapshot_timestamp_seconds") ||
+		!strings.Contains(expression, "topk(1,") {
+		t.Errorf("egress failure stat does not select one fresh fleet snapshot: %s", expression)
+	}
+
+	dominant := dashboardPanelById(dashboard, 10)
+	share := dashboardPanelById(dashboard, 11)
+	fleet := dashboardPanelById(dashboard, 14)
+	if dominant == nil || !strings.Contains(dominant.Description, "complete") ||
+		!strings.Contains(dominant.Description, "eligible") ||
+		share == nil || !strings.Contains(share.Description, "eligible population") ||
+		fleet == nil || fleet.Title != "eligible fleet by probe outcome" ||
+		!strings.Contains(fleet.Description, "unobserved") {
+		t.Fatal("egress dashboard does not explain the reconstructed eligible-population semantics")
+	}
+	if len(fleet.Targets) != 1 || !strings.Contains(fleet.Targets[0].Expr, "sum by (result)") {
+		t.Fatal("egress fleet panel must preserve each outcome in the selected snapshot")
+	}
+	success := dashboardPanelById(dashboard, 9)
+	if success == nil || len(success.Targets) != 1 ||
+		!strings.HasPrefix(success.Targets[0].Expr, "sum(") ||
+		strings.Contains(success.Targets[0].Expr, "vector(0)") {
+		t.Fatal("egress success panel must preserve exporter absence in its selected fleet snapshot")
+	}
+	for id := 5; id <= 14; id++ {
+		panel := dashboardPanelById(dashboard, id)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("fleet snapshot panel %d is missing", id)
+		}
+		expression := panel.Targets[0].Expr
+		for _, contract := range []string{
+			"fleet_snapshot_timestamp_seconds",
+			"topk(1,",
+			"and on(env,service,block,host,instance)",
+			`service="taskworker"`,
+			"time() - 900",
+			"time() + 30",
+		} {
+			if !strings.Contains(expression, contract) {
+				t.Errorf("fleet snapshot panel %d omits %q: %s", id, contract, expression)
+			}
+		}
+		if strings.Contains(expression, "vector(0)") {
+			t.Errorf("fleet snapshot panel %d hides stale or absent telemetry as zero: %s", id, expression)
+		}
+	}
+	if !strings.Contains(dashboard.Description, "go no-data after 15 minutes") ||
+		!strings.Contains(dashboard.Description, "§2.23") {
+		t.Fatal("egress dashboard does not disclose snapshot freshness and direct-database authority")
+	}
 }
 
 func TestCompetitionDashboardOperationalSignals(t *testing.T) {

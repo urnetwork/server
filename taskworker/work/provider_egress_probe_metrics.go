@@ -180,7 +180,7 @@ var egressProbeFleetAttemptProviders = prometheus.NewGaugeVec(prometheus.GaugeOp
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "fleet_attempt_providers",
-	Help:      "Providers by the outcome of their most recent full probe attempt: ok, or the probe_failure class",
+	Help:      "Current eligible providers by reconstructed full-probe outcome: ok, a bounded failure class, inconsistent, or unobserved",
 }, []string{"result"})
 
 var egressProbeFleetHealthProviders = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -201,14 +201,21 @@ var egressProbeFleetDominantFailure = prometheus.NewGaugeVec(prometheus.GaugeOpt
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "fleet_dominant_failure",
-	Help:      "1 for the failure class the fleet diagnosis blames on the prober (one class covers nearly every attempt), 0 otherwise",
+	Help:      "1 for the failure class the fleet diagnosis blames on the prober (one class covers nearly every eligible provider), 0 otherwise",
 }, []string{"class"})
 
 var egressProbeFleetDominantShare = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "fleet_dominant_share",
-	Help:      "Share of all recorded attempts covered by the dominant failure class; 0 when no class dominates",
+	Help:      "Share of the complete current eligible population covered by the dominant known failure class; 0 when no class dominates",
+})
+
+var egressProbeFleetSnapshotTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_probe",
+	Name:      "fleet_snapshot_timestamp_seconds",
+	Help:      "Unix time when this Taskworker last completed a fleet snapshot; consumers must select one fresh process snapshot rather than combine process-local gauges",
 })
 
 func init() {
@@ -236,6 +243,7 @@ func init() {
 		egressProbeFleetFlaggedProviders,
 		egressProbeFleetDominantFailure,
 		egressProbeFleetDominantShare,
+		egressProbeFleetSnapshotTimestamp,
 	)
 }
 
@@ -464,13 +472,14 @@ func lookupProviderEgressCountry(ctx context.Context, providerClientId string) s
 
 // egressProbeFleetSnapshot is what the fleet gauges are set from.
 type egressProbeFleetSnapshot struct {
-	attemptTally     map[string]int
+	outcomeTally     map[string]int
 	healthStates     map[string]int
 	blackholed       int
 	tlsAuthFailed    int
 	dominantClass    string
 	dominantShare    float64
 	knownFailClasses []string
+	refreshedAt      time.Time
 }
 
 // egressProbeKnownFailureClasses are the classes the dominant-failure gauge
@@ -484,9 +493,29 @@ var egressProbeKnownFailureClasses = []string{
 	"contract_failed",
 }
 
+// egressProbeFleetOutcomeClasses are emitted on every successful fleet
+// refresh. Pre-seeding the bounded label set distinguishes a live exporter
+// reporting zero providers in one state from an absent exporter, which must
+// remain no-data in Prometheus and Grafana.
+var egressProbeFleetOutcomeClasses = []string{
+	model.ProbeAttemptSuccessClass,
+	prober.FailureTunnel,
+	"contract_failed",
+	prober.FailureNoConsensus,
+	prober.FailureLocate,
+	prober.FailureNotConfident,
+	prober.FailureSubmit,
+	model.ProbeFleetUnknownFailureClass,
+	model.ProbeFleetInconsistentClass,
+	model.ProbeFleetUnobservedClass,
+}
+
 func setEgressProbeFleetGauges(snapshot egressProbeFleetSnapshot) {
 	egressProbeFleetAttemptProviders.Reset()
-	for class, count := range snapshot.attemptTally {
+	for _, class := range egressProbeFleetOutcomeClasses {
+		egressProbeFleetAttemptProviders.WithLabelValues(egressProbeResultLabel(class)).Set(0)
+	}
+	for class, count := range snapshot.outcomeTally {
 		egressProbeFleetAttemptProviders.WithLabelValues(egressProbeResultLabel(class)).Set(float64(count))
 	}
 	egressProbeFleetHealthProviders.Reset()
@@ -508,6 +537,7 @@ func setEgressProbeFleetGauges(snapshot egressProbeFleetSnapshot) {
 		egressProbeFleetDominantFailure.WithLabelValues(class).Set(value)
 	}
 	egressProbeFleetDominantShare.Set(snapshot.dominantShare)
+	egressProbeFleetSnapshotTimestamp.Set(float64(snapshot.refreshedAt.Unix()))
 }
 
 var egressProbeFleetRefreshLock sync.Mutex
@@ -526,13 +556,16 @@ func refreshEgressProbeFleetMetrics(ctx context.Context) {
 		return
 	}
 
-	tally := model.GetProviderEgressProbeAttemptTally(ctx)
+	tally := model.GetProviderEgressProbeFleetOutcomeTally(ctx)
 	snapshot := egressProbeFleetSnapshot{
-		attemptTally: tally,
+		outcomeTally: tally,
 		healthStates: map[string]int{},
 	}
 	for class := range tally {
-		if class != model.ProbeAttemptSuccessClass {
+		if class != model.ProbeAttemptSuccessClass &&
+			class != model.ProbeFleetUnobservedClass &&
+			class != model.ProbeFleetInconsistentClass &&
+			class != model.ProbeFleetUnknownFailureClass {
 			snapshot.knownFailClasses = append(snapshot.knownFailClasses, class)
 		}
 	}
@@ -541,9 +574,10 @@ func refreshEgressProbeFleetMetrics(ctx context.Context) {
 	}
 	snapshot.blackholed = len(model.GetAllProviderBlackholedClientIds(ctx))
 	snapshot.tlsAuthFailed = len(model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx))
-	if diagnosis := model.DiagnoseProbeFleet(tally); diagnosis != nil && 0 < diagnosis.Attempts {
+	if diagnosis := model.AssessProbeFleetOutcomes(tally).Dominant; diagnosis != nil && 0 < diagnosis.Eligible {
 		snapshot.dominantClass = diagnosis.DominantClass
-		snapshot.dominantShare = float64(diagnosis.DominantCount) / float64(diagnosis.Attempts)
+		snapshot.dominantShare = float64(diagnosis.DominantCount) / float64(diagnosis.Eligible)
 	}
+	snapshot.refreshedAt = time.Now()
 	setEgressProbeFleetGauges(snapshot)
 }

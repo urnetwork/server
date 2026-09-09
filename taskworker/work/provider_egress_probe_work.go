@@ -396,8 +396,10 @@ type providerEgressProbePass struct {
 	fullOptions           fleetprobe.FullOptions
 	runBlackhole          func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error)
 	runFull               func(context.Context, []string, fleetprobe.FullOptions) (prober.Summary, error)
-	// refreshFleet re-counts the fleet gauges after a pass that did work; nil
-	// skips it (tests, and passes with nothing due).
+	// refreshFleet re-counts the fleet gauges after every non-canceled pass,
+	// including idle and failed passes. A process-local snapshot that is not
+	// refreshed must age out visibly rather than be pushed forever as current.
+	// Nil skips it in focused tests.
 	refreshFleet func(context.Context)
 }
 
@@ -408,6 +410,13 @@ func (self *providerEgressProbePass) run(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
 ) (*ProviderEgressProbeResult, error) {
+	if self.refreshFleet != nil {
+		defer func() {
+			if ctx.Err() == nil {
+				self.refreshFleet(ctx)
+			}
+		}()
+	}
 	errList := []error{}
 	blackholeClientIds, err := self.blackholeDue(ctx, args.Blackhole.Limit)
 	if err != nil {
@@ -506,8 +515,6 @@ func (self *providerEgressProbePass) run(
 	if err := ctx.Err(); err != nil {
 		egressProbePassErrorsTotal.WithLabelValues("canceled").Inc()
 		errList = append(errList, err)
-	} else if self.refreshFleet != nil {
-		self.refreshFleet(ctx)
 	}
 
 	return result, errors.Join(errList...)

@@ -18,7 +18,7 @@ import (
 )
 
 func testProviderEgressProbeSettings(shardCount int) providerEgressProbeSettings {
-	settings := defaultProviderEgressProbeSettings("bringyour.com")
+	settings := defaultProviderEgressProbeSettings("example.test")
 	settings.ShardCount = shardCount
 	return settings
 }
@@ -53,10 +53,10 @@ func TestProviderEgressProbeArgsCoverEveryShardExactlyOnce(t *testing.T) {
 		if args.ShardCount != settings.ShardCount {
 			t.Fatalf("shard %d carries count %d, want %d", args.ShardIndex, args.ShardCount, settings.ShardCount)
 		}
-		if args.APIURL != "https://api.bringyour.com" {
+		if args.APIURL != "https://api.example.test" {
 			t.Fatalf("shard %d api url = %q", args.ShardIndex, args.APIURL)
 		}
-		if args.PlatformURL != "wss://connect.bringyour.com" {
+		if args.PlatformURL != "wss://connect.example.test" {
 			t.Fatalf("shard %d platform url = %q", args.ShardIndex, args.PlatformURL)
 		}
 		if args.Full.Limit == 0 || args.Blackhole.Limit == 0 {
@@ -71,7 +71,7 @@ func TestProviderEgressProbeArgsCoverEveryShardExactlyOnce(t *testing.T) {
 }
 
 func TestProviderEgressProbeSettingsLoadTaskArgumentsFromConfig(t *testing.T) {
-	t.Setenv("WARP_DOMAIN", "bringyour.com")
+	t.Setenv("WARP_DOMAIN", "example.test")
 	pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(`
 shard_count: 7
 idle_delay_seconds: 123
@@ -448,6 +448,7 @@ func TestProviderEgressProbePassDoesNotLetFullDueFailureStarveBlackholeProbe(t *
 
 func TestProviderEgressProbePassDoesNotLoadPinsWhenNothingIsDue(t *testing.T) {
 	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
+	refreshes := 0
 	pass := &providerEgressProbePass{
 		blackholeDue: func(context.Context, int) ([]string, error) {
 			return nil, nil
@@ -459,6 +460,7 @@ func TestProviderEgressProbePassDoesNotLoadPinsWhenNothingIsDue(t *testing.T) {
 			t.Fatal("an idle shard loaded certificate pins")
 			return nil, nil
 		},
+		refreshFleet: func(context.Context) { refreshes++ },
 	}
 
 	result, err := pass.run(context.Background(), args)
@@ -468,12 +470,16 @@ func TestProviderEgressProbePassDoesNotLoadPinsWhenNothingIsDue(t *testing.T) {
 	if result.Full || result.FullDue != 0 || result.BlackholeDue != 0 {
 		t.Fatalf("idle result = %+v", result)
 	}
+	if refreshes != 1 {
+		t.Fatalf("idle fleet refreshes = %d, want 1", refreshes)
+	}
 }
 
 func TestProviderEgressProbePassPropagatesCancellationFromFullProbe(t *testing.T) {
 	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	refreshes := 0
 	pass := &providerEgressProbePass{
 		blackholeDue: func(context.Context, int) ([]string, error) {
 			return nil, nil
@@ -488,6 +494,7 @@ func TestProviderEgressProbePassPropagatesCancellationFromFullProbe(t *testing.T
 			cancel()
 			return prober.Summary{Attempted: 1}, nil
 		},
+		refreshFleet: func(context.Context) { refreshes++ },
 	}
 
 	result, err := pass.run(ctx, args)
@@ -496,6 +503,9 @@ func TestProviderEgressProbePassPropagatesCancellationFromFullProbe(t *testing.T
 	}
 	if result.Attempted != 1 {
 		t.Fatalf("cancelled full result = %+v", result)
+	}
+	if refreshes != 0 {
+		t.Fatalf("canceled pass refreshed a partial fleet snapshot %d time(s)", refreshes)
 	}
 }
 
