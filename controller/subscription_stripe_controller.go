@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -1416,14 +1415,11 @@ func StripeCreateCustomerPortal(
 }
 
 func UnsubscribeStripe(session *session.ClientSession) error {
-
-	var subscriptionRenewals []struct {
-		TransactionId string
-	}
+	invoiceIds := []string{}
 	var queryErr error
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		subscriptionRenewals = nil
+		invoiceIds = nil
 		queryErr = nil
 
 		// query if network has active stripe subscriptions
@@ -1451,76 +1447,41 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-
-				var txId string
-
-				err := result.Scan(&txId)
+				var invoiceId string
+				err := result.Scan(&invoiceId)
 				if err != nil {
 					glog.Errorf("[unsubscribe] Failed to scan subscription renewal: %v", err)
 					queryErr = err
 					return
 				}
-
-				subscriptionRenewals = append(subscriptionRenewals, struct {
-					TransactionId string
-				}{
-					TransactionId: txId,
-				})
-
+				invoiceIds = append(invoiceIds, invoiceId)
 			}
 		})
-
 	})
 
 	if queryErr != nil {
 		return fmt.Errorf("[unsubscribe] failed to query subscription renewals: %w", queryErr)
 	}
 
-	if len(subscriptionRenewals) == 0 {
-		return nil
+	customerId := ""
+	stripeCustomerId, err := model.GetStripeCustomer(session)
+	if err != nil {
+		return fmt.Errorf("[unsubscribe] failed to query Stripe customer: %w", err)
+	}
+	if stripeCustomerId != nil {
+		customerId = *stripeCustomerId
+	}
+	deletions, err := stripeDiscoverDeletionSubscriptions(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		customerId,
+		invoiceIds,
+	)
+	if err != nil {
+		return fmt.Errorf("[unsubscribe] failed to discover Stripe subscriptions: %w", err)
 	}
 
-	for _, renewal := range subscriptionRenewals {
-
-		invoiceId := renewal.TransactionId
-		if invoiceId == "" {
-			return errors.New("[unsubscribe] active Stripe renewal has no invoice id")
-		}
-
-		subscription, err := stripeSubscriptionFromInvoice(session.Ctx, invoiceId)
-		if err != nil {
-			glog.Errorf("[unsubscribe] Failed to fetch invoice %s: %v", invoiceId, err)
-			return fmt.Errorf("[unsubscribe] failed to fetch Stripe invoice: %w", err)
-		}
-
-		// A prior attempt may have canceled the provider subscription and then
-		// failed before closing the local row. Stripe retains canceled
-		// subscriptions with status=canceled, which is the authoritative retry
-		// discriminator; a bare DELETE 404 is not treated as success.
-		if subscription.Status != "canceled" {
-			glog.Infof("[unsubscribe] Canceling Stripe subscription %s for network %s", subscription.Id, session.ByJwt.NetworkId)
-
-			canceled, err := server.HttpDelete[*stripeCustomerSubscription](
-				session.Ctx,
-				fmt.Sprintf("%s/v1/subscriptions/%s", stripeApiBaseUrl, url.PathEscape(subscription.Id)),
-				stripeAuthHeader,
-				server.HttpResponseRequireStatusOk[*stripeCustomerSubscription](
-					server.ResponseJsonObject[*stripeCustomerSubscription],
-				),
-			)
-			if err != nil {
-				glog.Errorf("[unsubscribe] Failed to cancel Stripe subscription %s: %v", subscription.Id, err)
-				return fmt.Errorf("[unsubscribe] failed to cancel Stripe subscription: %w", err)
-			}
-			if canceled == nil || canceled.Id != subscription.Id || canceled.Status != "canceled" {
-				return errors.New("[unsubscribe] Stripe cancellation did not confirm the requested canceled subscription")
-			}
-			glog.Infof("[unsubscribe] Successfully canceled Stripe subscription %s", subscription.Id)
-		}
-
-		// Close only the provider-confirmed renewal. If a later provider call
-		// fails, completed rows stay closed and the next request retries only the
-		// remaining active rows.
+	closeRenewal := func(invoiceId string) error {
 		var updateErr error
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			_, updateErr = tx.Exec(
@@ -1542,8 +1503,11 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 			glog.Errorf("[unsubscribe] Failed to close Stripe subscription renewal: %v", updateErr)
 			return fmt.Errorf("[unsubscribe] failed to close Stripe renewal: %w", updateErr)
 		}
+		return nil
 	}
-
+	if err := stripeCancelDeletionSubscriptions(session.Ctx, deletions, closeRenewal); err != nil {
+		return fmt.Errorf("[unsubscribe] failed to cancel Stripe subscriptions: %w", err)
+	}
 	return nil
 }
 

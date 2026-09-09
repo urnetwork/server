@@ -68,6 +68,15 @@ func newNetworkRemoveStripeFake(t testing.TB) *networkRemoveStripeFake {
 			t.Errorf("encode invoice: %v", err)
 		}
 	})
+	mux.HandleFunc("GET /v1/subscriptions/search", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(response).Encode(map[string]any{
+			"data":     []any{},
+			"has_more": false,
+		}); err != nil {
+			t.Errorf("encode empty subscription search: %v", err)
+		}
+	})
 	mux.HandleFunc("DELETE /v1/subscriptions/{subscriptionId}", func(response http.ResponseWriter, request *http.Request) {
 		subscriptionId := request.PathValue("subscriptionId")
 		fake.lock.Lock()

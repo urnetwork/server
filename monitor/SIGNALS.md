@@ -4996,15 +4996,26 @@ database signal would require an explicit delivery-mode or failure marker;
 querying for paid, no-email, unredeemed rows would also page on intentional
 `bringyourctl` codes and is therefore prohibited.
 
-One Stripe boundary remains open: cancellation discovery still starts from
-active local renewal rows. A provider subscription whose local renewal metadata
-is missing or already expired can therefore escape this deletion workflow.
-Before calling that case closed, compare authorized provider-side customer
-subscriptions with local renewal discovery; a later bounded change may reuse
-the existing Stripe customer-subscription listing path. Do not broaden an
-incident repair from local history or call Stripe without explicit authority.
-Historical orphan rows cannot be assigned to the old swallowed-error path,
-direct deletion, or a delayed credit from the aggregate alone.
+Stripe cancellation discovery no longer treats active local renewals as the
+complete provider inventory. Before any cancellation, it unions and deduplicates
+subscriptions resolved from every active local invoice, every page of the
+network's Stripe-customer subscription list, and every page of an exact
+`network_id` metadata search. Empty continuing pages, pagination cycles,
+malformed or mismatched objects, provider errors, and missing continuation
+tokens all fail closed before the first mutation. Every nonterminal provider
+object must then return the exact requested ID with `status=canceled`; only
+provider-confirmed objects can close their mapped local renewals. Synthetic
+tests cover pagination, deduplication, metadata-only discovery, terminal
+objects, exact cancellation, and account retention on incomplete discovery.
+
+Stripe Search is eventually consistent, so this inventory pass is not a hard
+fence against a Checkout subscription being created concurrently with account
+deletion. The database row lock prevents a later webhook from crediting a
+deleted network or consuming its ledger, but eliminating the provider-side
+race would require an explicit create/delete lifecycle protocol rather than an
+incident-only monitor change. Keep that architectural decision separate; do
+not overstate the bounded discovery fix or infer provenance for historical
+orphan rows from their aggregate shape.
 
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
