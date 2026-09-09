@@ -61,9 +61,10 @@ UR later replace the approved adapter design.
 
 The remaining work is operational: assign the runnable integration owner;
 record its stage/production release identity and private-registry entry; issue
-stage credentials; prove retry/cache idempotency and one complete staging
-submission; and record economics, participant policy, incident contacts, and
-any standard-artifact waivers. The current checklist is
+stage credentials; prove retry/cache idempotency and several complete staging
+epochs through finalized poll outcomes; and record economics, participant
+policy, incident contacts, and any standard-artifact waivers. The current
+checklist is
 [`APEX-OPEN-QUESTIONS.md`](APEX-OPEN-QUESTIONS.md).
 
 The REST/OpenAPI package is ready for integration. The Apex stage run, release

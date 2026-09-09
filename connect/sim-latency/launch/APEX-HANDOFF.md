@@ -27,12 +27,16 @@ do not consume another noise draw. One score job has a three-hour hard execution
 limit; the adapter must therefore be asynchronous and tolerate an unbounded
 post-close grading window.
 
-Before epoch 1, the API can expose one epoch-zero `staging_round`. Its
-submissions are fee-free, retained, cached, and pollable but never enter the
-evaluator, ranking, or leaderboard. The first production-round commit
-atomically cancels the staging round and its unfinished jobs. The adapter must
-prefer `active_round`, persist the returned `staging` boolean, and accept
-`staging_discarded` cancellation as the expected terminal integration result.
+Before production epoch 1, the API can expose a staging era with sequential
+`staging_round` epochs beginning at zero. Its submissions are fee-free and use
+the real retention, cache, FIFO, evaluator, scoring, embargo, and polling paths
+against frozen source epoch zero. A staging round automatically finalizes with
+no winner after close and drain, then publishes each score or typed failure at
+the immutable job status URL. It never enters production ranking, honesty
+review, promotion, or leaderboard state. The first production-round commit
+ends the era and atomically cancels queued staging work; it refuses to race a
+running evaluation. The adapter must prefer `active_round` once present and
+persist the returned `staging` boolean.
 
 ## Adapter mapping
 
@@ -45,7 +49,7 @@ returned immutable job id.
 | Apex action | Main API action |
 |---|---|
 | Discover policy and active epoch | `GET /competition/info` |
-| Discover pre-season test identity | Read `staging_round` only when no open `active_round` exists |
+| Discover staging-era test identity | Read `staging_round` only when no `active_round` exists |
 | Submit canonical text patch | `POST /competition/score` |
 | Persist accepted identity | Store `job_id`, `round_id`, `patch_sha256`, and `status_url` atomically |
 | Poll result | `GET /competition/score/{jobId}` using the returned status URL |
@@ -60,9 +64,10 @@ identity. Typed submission failures are terminal.
 
 Results remain embargoed while admission is open and while any accepted job is
 queued or running. Polling reports terminal work as outcome-neutral `completed`
-until the post-review finalization transaction commits. Only a finalized
-leaderboard is public; its rows identify approved, rejected, and unreviewed
-honesty status without exposing the private review report.
+until finalization commits. Staging then publishes outcomes through polling;
+production publishes only its finalized leaderboard. Production rows identify
+approved, rejected, and unreviewed honesty status without exposing the private
+review report.
 A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is normalized score
 descending, raw score ascending, submission time, then job id. Statistical

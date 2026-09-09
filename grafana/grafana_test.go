@@ -89,6 +89,7 @@ func TestCompetitionDashboardOperationalSignals(t *testing.T) {
 		"urnetwork_competition_evaluation_duration_estimate_seconds",
 		"urnetwork_competition_submission_backlog_estimated_seconds",
 		"urnetwork_competition_live_evaluation_metric_value",
+		"urnetwork_competition_current_round_staging",
 	} {
 		if !strings.Contains(joined, metric) {
 			t.Errorf("competition dashboard is missing %s", metric)
@@ -110,6 +111,11 @@ func TestCompetitionDashboardOperationalSignals(t *testing.T) {
 	}
 	if !foundWarning {
 		t.Fatal("runner heartbeat panel must warn at 30 seconds")
+	}
+	era := dashboardPanelById(dashboard, 26)
+	if era == nil || era.Title != "current era" || len(era.Targets) != 1 ||
+		!strings.Contains(era.Targets[0].Expr, "urnetwork_competition_current_round_staging") {
+		t.Fatal("competition staging-era panel is missing")
 	}
 	for _, panelId := range []int{22, 23, 24, 25} {
 		panel := dashboardPanelById(dashboard, panelId)

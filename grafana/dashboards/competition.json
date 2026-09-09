@@ -28,10 +28,10 @@
   },
   "panels": [
     {
-      "id": 1, "type": "stat", "title": "current epoch / 6",
+      "id": 1, "type": "stat", "title": "current round epoch",
       "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 6}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
       "targets": [{"refId": "A", "expr": "max(urnetwork_competition_current_epoch{env=\"$env\",host=~\"$host\"})", "instant": true}]
     },
@@ -281,6 +281,21 @@
       },
       "options": {"displayMode": "basic", "orientation": "vertical", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
       "targets": [{"refId": "A", "expr": "max by (job_id, role, replicate, significance) (urnetwork_competition_live_evaluation_metric_value{env=\"$env\",host=~\"$host\",metric=\"throughput_p95_bytes_per_s\"}) and on(job_id) max by (job_id) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "{{role}} r{{replicate}} [{{significance}}]", "instant": true}]
+    },
+    {
+      "id": 26, "type": "stat", "title": "current era",
+      "description": "Zero is production or pre-round idle; one is the independently numbered fee-free staging era.",
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 62},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none", "min": 0, "max": 1,
+          "mappings": [{"type": "value", "options": {"0": {"text": "production"}, "1": {"text": "staging"}}}]
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_current_round_staging{env=\"$env\",host=~\"$host\"})", "instant": true}]
     }
   ]
 }

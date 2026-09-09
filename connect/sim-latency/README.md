@@ -175,18 +175,23 @@ round baseline are built only after the new source epoch is active.
 
 ## Competition lifecycle
 
-Before epoch 1, an operator may create one epoch-zero staging round through
-`POST /competition/generate-staging-round`. Its `round_id` lets Apex exercise
-submitter authentication, structural patch validation, immutable MinIO
-retention, canonical-patch cache identity, and status polling. Staging
-admissions are explicitly fee-free and never enter the evaluator FIFO,
-ranking, or leaderboard. Committing epoch 1 atomically cancels the staging
-round and every unfinished staging job; the canceled records remain retained
-audit evidence.
+Before production epoch 1, operators can run a staging era containing any
+number of sequential staging epochs numbered from zero. Each staging epoch
+uses the same authenticated submission, immutable MinIO retention, canonical
+patch cache, Redis FIFO, isolated evaluator, scoring, embargo, and poll-result
+publication paths as production. It is fee-free, always evaluates against the
+frozen source epoch 0, and finalizes automatically with no winner after its
+window closes and all accepted work drains. Staging never creates leaderboard
+rows, honesty-review candidates, source promotion, or a production winner.
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
-`./run-main.sh staging` creates this round idempotently and prints the public
-record that can be shared with the staging submitter.
+`./run-main.sh staging` creates or returns the current staging epoch and
+`./run-main.sh staging-worker` evaluates it through finalization. Calling
+`staging` again then creates the next epoch. `staging --replace-current` is an
+explicit reset that refuses to run while an evaluation is active. Committing
+production epoch 1 atomically ends the staging era and cancels queued staging
+work while retaining its audit evidence; transition refuses to race a running
+staging evaluation.
 
 Submissions are admitted throughout each seven-day window and evaluated as
 soon as possible in exact FIFO order. Closing an epoch stops admission but does

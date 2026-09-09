@@ -588,7 +588,7 @@ func TestReadinessFailureIncludesAuthenticatedCheckDetails(t *testing.T) {
 	}
 }
 
-func TestStagingAdmissionBypassesEvaluatorWithoutEnteringProduction(t *testing.T) {
+func TestStagingAdmissionBypassesProductionReadinessAndEntersQueue(t *testing.T) {
 	settings := validSettings()
 	roundId := server.NewId()
 	jobId := server.NewId()
@@ -627,9 +627,9 @@ func TestStagingAdmissionBypassesEvaluatorWithoutEnteringProduction(t *testing.T
 	}
 }
 
-func TestGenerateStagingRoundUsesServerOwnedEpochZero(t *testing.T) {
+func TestGenerateStagingRoundDefaultsToTwoDayWindow(t *testing.T) {
 	settings := validSettings()
-	settings.SeasonEndsAt = server.NowUtc().Add(24 * time.Hour)
+	settings.SeasonEndsAt = server.NowUtc().Add(72 * time.Hour)
 	settings.RetainUntil = settings.SeasonEndsAt.Add(24 * time.Hour)
 	round := &roundRecord{RoundResult: RoundResult{
 		RoundId: server.NewId(), Epoch: 0, Staging: true, Status: "open",
@@ -645,16 +645,76 @@ func TestGenerateStagingRoundUsesServerOwnedEpochZero(t *testing.T) {
 		},
 	}
 	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
-	result, evalError := service.GenerateStagingRound(context.Background())
+	before := server.NowUtc()
+	result, evalError := service.GenerateStagingRound(context.Background(), GenerateStagingRoundArgs{})
 	if evalError != nil || result == nil || result.RoundId != round.RoundId ||
-		result.Epoch != 0 || !result.Staging {
+		result.Epoch != 0 || !result.Staging || len(store.stagingArgs) != 1 {
 		t.Fatalf("generated staging round = %#v, %#v", result, evalError)
+	}
+	generated := store.stagingArgs[0]
+	if generated.OpensAt.Before(before) || generated.ClosesAt.Sub(generated.OpensAt) != defaultStagingRoundWindow ||
+		!generated.RevealAt.Equal(generated.ClosesAt) || store.stagingReplace[0] {
+		t.Fatalf("default staging args = %#v, replace=%t", generated, store.stagingReplace[0])
 	}
 
 	store.stagingRound = round
-	result, evalError = service.GenerateStagingRound(context.Background())
-	if result != nil || evalError == nil || evalError.Code != "staging_round_exists" {
+	result, evalError = service.GenerateStagingRound(context.Background(), GenerateStagingRoundArgs{})
+	if result != nil || evalError == nil || evalError.Code != "staging_round_open" {
 		t.Fatalf("duplicate staging round = %#v, %#v", result, evalError)
+	}
+}
+
+func TestGenerateStagingRoundPropagatesExplicitReplacement(t *testing.T) {
+	settings := validSettings()
+	now := server.NowUtc().Truncate(time.Second)
+	settings.SeasonEndsAt = now.Add(14 * 24 * time.Hour)
+	settings.RetainUntil = settings.SeasonEndsAt.Add(24 * time.Hour)
+	current := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 0, Staging: true, Status: "open",
+		OpensAt: now.Add(-time.Hour), ClosesAt: now.Add(time.Hour),
+	}}
+	next := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 1, Staging: true, Status: "scheduled",
+	}}
+	store := &fakeStore{
+		stagingRound:  current,
+		createStaging: next,
+		readiness: map[string]bool{
+			"configuration": true, "frozen_policy": true,
+			"retention_window": true, "database": true,
+			"artifact_archive": true, "api_image_identity": true,
+		},
+	}
+	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+	args := GenerateStagingRoundArgs{
+		OpensAt: now.Add(time.Minute), ClosesAt: now.Add(2 * time.Hour),
+		RevealAt: now.Add(2 * time.Hour), ReplaceCurrent: true,
+	}
+	result, evalError := service.GenerateStagingRound(context.Background(), args)
+	if evalError != nil || result == nil || result.RoundId != next.RoundId || len(store.stagingArgs) != 1 {
+		t.Fatalf("replacement staging round = %#v, %#v", result, evalError)
+	}
+	generated := store.stagingArgs[0]
+	if generated.OpensAt != args.OpensAt || generated.ClosesAt != args.ClosesAt ||
+		generated.RevealAt != args.RevealAt || !store.stagingReplace[0] {
+		t.Fatalf("replacement args = %#v, replace=%t", generated, store.stagingReplace[0])
+	}
+}
+
+func TestGenerateStagingRoundRejectsPartialOrOversizedWindow(t *testing.T) {
+	settings := validSettings()
+	now := server.NowUtc().Truncate(time.Second)
+	settings.SeasonEndsAt = now.Add(30 * 24 * time.Hour)
+	settings.RetainUntil = settings.SeasonEndsAt.Add(24 * time.Hour)
+	tests := []GenerateStagingRoundArgs{
+		{OpensAt: now, ClosesAt: now.Add(time.Hour)},
+		{OpensAt: now, ClosesAt: now.Add(8 * 24 * time.Hour), RevealAt: now.Add(8 * 24 * time.Hour)},
+		{OpensAt: now, ClosesAt: now.Add(30 * time.Second), RevealAt: now.Add(30 * time.Second)},
+	}
+	for _, args := range tests {
+		if _, evalError := normalizeStagingRoundArgs(settings, args, now); evalError == nil || evalError.Code != "invalid_staging_round_times" {
+			t.Errorf("staging args %#v accepted with error %#v", args, evalError)
+		}
 	}
 }
 
@@ -836,33 +896,39 @@ func jsonUnmarshal(value []byte, out any) error {
 }
 
 type fakeStore struct {
-	mu              sync.Mutex
-	claimJobs       []*queuedJob
-	claims          int
-	heartbeats      int
-	completed       []EvaluationOutcome
-	handbacks       int
-	readiness       map[string]bool
-	readyErr        error
-	round           *roundRecord
-	stagingRound    *roundRecord
-	reviewState     *CandidateReviewState
-	reviewErr       error
-	reviewCalls     int
-	createRound     *roundRecord
-	createErr       error
-	createRoundArgs []GenerateRoundArgs
-	createStaging   *roundRecord
-	createStageErr  error
-	enqueueJob      *queuedJob
-	enqueueHit      bool
-	enqueueErr      error
-	enqueueCalls    int
-	getJob          *queuedJob
-	getJobErr       error
+	mu               sync.Mutex
+	claimJobs        []*queuedJob
+	claims           int
+	heartbeats       int
+	completed        []EvaluationOutcome
+	handbacks        int
+	readiness        map[string]bool
+	readyErr         error
+	round            *roundRecord
+	stagingRound     *roundRecord
+	reviewState      *CandidateReviewState
+	reviewErr        error
+	reviewCalls      int
+	createRound      *roundRecord
+	createErr        error
+	createRoundArgs  []GenerateRoundArgs
+	createStaging    *roundRecord
+	createStageErr   error
+	stagingArgs      []GenerateRoundArgs
+	stagingReplace   []bool
+	finalizeStaging  *roundRecord
+	finalizeStageErr error
+	enqueueJob       *queuedJob
+	enqueueHit       bool
+	enqueueErr       error
+	enqueueCalls     int
+	getJob           *queuedJob
+	getJobErr        error
 }
 
-func (f *fakeStore) CreateStagingRound(context.Context, *Settings) (*roundRecord, error) {
+func (f *fakeStore) CreateStagingRound(_ context.Context, _ *Settings, args GenerateRoundArgs, replace bool) (*roundRecord, error) {
+	f.stagingArgs = append(f.stagingArgs, args)
+	f.stagingReplace = append(f.stagingReplace, replace)
 	return f.createStaging, f.createStageErr
 }
 
@@ -876,6 +942,13 @@ func (f *fakeStore) CurrentRound(context.Context, *Settings) (*roundRecord, erro
 }
 
 func (f *fakeStore) CurrentStagingRound(context.Context, *Settings) (*roundRecord, error) {
+	return f.stagingRound, nil
+}
+
+func (f *fakeStore) FinalizeStagingRound(context.Context, *Settings, int) (*roundRecord, error) {
+	if f.finalizeStaging != nil || f.finalizeStageErr != nil {
+		return f.finalizeStaging, f.finalizeStageErr
+	}
 	return f.stagingRound, nil
 }
 
@@ -1038,6 +1111,42 @@ func TestWorkerExitsWhenEpochWasAlreadyFinalized(t *testing.T) {
 	}
 }
 
+func TestWorkerFinalizesDrainedStagingEpochWithoutHonestyReview(t *testing.T) {
+	settings := validSettings()
+	finalizedAt := server.NowUtc()
+	current := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 4, Staging: true, Status: "grading",
+	}}
+	finalized := *current
+	finalized.Status = "finalized"
+	finalized.FinalizedAt = &finalizedAt
+	store := &fakeStore{stagingRound: current, finalizeStaging: &finalized}
+	worker, err := newWorkerWithImageDigest(settings, store, &fakeEvaluator{}, "box-a-worker", testWorkerImageDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := worker.finishEpoch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !finished || store.reviewCalls != 0 {
+		t.Fatalf("staging finish = %t, production reviews=%d", finished, store.reviewCalls)
+	}
+}
+
+func TestStagingEvaluationAlwaysUsesBaselineSourceEpoch(t *testing.T) {
+	for epoch := 0; epoch < 4; epoch++ {
+		round := &roundRecord{RoundResult: RoundResult{Epoch: epoch, Staging: true}}
+		if sourceEpoch := evaluationSourceEpoch(round); sourceEpoch != 0 {
+			t.Errorf("staging epoch %d selected source epoch %d", epoch, sourceEpoch)
+		}
+	}
+	production := &roundRecord{RoundResult: RoundResult{Epoch: 4, Staging: false}}
+	if sourceEpoch := evaluationSourceEpoch(production); sourceEpoch != 3 {
+		t.Fatalf("production epoch 4 selected source epoch %d", sourceEpoch)
+	}
+}
+
 func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
 	settings := validSettings()
 	raw, normalized := 10.0, 112.0
@@ -1100,11 +1209,40 @@ func TestStagingDiscardReasonIsVisibleWithoutDisclosingOtherErrors(t *testing.T)
 		result.EvalError == nil || result.EvalError.Code != "staging_discarded" {
 		t.Fatalf("staging discard view = %#v, %d, %#v", result, status, evalError)
 	}
+	job.EvalError = submissionError(
+		"staging_superseded",
+		"staging submission was discarded when the operator replaced its round",
+	)
+	result, status, evalError = service.GetScore(context.Background(), job.JobId, submitter)
+	if evalError != nil || status != http.StatusOK || result.State != "canceled" ||
+		result.EvalError == nil || result.EvalError.Code != "staging_superseded" {
+		t.Fatalf("staging supersede view = %#v, %d, %#v", result, status, evalError)
+	}
 
 	job.EvalError = submissionError("candidate_build_failed", "must remain embargoed")
 	result, _, _ = service.GetScore(context.Background(), job.JobId, submitter)
 	if result.EvalError != nil {
 		t.Fatalf("non-staging error escaped embargo = %#v", result)
+	}
+}
+
+func TestCanceledStagingRoundPublishesCleanupInsteadOfMeasuredOutcome(t *testing.T) {
+	rawScore := 10.0
+	normalizedScore := 100.0
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), Staging: true, State: "succeeded",
+			Score: &ScoreResult{ScoreSchema: ScoreSchema, RawScore: &rawScore, NormalizedScore: &normalizedScore},
+		},
+		Round: roundRecord{RoundResult: RoundResult{Staging: true}, Canceled: true},
+	}
+	view := scoreJobView(job, &Principal{Role: "submitter"}, server.NowUtc())
+	if view.State != "canceled" || view.Score != nil || view.EvalError == nil || view.EvalError.Code != "staging_discarded" {
+		t.Fatalf("canceled staging view = %#v", view)
+	}
+	operatorView := scoreJobView(job, &Principal{Role: "operator"}, server.NowUtc())
+	if operatorView.State != "succeeded" || operatorView.Score == nil || operatorView.EvalError != nil {
+		t.Fatalf("operator staging evidence view = %#v", operatorView)
 	}
 }
 
@@ -1171,6 +1309,50 @@ func TestHostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline(t *
 	check.RebaselinePassed = true
 	if check.Eligible(settings) {
 		t.Fatal("host claimed a re-baseline without binding a round")
+	}
+}
+
+func TestWorkerStagingEvaluationDoesNotRequireProductionRebaseline(t *testing.T) {
+	settings := validSettings()
+	startedAt := server.NowUtc()
+	job := &queuedJob{ScoreJobResult: ScoreJobResult{
+		JobId: server.NewId(), RoundId: server.NewId(), Staging: true,
+		StartedAt: &startedAt, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+	}}
+	store := &fakeStore{}
+	evaluator := &fakeEvaluator{outcomes: []EvaluationOutcome{{
+		Error: submissionError("candidate_build_failed", "synthetic staging failure"),
+	}}}
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.evaluateOne(context.Background(), job, HostSelfCheck{}); err != nil {
+		t.Fatal(err)
+	}
+	if evaluator.calls != 1 || store.handbacks != 0 || store.completedCount() != 1 {
+		t.Fatalf("staging evaluation calls=%d handbacks=%d completed=%d", evaluator.calls, store.handbacks, store.completedCount())
+	}
+}
+
+func TestWorkerProductionEvaluationRequiresMatchingRebaseline(t *testing.T) {
+	settings := validSettings()
+	startedAt := server.NowUtc()
+	job := &queuedJob{ScoreJobResult: ScoreJobResult{
+		JobId: server.NewId(), RoundId: server.NewId(), Staging: false,
+		StartedAt: &startedAt, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+	}}
+	store := &fakeStore{}
+	evaluator := &fakeEvaluator{}
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = worker.evaluateOne(context.Background(), job, HostSelfCheck{})
+	if err == nil || !strings.Contains(err.Error(), "not re-baselined") || evaluator.calls != 0 || store.handbacks != 1 {
+		t.Fatalf("production rebaseline error=%v calls=%d handbacks=%d", err, evaluator.calls, store.handbacks)
 	}
 }
 
@@ -3468,7 +3650,85 @@ func TestApexAdapterUsesFeeFreeStagingRound(t *testing.T) {
 	}
 }
 
-func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
+func TestApexAdapterPollsCompletedStagingAdmissionUntilPublished(t *testing.T) {
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	inputPatchSha256 := strings.Repeat("8", 64)
+	canonicalPatchSha256 := strings.Repeat("9", 64)
+	roundId := server.NewId()
+	jobId := server.NewId()
+	if _, err := store.BeginSubmission("staging-published", inputPatchSha256, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordRound("staging-published", roundId, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAdmission("staging-published", ScoreAcceptedResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "queued", StatusUrl: "/competition/score/" + jobId.String(),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.RecordPoll("staging-published", ScoreJobResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "completed",
+	}, now.Add(time.Minute))
+	if err != nil || record.Published || record.Score != nil || record.EvalError != nil {
+		t.Fatalf("embargoed staging poll = %#v, %v", record, err)
+	}
+	if pending, err := store.Pending(); err != nil || len(pending) != 1 || pending[0].JobId != jobId {
+		t.Fatalf("embargoed staging pending = %#v, %v", pending, err)
+	}
+	rawScore := 100.0
+	normalizedScore := 100.0
+	score := &ScoreResult{
+		ScoreSchema: ScoreSchema, RawScore: &rawScore, NormalizedScore: &normalizedScore,
+		Placeable: true, Gates: map[string]Gate{}, Significance: testScoreSignificance(false),
+	}
+	record, err = store.RecordPoll("staging-published", ScoreJobResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "succeeded", Score: score,
+	}, now.Add(2*time.Minute))
+	if err != nil || !record.Published || record.Score == nil || record.EvalError != nil {
+		t.Fatalf("published staging poll = %#v, %v", record, err)
+	}
+	if pending, err := store.Pending(); err != nil || len(pending) != 0 {
+		t.Fatalf("published staging pending = %#v, %v", pending, err)
+	}
+	failureJobId := server.NewId()
+	failureInputPatchSha256 := strings.Repeat("a", 64)
+	failureCanonicalPatchSha256 := strings.Repeat("b", 64)
+	if _, err := store.BeginSubmission("staging-published-failure", failureInputPatchSha256, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordRound("staging-published-failure", roundId, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAdmission("staging-published-failure", ScoreAcceptedResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "queued", StatusUrl: "/competition/score/" + failureJobId.String(),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.RecordPoll("staging-published-failure", ScoreJobResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "failed",
+		EvalError: submissionError("candidate_build_failed", "synthetic candidate failure"),
+	}, now.Add(2*time.Minute))
+	if err != nil || !record.Published || record.Score != nil || record.EvalError == nil ||
+		record.EvalError.Code != "candidate_build_failed" {
+		t.Fatalf("published staging failure = %#v, %v", record, err)
+	}
+}
+
+func TestCompetitionActiveStagingRoundIsDiscardedBeforeProductionEra(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -3495,7 +3755,9 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 			})
 		})
 
-		stagingRound, err := store.CreateStagingRound(ctx, settings)
+		stagingRound, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
 		if err != nil {
 			t.Fatalf("CreateStagingRound: %v", err)
 		}
@@ -3525,13 +3787,6 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 			"staging identity changed",
 			stagingRound.RoundId,
 		)
-		assertRoundUpdateRejected(
-			`UPDATE competition_round SET finalized_at = $2 WHERE round_id = $1`,
-			"staging round cannot be finalized",
-			stagingRound.RoundId,
-			settings.SeasonEndsAt,
-		)
-
 		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("staging-api"), settings.PatchPolicy)
 		if patchErr != nil {
 			t.Fatal(patchErr)
@@ -3547,6 +3802,12 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 		if err != nil || hit || job == nil || !job.Staging || job.State != "queued" {
 			t.Fatalf("staging enqueue = %#v, hit=%t, err=%v", job, hit, err)
 		}
+		assertRoundUpdateRejected(
+			`UPDATE competition_round SET finalized_at = $2 WHERE round_id = $1`,
+			"active evaluations",
+			stagingRound.RoundId,
+			settings.SeasonEndsAt,
+		)
 		cached, hit, err := store.Enqueue(
 			ctx,
 			settings,
@@ -3563,12 +3824,25 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 			queuedSignals, err = client.LLen(ctx, fifoListKey).Result()
 			server.Raise(err)
 		})
-		if queuedSignals != 0 {
-			t.Fatalf("staging admission emitted %d evaluator FIFO signals", queuedSignals)
+		if queuedSignals != 1 {
+			t.Fatalf("staging admission emitted %d evaluator FIFO signals, want 1", queuedSignals)
 		}
 		claimed, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
-		if err != nil || claimed != nil {
+		if err != nil || claimed == nil || claimed.JobId != job.JobId || !claimed.Staging {
 			t.Fatalf("worker claimed staging job = %#v, %v", claimed, err)
+		}
+		if _, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, true); !errors.Is(err, ErrEvaluationRunning) {
+			t.Fatalf("running staging replacement error = %v", err)
+		}
+		if _, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}); !errors.Is(err, ErrEvaluationRunning) {
+			t.Fatalf("production transition during staging evaluation error = %v", err)
+		}
+		if err := store.HandBack(ctx, "worker-a", job.JobId, "staging-transition-test"); err != nil {
+			t.Fatalf("hand back staging evaluation: %v", err)
 		}
 
 		productionRound, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
@@ -3605,8 +3879,140 @@ func TestCompetitionStagingRoundIsDiscardedBeforeEpochOne(t *testing.T) {
 		if err != nil || !storedStaging.Canceled || storedStaging.Status != "canceled" {
 			t.Fatalf("retained staging audit round = %#v, %v", storedStaging, err)
 		}
-		if _, err := store.CreateStagingRound(ctx, settings); !errors.Is(err, ErrSeasonStarted) {
+		if _, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false); !errors.Is(err, ErrSeasonStarted) {
 			t.Fatalf("post-start staging round error = %v", err)
+		}
+	})
+}
+
+func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.ArtifactRoot = t.TempDir()
+		settings.EvaluationPolicy.ProviderCount = 5
+		settings.workloadGenerator = nil
+		settings.artifactArchive = &blobArtifactArchive{
+			store: server.NewLocalBlobStore(t.TempDir(), "competition").(server.RetainedBlobStore),
+		}
+		settings.CompetitionId += "-staging-era"
+		currentTime := server.NowUtc().Add(-2 * time.Hour).Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		fifoListKey, fifoMemberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, fifoListKey, fifoMemberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), fifoListKey, fifoMemberKey).Err()
+			})
+		})
+
+		first, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil || first.Epoch != 0 || !first.Staging {
+			t.Fatalf("first staging epoch = %#v, %v", first, err)
+		}
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("staging-evaluated"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		job, hit, err := store.Enqueue(
+			ctx,
+			settings,
+			first.RoundId,
+			patch,
+			"macrocosmos-stage",
+			testApiImageDigest(),
+		)
+		if err != nil || hit || job == nil {
+			t.Fatalf("staging enqueue = %#v, hit=%t, err=%v", job, hit, err)
+		}
+		claimed, err := store.Claim(ctx, settings, "staging-worker", testWorkerImageDigest())
+		if err != nil || claimed == nil || claimed.JobId != job.JobId || !claimed.Staging {
+			t.Fatalf("staging claim = %#v, %v", claimed, err)
+		}
+		raw, normalized := 100.0, 100.0
+		_, err = store.Complete(ctx, settings, "staging-worker", claimed.JobId, EvaluationOutcome{
+			Score: &ScoreResult{
+				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
+				Placeable: true, TakeoverEligible: true,
+				Gates:        map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
+				Significance: testScoreSignificance(true),
+			},
+		})
+		if err != nil {
+			t.Fatalf("complete staging evaluation: %v", err)
+		}
+		currentTime = first.ClosesAt.Add(time.Second)
+		finalized, err := store.FinalizeStagingRound(ctx, settings, first.Epoch)
+		if err != nil || finalized.FinalizedAt == nil || finalized.WinnerJobId != nil || finalized.Status != "finalized" {
+			t.Fatalf("finalized staging epoch = %#v, %v", finalized, err)
+		}
+		service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+		visible, status, evalError := service.GetScore(
+			ctx,
+			job.JobId,
+			&Principal{Id: "macrocosmos-stage", Role: "submitter"},
+		)
+		if evalError != nil || status != http.StatusOK || visible.State != "succeeded" || visible.Score == nil {
+			t.Fatalf("published staging result = %#v, %d, %#v", visible, status, evalError)
+		}
+		info, evalError := service.Info(ctx)
+		if evalError != nil || info.StagingRound == nil || info.StagingRound.Status != "finalized" ||
+			info.StagingRound.RevealedSeed == nil || info.StagingRound.ProvidersUrl == "" {
+			t.Fatalf("finalized staging info = %#v, %#v", info, evalError)
+		}
+		providers, digest, workloadStatus, evalError := service.GetRoundWorkload(ctx, first.RoundId)
+		if evalError != nil || workloadStatus != http.StatusOK || len(providers) == 0 || digest != first.ProvidersSha256 {
+			t.Fatalf("staging workload reveal bytes=%d digest=%q status=%d error=%#v", len(providers), digest, workloadStatus, evalError)
+		}
+		leaderboards, err := store.Leaderboards(ctx, settings)
+		if err != nil || len(leaderboards.Epochs) != 0 {
+			t.Fatalf("staging production leaderboards = %#v, %v", leaderboards, err)
+		}
+
+		second, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil || second.Epoch != 1 || !second.Staging {
+			t.Fatalf("second staging epoch = %#v, %v", second, err)
+		}
+		if _, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false); !errors.Is(err, ErrConflict) {
+			t.Fatalf("parallel staging epoch error = %v", err)
+		}
+		third, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, true)
+		if err != nil || third.Epoch != 2 || !third.Staging {
+			t.Fatalf("replacement staging epoch = %#v, %v", third, err)
+		}
+		superseded, err := store.GetRound(ctx, settings, second.RoundId)
+		if err != nil || !superseded.Canceled || superseded.Status != "canceled" {
+			t.Fatalf("superseded staging epoch = %#v, %v", superseded, err)
+		}
+
+		production, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		})
+		if err != nil || production.Epoch != 1 || production.Staging {
+			t.Fatalf("first production epoch = %#v, %v", production, err)
+		}
+		if current, err := store.CurrentStagingRound(ctx, settings); err != nil || current != nil {
+			t.Fatalf("staging era remained current after production = %#v, %v", current, err)
+		}
+		retainedFirst, err := store.GetRound(ctx, settings, first.RoundId)
+		if err != nil || retainedFirst.Canceled || retainedFirst.FinalizedAt == nil {
+			t.Fatalf("finalized staging evidence changed at production = %#v, %v", retainedFirst, err)
 		}
 	})
 }

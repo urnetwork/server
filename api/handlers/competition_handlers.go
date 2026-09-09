@@ -32,7 +32,7 @@ func CompetitionGenerateRound(w http.ResponseWriter, r *http.Request) {
 	controller.GenerateRoundHandler(w, r)
 }
 
-// CompetitionGenerateStagingRound creates the one pre-season API-test round.
+// CompetitionGenerateStagingRound advances the pre-production staging era.
 func CompetitionGenerateStagingRound(w http.ResponseWriter, r *http.Request) {
 	controller.GenerateStagingRoundHandler(w, r)
 }

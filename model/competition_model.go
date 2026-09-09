@@ -90,6 +90,17 @@ type CompetitionGenerateRoundArgs struct {
 	RevealAt time.Time `json:"reveal_at"`
 }
 
+// Operator-selected staging timing is optional. Omitting all three timestamps
+// creates an immediately open 48-hour round. Replacing a current round is an
+// explicit destructive staging-only transition; production rounds are never
+// affected.
+type CompetitionGenerateStagingRoundArgs struct {
+	OpensAt        time.Time `json:"opens_at,omitempty"`
+	ClosesAt       time.Time `json:"closes_at,omitempty"`
+	RevealAt       time.Time `json:"reveal_at,omitempty"`
+	ReplaceCurrent bool      `json:"replace_current,omitempty"`
+}
+
 type CompetitionRoundResult struct {
 	RoundId            server.Id  `json:"round_id"`
 	Epoch              int        `json:"epoch"`

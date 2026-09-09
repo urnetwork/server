@@ -165,10 +165,11 @@ results omitted.
 
 Every evaluator result must retain an authenticated `baseline.json` created
 from the same round workload and frozen replicate policy, in addition to the
-candidate score, accounting, resources, and completion marker. A host is
-eligible for submissions only when its fresh self-check names that exact round
-in `rebaseline_round_id`; round generation intentionally checks the authoritative-host
-containment boundary before this round-scoped attestation can exist.
+candidate score, accounting, resources, and completion marker. Production
+evaluation additionally requires the fresh host self-check to name that exact
+round in `rebaseline_round_id`. Fee-free staging evaluation retains the
+per-job same-round baseline but deliberately omits this separate production
+launch gate so several integration epochs can run without promotion work.
 
 ## Verification
 
@@ -201,9 +202,8 @@ The progress record is retained with the attempt, but it is not served by the
 public competition API; public results still appear only after post-review
 epoch finalization, and the completed sealed score remains authoritative.
 
-The current public Apex sandbox/spec contract does not directly expose an
-external scoring-service adapter and its standard resource ceilings are below
-this evaluator's host boundary. The precise staging decision that must be made
-with Macrocosmos is recorded in
-[`APEX-INTEGRATION-GAP.md`](APEX-INTEGRATION-GAP.md); do not claim Apex registry
-or staging completion until one of those integration paths is accepted.
+The public Apex sandbox/spec contract does not directly expose an external
+scoring-service adapter and its standard resource ceilings are below this
+evaluator's host boundary. Macrocosmos approved the external-adapter design;
+the remaining activation records and staging-era proof are tracked in
+[`APEX-OPEN-QUESTIONS.md`](../launch/APEX-OPEN-QUESTIONS.md).

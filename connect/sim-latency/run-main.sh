@@ -12,19 +12,26 @@ operator_token_file=${SIM_LATENCY_OPERATOR_TOKEN_FILE:-}
 reviewer_id=${SIM_LATENCY_REVIEWER_ID:-}
 first_opens_at=${SIM_LATENCY_FIRST_OPENS_AT:-}
 preparation_seconds=${SIM_LATENCY_PREPARATION_SECONDS:-57600}
+staging_window_seconds=${SIM_LATENCY_STAGING_WINDOW_SECONDS:-172800}
 
 usage() {
     cat <<'EOF'
 Usage:
-  run-main.sh staging
+  run-main.sh staging [--replace-current]
+  run-main.sh staging-worker
   run-main.sh run
   run-main.sh status [--epoch N]
   run-main.sh candidate --epoch N
   run-main.sh approve --epoch N --job-id ID --evidence FILE --reason TEXT
   run-main.sh reject --epoch N --job-id ID --evidence FILE --reason TEXT
 
-Required environment for run:
+Required environment for authenticated commands:
   SIM_LATENCY_OPERATOR_TOKEN_FILE  private file containing the operator token
+
+Also required for staging-worker and run:
+  WARP_IMAGE_DIGEST                exact deployed worker sha256 image identity
+
+Also required for production run/review:
   SIM_LATENCY_REVIEWER_ID          stable agent/operator reviewer identity
 
 Optional environment:
@@ -34,6 +41,8 @@ Optional environment:
                                     WORKSPACE/.sim-latency-state
   SIM_LATENCY_FIRST_OPENS_AT       RFC3339 start for epoch 1; default is now
   SIM_LATENCY_PREPARATION_SECONDS  delay before later epochs open; default 57600
+  SIM_LATENCY_STAGING_WINDOW_SECONDS
+                                    staging admission window; default 172800
 
 Exit 20 means an authenticated significant candidate is waiting for the
 mandatory honesty and safety review documented in RUN-MAIN.md.
@@ -163,19 +172,59 @@ create_round() {
 }
 
 staging_round() {
-    local info response
+    local replace_current=$1
+    local info response status request epoch
     info=$(api_request GET /competition/info)
     if [[ $(jq -r '.active_round.epoch // 0' <<<"$info") != 0 ]]; then
         fail "the production season has started; staging is no longer available"
     fi
     response=$(jq -c '.staging_round // empty' <<<"$info")
-    if [[ -z $response ]]; then
-        response=$(api_request POST /competition/generate-staging-round)
+    status=$(jq -r '.status // empty' <<<"$response")
+    if [[ -z $response || $status == finalized || $replace_current == true ]]; then
+        [[ $staging_window_seconds =~ ^[0-9]+$ ]] &&
+            (( 60 <= staging_window_seconds && staging_window_seconds <= 604800 )) ||
+            fail "SIM_LATENCY_STAGING_WINDOW_SECONDS must be in 60..604800"
+        request=$(jq -cn --argjson replace "$replace_current" \
+            --argjson window "$staging_window_seconds" \
+            'now as $opens | ($opens + $window) as $closes | {
+                opens_at:($opens | todateiso8601),
+                closes_at:($closes | todateiso8601),
+                reveal_at:($closes | todateiso8601),
+                replace_current:$replace
+            }')
+        response=$(api_request POST /competition/generate-staging-round "$request")
+    elif [[ $status != scheduled && $status != open && $status != grading ]]; then
+        fail "current staging epoch has unsupported status: $status"
     fi
-    jq -e '.epoch == 0 and .staging == true and .status == "open" and .round_id != null' \
+    jq -e '.epoch >= 0 and .staging == true and (.status == "scheduled" or .status == "open" or .status == "grading") and .round_id != null' \
         <<<"$response" >/dev/null || fail "API returned an invalid staging-round record"
-    write_evidence "staging-round.json" "$response"
+    epoch=$(jq -er '.epoch' <<<"$response")
+    write_evidence "staging-epoch-$epoch-round.json" "$response"
     printf '%s\n' "$response" | jq .
+}
+
+run_staging_worker() {
+    local info epoch status opens_at
+    info=$(api_request GET /competition/info)
+    [[ $(jq -r '.active_round // empty' <<<"$info") == "" ]] ||
+        fail "the production era has started; use run-main.sh run"
+    epoch=$(jq -er '.staging_round.epoch' <<<"$info") || fail "there is no current staging epoch"
+    status=$(jq -er '.staging_round.status' <<<"$info")
+    case $status in
+        scheduled|open|grading)
+            opens_at=$(jq -er '.staging_round.opens_at' <<<"$info")
+            run_worker staging "$epoch" "$opens_at"
+            ;;
+        finalized)
+            return 0
+            ;;
+        *)
+            fail "API returned unknown staging status: $status"
+            ;;
+    esac
+    info=$(api_request GET /competition/info)
+    [[ $(jq -r '.staging_round.status // empty' <<<"$info") == finalized ]] ||
+        fail "staging worker exited before the epoch finalized"
 }
 
 review_json() {
@@ -215,15 +264,16 @@ present_candidate_or_promote_no_winner() {
 }
 
 run_worker() {
-    local epoch=$1
-    local opens_at=$2
+    local era=$1
+    local epoch=$2
+    local opens_at=$3
     local worker=$state_dir/bin/competitionworker
     mkdir -p "$state_dir/bin"
     go build -trimpath -buildvcs=true -o "$worker" "$server_root/cli/competitionworker"
     chmod 0500 "$worker"
-    printf 'Epoch %d opens at %s. The worker heartbeat starts now; claims wait for the open boundary.\n' \
-        "$epoch" "$opens_at" >&2
-    "$worker" --worker_id="sim-latency-epoch-$epoch"
+    printf '%s epoch %d opens at %s. The worker heartbeat starts now; claims wait for the open boundary.\n' \
+        "$era" "$epoch" "$opens_at" >&2
+    "$worker" --worker_id="sim-latency-$era-epoch-$epoch"
 }
 
 run_season() {
@@ -250,7 +300,7 @@ run_season() {
         case $status in
             scheduled|open|grading)
                 opens_at=$(jq -er '.active_round.opens_at' <<<"$info")
-                run_worker "$epoch" "$opens_at"
+                run_worker production "$epoch" "$opens_at"
                 present_candidate_or_promote_no_winner "$epoch" || return $?
                 ;;
             finalized)
@@ -354,8 +404,17 @@ command=${1:-}
 shift || true
 case $command in
     staging)
-        [[ $# == 0 ]] || fail "staging takes no arguments"
-        staging_round
+        replace_current=false
+        if [[ ${1:-} == --replace-current ]]; then
+            replace_current=true
+            shift
+        fi
+        [[ $# == 0 ]] || fail "staging accepts only --replace-current"
+        staging_round "$replace_current"
+        ;;
+    staging-worker)
+        [[ $# == 0 ]] || fail "staging-worker takes no arguments"
+        run_staging_worker
         ;;
     run)
         [[ $# == 0 ]] || fail "run takes no arguments"

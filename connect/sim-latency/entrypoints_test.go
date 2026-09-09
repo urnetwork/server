@@ -1,11 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -93,6 +98,9 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	for _, required := range []string{
 		"set -euo pipefail",
 		"/competition/generate-staging-round",
+		"staging-worker",
+		"--replace-current",
+		"SIM_LATENCY_STAGING_WINDOW_SECONDS",
 		".staging == true",
 		"/competition/generate-round",
 		".staging == false",
@@ -125,6 +133,87 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	} {
 		if !strings.Contains(string(seasonRunbook), required) {
 			t.Errorf("RUN-MAIN.md is missing agent handoff contract %q", required)
+		}
+	}
+}
+
+func TestRunMainAdvancesAndExplicitlyReplacesStagingRounds(t *testing.T) {
+	cases := []struct {
+		name           string
+		currentStatus  string
+		replaceCurrent bool
+	}{
+		{name: "advance finalized", currentStatus: "finalized", replaceCurrent: false},
+		{name: "replace open", currentStatus: "open", replaceCurrent: true},
+	}
+	for _, c := range cases {
+		requestCount := 0
+		var stagingRequest struct {
+			OpensAt        time.Time `json:"opens_at"`
+			ClosesAt       time.Time `json:"closes_at"`
+			RevealAt       time.Time `json:"reveal_at"`
+			ReplaceCurrent bool      `json:"replace_current"`
+		}
+		apiServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			if request.Header.Get("Authorization") != "Bearer synthetic-stage-token" {
+				response.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			switch {
+			case request.Method == http.MethodGet && request.URL.Path == "/competition/info":
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"active_round": nil,
+					"staging_round": map[string]any{
+						"round_id": "00000000-0000-0000-0000-000000000001",
+						"epoch":    0, "staging": true, "status": c.currentStatus,
+					},
+				})
+			case request.Method == http.MethodPost && request.URL.Path == "/competition/generate-staging-round":
+				requestCount++
+				decoder := json.NewDecoder(request.Body)
+				decoder.DisallowUnknownFields()
+				if err := decoder.Decode(&stagingRequest); err != nil {
+					t.Errorf("%s staging request: %v", c.name, err)
+				}
+				response.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"round_id": "00000000-0000-0000-0000-000000000002",
+					"epoch":    1, "staging": true, "status": "open",
+				})
+			default:
+				response.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		tokenPath := filepath.Join(t.TempDir(), "operator.token")
+		if err := os.WriteFile(tokenPath, []byte("synthetic-stage-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sourceConfigPath := filepath.Join(t.TempDir(), "sim-latency.yml")
+		if err := os.WriteFile(sourceConfigPath, []byte("epochs:\n  - epoch: 0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		arguments := []string{"./run-main.sh", "staging"}
+		if c.replaceCurrent {
+			arguments = append(arguments, "--replace-current")
+		}
+		command := exec.Command("/bin/bash", arguments...)
+		command.Env = append(os.Environ(),
+			"SIM_LATENCY_API_URL="+apiServer.URL,
+			"SIM_LATENCY_OPERATOR_TOKEN_FILE="+tokenPath,
+			"SIM_LATENCY_SOURCE_CONFIG="+sourceConfigPath,
+			"SIM_LATENCY_STATE_DIR="+t.TempDir(),
+			"SIM_LATENCY_STAGING_WINDOW_SECONDS=120",
+		)
+		output, err := command.CombinedOutput()
+		apiServer.Close()
+		if err != nil {
+			t.Fatalf("%s run-main staging: %v\n%s", c.name, err, output)
+		}
+		if requestCount != 1 || stagingRequest.ReplaceCurrent != c.replaceCurrent ||
+			!stagingRequest.RevealAt.Equal(stagingRequest.ClosesAt) ||
+			stagingRequest.ClosesAt.Sub(stagingRequest.OpensAt) != 2*time.Minute {
+			t.Errorf("%s request count=%d body=%+v", c.name, requestCount, stagingRequest)
 		}
 	}
 }

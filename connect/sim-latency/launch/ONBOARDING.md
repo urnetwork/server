@@ -19,17 +19,22 @@ submission. There is no per-epoch submission-count cap. A duplicate canonical
 patch reuses the existing immutable job/cache identity and must not collect a
 second fee.
 
-Before epoch 1, `GET /competition/info` may expose `staging_round` with epoch
-zero. It exists only to test authentication, patch validation, immutable
-admission/cache identity, and polling. A response carrying `staging: true` is
-fee-free, is never evaluated or ranked, remains `queued` during staging, and
-becomes `canceled` when epoch 1 is committed. Apex must prefer an open
-`active_round` whenever one exists and must never present a staging job as a
-competition result.
+Before production epoch 1, `GET /competition/info` may expose the current
+`staging_round`. The staging era begins at epoch zero and can advance through
+multiple sequential epochs. A response carrying `staging: true` is fee-free
+and follows the production admission, cache, FIFO, isolated evaluation,
+scoring, embargo, and authenticated polling paths against frozen source epoch
+zero. After close and complete drain, it finalizes automatically with no winner
+and makes each job's score or typed failure visible through its status URL. It
+does not create a production leaderboard row, candidate review, or promotion.
 
-UR creates or retrieves this identity with `run-main.sh staging`; the operator
-token stays inside UR. Apex receives the public `round_id` and uses its normal
-submitter token for `POST /competition/score` and subsequent status polling.
+UR creates or retrieves each identity with `run-main.sh staging` and runs it
+with `run-main.sh staging-worker`; the operator token stays inside UR. Apex
+receives the public `round_id` and uses its normal submitter token for
+`POST /competition/score` and subsequent status polling. Apex must prefer an
+open `active_round` once production exists. Creating production epoch 1 ends
+the staging era and cancels queued staging work; it refuses to race a running
+evaluation.
 
 ## Authentication and API flow
 
@@ -48,9 +53,10 @@ The adapter sends it as `Authorization: Bearer TOKEN`.
 4. Poll the exact status URL. Preserve identity across HTTP 429 and retriable
    5xx responses; use bounded exponential backoff and never resubmit under a
    new identity to bypass FIFO order or the fee boundary.
-5. Before finalization, non-operator responses expose state only. After every
-   job is terminal and review finalizes the epoch, read the public leaderboard,
-   reveal, and authenticated workload.
+5. Before finalization, non-operator responses expose state only. A finalized
+   staging epoch publishes each outcome at its status URL. After production
+   review finalizes an epoch, read its public leaderboard, reveal, and
+   authenticated workload.
 
 The authoritative schema is
 [`sn/api/competition.yml`](../../../../sn/api/competition.yml). The Go Apex

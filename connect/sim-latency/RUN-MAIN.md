@@ -60,13 +60,30 @@ Run launch preflight and retain its passing JSON before the first epoch. Then:
 ```sh
 cd /home/by/urnetwork/server/connect/sim-latency
 ./run-main.sh staging
+./run-main.sh staging-worker
 ```
 
-The idempotent `staging` command creates the sole epoch-zero API-test round or
-returns the existing one. Share its `round_id` with the Apex staging
-integration. It admits fee-free test patches but never queues evaluator work.
-Starting epoch 1 cancels the staging identity and its unfinished jobs in the
-same transaction that commits the production round.
+The staging era can contain any number of sequential epochs, beginning at
+epoch zero. `staging` creates a 48-hour round by default, or returns the current
+scheduled/open/grading round. Share its `round_id` with the Apex integration.
+Fee-free staging patches traverse the real FIFO, isolation, evaluation,
+scoring, embargo, and authenticated polling paths. Every staging epoch uses
+frozen source epoch zero and automatically finalizes with no winner once it
+closes and the worker drains all accepted jobs. It creates no leaderboard,
+honesty-review, promotion, or production-winner state.
+
+Staging still produces the candidate's authenticated same-round baseline and
+score bundle, but it does not require the separately promoted host rebaseline
+identity used as a production launch gate. Production retains that exact-round
+requirement.
+
+After `staging-worker` exits, run `staging` again to activate the next staging
+epoch. Set `SIM_LATENCY_STAGING_WINDOW_SECONDS` to 60 through 604800 seconds
+when a different test window is needed. `staging --replace-current` explicitly
+cancels a legacy or unwanted current staging epoch and its queued jobs before
+creating the next one; it fails closed if any job is running. Starting
+production epoch 1 ends the staging era and atomically cancels queued staging
+work; it refuses to race an evaluation that is still running.
 
 After the staging admission and polling proof is captured, start the season:
 

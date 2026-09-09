@@ -268,8 +268,9 @@ For every later round, derive both expected values from its selected source
 epoch in `config/main/sim-latency.yml`; do not copy epoch 0 values forward.
 
 On first boot, the worker must heartbeat before round generation. An
-authenticated `/readyz` may still return 503 because the old staging round is
-the last promoted rebaseline. That is expected; do not open submissions.
+authenticated `/readyz` remains 503 until the host has an authenticated
+rebaseline matching the current round and its selected source epoch. That is
+expected during preparation; do not open submissions until it passes.
 
 Prepare the first strict JSON request with `closes_at = opens_at + 7 days` and
 `reveal_at = closes_at`. Create it far enough before opening to complete the
