@@ -95,6 +95,14 @@ func NetworkCreate(
 			)
 		}
 
+		// the onboarding campaign: the account exists and can be mailed now
+		// (a verification-pending sign-up enters from AuthVerify instead)
+		userAuth := ""
+		if result.UserAuth != nil {
+			userAuth = *result.UserAuth
+		}
+		StartOnboardingCampaign(session, result.Network.NetworkId, userAuth)
+
 	}
 
 	return result, nil

@@ -7469,4 +7469,67 @@ var migrations = []any{
 	newSqlMigration(`
 		ALTER TABLE stripe_customer ADD COLUMN billing_country varchar(2) NULL
 	`),
+
+	// ----- onboarding campaign (mmm/onboarding/PLAN.md "THE EMAIL SEQUENCE") -----
+	// One row per network: which path it is on (A saw the in-app offer, B did
+	// not), whether it can receive email at all, the local time zone and locale
+	// used to place and render the sends, the email.sequence experiment variant,
+	// when each step went out, what is scheduled next, and why it stopped.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding (
+			network_id uuid NOT NULL,
+			created_at timestamp NOT NULL,
+			path varchar(1) NOT NULL DEFAULT '',
+			email bool NOT NULL,
+			time_zone varchar(64) NOT NULL DEFAULT '',
+			platform varchar(16) NOT NULL DEFAULT '',
+			locale varchar(32) NOT NULL DEFAULT '',
+			country varchar(2) NOT NULL DEFAULT '',
+			experiment_id varchar(64) NOT NULL DEFAULT '',
+			email_variant varchar(64) NOT NULL DEFAULT '',
+			e1_sent_at timestamp NULL,
+			e2_sent_at timestamp NULL,
+			e3_sent_at timestamp NULL,
+			e4_sent_at timestamp NULL,
+			e5_sent_at timestamp NULL,
+			last_step varchar(8) NOT NULL DEFAULT '',
+			next_step varchar(8) NOT NULL DEFAULT '',
+			next_send_at timestamp NULL,
+			exit_reason varchar(32) NOT NULL DEFAULT '',
+			exited_at timestamp NULL,
+			bounced bool NOT NULL DEFAULT false,
+			complained bool NOT NULL DEFAULT false,
+			complained_step varchar(8) NOT NULL DEFAULT '',
+			send_failures int NOT NULL DEFAULT 0,
+			last_send_error varchar(256) NOT NULL DEFAULT '',
+			PRIMARY KEY (network_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_next_send_at
+		ON network_onboarding (next_send_at)
+		WHERE next_send_at IS NOT NULL
+	`),
+	// One row per campaign email sent through Brevo, keyed by Brevo's message id
+	// so the transactional webhook events (delivered/opened/click/bounce/
+	// complaint) can be attributed to the network and step.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_email (
+			message_id varchar(256) NOT NULL,
+			network_id uuid NOT NULL,
+			step varchar(8) NOT NULL,
+			template varchar(32) NOT NULL,
+			variant varchar(32) NOT NULL,
+			experiment varchar(64) NOT NULL DEFAULT '',
+			experiment_variant varchar(64) NOT NULL DEFAULT '',
+			template_id int NOT NULL,
+			locale varchar(32) NOT NULL DEFAULT '',
+			sent_at timestamp NOT NULL,
+			PRIMARY KEY (message_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_email_network_id_sent_at
+		ON network_onboarding_email (network_id, sent_at)
+	`),
 }

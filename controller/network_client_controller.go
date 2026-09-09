@@ -33,6 +33,9 @@ func AuthNetworkClient(
 		// onboarding attribution: an app open that follows a campaign landing
 		// click within 48h (one cheap query, never fails the caller)
 		AttributeAppOpen(clientSession, clientSession.ByJwt.NetworkId)
+		// the device's zone, locale and platform place and render the
+		// onboarding campaign's emails
+		RecordOnboardingClientContext(clientSession, clientSession.ByJwt.NetworkId, authClient.TimeZone, authClient.Locale, authClient.DeviceSpec)
 	}
 	if err != nil || result == nil || verifySettings == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil {
 		return result, err

@@ -38,6 +38,38 @@ type OnboardingBrevoConfig struct {
 	// "not uploaded": the campaign engine must skip the step rather than send it.
 	Templates  map[string]map[string]map[string]int `yaml:"templates"`
 	TestListId int                                  `yaml:"test_list_id"`
+	// CompanyLine is the footer company line every campaign template renders as
+	// `{{ params.company_line }}` (the postal address never lives in a template).
+	// Empty = the account mailer's line (OnboardingCompanyLineDefault).
+	CompanyLine string `yaml:"company_line"`
+	// ReplyTo is the monitored reply address on every campaign send. Empty =
+	// support@ur.io.
+	ReplyTo string `yaml:"reply_to"`
+	// WebhookUrl is the public URL of POST /updates/brevo that the transactional
+	// webhook is registered against (bringyourctl onboarding webhook-ensure).
+	// Empty = the registration is skipped.
+	WebhookUrl string `yaml:"webhook_url"`
+}
+
+// OnboardingCompanyLineDefault mirrors the account mailer's footer line
+// (controller/email_templates/_layout.txt) so the two mails match when the
+// config does not override it.
+const OnboardingCompanyLineDefault = "BringYour, Inc. · 2261 Market Street #5245, San Francisco, CA 94114, United States"
+
+// OnboardingAppleOfferCodesConfig is the non-secret side of the App Store
+// Connect one-time offer code top-up (mmm/onboarding/PLAN.md "THE OFFER" App
+// Store). The credentials live in vault/main/apple_app_store_connect.yml.
+type OnboardingAppleOfferCodesConfig struct {
+	// OfferCodeId is the App Store Connect `subscriptionOfferCodes` resource id
+	// of the onboarding25 offer code. Empty = the top-up task is inert and the
+	// custom code stays the only App Store path.
+	OfferCodeId string `yaml:"offer_code_id"`
+	// BatchSize per top-up (Apple's minimum is 500)
+	BatchSize int `yaml:"batch_size"`
+	// MinAvailable: a top-up runs when fewer unexpired, unassigned codes remain
+	MinAvailable int `yaml:"min_available"`
+	// ExpiryDays of a batch (the offer's validity, 5)
+	ExpiryDays int `yaml:"expiry_days"`
 }
 
 // Template variant and locale fallbacks.
@@ -103,6 +135,9 @@ type OnboardingOfferConfig struct {
 	// pool is empty or not configured
 	AppleCustomOfferCode      string `yaml:"apple_custom_offer_code"`
 	AppleOfferCodeBatchPrefix string `yaml:"apple_offer_code_batch_prefix"`
+	// Apple is the App Store Connect one-time code top-up (S2); credentials in
+	// vault/main/apple_app_store_connect.yml
+	Apple OnboardingAppleOfferCodesConfig `yaml:"apple"`
 }
 
 type OnboardingScheduleConfig struct {
@@ -141,11 +176,45 @@ type OnboardingExperiment struct {
 }
 
 type OnboardingConfig struct {
+	// Enabled gates every outbound side effect of the campaign engine: Brevo
+	// sends, contact upserts, the webhook registration and the App Store
+	// Connect code batches. Default false: the engine still creates rows and
+	// runs its schedule, and logs each send it would have made at V(1).
+	Enabled bool `yaml:"enabled"`
+	// SiteUrl is the base of the landing and feedback links (https://ur.io).
+	SiteUrl     string                   `yaml:"site_url"`
 	Brevo       OnboardingBrevoConfig    `yaml:"brevo"`
 	Offer       OnboardingOfferConfig    `yaml:"offer"`
 	Schedule    OnboardingScheduleConfig `yaml:"schedule"`
 	Experiment  OnboardingHoldoutConfig  `yaml:"experiment"`
 	Experiments []*OnboardingExperiment  `yaml:"experiments"`
+}
+
+// OnboardingSiteUrlDefault is the site the campaign links point at.
+const OnboardingSiteUrlDefault = "https://ur.io"
+
+// EffectiveSiteUrl is SiteUrl or the default.
+func (c *OnboardingConfig) EffectiveSiteUrl() string {
+	if v := strings.TrimSpace(c.SiteUrl); v != "" {
+		return v
+	}
+	return OnboardingSiteUrlDefault
+}
+
+// EffectiveCompanyLine is brevo.company_line or the account mailer's line.
+func (c *OnboardingConfig) EffectiveCompanyLine() string {
+	if v := strings.TrimSpace(c.Brevo.CompanyLine); v != "" {
+		return v
+	}
+	return OnboardingCompanyLineDefault
+}
+
+// EffectiveReplyTo is brevo.reply_to or support@ur.io.
+func (c *OnboardingConfig) EffectiveReplyTo() string {
+	if v := strings.TrimSpace(c.Brevo.ReplyTo); v != "" {
+		return v
+	}
+	return "support@ur.io"
 }
 
 // Experiment status values.

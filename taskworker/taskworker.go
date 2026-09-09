@@ -41,6 +41,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		work.ScheduleWebSearchAnalytics(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
+		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
@@ -370,6 +371,16 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.RemoveProductUpdates,
 			controller.RemoveProductUpdatesPost,
+		),
+		// the onboarding email campaign: one task per network and step, and the
+		// daily App Store one-time offer code top-up
+		task.NewTaskTargetWithPost(
+			controller.OnboardingCampaignStep,
+			controller.OnboardingCampaignStepPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.AppleOfferCodeTopUp,
+			controller.AppleOfferCodeTopUpPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientLocations,

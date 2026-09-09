@@ -73,6 +73,10 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
+    bringyourctl onboarding status --network_id=<network_id>
+    bringyourctl onboarding preview --network_id=<network_id> --step=<step>
+    bringyourctl onboarding send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
+    bringyourctl onboarding webhook-ensure
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
@@ -239,6 +243,16 @@ Options:
 			payoutByPaymentId(opts)
 		} else if pending, _ := opts.Bool("pending"); pending {
 			payoutPending()
+		}
+	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
+		if status, _ := opts.Bool("status"); status {
+			onboardingStatus(opts)
+		} else if preview, _ := opts.Bool("preview"); preview {
+			onboardingPreview(opts)
+		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
+			onboardingSendTest(opts)
+		} else if webhookEnsure, _ := opts.Bool("webhook-ensure"); webhookEnsure {
+			onboardingWebhookEnsure()
 		}
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
@@ -2363,4 +2377,72 @@ func stFinalize(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
+}
+
+// ----- onboarding campaign (mmm/onboarding/PLAN.md) -----
+
+// onboardingStatus prints a network's campaign row, offer, sends, events and
+// the facts a step decision would see now.
+func onboardingStatus(opts docopt.Opts) {
+	ctx := context.Background()
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	status := controller.OnboardingCampaignStatus(ctx, networkId)
+	if status.Row == nil {
+		fmt.Printf("network %s is not in the onboarding campaign\n", networkId)
+	}
+	out, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingPreview renders the decision a step would make now and, when it
+// would send, the template id and params. Nothing is sent.
+func onboardingPreview(opts docopt.Opts) {
+	ctx := context.Background()
+	networkIdStr, _ := opts.String("--network_id")
+	step, _ := opts.String("--step")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	preview, err := controller.OnboardingCampaignPreview(ctx, networkId, step)
+	if err != nil {
+		panic(err)
+	}
+	out, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingSendTest sends one template to an explicit address with sample
+// data (the only send path outside the scheduler; behind onboarding.enabled).
+func onboardingSendTest(opts docopt.Opts) {
+	ctx := context.Background()
+	email, _ := opts.String("--email")
+	template, _ := opts.String("--template")
+	variant, _ := opts.String("--variant")
+	locale, _ := opts.String("--locale")
+	messageId, err := controller.OnboardingCampaignSendTest(ctx, email, template, variant, locale)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Sent %s/%s/%s to %s (message id %s)\n", template, variant, locale, email, messageId)
+}
+
+// onboardingWebhookEnsure registers the Brevo transactional webhook once.
+func onboardingWebhookEnsure() {
+	ctx := context.Background()
+	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", outcome)
 }
