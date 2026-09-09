@@ -2498,11 +2498,19 @@ func onboardingSendTest(opts docopt.Opts) {
 }
 
 // onboardingWebhookEnsure registers the Brevo transactional webhook once.
+// A disabled campaign is a refusal, not a fault: the gate exists so nothing
+// touches the live Brevo account until onboarding.enabled is set, so say what
+// to flip and exit non-zero without a stack trace.
 func onboardingWebhookEnsure() {
+	if !model.Onboarding().Enabled {
+		fmt.Fprintln(os.Stderr, "onboarding campaign is disabled: set onboarding.enabled: true in config/main/onboarding.yml (and deploy the config) before registering the Brevo webhook")
+		os.Exit(1)
+	}
 	ctx := context.Background()
 	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "onboarding webhook-ensure: %s\n", err)
+		os.Exit(1)
 	}
 	fmt.Printf("%s\n", outcome)
 }
