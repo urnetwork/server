@@ -97,6 +97,7 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	seasonHarness := string(seasonHarnessBytes)
 	for _, required := range []string{
 		"set -euo pipefail",
+		"WARP_HOME=${WARP_HOME:-$workspace_root}",
 		"/competition/generate-staging-round",
 		"staging-worker",
 		"--replace-current",
@@ -105,6 +106,8 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		"/competition/generate-round",
 		".staging == false",
 		"competitionworker",
+		"--check",
+		"sudo -n --preserve-env=",
 		"epoch-review",
 		"pending_review",
 		"promote --epoch=",
@@ -114,6 +117,9 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		if !strings.Contains(seasonHarness, required) {
 			t.Errorf("run-main.sh is missing fail-closed lifecycle contract %q", required)
 		}
+	}
+	if !strings.Contains(seasonHarness, "advance_staging() {\n    preflight_worker staging\n    close_staging_round") {
+		t.Fatal("advance-staging must preflight the worker before closing admission")
 	}
 	if strings.Contains(strings.ToLower(seasonHarness), "python") {
 		t.Fatal("run-main.sh must remain Go/shell-only")

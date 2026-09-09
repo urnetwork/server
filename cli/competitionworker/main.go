@@ -23,12 +23,14 @@ promotes an approved winner (or records no winner), and starts the next epoch.
 
 Usage:
   competitionworker [--worker_id=<id>]
+  competitionworker --check [--worker_id=<id>]
   competitionworker -h | --help
   competitionworker --version
 
 Options:
   -h --help          Show this screen.
   --version          Show version.
+  --check            Verify the host and database without claiming work.
   --worker_id=<id>   Stable evaluator identity; defaults to hostname.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -54,6 +56,13 @@ Options:
 	)
 	if err != nil {
 		panic(err)
+	}
+	check, _ := opts.Bool("--check")
+	if check {
+		if err := worker.Preflight(context.Background()); err != nil {
+			panic(fmt.Errorf("competition worker preflight: %w", err))
+		}
+		return
 	}
 	quit := server.NewEventWithContext(context.Background())
 	closeSignals := quit.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)

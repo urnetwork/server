@@ -5204,11 +5204,41 @@ type HostSelfCheck struct {
 }
 
 func (self HostSelfCheck) Eligible(settings *Settings) bool {
-	return self.Schema == 1 &&
-		self.HostId != "" &&
-		self.HardwareId == settings.EvaluationPolicy.HardwareId &&
+	return self.commonContainmentEligible(settings) &&
 		self.QualificationSha256 == settings.EvaluationPolicy.HostQualificationSha256 &&
 		self.ImageDigest == settings.EvaluatorImageDigest &&
+		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
+		allChecks(self.Checks)
+}
+
+// Allows staging to bootstrap a newly pinned evaluator from a complete prior
+// containment record. The evaluator re-proves every attempt-level security
+// gate; only production requires the season-frozen host/image identity and
+// same-round re-baseline before a worker may claim work.
+func (self HostSelfCheck) EligibleForStaging(settings *Settings) bool {
+	if !self.commonContainmentEligible(settings) ||
+		!sha256Pattern.MatchString(self.QualificationSha256) ||
+		!imageDigestPattern.MatchString(self.ImageDigest) {
+		return false
+	}
+	qualificationPresent := false
+	for name, passed := range self.Checks {
+		if name == "qualification_match" {
+			qualificationPresent = true
+			continue
+		}
+		if !passed {
+			return false
+		}
+	}
+	return qualificationPresent
+}
+
+// Covers live containment facts shared by production qualification and the
+// deliberately non-ranking staging integration era.
+func (self HostSelfCheck) commonContainmentEligible(settings *Settings) bool {
+	return self.Schema == 1 && self.HostId != "" &&
+		self.HardwareId == settings.EvaluationPolicy.HardwareId &&
 		self.KernelRelease != "" && self.MicrocodeRevision != "" &&
 		self.LogicalCpuCount == 12 &&
 		self.SMTDisabled && self.GovernorPinned && self.TurboPinned && self.NumaPinned && self.IrqPinned &&
@@ -5217,9 +5247,7 @@ func (self HostSelfCheck) Eligible(settings *Settings) bool {
 		self.ArtifactStorage && self.ImmutableReports && self.NoProductionSecrets &&
 		self.CleanupVerified && self.ResourceLimitsVerified &&
 		self.ManagementCpuReserved && self.ManagementMemoryReserved &&
-		self.ResourceBombCleanupVerified &&
-		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
-		allChecks(self.Checks)
+		self.ResourceBombCleanupVerified
 }
 
 var workerIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -5267,16 +5295,9 @@ func newWorkerWithImageDigest(
 }
 
 func (self *Worker) Run(ctx context.Context) error {
-	hostCheck, err := self.evaluator.SelfCheck(ctx, self.settings)
+	hostCheck, err := self.preflight(ctx)
 	if err != nil {
-
-		if hostCheck.HostId != "" {
-			_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, hostCheck)
-		}
-		return fmt.Errorf("competition evaluator self-check: %w", err)
-	}
-	if err := self.store.RegisterHost(ctx, self.settings, hostCheck); err != nil {
-		return fmt.Errorf("register evaluator host: %w", err)
+		return err
 	}
 	hostTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
 	defer hostTicker.Stop()
@@ -5306,7 +5327,7 @@ func (self *Worker) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-pollTicker.C:
 		case <-hostTicker.C:
-			fresh, checkErr := self.evaluator.SelfCheck(ctx, self.settings)
+			fresh, checkErr := self.selfCheck(ctx)
 			if checkErr != nil {
 				if fresh.HostId != "" {
 					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
@@ -5319,6 +5340,59 @@ func (self *Worker) Run(ctx context.Context) error {
 			hostCheck = fresh
 		}
 	}
+}
+
+// Verifies the database boundary and evaluator host before an operator closes
+// admission. It does not claim work or start a heartbeat loop.
+func (self *Worker) Preflight(ctx context.Context) error {
+	_, err := self.preflight(ctx)
+	return err
+}
+
+// Returns the authenticated host report used for subsequent job-level gates.
+func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
+	hostCheck, err := self.selfCheck(ctx)
+	if err != nil {
+		if hostCheck.HostId != "" {
+			_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, hostCheck)
+		}
+		return hostCheck, fmt.Errorf("competition evaluator self-check: %w", err)
+	}
+	if err := self.store.RegisterHost(ctx, self.settings, hostCheck); err != nil {
+		return hostCheck, fmt.Errorf("register evaluator host: %w", err)
+	}
+	return hostCheck, nil
+}
+
+// Keeps the production identity gate exact while allowing the staging era to
+// exercise a newly pinned evaluator from an authenticated prior containment
+// record. Staging scores never enter winner selection or source promotion.
+func (self *Worker) selfCheck(ctx context.Context) (HostSelfCheck, error) {
+	hostCheck, checkErr := self.evaluator.SelfCheck(ctx, self.settings)
+	if checkErr == nil {
+		return hostCheck, nil
+	}
+	productionRound, err := self.store.CurrentRound(ctx, self.settings)
+	if err != nil {
+		return hostCheck, fmt.Errorf("read production round after self-check failure: %w", err)
+	}
+	if productionRound != nil {
+		return hostCheck, checkErr
+	}
+	stagingRound, err := self.store.CurrentStagingRound(ctx, self.settings)
+	if err != nil {
+		return hostCheck, fmt.Errorf("read staging round after self-check failure: %w", err)
+	}
+	if stagingRound == nil ||
+		(stagingRound.Status != "scheduled" && stagingRound.Status != "open" && stagingRound.Status != "grading") ||
+		!hostCheck.EligibleForStaging(self.settings) {
+		return hostCheck, checkErr
+	}
+	glog.Warningf(
+		"[competition]staging epoch %d is using prior qualified containment; production host identity remains ineligible\n",
+		stagingRound.Epoch,
+	)
+	return hostCheck, nil
 }
 
 // Seals the one round owned by this process after admission closes and the

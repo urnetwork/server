@@ -1057,12 +1057,13 @@ func (f *fakeStore) HandBack(context.Context, string, server.Id, string) error {
 
 type fakeEvaluator struct {
 	check    HostSelfCheck
+	checkErr error
 	outcomes []EvaluationOutcome
 	calls    int
 }
 
 func (f *fakeEvaluator) SelfCheck(context.Context, *Settings) (HostSelfCheck, error) {
-	return f.check, nil
+	return f.check, f.checkErr
 }
 
 func (f *fakeEvaluator) Evaluate(context.Context, *Settings, *queuedJob) EvaluationOutcome {
@@ -1333,6 +1334,47 @@ func TestHostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline(t *
 	check.RebaselinePassed = true
 	if check.Eligible(settings) {
 		t.Fatal("host claimed a re-baseline without binding a round")
+	}
+}
+
+func TestWorkerStagingAcceptsPriorContainmentButProductionRejectsStaleIdentity(t *testing.T) {
+	settings := validSettings()
+	check := passingHostCheck(settings)
+	check.QualificationSha256 = strings.Repeat("a", 64)
+	check.ImageDigest = "sha256:" + strings.Repeat("b", 64)
+	check.Checks = map[string]bool{
+		"config_secure":           true,
+		"qualification_match":     false,
+		"cpu_count_exact":         true,
+		"worker_affinity_pinned":  true,
+		"kernel_microcode_pinned": true,
+		"docker_runtime":          true,
+		"docker_user_namespace":   true,
+	}
+	checkErr := errors.New("strict host identity is stale")
+	evaluator := &fakeEvaluator{check: check, checkErr: checkErr}
+	store := &fakeStore{stagingRound: &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 3, Staging: true, Status: "open",
+	}}}
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.selfCheck(context.Background()); err != nil {
+		t.Fatalf("staging rejected complete prior containment: %v", err)
+	}
+
+	store.round = &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 1, Status: "open",
+	}}
+	if _, err := worker.selfCheck(context.Background()); !errors.Is(err, checkErr) {
+		t.Fatalf("production identity error = %v, want %v", err, checkErr)
+	}
+	store.round = nil
+	check.DefaultDenyNetwork = false
+	evaluator.check = check
+	if _, err := worker.selfCheck(context.Background()); !errors.Is(err, checkErr) {
+		t.Fatalf("staging containment error = %v, want %v", err, checkErr)
 	}
 }
 

@@ -81,13 +81,19 @@ honesty-review, promotion, or production-winner state.
 Staging still produces the candidate's authenticated same-round baseline and
 score bundle, but it does not require the separately promoted host rebaseline
 identity used as a production launch gate. Production retains that exact-round
-requirement.
+requirement. A staging worker may bootstrap a newly pinned evaluator from the
+complete prior root-owned containment record when only the frozen
+qualification/image identity is stale. Every new attempt must still pass all
+current-image containment, isolation, cleanup, and artifact-integrity gates;
+this exception never makes the host production-eligible.
 
 `advance-staging` is the ordinary staging handoff. It atomically closes new
-admission without rewriting the published schedule or canceling accepted work,
-runs the worker until every FIFO submission is terminal, finalizes and reveals
-the round with no winner, and creates the next open staging epoch. The command
-returns only after the next `round_id` is ready to share. `staging-worker`
+admission without rewriting the published schedule or canceling accepted work.
+Before closing, it runs a root-owned evaluator/database preflight; a failure
+therefore leaves the round open and retryable. It then runs the worker until
+every FIFO submission is terminal, finalizes and reveals the round with no
+winner, and creates the next open staging epoch. The command returns only after
+the next `round_id` is ready to share. `staging-worker`
 remains available when the original admission window should run to its natural
 end. Set `SIM_LATENCY_STAGING_WINDOW_SECONDS` to 60 through 604800 seconds when
 a different test window is needed. `staging --replace-current` explicitly

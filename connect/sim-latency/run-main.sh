@@ -88,7 +88,8 @@ remove_candidate_directory() {
 }
 
 main_environment() {
-    export WARP_HOST=${WARP_HOST:-127.0.0.1}
+    export WARP_HOME=${WARP_HOME:-$workspace_root}
+    export WARP_HOST=${WARP_HOST:-$(hostname -s)}
     export WARP_BLOCK=${WARP_BLOCK:-sim}
     export WARP_SERVICE=${WARP_SERVICE:-sim}
     export WARP_VERSION=${WARP_VERSION:-0.0.0-local}
@@ -287,6 +288,7 @@ close_staging_round() {
 }
 
 advance_staging() {
+    preflight_worker staging
     close_staging_round
     run_staging_worker
     staging_round false
@@ -328,17 +330,39 @@ present_candidate_or_promote_no_winner() {
     esac
 }
 
-run_worker() {
-    local era=$1
-    local epoch=$2
-    local opens_at=$3
+build_worker() {
     local worker=$state_dir/bin/competitionworker
     mkdir -p "$state_dir/bin"
     go build -trimpath -buildvcs=true -o "$worker" "$server_root/cli/competitionworker"
     chmod 0500 "$worker"
+    printf '%s\n' "$worker"
+}
+
+invoke_worker() {
+    local worker=$1
+    shift
+    sudo -n --preserve-env=WARP_HOME,WARP_HOST,WARP_BLOCK,WARP_SERVICE,WARP_VERSION,WARP_ENV,WARP_DOMAIN,BRINGYOUR_POSTGRES_HOSTNAME,BRINGYOUR_REDIS_HOSTNAME,BRINGYOUR_MINIO_HOSTNAME,WARP_IMAGE_DIGEST \
+        "$worker" "$@"
+}
+
+preflight_worker() {
+    local era=$1
+    local worker
+    worker=$(build_worker)
+    printf '%s evaluator preflight is checking containment and control-plane access before admission closes.\n' \
+        "$era" >&2
+    invoke_worker "$worker" --check --worker_id="sim-latency-$era-preflight"
+}
+
+run_worker() {
+    local era=$1
+    local epoch=$2
+    local opens_at=$3
+    local worker
+    worker=$(build_worker)
     printf '%s epoch %d opens at %s. The worker heartbeat starts now; claims wait for the open boundary.\n' \
         "$era" "$epoch" "$opens_at" >&2
-    "$worker" --worker_id="sim-latency-$era-epoch-$epoch"
+    invoke_worker "$worker" --worker_id="sim-latency-$era-epoch-$epoch"
 }
 
 run_season() {
@@ -454,8 +478,10 @@ require_command date
 require_command flock
 require_command git
 require_command go
+require_command hostname
 require_command jq
 require_command make
+require_command sudo
 require_command stat
 [[ -f $source_config ]] || fail "source config is absent: $source_config"
 mkdir -p "$state_dir"
