@@ -356,6 +356,17 @@ func StripeWebhook(
 
 		return stripeHandleCustomerUpdated(stripeWebhook.Data.Object, clientSession)
 
+	} else if stripeWebhook.Type == "customer.subscription.deleted" && stripeWebhook.Data != nil {
+
+		/**
+		 * the onboarding trial outcome: a subscription deleted within its
+		 * trial is trial.cancelled (onboarding_stripe_controller.go)
+		 */
+
+		glog.Infof("type: customer.subscription.deleted")
+
+		return stripeHandleSubscriptionDeleted(stripeWebhook.Data.Object, clientSession)
+
 	}
 	// else IGNORE the event and answer 200. This is load-bearing: the endpoint
 	// subscribes to the full event catalog, and a non-2xx on an unhandled type
@@ -1172,6 +1183,10 @@ func stripeHandleRefund(
 			"[sub]%s %s (charge %s): action=%s ended=%d\n",
 			eventType, refundId, chargeId, eventAction, len(endedNetworkIds),
 		)
+		if ledgerNetworkId != nil {
+			// the onboarding refund outcome (cents to dollars)
+			RecordRefund(ctx, *ledgerNetworkId, model.OnboardingStoreStripe, float64(amount)/100)
+		}
 	}
 	return nil
 }

@@ -556,8 +556,120 @@ func stripeHandleInvoicePaidWithOnboarding(
 	}
 	if sub != nil {
 		stripeRecordOnboardingForInvoice(clientSession, sub, invoice.Id)
+		stripeRecordTrialOutcomeForInvoice(clientSession.Ctx, sub, invoice)
 	}
 	return result, nil
+}
+
+// stripePlanForSubscription is yearly or monthly from the subscription's first
+// recurring price, "" when unknown.
+func stripePlanForSubscription(sub *stripe.Subscription) string {
+	if sub == nil || sub.Items == nil {
+		return ""
+	}
+	for _, item := range sub.Items.Data {
+		if item == nil || item.Price == nil || item.Price.Recurring == nil {
+			continue
+		}
+		switch item.Price.Recurring.Interval {
+		case stripe.PriceRecurringIntervalYear:
+			return model.PlanYearly
+		case stripe.PriceRecurringIntervalMonth:
+			return model.PlanMonthly
+		}
+	}
+	return ""
+}
+
+// stripeRecordTrialOutcomeForInvoice writes trial.converted when a
+// subscription that had a trial is charged a non-zero invoice: the trial's
+// first paid period (mmm/onboarding/PLAN.md "MEASUREMENT", S3).
+func stripeRecordTrialOutcomeForInvoice(ctx context.Context, sub *stripe.Subscription, invoice *StripeEventInvoiceObject) {
+	if sub == nil || invoice == nil || invoice.Total <= 0 || sub.TrialEnd <= 0 {
+		return
+	}
+	networkId, err := server.ParseId(sub.Metadata[stripeMetadataNetworkId])
+	if err != nil {
+		return
+	}
+	if !server.NowUtc().After(time.Unix(sub.TrialEnd, 0).UTC().Add(-24 * time.Hour)) {
+		// a paid invoice while the trial is running is a plan change, not
+		// the conversion
+		return
+	}
+	if RecordTrialConverted(ctx, networkId, model.OnboardingStoreStripe, stripePlanForSubscription(sub)) {
+		glog.Infof("[onboarding]trial converted on stripe by network %s (invoice %s)\n", networkId, invoice.Id)
+	}
+}
+
+// stripeEventSubscriptionObject is the customer.subscription.deleted payload's
+// fields the trial outcome needs.
+type stripeEventSubscriptionObject struct {
+	Id         string            `json:"id"`
+	Status     string            `json:"status"`
+	TrialEnd   int64             `json:"trial_end"`
+	EndedAt    int64             `json:"ended_at"`
+	CanceledAt int64             `json:"canceled_at"`
+	Metadata   map[string]string `json:"metadata"`
+	Items      *struct {
+		Data []struct {
+			Price *struct {
+				Recurring *struct {
+					Interval string `json:"interval"`
+				} `json:"recurring"`
+			} `json:"price"`
+		} `json:"data"`
+	} `json:"items"`
+}
+
+func (self *stripeEventSubscriptionObject) plan() string {
+	if self.Items == nil {
+		return ""
+	}
+	for _, item := range self.Items.Data {
+		if item.Price == nil || item.Price.Recurring == nil {
+			continue
+		}
+		switch item.Price.Recurring.Interval {
+		case "year":
+			return model.PlanYearly
+		case "month":
+			return model.PlanMonthly
+		}
+	}
+	return ""
+}
+
+// stripeHandleSubscriptionDeleted writes trial.cancelled when a subscription
+// with a trial ends before (or at) the trial's end: the trial never became a
+// paid period. Any other deletion is the end of a paid subscription, which the
+// entitlement code already handles by the paid-through date. Always 200.
+func stripeHandleSubscriptionDeleted(object json.RawMessage, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
+	var sub stripeEventSubscriptionObject
+	if err := json.Unmarshal(object, &sub); err != nil {
+		glog.Warningf("[onboarding]could not parse deleted subscription: %s\n", err)
+		return &StripeWebhookResult{}, nil
+	}
+	if sub.TrialEnd <= 0 {
+		return &StripeWebhookResult{}, nil
+	}
+	networkId, err := server.ParseId(sub.Metadata[stripeMetadataNetworkId])
+	if err != nil {
+		return &StripeWebhookResult{}, nil
+	}
+	endedAt := server.NowUtc()
+	if 0 < sub.EndedAt {
+		endedAt = time.Unix(sub.EndedAt, 0).UTC()
+	}
+	trialEnd := time.Unix(sub.TrialEnd, 0).UTC()
+	if sub.Status != string(stripe.SubscriptionStatusTrialing) && trialEnd.Add(24*time.Hour).Before(endedAt) {
+		// ended after a paid period began
+		return &StripeWebhookResult{}, nil
+	}
+	if storeTrialCancelled(clientSession.Ctx, networkId, model.OnboardingStoreStripe, sub.plan(), endedAt) {
+		glog.Infof("[onboarding]trial cancelled on stripe by network %s (subscription %s)\n", networkId, sub.Id)
+	}
+	return &StripeWebhookResult{}, nil
 }
 
 // stripeSubscriptionForInvoice fetches the subscription an invoice bills, nil

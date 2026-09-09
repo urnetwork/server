@@ -285,3 +285,41 @@ func TestCountryCodeFromStorefront(t *testing.T) {
 	}
 	connect.AssertEqual(t, true, 245 <= len(countryAlpha3ToAlpha2))
 }
+
+func TestAssignExperimentsPausedOverlay(t *testing.T) {
+	inApp := testExperiment("offer_screen", map[string]float64{"control": 50, "warm": 50}, "control", "warm")
+	c := &OnboardingConfig{Experiments: []*OnboardingExperiment{inApp}}
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+	// find a network the hash puts on `warm`
+	var networkId server.Id
+	for {
+		networkId = server.NewId()
+		if inApp.Assign(networkId) == "warm" {
+			break
+		}
+	}
+	SetPausedVariantsForTest(map[string]map[string]bool{})
+	defer SetPausedVariantsForTest(nil)
+	connect.AssertEqual(t, "warm", c.AssignExperiments(networkId, now)[ExperimentSurfaceOfferInApp].Variant)
+
+	// paused: served control, the registry assignment is unchanged
+	SetPausedVariantsForTest(map[string]map[string]bool{"offer_screen": {"warm": true}})
+	connect.AssertEqual(t, "control", c.AssignExperiments(networkId, now)[ExperimentSurfaceOfferInApp].Variant)
+	connect.AssertEqual(t, "control", c.AssignmentForSurface(networkId, ExperimentSurfaceOfferIntroStep, now).Variant)
+	connect.AssertEqual(t, "warm", inApp.Assign(networkId))
+
+	// a pause on another experiment does not leak
+	SetPausedVariantsForTest(map[string]map[string]bool{"other": {"warm": true}})
+	connect.AssertEqual(t, "warm", c.AssignExperiments(networkId, now)[ExperimentSurfaceOfferInApp].Variant)
+
+	// the results defaults
+	zero := &OnboardingConfig{}
+	connect.AssertEqual(t, OnboardingResultsMinExposuresDefault, zero.EffectiveMinExposures())
+	connect.AssertEqual(t, OnboardingResultsRollupDaysDefault, zero.EffectiveRollupDays())
+	connect.AssertEqual(t, OnboardingResultsGuardrailDaysDefault, zero.EffectiveGuardrailDays())
+	tuned := &OnboardingConfig{Results: OnboardingResultsConfig{MinExposures: 25, RollupDays: 90, GuardrailDays: 7}}
+	connect.AssertEqual(t, 25, tuned.EffectiveMinExposures())
+	connect.AssertEqual(t, 90, tuned.EffectiveRollupDays())
+	connect.AssertEqual(t, 7, tuned.EffectiveGuardrailDays())
+}

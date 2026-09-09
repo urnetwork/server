@@ -891,6 +891,15 @@ func PlayWebhook(
 				"SUBSCRIPTION_STATE_EXPIRED",
 				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
 				acknowledgeAndCheckRenewal = false
+				// the onboarding trial outcome: a trial that stops renewing or
+				// expires before its first paid period is trial.cancelled
+				storeTrialCancelled(
+					clientSession.Ctx,
+					networkId,
+					model.OnboardingStorePlay,
+					planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+					server.NowUtc(),
+				)
 			}
 
 			if acknowledgeAndCheckRenewal {
@@ -926,7 +935,7 @@ func PlayWebhook(
 				// non-2xx so Pub/Sub RETRIES the delivery -- otherwise the entitlement
 				// would arrive only via the task scheduled at the END of the paid
 				// period, or never.
-				_, err = PlaySubscriptionRenewal(
+				renewalResult, err := PlaySubscriptionRenewal(
 					&PlaySubscriptionRenewalArgs{
 						NetworkId:      networkId,
 						PackageName:    rtdnMessage.PackageName,
@@ -941,6 +950,17 @@ func PlayWebhook(
 						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
 					)
 					return nil, err
+				}
+				if renewalResult != nil && renewalResult.Renewed {
+					// the onboarding trial outcome: a credited renewal past a
+					// recorded trial's length is trial.converted
+					storeTrialConverted(
+						clientSession.Ctx,
+						networkId,
+						model.OnboardingStorePlay,
+						planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+						server.NowUtc(),
+					)
 				}
 
 				// continually renew as long as the expiry time keeps getting pushed forward
@@ -998,6 +1018,8 @@ func playHandleRevoked(
 			// failed delivery (Pub/Sub would redeliver into a no-op)
 			glog.Errorf("[sub]play revoked token %s: could not record event: %s\n", purchaseToken, err)
 		}
+		// the onboarding refund outcome
+		RecordRefund(clientSession.Ctx, networkId, model.OnboardingStorePlay, 0)
 	}
 	glog.Infof(
 		"[sub]play revoked token %s (%s): ended %d network(s)\n",

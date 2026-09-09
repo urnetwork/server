@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net"
@@ -562,6 +563,32 @@ func redactEventText(value string) (string, bool) {
 // app.opened, signup.optout_changed at sign-up, ...). The name must be in the
 // schema. Never fails the caller: an event that cannot be stored is logged.
 func WriteServerEvent(clientSession *session.ClientSession, networkId server.Id, name string, props map[string]any, platform string) bool {
+	ctx := context.Background()
+	tier := ""
+	if clientSession != nil {
+		ctx = clientSession.Ctx
+		if code := clientCountryCode(clientSession); code != "" {
+			tier = model.Pro().PriceTierForCountry(code).Name
+		}
+	}
+	return writeServerEvent(ctx, networkId, name, props, platform, tier)
+}
+
+// WriteServerEventWithContext is WriteServerEvent for callers that have no
+// client session (store notification handlers, the nightly rollup). The tier is
+// taken from the network's onboarding row when there is one.
+func WriteServerEventWithContext(ctx context.Context, networkId server.Id, name string, props map[string]any, platform string) bool {
+	tier := ""
+	if row := model.GetNetworkOnboarding(ctx, networkId); row != nil && row.Country != "" {
+		tier = model.Pro().PriceTierForCountry(row.Country).Name
+		if platform == "" {
+			platform = row.Platform
+		}
+	}
+	return writeServerEvent(ctx, networkId, name, props, platform, tier)
+}
+
+func writeServerEvent(ctx context.Context, networkId server.Id, name string, props map[string]any, platform string, tier string) bool {
 	defer func() {
 		if r := recover(); r != nil {
 			glog.Errorf("[onboarding]could not write %s for network %s: %v\n", name, networkId, r)
@@ -579,13 +606,9 @@ func WriteServerEvent(clientSession *session.ClientSession, networkId server.Id,
 		At:         now,
 		ReceivedAt: now,
 		Platform:   platform,
-		Path:       model.OnboardingPathForNetwork(model.GetOnboardingOffer(clientSession.Ctx, networkId)),
+		Tier:       tier,
+		Path:       model.OnboardingPathForNetwork(model.GetOnboardingOffer(ctx, networkId)),
 		Props:      validated,
-	}
-	if clientSession != nil {
-		if code := clientCountryCode(clientSession); code != "" {
-			event.Tier = model.Pro().PriceTierForCountry(code).Name
-		}
 	}
 	if step, ok := validated["step"].(string); ok && step != "" {
 		if a := model.Onboarding().AssignmentForSurface(networkId, "email."+step, now); a != nil {
@@ -593,7 +616,7 @@ func WriteServerEvent(clientSession *session.ClientSession, networkId server.Id,
 			event.Variant = a.Variant
 		}
 	}
-	if err := model.AddOnboardingEvent(clientSession.Ctx, event); err != nil {
+	if err := model.AddOnboardingEvent(ctx, event); err != nil {
 		glog.Errorf("[onboarding]could not write %s for network %s: %s\n", name, networkId, err)
 		return false
 	}

@@ -177,6 +177,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/onboarding/click", handlers.OnboardingClick),
 		router.NewRoute("GET", "/onboarding/feedback/([^/]+)", handlers.OnboardingFeedbackToken),
 		router.NewRoute("POST", "/client/events", handlers.ClientEventsSend),
+		// the onboarding results side (PLAN.md "OPTIMIZATION LOOP"): the
+		// nightly aggregate and the registry, behind the vault admin bearers
+		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
+		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
 		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
 		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),
 		// the "Manage subscription" screen: every store billing the network with

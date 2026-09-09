@@ -7532,4 +7532,54 @@ var migrations = []any{
 		CREATE INDEX network_onboarding_email_network_id_sent_at
 		ON network_onboarding_email (network_id, sent_at)
 	`),
+	// onboarding results (PLAN.md "OPTIMIZATION LOOP" §3): the nightly aggregate
+	// per (cohort day, experiment, variant, surface, platform, tier, path).
+	// Counts are networks. matured_days is the cohort's age at computation.
+	newSqlMigration(`
+		CREATE TABLE onboarding_results_daily (
+			cohort_day timestamp NOT NULL,
+			experiment varchar(64) NOT NULL,
+			variant varchar(64) NOT NULL,
+			surface varchar(64) NOT NULL,
+			platform varchar(32) NOT NULL,
+			tier varchar(32) NOT NULL,
+			path varchar(16) NOT NULL,
+			exposures int NOT NULL DEFAULT 0,
+			sent int NOT NULL DEFAULT 0,
+			delivered int NOT NULL DEFAULT 0,
+			opened int NOT NULL DEFAULT 0,
+			clicked int NOT NULL DEFAULT 0,
+			landing_clicked int NOT NULL DEFAULT 0,
+			app_open_48h int NOT NULL DEFAULT 0,
+			connect_7d int NOT NULL DEFAULT 0,
+			widget_7d int NOT NULL DEFAULT 0,
+			feedback_7d int NOT NULL DEFAULT 0,
+			pro_start_14d int NOT NULL DEFAULT 0,
+			trial_to_paid_35d int NOT NULL DEFAULT 0,
+			refund_60d int NOT NULL DEFAULT 0,
+			retention_d7 int NOT NULL DEFAULT 0,
+			retention_d30 int NOT NULL DEFAULT 0,
+			unsubscribe int NOT NULL DEFAULT 0,
+			complaint int NOT NULL DEFAULT 0,
+			matured_days int NOT NULL DEFAULT 0,
+			computed_at timestamp NOT NULL,
+			PRIMARY KEY (cohort_day, experiment, variant, surface, platform, tier, path)
+		)
+	`),
+	// experiment-state overlay (§5): a paused variant is served control without
+	// editing the registry. Written by the guardrail check and bringyourctl.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_experiment_state (
+			experiment_id varchar(64) NOT NULL,
+			variant varchar(64) NOT NULL,
+			status varchar(16) NOT NULL,
+			reason varchar(256) NOT NULL DEFAULT '',
+			updated_at timestamp NOT NULL,
+			PRIMARY KEY (experiment_id, variant)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_created_at
+		ON network_onboarding (created_at)
+	`),
 }

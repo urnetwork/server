@@ -60,6 +60,7 @@ const (
 const (
 	ExitNoEmail        = "no_email"
 	ExitHoldout        = "holdout"
+	ExitPaused         = "paused"
 	ExitOptOut         = "opt_out"
 	ExitPro            = "pro"
 	ExitNetworkDeleted = "network_deleted"
@@ -156,6 +157,7 @@ type Facts struct {
 	// ----- global exits -----
 	HasEmail       bool
 	Holdout        bool // email.sequence variant is `holdout`
+	Paused         bool // the row's (experiment, variant) is paused by the guardrail overlay
 	ProductUpdates bool // the sign-up preference; false after an unsubscribe too
 	Pro            bool
 	NetworkExists  bool
@@ -210,6 +212,8 @@ func GlobalExit(f Facts) string {
 		return ExitNetworkDeleted
 	case f.Holdout:
 		return ExitHoldout
+	case f.Paused:
+		return ExitPaused
 	case !f.ProductUpdates:
 		return ExitOptOut
 	case f.Pro:

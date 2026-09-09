@@ -13,6 +13,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/onboarding"
 )
 
 // Onboarding is the parsed onboarding program config (config/<env>/onboarding.yml;
@@ -188,6 +189,53 @@ type OnboardingConfig struct {
 	Schedule    OnboardingScheduleConfig `yaml:"schedule"`
 	Experiment  OnboardingHoldoutConfig  `yaml:"experiment"`
 	Experiments []*OnboardingExperiment  `yaml:"experiments"`
+	Results     OnboardingResultsConfig  `yaml:"results"`
+}
+
+// OnboardingResultsConfig tunes the nightly results rollup and the admin
+// results endpoint (PLAN.md "OPTIMIZATION LOOP" §3-§5).
+type OnboardingResultsConfig struct {
+	// MinExposures is the volume floor of /admin/onboarding/results: a row with
+	// fewer exposures is not returned (it would identify a handful of networks
+	// by dimension alone). Default 10.
+	MinExposures int `yaml:"min_exposures"`
+	// RollupDays is how many cohort days back the nightly rollup recomputes so
+	// the fixed-window outcomes (up to 60 days) mature in place. Default 60.
+	RollupDays int `yaml:"rollup_days"`
+	// GuardrailDays is the cohort window the guardrail check sums over before
+	// comparing a variant's rates with the registry thresholds. Default 14.
+	GuardrailDays int `yaml:"guardrail_days"`
+}
+
+// Defaults of OnboardingResultsConfig.
+const (
+	OnboardingResultsMinExposuresDefault  = 10
+	OnboardingResultsRollupDaysDefault    = 60
+	OnboardingResultsGuardrailDaysDefault = 14
+)
+
+// EffectiveMinExposures is results.min_exposures or the default.
+func (c *OnboardingConfig) EffectiveMinExposures() int {
+	if 0 < c.Results.MinExposures {
+		return c.Results.MinExposures
+	}
+	return OnboardingResultsMinExposuresDefault
+}
+
+// EffectiveRollupDays is results.rollup_days or the default.
+func (c *OnboardingConfig) EffectiveRollupDays() int {
+	if 0 < c.Results.RollupDays {
+		return c.Results.RollupDays
+	}
+	return OnboardingResultsRollupDaysDefault
+}
+
+// EffectiveGuardrailDays is results.guardrail_days or the default.
+func (c *OnboardingConfig) EffectiveGuardrailDays() int {
+	if 0 < c.Results.GuardrailDays {
+		return c.Results.GuardrailDays
+	}
+	return OnboardingResultsGuardrailDaysDefault
 }
 
 // OnboardingSiteUrlDefault is the site the campaign links point at.
@@ -339,6 +387,12 @@ func (e *OnboardingExperiment) Validate() error {
 	return nil
 }
 
+// ParseExperimentDay parses a registry start/stop day (YYYY-MM-DD or RFC 3339);
+// empty means unbounded (nil).
+func ParseExperimentDay(value string) (*time.Time, error) {
+	return parseExperimentDay(value)
+}
+
 func parseExperimentDay(value string) (*time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -460,15 +514,26 @@ func (c *OnboardingConfig) ActiveExperiments(now time.Time) []*OnboardingExperim
 // AssignExperiments returns the network's variant for every active experiment,
 // keyed by surface. When two active experiments share a surface the first in
 // registry order wins (and the registry should not do that).
+//
+// The experiment-state overlay (network_onboarding_experiment_state, written by
+// the guardrail check and `bringyourctl onboarding experiments`) is applied on
+// top of the hash assignment: a network whose variant is paused is served the
+// control variant instead (see onboarding.EffectiveVariant). The registry
+// assignment itself is unchanged, so resuming the variant restores the same
+// networks to it.
 func (c *OnboardingConfig) AssignExperiments(networkId server.Id, now time.Time) map[string]*ExperimentAssignment {
 	assignments := map[string]*ExperimentAssignment{}
 	for _, e := range c.ActiveExperiments(now) {
 		if _, taken := assignments[e.Surface]; taken {
 			continue
 		}
+		variant := e.Assign(networkId)
+		if paused := PausedVariantsForExperiment(e.Id, now); len(paused) != 0 {
+			variant = onboarding.EffectiveVariant(variant, e.VariantNames(), paused)
+		}
 		assignments[e.Surface] = &ExperimentAssignment{
 			ExperimentId: e.Id,
-			Variant:      e.Assign(networkId),
+			Variant:      variant,
 		}
 	}
 	return assignments

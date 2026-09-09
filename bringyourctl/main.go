@@ -77,6 +77,8 @@ Usage:
     bringyourctl onboarding preview --network_id=<network_id> --step=<step>
     bringyourctl onboarding send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl onboarding webhook-ensure
+    bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
+    bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
@@ -253,6 +255,10 @@ Options:
 			onboardingSendTest(opts)
 		} else if webhookEnsure, _ := opts.Bool("webhook-ensure"); webhookEnsure {
 			onboardingWebhookEnsure()
+		} else if rollup, _ := opts.Bool("rollup"); rollup {
+			onboardingRollup(opts)
+		} else if experiments, _ := opts.Bool("experiments"); experiments {
+			onboardingExperiments(opts)
 		}
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
@@ -2424,6 +2430,60 @@ func onboardingPreview(opts docopt.Opts) {
 
 // onboardingSendTest sends one template to an explicit address with sample
 // data (the only send path outside the scheduler; behind onboarding.enabled).
+// onboardingRollup recomputes onboarding_results_daily for the cohort days
+// [--from, --to] (default: the configured window ending yesterday), exactly as
+// the nightly task does. The first backfill after deploy:
+//
+//	bringyourctl onboarding rollup --from=2026-09-01 --to=2026-09-30
+func onboardingRollup(opts docopt.Opts) {
+	ctx := context.Background()
+	parse := func(flag string) time.Time {
+		value, _ := opts.String(flag)
+		if value == "" {
+			return time.Time{}
+		}
+		t, err := time.Parse("2006-01-02", value)
+		if err != nil {
+			panic(fmt.Errorf("%s must be YYYY-MM-DD: %w", flag, err))
+		}
+		return t.UTC()
+	}
+	result, err := controller.RunOnboardingResultsRollup(ctx, parse("--from"), parse("--to"))
+	if err != nil {
+		panic(err)
+	}
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingExperiments prints the registry with the live variant states, or
+// with --resume / --pause changes one variant's state first.
+func onboardingExperiments(opts docopt.Opts) {
+	ctx := context.Background()
+	experiment, _ := opts.String("--experiment")
+	variant, _ := opts.String("--variant")
+	if resume, _ := opts.Bool("--resume"); resume {
+		if err := controller.ResumeExperimentVariant(ctx, experiment, variant); err != nil {
+			panic(err)
+		}
+		fmt.Printf("Resumed %s/%s\n", experiment, variant)
+	} else if pause, _ := opts.Bool("--pause"); pause {
+		reason, _ := opts.String("--reason")
+		if err := controller.PauseExperimentVariant(ctx, experiment, variant, reason); err != nil {
+			panic(err)
+		}
+		fmt.Printf("Paused %s/%s\n", experiment, variant)
+	}
+	out, err := json.MarshalIndent(controller.OnboardingExperimentsState(ctx), "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
 func onboardingSendTest(opts docopt.Opts) {
 	ctx := context.Background()
 	email, _ := opts.String("--email")

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/router"
@@ -58,4 +59,40 @@ func StripePrices(w http.ResponseWriter, r *http.Request) {
 		return controller.StripePrices(storefrontCountry, clientSession)
 	}
 	router.WrapRequireAuth(impl, w, r)
+}
+
+// AdminOnboardingResults pages the nightly onboarding results aggregate. Auth
+// is the vault admin bearer, checked by the controller (401 / 403).
+func AdminOnboardingResults(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limit := 0
+	if v := query.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	args := &controller.AdminOnboardingResultsArgs{
+		Experiment: query.Get("experiment"),
+		From:       query.Get("from"),
+		To:         query.Get("to"),
+		Surface:    query.Get("surface"),
+		Platform:   query.Get("platform"),
+		Tier:       query.Get("tier"),
+		Path:       query.Get("path"),
+		Cursor:     query.Get("cursor"),
+		Limit:      limit,
+	}
+	router.WrapNoAuth(
+		func(clientSession *session.ClientSession) (*controller.AdminOnboardingResultsResult, error) {
+			return controller.AdminOnboardingResults(args, clientSession)
+		},
+		w,
+		r,
+	)
+}
+
+// AdminOnboardingExperiments returns the experiment registry as loaded, with
+// the live variant states. Same auth as AdminOnboardingResults.
+func AdminOnboardingExperiments(w http.ResponseWriter, r *http.Request) {
+	router.WrapNoAuth(controller.AdminOnboardingExperiments, w, r)
 }

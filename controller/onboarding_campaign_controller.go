@@ -473,6 +473,7 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		Path:              path,
 		HasEmail:          row.Email,
 		Holdout:           row.EmailVariant == model.ExperimentVariantHoldout,
+		Paused:            row.ExperimentId != "" && model.PausedVariantsForExperiment(row.ExperimentId, now)[row.EmailVariant],
 		ProductUpdates:    model.NetworkProductUpdates(ctx, row.NetworkId),
 		Pro:               model.IsProNetwork(ctx, row.NetworkId),
 		NetworkExists:     model.NetworkExists(ctx, row.NetworkId),

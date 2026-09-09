@@ -9,6 +9,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
@@ -42,6 +43,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleWebSearchAnalytics(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
+		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
@@ -381,6 +383,12 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.AppleOfferCodeTopUp,
 			controller.AppleOfferCodeTopUpPost,
+		),
+		// the nightly onboarding results rollup (02:00 UTC): outcome events,
+		// the trial backstop, onboarding_results_daily, guardrails
+		task.NewTaskTargetWithPost(
+			controller.OnboardingResultsRollup,
+			controller.OnboardingResultsRollupPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientLocations,

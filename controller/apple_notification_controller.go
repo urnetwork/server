@@ -12,6 +12,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -144,7 +146,41 @@ func ProcessAppleNotification(
 		// immediately rather than after ProCacheTtl
 		model.UpdateProNetwork(ctx, networkId)
 	}
+	if returnErr == nil && transaction != nil {
+		appleRecordOnboardingOutcome(ctx, notification.NotificationType, transaction, processed, revokedNetworkIds)
+	}
 	return processed, returnErr
+}
+
+// appleRecordOnboardingOutcome writes the onboarding trial and refund outcomes
+// a notification implies (mmm/onboarding/PLAN.md "MEASUREMENT", S3): a
+// DID_RENEW credited after a recorded trial purchase is trial.converted, an
+// EXPIRED within the trial window is trial.cancelled, and REFUND / REVOKE is a
+// refund for every network whose entitlement ended. Never fails the caller.
+func appleRecordOnboardingOutcome(ctx context.Context, notificationType string, transaction *validatedAppleTransaction, processed bool, revokedNetworkIds []server.Id) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Warningf("[onboarding]apple outcome %s: %v\n", notificationType, r)
+		}
+	}()
+	now := server.NowUtc()
+	plan := planForProductId(transaction.productId)
+	switch notificationType {
+	case "DID_RENEW":
+		if processed {
+			storeTrialConverted(ctx, transaction.networkId, model.OnboardingStoreApple, plan, now)
+		}
+	case "EXPIRED":
+		storeTrialCancelled(ctx, transaction.networkId, model.OnboardingStoreApple, plan, now)
+	case "REFUND", "REVOKE":
+		networkIds := revokedNetworkIds
+		if len(networkIds) == 0 {
+			networkIds = []server.Id{transaction.networkId}
+		}
+		for _, networkId := range networkIds {
+			RecordRefund(ctx, networkId, model.OnboardingStoreApple, 0)
+		}
+	}
 }
 
 func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId server.Id) bool {

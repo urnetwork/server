@@ -63,12 +63,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Onboarding campaign** (mmm/onboarding/PLAN.md). Server-driven emails E1\u2013E5 through Brevo, one scheduled task per network and step, re-evaluated at send time. `starts` = networks entering (email true/false, sequence variant); `emails` = step outcomes (sent / skipped = condition not met / dry_run = `onboarding.enabled` false / failed = Brevo error, retried); `exits` = why a network left; `webhook events` = Brevo delivery events attributed to a campaign send. The results table and the experiment readout (S3) extend this dashboard. Every `urnetwork_onboarding_*` metric is on this page."
+        "content": "**Onboarding campaign** (mmm/onboarding/PLAN.md). Server-driven emails E1\u2013E5 through Brevo, one scheduled task per network and step, re-evaluated at send time. `starts` = networks entering (email true/false, sequence variant); `emails` = step outcomes (sent / skipped = condition not met / dry_run = `onboarding.enabled` false / failed = Brevo error, retried); `exits` = why a network left; `webhook events` = Brevo delivery events attributed to a campaign send. The nightly results rollup (02:00 UTC, `OnboardingResultsRollup`) writes the retention and trial-outcome events, recomputes `onboarding_results_daily` for the last `results.rollup_days` cohort days, checks the registry guardrails (a breach pauses the variant: `variants paused`) and prunes old events; `outcome events` = server-written trial.converted / trial.cancelled / refund / retention.* by store (`server` = the rollup, `unknown` = the backstop); `admin results requests` = GET /admin/onboarding/results|experiments by auth result. The per-cohort funnel itself is read from `onboarding_results_daily` through the admin endpoint (mmm/onboarding/analyze.mjs), not from Prometheus. Every `urnetwork_onboarding_*` metric is on this page."
       }
     },
     {
       "type": "row",
-      "title": "the funnel",
+      "title": "the funnel and the nightly results rollup",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -455,13 +455,390 @@
       ]
     },
     {
+      "type": "stat",
+      "title": "results rows (last rollup)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_onboarding_results_rows{env=\"$env\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "cohort networks in the rollup window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_onboarding_results_cohort_networks{env=\"$env\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "variants paused by guardrails",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_onboarding_experiment_variants_paused{env=\"$env\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "rollup runs / day by result",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_onboarding_results_rollup_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "outcome events / day by name and store",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (name, store) (increase(urnetwork_onboarding_outcome_events_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{name}} {{store}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "trial outcomes decided by the backstop / day",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_onboarding_trial_backstop_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "guardrail breaches (auto-pauses) by experiment, variant, guardrail",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (experiment, variant, guardrail) (increase(urnetwork_onboarding_guardrail_breaches_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{experiment}}/{{variant}} {{guardrail}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "admin results requests / h by endpoint and result",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (endpoint, result) (increase(urnetwork_onboarding_admin_requests_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{endpoint}} {{result}}"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "delivery (Brevo webhook)",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 47
       },
       "collapsed": false,
       "panels": []
@@ -477,7 +854,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -529,7 +906,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -590,7 +967,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -651,7 +1028,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -699,7 +1076,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 64
       },
       "collapsed": false,
       "panels": []
@@ -715,7 +1092,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 65
       },
       "fieldConfig": {
         "defaults": {
@@ -767,7 +1144,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 65
       },
       "fieldConfig": {
         "defaults": {
