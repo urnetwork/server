@@ -402,8 +402,9 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 	fmt.Printf("Scrubbed %d task row(s) and %d audit blob(s).\n", scrubbedTaskCount, scrubbedAuditCount)
 }
 
-// dbAudit compares the live DB schema against the schema the full local
-// db_migrations head should produce.
+// dbAudit compares the live DB schema against the schema its recorded migration
+// version should produce. Pending migrations are reported separately and are
+// only applied by db migrate.
 //
 //	db audit                      report the drift, then print the reconciling
 //	                              SQL as a dry run (summary at top, SQL at bottom)
@@ -425,9 +426,9 @@ func dbAudit(opts docopt.Opts) {
 		return
 	}
 
-	// the expected schema is always the full local db_migrations head
 	result := server.AuditSchema(ctx)
 	fmt.Printf("DB recorded version: %d   local db_migrations head: %d\n", result.DbVersion, result.LocalVersion)
+	pendingMigrationCount := result.LocalVersion - result.DbVersion
 
 	if !fix {
 		// plain audit is the dry run: summary first, then the SQL --fix would run
@@ -436,7 +437,7 @@ func dbAudit(opts docopt.Opts) {
 			fmt.Print("\n")
 			fmt.Print(result.Diff.FixSql())
 		}
-		fmt.Printf("\n%d migration(s) need to be applied.\n", result.LocalVersion-result.DbVersion)
+		fmt.Printf("\n%d migration(s) need to be applied.\n", pendingMigrationCount)
 		return
 	}
 
@@ -468,6 +469,7 @@ func dbAudit(opts docopt.Opts) {
 		fmt.Print("\n")
 		fmt.Print(notApplied)
 	}
+	fmt.Printf("\n%d migration(s) need to be applied with `bringyourctl db migrate`.\n", pendingMigrationCount)
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id

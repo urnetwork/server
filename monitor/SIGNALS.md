@@ -7461,7 +7461,7 @@ Tier-1 (warn):
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
-| migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
+| migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every source-known durable identity and published schema artifact | page when any identity differs or any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
@@ -8225,6 +8225,60 @@ This is the version-to-artifact contract checked by the probe:
 | 632 | `transfer_contract_unresolved_source_pair_create_time` |
 | 633 | `transfer_contract_unresolved_destination_pair_create_time` |
 | 634 | `transfer_contract_unresolved_payer_transfer_byte_count` |
+| 635 | bounded `transfer_contract.open` statistics and autovacuum-analyze settings |
+| 636 | `network_onboarding_offer` |
+| 637 | `network_onboarding_apple_offer_code` |
+| 638 | `network_onboarding_apple_offer_code_available` |
+| 639 | `network_onboarding_event` |
+| 640 | `network_onboarding_event_network_id_at` |
+| 641 | `network_onboarding_event_name_at` |
+| 642 | nullable `subscription_renewal.price_tier` |
+| 643 | nullable `stripe_customer.billing_country` |
+| 644 | `network_onboarding` |
+| 645 | partial `network_onboarding_next_send_at` |
+| 646 | `network_onboarding_email` |
+| 647 | `network_onboarding_email_network_id_sent_at` |
+| 648 | `onboarding_results_daily` |
+| 649 | `network_onboarding_experiment_state` |
+| 650 | `network_onboarding_created_at` |
+| 651 | signed client-key history/head tables, constraints, functions, and enabled triggers |
+| 652 | repeatable competition staging constraint/index lifecycle and removal of the old finalization block |
+| 653 | nullable `competition_round.admission_closed_at`, its check, and the updated immutable guard |
+| 654 | required `network_points_leaderboard_snapshot.epoch_metrics_available` |
+
+On 2026-09-09, Main had durably reached version 650 through the onboarding
+schema while independently developed client-key and competition-staging
+branches were combined ahead of those already-published entries. Local source
+then assigned signed client-key history to version 636. `db audit --fix` also
+rebuilt its expected database to the local head instead of Main's recorded
+version, misclassified the four genuinely pending migrations as drift, and
+attempted to create the alphabetically earlier head table with a foreign key to
+the still-absent history table. PostgreSQL rejected that first transaction, so
+the failed attempt left no partial table.
+
+The root correction preserves the exact published onboarding sequence at
+versions 636–650 and appends client-key history, repeatable staging, admission
+closure, and points availability at versions 651–654. Schema audit now verifies
+the durable identity at every source-known migration index and reconstructs
+only the recorded database version; pending functions, triggers, and data work
+remain exclusively owned by `bringyourctl db migrate`. Its repair planner also
+creates every missing table, column, candidate key, and supporting index before
+installing any foreign key, including cyclic missing-table graphs. A synthetic
+version-650 database must contain the final onboarding index, lack every
+post-650 artifact, and migrate normally through all four appends with all three
+client-key triggers present. Never use schema reconciliation to emulate pending
+migrations or edit `migration_audit` to make reordered source appear current.
+
+The first live exact-identity probe exposed a separate detector-only failure:
+it selected `migration_index::text` and ordered by the unqualified
+`migration_index` output alias. PostgreSQL therefore returned lexical order
+(`0,1,10,...`) and the positional reducer falsely reported identity index 2,
+even though the standalone audit validated the same cluster and catalog. The
+query now selects and orders the numeric source column explicitly, and the
+reducer indexes rows by their parsed migration number, rejecting malformed,
+duplicate, missing, or out-of-range entries without treating delivery order as
+schema evidence. A deterministic lexical-order fixture preserves the exact
+false-page reproduction.
 
 Versions 632–634 are the §2.3 structural plan repair. All three versions must be
 valid and ready, with the opaque equivalent-open `CASE` predicates and their
@@ -8247,10 +8301,12 @@ it must not be silently reassigned to the lowest client id. The migration adds
 no default and does not scan or rewrite the existing sweep history; its shape
 constraint enforces new writes without requiring a full-table validation.
 
-Page immediately as `migration-schema-drift` when the successful audit head is
-at or above an artifact's version but that artifact is absent. Warn as
-`migration-behind` while the audit head is below `server.MigrationCount()` for
-this source tree; never duplicate that count as a monitor constant. The
+Page immediately as `migration-schema-drift` when any source-known durable
+migration identity differs or the successful audit head is at or above an
+artifact's version but that artifact is absent. Count and contiguous range are
+not identity proof. Warn as `migration-behind` while the audit head is below
+`server.MigrationCount()` for this source tree; never duplicate that count as a
+monitor constant. The
 deployment gate is strict: run migrations from the exact service commit,
 require the current head and all version-gated artifact checks, and only then
 activate dependent APIs or taskworkers. Never edit `migration_audit` or create

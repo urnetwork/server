@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,12 +79,31 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "ST signature/notification deployment identity", requiredVersion: 627, rowColumn: 38},
 	{name: "transfer_contract.stream_id+contract_participant", requiredVersion: 628, rowColumn: 39},
 	{name: "transfer_contract_stream_id", requiredVersion: 629, rowColumn: 40},
-	{name: "competition staging identity and admission guards", requiredVersion: 630, rowColumn: 41},
+	{name: "competition staging identity and initial guards", requiredVersion: 630, removedVersion: 652, rowColumn: 41},
 	{name: "transfer_escrow_sweep.provider_payouts", requiredVersion: 631, rowColumn: 42},
 	{name: "transfer_contract_unresolved_source_pair_create_time", requiredVersion: 632, rowColumn: 43},
 	{name: "transfer_contract_unresolved_destination_pair_create_time", requiredVersion: 633, rowColumn: 44},
 	{name: "transfer_contract_unresolved_payer_transfer_byte_count", requiredVersion: 634, rowColumn: 45},
 	{name: "transfer_contract bounded open statistics", requiredVersion: 635, rowColumn: 46},
+	{name: "network_onboarding_offer", requiredVersion: 636, rowColumn: 47},
+	{name: "network_onboarding_apple_offer_code", requiredVersion: 637, rowColumn: 48},
+	{name: "network_onboarding_apple_offer_code_available", requiredVersion: 638, rowColumn: 49},
+	{name: "network_onboarding_event", requiredVersion: 639, rowColumn: 50},
+	{name: "network_onboarding_event_network_id_at", requiredVersion: 640, rowColumn: 51},
+	{name: "network_onboarding_event_name_at", requiredVersion: 641, rowColumn: 52},
+	{name: "subscription_renewal.price_tier", requiredVersion: 642, rowColumn: 53},
+	{name: "stripe_customer.billing_country", requiredVersion: 643, rowColumn: 54},
+	{name: "network_onboarding", requiredVersion: 644, rowColumn: 55},
+	{name: "network_onboarding_next_send_at", requiredVersion: 645, rowColumn: 56},
+	{name: "network_onboarding_email", requiredVersion: 646, rowColumn: 57},
+	{name: "network_onboarding_email_network_id_sent_at", requiredVersion: 647, rowColumn: 58},
+	{name: "onboarding_results_daily", requiredVersion: 648, rowColumn: 59},
+	{name: "network_onboarding_experiment_state", requiredVersion: 649, rowColumn: 60},
+	{name: "network_onboarding_created_at", requiredVersion: 650, rowColumn: 61},
+	{name: "signed client-key history tables and guards", requiredVersion: 651, rowColumn: 62},
+	{name: "repeatable competition staging lifecycle", requiredVersion: 652, rowColumn: 63},
+	{name: "competition_round.admission_closed_at and guard", requiredVersion: 653, rowColumn: 64},
+	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -540,6 +560,158 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 'autovacuum_analyze_scale_factor=0',
 		                 'autovacuum_analyze_threshold=1000000'
 		             ]::text[]
+		       ),
+		       to_regclass('public.network_onboarding_offer') IS NOT NULL,
+		       to_regclass('public.network_onboarding_apple_offer_code') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding_apple_offer_code'
+		             AND index_name = 'network_onboarding_apple_offer_code_available'
+		             AND predicate_definition LIKE '%network_id IS NULL%'
+		             AND indisvalid AND indisready
+		       ),
+		       to_regclass('public.network_onboarding_event') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding_event'
+		             AND index_name = 'network_onboarding_event_network_id_at'
+		             AND definition LIKE '%(network_id, at)%'
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding_event'
+		             AND index_name = 'network_onboarding_event_name_at'
+		             AND definition LIKE '%(name, at)%'
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'subscription_renewal'
+		             AND column_name = 'price_tier' AND data_type = 'character varying'
+		             AND character_maximum_length = 32 AND is_nullable = 'YES'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'stripe_customer'
+		             AND column_name = 'billing_country' AND data_type = 'character varying'
+		             AND character_maximum_length = 2 AND is_nullable = 'YES'
+		       ),
+		       to_regclass('public.network_onboarding') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding'
+		             AND index_name = 'network_onboarding_next_send_at'
+		             AND definition LIKE '%(next_send_at)%'
+		             AND predicate_definition LIKE '%next_send_at IS NOT NULL%'
+		             AND indisvalid AND indisready
+		       ),
+		       to_regclass('public.network_onboarding_email') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding_email'
+		             AND index_name = 'network_onboarding_email_network_id_sent_at'
+		             AND definition LIKE '%(network_id, sent_at)%'
+		             AND indisvalid AND indisready
+		       ),
+		       to_regclass('public.onboarding_results_daily') IS NOT NULL,
+		       to_regclass('public.network_onboarding_experiment_state') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding'
+		             AND index_name = 'network_onboarding_created_at'
+		             AND definition LIKE '%(created_at)%'
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.st_client_key_history') IS NOT NULL
+		           AND to_regclass('public.st_client_key_head') IS NOT NULL
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'st_client_key_history' AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (client_id, generation)' AND validated
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'st_client_key_head' AND constraint_type = 'f'
+		                 AND definition LIKE '%(client_id, generation)%st_client_key_history(client_id, generation)%'
+		                 AND validated
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1 FROM (VALUES
+		                   ('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
+		                   ('st_client_key_head', 'st_client_key_head_identity', 'st_client_key_head_identity_guard'),
+		                   ('network_client', 'st_client_key_retire_on_client_delete', 'st_client_key_retire_deleted_client')
+		               ) expected(table_name, trigger_name, function_name)
+		               WHERE NOT EXISTS (
+		                   SELECT 1 FROM pg_trigger trigger_record
+		                   JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
+		                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+		                   WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
+		                     AND trigger_record.tgname = expected.trigger_name
+		                     AND trigger_record.tgenabled = 'O'
+		                     AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
+		                     AND NOT trigger_record.tgisinternal
+		               )
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'competition_round'
+		                 AND constraint_name = 'competition_round_epoch_kind'
+		                 AND constraint_type = 'c' AND validated
+		                 AND definition LIKE '%epoch_number >= 0%'
+		                 AND definition LIKE '%epoch_number > 0%'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'competition_round'
+		                 AND index_name = 'competition_round_one_active_staging'
+		                 AND definition LIKE '%(competition_id)%'
+		                 AND predicate_definition LIKE '%staging = true%'
+		                 AND predicate_definition LIKE '%canceled = false%'
+		                 AND predicate_definition LIKE '%finalized_at IS NULL%'
+		                 AND indisvalid AND indisready
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1 FROM pg_trigger trigger_record
+		               JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
+		               JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+		               WHERE namespace.nspname = 'public' AND relation.relname = 'competition_round'
+		                 AND trigger_record.tgname = 'competition_staging_finalization_blocked'
+		                 AND NOT trigger_record.tgisinternal
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'competition_round'
+		                 AND column_name = 'admission_closed_at'
+		                 AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'competition_round'
+		                 AND constraint_name = 'competition_round_admission_closed_kind'
+		                 AND constraint_type = 'c' AND validated
+		                 AND definition LIKE '%admission_closed_at%'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM pg_proc function_record
+		               JOIN pg_namespace namespace ON namespace.oid = function_record.pronamespace
+		               WHERE namespace.nspname = 'public'
+		                 AND function_record.proname = 'competition_round_immutable_guard'
+		                 AND pg_get_functiondef(function_record.oid) LIKE '%OLD.admission_closed_at%'
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public'
+		             AND table_name = 'network_points_leaderboard_snapshot'
+		             AND column_name = 'epoch_metrics_available'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
 		       )
 		FROM version;
 	`)
@@ -566,17 +738,42 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			missing = append(missing, "migration_catalog identities@v600")
 		} else {
 			catalogRows, catalogErr := env.runner.pg(ctx, `
-				SELECT count(*)::int,
-				       coalesce(min(migration_index), -1)::int,
-				       coalesce(max(migration_index), -1)::int
-				FROM migration_catalog;
+				SELECT migration_index, trim(identity_sha256)
+				FROM migration_catalog
+				ORDER BY migration_catalog.migration_index;
 			`)
 			if catalogErr != nil {
 				return nil, catalogErr
 			}
-			if len(catalogRows) != 1 || atoiRow(catalogRows[0], 0) != dbVersion ||
-				atoiRow(catalogRows[0], 1) != 0 || atoiRow(catalogRows[0], 2) != dbVersion-1 {
+			catalogIdentities := make(map[int]string, len(catalogRows))
+			catalogComplete := len(catalogRows) == dbVersion
+			for _, row := range catalogRows {
+				if len(row) != 2 {
+					catalogComplete = false
+					break
+				}
+				index, parseErr := strconv.Atoi(row.str(0))
+				_, duplicate := catalogIdentities[index]
+				if parseErr != nil || index < 0 || dbVersion <= index || duplicate {
+					catalogComplete = false
+					break
+				}
+				catalogIdentities[index] = row.str(1)
+			}
+			if !catalogComplete || len(catalogIdentities) != dbVersion {
 				missing = append(missing, "migration_catalog identities@v600")
+			} else {
+				compareCount := min(dbVersion, requiredHead)
+				for index := 0; index < compareCount; index++ {
+					expectedIdentity, identityErr := server.MigrationIdentity(index)
+					if identityErr != nil {
+						return nil, identityErr
+					}
+					if strings.TrimSpace(catalogIdentities[index]) != expectedIdentity {
+						missing = append(missing, fmt.Sprintf("migration_catalog identity[%d]@v600", index))
+						break
+					}
+				}
 			}
 		}
 	}

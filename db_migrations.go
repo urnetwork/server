@@ -7236,146 +7236,6 @@ var migrations = []any{
 			)
 	`),
 
-	// Preserve operator-signed key history independently of mutable Redis
-	// projection and retire current access atomically with client deletion.
-	newSqlMigration(clientKeyHistorySchemaSQL),
-
-	// Staging is an independently numbered, repeatable pre-production era. Its
-	// jobs traverse the real evaluator and become public after close and drain,
-	// but can never enter honesty review, select a winner, or consume one of the
-	// six production epoch identities. The existing epoch-zero row remains the
-	// first immutable staging record.
-	newSqlMigration(`
-		DROP TRIGGER competition_staging_finalization_blocked ON competition_round;
-		DROP FUNCTION competition_staging_finalization_guard();
-
-		ALTER TABLE competition_round
-			DROP CONSTRAINT competition_round_epoch_kind,
-			ADD CONSTRAINT competition_round_epoch_kind CHECK (
-				(staging = true AND epoch_number >= 0) OR
-				(staging = false AND epoch_number > 0)
-			);
-
-		DROP INDEX competition_round_epoch_identity;
-		CREATE UNIQUE INDEX competition_round_epoch_identity
-		ON competition_round (competition_id, staging, epoch_number);
-
-		CREATE UNIQUE INDEX competition_round_one_active_staging
-		ON competition_round (competition_id)
-		WHERE staging = true AND canceled = false AND finalized_at IS NULL;
-
-		CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()
-		RETURNS trigger
-		LANGUAGE plpgsql
-		AS $competition_round_honesty_review_gate$
-		BEGIN
-			IF NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL THEN
-				IF EXISTS (
-					SELECT 1 FROM competition_job
-					WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
-				) THEN
-					RAISE EXCEPTION 'competition epoch still has active evaluations';
-				END IF;
-				IF NEW.staging = true THEN
-					IF NEW.winner_job_id IS NOT NULL THEN
-						RAISE EXCEPTION 'competition staging round cannot select a winner';
-					END IF;
-					RETURN NEW;
-				END IF;
-				IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
-					SELECT 1 FROM competition_candidate_review
-					WHERE round_id = NEW.round_id AND job_id = NEW.winner_job_id
-					  AND decision = 'approved'
-				) THEN
-					RAISE EXCEPTION 'competition winner has not passed honesty review';
-				END IF;
-				IF NEW.winner_job_id IS NULL AND EXISTS (
-					SELECT 1
-					FROM competition_job AS candidate
-					WHERE candidate.round_id = NEW.round_id AND candidate.state = 'succeeded'
-					  AND candidate.score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
-					  AND candidate.score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
-					  AND jsonb_typeof(candidate.score_json->'gates') = 'object'
-					  AND candidate.score_json->'gates' <> '{}'::jsonb
-					  AND NOT EXISTS (
-					      SELECT 1 FROM jsonb_each(candidate.score_json->'gates') AS gate
-					      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
-					  )
-					  AND NOT EXISTS (
-					      SELECT 1 FROM competition_candidate_review AS review
-					      WHERE review.round_id = NEW.round_id
-					        AND review.job_id = candidate.job_id
-					        AND review.decision = 'rejected'
-					  )
-				) THEN
-					RAISE EXCEPTION 'competition epoch has an unresolved significant candidate';
-				END IF;
-			END IF;
-			RETURN NEW;
-		END
-		$competition_round_honesty_review_gate$;
-	`),
-
-	// Closing a staging admission early must not rewrite its published schedule
-	// or workload commitment. This one-way marker is serialized with admission;
-	// queued work remains eligible and finalization may occur after the marker.
-	newSqlMigration(`
-		ALTER TABLE competition_round
-			ADD COLUMN admission_closed_at timestamp NULL,
-			ADD CONSTRAINT competition_round_admission_closed_kind CHECK (
-				admission_closed_at IS NULL OR (
-					staging = true AND
-					opens_at <= admission_closed_at AND
-					admission_closed_at <= closes_at
-				)
-			);
-
-		CREATE OR REPLACE FUNCTION competition_round_immutable_guard()
-		RETURNS trigger
-		LANGUAGE plpgsql
-		AS $competition_epoch_lifecycle_guard$
-		BEGIN
-			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
-			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
-			   OLD.epoch_number IS DISTINCT FROM NEW.epoch_number OR
-			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
-			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
-			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
-			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
-			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
-			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
-			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
-			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
-			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
-			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
-			   (OLD.admission_closed_at IS NOT NULL AND
-			       OLD.admission_closed_at IS DISTINCT FROM NEW.admission_closed_at) OR
-			   (OLD.canceled AND NOT NEW.canceled) OR
-			   (OLD.finalized_at IS NOT NULL AND (
-			       OLD.finalized_at IS DISTINCT FROM NEW.finalized_at OR
-			       OLD.winner_job_id IS DISTINCT FROM NEW.winner_job_id
-			   )) OR
-			   (NEW.finalized_at IS NULL AND NEW.winner_job_id IS NOT NULL) OR
-			   (NEW.finalized_at IS NOT NULL AND
-			       NEW.finalized_at < COALESCE(NEW.admission_closed_at, NEW.closes_at))
-			THEN
-				RAISE EXCEPTION 'competition round immutable fields changed';
-			END IF;
-			IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
-				SELECT 1 FROM competition_job AS job
-				WHERE job.job_id = NEW.winner_job_id
-				  AND job.round_id = NEW.round_id
-				  AND job.state = 'succeeded'
-				  AND (job.score_json->>'placeable')::boolean
-				  AND (job.score_json->>'takeover_eligible')::boolean
-			) THEN
-				RAISE EXCEPTION 'competition winner is not an eligible job in this round';
-			END IF;
-			RETURN NEW;
-		END
-		$competition_epoch_lifecycle_guard$;
-	`),
-
 	// ----- onboarding program (mmm/onboarding/PLAN.md) -----
 
 	// The welcome offer: one row per network, issued once, never re-issued.
@@ -7581,6 +7441,146 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX network_onboarding_created_at
 		ON network_onboarding (created_at)
+	`),
+
+	// Preserve operator-signed key history independently of mutable Redis
+	// projection and retire current access atomically with client deletion.
+	newSqlMigration(clientKeyHistorySchemaSQL),
+
+	// Staging is an independently numbered, repeatable pre-production era. Its
+	// jobs traverse the real evaluator and become public after close and drain,
+	// but can never enter honesty review, select a winner, or consume one of the
+	// six production epoch identities. The existing epoch-zero row remains the
+	// first immutable staging record.
+	newSqlMigration(`
+		DROP TRIGGER competition_staging_finalization_blocked ON competition_round;
+		DROP FUNCTION competition_staging_finalization_guard();
+
+		ALTER TABLE competition_round
+			DROP CONSTRAINT competition_round_epoch_kind,
+			ADD CONSTRAINT competition_round_epoch_kind CHECK (
+				(staging = true AND epoch_number >= 0) OR
+				(staging = false AND epoch_number > 0)
+			);
+
+		DROP INDEX competition_round_epoch_identity;
+		CREATE UNIQUE INDEX competition_round_epoch_identity
+		ON competition_round (competition_id, staging, epoch_number);
+
+		CREATE UNIQUE INDEX competition_round_one_active_staging
+		ON competition_round (competition_id)
+		WHERE staging = true AND canceled = false AND finalized_at IS NULL;
+
+		CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_honesty_review_gate$
+		BEGIN
+			IF NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL THEN
+				IF EXISTS (
+					SELECT 1 FROM competition_job
+					WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+				) THEN
+					RAISE EXCEPTION 'competition epoch still has active evaluations';
+				END IF;
+				IF NEW.staging = true THEN
+					IF NEW.winner_job_id IS NOT NULL THEN
+						RAISE EXCEPTION 'competition staging round cannot select a winner';
+					END IF;
+					RETURN NEW;
+				END IF;
+				IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+					SELECT 1 FROM competition_candidate_review
+					WHERE round_id = NEW.round_id AND job_id = NEW.winner_job_id
+					  AND decision = 'approved'
+				) THEN
+					RAISE EXCEPTION 'competition winner has not passed honesty review';
+				END IF;
+				IF NEW.winner_job_id IS NULL AND EXISTS (
+					SELECT 1
+					FROM competition_job AS candidate
+					WHERE candidate.round_id = NEW.round_id AND candidate.state = 'succeeded'
+					  AND candidate.score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+					  AND candidate.score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+					  AND jsonb_typeof(candidate.score_json->'gates') = 'object'
+					  AND candidate.score_json->'gates' <> '{}'::jsonb
+					  AND NOT EXISTS (
+					      SELECT 1 FROM jsonb_each(candidate.score_json->'gates') AS gate
+					      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+					  )
+					  AND NOT EXISTS (
+					      SELECT 1 FROM competition_candidate_review AS review
+					      WHERE review.round_id = NEW.round_id
+					        AND review.job_id = candidate.job_id
+					        AND review.decision = 'rejected'
+					  )
+				) THEN
+					RAISE EXCEPTION 'competition epoch has an unresolved significant candidate';
+				END IF;
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_honesty_review_gate$;
+	`),
+
+	// Closing a staging admission early must not rewrite its published schedule
+	// or workload commitment. This one-way marker is serialized with admission;
+	// queued work remains eligible and finalization may occur after the marker.
+	newSqlMigration(`
+		ALTER TABLE competition_round
+			ADD COLUMN admission_closed_at timestamp NULL,
+			ADD CONSTRAINT competition_round_admission_closed_kind CHECK (
+				admission_closed_at IS NULL OR (
+					staging = true AND
+					opens_at <= admission_closed_at AND
+					admission_closed_at <= closes_at
+				)
+			);
+
+		CREATE OR REPLACE FUNCTION competition_round_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_epoch_lifecycle_guard$
+		BEGIN
+			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
+			   OLD.epoch_number IS DISTINCT FROM NEW.epoch_number OR
+			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
+			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
+			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
+			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
+			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
+			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
+			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
+			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
+			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
+			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
+			   (OLD.admission_closed_at IS NOT NULL AND
+			       OLD.admission_closed_at IS DISTINCT FROM NEW.admission_closed_at) OR
+			   (OLD.canceled AND NOT NEW.canceled) OR
+			   (OLD.finalized_at IS NOT NULL AND (
+			       OLD.finalized_at IS DISTINCT FROM NEW.finalized_at OR
+			       OLD.winner_job_id IS DISTINCT FROM NEW.winner_job_id
+			   )) OR
+			   (NEW.finalized_at IS NULL AND NEW.winner_job_id IS NOT NULL) OR
+			   (NEW.finalized_at IS NOT NULL AND
+			       NEW.finalized_at < COALESCE(NEW.admission_closed_at, NEW.closes_at))
+			THEN
+				RAISE EXCEPTION 'competition round immutable fields changed';
+			END IF;
+			IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM competition_job AS job
+				WHERE job.job_id = NEW.winner_job_id
+				  AND job.round_id = NEW.round_id
+				  AND job.state = 'succeeded'
+				  AND (job.score_json->>'placeable')::boolean
+				  AND (job.score_json->>'takeover_eligible')::boolean
+			) THEN
+				RAISE EXCEPTION 'competition winner is not an eligible job in this round';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_epoch_lifecycle_guard$;
 	`),
 
 	// A zero blocks/streak value is meaningful only after at least one finalized
