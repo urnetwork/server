@@ -15,6 +15,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 // monitorYaml mirrors vault/<env>/monitor.yml.
@@ -146,6 +147,19 @@ type appleReportingVault struct {
 	PrivateKey string `yaml:"private_key"`
 }
 
+type credentialFieldSpec struct {
+	name string
+	path []string
+}
+
+type credentialRequirementSpec struct {
+	key      string
+	resource string
+	purpose  string
+	required bool
+	fields   []credentialFieldSpec
+}
+
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
@@ -162,25 +176,21 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 
-	pgResource, err := server.Vault.SimpleResource("pg.yml")
-	if err != nil {
-		return SignalSettings{}, fmt.Errorf("pg.yml: %w", err)
-	}
-	pgKeys, err := pgResource.ParseE()
-	if err != nil {
-		return SignalSettings{}, err
+	// Core credentials are deliberately fail-soft at assembly time. The
+	// credentials signal must be able to report a missing or malformed pg.yml
+	// or grafana.yml instead of the settings loader exiting before any
+	// structured alert can be written. Dependent probes still fail visibly
+	// with empty settings, so this never turns an unknown backend into green.
+	pgKeys := map[string]any{}
+	if pgResource, resourceErr := server.Vault.SimpleResource("pg.yml"); resourceErr == nil {
+		if parsed, parseErr := pgResource.ParseE(); parseErr == nil {
+			pgKeys = parsed
+		}
 	}
 
-	grafanaResource, err := server.Vault.SimpleResource("grafana.yml")
-	if err != nil {
-		return SignalSettings{}, fmt.Errorf("grafana.yml: %w", err)
-	}
 	var grafanaVault grafanaVaultYaml
-	if err := grafanaResource.UnmarshalYamlE(&grafanaVault); err != nil {
-		return SignalSettings{}, err
-	}
-	if grafanaVault.Grafana.AdminPassword == "" {
-		return SignalSettings{}, fmt.Errorf("grafana.yml: grafana.admin_password is required")
+	if grafanaResource, resourceErr := server.Vault.SimpleResource("grafana.yml"); resourceErr == nil {
+		_ = grafanaResource.UnmarshalYamlE(&grafanaVault)
 	}
 
 	servicesResource, err := server.Vault.SimpleResource("services.yml")
@@ -257,6 +267,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 		},
 		GooglePlay:     loadGooglePlayReportingSettings(),
 		AppleReporting: loadAppleReportingSettings(),
+		Credentials:    loadCredentialRequirements(env, stEnabled, logServices),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -335,6 +346,340 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// loadCredentialRequirements is the proactive counterpart to SIGNALS.md
+// §8.7's route-failure log classifier. Main runs every listed core and
+// payment integration, so a missing resource or field is a release defect.
+// Crash-report resources remain optional by contract: absence is a no-op, but
+// a present partial credential is still observable.
+func loadCredentialRequirements(environment string, stEnabled bool, services []string) []CredentialRequirement {
+	required := environment == "main"
+	serviceEnabled := func(wanted string) bool {
+		for _, service := range services {
+			if service == wanted {
+				return true
+			}
+		}
+		return false
+	}
+	field := func(name string, path ...string) credentialFieldSpec {
+		return credentialFieldSpec{name: name, path: path}
+	}
+	specs := []credentialRequirementSpec{
+		{
+			key: "database", resource: "pg.yml", purpose: "Application PostgreSQL authentication", required: required,
+			fields: []credentialFieldSpec{
+				field("authority", "authority"),
+				field("user", "user"),
+				field("password", "password"),
+				field("db", "db"),
+			},
+		},
+		{
+			key: "database-maintenance", resource: "pg_maintenance.yml", purpose: "Direct PostgreSQL maintenance authentication", required: false,
+			fields: []credentialFieldSpec{
+				field("authority", "authority"),
+				field("user", "user"),
+				field("password", "password"),
+				field("db", "db"),
+			},
+		},
+		{
+			key: "redis", resource: "redis.yml", purpose: "Application Redis authentication", required: required,
+			// An explicitly empty password is valid for a private, deliberately
+			// unauthenticated Redis deployment. Require the connection identity;
+			// transport exposure/authentication policy is a separate signal.
+			fields: []credentialFieldSpec{field("authority", "authority")},
+		},
+		{
+			key: "grafana", resource: "grafana.yml", purpose: "Grafana administration, metric push, datasource, and object-storage authentication", required: required,
+			fields: []credentialFieldSpec{
+				field("grafana.admin_password", "grafana", "admin_password"),
+				field("postgres.password", "postgres", "password"),
+				field("minio.access_key", "minio", "access_key"),
+				field("minio.secret_key", "minio", "secret_key"),
+				field("users", "users"),
+			},
+		},
+		{
+			key: "password-auth", resource: "password.yml", purpose: "Password credential hashing", required: required,
+			fields: []credentialFieldSpec{field("password.pepper", "password", "pepper")},
+		},
+		{
+			key: "oauth-signing", resource: "auth.yml", purpose: "OAuth authorization and dedicated token signing", required: required,
+			fields: []credentialFieldSpec{
+				field("oauth.issuer", "oauth", "issuer"),
+				field("oauth.authorization_endpoint", "oauth", "authorization_endpoint"),
+				field("oauth.signer_keys", "oauth", "signer_keys"),
+			},
+		},
+		{
+			key: "apple-payment", resource: "apple.yml", purpose: "Apple subscription notification and App Store Server API reconciliation", required: required,
+			fields: []credentialFieldSpec{
+				field("app_store_server_api_key_id", "app_store_server_api_key_id"),
+				field("issuer_id", "issuer_id"),
+				field("private_key", "private_key"),
+				field("app_store_notifications.bundle_id", "app_store_notifications", "bundle_id"),
+				field("app_store_notifications.app_apple_id", "app_store_notifications", "app_apple_id"),
+				field("app_store_notifications.environments", "app_store_notifications", "environments"),
+				field("app_store_notifications.product_ids", "app_store_notifications", "product_ids"),
+			},
+		},
+		{
+			key: "google-payment", resource: "google.yml", purpose: "Google Play subscription notification and reconciliation", required: required,
+			fields: []credentialFieldSpec{
+				field("webhook.publisher_email", "webhook", "publisher_email"),
+				field("webhook.package_name", "webhook", "package_name"),
+				field("oauth.client_id", "oauth", "client_id"),
+				field("oauth.client_secret", "oauth", "client_secret"),
+				field("oauth.refresh_token", "oauth", "refresh_token"),
+			},
+		},
+		{
+			key: "stripe-payment", resource: "stripe.yml", purpose: "Stripe checkout, webhook verification, and reconciliation", required: required,
+			fields: []credentialFieldSpec{
+				field("api.token", "api", "token"),
+				field("api.publishable_key", "api", "publishable_key"),
+				field("webhook.signing_secret", "webhook", "signing_secret"),
+			},
+		},
+		{
+			key: "solana-payment", resource: "helius.yml", purpose: "Solana payment webhook verification and reconciliation", required: required,
+			fields: []credentialFieldSpec{
+				field("helius.api_key", "helius", "api_key"),
+				field("helius.webhook_auth_header", "helius", "webhook_auth_header"),
+			},
+		},
+		{
+			key: "coinbase-payment", resource: "coinbase.yml", purpose: "Coinbase data-pack checkout and webhook verification", required: required,
+			fields: []credentialFieldSpec{
+				field("api.account_id", "api", "account_id"),
+				field("api.key_name", "api", "key_name"),
+				field("api.private_key", "api", "private_key"),
+				field("webhook.shared_secret", "webhook", "shared_secret"),
+			},
+		},
+		{
+			key: "circle-payout", resource: "circle.yml", purpose: "Circle wallet and provider payout submission", required: required,
+			fields: []credentialFieldSpec{
+				field("circle.api_token", "circle", "api_token"),
+				field("circle.entity_secret", "circle", "entity_secret"),
+				field("circle.wallet_set_id", "circle", "wallet_set_id"),
+				field("circle.solana_wallet_id", "circle", "solana_wallet_id"),
+				field("circle.polygon_wallet_id", "circle", "polygon_wallet_id"),
+			},
+		},
+		{
+			key: "jwt-signing", resource: "jwt.yml", purpose: "API and client JWT signing", required: required,
+			fields: []credentialFieldSpec{field("tls_key_paths", "tls_key_paths")},
+		},
+		{
+			key: "client-ip-hash", resource: "client.yml", purpose: "Client address privacy-preserving hashing", required: required,
+			fields: []credentialFieldSpec{field("client_ip_hash_pepper", "client_ip_hash_pepper")},
+		},
+		{
+			key: "wireguard-handoff", resource: "wireguard.yml", purpose: "WireGuard peer handoff encryption", required: required,
+			fields: []credentialFieldSpec{field("handoff_encryption_key", "handoff_encryption_key")},
+		},
+		{
+			key: "proxy-auth", resource: "proxy.yml", purpose: "Hosted proxy authentication and WireGuard identity", required: required,
+			fields: []credentialFieldSpec{
+				field("secrets", "secrets"),
+				field("wg.private_key", "wg", "private_key"),
+				field("wg.public_key", "wg", "public_key"),
+			},
+		},
+		{
+			key: "object-storage", resource: "minio.yml", purpose: "Durable object storage", required: required,
+			fields: []credentialFieldSpec{
+				field("access_key", "access_key"),
+				field("secret_key", "secret_key"),
+			},
+		},
+		{
+			key: "account-email", resource: "aws.yml", purpose: "Transactional account email", required: required,
+			fields: []credentialFieldSpec{
+				field("aws.access_key_id", "aws", "access_key_id"),
+				field("aws.secret_access_key", "aws", "secret_access_key"),
+			},
+		},
+		{
+			key: "product-updates", resource: "brevo.yml", purpose: "Product-update delivery and webhook authentication", required: required,
+			fields: []credentialFieldSpec{
+				field("brevo.api_key", "brevo", "api_key"),
+				field("brevo.webhook_bearers", "brevo", "webhook_bearers"),
+			},
+		},
+		{
+			key: "provider-egress", resource: "provider_egress.yml", purpose: "Provider egress result ingestion", required: required,
+			fields: []credentialFieldSpec{field("ingest_secret", "ingest_secret")},
+		},
+		{
+			key: "stats-integrity", resource: "stats.yml", purpose: "Public statistics privacy hashing", required: required,
+			fields: []credentialFieldSpec{field("hmac_salt", "hmac_salt")},
+		},
+		{
+			key: "walletconnect", resource: "walletconnect.yml", purpose: "WalletConnect project authentication", required: required,
+			fields: []credentialFieldSpec{field("project_id", "project_id")},
+		},
+		{
+			key: "ipinfo", resource: "ipinfo.yml", purpose: "IP geolocation lookup", required: required,
+			fields: []credentialFieldSpec{field("ipinfo.access_token", "ipinfo", "access_token")},
+		},
+		{
+			key: "apple-crash-reporting", resource: "apple-reporting.yml", purpose: "Apple crash-report retrieval", required: false,
+			fields: []credentialFieldSpec{
+				field("issuer_id", "issuer_id"),
+				field("key_id", "key_id"),
+				field("private_key", "private_key"),
+			},
+		},
+		{
+			key: "google-play-crash-reporting", resource: "google-play-reporting.json", purpose: "Google Play crash-report retrieval", required: false,
+			fields: []credentialFieldSpec{
+				field("client_email", "client_email"),
+				field("private_key", "private_key"),
+				field("private_key_id", "private_key_id"),
+				field("token_uri", "token_uri"),
+			},
+		},
+	}
+	if analyticsFields := enabledAnalyticsCredentialFields(); len(analyticsFields) != 0 {
+		specs = append(specs, credentialRequirementSpec{
+			key: "analytics", resource: "analytics.yml", purpose: "Enabled search and webmaster analytics collection",
+			required: required && serviceEnabled("taskworker"), fields: analyticsFields,
+		})
+	}
+	if serviceEnabled("mcp") {
+		specs = append(specs, credentialRequirementSpec{
+			key: "anthropic", resource: "anthropic.yml", purpose: "MCP Anthropic provider", required: required,
+			fields: []credentialFieldSpec{field("anthropic.api_key", "anthropic", "api_key")},
+		})
+	}
+	if stEnabled {
+		specs = append(specs,
+			credentialRequirementSpec{
+				key: "subnet", resource: "st.yml", purpose: "Enabled subnet signing, artifact, and settlement identities", required: true,
+				fields: []credentialFieldSpec{
+					field("deployment_id", "deployment_id"),
+					field("genesis_hash", "genesis_hash"),
+					field("policy_hash", "policy_hash"),
+					field("root_key", "root_key"),
+					field("artifact_key", "artifact_key"),
+					field("deposit_key", "deposit_key"),
+				},
+			},
+			credentialRequirementSpec{
+				key: "subnet-verification", resource: "verify.yml", purpose: "Enabled subnet route-verification signing and egress hashing", required: true,
+				fields: []credentialFieldSpec{
+					field("keys", "keys"),
+					field("egress_hash_key", "egress_hash_key"),
+				},
+			},
+		)
+	}
+
+	requirements := make([]CredentialRequirement, 0, len(specs))
+	for _, spec := range specs {
+		requirements = append(requirements, inspectCredentialRequirement(spec))
+	}
+	sort.Slice(requirements, func(i, j int) bool { return requirements[i].Key < requirements[j].Key })
+	return requirements
+}
+
+// enabledAnalyticsCredentialFields mirrors the controller's actual gates: a
+// provider needs a credential only when global search ingestion, its API
+// adapter, and at least one matching site property are all enabled. This keeps
+// a deliberately unused provider from becoming a false missing-secret page.
+func enabledAnalyticsCredentialFields() []credentialFieldSpec {
+	config, err := model.LoadAnalyticsConfig()
+	if err != nil || !config.Enabled || !config.Search.Enabled {
+		return nil
+	}
+	hasSiteProperty := func(property func(model.AnalyticsSiteProperties) string) bool {
+		for _, site := range config.Sites {
+			if strings.TrimSpace(property(site.Properties)) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	fields := make([]credentialFieldSpec, 0, 4)
+	if provider := config.Providers.Google; provider.Enabled && provider.Mode == "api" &&
+		hasSiteProperty(func(properties model.AnalyticsSiteProperties) string { return properties.GoogleSearchConsole }) {
+		fields = append(fields, credentialFieldSpec{
+			name: "google_search_console.service_account_json", path: []string{"google_search_console", "service_account_json"},
+		})
+	}
+	if provider := config.Providers.Bing; provider.Enabled && provider.Mode == "api" && provider.Protocol == "rest" &&
+		hasSiteProperty(func(properties model.AnalyticsSiteProperties) string { return properties.BingWebmaster }) {
+		fields = append(fields, credentialFieldSpec{
+			name: "bing_webmaster.api_key", path: []string{"bing_webmaster", "api_key"},
+		})
+	}
+	if provider := config.Providers.Yandex; provider.Enabled && provider.Mode == "api" &&
+		hasSiteProperty(func(properties model.AnalyticsSiteProperties) string { return properties.YandexHostID }) {
+		fields = append(fields,
+			credentialFieldSpec{name: "yandex_webmaster.oauth_token", path: []string{"yandex_webmaster", "oauth_token"}},
+			credentialFieldSpec{name: "yandex_webmaster.user_id", path: []string{"yandex_webmaster", "user_id"}},
+		)
+	}
+	return fields
+}
+
+func inspectCredentialRequirement(spec credentialRequirementSpec) CredentialRequirement {
+	requirement := CredentialRequirement{
+		Key: spec.key, Resource: spec.resource, Purpose: spec.purpose, Required: spec.required,
+	}
+	resource, err := server.Vault.SimpleResource(spec.resource)
+	if err != nil {
+		for _, field := range spec.fields {
+			requirement.MissingFields = append(requirement.MissingFields, field.name)
+		}
+		return requirement
+	}
+	requirement.Present = true
+	values, err := resource.ParseE()
+	if err != nil {
+		requirement.Malformed = true
+		return requirement
+	}
+	for _, field := range spec.fields {
+		var value any = values
+		for _, component := range field.path {
+			object, ok := value.(map[string]any)
+			if !ok {
+				value = nil
+				break
+			}
+			value = object[component]
+		}
+		if !credentialValuePresent(value) {
+			requirement.MissingFields = append(requirement.MissingFields, field.name)
+		}
+	}
+	sort.Strings(requirement.MissingFields)
+	return requirement
+}
+
+func credentialValuePresent(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		return len(typed) != 0
+	case []string:
+		return len(typed) != 0
+	case int:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case float64:
+		return typed != 0
+	default:
+		return value != nil
+	}
 }
 
 func monitorSSHKeyPaths(paths []string) []string {

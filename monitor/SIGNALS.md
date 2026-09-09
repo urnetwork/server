@@ -4818,6 +4818,91 @@ concentrated same-network and retained-Public-route boundaries, malformed and
 contradictory aggregates, query scoping, privacy boundaries, and detailed
 Markdown rendering.
 
+### 2.21 Payment reconciliation liveness and repair audit
+Probe: `payment-reconciliation`
+
+The hourly `PaymentReconcile` task is the lost-notification safety net for
+Apple, Google Play, Stripe, and Solana. A run-level heartbeat is necessary but
+not sufficient: the controller deliberately continues after one store is
+skipped or errors, then still records its global heartbeat. Observe all layers:
+
+- exactly one canonical fully-qualified `PaymentReconcile` RunOnce row, with
+  no retained reschedule error;
+- a non-dry-run `store=all, action=heartbeat` no more than 150 minutes old;
+- one successful watermark per expected store no more than three hours old;
+  more than six hours or no watermark is PAGE;
+- zero `skipped_store` and `error` rows per store in the last three hours;
+- every safety-net-originated `credited` or `ended` repair in the last 24
+  hours, grouped only by store/action.
+
+`payment-reconciliation-store-skipped` is PAGE immediately. Missing credentials
+are not a healthy local-environment convenience on Main: they disable that
+store's ability to recover a lost renewal, revocation, or refund. Run §8.7 to
+name the missing resource/fields without reading a value into the alert.
+`payment-reconciliation-store-error` warns on one event and pages on two or
+more in three hours. Authentication, provider availability, schema validation,
+budget exhaustion, and local persistence are separate discriminators; never
+advance a watermark merely to clear the alert.
+
+`payment-reconciliation-repair` warns on every real `credited`/`ended` repair
+whose run also emitted a reconciliation heartbeat. The account is protected,
+but the repair proves the ordinary notification/verification/idempotency path
+missed authoritative provider state. Trace and fix that earlier stage. The
+query never returns run IDs, network IDs, transaction IDs, evidence, details,
+or credential values.
+
+The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
+global task was healthy (22 completions in 24 hours and a current heartbeat),
+while Apple was skipped on every run because `apple.yml` lacked the App Store
+Server API key ID, issuer ID, and private key. Google, Stripe, and Solana
+watermarks continued advancing. One Apple subscriber's locally recorded paid
+window ended without a later renewal being credited; opening the global
+heartbeat alone would have reported green. Apple In-App Purchase keys require
+an Account Holder/Admin to generate and download the private key once in App
+Store Connect. This is a **credential/operations repair**: software can detect,
+contain, and reconcile after the credential is deployed, but cannot safely
+manufacture the missing Apple authority.
+
+Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
+to `signal_payment_reconciliation.go` and
+`signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy
+four-store run, a store skipped behind a healthy heartbeat, repeated provider
+errors, missing/stale watermarks, a dead singleton chain, safety-net repairs,
+strict aggregate validation, privacy boundaries, and detailed Markdown.
+
+### 2.22 Durable payment and entitlement failures
+Probe: `payment-failures`
+
+This probe checks business outcomes that ordinary API/process liveness cannot
+establish:
+
+- `payment-entitlement-missing` (PAGE): an in-window supporter renewal exists
+  for Apple, Google, Stripe, or Solana, but the same network has no in-window
+  `transfer_balance.pro=true`. This is the exact “paying but shown as free”
+  invariant. The check uses entitlement time, not remaining bytes.
+- `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
+  `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
+  provider webhook was already acknowledged; never delete this recovery row.
+- `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
+  event could not be mapped to the immutable purchase ledger. Do not guess by
+  email or manually edit a balance.
+- `payment-identity-fallback` (WARN): a Stripe credit used the legacy customer
+  email fallback because immutable network metadata was missing. The credit is
+  retained, but the checkout producer must be corrected.
+
+All rows are aggregated to kind, store/reason, count, and oldest/newest age.
+No account, email, network, payment reference, signature, provider object,
+stored details, or credential may enter an alert. A payment received but not
+fulfilled can require an **authorized financial/operations decision** (for
+example a verified refund when an underpayment cannot be credited); software
+must preserve the evidence and idempotency boundary but cannot choose or
+authorize that disposition.
+
+Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
+`signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
+tests cover every durable class, healthy zero rows, strict allowlists and
+numeric validation, privacy boundaries, severity, and Markdown rendering.
+
 ---
 
 ## 3. redis signal catalog
@@ -7606,7 +7691,47 @@ the coverage field. Exclude it from denominators only when the operator has
 explicitly declared it offline; never silently turn an SSH failure into a
 healthy sample.
 
-### 8.7 Lazy required-vault resource — green startup, route-specific 500
+### 8.7 Required credential and lazy-vault readiness — green startup, missing work
+Probe: `credentials`
+
+The proactive credential inventory runs before a customer discovers a lazy
+resource. It retains only a semantic requirement key, the Vault resource name,
+whether that resource exists and parses, and sorted missing field names. Secret
+values and malformed parser input are discarded while settings are loaded and
+can never reach a monitor alert or state file.
+
+On Main, the inventory requires the credentials used by PostgreSQL (including
+any configured direct-maintenance identity), Redis, Grafana administration and
+metric push, password hashing, OAuth and JWT signing, enabled analytics
+collectors, subscription/payment providers (Apple, Google Play, Stripe,
+Solana/Helius, Coinbase, Circle), client-address privacy hashing, WireGuard
+handoff, hosted Proxy, object storage, account/product email, provider-egress
+ingestion, public-stats integrity, WalletConnect, IP geolocation, and any active
+MCP provider. Subnet signing/artifact/deposit and route-verification credentials
+become required only when the subnet is enabled. Keep this inventory
+synchronized whenever a new runtime credential is introduced; a code path that
+calls `RequireSimpleResource` without either an inventory requirement or an
+explicit feature gate is incomplete.
+
+The 2026-09-08 secret-free Main snapshot found two incomplete enabled
+integrations: `apple.yml` lacked `app_store_server_api_key_id`, `issuer_id`, and
+`private_key`; `analytics.yml` lacked the Google Search Console
+`service_account_json` and Bing Webmaster `api_key` while both API collectors
+and matching site properties were enabled. Provider and site gates are part of
+the analytics requirement: an unused adapter must not create a false missing-
+credential page. An explicitly empty Redis password is likewise a supported
+private-network configuration and is not mislabeled as a missing secret;
+network exposure and authentication policy belong to their own security
+signal.
+
+Apple and Google crash-report credentials remain optional by the §20 contract.
+An absent optional resource is a graceful no-op. A resource that is present but
+malformed or partial is WARN because a half-configured integration must not
+silently look disabled. Required missing/malformed/partial credentials PAGE on
+the first observation. Remediation is a **credential/operations action**:
+provision or rotate through the supported secret workflow and deploy the Vault
+generation. Never generate placeholder material, paste a value into an alert,
+or put a real secret in source or a test.
 
 `Resolver.RequireSimpleResource` is evaluated lazily by some controllers. A
 missing resource therefore does not necessarily crash startup or fail
@@ -7658,6 +7783,12 @@ returned 500 while `/hello` remained 200.
   documented 503 response for one intentionally disabled. Restarting an old
   process without either gating the route or deploying the enabled resource
   reproduces the failure.
+
+Implementation convention: SIGNALS.md §8.7 (`credentials`) maps to
+`signal_credentials.go` and `signal_credentials_test.go`. Synthetic tests cover
+required missing, malformed, and incomplete resources; optional absent versus
+partial behavior; deterministic field ordering; secret-value disposal; and
+detailed Markdown rendering.
 
 ### 8.8 Source attribution — liveness can be green while every client is the ingress
 Probe: `source-attribution`
@@ -10051,14 +10182,15 @@ producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
 Outside an execution transition, the GitHub writer is either running or
 inactive with `Result=success` and `ExecMainStatus=0`. Its persistent daily
-timer is active, has durable `UnitFileState=enabled`, and exposes a current or
-future next trigger. A still-fresh previous code tarball does not satisfy either
-execution or scheduling health.
+timer is active, has durable `UnitFileState=enabled`, and either exposes a
+current/future next trigger or owns the exact still-running activation that
+consumed its elapsed trigger. A still-fresh previous code tarball does not
+satisfy either execution or scheduling health.
 The data-pull oneshot has effective `Restart=on-failure` and
 `RestartUSec=30min`, so a late encrypted-disk mount can recover without making
 successful pulls repeat. Its persistent daily timer is also active, durably
-enabled, and exposes a current or future next trigger. The effective data-pull
-unit matches the two
+enabled, and has either a current/future next trigger or ownership of its exact
+still-running activation. The effective data-pull unit matches the two
 dedicated direct SSH endpoints and ports recorded in monitor inventory. These
 bulk paths deliberately bypass the `172.28.*` management VPN; the monitor
 itself may still use that VPN to inspect Planetoid. An executing data pull has
@@ -10127,11 +10259,16 @@ BROKEN:
 - `backup-archive-volume-recovery-unverified` is immediate when the currently
   read-write archive lineage has a transport, direct block-I/O, JBD2/ext4
   journal-abort, emergency-read-only, or read-only-remount event in the bounded
-  history. Journal replay and a fresh mount do not clear it. Keep both writers
-  stopped; identify the physical device by stable LUKS UUID/serial, repair or
-  replace the proven cable, port, enclosure, bridge, or SSD boundary, run a
-  full `e2fsck` offline, and complete the explicit probation gates below. The
-  page intentionally remains active for the full 30-day evidence window when
+  history. Journal replay and a fresh mount do not clear it. Without valid
+  stable-identity clearance, keep both writers stopped; identify the physical
+  device by stable LUKS UUID/serial, repair or replace the proven cable, port,
+  enclosure, bridge, or SSD boundary, run a full `e2fsck` offline, and complete
+  the explicit probation gates below. When the exact installed helper reports
+  valid clearance and one authorized writer is already active, the retained
+  page is historical risk context: preserve that single writer and do not
+  stop, restart, duplicate, or repeat offline repair solely to clear the page.
+  A new post-clearance lineage fault invalidates that exception. The page
+  intentionally remains active for the full 30-day evidence window when
   repaired hardware keeps the same lineage. The 30-minute fault-free interval
   is only the minimum probation before the authorized catch-up gate, not an
   automated clear condition; eventual lookback expiry is not a repair
@@ -10153,6 +10290,15 @@ BROKEN:
   test, observes the 30-minute fault-free probation, and authorizes one writer.
   A missing, mismatched, stale/vacuumed, malformed, or post-fault clearance
   fails closed. Reboot, journal replay, and a fresh `rw` mount never create it.
+- `backup-archive-root-unobservable` warns after two probes when the archive
+  volume is read-write but the exact allowlisted privileged helper does not
+  return one complete, valid privacy-reduced root contract. The archive root
+  is deliberately root:root mode 0700, so the ordinary monitor login cannot
+  distinguish permission denial from a missing path with `test` or `stat`.
+  Unknown must not become `backup-archive-root-unavailable`. Deploy the current
+  helper and exact `--root-status` sudoers rule before the monitor binary; do
+  not relax directory permissions, create a path, or stop a writer merely to
+  repair observation.
 - `backup-archive-root-unavailable` is immediate when the archive volume is
   read-write but either effective writer path is missing, is not a directory,
   differs from its sibling, names a different mount, resolves outside the
@@ -10185,7 +10331,12 @@ BROKEN:
   single-writer rule and obtain operator authorization before one catch-up run.
 - `backup-archive-timer-unscheduled` is immediate, independently for the code
   and PostgreSQL/Redis writers, when its timer is not active, is not durably
-  enabled, has no next trigger, or reports a trigger materially in the past.
+  enabled, or has neither a current/future next trigger nor an exact
+  timer-linked running activation. While a long oneshot consumes an elapsed
+  event, `NextElapseUSecRealtime` can remain in the past; a nonfuture
+  `LastTriggerUSec` no earlier than the running writer's realtime start proves
+  that boundary and suppresses the false page. A running manual writer without
+  that link does not. After the writer exits, require a future next trigger.
   A young valid generation in `latest`, `weekly`, or `monthly` does not prove
   that another generation is scheduled. The offline filesystem repair workflow
   intentionally stops both writers and timers, but its clearance marker does
@@ -10214,24 +10365,30 @@ BROKEN:
   or when either source uses `172.28.*`. This is a configuration failure even
   when the management VPN is reachable; bulk PG/Redis payloads must not use it.
 
-On 2026-09-08, after the archive-volume repair workflow, a direct reduced
-systemd read found the GitHub writer terminally failed with no MainPID,
-`Result=exit-code`, and `ExecMainStatus=1`; its timer was inactive and exposed
-no next trigger. The last invocation's bounded journal classified only
-filesystem failures: zero credential/authentication, network, lock, wrapper,
-or configuration evidence. The external filesystem itself was mounted
-read-write with a valid clearance marker, but the exact effective archive root
-shared by the units was missing. Both prior code generations were still about
-four days old, so the existing freshness, phase, and mount checks emitted no
-writer, root, or scheduling failure. That is a monitor false negative. The
-timer's journal records an explicit later stop, but the bounded privacy-safe
-evidence cannot attribute its actor or reason; do not turn that uncertainty
-into a deployment claim. The direct root, execution, and timer classes above
-close the detection gap. Operational closure still requires the root-only
-directory on the exact mounted filesystem, bounded failed-invocation evidence,
-valid storage clearance, an explicitly authorized single writer, two validated
-code artifacts/manifests, two matching direct Mimir reads, and a durably active
-next timer trigger.
+On 2026-09-08 the first watcher containing the root and timer classes emitted
+both immediately after its detector rollout; the preceding watcher window had
+neither class. The root probe had used unprivileged `test`, `findmnt`, and
+`stat` against the deliberately root-only archive tree. Permission denial was
+therefore deterministically reduced to `missing` even when the secured root
+was healthy. Independently, the active and enabled code timer's exact last
+trigger equaled its still-running writer's realtime start, while its displayed
+next event remained elapsed. Fresh producer heartbeats and a live process tree
+were healthy controls. Thus these two first-bad boundaries were monitor
+classification defects, not proof that the archive directory disappeared or
+that the timer lost its calendar owner. The Xops privileged inspector now owns
+root classification and returns only fixed reduced fields; its helper/sudoers
+deployment must precede monitor promotion. Timer evaluation now joins the last
+trigger to the running writer and still requires a future event after it exits.
+
+The same snapshot retained `backup-archive-volume-recovery-unverified` from
+older exact-lineage transport, block-I/O, and journal evidence. Valid current
+clearance and later completed archive generations prove that the repair
+workflow advanced, but the class intentionally retains the history for 30
+days. It must not instruct an operator to interrupt the current authorized
+single writer solely because the historical page remains. Operational closure
+still requires no new post-clearance fault, one validated generation, two
+matching direct Mimir reads, and a future timer event after the active writer
+finishes.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both

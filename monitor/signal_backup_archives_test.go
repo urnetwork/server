@@ -980,6 +980,70 @@ func TestBackupArchivesWriterCommandReducesInvocationIdentifiersToPresence(t *te
 	}
 }
 
+func TestBackupArchivesWriterCommandAcceptsOnlyReducedPrivilegedRootState(t *testing.T) {
+	binDir := t.TempDir()
+	sudo := `#!/bin/sh
+case " $* " in
+  *" --root-status ")
+    printf '%s\n' \
+      'github_archive_path_state=directory' \
+      'remote_archive_path_state=directory' \
+      'archive_paths_match=true' \
+      'archive_mounts_match=true' \
+      'archive_paths_on_mount=true' \
+      'archive_path_permissions_secure=true'
+    if [ "${FAKE_ROOT_HELPER_EXTRA:-0}" = 1 ]; then
+      printf '%s\n' 'effective_path=/synthetic/private/archive'
+    fi
+    ;;
+  *" --status ") printf '%s\n' valid ;;
+  *) exit 1 ;;
+esac
+`
+	for _, name := range []string{"systemctl", "date", "sudo", "mountpoint", "journalctl"} {
+		body := "#!/bin/sh\nexit 1\n"
+		if name == "sudo" {
+			body = sudo
+		}
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatalf("write synthetic %s: %v", name, err)
+		}
+	}
+	run := func(extra bool) string {
+		t.Helper()
+		command := exec.Command("sh", "-c", backupArchiveWriterCommand)
+		command.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if extra {
+			command.Env = append(command.Env, "FAKE_ROOT_HELPER_EXTRA=1")
+		}
+		outputBytes, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run writer observation command: %v\n%s", err, outputBytes)
+		}
+		return string(outputBytes)
+	}
+
+	healthy := run(false)
+	for _, want := range []string{
+		"archive_root_observation=observable\n",
+		"github_archive_path_state=directory\n",
+		"archive_path_permissions_secure=true\n",
+	} {
+		if !strings.Contains(healthy, want) {
+			t.Fatalf("writer observation missing %q:\n%s", want, healthy)
+		}
+	}
+
+	malformed := run(true)
+	if !strings.Contains(malformed, "archive_root_observation=unobservable\n") {
+		t.Fatalf("extra helper field did not fail observation closed:\n%s", malformed)
+	}
+	if strings.Contains(malformed, "/synthetic/private/archive") {
+		t.Fatalf("writer observation leaked rejected helper output:\n%s", malformed)
+	}
+}
+
 func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testing.T) {
 	now := time.Date(2026, 9, 1, 23, 56, 0, 0, time.UTC)
 	zero := float64(0)
@@ -1039,8 +1103,11 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
 		{name: "github exit", output: strings.Replace(valid, "github_exit_status=0", "github_exit_status=nope", 1), want: "invalid GitHub exit status"},
 		{name: "github invocation", output: strings.Replace(valid, "github_invocation_id=present", "github_invocation_id=not-a-state", 1), want: "invalid github_invocation_id"},
+		{name: "github start epoch", output: strings.Replace(valid, "github_exec_start_epoch=0", "github_exec_start_epoch=earlier", 1), want: "invalid github_exec_start_epoch"},
 		{name: "github timer epoch", output: strings.Replace(valid, "github_timer_next_epoch=2000000000", "github_timer_next_epoch=tomorrow", 1), want: "invalid github_timer_next_epoch"},
+		{name: "root observation", output: strings.Replace(valid, "archive_root_observation=observable", "archive_root_observation=maybe", 1), want: "invalid archive_root_observation"},
 		{name: "archive path state", output: strings.Replace(valid, "github_archive_path_state=directory", "github_archive_path_state=unsafe", 1), want: "invalid github_archive_path_state"},
+		{name: "observable unknown root", output: strings.Replace(valid, "github_archive_path_state=directory", "github_archive_path_state=unknown", 1), want: "invalid archive path state for observable archive root"},
 		{name: "archive path mount", output: strings.Replace(valid, "archive_paths_on_mount=true", "archive_paths_on_mount=maybe", 1), want: "invalid archive_paths_on_mount"},
 		{name: "data timer unit file", output: strings.Replace(valid, "remote_timer_unit_file_state=enabled", "remote_timer_unit_file_state=ENABLED", 1), want: "invalid remote_timer_unit_file_state"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},

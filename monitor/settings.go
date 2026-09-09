@@ -177,6 +177,25 @@ type AppleReportingSettings struct {
 	LoadError  error
 }
 
+// CredentialRequirement is a secret-free readiness result assembled while
+// loading an environment. It deliberately retains only the resource name and
+// missing field names: credential values and parser input never enter a
+// SignalSettings value, an Alert, or monitor state.
+//
+// Required means the integration is expected to work in this environment. An
+// absent optional resource is healthy; once an optional resource is present,
+// it must still be complete and parseable so a half-configured integration
+// cannot disappear silently.
+type CredentialRequirement struct {
+	Key           string
+	Resource      string
+	Purpose       string
+	Required      bool
+	Present       bool
+	Malformed     bool
+	MissingFields []string
+}
+
 // SourceAttributionSettings arms SIGNALS.md §8.8. Each configured expected
 // address is checked through its family-specific endpoint from the monitor
 // runner itself, so a healthy API process cannot hide lost client identity.
@@ -286,6 +305,7 @@ type SignalSettings struct {
 	Grafana           GrafanaSettings
 	GooglePlay        GooglePlayReportingSettings
 	AppleReporting    AppleReportingSettings
+	Credentials       []CredentialRequirement
 	SourceAttribution SourceAttributionSettings
 	StateDir          string
 
