@@ -594,7 +594,15 @@ func TestRemoveNetworkClientsDeactivatesTargetedClients(t *testing.T) {
 			},
 		}
 
-		beforeCall := server.NowUtc()
+		var beforeCall time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			if err := conn.QueryRow(
+				ctx,
+				`SELECT clock_timestamp() AT TIME ZONE 'UTC'`,
+			).Scan(&beforeCall); err != nil {
+				t.Fatal(err)
+			}
+		})
 		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
 			ClientIds: []server.Id{clientIdA, clientIdB},
 		}, sess)
@@ -628,7 +636,7 @@ func TestRemoveNetworkClientsDeactivatesTargetedClients(t *testing.T) {
 			t.Fatal("deactivate_time was not set")
 		}
 		if deactivateTime.Before(beforeCall) {
-			t.Fatal("deactivate_time predates the call")
+			t.Fatal("deactivate_time predates the database-clock control")
 		}
 	})
 }

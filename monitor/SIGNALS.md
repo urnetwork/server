@@ -4784,9 +4784,10 @@ coverage/quiet-hour control, and ambiguous aggregate rejection.
 Probe: `stale-contracts`
 
 The rejection counter in §2.18 measures attempts stopped by the lifecycle
-guard. This probe independently measures the more severe opposite outcome: a
-row was successfully created after its destination had already become
-inactive. It reads only the most recent five-minute PostgreSQL cohort:
+guard. This probe independently measures successful rows whose recorded
+contract/deactivation timestamps appear reversed. That is an affirmative
+lifecycle failure only outside the bounded legacy application-clock ambiguity
+described below. It reads only the most recent five-minute PostgreSQL cohort:
 
 ```sql
 SELECT count(*)
@@ -4801,9 +4802,12 @@ WHERE tc.create_time >= now() - interval '5 minutes'
 
 The `deactivate_time <= create_time` boundary is essential. Looking only at a
 destination's current inactive bit would falsely include a healthy contract
-whose destination disconnected after creation. The probe also exports only
-aggregate same/cross-network, derived/top-level, active-top-level source,
-distinct endpoint counts, and median/p95 deactivation lead time. For the
+whose destination disconnected after creation. The probe partitions matching
+rows into subsecond and at-least-one-second timestamp classes and exports exact
+three-decimal millisecond quantiles; rounding a 0.623ms inversion to zero
+seconds destroys the causal discriminator. It also exports only aggregate
+same/cross-network, derived/top-level, active-top-level source, distinct
+endpoint counts, and median/p95 deactivation lead time. For the
 same-network subset it exports distinct network, source-device, destination-
 parent, and destination-device counts; these distinguish one concentrated
 relationship/window boundary from a common failure distributed across several
@@ -4813,11 +4817,24 @@ distinct parent, and distinct device counts. Those bounded counts distinguish
 one retained client window from a fleet-wide producer without returning
 identifiers or contract content.
 
-- HEALTHY: zero matching successful contracts on two consecutive five-minute
-  cohorts, alongside both observable §2.18 rejection partitions.
-- `stale-contract-success` (PAGE immediately): one or more matching rows. A
-  successful row is affirmative contract-correctness failure, not a noisy
-  retry or inferred client error. Same-network derived-destination dominance
+- HEALTHY: zero matching rows in both timestamp classes on two consecutive
+  five-minute cohorts, alongside both observable §2.18 rejection partitions.
+- `stale-contract-timestamp-ambiguous` (PAGE immediately): one or more rows
+  have `0 <= create_time - deactivate_time < 1 second`. Before every writer
+  uses the PostgreSQL primary clock, this is high-severity unknown ordering,
+  not proof that the API inserted after deactivation. Preserve it as a page;
+  prove the deployed lifecycle-lock and timestamp-provenance boundaries. Once
+  those boundaries are fleet-wide, any recurrence requires an audit for a
+  bypass writer or serialization regression and must not be dismissed as NTP
+  noise.
+- `stale-contract-success` (PAGE immediately): one or more rows are at least
+  one second beyond the recorded deactivation, outside the conservative
+  subsecond legacy-clock band. The one-second boundary is a conservative
+  operational classification under the fleet's bounded clock discipline, not
+  transaction-order proof for an arbitrarily skewed legacy host; independently
+  verify clock health and artifact provenance before assigning mechanism. This
+  remains a contract-correctness page, not a noisy retry or inferred client
+  error. Same-network derived-destination dominance
   identifies the stale return-path class seen on 2026-09-02. Its bounded
   network and parent/device cardinalities distinguish one retained relationship
   from a systemic multi-window lifecycle failure. Cross-network rows to
@@ -4831,10 +4848,14 @@ identifiers or contract content.
   failure rather than coercing it to zero.
 
 Use §8.12 to prove every API artifact contains server commit `c8dfe570` for the
-pre-selection guard and the later transactional lifecycle-lock correction,
-after satisfying the selected artifact's append-only migration prerequisite.
-The API must reject the stale destination before mode selection and lock and
-validate both endpoint rows in the insertion transaction. A Connect-bearing
+pre-selection guard and `883d39c8` for the transactional lifecycle-lock
+correction, after satisfying the selected artifact's append-only migration
+prerequisite. The API must reject the stale destination before mode selection,
+then lock and validate both endpoint rows in the insertion transaction. API
+and Taskworker artifacts must also stamp `transfer_contract.create_time` and
+`network_client.deactivate_time` from one PostgreSQL-primary
+`clock_timestamp()` read at their lock-protected write boundary. Application
+host clocks cannot establish cross-service transaction order. A Connect-bearing
 client containing `5b33c91` separately consumes the Reliability result and
 retires only the emitting route, reducing repeated attempts; client behavior
 cannot substitute for the server-side zero-success invariant. Do not delete
@@ -4901,12 +4922,39 @@ state and timestamps: a committed deactivation makes the waiting contract fail,
 while a contract that holds the shared lifecycle lock commits before the
 deactivator records its time.
 
+A bounded read-only `2026-09-10T07:01Z` audit then found a materially different
+singleton. Exactly one of 635 recent non-companion contracts whose destinations
+were now inactive matched the old timestamp predicate, and its recorded
+inversion was only **0.623ms**. It was a same-network contract from one active
+top-level source to one inactive derived destination and was already closed.
+Nearby healthy controls put five later deactivations 10--100ms after creation,
+160 at 100--1000ms, and 55 at one--five seconds. Every sampled API block
+reported historical version `2026.9.8+1040985530`; that tag contains the
+`883d39c8` row-lock boundary, and a source audit found no production contract
+insert or `active=false` writer bypassing the corresponding shared/exclusive
+locks. PostgreSQL `track_commit_timestamp` was off and the closed contract's
+current `xmin` no longer represented its insert, so event-specific commit order
+could not be recovered. The sampled tag and audited source make cross-host
+application-clock offset or backstep the leading mechanism because those paths
+serialize in the opposite order. They do not prove it for this event: exact
+runtime bytes, source identity, and commit order were unavailable. Preserve the
+possibility of an unobserved or bypassing writer until exact artifact provenance
+and post-database-clock cohorts close it. Classify this shape as timestamp-
+provenance ambiguity, not an API guard regression. The owning correction moves
+all four lock-protected writer paths—both contract inserts, synchronous/batch
+client deactivation, and idle
+maintenance deactivation—to the PostgreSQL primary clock; each bulk UPDATE
+materializes one clock row so every client in the batch retains one timestamp.
+No migration is required. Deploy both API and Taskworker descendants before
+starting the two-window verification gate.
+
 Implementation convention: SIGNALS.md §2.20 (`stale-contracts`) maps to
 `signal_stale_contracts.go` and `signal_stale_contracts_test.go`. Synthetic
-tests cover the exact inactive-before-create failure, a healthy zero cohort,
-concentrated same-network and retained-Public-route boundaries, malformed and
-contradictory aggregates, query scoping, privacy boundaries, and detailed
-Markdown rendering.
+tests cover the exact 0.623ms application-clock ambiguity, the at-least-one-
+second failure, a mixed two-class cohort, a healthy zero cohort, concentrated
+same-network and retained-Public-route boundaries, malformed and contradictory
+aggregates, query scoping, privacy boundaries, exact-millisecond rendering,
+and rejection of the prior false causal claim.
 
 ### 2.21 Payment reconciliation liveness and repair audit
 Probe: `payment-reconciliation`

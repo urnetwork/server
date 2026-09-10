@@ -1566,7 +1566,11 @@ func createTransferEscrowInTx(
 	                create_time,
 	                priority
 	            )
-	            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	            VALUES (
+	                $1, $2, $3, $4, $5, $6, $7, $8,
+	                clock_timestamp() AT TIME ZONE 'UTC',
+	                $9
+	            )
 	        `,
 			contractId,
 			sourceNetworkId,
@@ -1576,7 +1580,6 @@ func createTransferEscrowInTx(
 			contractTransferByteCount,
 			companionContractId,
 			payerNetworkId,
-			now,
 			priority,
 		)
 	})
@@ -2132,15 +2135,17 @@ func createContractNoEscrowInTx(
                     transfer_byte_count,
                     create_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-            `,
+	            VALUES (
+	                $1, $2, $3, $4, $5, $6,
+	                clock_timestamp() AT TIME ZONE 'UTC'
+	            )
+	        `,
 		contractId,
 		sourceNetworkId,
 		sourceId,
 		destinationNetworkId,
 		destinationId,
 		contractTransferByteCount,
-		server.NowUtc(),
 	))
 	return
 }
