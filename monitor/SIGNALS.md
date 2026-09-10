@@ -5019,6 +5019,35 @@ Store Connect. This is a **credential/operations repair**: software can detect,
 contain, and reconcile after the credential is deployed, but cannot safely
 manufacture the missing Apple authority.
 
+A distinct 2026-09-10 Google incident contained 26 non-dry-run errors from
+`11:15:37Z` through `12:16:49Z`: all were Android Publisher HTTP 500 responses
+with provider status `INTERNAL`, split between 16 initial status reads and ten
+renewal-credit re-fetches. They covered 24 store objects, with only two objects
+seen twice. There were no authentication/permission, rate-limit, transport,
+schema, persistence, or panic errors. The first affected run preceded a
+Taskworker rollout and recorded three errors; the second ran after all eight
+slots had converged on one generation and recorded 23. The next natural run on
+that same converged generation recorded zero errors and advanced the Google
+watermark. Sixty-seven of 70 runs in the bounded 72-hour control were clean;
+the only other failure was a one-error Google run two days earlier. This is a
+historical transient provider failure, not a credential or deployment repair,
+and the three-hour error page correctly remains visible until the whole audit
+window ages out. Apple credential skips and Solana entitlement repairs in the
+same snapshot retain their separate causes.
+
+That incident also exposed a local watermark bug: a store adapter could record
+per-object errors, return `complete=true`, and still advance its watermark,
+contrary to the error-free completion contract. The pending code correction
+snapshots each store's own error count and advances only when that count is
+unchanged; an error in one store does not stop healthy siblings or the run
+heartbeat. It does not add an immediate retry or hide provider failures.
+Deterministic tests make a synthetic Google status read return HTTP 500 after
+seeding an exact watermark, require that watermark to remain fixed while a
+healthy Solana store advances, then require a later error-free Google pass to
+advance normally. After deployment, require two natural error-free runs and no
+new Google error; the alert clears only after the last failure leaves the
+complete three-hour window.
+
 Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
 to `signal_payment_reconciliation.go` and
 `signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy

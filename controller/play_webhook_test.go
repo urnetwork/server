@@ -30,6 +30,8 @@ type playWebhookTestEnv struct {
 	subscriptions map[string]*PlaySubscription
 	// how many times each token was acknowledged
 	acknowledged map[string]*atomic.Int64
+	// purchase token -> synthetic status returned by the subscription GET
+	statusFailures map[string]int
 	// when true, the acknowledge endpoint answers 500
 	failAcknowledge bool
 
@@ -38,9 +40,10 @@ type playWebhookTestEnv struct {
 
 func newPlayWebhookTestEnv(t testing.TB, skus map[string]*Sku) *playWebhookTestEnv {
 	env := &playWebhookTestEnv{
-		packageName:   "network.ur.test",
-		subscriptions: map[string]*PlaySubscription{},
-		acknowledged:  map[string]*atomic.Int64{},
+		packageName:    "network.ur.test",
+		subscriptions:  map[string]*PlaySubscription{},
+		acknowledged:   map[string]*atomic.Int64{},
+		statusFailures: map[string]int{},
 	}
 
 	mux := http.NewServeMux()
@@ -48,6 +51,10 @@ func newPlayWebhookTestEnv(t testing.TB, skus map[string]*Sku) *playWebhookTestE
 	mux.HandleFunc(
 		fmt.Sprintf("GET /androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/{token}", env.packageName),
 		func(w http.ResponseWriter, r *http.Request) {
+			if status := env.statusFailures[r.PathValue("token")]; status != 0 {
+				http.Error(w, "synthetic provider failure", status)
+				return
+			}
 			sub, ok := env.subscriptions[r.PathValue("token")]
 			if !ok {
 				http.Error(w, "not found", http.StatusGone)
