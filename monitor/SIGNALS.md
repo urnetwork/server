@@ -4633,7 +4633,8 @@ For each shard, aggregate without exporting identifiers:
   that same shard;
 - newest blackhole activity: the newest blackhole check in that shard; and
 - current coverage: locations inside seven days and blackhole checks inside
-  three hours.
+  three hours, plus the number of unique latest blackhole checks written in the
+  last hour.
 
 The due ages are the application contract: full refresh begins at half the
 seven-day location lifetime, failed attempts back off for six hours, and the
@@ -4643,6 +4644,24 @@ when `due > 0`, require the corresponding shard-local newest timestamp to be no
 older than its durable `max_time + idle_delay` plus one five-minute monitor
 cadence. Old evidence is healthy when the exact due count is zero.
 
+Shard activity is necessary but not sufficient. Sum the eligible, current, and
+last-hour blackhole counts across the complete geometry. When current coverage
+is incomplete and at least one check was written in the last hour, project one
+whole-fleet sweep at that measured rate. It must fit inside
+`ProviderBlackholeCheckMaxAge` (currently three hours):
+
+```text
+required_per_hour = ceil(eligible / max_age_hours)
+projected_sweep = ceil(eligible / checked_last_hour) hours
+```
+
+This is a rate/capacity invariant, not a percentage floor. A first sweep may be
+incomplete without fault when its measured rate can finish before evidence
+expires. Conversely, a shard can advance forever and remain broken when the
+projection is longer than the verdict lifetime. In that state an already-dark
+provider ages out of `GetAllProviderBlackholedClientIds` and becomes selectable
+again without a successful recheck.
+
 - `egress-probe-shards` (PAGE): missing, duplicate, malformed, or
   mixed-generation durable geometry. Let the normal bootstrap/post path
   converge it; never clone, delete, or rewrite pending rows by hand.
@@ -4650,6 +4669,14 @@ cadence. Old evidence is healthy when the exact due count is zero.
   candidates but no location/attempt/health progress inside the derived bound.
 - `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
   due candidates but no check progress inside the same derived bound.
+- `egress-blackhole-capacity` (PAGE after two samples): shard activity is
+  current, but the complete-fleet projection at the measured last-hour rate is
+  longer than the blackhole-verdict lifetime. Diagnose §2.23 and §2.24 first:
+  a common timeout cohort consumes the full per-probe deadline and can create
+  the capacity collapse. Then capacity-test any shard/concurrency increase
+  against API, PostgreSQL, and Taskworker headroom. Keeping a failed verdict
+  until a successful recheck is a separate correctness/availability decision;
+  never hide the fault by merely lengthening the maximum age or deleting rows.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
   durable tasks are absent. When the schema is absent, apply migrations before
   deploying a Taskworker artifact from an intentional server checkout
@@ -4683,6 +4710,17 @@ require `mixed_settings`, reject an enabled bandwidth sampler with no timeout,
 and prove an unknown secret-shaped field produces only a redacted structural
 error.
 
+The 2026-09-09 main control exposed the distinct advancing-but-under-capacity
+case. About 66.9k providers were eligible, only about 16% had a current
+three-hour blackhole verdict, and 3,678 unique providers were checked in the
+latest hour. That projects roughly 18 hours for one sweep versus the
+three-hour verdict lifetime and requires at least about 22.3k checks/hour.
+Every shard was advancing, so the previous newest-timestamp-only contract was
+green while known-dark providers repeatedly became eligible again. A large
+legacy HMAC-incompatible cohort (§2.24) was taking the full timeout and is a
+causal throughput input; it does not eliminate the independent requirement to
+measure and bound whole-fleet drain time.
+
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
 task-claim, or tunnel execution fault; do not delete provider evidence just to
@@ -4696,7 +4734,8 @@ tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
 boundary, a missing shard, complete execution-setting drift, unknown-field and
 malformed-secret redaction, an invalid bandwidth timeout, shard-local
 full/blackhole stalls hidden by a healthy sibling, healthy empty due queues,
-normalized signed hashing, and ambiguous aggregate rejection.
+normalized signed hashing, the exact complete-sweep rate boundary, a complete
+coverage/quiet-hour control, and ambiguous aggregate rejection.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -5123,6 +5162,92 @@ tests cover the exact 90%/20-observation boundaries, survivor-bias controls,
 mixed failures without credential attribution, unknown-class non-dominance,
 reprioritization after a current failure, stale-failure ambiguity, inconsistent
 success, strict aggregate rejection, query privacy, and detailed Markdown.
+
+### 2.24 Stored-contract HMAC cutover compatibility
+Probe: `hmac-cutover`
+
+`connect.SignStoredContract` changes the signature emitted by API and resident
+Connect controllers at `ContractManagerSettings.NetworkEventTimeChangeHmac`.
+The legacy implementation called `mac.Sum(storedContractBytes)` without first
+writing the bytes, producing `storedContractBytes || HMAC(key, empty)`. The
+standard implementation writes the stored bytes and emits
+`HMAC(key, storedContractBytes)`. Current verifiers accept both, but Connect
+clients older than `v2026.5.14` accept only the legacy shape. A calendar cutoff
+is therefore unsafe while an active legacy receiver remains; no process restart
+or deployment is required for an already-running signer to cross the boundary.
+
+The production database does not persist the authenticated transport's exact
+runtime capability. It does contain the provider-supplied description for the
+top-level client. This probe recognizes only descriptions containing the fixed
+`provider`, `linux`, and exactly one `YYYY.M.D` shape, then reduces that version
+inside PostgreSQL to:
+
+- `legacy`: earlier than `2026.5.14`;
+- `compatible`: `2026.5.14` or later; and
+- `unknown`: absent, ambiguous, or outside that bounded shape.
+
+The description is claimed metadata, not runtime attestation. It cannot by
+itself establish a protocol failure. Join each eligible provider to its latest
+blackhole verdict and require a behavioral negative control before causal
+attribution:
+
+- at least 20 claimed-legacy providers have a current verdict;
+- at least 90% of that checked legacy cohort is dark;
+- at least 20 claimed-compatible providers have a current verdict; and
+- at least 50% of the checked compatible cohort passes.
+
+The complete eligible population remains active, top-level, connected, valid,
+and Public-providing, identical to §2.19/§2.23. The final query returns only
+cutoff state/age, aggregate legacy/compatible/unknown counts, a distinct
+legacy-network count, and aggregate current pass/dark counts. Raw descriptions,
+versions beyond the fixed numeric boundary, provider IDs, network IDs,
+endpoints, contracts, and failure text never leave PostgreSQL.
+
+- `contract-hmac-incompatible` (PAGE): standard signing is active and both
+  behavioral cohorts meet the causal thresholds. The compatible cohort rules
+  out a shared prober credential, tunnel, or API failure; old receivers reject
+  the new contract before payload forwarding.
+- `contract-hmac-readiness` (WARN after two samples): a claimed-legacy cohort
+  remains within 30 days before the cutoff or after it, but coverage or the
+  compatible control is insufficient for the causal page. Unknown metadata is
+  never treated as compatible, and claimed legacy metadata alone is never
+  reported as proof of the live process version.
+
+Closure requires an explicit security/availability decision:
+
+1. **Secure containment:** quarantine claimed/proven legacy receivers until
+   they upgrade, then prove §2.8/§2.9 retain adequate healthy provider capacity.
+2. **Temporary compatibility:** postpone standard signing and converge both API
+   and Connect signer paths. This restores legacy receivers but deliberately
+   retains the weak key-only legacy MAC; an API-only rollout is inconsistent.
+3. **Durable protocol treatment:** explicit per-client HMAC capability
+   negotiation and removal of the time-only assumption. This changes protocol
+   architecture and requires operator approval rather than an incident agent
+   silently introducing it.
+
+Do not move the cutoff, quarantine supply, or choose weaker signing solely to
+clear a monitor alert. Do not lengthen egress timeouts: legacy rejection occurs
+before forwarding, and longer waits further reduce §2.19 coverage. For any
+chosen path, complete one whole-fleet blackhole refresh within the verdict
+lifetime, keep the compatible control healthy for two cadences, and require
+settled destination bytes—not contract creation alone—as the end-to-end gate.
+
+The 2026-09-09 main incident established the causal boundary. The configured
+cutover was `2026-09-01T00:00:00Z`. A privacy-bounded current census found
+15,893 eligible providers claiming pre-compatibility Linux versions across 149
+networks. All 3,365 with a current blackhole verdict were dark; the compatible
+control had 1,771 passing and 70 dark. Independently sampled March/April cohorts
+had settled destination traffic up to August 31 and none after the cutoff,
+while June/July controls continued. Contract creation and the prober tunnel
+succeeded, but destination bytes remained zero, matching rejection by the old
+receiver verifier. These dated counts are evidence for this incident, not
+permanent thresholds or current fleet assertions.
+
+Implementation convention: SIGNALS.md §2.24 (`hmac-cutover`) maps to
+`signal_hmac_cutover.go` and `signal_hmac_cutover_test.go`. Synthetic tests
+cover both exact behavioral thresholds, insufficient-control non-attribution,
+pre-cutover risk, a healthy no-legacy cohort, contradictory aggregates, query
+population/age bounds, privacy, and detailed Markdown.
 
 ---
 
