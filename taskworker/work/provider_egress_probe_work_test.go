@@ -691,6 +691,58 @@ func TestProviderEgressProbePostConvergesAChangedShardCount(t *testing.T) {
 	})
 }
 
+// A capacity-only rollout keeps the durable shard keys stable. The currently
+// claimed row completes with its immutable arguments, then its post-step must
+// snapshot the new worker-pool size into the successor without requiring a
+// second task chain or a manual pending_task edit.
+func TestProviderEgressProbePostConvergesChangedBatchSettings(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		currentSettings := testProviderEgressProbeSettings(4)
+		currentSettings.Blackhole.Concurrency = 32
+		withProviderEgressProbeSettings(t, currentSettings)
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		oldSettings := testProviderEgressProbeSettings(4)
+		oldSettings.Blackhole.Concurrency = 4
+		oldArgs := providerEgressProbeArgs(oldSettings, 2)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := ProviderEgressProbePost(oldArgs, &ProviderEgressProbeResult{Full: true}, clientSession, tx); err != nil {
+				t.Fatalf("ProviderEgressProbePost: %v", err)
+			}
+		})
+
+		var argsJSON []byte
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT args_json
+				FROM pending_task
+				WHERE run_once_key = '["provider_egress_probe",2]'
+			`)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("capacity rollout did not schedule the shard successor")
+				}
+				server.Raise(result.Scan(&argsJSON))
+			})
+		})
+		var nextArgs ProviderEgressProbeArgs
+		if err := json.Unmarshal(argsJSON, &nextArgs); err != nil {
+			t.Fatalf("decode next args: %v", err)
+		}
+		if nextArgs.ShardCount != 4 || nextArgs.ShardIndex != 2 {
+			t.Fatalf("capacity rollout changed shard geometry: %d/%d", nextArgs.ShardIndex, nextArgs.ShardCount)
+		}
+		if nextArgs.Blackhole.Concurrency != 32 {
+			t.Fatalf("successor blackhole concurrency = %d, want 32", nextArgs.Blackhole.Concurrency)
+		}
+		if oldArgs.Blackhole.Concurrency != 4 {
+			t.Fatalf("post-step mutated claimed args to %d, want immutable 4", oldArgs.Blackhole.Concurrency)
+		}
+	})
+}
+
 func TestProviderEgressProbePostRetiresAShardRemovedByConfiguration(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		currentSettings := testProviderEgressProbeSettings(3)

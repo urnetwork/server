@@ -4655,6 +4655,16 @@ required_per_hour = ceil(eligible / max_age_hours)
 projected_sweep = ceil(eligible / checked_last_hour) hours
 ```
 
+Join this measured rate to the complete common task-argument snapshot and
+report the configured shard count, concurrency per shard, total concurrency,
+request timeout, timeout-only checks/hour ceiling before setup/teardown,
+minimum concurrency obtained by scaling the measured per-slot rate, and the
+deadline-only minimum concurrency if every request consumes its complete
+deadline. Both concurrency figures are lower bounds, not proof of sufficient
+capacity: tunnel setup/teardown, fast successes, and mixed failure latency can
+move the realized rate. Malformed or mixed task geometry still fails before
+any capacity calculation.
+
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
 expires. Conversely, a shard can advance forever and remain broken when the
@@ -4720,6 +4730,39 @@ green while known-dark providers repeatedly became eligible again. A large
 legacy HMAC-incompatible cohort (§2.24) was taking the full timeout and is a
 causal throughput input; it does not eliminate the independent requirement to
 measure and bound whole-fleet drain time.
+
+A focused `2026-09-10T05:45Z` Main sample made the configuration cause exact:
+68,094 providers were eligible, 14,500 had a current verdict, and 4,303 were
+checked in the preceding hour versus 22,698/hour required. The active four
+shards each carried concurrency four and a 15-second request deadline: 16 total
+slots provide only 3,840 checks/hour when every request times out, closely
+matching the observed saturated rate after mixing faster controls. In the same
+snapshot, §2.12 Taskworker memory, §1.3a PostgreSQL capacity, §14.7 Proxy
+memory, and §2.23 outcome distribution were healthy; PostgreSQL retained 630
+normal-role slots with only four active client backends. This rules out those
+resource boundaries as the current limiter without claiming unlimited
+headroom.
+
+The prepared Main configuration keeps the four durable task rows and raises
+only blackhole concurrency to 32 per row. Its 128 total slots have a 30,720/hour
+timeout-only ceiling before setup/teardown, corresponding to a roughly 2h13m
+nominal sweep and about 35% room above that sample's requirement for overhead.
+That calculation is a sizing input, not a throughput guarantee. Keeping the
+shard count stable avoids consuming more taskworker executor slots; each
+completed row's normal post-step snapshots the new batch settings into its
+successor. This configuration is **ready, not deployed** until runtime task
+arguments converge. Verify realized rate, CPU, memory, API, and PostgreSQL for
+two complete verdict lifetimes rather than treating the calculation as rollout
+proof.
+
+Connect commit `d3b49d9` and Operator Proxy commit `35b0bc7` separately make a
+short-lived probe's final derived-client removal part of joined tunnel
+retirement. They prevent canceled control-plane cleanup from leaving active
+derived rows until the idle reaper, but do not repair legacy HMAC rejection or
+substitute for the concurrency correction. Require aggregate child-lifecycle
+evidence before attributing current fleet size or throughput to that adjacent
+leak, and require a Taskworker build containing both sibling changes before its
+post-deploy cleanup gate begins.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,

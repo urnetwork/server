@@ -33,9 +33,17 @@ full:
 
 blackhole:
   limit: 250
-  concurrency: 4
+  concurrency: 32
   probe_timeout_seconds: 15
 ```
+
+Main keeps four durable rows and runs 32 blackhole workers inside each row.
+That is 128 total probe slots without consuming more taskworker executor slots.
+At the 15-second request deadline the timeout-only ceiling before setup and
+teardown is 30,720 checks per hour; the measured fleet rate remains
+authoritative because overhead and fast successes change realized throughput.
+Monitor §2.19 reports both this configured bound and the measured complete-sweep
+projection.
 
 `enabled` defaults to `true` to preserve existing deployments. Set it
 explicitly to `false` in a simulation or environment that must not contact the

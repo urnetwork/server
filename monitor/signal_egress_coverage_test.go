@@ -253,13 +253,74 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
 		"66.4%",
 		"projected_sweep=3h0m36s",
 		"required_per_hour=101",
+		"configured_total_concurrency=4",
+		"timeout_only_ceiling_per_hour=960",
+		"minimum_concurrency_from_observed_rate=5",
+		"deadline_only_minimum_concurrency=1",
 		"becomes selectable again without a successful recheck",
 		"Run §2.23 and §2.24 first",
+		"above both reported minimum-concurrency bounds",
 		"not proof that Proxy hosts need more active-client hardware",
 		"Provider, network, task, endpoint, and failure identities never leave",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("capacity alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
+	const shardCount = 3
+	taskRows := make([]Row, 0, shardCount)
+	for shardIndex := range shardCount {
+		args := egressCoverageTaskArgs{
+			ShardIndex: shardIndex, ShardCount: shardCount,
+			IdleDelaySeconds: 120, MaxTimeSeconds: 900,
+			Full: egressCoverageBatchArgs{
+				Limit: 6, Concurrency: 2, ProbeTimeoutSeconds: 60,
+			},
+			Blackhole: egressCoverageBatchArgs{
+				Limit: 90, Concurrency: 5, ProbeTimeoutSeconds: 20,
+			},
+			APIURL:      "https://api.example.invalid",
+			PlatformURL: "wss://connect.example.invalid",
+		}
+		taskRows = append(taskRows, syntheticEgressCoverageTaskWithArgs(t, args))
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "pg_attribute"):
+			return []Row{{"t"}}, nil
+		case strings.Contains(query, "FROM pending_task"):
+			return taskRows, nil
+		case strings.Contains(query, "WITH shards AS"):
+			return []Row{
+				{"0", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+				{"1", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+				{"2", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+			}, nil
+		default:
+			t.Fatalf("unexpected provider coverage query: %s", query)
+			return nil, nil
+		}
+	}}
+	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "egress-blackhole-capacity")
+	for _, want := range []string{
+		"configured_shards=3",
+		"configured_concurrency_per_shard=5",
+		"configured_total_concurrency=15",
+		"probe_timeout_seconds=20",
+		"timeout_only_ceiling_per_hour=2700",
+		"minimum_concurrency_from_observed_rate=50",
+		"deadline_only_minimum_concurrency=12",
+		"both reported concurrency requirements are lower bounds",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("configured capacity alert missing %q:\n%s", want, alert.Markdown())
 		}
 	}
 }
