@@ -6194,7 +6194,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | Class (grep) | Meaning | Action |
 |---|---|---|
 | `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters; correlate rejected-candidate pusher starts and steady exporter cardinality as context only. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through a complete two-hour window; historical gaps stay under §11.20. |
-| `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. | Match the emitting parent and child generation, child shutdown/SIGTERM, HTTP-front shutdown, and rollout boundary. A pre-`6544fe1` rolling shutdown can stop the child concurrently while its SO_REUSEPORT front still accepts; use §11.21. Outside replacement, inspect the exact child readiness, restart, bind, and OOM evidence. Never restart Redis from this signature. Require Warp `6544fe1` on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children, and no new §11.20 gap. |
+| `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
@@ -10899,7 +10899,7 @@ remain local, and the full response and scalar values outside those six paths
 never cross the host boundary. Require a production-shaped synthetic plus one
 privacy-reduced live reducer control before promoting that candidate.
 
-The 2026-09-10 `2026.9.10+1042298530` fleet rollout exposed a separate write
+The 2026-09-10 `2026.9.10+1042298530` fleet rollout first exposed a write
 handoff defect. Two successive generations on one block were healthy until
 their own child shutdown boundary. The first replacement had latched every
 child ready before the prior generation received Mimir SIGTERM; that retiring
@@ -10907,10 +10907,10 @@ parent then rejected five local metric pushes beginning 5.3 seconds later. The
 next replacement also latched ready before its predecessor received SIGTERM;
 the predecessor then rejected 22 local pushes beginning 2.9 seconds later and
 continuing for about 25 seconds. It had emitted zero refusals during its prior
-195-second serving interval, and the newest generation emitted none. The
-bounded window contained no Mimir supervised restart, unhealthy restart, OOM,
-kill, panic, or fatal signature. That strict post-SIGTERM reproduction rules
-out startup, persistent bind, Redis, and sustained Mimir failure.
+195-second serving interval. The bounded window contained no Mimir supervised
+restart, unhealthy restart, OOM, kill, panic, or fatal signature. That strict
+post-SIGTERM reproduction proved the shutdown branch, but a later fleet-wide
+rollout showed that it was not valid to rule out startup for every occurrence.
 
 The cause was one cancellation event shared by the accepting HTTP fronts and
 all three children. During SO_REUSEPORT overlap, a retiring parent could still
@@ -10922,22 +10922,80 @@ bounded drain, and only then stops the children. Ring TCP/UDP proxies remain
 event-cancelled and are outside this metric-push proof. Deterministic tests
 cover ordinary drain ordering, a listener-error path with one blocked front,
 concurrent listener closure, and forced close after graceful-drain failure.
-The code fix is ready but is not deployed by this observation; the running
-version was built before the local correction, and §8.13 must still prove the
-next artifact's ancestry.
+
+The later `2026.9.10+1042581110` rollout proves that shutdown fix reached the
+fleet and also isolates a second startup defect. Warpctl reported version and
+config `2026.9.10+1042581110` on all 20 Grafana blocks. On edge-0 and edge-4,
+the final running containers had image digest
+`sha256:28e7a8326735354bd7bf34f886464c6630df4d21d554092667c53b08d5b5c003`,
+the expected version/config environment, one live parent with live
+Grafana/Loki/Mimir children, and every allocated child plus stable `:3100`
+listener owned by the expected process. The binary build metadata names build
+repository commit `f667cf5`; that committed build tree's `warp` gitlink is
+exactly `6544fe135c9d9351ea60944b559d8f3b3dd04ebc`. This is deployed-artifact
+ancestry rather than an inference from a local checkout.
+
+The service journals explain the apparent duplicate rollout. The image target
+advanced first while config remained `2026.9.10+1042298530`; as soon as config
+`2026.9.10+1042581110` arrived, Warpctl intentionally ran a second replacement
+with the same image. On edge-4, the first fixed candidate `63db9a9a08c4`
+latched ready, then Warpctl issued `docker container stop -t 3600` for the old
+`ff6e749427e8` at `19:30:55.298120Z`; the old parent began refusing its local
+Mimir at `19:30:58.806723Z`. On edge-0, candidate `2dab8665336b` latched ready,
+the old `5feaedb1a223` received the stop at `19:31:14.642191Z`, and its first
+refusal followed at `19:31:17.154586Z`. Those old errors report
+`main.go:1944`, the proxy-error line in parent Warp `3745537`. When the second
+config wave retired the fixed `63db9a9a08c4` and `2dab8665336b` parents, neither
+emitted a shutdown refusal. That same-rollout control proves `6544fe1` repairs
+the original stop-order race.
+
+The fixed edge-0 candidate nevertheless exposed its publisher too early. It
+logged `[mimir]start` at `19:30:01.771778Z`, bound its stable LAN and loopback
+SO_REUSEPORT fronts beginning at `19:30:01.772319Z`, and rejected two
+`/api/v1/push` requests at `19:30:01.847327Z` and `19:30:01.848188Z` because
+its generation-local Mimir port `:14819` was not listening yet. The parent did
+not latch child readiness until `19:31:08.891963Z`. These errors report
+`main.go:1963`, the proxy-error line in `6544fe1`, which separates them from
+the retiring parents without relying on wall-clock proximity alone. The main
+allocated HTTP front must start early so Warpctl can poll `/status`, but the
+stable publisher is outside that cutover: SO_REUSEPORT admitted the unready
+candidate to live host traffic as soon as it bound.
+
+The bounded source correction preserves that stable-publisher architecture.
+Readiness now runs in two phases: direct Loki, Mimir, and Grafana checks pass
+before any stable publisher socket is bound; then the sockets bind as one
+activation, and only afterward does the cross-datasource check run and
+`/status` latch ready. The cross-datasource check must be second because the
+provisioned shared-database datasource intentionally traverses the stable
+loopback publisher; putting it first would deadlock readiness. A partial bind
+closes every socket already acquired, cancellation never activates the
+publisher, and the existing front-before-child shutdown order remains intact.
+Deterministic tests cover phase order, the no-ready-before-activation
+boundary, listener-error precedence at simultaneous readiness, the real
+datasource phase assignment, activation failure, cancellation, partial-bind
+cleanup, and all prior shutdown cases.
 
 The standing log signal now classifies the exact privacy-bounded signature as
 `grafana-mimir-push-refused` before generic connection refusal, fixes its frame
 to `local-mimir-push`, and removes the rotating endpoint from its sample. One
 line pages because it proves a lost push; its rate is rejected samples, not
-incident or parent cardinality. Closure requires every Grafana block to contain
-Warp `6544fe1`, then one controlled rolling replacement with no recurrence,
-healthy exact children/fronts, fresh pushed metrics, and no new §11.20 gap
-through the complete rollout plus ten steady minutes.
+incident or parent cardinality. The §11.20 control visible during this rollout
+does not prove that these rejected requests created its gap: the gap began
+hours before the replacement, resumed at the `19:35Z` evaluation, and later
+classified `mimir-query-store-visibility-gap` as its left boundary advanced.
+No separate `mimir-ingestion-gap` appeared. Preserve the refused pushes as
+known request loss, but do not relabel the overlapping five-minute continuity
+evidence as permanent ingestion loss. Closure requires every Grafana block to
+contain both `6544fe1` and the publisher-readiness correction, then one
+controlled rolling replacement with no recurrence, healthy exact
+children/fronts, fresh pushed metrics, and no new §11.20 ingestion gap through
+the complete rollout plus ten steady minutes.
 
-This alert is an architecture/operator decision gate. Keep each generation's
-TSDB private; never shared-mount a WAL/TSDB directory into overlapping
-containers. Do not deploy a long overlap until host RSS/cgroup and local-disk
+The longer-horizon `mimir-replacement-continuity-unverified` alert remains an
+architecture/operator decision gate; the front lifecycle fixes above do not
+close it. Keep each generation's TSDB private; never shared-mount a WAL/TSDB
+directory into overlapping containers. Do not deploy a long overlap until
+host RSS/cgroup and local-disk
 headroom, object-store exposure, ring/query fan-out, repeated-deploy
 serialization, fail-closed cleanup, and rollback have been approved. The
 classic handoff must close the old write front, mark the old ingester read-only,

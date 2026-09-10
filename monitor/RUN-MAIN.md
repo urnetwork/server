@@ -136,6 +136,13 @@ chmod 700 "$monitor_preflight_dir/monitor"
 test -x "$monitor_preflight_dir/monitor"
 ```
 
+In zsh-backed wrappers, never assign shell-special or generic process names
+such as `status`, `pipestatus`, `HOME`, or `CODEX_HOME`. Use a task-specific
+name such as `probe_exit` and record it immediately after the child returns.
+If wrapper bookkeeping fails after a bounded production probe already emitted
+valid evidence, preserve the evidence and its missing exit-code boundary; do
+not repeat production contact solely to reconstruct wrapper metadata.
+
 Keep every disposable repository checkout or Git worktree under a per-run
 workspace in `$BRINGYOUR_HOME/temp`, for example
 `$BRINGYOUR_HOME/temp/server-monitor-source.<revision>.<suffix>/server`. Go
