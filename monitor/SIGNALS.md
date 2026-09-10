@@ -127,9 +127,10 @@ reduces the exact recent-store and replacement-handoff settings needed to
 explain a temporary query blind zone without exposing rendered credentials.
 The admission follow-up adds §11.20a (`mimir-admission`): it reduces each exact
 Mimir child's series-admission counters and headroom at one-minute cadence,
-keeps descriptor loss unknown, treats an uninstantiated exact-reason child as
-zero, and requires a complete two-hour quiet window before resolving a direct
-admission page.
+uses an exact source contract to distinguish a clean whole-family lazy zero
+from descriptor loss, treats a descriptor-backed uninstantiated exact-reason
+child as zero, and requires a complete two-hour quiet window before resolving
+a direct admission page.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -10605,20 +10606,30 @@ identifies Grafana Mimir, then reduces that exact child's metrics and the two
 allowlisted series-limit fields from its effective configuration. The remote
 reducer returns only a strict fixed frame: process start, memory/active series,
 created/removed counters, local/global limits, descriptor and exact-reason
-presence, and the exact per-user-series discard total. Any malformed,
-duplicated, missing, or trailing field fails closed. Raw metric labels,
+presence, exact whole-family absence, an exact-build source-contract Boolean,
+and the exact per-user-series discard total. Any malformed, duplicated,
+missing, or trailing field fails closed. Raw build information, metric labels,
 rendered configuration, tenant values, and journal lines never leave the host.
 
-The exact HELP/TYPE descriptor is the observation boundary. A missing or
-malformed discard-counter descriptor is unknown because the whole family may
-be unavailable. With that descriptor present, no
-`per_user_series_limit` row is an observed zero: Mimir always registers that
-reason's counter vector, but Prometheus emits no `{user,group}` child until an
-increment instantiates it. A malformed exact-reason row still fails closed. A
-same-generation disappearance after a positive observation is a monotonic
-counter decrease, so it emits `cannot-observe`, preserves the page, and starts
-a zero baseline only for a subsequent quiet interval. A confirmed positive
-sibling still pages even when another child or host is unknown.
+Mimir 3.1.1 source revision `a3d6c90f25` registers a separate
+`cortex_discarded_samples_total` CounterVec for each discard reason but does
+not instantiate a `{user,group}` child. Prometheus collection enumerates only
+instantiated vector children, so a fresh process with no discard of any reason
+emits neither samples nor the family's HELP/TYPE lines. The remote reducer may
+interpret that exact whole-family absence as zero only when build-info matches
+that exact source contract. An absent family from any unknown or future build
+remains `cannot-observe`; so does a partial/malformed descriptor or a family
+row without the exact descriptor. This preserves rename, removal, parser
+drift, and scrape ambiguity instead of silently extending the allowlist.
+
+With the exact descriptor present, no `per_user_series_limit` row is an
+observed zero: the family proves that another child was instantiated while the
+target reason was not. Under either zero path, a same-generation disappearance
+after a positive observation is a monotonic counter decrease, so it emits
+`cannot-observe`, preserves the page, and starts a zero baseline only for a
+subsequent quiet interval. A malformed exact-reason row still fails closed. A
+confirmed positive sibling still pages even when another child or host is
+unknown.
 
 Counter state is keyed by host, listener port, and the canonical full-precision
 process start exposed by that child; whole-second rounding must never collapse
@@ -10630,8 +10641,9 @@ decrease establishes an incomparable boundary; neither can clear an active
 incident or be interpreted as a negative delta. Resolution begins only on a
 later complete, same-generation, non-increasing fleet observation and requires
 two uninterrupted hours of complete comparable zero deltas. Observation loss,
-descriptor loss, a malformed exact-reason row, another generation change, or
-another increase resets that quiet window.
+source-unrecognized whole-family absence, descriptor loss, a malformed
+exact-reason row, another generation change, or another increase resets that
+quiet window.
 
 The bounded host/port/process histories, active-incident bit, and quiet boundary
 are stored atomically under the configured monitor state directory through the
@@ -10660,13 +10672,35 @@ cause. Publisher/readiness counts therefore neither open nor clear the direct
 counter page. Memory-series headroom and created/removed deltas likewise guide
 capacity diagnosis without replacing the affirmative admission counter.
 
-For closure, prove every enabled child and exact reason are observable without
-a generation or counter-reset gap, then retain zero new admission increments
-and measured rollout headroom through the complete two-hour window. Verify two
-fresh independent application-metric reads and the exact running Server/Warp
-artifacts. Do not raise a limit, suppress labels, retry rejected candidates,
-or restart Mimir merely to reset the visible counter. Historical availability
-and replacement durability remain independent under §11.20 and §11.21.
+On 2026-09-10, the just-converged Grafana replacement exposed this monitor
+boundary on all six enabled services hosts. A separate host-local reduction
+matched one Mimir child per host, build version 3.1.1 and source revision
+`a3d6c90f25` on all six, with process starts spanning 160.31 seconds. Every
+loopback metrics request succeeded. The target family had zero HELP lines,
+zero TYPE lines, and zero sample rows on every child, while process start,
+memory series, active series, created/removed series, local limits, and
+ingested samples each had an exact descriptor and sample on every child; the
+explicitly initialized instance-rejection vector exposed six children per
+process. The independently lazy discarded-request family was also wholly
+absent. This is the source-predicted empty-vector signature, not a scrape
+failure, reducer drift, or a metric rename/removal. The same descriptor-loss
+alert had already appeared on 2026-09-08, while Warp has pinned Mimir 3.1.1
+since July; the rollout revealed a pre-existing signal assumption rather than
+introducing a new Mimir metric schema. Current zero discard exposure is a
+baseline, not proof that historical rejected samples were recovered.
+
+For closure, prove every enabled child and exact reason are observable through
+either an exact descriptor or the allowlisted source-backed whole-family-zero
+contract, without a generation or counter-reset gap, then retain zero new
+admission increments and measured rollout headroom through the complete
+two-hour window. Verify two fresh independent application-metric reads and the
+exact running Server/Warp artifacts. A new Mimir version or revision must stay
+unknown until its registration, instantiation, and exposition behavior is
+reviewed and added with deterministic descriptor-present, exact-absence,
+partial-descriptor, and positive-row controls. Do not raise a limit, suppress
+labels, retry rejected candidates, or restart Mimir merely to reset the visible
+counter. Historical availability and replacement durability remain independent
+under §11.20 and §11.21.
 
 ### 11.21 Mimir shutdown durability configuration
 

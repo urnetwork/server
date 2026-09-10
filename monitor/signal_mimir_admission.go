@@ -16,11 +16,17 @@ import (
 )
 
 const (
-	mimirAdmissionMarker       = "monitor-signal-11.20a-mimir-admission"
-	mimirAdmissionQuietWindow  = 2 * time.Hour
-	mimirAdmissionStateVersion = 1
-	mimirAdmissionHistoryLimit = 1024
+	mimirAdmissionMarker                   = "monitor-signal-11.20a-mimir-admission"
+	mimirAdmissionQuietWindow              = 2 * time.Hour
+	mimirAdmissionStateVersion             = 1
+	mimirAdmissionHistoryLimit             = 1024
+	mimirAdmissionLazyFamilyVersion        = "3.1.1"
+	mimirAdmissionLazyFamilySourceRevision = "a3d6c90f25"
 )
+
+// The source allowlist is deliberately exact. An unfamiliar Mimir build can
+// still be observed through a valid descriptor, but whole-family absence on
+// that build remains unknown until its collector behavior has been reviewed.
 
 // Signal mimir-admission implements SIGNALS.md §11.20a. It reads every
 // bundled Mimir child's exact process counters and keeps admission failures
@@ -75,20 +81,22 @@ type mimirAdmissionHistory struct {
 // One strict frame represents either a complete child or an explicitly
 // unobservable child. No metric label or rendered configuration is retained.
 type mimirAdmissionInstance struct {
-	port              int
-	observable        bool
-	observableSeen    bool
-	processStart      string
-	memorySeries      int64
-	activeSeries      int64
-	createdTotal      int64
-	removedTotal      int64
-	localLimit        int64
-	globalLimit       int64
-	discardDescriptor bool
-	discardPresent    bool
-	discardTotal      int64
-	seen              map[string]bool
+	port                 int
+	observable           bool
+	observableSeen       bool
+	processStart         string
+	memorySeries         int64
+	activeSeries         int64
+	createdTotal         int64
+	removedTotal         int64
+	localLimit           int64
+	globalLimit          int64
+	discardDescriptor    bool
+	discardFamilyAbsent  bool
+	discardAbsenceSource bool
+	discardPresent       bool
+	discardTotal         int64
+	seen                 map[string]bool
 }
 
 // Host-level journal counts are diagnostic context only. A failed journal
@@ -120,6 +128,7 @@ type mimirAdmissionAssessment struct {
 	observableHosts     int
 	instanceCount       int
 	descriptorInstances int
+	sourceZeroInstances int
 	journalHosts        int
 	publisherStarts     int64
 	readinessRejects    int64
@@ -609,18 +618,26 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 				})
 				continue
 			}
-			if !instance.discardDescriptor {
+			if !instance.discardDescriptor && !(instance.discardFamilyAbsent && instance.discardAbsenceSource) {
 				hostComplete = false
 				assessment.directComplete = false
 				assessment.comparable = false
+				visibilityErr := fmt.Errorf("discard counter descriptor is unavailable")
+				if instance.discardFamilyAbsent && !instance.discardAbsenceSource {
+					visibilityErr = fmt.Errorf("discard counter family is absent outside the recognized source contract")
+				}
 				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
 					target: hostName + "/mimir-admission",
-					err:    fmt.Errorf("discard counter descriptor is unavailable"),
+					err:    visibilityErr,
 				})
 				continue
 			}
 
-			assessment.descriptorInstances++
+			if instance.discardDescriptor {
+				assessment.descriptorInstances++
+			} else {
+				assessment.sourceZeroInstances++
+			}
 
 			headroom := instance.localLimit - instance.memorySeries
 			if !metricRangeInitialized {
@@ -743,12 +760,13 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 			mimirAdmissionQuietWindow,
 		),
 		observed: fmt.Sprintf(
-			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d affected_instances=%d initial_positive_instances=%d discard_counter_increase=%d memory_series=%d..%d active_series=%d..%d local_limit=%d..%d global_limit=%d..%d local_headroom=%d..%d created_increase=%d removed_increase=%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%d readiness_rejects=%d admission_rejects=%d",
+			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d discard_counter_increase=%d memory_series=%d..%d active_series=%d..%d local_limit=%d..%d global_limit=%d..%d local_headroom=%d..%d created_increase=%d removed_increase=%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%d readiness_rejects=%d admission_rejects=%d",
 			state,
 			assessment.configuredHosts,
 			assessment.observableHosts,
 			assessment.instanceCount,
 			assessment.descriptorInstances,
+			assessment.sourceZeroInstances,
 			assessment.affectedInstances,
 			assessment.initialPositive,
 			assessment.discardIncrease,
@@ -804,7 +822,10 @@ func mimirAdmissionCommand(environment string, blockValues map[string][]string) 
 // The injected address keeps child discovery and every loopback request on
 // one explicit boundary while allowing documentation-only test fixtures.
 func mimirAdmissionScript(loopbackAddress string) string {
-	return "loopback_address=" + shellSingleQuote(loopbackAddress) + "\n" + mimirAdmissionScriptBody
+	return "loopback_address=" + shellSingleQuote(loopbackAddress) + "\n" +
+		"lazy_family_version=" + shellSingleQuote(mimirAdmissionLazyFamilyVersion) + "\n" +
+		"lazy_family_source_revision=" + shellSingleQuote(mimirAdmissionLazyFamilySourceRevision) + "\n" +
+		mimirAdmissionScriptBody
 }
 
 // Strict framing rejects duplicates, omissions, malformed numbers, and any
@@ -883,7 +904,7 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 			case "discard_total":
 				instance.discardTotal = value
 			}
-		case "discard_descriptor", "discard_present":
+		case "discard_descriptor", "discard_family_absent", "discard_absence_source", "discard_present":
 			if len(fields) != 2 || current < 0 {
 				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
 			}
@@ -898,6 +919,10 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 			instance.seen[key] = true
 			if key == "discard_descriptor" {
 				instance.discardDescriptor = value
+			} else if key == "discard_family_absent" {
+				instance.discardFamilyAbsent = value
+			} else if key == "discard_absence_source" {
+				instance.discardAbsenceSource = value
 			} else {
 				instance.discardPresent = value
 			}
@@ -912,7 +937,8 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 			if instance.observable {
 				for _, required := range []string{
 					"process_start", "memory_series", "active_series", "created_total", "removed_total",
-					"local_limit", "global_limit", "discard_descriptor", "discard_present", "discard_total",
+					"local_limit", "global_limit", "discard_descriptor", "discard_family_absent",
+					"discard_absence_source", "discard_present", "discard_total",
 				} {
 					if !instance.seen[required] {
 						return sample, fmt.Errorf("mimir admission line %d: instance omitted %s", lineNumber+1, required)
@@ -920,6 +946,12 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				}
 				if !instance.discardPresent && instance.discardTotal != 0 {
 					return sample, fmt.Errorf("mimir admission line %d: absent discard row has a nonzero total", lineNumber+1)
+				}
+				if instance.discardDescriptor && instance.discardFamilyAbsent {
+					return sample, fmt.Errorf("mimir admission line %d: present descriptor contradicts absent family", lineNumber+1)
+				}
+				if instance.discardFamilyAbsent && instance.discardPresent {
+					return sample, fmt.Errorf("mimir admission line %d: absent family contains an exact counter row", lineNumber+1)
 				}
 			} else if len(instance.seen) != 0 {
 				return sample, fmt.Errorf("mimir admission line %d: unobservable instance contains metric fields", lineNumber+1)
@@ -1026,6 +1058,28 @@ for port in $ports; do
     *) continue ;;
   esac
 
+  discard_absence_source=$(printf '%s\n' "$build_info" | awk \
+    -v version="$lazy_family_version" \
+    -v revision="$lazy_family_source_revision" '
+    function occurrences(text, needle, count, position) {
+      count=0
+      while ((position=index(text, needle)) > 0) {
+        count++
+        text=substr(text, position+length(needle))
+      }
+      return count
+    }
+    BEGIN {
+      version_key="\"version\":\"" version "\""
+      revision_key="\"revision\":\"" revision "\""
+    }
+    {
+      version_count+=occurrences($0, version_key)
+      revision_count+=occurrences($0, revision_key)
+    }
+    END {print (version_count == 1 && revision_count == 1) ? 1 : 0}
+  ')
+
   mimir_count=$((mimir_count+1))
   printf 'instance_begin %s\n' "$port"
   global_limit=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null | awk '
@@ -1074,6 +1128,7 @@ for port in $ports; do
     function numeric(value) {return value ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/}
     /^# HELP cortex_discarded_samples_total / {descriptor_help++}
     /^# TYPE cortex_discarded_samples_total counter$/ {descriptor_type++}
+	/^cortex_discarded_samples_total([{ \t])/ {discard_family_rows++}
     /^process_start_time_seconds[ \t]/ && numeric($NF) {
       process_count++
       process_start_value=$NF
@@ -1103,6 +1158,7 @@ for port in $ports; do
           local_count < 1 || local_minimum <= 0 || local_minimum != local_maximum ||
           discard_invalid > 0 || discard_seen != discard_count) exit 42
       descriptor=(descriptor_help == 1 && descriptor_type == 1)
+	  family_absent=(descriptor_help == 0 && descriptor_type == 0 && discard_family_rows == 0)
       printf "process_start %s\n", process_start_text
       printf "memory_series %.0f\n", memory_series
       printf "active_series %.0f\n", active_series
@@ -1110,6 +1166,7 @@ for port in $ports; do
       printf "removed_total %.0f\n", removed_total
       printf "local_limit %.0f\n", local_minimum
       printf "discard_descriptor %d\n", descriptor
+	  printf "discard_family_absent %d\n", family_absent
       printf "discard_present %d\n", (discard_count > 0)
       printf "discard_total %.0f\n", discard_total
     }
@@ -1119,7 +1176,8 @@ for port in $ports; do
     printf 'observable 0\ninstance_end\n'
     continue
   fi
-  printf 'observable 1\n%s\nglobal_limit %s\ninstance_end\n' "$reduced" "$global_limit"
+  printf 'observable 1\n%s\nglobal_limit %s\ndiscard_absence_source %s\ninstance_end\n' \
+    "$reduced" "$global_limit" "$discard_absence_source"
 done
 printf 'mimir_count %s\n' "$mimir_count"
 
