@@ -4657,14 +4657,15 @@ projected_sweep = ceil(eligible / checked_last_hour) hours
 ```
 
 Join this measured rate to the complete common task-argument snapshot and
-report the configured shard count, concurrency per shard, total concurrency,
-request timeout, timeout-only checks/hour ceiling before setup/teardown,
-minimum concurrency obtained by scaling the measured per-slot rate, and the
-deadline-only minimum concurrency if every request consumes its complete
-deadline. Both concurrency figures are lower bounds, not proof of sufficient
-capacity: tunnel setup/teardown, fast successes, and mixed failure latency can
-move the realized rate. Malformed or mixed task geometry still fails before
-any capacity calculation.
+report the configured shard count, blackhole concurrency per shard and total,
+blackhole request timeout, the blackhole-only timeout ceiling before
+setup/teardown, the blackhole-only deadline minimum concurrency, and the full
+batch limit/concurrency/timeout. The blackhole-only figures deliberately do not
+claim to be a whole-task ceiling: an older running artifact can spend most of
+the shard task inside a serialized full batch, whose location, health, and
+bandwidth stages are not described by one blackhole timeout. Measured
+throughput remains authoritative. Malformed or mixed task geometry still fails
+before any capacity calculation.
 
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
@@ -4684,10 +4685,13 @@ again without a successful recheck.
   current, but the complete-fleet projection at the measured last-hour rate is
   longer than the blackhole-verdict lifetime. Diagnose §2.23 and §2.24 first:
   a common timeout cohort consumes the full per-probe deadline and can create
-  the capacity collapse. Then capacity-test any shard/concurrency increase
-  against API, PostgreSQL, and Taskworker headroom. Keeping a failed verdict
-  until a successful recheck is a separate correctness/availability decision;
-  never hide the fault by merely lengthening the maximum age or deleting rows.
+  part of the capacity collapse. Then establish whether the running Taskworker
+  serializes full work after one blackhole batch. If so, deploy the bounded
+  independent-drain correction before increasing concurrency; if it is already
+  present, capacity-test any geometry change against API, PostgreSQL/PgBouncer,
+  and Taskworker headroom. Keeping a failed verdict until a successful recheck
+  is a separate correctness/availability decision; never hide the fault by
+  merely lengthening the maximum age or deleting rows.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
   durable tasks are absent. When the schema is absent, apply migrations before
   deploying a Taskworker artifact from an intentional server checkout
@@ -4755,6 +4759,48 @@ successor. This configuration is **ready, not deployed** until runtime task
 arguments converge. Verify realized rate, CPU, memory, API, and PostgreSQL for
 two complete verdict lifetimes rather than treating the calculation as rollout
 proof.
+
+The later 2026-09-10T22:34Z Main control is the closure of that configuration
+assumption, not standing version guidance. All four durable shards had converged
+to blackhole concurrency 32 and a 15-second timeout, exactly matching the clean
+configuration source, yet 71,760 providers were eligible, 30,810 had a current
+verdict, and 11,689/hour were checked versus 23,920/hour required. The projected
+sweep was 6h8m, more than twice the three-hour lifetime. A bounded 30-minute
+Mimir reduction then showed saturated 250-provider blackhole and 8-provider
+full due lists on every sampled completion, blackhole p95 batch residence
+116.57s, full p95 residence 484.27s, 12,624.96 blackhole checks/hour, and only
+420.03 full attempts/hour. The source executed exactly one blackhole batch and
+then one full batch serially in the same durable shard task. The blackhole p95
+closely matches eight 32-slot waves at the 15-second deadline; using that direct
+residence alone gives about 30.9k checks/hour across four shards, above the
+23.9k requirement. The serialized full residence is therefore the omitted and
+causally sufficient limiter after the concurrency rollout; increasing
+blackhole concurrency again is not the first repair.
+
+The HMAC split remains a causal latency input, not this newly isolated
+scheduling defect: 4,073/4,073 checked legacy-contract providers were dark,
+while 2,332/2,714 checked compatible providers passed. The direct healthy
+controls had no Taskworker-memory, Proxy-memory, PostgreSQL-capacity, or
+full-outcome alert. The adjacent derived-client leak left 29,346 mature active
+disconnected children and needs its own deployed cleanup gate (§2.25), but no
+evidence attributed the one-batch cadence to those rows. The bounded code
+correction keeps the four durable tasks and the configured per-shard peak: it
+runs the full batch beside repeated blackhole batches, reserving the full pool
+from the blackhole pool, and stops admitting blackhole work when full completes,
+the due queue becomes partial, cancellation begins, or either blackhole run or
+submission fails. One concurrent blackhole/full pair is insufficient because
+the next blackhole admission would still wait behind the long full batch.
+
+The rollout gate must account for sustained duty cycle rather than raise the
+32-slot setting. During a current probe wave, the direct PostgreSQL census rose
+to 723 clients with 625 young loopback-idle sessions, then drained normally to
+388 clients with only six idle sessions aged at least ten minutes. That clears
+the retention boundary but demonstrates refill amplitude. After the corrected
+Taskworker converges, require more than 25% PostgreSQL normal-role headroom and
+healthy §1.3a/§1.3b, API, Taskworker CPU/memory, and Proxy controls throughout
+two complete three-hour verdict lifetimes; also require measured throughput at
+or above the live requirement and a projected sweep inside three hours. A
+current-zero or one quiet sample is not recovery.
 
 Connect commit `66aaad4` (the patch-identical rebased successor of historical
 commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a

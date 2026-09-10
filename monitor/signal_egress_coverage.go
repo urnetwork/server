@@ -58,6 +58,9 @@ type egressCoverageGeometry struct {
 	shardCount              int
 	idleDelaySeconds        int
 	maxTimeSeconds          int
+	fullLimit               int
+	fullConcurrency         int
+	fullTimeoutSeconds      int
 	blackholeConcurrency    int
 	blackholeTimeoutSeconds int
 	indices                 []int
@@ -232,6 +235,9 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			geometry.shardCount = args.ShardCount
 			geometry.idleDelaySeconds = args.IdleDelaySeconds
 			geometry.maxTimeSeconds = args.MaxTimeSeconds
+			geometry.fullLimit = args.Full.Limit
+			geometry.fullConcurrency = args.Full.Concurrency
+			geometry.fullTimeoutSeconds = args.Full.ProbeTimeoutSeconds
 			geometry.blackholeConcurrency = args.Blackhole.Concurrency
 			geometry.blackholeTimeoutSeconds = args.Blackhole.ProbeTimeoutSeconds
 			expected = config
@@ -402,11 +408,10 @@ func egressBlackholeCapacityFinding(
 		return finding{}, false
 	}
 	requiredPerHour := (eligible*int64(time.Hour/time.Second) + maxAgeSeconds - 1) / maxAgeSeconds
-	configuredConcurrency := int64(geometry.shardCount) * int64(geometry.blackholeConcurrency)
+	configuredBlackholeConcurrency := int64(geometry.shardCount) * int64(geometry.blackholeConcurrency)
 	probeTimeoutSeconds := int64(geometry.blackholeTimeoutSeconds)
-	timeoutOnlyCeilingPerHour := configuredConcurrency * int64(time.Hour/time.Second) / probeTimeoutSeconds
-	minimumConcurrencyFromObservedRate := (configuredConcurrency*requiredPerHour + checkedLastHour - 1) / checkedLastHour
-	deadlineOnlyMinimumConcurrency := (requiredPerHour*probeTimeoutSeconds + int64(time.Hour/time.Second) - 1) / int64(time.Hour/time.Second)
+	blackholeOnlyTimeoutCeilingPerHour := configuredBlackholeConcurrency * int64(time.Hour/time.Second) / probeTimeoutSeconds
+	blackholeOnlyDeadlineMinimumConcurrency := (requiredPerHour*probeTimeoutSeconds + int64(time.Hour/time.Second) - 1) / int64(time.Hour/time.Second)
 	coveragePercent := 100 * float64(current) / float64(eligible)
 	return finding{
 		probeId: "pg/egress-coverage", tier: tierPage,
@@ -415,20 +420,20 @@ func egressBlackholeCapacityFinding(
 			"Provider blackhole checks cover %.1f%% of the eligible fleet, and the last-hour rate projects a %s sweep beyond the %s verdict lifetime.",
 			coveragePercent, (time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
 		),
-		mechanism: "Shard timestamps are advancing, but aggregate production is too slow to refresh the complete eligible population before verdicts expire. A known-dark provider therefore ages out of the exclusion set and becomes selectable again without a successful recheck; shard-local liveness alone cannot see this chronic under-capacity state.",
+		mechanism: "Shard timestamps are advancing, but aggregate production is too slow to refresh the complete eligible population before verdicts expire. A known-dark provider therefore ages out of the exclusion set and becomes selectable again without a successful recheck; shard-local liveness alone cannot see this chronic under-capacity state. The blackhole-only slot calculation does not include residence time spent on full probes inside the same durable task.",
 		baseline:  fmt.Sprintf("The measured one-hour blackhole-check rate is at least %d providers/hour, so one complete fleet sweep fits inside the %s verdict lifetime, or current coverage is already complete.", requiredPerHour, model.ProviderBlackholeCheckMaxAge),
 		observed: fmt.Sprintf(
-			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_concurrency_per_shard=%d configured_total_concurrency=%d probe_timeout_seconds=%d timeout_only_ceiling_per_hour=%d minimum_concurrency_from_observed_rate=%d deadline_only_minimum_concurrency=%d",
+			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_blackhole_concurrency_per_shard=%d configured_total_blackhole_concurrency=%d blackhole_probe_timeout_seconds=%d blackhole_only_timeout_ceiling_per_hour=%d blackhole_only_deadline_minimum_concurrency=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d full_probe_timeout_seconds=%d",
 			eligible, current, coveragePercent, checkedLastHour, requiredPerHour,
 			(time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
-			geometry.shardCount, geometry.blackholeConcurrency, configuredConcurrency,
-			probeTimeoutSeconds, timeoutOnlyCeilingPerHour,
-			minimumConcurrencyFromObservedRate, deadlineOnlyMinimumConcurrency,
+			geometry.shardCount, geometry.blackholeConcurrency, configuredBlackholeConcurrency,
+			probeTimeoutSeconds, blackholeOnlyTimeoutCeilingPerHour, blackholeOnlyDeadlineMinimumConcurrency,
+			geometry.fullLimit, geometry.fullConcurrency, geometry.fullTimeoutSeconds,
 		),
 		evidence: "The query counts one latest row per eligible provider inside PostgreSQL and joins those aggregate rates only to the complete common execution geometry parsed from the durable task arguments. Provider, network, task, endpoint, and failure identities never leave the database.",
-		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full per-probe deadline and depress throughput even while every shard keeps moving. The timeout-only rate is a ceiling before setup and teardown overhead, and both reported concurrency requirements are lower bounds; measured throughput remains authoritative because setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
-		action:   "Run §2.23 and §2.24 first and remove any proved common timeout cause. Then capacity-test a total blackhole concurrency above both reported minimum-concurrency bounds with explicit overhead and database, API, Taskworker memory, and Taskworker CPU headroom, and update the durable shard/concurrency geometry. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
-		verify:   "For two complete verdict lifetimes, every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable.",
+		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full blackhole deadline and depress throughput. The blackhole-only timeout rate is not a whole-task ceiling when a running artifact serializes full work in the same shard; measured throughput remains authoritative because full-probe residence, setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
+		action:   "Run §2.23 and §2.24 first, then establish the running Taskworker's execution behavior. If full work blocks blackhole progress inside one shard task, deploy the architecture-preserving correction that overlaps one full batch with a repeated blackhole drain while reserving its configured concurrency; do not increase concurrency first. If independent drain is already present and the measured rate still misses the bound, capacity-test any geometry change against PostgreSQL/PgBouncer, API, and Taskworker CPU/memory headroom. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
+		verify:   "After convergence, for two complete verdict lifetimes every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable. Keep more than 25% PostgreSQL normal-role headroom and verify PgBouncer, API, and Taskworker CPU/memory controls throughout the sustained duty cycle.",
 		playbook: "SIGNALS.md §2.19, §2.23, and §2.24",
 	}, true
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -247,44 +248,51 @@ func TestProviderEgressProbeEnabledStillRejectsInvalidPersistedArguments(t *test
 
 func TestProviderEgressProbePassRunsBothSchedulesWithOnePinSnapshot(t *testing.T) {
 	args := providerEgressProbeArgs(testProviderEgressProbeSettings(4), 2)
+	var eventsLock sync.Mutex
 	events := []string{}
+	recordEvent := func(event string) {
+		eventsLock.Lock()
+		defer eventsLock.Unlock()
+		events = append(events, event)
+	}
 	pins := map[string][]string{"source.example": {"leaf", "intermediate"}}
 	pass := &providerEgressProbePass{
 		blackholeDue: func(_ context.Context, limit int) ([]string, error) {
-			events = append(events, "blackhole-due")
+			recordEvent("blackhole-due")
 			if limit != args.Blackhole.Limit {
 				t.Fatalf("blackhole limit = %d, want %d", limit, args.Blackhole.Limit)
 			}
 			return []string{"blackhole-1", "blackhole-2"}, nil
 		},
 		fullDue: func(_ context.Context, limit int) ([]string, error) {
-			events = append(events, "full-due")
+			recordEvent("full-due")
 			if limit != args.Full.Limit {
 				t.Fatalf("full limit = %d, want %d", limit, args.Full.Limit)
 			}
 			return []string{"full-1"}, nil
 		},
 		loadPins: func(context.Context) (map[string][]string, error) {
-			events = append(events, "pins")
+			recordEvent("pins")
 			return pins, nil
 		},
 		submitBlackholeChecks: func(_ context.Context, checks []ingest.BlackholeCheck) error {
-			events = append(events, "blackhole-submit")
+			recordEvent("blackhole-submit")
 			if len(checks) != 2 {
-				t.Fatalf("submitted blackhole checks = %d, want 2", len(checks))
+				t.Errorf("submitted blackhole checks = %d, want 2", len(checks))
 			}
 			return nil
 		},
 		runBlackhole: func(_ context.Context, clientIds []string, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
-			events = append(events, "blackhole-run")
+			recordEvent("blackhole-run")
 			if !slices.Equal(clientIds, []string{"blackhole-1", "blackhole-2"}) {
-				t.Fatalf("blackhole client ids = %v", clientIds)
+				t.Errorf("blackhole client ids = %v", clientIds)
 			}
-			if options.Concurrency != args.Blackhole.Concurrency || options.Timeout != time.Duration(args.Blackhole.ProbeTimeoutSeconds)*time.Second {
-				t.Fatalf("blackhole options = %+v", options)
+			wantConcurrency := args.Blackhole.Concurrency - args.Full.Concurrency
+			if options.Concurrency != wantConcurrency || options.Timeout != time.Duration(args.Blackhole.ProbeTimeoutSeconds)*time.Second {
+				t.Errorf("blackhole options = %+v, want concurrency %d", options, wantConcurrency)
 			}
 			if options.Pins == nil || !slices.Equal(options.Pins()["source.example"], []string{"leaf", "intermediate"}) {
-				t.Fatalf("blackhole pins = %v", options.Pins)
+				t.Errorf("blackhole pins = %v", options.Pins)
 			}
 			return fleetprobe.BlackholeSummary{
 				Checks: []ingest.BlackholeCheck{
@@ -296,15 +304,15 @@ func TestProviderEgressProbePassRunsBothSchedulesWithOnePinSnapshot(t *testing.T
 			}, nil
 		},
 		runFull: func(_ context.Context, clientIds []string, options fleetprobe.FullOptions) (prober.Summary, error) {
-			events = append(events, "full-run")
+			recordEvent("full-run")
 			if !slices.Equal(clientIds, []string{"full-1"}) {
-				t.Fatalf("full client ids = %v", clientIds)
+				t.Errorf("full client ids = %v", clientIds)
 			}
 			if options.Concurrency != args.Full.Concurrency || options.ProbeTimeout != time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second {
-				t.Fatalf("full options = %+v", options)
+				t.Errorf("full options = %+v", options)
 			}
 			if options.Pins == nil || !slices.Equal(options.Pins()["source.example"], []string{"leaf", "intermediate"}) {
-				t.Fatalf("full pins = %v", options.Pins)
+				t.Errorf("full pins = %v", options.Pins)
 			}
 			return prober.Summary{Attempted: 1, Submitted: 1}, nil
 		},
@@ -314,22 +322,168 @@ func TestProviderEgressProbePassRunsBothSchedulesWithOnePinSnapshot(t *testing.T
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	wantEvents := []string{
-		"blackhole-due",
-		"full-due",
-		"pins",
-		"blackhole-run",
-		"blackhole-submit",
-		"full-run",
+	eventsLock.Lock()
+	gotEvents := slices.Clone(events)
+	eventsLock.Unlock()
+	if len(gotEvents) != 6 || !slices.Equal(gotEvents[:3], []string{"blackhole-due", "full-due", "pins"}) {
+		t.Fatalf("events = %v, want ordered lookups/pins followed by three lane events", gotEvents)
 	}
-	if !slices.Equal(events, wantEvents) {
-		t.Fatalf("events = %v, want %v", events, wantEvents)
+	eventIndex := map[string]int{}
+	for index, event := range gotEvents {
+		eventIndex[event] = index
+	}
+	if eventIndex["blackhole-run"] < 3 || eventIndex["full-run"] < 3 || eventIndex["blackhole-submit"] <= eventIndex["blackhole-run"] {
+		t.Fatalf("lane events = %v, want both runs and blackhole submit after its run", gotEvents[3:])
 	}
 	if result.BlackholeDue != 2 || result.Checked != 2 || result.Dark != 1 || result.TunnelFailed != 1 {
 		t.Fatalf("blackhole result = %+v", result)
 	}
 	if result.FullDue != 1 || result.Attempted != 1 || result.Submitted != 1 {
 		t.Fatalf("full result = %+v", result)
+	}
+}
+
+func TestProviderEgressProbePassDrainsBlackholeWhileFullBatchIsBlocked(t *testing.T) {
+	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
+	args.Blackhole.Limit = 1
+	args.Blackhole.Concurrency = 32
+	args.Full.Limit = 1
+	args.Full.Concurrency = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fullStarted := make(chan struct{})
+	releaseFull := make(chan struct{})
+	secondBlackholeSubmitted := make(chan struct{})
+	blackholeDueCalls := 0
+	blackholeRuns := 0
+	blackholeSubmissions := 0
+	pinLoads := 0
+	pass := &providerEgressProbePass{
+		blackholeDue: func(context.Context, int) ([]string, error) {
+			blackholeDueCalls++
+			switch blackholeDueCalls {
+			case 1:
+				return []string{"blackhole-a"}, nil
+			case 2:
+				return []string{"blackhole-b"}, nil
+			default:
+				return nil, nil
+			}
+		},
+		fullDue: func(context.Context, int) ([]string, error) {
+			return []string{"full-a"}, nil
+		},
+		loadPins: func(context.Context) (map[string][]string, error) {
+			pinLoads++
+			return map[string][]string{"source.example": {"leaf", "intermediate"}}, nil
+		},
+		runFull: func(ctx context.Context, _ []string, options fleetprobe.FullOptions) (prober.Summary, error) {
+			if options.Concurrency != 2 {
+				t.Errorf("full concurrency = %d, want 2", options.Concurrency)
+			}
+			close(fullStarted)
+			select {
+			case <-releaseFull:
+				return prober.Summary{Attempted: 1, Submitted: 1}, nil
+			case <-ctx.Done():
+				return prober.Summary{}, ctx.Err()
+			}
+		},
+		runBlackhole: func(ctx context.Context, clientIds []string, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+			if options.Concurrency != 30 {
+				t.Errorf("blackhole concurrency = %d, want 30 reserved beside the 2-slot full pool", options.Concurrency)
+			}
+			select {
+			case <-fullStarted:
+			case <-ctx.Done():
+				return fleetprobe.BlackholeSummary{}, ctx.Err()
+			}
+			blackholeRuns++
+			return fleetprobe.BlackholeSummary{
+				Checks: []ingest.BlackholeCheck{{ClientId: clientIds[0]}},
+			}, nil
+		},
+		submitBlackholeChecks: func(context.Context, []ingest.BlackholeCheck) error {
+			blackholeSubmissions++
+			if blackholeSubmissions == 2 {
+				close(secondBlackholeSubmitted)
+			}
+			return nil
+		},
+	}
+
+	type runOutcome struct {
+		result *ProviderEgressProbeResult
+		err    error
+	}
+	done := make(chan runOutcome, 1)
+	go func() {
+		result, err := pass.run(ctx, args)
+		done <- runOutcome{result: result, err: err}
+	}()
+
+	select {
+	case <-secondBlackholeSubmitted:
+		close(releaseFull)
+	case <-time.After(2 * time.Second):
+		cancel()
+		close(releaseFull)
+		<-done
+		t.Fatal("a blocked full batch prevented the second blackhole batch")
+	}
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatalf("run: %v", outcome.err)
+	}
+	if pinLoads != 1 {
+		t.Fatalf("pin snapshots = %d, want 1", pinLoads)
+	}
+	if blackholeDueCalls < 2 || blackholeRuns != 2 || blackholeSubmissions != 2 {
+		t.Fatalf("blackhole due=%d runs=%d submissions=%d, want at least 2/2/2", blackholeDueCalls, blackholeRuns, blackholeSubmissions)
+	}
+	if outcome.result.BlackholeDue != 2 || outcome.result.Checked != 2 {
+		t.Fatalf("drained blackhole result = %+v, want two batches", outcome.result)
+	}
+	if outcome.result.FullDue != 1 || outcome.result.Attempted != 1 || outcome.result.Submitted != 1 {
+		t.Fatalf("concurrent full result = %+v", outcome.result)
+	}
+}
+
+func TestProviderEgressProbePassKeepsOneBlackholeBatchWhenFullIsNotDue(t *testing.T) {
+	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
+	args.Blackhole.Limit = 1
+	blackholeDueCalls := 0
+	pass := &providerEgressProbePass{
+		blackholeDue: func(context.Context, int) ([]string, error) {
+			blackholeDueCalls++
+			return []string{"blackhole-a"}, nil
+		},
+		fullDue: func(context.Context, int) ([]string, error) {
+			return nil, nil
+		},
+		loadPins: func(context.Context) (map[string][]string, error) {
+			return map[string][]string{"source.example": {"leaf", "intermediate"}}, nil
+		},
+		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+			return fleetprobe.BlackholeSummary{
+				Checks: []ingest.BlackholeCheck{{ClientId: "blackhole-a"}},
+			}, nil
+		},
+		submitBlackholeChecks: func(context.Context, []ingest.BlackholeCheck) error {
+			return nil
+		},
+	}
+
+	result, err := pass.run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if blackholeDueCalls != 1 {
+		t.Fatalf("blackhole due lookups = %d, want one without a concurrent full batch", blackholeDueCalls)
+	}
+	if result.BlackholeDue != 1 || result.Checked != 1 || !result.Full {
+		t.Fatalf("one-batch result = %+v", result)
 	}
 }
 
@@ -348,7 +502,7 @@ func TestProviderEgressProbePassDoesNotLetBlackholeFailureStarveFullProbe(t *tes
 			return map[string][]string{"source.example": {"leaf", "intermediate"}}, nil
 		},
 		submitBlackholeChecks: func(context.Context, []ingest.BlackholeCheck) error {
-			t.Fatal("a failed blackhole run must not submit")
+			t.Error("a failed blackhole run must not submit")
 			return nil
 		},
 		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
@@ -472,6 +626,39 @@ func TestProviderEgressProbePassDoesNotLoadPinsWhenNothingIsDue(t *testing.T) {
 	}
 	if refreshes != 1 {
 		t.Fatalf("idle fleet refreshes = %d, want 1", refreshes)
+	}
+}
+
+func TestProviderEgressProbePassDoesNotLaunchBatchesCanceledWhileLoadingPins(t *testing.T) {
+	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	pass := &providerEgressProbePass{
+		blackholeDue: func(context.Context, int) ([]string, error) {
+			return []string{"blackhole-a"}, nil
+		},
+		fullDue: func(context.Context, int) ([]string, error) {
+			return []string{"full-a"}, nil
+		},
+		loadPins: func(context.Context) (map[string][]string, error) {
+			cancel()
+			return map[string][]string{"source.example": {"leaf", "intermediate"}}, nil
+		},
+		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+			t.Error("canceled pass launched blackhole work")
+			return fleetprobe.BlackholeSummary{}, nil
+		},
+		runFull: func(context.Context, []string, fleetprobe.FullOptions) (prober.Summary, error) {
+			t.Error("canceled pass launched full work")
+			return prober.Summary{}, nil
+		},
+	}
+
+	result, err := pass.run(ctx, args)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error = %v, want context cancellation", err)
+	}
+	if result.BlackholeDue != 1 || result.Checked != 0 || result.Attempted != 0 {
+		t.Fatalf("canceled pre-launch result = %+v", result)
 	}
 }
 
