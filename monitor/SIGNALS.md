@@ -4760,9 +4760,9 @@ short-lived probe's final derived-client removal part of joined tunnel
 retirement. They prevent canceled control-plane cleanup from leaving active
 derived rows until the idle reaper, but do not repair legacy HMAC rejection or
 substitute for the concurrency correction. Require aggregate child-lifecycle
-evidence before attributing current fleet size or throughput to that adjacent
-leak, and require a Taskworker build containing both sibling changes before its
-post-deploy cleanup gate begins.
+evidence from §2.25 before attributing current fleet size or throughput to that
+adjacent leak, and require a Taskworker build containing both sibling changes
+before its post-deploy cleanup gate begins.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
@@ -5305,6 +5305,57 @@ Implementation convention: SIGNALS.md §2.24 (`hmac-cutover`) maps to
 cover both exact behavioral thresholds, insufficient-control non-attribution,
 pre-cutover risk, a healthy no-legacy cohort, contradictory aggregates, query
 population/age bounds, privacy, and detailed Markdown.
+
+### 2.25 Egress-prober derived-client retirement
+Probe: `probe-cleanup`
+
+Every provider-egress attempt derives a short-lived API client from the durable
+`prober_identity` singleton. Closing the bounded tunnel must retire that child;
+otherwise active rows accumulate until the much later idle reaper and inflate
+the database's apparent active-client population. This probe identifies the
+cohort by both the singleton network and parent client, limits reads to six
+hours, applies a ten-minute close grace, and exports only aggregate lifecycle
+counts. IDs, credentials, endpoints, and descriptions remain in PostgreSQL.
+
+- `probe-child-retirement` (WARN for any residual; PAGE after two samples when
+  at least 20 residuals are at least 10% of 20 or more mature children): mature
+  children remain active without a connected session. Active connected rows
+  are retained as the in-flight control; §2.19 and §2.23 must independently
+  bound probe execution and advancement rather than treating this signal as a
+  generic stuck-task detector.
+- `probe-child-retirement-identity` (WARN after two samples): the singleton
+  authority is absent or incomplete. Repair §2.23 bootstrap; never infer the
+  parent from descriptive text.
+- `probe-child-retirement-integrity` (WARN after two samples): a recent child
+  is inactive without `deactivate_time`. The active flag and timestamp must be
+  written together. Find the exact writer before any historical backfill.
+
+A privacy-bounded 2026-09-10 Main sample found 64,556 children created in six
+hours. Of 63,174 past the grace, 5,872 were inactive, 14 remained connected,
+and 57,288 (90.7%) were active without a connection; the oldest residual was
+21,599 seconds old. The control-plane review found two joined-lifecycle gaps:
+legacy Operator Proxy tunnel close canceled the shared generator context before
+cleanup completed, and legacy Connect final client removal did not wait for the
+remove response. Connect `d3b49d9` and Operator Proxy `35b0bc7` correct new
+teardown, but an immutable Taskworker artifact must prove both exact sibling
+inputs because Server's local module replacements make its outer VCS stamp
+insufficient evidence.
+
+Do not bulk-delete or deactivate production children to clear this alert. The
+software fix prevents new leakage; historical active stock needs a separately
+reviewed, bounded reaper or operational cleanup. Begin an explicit post-rollout
+cohort only after every Taskworker contains both fixes, wait through the
+ten-minute grace, and require creation/deactivation balance. The rolling signal
+cannot become independently clean until rollout end plus six hours and the
+grace. This is a **software lifecycle/data-integrity** class, not a Proxy
+hardware-capacity remedy and not an explanation for the independent §2.24 HMAC
+failure.
+
+Implementation convention: SIGNALS.md §2.25 (`probe-cleanup`) maps to
+`signal_probe_cleanup.go` and `signal_probe_cleanup_test.go`. Synthetic tests
+cover a production-shaped severe leak, exact warning/page thresholds, a
+connected control, missing singleton authority, missing deactivation time,
+contradictory aggregates, bounded private SQL, and detailed Markdown.
 
 ---
 
@@ -8091,6 +8142,20 @@ ordinary entry JSON supported by both versions, and treats malformed or
 missing timestamp fields as visibility loss. At the same observation, every
 affected host had a valid boundary witness; their actual local coverage was
 not short. High recent volume remains a capacity input, not proof of loss.
+
+**2026-09-10 post-query clock discriminator.** A recurring `cannot-observe`
+with command exit 35 on one enabled edge was not malformed journal JSON or a
+host fault. Forty bounded structural reads returned one valid JSON record and
+one numeric realtime timestamp every time, but validation against the clock
+captured *before* `journalctl` failed on ordinary second rollovers: 1/40 latest
+records appeared one second newer than that stale clock and 4/40 exact cutoff
+records computed as 2,999 seconds old. The same observations failed 0/40 when
+compared with a post-query clock, with a minimum cutoff age of exactly 3,000
+seconds. The probe now samples time after both bounded reads, still rejects a
+timestamp newer than that final clock, and has a deterministic T-to-T+1
+regression. Do not interpret historical exit 35 as journal loss; require the
+fixed probe to parse the same host and then evaluate its concrete policy and
+coverage findings.
 
 ### 8.6 Config-generation restart wave — binary version alone is incomplete
 

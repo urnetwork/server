@@ -240,7 +240,33 @@ func TestJournalBufferCommandSystemd249PlainListBootsUsesEntryQuery(t *testing.T
 	}
 }
 
+func TestJournalBufferCommandValidatesAgainstPostQueryClock(t *testing.T) {
+	// The two journal queries cross from T to T+1. A clock captured before the
+	// reads rejects latest=T+1 as future and computes an exact cutoff as 2999s.
+	// The post-query clock accepts both without weakening the future-row guard.
+	output, err := runJournalBufferCommandWithClock(t, "present", "exact", "cross")
+	if err != nil {
+		t.Fatalf("valid rollover records were rejected: %v\n%s", err, output)
+	}
+	sample, err := parseJournalBufferSample(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sample.coveragePresent || sample.boundaryEntryAgeSeconds != 3000 {
+		t.Fatalf("rollover sample=%+v, want exact 3000-second coverage", sample)
+	}
+
+	output, err = runJournalBufferCommandWithClock(t, "future", "exact", "cross")
+	if err == nil {
+		t.Fatalf("timestamp newer than the post-query clock was accepted:\n%s", output)
+	}
+}
+
 func runJournalBufferCommand(t *testing.T, latestMode, boundaryMode string) (string, error) {
+	return runJournalBufferCommandWithClock(t, latestMode, boundaryMode, "fixed")
+}
+
+func runJournalBufferCommandWithClock(t *testing.T, latestMode, boundaryMode, clockMode string) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	writeExecutable := func(name, body string) {
@@ -282,10 +308,16 @@ exec "$@"
 `)
 	// The command and its fake journalctl child must share one clock. Sampling
 	// the real clock twice made a loaded test host manufacture a future latest
-	// record when process startup crossed more than one second.
+	// record when process startup crossed more than one second. Cross mode makes
+	// the query advance that shared clock once, deterministically reproducing
+	// the production second-boundary race.
 	writeExecutable("date", `#!/bin/sh
 if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then
-  echo 2000000000
+  if [ "$JOURNAL_CLOCK_MODE" = cross ] && [ -e "$JOURNAL_CLOCK_STATE" ]; then
+    echo 2000000001
+  else
+    echo 2000000000
+  fi
   exit 0
 fi
 exec /bin/date "$@"
@@ -302,10 +334,17 @@ age=1
 case " $* " in
   *' --until '*) mode=$JOURNAL_BOUNDARY_MODE; age=3300 ;;
 esac
+if [ "$JOURNAL_CLOCK_MODE" = cross ]; then
+  touch "$JOURNAL_CLOCK_STATE"
+fi
 now=$(date +%s)
+case "$mode" in
+  present) age=0 ;;
+  exact) age=3000 ;;
+esac
 timestamp=$(( (now - age) * 1000000 ))
 case "$mode" in
-  string) printf '{"__REALTIME_TIMESTAMP":"%s"}\n' "$timestamp" ;;
+  string|present|exact) printf '{"__REALTIME_TIMESTAMP":"%s"}\n' "$timestamp" ;;
   numeric) printf '{"__REALTIME_TIMESTAMP":%s}\n' "$timestamp" ;;
   future) printf '{"__REALTIME_TIMESTAMP":"%s"}\n' "$(( (now + 1) * 1000000 ))" ;;
   young) printf '{"__REALTIME_TIMESTAMP":"%s"}\n' "$(( (now - 2999) * 1000000 ))" ;;
@@ -323,6 +362,8 @@ esac
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"JOURNAL_LATEST_MODE="+latestMode,
 		"JOURNAL_BOUNDARY_MODE="+boundaryMode,
+		"JOURNAL_CLOCK_MODE="+clockMode,
+		"JOURNAL_CLOCK_STATE="+filepath.Join(bin, "query-seen"),
 	)
 	output, err := command.CombinedOutput()
 	return string(output), err

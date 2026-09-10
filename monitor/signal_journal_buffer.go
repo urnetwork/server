@@ -84,20 +84,28 @@ parse_journal_timestamp() {
   case "$journal_timestamp_us" in ''|*[!0-9]*) return 1 ;; esac
 }
 
-now_seconds=$(date +%s) || exit 34
 latest_record=$(timeout 10s journalctl -q -b 0 --reverse -n 1 --no-pager \
   --output-fields=__REALTIME_TIMESTAMP -o json 2>&1) || exit 34
 parse_journal_timestamp "$latest_record" || exit 35
 latest_entry_seconds=$(( journal_timestamp_us / 1000000 ))
-[ "$latest_entry_seconds" -le "$now_seconds" ] || exit 35
 
 boundary_record=$(timeout 10s journalctl -q -b 0 --reverse \
   --until '50 minutes ago' -n 1 --no-pager \
   --output-fields=__REALTIME_TIMESTAMP -o json 2>&1) || exit 34
+boundary_entry_seconds=0
 boundary_entry_age_seconds=0
 if [ -n "$boundary_record" ]; then
   parse_journal_timestamp "$boundary_record" || exit 35
-  boundary_entry_age_seconds=$(( now_seconds - journal_timestamp_us / 1000000 ))
+  boundary_entry_seconds=$(( journal_timestamp_us / 1000000 ))
+fi
+
+# Validate against a clock sampled after both bounded reads. Sampling before
+# journalctl races an ordinary second rollover: a valid latest row can appear
+# one second "in the future", and an exact 50-minute cutoff can look 2999s old.
+now_seconds=$(date +%s) || exit 34
+[ "$latest_entry_seconds" -le "$now_seconds" ] || exit 35
+if [ -n "$boundary_record" ]; then
+  boundary_entry_age_seconds=$(( now_seconds - boundary_entry_seconds ))
   [ "$boundary_entry_age_seconds" -ge 3000 ] || exit 35
 fi
 
