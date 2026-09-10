@@ -98,18 +98,22 @@ func TestEventSchemaLists(t *testing.T) {
 		connect.AssertEqual(t, EventOwnerClient, spec.Owner)
 	}
 	serverNames := ServerEventNames()
-	connect.AssertEqual(t, 14, len(serverNames))
+	connect.AssertEqual(t, 15, len(serverNames))
 	for _, name := range serverNames {
 		spec := EventSpecFor(name)
 		connect.AssertEqual(t, true, spec.ServerOnly)
 		connect.AssertEqual(t, true, spec.Owner != EventOwnerClient)
 	}
 	connect.AssertEqual(t, true, EventSpecFor("nope") == nil)
+	// connect.day is the server's connection history: never from a client
+	connect.AssertEqual(t, true, EventSpecFor(EventConnectDay).ServerOnly)
+	_, err := ValidateClientEvent(EventConnectDay, map[string]any{})
+	connect.AssertEqual(t, true, err != nil)
 	connect.AssertEqual(t, []string{"text"}, EventTextPropKeys(EventFeedbackSubmitted))
 	connect.AssertEqual(t, 0, len(EventTextPropKeys(EventConnectFirst)))
 
 	// the server may write any name, client names included
-	_, err := ValidateServerEvent(EventSignupOptoutChanged, map[string]any{"product_updates": true})
+	_, err = ValidateServerEvent(EventSignupOptoutChanged, map[string]any{"product_updates": true})
 	connect.AssertEqual(t, nil, err)
 	_, err = ValidateServerEvent(EventAppOpened, map[string]any{"step": "e1_connect"})
 	connect.AssertEqual(t, nil, err)

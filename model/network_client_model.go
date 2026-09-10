@@ -2354,9 +2354,9 @@ func ConnectNetworkClient(
 		expectedLatencyMillis = int(2.5*distanceMillis + 0.5)
 	}
 
+	connectTime := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
-		connectTime := server.NowUtc()
 
 		host, _ := server.Host()
 		service, _ := server.Service()
@@ -2434,6 +2434,12 @@ func ConnectNetworkClient(
 			connectTime.Add(-clientAuthTimeRefreshMinInterval),
 		))
 	})
+
+	// the durable connection history for the onboarding results: one
+	// connect.day event per network per UTC day, its own transaction after
+	// the connection is committed, cached per process, never failing this
+	// connect (RecordConnectDay)
+	RecordConnectDay(ctx, clientId, connectTime)
 
 	return
 }

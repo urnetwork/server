@@ -59,6 +59,7 @@ const (
 	EventRefund            = "refund"
 	EventRetentionD7       = "retention.d7"
 	EventRetentionD30      = "retention.d30"
+	EventConnectDay        = "connect.day"
 )
 
 // NetworkFacts is everything the rollup knows about one network: its cohort
@@ -67,7 +68,10 @@ type NetworkFacts struct {
 	CohortAt time.Time
 	// FirstEventAt is the earliest `at` per event name.
 	FirstEventAt map[string]time.Time
-	// ConnectionDays are the UTC days with at least one connection, in any order.
+	// ConnectionDays are the UTC days with at least one connection, in any
+	// order: the network's connect.day events (one per day, written by the
+	// client connection path). network_client_connection is pruned hours after
+	// disconnect and never backs this.
 	ConnectionDays []time.Time
 	// FirstFeedbackAt is the earliest account feedback (the feedback screen).
 	FirstFeedbackAt *time.Time

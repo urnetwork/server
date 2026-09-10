@@ -54,6 +54,12 @@ const (
 	EventRefund         = "refund"
 	EventRetentionD7    = "retention.d7"
 	EventRetentionD30   = "retention.d30"
+	// EventConnectDay is written by the client connection path once per
+	// network per UTC day with at least one connection: the durable
+	// connection history the rollup's connect_7d, retention_d7 and
+	// retention_d30 read (network_client_connection is pruned 8 h after
+	// disconnect and cannot back them).
+	EventConnectDay = "connect.day"
 )
 
 // Event platforms (the `platform` field of every client event).
@@ -243,6 +249,7 @@ var eventSpecs = func() map[string]*EventSpec {
 		{Name: EventRetentionD7, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{
 			"connect_days": propInt(false, 0, 7),
 		}},
+		{Name: EventConnectDay, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{}},
 		{Name: EventRetentionD30, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{
 			"connect_days": propInt(false, 0, 30),
 		}},

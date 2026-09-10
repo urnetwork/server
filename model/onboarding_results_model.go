@@ -297,8 +297,8 @@ func ListNetworkOnboardingCohort(ctx context.Context, from time.Time, to time.Ti
 }
 
 // LoadOnboardingCohortFacts loads the outcome facts of a cohort in four set
-// queries: the first time of each event name per network, the connection days,
-// the first feedback and the first subscription renewal.
+// queries: the first time of each event name per network, the connection days
+// (connect.day events), the first feedback and the first subscription renewal.
 func LoadOnboardingCohortFacts(ctx context.Context, rows []*NetworkOnboarding) map[server.Id]*onboarding.NetworkFacts {
 	facts := map[server.Id]*onboarding.NetworkFacts{}
 	if len(rows) == 0 {
@@ -335,15 +335,22 @@ func LoadOnboardingCohortFacts(ctx context.Context, rows []*NetworkOnboarding) m
 			}
 		})
 
+		// connection days come from the connect.day events the client
+		// connection path writes (one per network per UTC day). The
+		// connection table cannot be used: RemoveDisconnectedNetworkClients
+		// prunes its rows 8 h after disconnect, so it holds days of history
+		// against the 31 days the retention windows need. There is no
+		// history before the deploy of that writer.
 		result, err = conn.Query(
 			ctx,
 			`
-				SELECT DISTINCT network_client.network_id, date_trunc('day', network_client_connection.connect_time)
-				FROM network_client_connection
-				INNER JOIN network_client ON network_client.client_id = network_client_connection.client_id
-				WHERE network_client.network_id = ANY($1)
+				SELECT network_id, date_trunc('day', at)
+				FROM network_onboarding_event
+				WHERE network_id = ANY($1) AND name = $2
+				GROUP BY network_id, date_trunc('day', at)
 			`,
 			networkIds,
+			EventConnectDay,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
