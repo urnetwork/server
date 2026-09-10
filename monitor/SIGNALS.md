@@ -4756,14 +4756,17 @@ arguments converge. Verify realized rate, CPU, memory, API, and PostgreSQL for
 two complete verdict lifetimes rather than treating the calculation as rollout
 proof.
 
-Connect commit `d3b49d9` and Operator Proxy commit `35b0bc7` separately make a
+Connect commit `66aaad4` (the patch-identical rebased successor of historical
+commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a
 short-lived probe's final derived-client removal part of joined tunnel
 retirement. They prevent canceled control-plane cleanup from leaving active
 derived rows until the idle reaper, but do not repair legacy HMAC rejection or
 substitute for the concurrency correction. Require aggregate child-lifecycle
 evidence from §2.25 before attributing current fleet size or throughput to that
-adjacent leak, and require a Taskworker build containing both sibling changes
-before its post-deploy cleanup gate begins.
+adjacent leak, and require a Taskworker build containing current Connect
+`66aaad4` plus Operator Proxy `35b0bc7` before its post-deploy cleanup gate
+begins. The historical hash documents the original incident fix; it is not
+standing deployment guidance after the rebase.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
@@ -5445,10 +5448,12 @@ and 57,288 (90.7%) were active without a connection; the oldest residual was
 21,599 seconds old. The control-plane review found two joined-lifecycle gaps:
 legacy Operator Proxy tunnel close canceled the shared generator context before
 cleanup completed, and legacy Connect final client removal did not wait for the
-remove response. Connect `d3b49d9` and Operator Proxy `35b0bc7` correct new
+remove response. Current Connect `66aaad4` (the patch-identical rebased
+successor of historical `d3b49d9`) and Operator Proxy `35b0bc7` correct new
 teardown, but an immutable Taskworker artifact must prove both exact sibling
 inputs because Server's local module replacements make its outer VCS stamp
-insufficient evidence.
+insufficient evidence. Do not require the superseded Connect hash to be an
+ancestor of a post-rebase build.
 
 A later 2026-09-10 running-artifact discriminator found all eight fresh
 Taskworker slots on one generation with no fresh predecessor overlap. The exact

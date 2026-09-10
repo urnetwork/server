@@ -37,8 +37,10 @@ func TestProbeCleanupSignalSyntheticSevereLeak(t *testing.T) {
 		"mature_active_disconnected_percent=90.7",
 		"oldest_active_disconnected_age_seconds=21599",
 		"canceled the generator control plane",
-		"Connect d3b49d9",
+		"current Connect 66aaad4",
 		"Operator Proxy 35b0bc7",
+		"former Connect d3b49d9",
+		"historical evidence, not a required ancestor",
 		"outer Server VCS stamp is insufficient",
 		"not proof of a Proxy active-client hardware ceiling",
 		"Do not delete or deactivate production rows merely to clear this signal",
@@ -46,6 +48,9 @@ func TestProbeCleanupSignalSyntheticSevereLeak(t *testing.T) {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("cleanup alert missing %q:\n%s", want, alert.Markdown())
 		}
+	}
+	if strings.Contains(alert.Action, "containing Connect d3b49d9") {
+		t.Fatalf("cleanup action retained superseded deployment requirement:\n%s", alert.Markdown())
 	}
 }
 
