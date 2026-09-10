@@ -852,10 +852,14 @@ type recordingCloseWaiter struct {
 	name  string
 	order *[]string
 	err   error
+	check func() error
 }
 
 func (c *recordingCloseWaiter) CloseAndWait(context.Context) error {
 	*c.order = append(*c.order, c.name)
+	if c.check != nil {
+		return errors.Join(c.err, c.check())
+	}
 	return c.err
 }
 
@@ -869,21 +873,39 @@ func TestCloseTunnelPartsJoinsGeneratorOwnership(t *testing.T) {
 	pumpDone := make(chan struct{})
 	close(pumpDone)
 	multiClient := &recordingCloseWaiter{name: "multi-client", order: &order}
-	generator := &recordingCloseWaiter{name: "generator", order: &order}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(t.Context())
+	generator := &recordingCloseWaiter{
+		name:  "generator",
+		order: &order,
+		check: func() error {
+			if err := lifecycleCtx.Err(); err != nil {
+				return fmt.Errorf("generator lifecycle canceled before retirement: %w", err)
+			}
+			return nil
+		},
+	}
 
 	err := closeTunnelParts(
-		context.Background(),
-		func() { order = append(order, "cancel") },
+		t.Context(),
+		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return nil },
 		pumpDone,
 		multiClient,
 		generator,
+		func() { order = append(order, "client-strategy") },
+		func() {
+			order = append(order, "cancel-lifecycle")
+			cancelLifecycle()
+		},
 	)
 	if err != nil {
 		t.Fatalf("closeTunnelParts: %v", err)
 	}
-	if want := []string{"cancel", "tun", "multi-client", "generator"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
+	}
+	if lifecycleCtx.Err() == nil {
+		t.Fatal("tunnel lifecycle remained live after every owner retired")
 	}
 }
 
@@ -899,17 +921,19 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 	generator := &recordingCloseWaiter{name: "generator", order: &order}
 
 	err := closeTunnelParts(
-		context.Background(),
-		func() { order = append(order, "cancel") },
+		t.Context(),
+		func() { order = append(order, "cancel-data") },
 		func() error { order = append(order, "tun"); return errors.New("tun close failed") },
 		pumpDone,
 		multiClient,
 		generator,
+		func() { order = append(order, "client-strategy") },
+		func() { order = append(order, "cancel-lifecycle") },
 	)
 	if err == nil {
 		t.Fatal("closeTunnelParts returned nil despite close failures")
 	}
-	if want := []string{"cancel", "tun", "multi-client", "generator"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"cancel-data", "tun", "multi-client", "generator", "client-strategy", "cancel-lifecycle"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("close order = %v, want %v", order, want)
 	}
 }

@@ -127,14 +127,16 @@ func inTunnelOnlyDnsResolverSettings() *connect.DnsResolverSettings {
 // Tunnel is a live data path pinned to exactly one provider. Every connection
 // dialed through it egresses from that provider.
 type Tunnel struct {
-	cancel    context.CancelFunc
-	tun       *connect.Tun
-	mc        *connect.RemoteUserNatMultiClient
-	generator *connect.ApiMultiClientGenerator
-	pumpDone  <-chan struct{}
-	pins      map[string][]string
-	closeOnce sync.Once
-	closeErr  error
+	cancelData      context.CancelFunc
+	cancelLifecycle context.CancelFunc
+	tun             *connect.Tun
+	mc              *connect.RemoteUserNatMultiClient
+	generator       *connect.ApiMultiClientGenerator
+	clientStrategy  *connect.ClientStrategy
+	pumpDone        <-chan struct{}
+	pins            map[string][]string
+	closeOnce       sync.Once
+	closeErr        error
 }
 
 const tunnelCloseTimeout = 30 * time.Second
@@ -152,14 +154,21 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		return nil, ErrPinsRequired
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	// The packet path and the control-plane lifecycle have separate child
+	// contexts. Close must stop Tun traffic first, while keeping the API and
+	// ClientStrategy alive long enough to retire the short-lived derived
+	// network client. A single shared cancellation edge made every final
+	// remove-client request start on an already-canceled strategy.
+	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	dataCtx, cancelData := context.WithCancel(lifecycleCtx)
+	clientStrategy := newControlplaneClientStrategy(lifecycleCtx)
 
 	generator := connect.NewApiMultiClientGenerator(
-		ctx,
+		lifecycleCtx,
 		[]*connect.ProviderSpec{
 			{ClientId: &providerClientId},
 		},
-		newControlplaneClientStrategy(ctx),
+		clientStrategy,
 		// exclude self
 		[]connect.Id{cfg.ClientId},
 		cfg.ApiURL,
@@ -173,12 +182,14 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	tun, err := createTun(ctx, inTunnelOnlyDnsResolverSettings())
+	tun, err := createTun(dataCtx, inTunnelOnlyDnsResolverSettings())
 	if err != nil {
-		cancel()
+		cancelData()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), tunnelCloseTimeout)
 		defer closeCancel()
 		closeErr := generator.CloseAndWait(closeCtx)
+		clientStrategy.Close()
+		cancelLifecycle()
 		return nil, errors.Join(
 			fmt.Errorf("create tun: %w", err),
 			wrapCloseError("generator", closeErr),
@@ -186,7 +197,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 
 	mc := connect.NewRemoteUserNatMultiClient(
-		ctx,
+		dataCtx,
 		generator,
 		func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
 			_, _ = tun.Write(packet)
@@ -203,7 +214,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		for {
 			packet, err := tun.Read()
 			if err != nil {
-				reportTunReadError(ctx, err, log.Println)
+				reportTunReadError(dataCtx, err, log.Println)
 				return
 			}
 			mc.SendPacket(source, protocol.ProvideMode_Network, packet, 15*time.Second)
@@ -221,12 +232,14 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 
 	return &Tunnel{
-		cancel:    cancel,
-		tun:       tun,
-		mc:        mc,
-		generator: generator,
-		pumpDone:  pumpDone,
-		pins:      pins,
+		cancelData:      cancelData,
+		cancelLifecycle: cancelLifecycle,
+		tun:             tun,
+		mc:              mc,
+		generator:       generator,
+		clientStrategy:  clientStrategy,
+		pumpDone:        pumpDone,
+		pins:            pins,
 	}, nil
 }
 
@@ -279,7 +292,16 @@ func (t *Tunnel) Close() error {
 	t.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), tunnelCloseTimeout)
 		defer cancel()
-		t.closeErr = closeTunnelParts(ctx, t.cancel, t.tun.Close, t.pumpDone, t.mc, t.generator)
+		t.closeErr = closeTunnelParts(
+			ctx,
+			t.cancelData,
+			t.tun.Close,
+			t.pumpDone,
+			t.mc,
+			t.generator,
+			t.clientStrategy.Close,
+			t.cancelLifecycle,
+		)
 	})
 	return t.closeErr
 }
@@ -294,13 +316,18 @@ func (t *Tunnel) Close() error {
 // the remaining owners.
 func closeTunnelParts(
 	ctx context.Context,
-	cancel context.CancelFunc,
+	cancelData context.CancelFunc,
 	closeTun func() error,
 	pumpDone <-chan struct{},
 	multiClient closeAndWaiter,
 	generator closeAndWaiter,
+	closeClientStrategy func(),
+	cancelLifecycle context.CancelFunc,
 ) error {
-	cancel()
+	// Stop packet admission first. The lifecycle context deliberately remains
+	// live through generator retirement so its final authenticated
+	// remove-client request can complete.
+	cancelData()
 	errList := []error{wrapCloseError("tun", closeTun())}
 	select {
 	case <-pumpDone:
@@ -311,6 +338,8 @@ func closeTunnelParts(
 		wrapCloseError("multi-client", multiClient.CloseAndWait(ctx)),
 		wrapCloseError("generator", generator.CloseAndWait(ctx)),
 	)
+	closeClientStrategy()
+	cancelLifecycle()
 	return errors.Join(errList...)
 }
 
