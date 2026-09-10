@@ -153,6 +153,13 @@ type AuthNetworkClientArgs struct {
 	Principal string   `json:"principal,omitempty"`
 
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
+
+	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"), used
+	// only to place the onboarding campaign's sends in the user's local day.
+	// Optional; never stored on the client.
+	TimeZone string `json:"time_zone,omitempty"`
+	// Locale is the device's BCP 47 locale ("de-DE"); same use, same rules.
+	Locale string `json:"locale,omitempty"`
 }
 
 type ProxyConfig struct {

@@ -1006,6 +1006,14 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+An exact `automatic balance-code delivery failed without email recovery` line
+is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
+fulfillment retained its durable balance code, automatic redemption failed,
+and no email delivery fallback exists. The class uses a fixed redacted sample.
+Intentional no-email codes printed by `bringyourctl` do not emit this line, and
+the same database row shape cannot safely establish delivery failure; follow
+the recovery and verification boundary in §2.22.
+
 An exact `Stats push rejected (400): ... per-user series limit` line is
 `mimir-series-limit`: PAGE on the first one-minute window containing at least
 one rejection, with sustain 1. This is affirmative series-admission failure,
@@ -4832,8 +4840,9 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
 - one successful watermark per expected store no more than three hours old;
   more than six hours or no watermark is PAGE;
 - zero `skipped_store` and `error` rows per store in the last three hours;
-- every safety-net-originated `credited` or `ended` repair in the last 24
-  hours, grouped only by store/action.
+- every safety-net-originated `credited`, `ended`, or
+  `entitlement_repaired` repair in the last 24 hours, grouped only by
+  store/action.
 
 `payment-reconciliation-store-skipped` is PAGE immediately. Missing credentials
 are not a healthy local-environment convenience on Main: they disable that
@@ -4844,12 +4853,28 @@ more in three hours. Authentication, provider availability, schema validation,
 budget exhaustion, and local persistence are separate discriminators; never
 advance a watermark merely to clear the alert.
 
-`payment-reconciliation-repair` warns on every real `credited`/`ended` repair
-whose run also emitted a reconciliation heartbeat. The account is protected,
-but the repair proves the ordinary notification/verification/idempotency path
-missed authoritative provider state. Trace and fix that earlier stage. The
-query never returns run IDs, network IDs, transaction IDs, evidence, details,
-or credential values.
+`payment-reconciliation-repair` warns on every real `credited`/`ended`/
+`entitlement_repaired` repair whose run also emitted a reconciliation
+heartbeat. `entitlement_repaired` means the provider affirmatively reported an
+existing account's exact renewal as entitled, but that renewal had no matching
+Pro metadata. The repair adds only a zero-byte, zero-revenue Pro marker for the
+same window, rechecks the live network and renewal under a transaction lock,
+refreshes the Pro cache after commit, and is idempotent. It never trusts a
+local renewal by itself and never duplicates purchased data or revenue. The
+account is protected, but every generic repair proves the ordinary
+notification/verification/idempotency path missed authoritative provider
+state or its metadata. Trace and fix that earlier stage.
+
+Stripe `ended` is a distinct source boundary. At the revision described here,
+the Stripe webhook handles invoice credits, refunds, and disputes but has no
+real-time subscription-lifecycle consumer. A `store=stripe, action=ended`
+repair therefore means reconciliation first applied Stripe's terminal state to
+the local renewal and matching Pro entitlement; it does not prove delivery was
+lost from an implemented lifecycle handler, and there is no lifecycle
+idempotency ledger to inspect. Confirm the provider remains terminal and the
+local entitlement ended, then require no repeat through two complete
+reconciliation windows. The query never returns run IDs, network IDs,
+transaction IDs, evidence, details, or credential values.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
@@ -4877,9 +4902,29 @@ This probe checks business outcomes that ordinary API/process liveness cannot
 establish:
 
 - `payment-entitlement-missing` (PAGE): an in-window supporter renewal exists
-  for Apple, Google, Stripe, or Solana, but the same network has no in-window
-  `transfer_balance.pro=true`. This is the exact “paying but shown as free”
-  invariant. The check uses entitlement time, not remaining bytes.
+  for Apple, Google, Stripe, or Solana on an existing network, but the same
+  network has no in-window `transfer_balance.pro=true`. This is the exact
+  “paying but shown as free” invariant. The check uses entitlement time, not
+  remaining bytes. Reconciliation may repair it only after that provider
+  independently confirms the renewal remains entitled.
+- `payment-renewal-orphan` (WARN): an in-window Apple, Google, or Stripe
+  supporter renewal belongs to a deleted network. The count is distinct
+  deleted owners, not physical renewal rows; sequential windows for one owner
+  remain one lifecycle boundary. It is deliberately excluded from
+  paying-account and Pro-repair counts: recreating a deleted account from
+  financial history would be unsafe. Local history alone does not prove
+  current billing, so use authorized provider tooling to establish the
+  provider-side disposition and repair the account-deletion lifecycle while
+  retaining financial audit history. Solana is excluded from this class: its
+  supporter purchase is a prepaid, fixed-window on-chain entitlement, not a
+  cancellable recurring provider subscription, and its inert row after account
+  deletion is retained payment history rather than evidence of missed
+  provider cancellation. For a revision carrying the deletion/credit fence,
+  verify every paid writer locks an existing network before consuming its
+  idempotency ledger or payment intent. Stripe deletion additionally requires
+  provider-confirmed cancellation before local deletion and propagates every
+  provider/local-close failure. Apple and Google deletion disposition remains
+  separate product policy; the Stripe workflow does not settle it.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -4889,19 +4934,195 @@ establish:
 - `payment-identity-fallback` (WARN): a Stripe credit used the legacy customer
   email fallback because immutable network metadata was missing. The credit is
   retained, but the checkout producer must be corrected.
+- `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
+  fulfillment durably created a balance code, automatic redemption failed,
+  and no email recovery channel exists. Preserve the code and provider ledger;
+  retry idempotently to a verified destination or record an authorized support
+  or refund disposition. Do not infer this failure from balance-code rows.
 
-All rows are aggregated to kind, store/reason, count, and oldest/newest age.
-No account, email, network, payment reference, signature, provider object,
-stored details, or credential may enter an alert. A payment received but not
-fulfilled can require an **authorized financial/operations decision** (for
-example a verified refund when an underpayment cannot be credited); software
-must preserve the evidence and idempotency boundary but cannot choose or
-authorize that disposition.
+Findings are aggregated to kind, store/reason, count, and oldest/newest age;
+the orphan-renewal count is distinct deleted owners and its ages are renewal
+start ages, not inferred deletion times. No account, email, network, payment
+reference, signature, provider object, stored details, or credential may enter
+an alert. A payment received but not fulfilled can require an **authorized
+financial/operations decision** (for example a verified refund when an
+underpayment cannot be credited); software must preserve the evidence and
+idempotency boundary but cannot choose or authorize that disposition.
+
+The 2026-09-08 Main split of the original entitlement alert found zero affected
+existing networks. Its missing-Pro denominator contained four deleted Stripe
+owners and one deleted Solana owner. Treating them as paying accounts was a
+probe defect and would have made an automatic Pro backfill unsafe. A later
+orphan-only census found five distinct deleted Stripe owners across six active
+renewal rows: one additional owner still had an in-window Pro row and was
+therefore correctly absent from the original missing-Pro denominator. No
+matching owner had entered through a deletion in the preceding 24 hours, so
+the four-to-five change was a denominator change, not evidence of a new
+deletion. The single Solana row represented prepaid fixed-window history and
+was not a provider-cancellation failure; it is no longer emitted as
+`payment-renewal-orphan`. The controller's candidate query independently keeps
+all deleted owners outside provider calls and metadata repair.
+
+The deletion-path audit found an architecture-preserving correctness defect.
+`NetworkRemove` deleted the network before asking Stripe to cancel, while
+`UnsubscribeStripe` logged and swallowed provider and local-close failures; the
+direct CLI bypassed cancellation entirely. Paid writers could also consume a
+Stripe ledger, Apple ledger, Google renewal, Solana intent, x402 grant, or paid
+Stripe/Coinbase balance code after the owner had already been deleted. The
+correction preauthorizes the request, cancels each locally discovered active
+Stripe subscription before deletion, requires the returned object to name the
+requested subscription with `status=canceled`, closes only that confirmed
+local renewal, and stops on every failure. A canceled status returned by the
+invoice lookup makes a retry idempotent; a bare DELETE 404 does not.
+
+The database boundary is a network-row `FOR UPDATE` deletion lock paired with
+`FOR KEY SHARE` in the corrected payment-ingestion writers, taken before
+consuming a Stripe or Apple ledger, Google renewal, Solana intent, x402 grant,
+or balance code and before writing an entitlement or data balance. Both sides
+use Read Committed. A writer waiting behind a committed delete observes no
+network and fails without consuming payment evidence. A delete waiting behind
+a Stripe credit sees its newly committed active renewal and refuses deletion,
+including a future/queued renewal whose start has not arrived. This Stripe
+guard also makes the direct CLI fail closed. If an Apple, Google, Solana, or
+x402 credit wins first, its post-credit deletion disposition remains the
+owning product policy rather than being silently treated as Stripe
+cancellation.
+
+Automatic balance-code fulfillment now exposes both recovery outcomes. With a
+purchase email, a failed optional auto-application still sends the durable
+code. Without an email, the handler returns the exact §1.5 error and leaves the
+code unredeemed for idempotent retry or authorized disposition. A durable
+database signal would require an explicit delivery-mode or failure marker;
+querying for paid, no-email, unredeemed rows would also page on intentional
+`bringyourctl` codes and is therefore prohibited.
+
+Stripe cancellation discovery no longer treats active local renewals as the
+complete provider inventory. Before any cancellation, it unions and deduplicates
+subscriptions resolved from every active local invoice, every page of the
+network's Stripe-customer subscription list, and every page of an exact
+`network_id` metadata search. Empty continuing pages, pagination cycles,
+malformed or mismatched objects, provider errors, and missing continuation
+tokens all fail closed before the first mutation. Every nonterminal provider
+object must then return the exact requested ID with `status=canceled`; only
+provider-confirmed objects can close their mapped local renewals. Synthetic
+tests cover pagination, deduplication, metadata-only discovery, terminal
+objects, exact cancellation, and account retention on incomplete discovery.
+
+Stripe Search is eventually consistent, so this inventory pass is not a hard
+fence against a Checkout subscription being created concurrently with account
+deletion. The database row lock prevents a later webhook from crediting a
+deleted network or consuming its ledger, but eliminating the provider-side
+race would require an explicit create/delete lifecycle protocol rather than an
+incident-only monitor change. Keep that architectural decision separate; do
+not overstate the bounded discovery fix or infer provenance for historical
+orphan rows from their aggregate shape.
 
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
 numeric validation, privacy boundaries, severity, and Markdown rendering.
+
+### 2.23 Provider egress probe outcome distribution
+Probe: `egress-outcomes`
+
+The provider-egress attempt table cannot be diagnosed as a raw time cohort.
+Failed providers retry after six hours, successful locations are not normally
+due again until 84 hours, attempt rows are retained only about 24 hours, and a
+successful location remains trusted for seven days. Filtering attempts to the
+last six hours therefore preferentially retains failures and can manufacture a
+fleet-wide incident in healthy steady state. This probe instead reconstructs
+one state for every **currently eligible** provider using the same population
+contract as §2.19:
+
+- the client is active and top-level;
+- its location-reliability row is connected and valid; and
+- it holds a Public provide key (`provide_mode=3`), tested with `EXISTS` so
+  multiple keys cannot duplicate the denominator.
+
+The query joins each eligible provider to its single location and attempt rows,
+then emits only one fixed aggregate. A nonempty attempt inside the six-hour
+retry window is a current failure when there is no trusted location or its
+server-written update time is later than the location update. A trusted
+location is success only when no retained attempt exists or the retained
+attempt itself reports success. A retained nonempty failure older than six
+hours is `unobserved`, not permission to resurrect an older success. A current
+success attempt without a trusted location is `inconsistent`.
+
+Location `update_time` is deliberately one-way evidence. Client-verdict quorum
+handling can reprioritize a location by backdating `observed_at` and writing a
+new `update_time` without running a successful probe. A location update newer
+than a nonempty attempt is therefore ambiguous and becomes `unobserved`; it
+must never be treated as recovery. `observed_at` is used only for the seven-day
+trust bound. Exact success/failure ordering would require a distinct immutable
+successful-ingest timestamp; do not infer it from this overloaded column.
+
+The only exported outcome vocabulary is success, `tunnel_failed`, legacy
+`contract_failed`, `no_consensus`, `locate_failed`, `not_confident`,
+`submit_failed`, `unknown_failure`, `inconsistent`, and `unobserved`. Raw
+failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
+the total failure share but can never become the dominant common class because
+several distinct raw values may have collapsed into that one redacted bucket.
+No client ID, raw class, location, endpoint, credential, task ID, or payload
+leaves PostgreSQL.
+
+Taskworker metrics mirror the same classifier but are process-local snapshots.
+Each completed refresh publishes a snapshot timestamp, including idle passes;
+the Grafana fleet panels select exactly one most-recent Taskworker instance and
+go no-data when no snapshot completed in 15 minutes. They must never sum
+whole-fleet gauges across Taskworkers or render absent telemetry as zero. The
+direct PostgreSQL signal in this section remains authoritative for alerts.
+
+Thresholds use the complete eligible population as the denominator and require
+at least 20 actually observed success/failure outcomes. Unobserved and
+inconsistent providers remain in the denominator but cannot satisfy that
+evidence floor:
+
+- `egress-common-mode` (PAGE): one known current failure class covers at least
+  90% of all eligible providers. Inspect the shared prober path before
+  individual providers. For `no_consensus`, `tunnel_failed`, or
+  `contract_failed`, inspect the persisted `prober_identity` singleton's client
+  credential/mint readiness, the `ProberBootstrap` task, and the prober
+  network's transfer balance first; then verify Taskworker platform/API
+  reachability and egress confinement. Never print the stored token or
+  reintroduce the retired environment-token design.
+- `egress-mixed-failure` (WARN after two samples): total current failures cover
+  at least 90% of eligible providers, but no one known class does. This proves
+  broad degradation, not a credential cause. Split task, API, tunnel,
+  geolocation-source, and submission evidence before acting.
+- `egress-outcome-inconsistent` (WARN after two samples): a current attempt
+  says success but no trusted location exists. Trace submission/report ordering,
+  monotonic upserts, retention, and direct mutations; never create a location
+  or delete an attempt to clear the alert.
+- `egress-outcome-unknown` (WARN after two samples): the producer and reader
+  failure vocabularies differ or an invalid class was stored. Compare exact
+  artifacts and add a reviewed bounded class when intentional; the raw value
+  remains private.
+
+Low current-attempt volume and an unobserved population are not independent
+faults: successful providers legitimately probe less often. Use §2.19 for
+durable shard geometry, due work, and advancement. Likewise, alert absence is
+not sufficient recovery: failed rows legitimately remain deferred for six
+hours, while simply aging past that backoff can turn them into `unobserved`.
+The next applicable due cycle is six hours for an absent or stale location, but
+can be as late as the 12-hour health due age when a failed full-probe pass
+refreshed health without replacing a still-fresh location. After repairing the
+proved shared boundary, require §2.19 to keep advancing through that applicable
+due cycle plus configured shard `max_time`, `idle_delay`, and one monitor
+cadence, and require replacement success/current evidence. Keep the
+reconstructed distribution healthy for two later cadences and never delete or
+rewrite attempts to manufacture recovery.
+
+This is a **software/operational common-path and data-integrity** signal. It is
+not resolved by adding Proxy hardware. Hardware raises the independent active
+client ceiling but cannot repair a prober credential, balance, API path,
+classifier, or persistence invariant.
+
+Implementation convention: SIGNALS.md §2.23 (`egress-outcomes`) maps to
+`signal_egress_outcomes.go` and `signal_egress_outcomes_test.go`. Synthetic
+tests cover the exact 90%/20-observation boundaries, survivor-bias controls,
+mixed failures without credential attribution, unknown-class non-dominance,
+reprioritization after a current failure, stale-failure ambiguity, inconsistent
+success, strict aggregate rejection, query privacy, and detailed Markdown.
 
 ---
 
@@ -5594,6 +5815,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
+| `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly; that dispatch does not normally produce `window_stall failed=1`, which remains accepted only as a compatibility shape. The terminal event warns on its first line. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for the normally absent `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer terminal impact, restart Taskworker, or deploy a transport change from `failed=0`; do not infer a root cause from `window_failed` or compatible `failed=1` alone. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
+| `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
@@ -7069,6 +7292,36 @@ through the next balance-expiry/close boundary. Do not manually replay an
 `INCRBY`: a pipeline error can follow partial application and blind replay can
 double-reserve.
 
+A current-artifact recurrence at `04:07:03Z` on 2026-09-09 proves that the
+fast unsettled-partial path narrows, but does not close, the cross-store race.
+A bounded reservation cohort on one still-current balance was created while
+the preceding 20.9-second reconciliation was live, after its PostgreSQL page
+snapshot had become fixed. The cohort's durable releases exceeded the absolute
+negative settlement diagnostics by exactly the positive Redis mirror remainder
+observed at close; all but one settlement result matched its release exactly,
+and every line reported `clamped_to=0`. The balance remained unexpired beyond
+the incident, no mirror-write error was present in the bounded precursor
+window, and the adjacent reconciliations were ordinary passes. This rules out
+rounding, the ended-balance blind spot, the legacy fleet writer, and a missing
+clamp. The page-local correction read Redis after those reservations' posts but
+corrected toward the older PostgreSQL snapshot; settlement exposed the
+resulting short mirror.
+
+A Redis value CAS or simple operation reordering is not a correctness fix.
+For settlement, reconciliation can observe old Redis value `O`, a PostgreSQL
+outcome can commit, the fixed snapshot can omit release `d`, and CAS can then
+change `O` to `O-d`; the delayed mirror release applies another `-d`. Creation
+has the symmetric double-increment interleaving. Value equality cannot tell a
+committed-but-not-yet-mirrored mutation from the state represented by the
+snapshot. Closing this gap requires a durable per-balance mutation sequence,
+outbox, or equivalent fence that spans PostgreSQL commit, Redis posting, and
+reconciliation. That changes the cross-store protocol and needs an explicit
+design/schema decision; do not ship a partial CAS as a monitor repair. The
+atomic clamp contains each negative result, but this boundary remains open
+until that durable protocol is deployed and a subsequent scheduled reconcile
+plus full natural close/expiry interval remain free of all three emitters'
+negative lines after ingestion delay.
+
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
 `{escrow_<id>}net`, with roughly 36,306 days remaining. PostgreSQL showed this
@@ -7191,7 +7444,7 @@ Tier-1 (warn):
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
-| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, wall-clock-moving left edge is temporary store visibility, repeated fixed post-boundary gap is loss |
+| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, a strictly advancing left edge on the same fixed-right-edge gap is temporary store visibility even when discovery is batched, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
@@ -7208,7 +7461,7 @@ Tier-1 (warn):
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
-| migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
+| migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every source-known durable identity and published schema artifact | page when any identity differs or any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
@@ -7707,11 +7960,16 @@ collectors, subscription/payment providers (Apple, Google Play, Stripe,
 Solana/Helius, Coinbase, Circle), client-address privacy hashing, WireGuard
 handoff, hosted Proxy, object storage, account/product email, provider-egress
 ingestion, public-stats integrity, WalletConnect, IP geolocation, and any active
-MCP provider. Subnet signing/artifact/deposit and route-verification credentials
-become required only when the subnet is enabled. Keep this inventory
-synchronized whenever a new runtime credential is introduced; a code path that
-calls `RequireSimpleResource` without either an inventory requirement or an
-explicit feature gate is incomplete.
+MCP provider. When API is active, the inventory separately requires Apple and
+Google sign-in audience IDs and the Google browser authorization-code client's
+ID and secret. These are not interchangeable with the Play payment OAuth
+client: a missing `sign_in_oauth` section makes the Windows/Linux browser
+callback return `not_configured` even while native Android sign-in and Play
+reconciliation work. Subnet signing/artifact/deposit and route-verification
+credentials become required only when the subnet is enabled. Keep this
+inventory synchronized whenever a new runtime credential is introduced; a
+code path that calls `RequireSimpleResource` without either an inventory
+requirement or an explicit feature gate is incomplete.
 
 The 2026-09-08 secret-free Main snapshot found two incomplete enabled
 integrations: `apple.yml` lacked `app_store_server_api_key_id`, `issuer_id`, and
@@ -7723,6 +7981,24 @@ credential page. An explicitly empty Redis password is likewise a supported
 private-network configuration and is not mislabeled as a missing secret;
 network exposure and authentication policy belong to their own security
 signal.
+
+The same audit found `google.yml` had no `sign_in_oauth.client_id` or
+`sign_in_oauth.client_secret`. That is an independent enabled-API setup failure,
+not a Google Play payment failure. The inventory now keeps `google-sign-in` and
+`google-payment` as separate identities and also requires each provider's
+top-level `client_id` audience allowlist while API is active. Closure requires a
+Vault rollout, a fresh API process, and a state/nonce/audience-checked browser
+round trip; `/hello` and a successful native mobile login are not controls for
+the browser code-exchange path.
+
+Coinbase readiness follows the fields current Server code actually consumes.
+The exchange-rate client reads `api.host` for its unauthenticated public request,
+and webhook verification reads `webhook.shared_secret`. The retained
+`api.account_id`, `api.key_name`, and `api.private_key` fields have no non-test
+Server consumer and are not credential prerequisites; their absence must not
+page, and their presence cannot substitute for a missing host or webhook
+secret. Reintroducing an authenticated Coinbase API call requires adding its
+exact fields to this inventory with the owning runtime change.
 
 Apple and Google crash-report credentials remain optional by the §20 contract.
 An absent optional resource is a graceful no-op. A resource that is present but
@@ -7949,6 +8225,60 @@ This is the version-to-artifact contract checked by the probe:
 | 632 | `transfer_contract_unresolved_source_pair_create_time` |
 | 633 | `transfer_contract_unresolved_destination_pair_create_time` |
 | 634 | `transfer_contract_unresolved_payer_transfer_byte_count` |
+| 635 | bounded `transfer_contract.open` statistics and autovacuum-analyze settings |
+| 636 | `network_onboarding_offer` |
+| 637 | `network_onboarding_apple_offer_code` |
+| 638 | `network_onboarding_apple_offer_code_available` |
+| 639 | `network_onboarding_event` |
+| 640 | `network_onboarding_event_network_id_at` |
+| 641 | `network_onboarding_event_name_at` |
+| 642 | nullable `subscription_renewal.price_tier` |
+| 643 | nullable `stripe_customer.billing_country` |
+| 644 | `network_onboarding` |
+| 645 | partial `network_onboarding_next_send_at` |
+| 646 | `network_onboarding_email` |
+| 647 | `network_onboarding_email_network_id_sent_at` |
+| 648 | `onboarding_results_daily` |
+| 649 | `network_onboarding_experiment_state` |
+| 650 | `network_onboarding_created_at` |
+| 651 | signed client-key history/head tables, constraints, functions, and enabled triggers |
+| 652 | repeatable competition staging constraint/index lifecycle and removal of the old finalization block |
+| 653 | nullable `competition_round.admission_closed_at`, its check, and the updated immutable guard |
+| 654 | required `network_points_leaderboard_snapshot.epoch_metrics_available` |
+
+On 2026-09-09, Main had durably reached version 650 through the onboarding
+schema while independently developed client-key and competition-staging
+branches were combined ahead of those already-published entries. Local source
+then assigned signed client-key history to version 636. `db audit --fix` also
+rebuilt its expected database to the local head instead of Main's recorded
+version, misclassified the four genuinely pending migrations as drift, and
+attempted to create the alphabetically earlier head table with a foreign key to
+the still-absent history table. PostgreSQL rejected that first transaction, so
+the failed attempt left no partial table.
+
+The root correction preserves the exact published onboarding sequence at
+versions 636–650 and appends client-key history, repeatable staging, admission
+closure, and points availability at versions 651–654. Schema audit now verifies
+the durable identity at every source-known migration index and reconstructs
+only the recorded database version; pending functions, triggers, and data work
+remain exclusively owned by `bringyourctl db migrate`. Its repair planner also
+creates every missing table, column, candidate key, and supporting index before
+installing any foreign key, including cyclic missing-table graphs. A synthetic
+version-650 database must contain the final onboarding index, lack every
+post-650 artifact, and migrate normally through all four appends with all three
+client-key triggers present. Never use schema reconciliation to emulate pending
+migrations or edit `migration_audit` to make reordered source appear current.
+
+The first live exact-identity probe exposed a separate detector-only failure:
+it selected `migration_index::text` and ordered by the unqualified
+`migration_index` output alias. PostgreSQL therefore returned lexical order
+(`0,1,10,...`) and the positional reducer falsely reported identity index 2,
+even though the standalone audit validated the same cluster and catalog. The
+query now selects and orders the numeric source column explicitly, and the
+reducer indexes rows by their parsed migration number, rejecting malformed,
+duplicate, missing, or out-of-range entries without treating delivery order as
+schema evidence. A deterministic lexical-order fixture preserves the exact
+false-page reproduction.
 
 Versions 632–634 are the §2.3 structural plan repair. All three versions must be
 valid and ready, with the opaque equivalent-open `CASE` predicates and their
@@ -7971,10 +8301,12 @@ it must not be silently reassigned to the lowest client id. The migration adds
 no default and does not scan or rewrite the existing sweep history; its shape
 constraint enforces new writes without requiring a full-table validation.
 
-Page immediately as `migration-schema-drift` when the successful audit head is
-at or above an artifact's version but that artifact is absent. Warn as
-`migration-behind` while the audit head is below `server.MigrationCount()` for
-this source tree; never duplicate that count as a monitor constant. The
+Page immediately as `migration-schema-drift` when any source-known durable
+migration identity differs or the successful audit head is at or above an
+artifact's version but that artifact is absent. Count and contiguous range are
+not identity proof. Warn as `migration-behind` while the audit head is below
+`server.MigrationCount()` for this source tree; never duplicate that count as a
+monitor constant. The
 deployment gate is strict: run migrations from the exact service commit,
 require the current head and all version-gated artifact checks, and only then
 activate dependent APIs or taskworkers. Never edit `migration_audit` or create
@@ -9840,14 +10172,18 @@ Leading and trailing absence is ignored because it can describe a new
 environment or normal ingestion delay; one or two isolated missing evaluations
 are tolerated. Three or more missing evaluations inside two present samples
 first emit `mimir-continuity-gap-unclassified`, preserving all gap ranges and
-the serving gateway. On later watcher observations, a fixed right edge whose
-left edge advances approximately with wall clock becomes
-`mimir-query-store-visibility-gap`: old timestamps became readable without
-producer backfill, the deterministic recent-store cutoff signature. A gap that
-stays fixed on consecutive observations after its right edge is older than the
-current Mimir 3.1.1 `query_store_after=12h` default plus two evaluation steps
-becomes `mimir-ingestion-gap`. Healthy findings cover all three stable classes,
-so reclassification or complete recovery resolves the previous identity.
+the serving gateway. On a later observation of the same fixed-right-edge gap,
+any strictly advancing left edge becomes `mimir-query-store-visibility-gap`:
+old timestamps became readable without producer backfill. Query/store
+discovery may expose several five-minute evaluations in one batch, so an
+individual step need not match elapsed wall clock. Approximately wall-clock
+movement across the series remains the stronger recent-store cutoff signature.
+A left-edge regression or a changed right edge starts new unclassified history.
+A gap that stays fixed on consecutive observations after its right edge is
+older than the current Mimir 3.1.1 `query_store_after=12h` default plus two
+evaluation steps becomes `mimir-ingestion-gap`. Healthy findings cover all
+three stable classes, so reclassification or complete recovery resolves the
+previous identity.
 
 On 2026-09-03, the newest global gap was `12:35Z` through `20:00Z`. Across
 repeated absolute-window reads its left edge advanced from `08:35Z` to
@@ -12567,6 +12903,94 @@ then loses WireGuard and SOCKS returns with the hosted device still connected
 and its exit window ready. Isolated green results therefore do not disprove
 the stale-artifact diagnosis; require the simultaneous three-protocol soak.
 
+**Window-teardown false platform attribution:** a post-promotion observation
+beginning near `04:17Z` on 2026-09-09 reached 20--34 taskworker
+`window-stall` lines/minute. Every structured sample was
+`window=quality reason=platform-unreachable failed=0`; all 220 enumeration
+errors in the same bounded thirty-minute source slice ended exactly in
+`generator call canceled`, with zero true generator abandonments or other
+suffixes and no `failed=1` class. On the legacy ordering, this population is
+consistent with local lifecycle churn, not sufficient evidence that the
+platform was unreachable. The exact suffix alone cannot prove outer-window
+cancellation because an inner generator can return the identical text while
+the outer context is live. The published Server module tag corresponding to
+the displayed release label requires Connect module
+`v2026.9.8-1040985530`; its exact tagged source records the enumeration failure
+and publishes the stall before checking the owning window context, and the
+sibling client-args branch
+has the same ordering. That is staged-source evidence, not runtime dependency
+provenance: the sampled Taskworker exposes no Connect revision or image digest,
+and its proved Server source uses an unpinned local Connect replacement. Do not
+assign the running binary a Connect SHA without extracted executable metadata
+or the recorded build-input tree required by §8.12.
+
+The dedicated `window-generator-canceled` class removes only the two exact
+terminal shapes from generic novelty at 20/min and leaves abandonment and
+every other suffix visible. It is artifact-bounded: current Connect checks the
+authoritative window context immediately after each generator error and
+returns before logging, recording a failure, publishing a stall reason, or
+entering backoff when that context is done. It deliberately does not suppress
+an identically worded inner error while the outer context is live, so a
+recurrence on a proved fixed artifact instead establishes that this live inner
+error reached the guard and requires diagnosis there. Deterministic barrier
+tests force cancellation inside both the enumeration and client-args calls,
+then release the abandoned call; separate live-context errors remain recorded
+as `platform-unreachable`. Rebuild and deploy the emitting Taskworker from a
+Connect revision containing this ordering fix after proving the current
+artifact lacks it. Verification is zero new `generator call canceled` failure
+lines and cancellation-derived `window_stall` transitions for ten minutes
+through comparable window teardown, while a synthetic or observed genuine
+generator error remains visible and provider windows still reach their
+configured minimum. Do not group this with the monitor host's contemporaneous
+IPv6 default-router loss: that observer-local event began later and cannot
+generate application logs inside Taskworker.
+
+**Terminal-window compatibility and evaluation-epoch attribution:** the
+post-promotion watcher observed two authoritative
+`event=window_failed window=quality reason=providers-unresponsive` lines from
+one Taskworker at `2026-09-09T08:12:51Z`, with exact `after` values of 45,039
+and 45,076 milliseconds. Current Connect
+`failOutcome` logs that event after the second zero-provider deadline, then
+calls `SetStallStatus(reason, true)` directly. It therefore does not normally
+pass through the separate transition logger that emits `event=window_stall
+... failed=1`. The standing tailer previously recognized only that normally
+absent compatibility shape and left the real terminal event unclassified.
+`window-stall-terminal` now accepts both exact structured forms at 1/min
+without changing ticket identity; malformed durations, reasons, or field order
+remain in the generic novelty safety net rather than being silently treated as
+terminal.
+
+The bounded same-emitter cohort distinguishes the terminal fact from its
+reason: it had zero exits, proven providers, or flows, repeated candidate
+transport-down/restored churn, and no later `window_recovered`. Its fixed
+ProviderEgressProbe workload attempted all eight due measurements, submitted
+none, and failed all eight; its aggregate was `blackhole_due=250`,
+`checked=250`, and `dark=196`, while `tunnel_failed` remained zero. The four
+preceding evaluation-ping errors all returned `context canceled` and
+co-occurred with four rebuilds and four nonterminal
+`providers-unresponsive` transitions, with no `Send sequence closed` control.
+`rebuildWindow` cancels the current
+`evalEpochCtx`, and each candidate channel is parented on that context, but the
+ping-result callback previously checked only the window-parented `pingDone`
+before logging and recording a provider failure. Thus a locally canceled old
+epoch could contaminate the dominant reason as `providers-unresponsive`.
+Current Connect suppresses a ping error only when the owning evaluation
+context is already done and the returned error matches that exact context
+outcome; the immediate-send and timeout branches apply the same ownership
+boundary. An identically worded error while the evaluation context is live,
+or a nonmatching error after cancellation, remains provider evidence.
+
+This correction does not acquit the terminal outcome. The window still reached
+its second deadline with zero providers, and the failed fixed measurement
+workload is not evidence of a fleet or customer outage. Prove the emitting
+Taskworker's embedded Connect ancestry under §8.12 before deploying the
+evaluation-epoch guard. After rollout, require zero rebuild-owned ping-error
+diagnostics and zero canceled-ping contributions to the stall reason for ten
+minutes through comparable rebuilds. Any later `window_failed` remains
+actionable: correlate its independently derived reason with provider progress
+and the fixed measurement workload, and require a real provider addition or
+`window_recovered` before declaring recovery.
+
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
 RPC/API access, H1 correctly pinned, and fill retries still running. The
@@ -14542,6 +14966,14 @@ samples with two peers and `isSyncing=true`, while the head advanced from
 701,762 to 733,678. Never turn a zero-peer `isSyncing=false` sample into a ready
 signal.
 
+The `subtensor-progress` finding therefore carries a three-cadence warning
+threshold and a five-cadence page threshold. The scheduler promotes the copied
+alert at the fifth consecutive failure without changing its
+`(signal_id,class,target,frame)` identity; one healthy cadence resets both
+thresholds. Implementation: SIGNALS.md §17.2 (`subtensor`) maps to
+`signal_subtensor.go` and `signal_subtensor_test.go`, with the generic stable-
+identity escalation contract pinned in `run_test.go`.
+
 On 2026-09-08, the lightnode again held zero peers for more than three monitor
 samples and reported `isSyncing=false` with its target equal to its own stale
 head. Its small continuing head movement during that interval was queued import
@@ -14921,7 +15353,11 @@ environment, host, and chain, preserve host/chain in aggregation, and show
 - HEALTHY BOOTSTRAP: a node outside its readiness band has positive net
   catch-up and `lag / net_rate <= 14 days`.
 - `subtensor-slow-convergence`: positive net catch-up implies an ETA above 14
-  days for three consecutive one-minute cadences.
+  days for three consecutive one-minute cadences. This is explicitly a
+  trailing-one-hour statement, not proof that the head is advancing now. If
+  `subtensor-progress` is also active for the same host/node, its bounded
+  static-head observation is the stronger current-state evidence; preserve the
+  generation and follow that stall boundary first.
 - `subtensor-nonconverging`: the target head grows at least as fast as the
   local best head, also sustained for three cadences. A rising best height is
   not recovery when lag is flat or growing.
@@ -15057,6 +15493,19 @@ Server/API/Taskworker deployment cannot invent that history; do not enable an
 unready deployment or insert synthetic `st_epoch` rows to silence the signal.
 This can require operator, finance, network, or additional node hardware work
 that software alone cannot provide.
+
+The implemented software contract persists the snapshot-level
+`epoch_metrics_available` bit from the actual finalized-window input, returns
+it from both rebuild and read APIs, and rejects Blocks/Streak paging while it
+is false. The shared SDK preserves total points, renders every epoch-derived
+value and rank as unavailable, rejects those two sort changes, and re-emits
+authoritative state so optimistic native adapters return to Points. Android,
+Apple, Windows, and `mmm/ur.io` consume those preformatted SDK fields; Linux
+does not currently expose this points board. Synthetic Server tests distinguish
+missing history from a legitimate zero on an available epoch, and the shared
+SDK test covers unavailable presentation, sort rejection, and later recovery.
+Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
+`signal_points_readiness.go` and `signal_points_readiness_test.go`.
 
 On 2026-09-08 the public API and direct database snapshot agreed: the latest
 snapshot contained 25,708 ranked networks with populated positive total points,
@@ -15324,6 +15773,25 @@ window. A later bounded enabled-host cross-control found a valid source route
 for all eight pairs but completed API and manager TLS on only two, so local
 observer recovery and host self-probes still cannot replace an independent
 externally routed closure check.
+
+The late-2026-09-08 local recurrence supplied a longer same-host control. The
+monitor recorded five `en0` default-router lifetime expirations at 23:18:34,
+23:18:58, 23:19:28, 23:25:28, and 23:31:06; every expiry was followed within
+milliseconds by an IPv6-absent network state. The third and fourth losses
+remained active for about five minutes, so the 23:20 and 23:30 edge/TLS
+cadences each found all eight configured targets failing locally with
+no-route while target identity, host-local HTTPS, and exact source-route
+controls remained available. Eight independent standing service tails also
+reconnected through the first route-loss wave while all tail processes
+survived. A new Wi-Fi association began only at 23:31:20, after the fifth
+expiry, and IPv6 returned by 23:31:24; that link change is a recovery boundary,
+not the cause of any preceding expiration. The bounded log still contains
+no distinct `ignoring RA (lifetime zero)` diagnostic. A later read found the
+default router present with a refreshed multi-hour lifetime and no further
+expiry through 00:15, which proves current recovery but not closure of the RA
+source/delivery defect. Keep the type-134 capture prerequisite: without it,
+source withdrawal and missed/late refresh delivery remain unresolved and no
+router or local-network configuration change is justified.
 
 Restore the observer's IPv6/default-router path without changing an edge, then
 require an unrelated IPv6 prefix and every exact edge from a genuinely routed

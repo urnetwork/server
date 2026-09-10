@@ -284,7 +284,7 @@ func StripeWebhook(
 			return nil, fmt.Errorf("failed to parse invoice: %v", err)
 		}
 
-		return stripeHandleInvoicePaid(
+		return stripeHandleInvoicePaidWithOnboarding(
 			&invoiceObject,
 			clientSession,
 		)
@@ -330,6 +330,41 @@ func StripeWebhook(
 		}
 
 		return stripeHandleDisputeCreated(&disputeObject, clientSession)
+
+	} else if stripeWebhook.Type == "setup_intent.succeeded" && stripeWebhook.Data != nil {
+
+		/**
+		 * the payment sheet's card is attached: finalize the regional price
+		 * tier from the card's billing country before the trial ends and
+		 * credit the held trial invoice (onboarding_stripe_controller.go)
+		 */
+
+		glog.Infof("type: setup_intent.succeeded")
+
+		return stripeHandleSetupIntentSucceeded(stripeWebhook.Data.Object, clientSession)
+
+	} else if stripeWebhook.Type == "payment_method.attached" && stripeWebhook.Data != nil {
+
+		glog.Infof("type: payment_method.attached")
+
+		return stripeHandlePaymentMethodAttached(stripeWebhook.Data.Object, clientSession)
+
+	} else if stripeWebhook.Type == "customer.updated" && stripeWebhook.Data != nil {
+
+		glog.Infof("type: customer.updated")
+
+		return stripeHandleCustomerUpdated(stripeWebhook.Data.Object, clientSession)
+
+	} else if stripeWebhook.Type == "customer.subscription.deleted" && stripeWebhook.Data != nil {
+
+		/**
+		 * the onboarding trial outcome: a subscription deleted within its
+		 * trial is trial.cancelled (onboarding_stripe_controller.go)
+		 */
+
+		glog.Infof("type: customer.subscription.deleted")
+
+		return stripeHandleSubscriptionDeleted(stripeWebhook.Data.Object, clientSession)
 
 	}
 	// else IGNORE the event and answer 200. This is load-bearing: the endpoint
@@ -767,6 +802,12 @@ func stripeCreditInvoicePaid(
 ) (credited bool, returnErr error) {
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		credited = false
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+			returnErr = err
+			return
+		}
 
 		ledgerTag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -819,7 +860,7 @@ func stripeCreditInvoicePaid(
 		)
 
 		credited = true
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return false, returnErr
@@ -1141,6 +1182,10 @@ func stripeHandleRefund(
 			"[sub]%s %s (charge %s): action=%s ended=%d\n",
 			eventType, refundId, chargeId, eventAction, len(endedNetworkIds),
 		)
+		if ledgerNetworkId != nil {
+			// the onboarding refund outcome (cents to dollars)
+			RecordRefund(ctx, *ledgerNetworkId, model.OnboardingStoreStripe, float64(amount)/100)
+		}
 	}
 	return nil
 }
@@ -1370,26 +1415,24 @@ func StripeCreateCustomerPortal(
 }
 
 func UnsubscribeStripe(session *session.ClientSession) error {
-
-	var subscriptionRenewals []struct {
-		TransactionId string
-		EndTime       time.Time
-	}
+	invoiceIds := []string{}
 	var queryErr error
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
+		invoiceIds = nil
+		queryErr = nil
 
 		// query if network has active stripe subscriptions
 		result, err := tx.Query(
 			session.Ctx,
 			`
-			SELECT transaction_id, end_time
+			SELECT DISTINCT transaction_id
 			FROM subscription_renewal
 			WHERE
 				network_id = $1
 				AND market = $2
 				AND end_time > $3
-			ORDER BY end_time DESC
+			ORDER BY transaction_id
 			`,
 			session.ByJwt.NetworkId,
 			model.SubscriptionMarketStripe,
@@ -1404,131 +1447,67 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-
-				var txId string
-				var endTime time.Time
-
-				err := result.Scan(&txId, &endTime)
+				var invoiceId string
+				err := result.Scan(&invoiceId)
 				if err != nil {
 					glog.Errorf("[unsubscribe] Failed to scan subscription renewal: %v", err)
 					queryErr = err
-					continue
+					return
 				}
-
-				subscriptionRenewals = append(subscriptionRenewals, struct {
-					TransactionId string
-					EndTime       time.Time
-				}{
-					TransactionId: txId,
-					EndTime:       endTime,
-				})
-
+				invoiceIds = append(invoiceIds, invoiceId)
 			}
 		})
-
 	})
 
 	if queryErr != nil {
 		return fmt.Errorf("[unsubscribe] failed to query subscription renewals: %w", queryErr)
 	}
 
-	if len(subscriptionRenewals) == 0 {
+	customerId := ""
+	stripeCustomerId, err := model.GetStripeCustomer(session)
+	if err != nil {
+		return fmt.Errorf("[unsubscribe] failed to query Stripe customer: %w", err)
+	}
+	if stripeCustomerId != nil {
+		customerId = *stripeCustomerId
+	}
+	deletions, err := stripeDiscoverDeletionSubscriptions(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		customerId,
+		invoiceIds,
+	)
+	if err != nil {
+		return fmt.Errorf("[unsubscribe] failed to discover Stripe subscriptions: %w", err)
+	}
+
+	closeRenewal := func(invoiceId string) error {
+		var updateErr error
+		server.Tx(session.Ctx, func(tx server.PgTx) {
+			_, updateErr = tx.Exec(
+				session.Ctx,
+				`
+					UPDATE subscription_renewal
+					SET end_time = now()
+					WHERE network_id = $1
+						AND market = $2
+						AND transaction_id = $3
+						AND end_time > now()
+				`,
+				session.ByJwt.NetworkId,
+				model.SubscriptionMarketStripe,
+				invoiceId,
+			)
+		})
+		if updateErr != nil {
+			glog.Errorf("[unsubscribe] Failed to close Stripe subscription renewal: %v", updateErr)
+			return fmt.Errorf("[unsubscribe] failed to close Stripe renewal: %w", updateErr)
+		}
 		return nil
 	}
-
-	stripe.Key = stripeApiToken()
-
-	for _, renewal := range subscriptionRenewals {
-
-		invoiceId := renewal.TransactionId
-		if invoiceId == "" {
-			glog.Infof("[unsubscribe] Subscription renewal with empty transaction id, skipping")
-			continue
-		}
-
-		// Get invoice details with expanded subscription info
-		url := fmt.Sprintf("%s/v1/invoices/%s?expand[]=subscription&expand[]=customer", stripeApiBaseUrl, invoiceId)
-		fullInvoice, err := server.HttpGetRequireStatusOk[*StripeInvoiceExpanded](
-			session.Ctx,
-			url,
-			func(header http.Header) {
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-			},
-			server.ResponseJsonObject[*StripeInvoiceExpanded],
-		)
-
-		if err != nil {
-			glog.Errorf("[unsubscribe] Failed to fetch invoice %s: %v", invoiceId, err)
-			continue
-		}
-
-		// Extract subscription ID
-		var subscriptionId string
-		if fullInvoice.Subscription != nil && fullInvoice.Subscription.ID != "" {
-			subscriptionId = fullInvoice.Subscription.ID
-		}
-
-		if subscriptionId == "" {
-			glog.Errorf("[unsubscribe] No subscription ID found for invoice %s", invoiceId)
-			continue
-		}
-
-		// Cancel the subscription
-		glog.Infof("[unsubscribe] Canceling Stripe subscription %s for network %s", subscriptionId, session.ByJwt.NetworkId)
-
-		cancelUrl := fmt.Sprintf("%s/v1/subscriptions/%s", stripeApiBaseUrl, subscriptionId)
-
-		req, err := http.NewRequestWithContext(session.Ctx, "DELETE", cancelUrl, nil)
-		if err != nil {
-			glog.Errorf("[unsubscribe] Failed to create cancel request for subscription %s: %v", subscriptionId, err)
-			continue
-		}
-
-		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-
-		httpClient := server.DefaultHttpClient()
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			glog.Errorf("[unsubscribe] Failed to cancel Stripe subscription %s: %v", subscriptionId, err)
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			glog.Errorf("[unsubscribe] Stripe API returned error status %d for subscription %s", resp.StatusCode, subscriptionId)
-			continue
-		}
-
-		glog.Infof("[unsubscribe] Successfully canceled Stripe subscription %s", subscriptionId)
-
+	if err := stripeCancelDeletionSubscriptions(session.Ctx, deletions, closeRenewal); err != nil {
+		return fmt.Errorf("[unsubscribe] failed to cancel Stripe subscriptions: %w", err)
 	}
-
-	// set subscription_renewal end time as now for all active subscriptions
-	// to prevent transfer balance from being unnecessarily added
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-
-		_, err := tx.Exec(
-			session.Ctx,
-			`
-			UPDATE subscription_renewal
-			SET end_time = $1
-			WHERE
-				network_id = $2
-				AND market = $3
-				AND end_time > $4
-			`,
-			server.NowUtc(),
-			session.ByJwt.NetworkId,
-			model.SubscriptionMarketStripe,
-			server.NowUtc(),
-		)
-
-		if err != nil {
-			glog.Errorf("[unsubscribe] Failed to update subscription_renewal end times: %v", err)
-		}
-
-	})
-
 	return nil
 }
 
@@ -1573,6 +1552,11 @@ const (
 
 type StripeCreateCheckoutSessionArgs struct {
 	ItemId string `json:"item_id"`
+	// the store's storefront country, when the caller knows it; resolves the
+	// regional price tier for the Pro items (else the Stripe billing country,
+	// else the client ip as an estimate; the charged tier is finalized from the
+	// card's billing country once it is attached)
+	StorefrontCountry string `json:"storefront_country,omitempty"`
 	// "hosted" (default) or "embedded". Defaults to hosted so existing callers, which
 	// only ever read checkout_url, keep working unchanged.
 	UiMode string `json:"ui_mode,omitempty"`
@@ -1805,15 +1789,14 @@ func StripeCreateCheckoutSession(
 	switch args.ItemId {
 
 	case StripeItemProMonthly, StripeItemProYearly:
-		prices := stripeSubscriptionPrices()
-		priceId := prices.Monthly
-		if args.ItemId == StripeItemProYearly {
-			priceId = prices.Yearly
-		}
-		if priceId == "" {
-			glog.Errorf("[stripe]no subscription price configured for %s\n", args.ItemId)
+		// the caller's regional tier price, and the welcome-offer coupon when
+		// the offer is redeemable (yearly only)
+		priceId, discounts, onboardingMetadata, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
+		if err != nil || priceId == "" {
+			glog.Errorf("[stripe]no subscription price configured for %s: %v\n", args.ItemId, err)
 			return stripeCheckoutError("That plan is not available."), nil
 		}
+		params.Discounts = discounts
 
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
 		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
@@ -1835,6 +1818,9 @@ func StripeCreateCheckoutSession(
 			Metadata: map[string]string{
 				"network_id": networkId.String(),
 			},
+		}
+		for key, value := range onboardingMetadata {
+			params.SubscriptionData.Metadata[key] = value
 		}
 		// only the yearly plan starts with the free trial (the web app, windows
 		// and linux sell Pro through these sessions)

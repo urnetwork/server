@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ func TestBalanceCode(t *testing.T) {
 		networkIdA := server.NewId()
 
 		userIdA := server.NewId()
+		Testing_CreateNetwork(ctx, networkIdA, "synthetic-balance-code", userIdA)
 		guestMode := false
 		isPro := false
 
@@ -95,6 +97,7 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 		networkIdA := server.NewId()
 
 		userIdA := server.NewId()
+		Testing_CreateNetwork(ctx, networkIdA, "synthetic-redeemed-code", userIdA)
 		guestMode := false
 		isPro := false
 
@@ -151,6 +154,7 @@ func TestRedeemBalanceCodeConcurrent(t *testing.T) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "synthetic-concurrent-code", server.NewId())
 
 		balanceCode, err := CreateBalanceCode(
 			ctx,
@@ -196,5 +200,49 @@ func TestRedeemBalanceCodeConcurrent(t *testing.T) {
 		balances := GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].BalanceByteCount, ByteCount(1024))
+	})
+}
+
+// TestRedeemBalanceCodeRefusesDeletedNetworkBeforeConsumption proves a
+// delete-first redemption leaves both the paid code and transfer ledger intact.
+func TestRedeemBalanceCodeRefusesDeletedNetworkBeforeConsumption(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "synthetic-code-delete-first", userId)
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			1024,
+			time.Hour,
+			100,
+			"synthetic-code-purchase",
+			"synthetic-code-record",
+			"synthetic@example.invalid",
+		)
+		if err != nil {
+			t.Fatalf("create balance code: %v", err)
+		}
+		if success, _ := RemoveNetwork(ctx, networkId, &userId); !success {
+			t.Fatal("delete synthetic destination")
+		}
+
+		result, err := RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: networkId,
+		}, ctx)
+		if result != nil || !errors.Is(err, ErrPaymentNetworkNotFound) {
+			t.Fatalf("redeem after delete = %#v, %v", result, err)
+		}
+		retained, err := GetBalanceCode(ctx, balanceCode.BalanceCodeId)
+		if err != nil {
+			t.Fatalf("get retained balance code: %v", err)
+		}
+		if retained.RedeemNetworkId != nil || !retained.RedeemTime.IsZero() {
+			t.Fatalf("refused code was consumed: network=%v time_zero=%v", retained.RedeemNetworkId, retained.RedeemTime.IsZero())
+		}
+		if balances := GetActiveTransferBalances(ctx, networkId); len(balances) != 0 {
+			t.Fatalf("refused code wrote %d transfer balances", len(balances))
+		}
 	})
 }

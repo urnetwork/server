@@ -97,6 +97,16 @@ type BrevoWebhookArgs struct {
 	Event     string `json:"event"`
 	Email     string `json:"email"`
 	MessageId string `json:"message-id"`
+	// the send's tags: Brevo posts either `tags` (array) or the legacy `tag`
+	// (a JSON-encoded array in a string); the onboarding campaign sends carry
+	// [onboarding, <template>, <variant>]
+	Tags       []string `json:"tags,omitempty"`
+	Tag        string   `json:"tag,omitempty"`
+	TemplateId int      `json:"template_id,omitempty"`
+	// X-Mailin-custom is the custom header the campaign sets per send
+	Custom  string `json:"X-Mailin-custom,omitempty"`
+	Link    string `json:"link,omitempty"`
+	TsEvent int64  `json:"ts_event,omitempty"`
 }
 
 type BrevoWebhookResult struct {
@@ -126,7 +136,7 @@ func BrevoWebhook(
 		return nil, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 	}
 
-	if webhookArgs.Event == "unsubscribe" {
+	if webhookArgs.Event == "unsubscribe" || webhookArgs.Event == "unsubscribed" {
 		glog.Infof("[product_updates]unsubscribe %s\n", maskEmail(webhookArgs.Email))
 		model.AccountProductUpdatesSetForEmail(
 			clientSession.Ctx,
@@ -134,6 +144,9 @@ func BrevoWebhook(
 			false,
 		)
 	}
+
+	// the onboarding campaign's delivery events (attributed by message id)
+	handleOnboardingBrevoWebhook(clientSession.Ctx, webhookArgs)
 
 	return &BrevoWebhookResult{}, nil
 }

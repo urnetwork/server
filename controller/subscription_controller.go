@@ -154,6 +154,15 @@ type SubscriptionBalanceResult struct {
 	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
 	UpdateTime                time.Time                `json:"update_time"`
+
+	// ----- the onboarding plan fields (onboarding_controller.go DecoratePlan) -----
+	// PriceTier is the caller's regional price tier (display estimate unless the
+	// source is a storefront or a billing country).
+	PriceTier *PriceTierResult `json:"price_tier,omitempty"`
+	// OnboardingOffer is the caller's welcome offer, null when none was issued.
+	OnboardingOffer *OnboardingOfferResult `json:"onboarding_offer"`
+	// Experiments is the caller's variant per experiment surface.
+	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
 }
 
 type Subscription struct {
@@ -490,6 +499,9 @@ func createBalanceCode(
 				"[sub]balance code %s redeem into network %s: %s\n",
 				balanceCode.BalanceCodeId, *redeemNetworkId, err,
 			)
+			if balanceCode.PurchaseEmail == "" {
+				return fmt.Errorf("automatic balance-code delivery failed without email recovery: %w", err)
+			}
 		} else if redeemResult != nil && redeemResult.Error != nil {
 			// "already redeemed" IS the retry: the data is already where it belongs.
 			// Anything else (expired, voided by a refund) means it is not.
@@ -498,6 +510,9 @@ func createBalanceCode(
 				"[sub]balance code %s redeem into network %s: %s\n",
 				balanceCode.BalanceCodeId, *redeemNetworkId, redeemResult.Error.Message,
 			)
+			if !applied && balanceCode.PurchaseEmail == "" {
+				return errors.New("automatic balance-code delivery failed without email recovery")
+			}
 		} else {
 			applied = true
 			glog.Infof(
@@ -508,9 +523,9 @@ func createBalanceCode(
 		}
 	}
 
-	// No email on the purchase: nothing to send. This only happens when
-	// redeemNetworkId was set (the caller guards the both-empty case), so the
-	// credit has already landed in the right network above -- delivery is done.
+	// No email on the purchase means automatic redemption is the only delivery
+	// channel. Every unsuccessful branch above returns an error, so reaching
+	// here proves the data landed in the requested network.
 	if balanceCode.PurchaseEmail == "" {
 		return nil
 	}
@@ -608,6 +623,9 @@ type PlaySubscriptionNotification struct {
 type PlaySubscription struct {
 	LineItems []*PlaySubscriptionPurchaseLineItem `json:"lineItems"`
 	StartTime string                              `json:"startTime"`
+	// RegionCode is the ISO 3166-1 alpha-2 billing country of the purchase: the
+	// storefront that prices the regional tier
+	RegionCode string `json:"regionCode,omitempty"`
 	// values:
 	// - SUBSCRIPTION_STATE_UNSPECIFIED
 	// - SUBSCRIPTION_STATE_PENDING
@@ -656,6 +674,34 @@ type PlaySubscriptionPurchaseLineItem struct {
 	// present for auto-renewing plans (absent for prepaid): the customer's
 	// auto-renew switch, read by the subscription details
 	AutoRenewingPlan *PlayAutoRenewingPlan `json:"autoRenewingPlan,omitempty"`
+	// OfferDetails names the base plan and offer the purchase was made under;
+	// the welcome offer is recognized by its offer tag
+	OfferDetails *PlayOfferDetails `json:"offerDetails,omitempty"`
+}
+
+type PlayOfferDetails struct {
+	OfferTags  []string `json:"offerTags,omitempty"`
+	BasePlanId string   `json:"basePlanId,omitempty"`
+	OfferId    string   `json:"offerId,omitempty"`
+}
+
+// HasOfferTag reports whether any line item was bought under an offer carrying
+// the tag.
+func (self *PlaySubscription) HasOfferTag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for _, item := range self.LineItems {
+		if item == nil || item.OfferDetails == nil {
+			continue
+		}
+		for _, itemTag := range item.OfferDetails.OfferTags {
+			if itemTag == tag {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type PlayAutoRenewingPlan struct {
@@ -845,6 +891,15 @@ func PlayWebhook(
 				"SUBSCRIPTION_STATE_EXPIRED",
 				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
 				acknowledgeAndCheckRenewal = false
+				// the onboarding trial outcome: a trial that stops renewing or
+				// expires before its first paid period is trial.cancelled
+				storeTrialCancelled(
+					clientSession.Ctx,
+					networkId,
+					model.OnboardingStorePlay,
+					planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+					server.NowUtc(),
+				)
 			}
 
 			if acknowledgeAndCheckRenewal {
@@ -880,7 +935,7 @@ func PlayWebhook(
 				// non-2xx so Pub/Sub RETRIES the delivery -- otherwise the entitlement
 				// would arrive only via the task scheduled at the END of the paid
 				// period, or never.
-				_, err = PlaySubscriptionRenewal(
+				renewalResult, err := PlaySubscriptionRenewal(
 					&PlaySubscriptionRenewalArgs{
 						NetworkId:      networkId,
 						PackageName:    rtdnMessage.PackageName,
@@ -895,6 +950,17 @@ func PlayWebhook(
 						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
 					)
 					return nil, err
+				}
+				if renewalResult != nil && renewalResult.Renewed {
+					// the onboarding trial outcome: a credited renewal past a
+					// recorded trial's length is trial.converted
+					storeTrialConverted(
+						clientSession.Ctx,
+						networkId,
+						model.OnboardingStorePlay,
+						planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+						server.NowUtc(),
+					)
 				}
 
 				// continually renew as long as the expiry time keeps getting pushed forward
@@ -952,6 +1018,8 @@ func playHandleRevoked(
 			// failed delivery (Pub/Sub would redeliver into a no-op)
 			glog.Errorf("[sub]play revoked token %s: could not record event: %s\n", purchaseToken, err)
 		}
+		// the onboarding refund outcome
+		RecordRefund(clientSession.Ctx, networkId, model.OnboardingStorePlay, 0)
 	}
 	glog.Infof(
 		"[sub]play revoked token %s (%s): ended %d network(s)\n",
@@ -1091,6 +1159,16 @@ func PlaySubscriptionRenewal(
 			// Per-statement snapshots make the post-lock re-check see the
 			// winner's commit, which is the entire point of the re-check.
 			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+				renewed = false
+				creditErr = nil
+				if err := model.LockPaymentNetworkInTx(
+					tx,
+					clientSession.Ctx,
+					playSubscriptionRenewal.NetworkId,
+				); err != nil {
+					creditErr = err
+					return
+				}
 				server.RaisePgResult(tx.Exec(
 					clientSession.Ctx,
 					`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -1120,6 +1198,9 @@ func PlaySubscriptionRenewal(
 						creditErr = err
 						return
 					}
+					// the regional price tier and the welcome offer, from the
+					// store's region code and offer tag
+					playRecordOnboardingInTx(tx, clientSession, sub, renewal)
 
 					// a supporter subscription -> carries the Pro entitlement
 					transferBalance := &model.TransferBalance{
@@ -1884,6 +1965,9 @@ func HeliusWebhook(
 			continue
 		}
 
+		// the regional price tier and the welcome offer on the credited row
+		solanaRecordOnboarding(clientSession, paymentSearchResult)
+
 		matched++
 	}
 
@@ -1937,6 +2021,16 @@ func solanaCreditPaymentIntent(
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		credited = false
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(
+			tx,
+			clientSession.Ctx,
+			*paymentSearchResult.NetworkId,
+		); err != nil {
+			returnErr = err
+			return
+		}
 
 		completed, err := model.MarkPaymentIntentCompletedInTx(
 			tx,
@@ -1989,7 +2083,7 @@ func solanaCreditPaymentIntent(
 		)
 
 		credited = true
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return false, returnErr
@@ -2020,6 +2114,9 @@ func solanaPlanDuration(subscriptionPlan string) time.Duration {
 	switch subscriptionPlan {
 	case model.SolanaPlanMonthly:
 		return 30 * 24 * time.Hour
+	case model.SolanaPlanYearlyOnboarding:
+		// the welcome offer stacks on the 14-day trial: a year plus the trial
+		return SubscriptionYearDuration + StripeSubscriptionTrialDays*24*time.Hour
 	default:
 		return SubscriptionYearDuration
 	}
@@ -2027,16 +2124,28 @@ func solanaPlanDuration(subscriptionPlan string) time.Duration {
 
 type SolanaPaymentIntentArgs struct {
 	Reference string `json:"reference"`
-	// The plan the customer picked. The PRICE is never taken from the client -- the
-	// server derives it from pro.yml. A client-supplied amount would let anyone quote
-	// themselves a year for a cent.
+	// The plan the customer picked: yearly | monthly | yearly_onboarding (the
+	// welcome offer, only while the caller's offer is redeemable). The PRICE is
+	// never taken from the client -- the server derives it from pro.yml. A
+	// client-supplied amount would let anyone quote themselves a year for a cent.
 	Plan string `json:"plan"`
+	// the store's storefront country, when the app knows it; else the tier is
+	// resolved from the Stripe billing country or the client ip (Solana keeps the
+	// estimate: accepted risk on a one-time crypto payment)
+	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
 type SolanaPaymentIntentResult struct {
 	// the price the SERVER quoted -- the client must pay exactly this
 	AmountUsd float64                   `json:"amount_usd,omitempty"`
 	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
+	// the tier the quote came from and the plan's regular price (the offer's
+	// full-year price for yearly_onboarding)
+	Tier             string  `json:"tier,omitempty"`
+	Plan             string  `json:"plan,omitempty"`
+	RegularAmountUsd float64 `json:"regular_amount_usd,omitempty"`
+	OfferApplied     bool    `json:"offer_applied,omitempty"`
+	Currency         string  `json:"currency,omitempty"`
 }
 
 type SolanaPaymentIntentError struct {
@@ -2052,12 +2161,25 @@ type SolanaPaymentIntentError struct {
 // `amount >= price - tolerance`, which at price 0 is `amount >= -0.01`: satisfied by
 // ANY payment, including none. We would hand out a year of Pro for nothing. Refuse.
 func solanaPlanPriceUsd(subscriptionPlan string) (float64, bool) {
+	return solanaPlanPriceUsdForTier(subscriptionPlan, model.Pro().DefaultPriceTier())
+}
+
+// solanaPlanPriceUsdForTier is solanaPlanPriceUsd at a regional price tier. The
+// welcome-offer plan (yearly_onboarding) is the tier's yearly price less the
+// configured discount; the caller must have checked the offer is redeemable.
+func solanaPlanPriceUsdForTier(subscriptionPlan string, tier *model.ProPriceTier) (float64, bool) {
 	var priceUsd float64
 	switch subscriptionPlan {
 	case model.SolanaPlanMonthly:
-		priceUsd = model.Pro().PriceMonthlyUsd()
+		priceUsd = tier.MonthlyUsd
 	case model.SolanaPlanYearly:
-		priceUsd = model.Pro().PriceYearlyUsd()
+		priceUsd = tier.YearlyUsd
+	case model.SolanaPlanYearlyOnboarding:
+		cfg := model.Onboarding()
+		if !cfg.OfferEnabled() {
+			return 0, false
+		}
+		priceUsd = cfg.OfferPriceUsd(tier.YearlyUsd)
 	default:
 		return 0, false
 	}
@@ -2076,12 +2198,27 @@ func CreateSolanaPaymentIntent(
 	clientSession *session.ClientSession,
 ) (*SolanaPaymentIntentResult, error) {
 
-	// The price comes from pro.yml, keyed by the plan. It is NEVER taken from the client.
-	priceUsd, ok := solanaPlanPriceUsd(intent.Plan)
+	// The price comes from pro.yml, keyed by the plan and the caller's regional
+	// price tier. It is NEVER taken from the client.
+	tier := ResolvePriceTier(clientSession, intent.StorefrontCountry)
+	offerApplied := false
+	if intent.Plan == model.SolanaPlanYearlyOnboarding {
+		if EligibleOnboardingOffer(clientSession, clientSession.ByJwt.NetworkId) == nil {
+			return &SolanaPaymentIntentResult{
+				Error: &SolanaPaymentIntentError{Message: "The welcome offer is not available."},
+			}, nil
+		}
+		offerApplied = true
+	}
+	priceUsd, ok := solanaPlanPriceUsdForTier(intent.Plan, tier.Tier)
 	if !ok || priceUsd <= 0 {
 		return &SolanaPaymentIntentResult{
 			Error: &SolanaPaymentIntentError{Message: "Unknown plan."},
 		}, nil
+	}
+	regularUsd := priceUsd
+	if offerApplied {
+		regularUsd = tier.Tier.YearlyUsd
 	}
 
 	// The error used to be discarded here, so a duplicate or failed intent looked exactly
@@ -2097,5 +2234,12 @@ func CreateSolanaPaymentIntent(
 
 	// Hand the quoted price back so the payment url the client builds and the intent the
 	// webhook checks against cannot disagree.
-	return &SolanaPaymentIntentResult{AmountUsd: priceUsd}, nil
+	return &SolanaPaymentIntentResult{
+		AmountUsd:        priceUsd,
+		Tier:             tier.Tier.Name,
+		Plan:             intent.Plan,
+		RegularAmountUsd: regularUsd,
+		OfferApplied:     offerApplied,
+		Currency:         model.PriceTierCurrency,
+	}, nil
 }

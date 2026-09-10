@@ -117,6 +117,33 @@ type logReconcileQuery func(ctx context.Context, start time.Time, blocks []strin
 
 var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
 
+// Connect's relEvent grammar renders booleans as 0/1 and durations as integer
+// milliseconds. Keep nonterminal transitions separate from terminal outcomes:
+// failOutcome logs window_failed and then calls SetStallStatus directly, so it
+// does not normally emit a window_stall failed=1 line. Retain failed=1 as a
+// compatibility shape, and keep both out of the generic novel detector.
+var (
+	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
+	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
+	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+	windowGeneratorCanceledRe = regexp.MustCompile(
+		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
+	)
+)
+
+func windowStallLogSample(line string) string {
+	return strings.TrimSpace(windowStallEventRe.FindString(line))
+}
+
+func windowTerminalLogSample(line string) string {
+	return strings.TrimSpace(windowTerminalRe.FindString(line))
+}
+
+// Drops the Warp identity while retaining the complete exact diagnostic.
+func windowGeneratorCanceledLogSample(line string) string {
+	return strings.TrimSpace(windowGeneratorCanceledRe.FindString(line))
+}
+
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
 	// A Mimir rejection body can contain arbitrary series labels, including
@@ -287,6 +314,17 @@ var logClasses = []logClass{
 		action:    "Run §1.3a through direct 5432 and split active, young idle-in-transaction, idle, and starting owners. Correlate them with wait events, completed PostgreSQL COMMIT latency, and PgBouncer connection logs or SHOW POOLS where permitted. If db-maintenance-legacy-reindex is present, wait for pg_stat_progress_create_index to become empty, then deploy a clean Taskworker containing current-main commits 908a8b2c and d8392c83; do not interrupt a live rebuild implicitly. Remove the proved upstream stall or leak before tuning pools. Do not raise max_connections first, restart PostgreSQL/PgBouncer, or mass-terminate sessions; this host's large work_mem makes a blind slot increase a memory-risk change.",
 		verify:    "For ten minutes through the workload that triggered the burst, normal-role connection headroom stays above 25%, direct 5432 remains available, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs. Correlate unique request failures separately from diagnostic lines.",
 	},
+	{name: "payment-balance-code-undelivered", re: regexp.MustCompile(`automatic balance-code delivery failed without email recovery(?:[^\r\n]*)$`),
+		sample: func(string) string {
+			return "automatic balance-code delivery failed without email recovery: details omitted"
+		},
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5 and §2.22", redactIDs: true,
+		meaning:   "a paid balance code was durably created, automatic redemption failed, and the purchase has no email delivery fallback",
+		mechanism: "The paid Stripe or Coinbase fulfillment path created its idempotent balance-code evidence, but the destination-network check or another redemption step failed before consuming the code. Because the purchase carried no email address, returning success would leave no delivery channel; the corrected path returns this error so the provider webhook remains visibly retryable.",
+		context:   "This exact error is emitted only for failed automatic delivery without email recovery. Intentional operator-issued, no-email, unredeemed codes do not emit it and cannot be distinguished safely from database columns alone. An emailed code remains recoverable and therefore does not use this class when only its optional automatic application fails.",
+		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
+		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
+	},
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning: "panic stack — the innermost app frame identifies the load-bearing call path"},
@@ -400,6 +438,34 @@ var logClasses = []logClass{
 		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
 		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
 	},
+	{name: "window-generator-canceled", re: windowGeneratorCanceledRe,
+		sample:        windowGeneratorCanceledLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "an exact generator-canceled diagnostic whose interpretation depends on the emitting artifact and owning-window context; on a proven legacy ordering it is consistent with teardown being falsely recorded as a platform error",
+		mechanism: "The deadline wrapper returns `generator call canceled` when its owning window is canceled, but an inner generator can return the identical text while that outer context remains live. Legacy enumerate and client-args branches logged and recorded every returned error before checking the window context, so ordinary teardown could publish platform-unreachable failed=0; current Connect suppresses only errors observed after authoritative outer cancellation.",
+		context:   "The line alone cannot prove outer-window cancellation. On an artifact proven to have the legacy log-before-context ordering, a population paired with nonterminal platform-unreachable stalls is consistent with one teardown boundary rather than a second Taskworker/platform failure. On a proved fixed artifact, the guard establishes that an inner generator returned the identical error while the outer context was live. Keep `generator call abandoned after ...` and all other generator errors distinct. A displayed release label or module tag is not proof of the Connect bytes embedded in the running Taskworker.",
+		action:    "Use §8.12 to prove the emitting artifact's recorded Connect build input. If it has the legacy ordering, rebuild and deploy the emitting service from a Connect revision that checks authoritative window cancellation before logging, recording, publishing, or backing off. If it contains that fix, diagnose the preserved live inner error instead. Do not restart Taskworker or deploy a transport change from this line alone.",
+		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
+		redactIDs: true,
+	},
+	{name: "window-stall-terminal", re: windowTerminalRe,
+		sample:        windowTerminalLogSample,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state for that window but does not identify the underlying failure branch",
+		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch updates the UI-facing terminal latch but does not normally emit window_stall failed=1; the latter remains an accepted compatibility shape. The reason names the current diagnostic branch, not a proven transport root cause.",
+		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
+		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
+		verify:    "No window_failed event or compatible failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
+	},
+	{name: "window-stall", re: windowStallNonterminalRe,
+		sample:        windowStallLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a provider window changed stall diagnosis while it was still trying; failed=0 is explicitly nonterminal",
+		mechanism: "The Connect window watchdog emits this structured transition once per reason/state change. At rate, failed=0 measures provider-window diagnostic churn; it is neither a count of failed windows nor an unclassified error merely because the field name contains the word failed.",
+		context:   "Reason is a bounded discriminator, not root-cause proof. Correlate platform-unreachable with explicit carrier/framer/reachability evidence and treat providers-unresponsive, rate-limited, and auth-failing as separate branches. One isolated nonterminal transition stays below the alert threshold.",
+		action:    "Use the structured reason and window to select the matching bounded controls, then repair only a corroborated transport, provider, rate-limit, or authentication boundary. Do not infer terminal user failure, restart Taskworker, or deploy a transport change from failed=0 alone.",
+		verify:    "The class remains below 20 transitions/minute for ten minutes under comparable traffic, terminal window-stall remains zero, and provider windows continue to reach their configured minimum.",
+	},
 	{name: "db-maintenance-legacy-reindex", re: dbMaintenanceLegacyReindexRe,
 		groupBy:       dbMaintenanceLegacyReindexLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.2a",
@@ -435,7 +501,7 @@ var logClasses = []logClass{
 
 // errorShaped marks lines that count toward the novel class when no taxonomy
 // row matches.
-var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b`)
+var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b`)
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.

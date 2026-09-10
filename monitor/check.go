@@ -62,6 +62,10 @@ type finding struct {
 	// sustain is how many consecutive failing ticks before a ticket opens
 	// (SIGNALS.md "for n min" translated to ticks at the probe's cadence)
 	sustain int
+	// pageSustain promotes a warning to PAGE after this many consecutive
+	// failing ticks while retaining the same alert identity. Zero means the
+	// finding never changes severity solely because its streak grew.
+	pageSustain int
 
 	// SIGNALS.md §6b payload — real names and observed values
 	symptom   string

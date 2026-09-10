@@ -189,8 +189,10 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, snapshot.TotalRanked, int64(3))
 		connect.AssertEqual(t, snapshot.LatestEpoch, uint64(3))
+		connect.AssertEqual(t, snapshot.EpochMetricsAvailable, true)
 		latest := GetLatestPointsLeaderboardSnapshot(ctx)
 		connect.AssertEqual(t, latest.SnapshotId, snapshot.SnapshotId)
+		connect.AssertEqual(t, latest.EpochMetricsAvailable, true)
 
 		// every network with points is listed from the start, names off
 		initial := GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, PointsLeaderboardSortPoints, 0, 10)
@@ -299,6 +301,36 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		connect.AssertEqual(t, rowB4.BlocksWithPoints, 2)
 		connect.AssertEqual(t, rowB4.TotalNanoPoints, PointsToNanoPoints(25))
 		connect.AssertEqual(t, rowB4.RankStreak, int64(1))
+	})
+}
+
+// An empty finalized-epoch input is persisted as unavailable, rather than
+// letting the structurally valid zero values masquerade as measured zeroes.
+// A later snapshot with a real epoch is available even when one network has
+// legitimately earned in zero epochs.
+func TestPointsLeaderboardSnapshotDistinguishesUnavailableFromZero(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "points_availability", server.NewId())
+		Testing_InsertAccountPoint(ctx, networkId, PointsToNanoPoints(1), server.NowUtc().Add(-24*time.Hour))
+
+		unavailable, err := RebuildPointsLeaderboard(ctx, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, unavailable.EpochMetricsAvailable, false)
+		connect.AssertEqual(t, GetPointsLeaderboardSnapshot(ctx, unavailable.SnapshotId).EpochMetricsAvailable, false)
+		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, unavailable.SnapshotId, networkId).BlocksWithPoints, 0)
+
+		now := server.NowUtc()
+		available, err := RebuildPointsLeaderboard(ctx, []PointsEpochWindow{{
+			Epoch: 1,
+			Start: now.Add(-2 * time.Hour),
+			End:   now.Add(-time.Hour),
+		}})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, available.EpochMetricsAvailable, true)
+		connect.AssertEqual(t, GetPointsLeaderboardSnapshot(ctx, available.SnapshotId).EpochMetricsAvailable, true)
+		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, available.SnapshotId, networkId).BlocksWithPoints, 0)
 	})
 }
 

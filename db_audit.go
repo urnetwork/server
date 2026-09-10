@@ -584,26 +584,12 @@ func (d *SchemaDiff) hasDataDrops() bool {
 }
 
 func (d *SchemaDiff) writeAdditiveSql(b *strings.Builder) {
-	for _, t := range d.missingTables {
+	for _, statement := range d.FixStatements() {
 		b.WriteString("\n")
-		b.WriteString(d.createTableSql(t))
-		b.WriteString("\n")
-	}
-
-	for _, t := range sortedMapKeys(d.missingCols) {
-		for _, c := range d.missingCols[t] {
-			fmt.Fprintf(b, "\nALTER TABLE %s ADD COLUMN %s;", t, columnDefSql(c))
+		b.WriteString(statement)
+		if !strings.HasSuffix(strings.TrimSpace(statement), ";") {
+			b.WriteString(";")
 		}
-	}
-
-	for _, t := range sortedMapKeys(d.missingConstraints) {
-		for _, con := range d.missingConstraints[t] {
-			fmt.Fprintf(b, "\n%s;", addConstraintSql(t, con, d.adoptConstraintIndex[con.name]))
-		}
-	}
-
-	for _, name := range d.missingIdx {
-		fmt.Fprintf(b, "\n%s;", d.expected.indexes[name].def)
 	}
 }
 
@@ -638,13 +624,14 @@ func (d *SchemaDiff) writeDataDropSql(b *strings.Builder) {
 	}
 }
 
-// FixStatements returns the additive reconciliation statements -- CREATE TABLE
-// for missing tables, ALTER TABLE ADD COLUMN for missing columns, CREATE INDEX
-// for missing indexes -- in dependency-friendly order (tables, then columns,
-// then indexes). These are exactly what ApplySchemaFix runs. Destructive changes
-// (DROP, changed-index replacement, DROP TABLE/COLUMN) are excluded -- index
-// drops are handled by IndexDropStatements under --force-drop-indexes, and
-// table/column drops are never applied.
+// FixStatements returns the additive reconciliation statements in dependency
+// order: tables without foreign keys, columns, primary/unique/check constraints,
+// indexes, then foreign keys. Deferring every foreign key until all referenced
+// relations and candidate keys exist also handles cycles between missing tables.
+// These are exactly what ApplySchemaFix runs. Destructive changes (DROP, changed-
+// index replacement, DROP TABLE/COLUMN) are excluded -- index drops are handled
+// by IndexDropStatements under --force-drop-indexes, and table/column drops are
+// never applied.
 func (d *SchemaDiff) FixStatements() []string {
 	statements := []string{}
 	for _, t := range d.missingTables {
@@ -657,11 +644,28 @@ func (d *SchemaDiff) FixStatements() []string {
 	}
 	for _, t := range sortedMapKeys(d.missingConstraints) {
 		for _, con := range d.missingConstraints[t] {
+			if con.typ == "f" {
+				continue
+			}
 			statements = append(statements, addConstraintSql(t, con, d.adoptConstraintIndex[con.name]))
 		}
 	}
 	for _, name := range d.missingIdx {
 		statements = append(statements, d.expected.indexes[name].def)
+	}
+	for _, t := range d.missingTables {
+		for _, con := range d.expected.constraints[t] {
+			if con.typ == "f" {
+				statements = append(statements, addConstraintSql(t, con, false))
+			}
+		}
+	}
+	for _, t := range sortedMapKeys(d.missingConstraints) {
+		for _, con := range d.missingConstraints[t] {
+			if con.typ == "f" {
+				statements = append(statements, addConstraintSql(t, con, false))
+			}
+		}
 	}
 	return statements
 }
@@ -719,8 +723,8 @@ func (d *SchemaDiff) DataDropCount() int {
 
 // createTableSql reconstructs a CREATE TABLE for a table missing from the DB,
 // using the expected snapshot. Primary key / unique / check constraints are
-// inlined; foreign keys are emitted as trailing ALTERs to sidestep table
-// ordering. It is review-quality DDL, not a substitute for the migration.
+// inlined. FixStatements emits foreign keys only after every missing table has
+// been created. It is review-quality DDL, not a substitute for the migration.
 func (d *SchemaDiff) createTableSql(table string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n", table)
@@ -729,20 +733,14 @@ func (d *SchemaDiff) createTableSql(table string) string {
 	for _, c := range d.expected.columns[table] {
 		lines = append(lines, "    "+columnDefSql(c))
 	}
-	fks := []auditConstraint{}
 	for _, con := range d.expected.constraints[table] {
 		if con.typ == "f" {
-			fks = append(fks, con)
 			continue
 		}
 		lines = append(lines, "    "+con.def)
 	}
 	b.WriteString(strings.Join(lines, ",\n"))
 	b.WriteString("\n);")
-
-	for _, fk := range fks {
-		fmt.Fprintf(&b, "\nALTER TABLE %s ADD CONSTRAINT %s %s;", table, fk.name, fk.def)
-	}
 	return b.String()
 }
 
@@ -793,24 +791,28 @@ func unionKeys[A any, B any](a map[string]A, b map[string]B) []string {
 type SchemaAuditResult struct {
 	// DbVersion is the migration version the live DB currently records.
 	DbVersion int
-	// LocalVersion is the head version of the local db_migrations.go -- the
-	// version the expected schema is always built to.
+	// LocalVersion is the head version of the local db_migrations.go. The
+	// expected schema is built only to DbVersion; pending migrations are not
+	// schema drift and must be applied through the migration runner.
 	LocalVersion int
 	Diff         *SchemaDiff
 }
 
-// AuditSchema diffs the live DB against the schema the full local
-// db_migrations.go head should produce. `db audit` reports this diff (and prints
-// the reconciling SQL as a dry run); `db audit --fix` applies the additive part
-// of it. Building to the head means the report/fix cover both genuine drift and
-// migrations the DB has not caught up to yet.
+// AuditSchema verifies the durable migration identities, then diffs the live DB
+// against the schema its recorded version should produce. `db audit` reports
+// this diff (and prints the reconciling SQL as a dry run); `db audit --fix`
+// applies its additive part. Pending migrations remain the migration runner's
+// responsibility: synthesizing their catalog-visible objects here would omit
+// migration-owned functions, triggers and data changes while leaving the
+// numeric migration version unchanged.
 func AuditSchema(ctx context.Context) *SchemaAuditResult {
 	dbVersion := DbVersion(ctx)
 	localVersion := MigrationCount()
+	verifyMigrationCatalog(ctx, dbVersion)
 
 	// introspect the real DB first, before buildExpectedSchema repoints the pools
 	actual := introspectSchema(ctx)
-	expected := buildExpectedSchema(ctx, localVersion)
+	expected := buildExpectedSchema(ctx, dbVersion)
 
 	return &SchemaAuditResult{
 		DbVersion:    dbVersion,

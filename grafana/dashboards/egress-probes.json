@@ -16,7 +16,7 @@
   },
   "graphTooltip": 1,
   "editable": true,
-  "description": "Continuous provider quality probes (operator-proxy fleetprobe, run by the taskworker): fleet state, probe outcomes, breakdowns by provider country and by probe target, failure classes, latency, geolocation, blackhole, bandwidth, and pass health.",
+  "description": "Continuous provider quality probes (operator-proxy fleetprobe, run by the taskworker): fleet state, probe outcomes, breakdowns by provider country and by probe target, failure classes, latency, geolocation, blackhole, bandwidth, and pass health. Fleet snapshot panels select one most-recent Taskworker refresh and go no-data after 15 minutes; monitor signal §2.23 is the authoritative direct-database alert.",
   "templating": {
     "list": [
       {
@@ -213,7 +213,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"healthy\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"healthy\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -274,7 +274,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"degraded\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"degraded\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -335,7 +335,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"dead\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_health_providers{env=\"$env\",state=\"dead\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -352,8 +352,8 @@
     },
     {
       "type": "stat",
-      "title": "failed last attempt",
-      "description": "Providers whose most recent full probe attempt failed (any class). Compare with the ok count on the right; the failure class split is in the fleet-by-class panel below.",
+      "title": "current proved failures",
+      "description": "Currently eligible providers with a proved current failure in the bounded failure vocabulary. Unobserved and inconsistent states stay in the population but are not mislabeled as provider failures.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -396,7 +396,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result!=\"ok\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result=~\"tunnel_failed|contract_failed|no_consensus|locate_failed|not_confident|submit_failed|unknown_failure\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -413,8 +413,8 @@
     },
     {
       "type": "stat",
-      "title": "ok last attempt",
-      "description": "Providers whose most recent full probe attempt succeeded end to end (located and submitted).",
+      "title": "current success",
+      "description": "Currently eligible providers with a trusted submitted location and no retained nonempty failure that makes the state failed or ambiguous.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -457,7 +457,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result=\"ok\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result=\"ok\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -475,7 +475,7 @@
     {
       "type": "stat",
       "title": "dominant failure class",
-      "description": "The fleet diagnosis (model.DiagnoseProbeFleet): set when one failure class covers nearly every recorded attempt, which blames the prober before the fleet. Empty is good. Share of attempts it covers is the next stat.",
+      "description": "The population-aware fleet diagnosis: set when one known current failure class covers at least 90% of the complete eligible population, with at least 20 observed outcomes. Unknown, inconsistent, and unobserved states cannot manufacture dominance. Empty is good.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -518,7 +518,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max by (class) (urnetwork_egress_probe_fleet_dominant_failure{env=\"$env\"} == 1)",
+          "expr": "max by (class) ((urnetwork_egress_probe_fleet_dominant_failure{env=\"$env\"} == 1) and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{class}}",
           "instant": true,
@@ -536,7 +536,7 @@
     {
       "type": "stat",
       "title": "dominant class share",
-      "description": "Share of all recorded attempts covered by the dominant failure class; 0 when nothing dominates.",
+      "description": "Share of the complete current eligible population covered by the dominant known failure class; 0 when nothing dominates.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -587,7 +587,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_egress_probe_fleet_dominant_share{env=\"$env\"})",
+          "expr": "max(urnetwork_egress_probe_fleet_dominant_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -648,7 +648,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_flagged_providers{env=\"$env\",flag=\"blackholed\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_flagged_providers{env=\"$env\",flag=\"blackholed\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -709,7 +709,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_flagged_providers{env=\"$env\",flag=\"tls_authentication_failed\"})",
+          "expr": "sum(urnetwork_egress_probe_fleet_flagged_providers{env=\"$env\",flag=\"tls_authentication_failed\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -726,8 +726,8 @@
     },
     {
       "type": "bargauge",
-      "title": "fleet by last attempt outcome",
-      "description": "Every provider by the class of its most recent full probe attempt (ok, tunnel_failed, no_consensus, locate_failed, not_confident, submit_failed, contract_failed). One tall failure bar with a small ok bar is the prober signature.",
+      "title": "eligible fleet by probe outcome",
+      "description": "Every currently eligible provider by reconstructed state: ok, a bounded current failure class, inconsistent, or unobserved. A known failure class covering at least 90% of the complete population is the common-prober signature; unknown values cannot establish it.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -772,7 +772,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (result) (urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\"})",
+          "expr": "sum by (result) (urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{result}}",
           "instant": true,

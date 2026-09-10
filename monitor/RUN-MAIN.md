@@ -19,7 +19,11 @@ so their evidence context and open causal boundaries remain intact:
 - A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution: preflight,
   immutable binary, authoritative watcher and tails, alert capture, focused
   reruns, source identity, and every verification gate. The Go watcher remains
-  model-neutral; Terra operates and interprets it.
+  model-neutral; Terra operates and interprets it. The primary agent must retain
+  the actual durable execution-session handle unless Terra remains active for
+  the entire watcher lifetime. Process ownership is not session ownership: a
+  watcher started inside a sub-agent tool session can disappear when that agent
+  returns even after its PID and tails passed a liveness check.
 - A `gpt-5.6-sol` agent at `max` reasoning owns diagnosis and repair for every
   new, changed, or unresolved causal boundary. It may run bounded read-only
   discriminators, but Terra remains the runner and verifier.
@@ -243,6 +247,17 @@ environment/mode/start timezone, alert/stderr objects, server commit/dirty
 state, expected tails, exclusions/reasons, boundaries, and deadlines. The
 session must support polling, graceful stop, and liveness proof.
 
+The agent that owns the attached execution session must not return, complete,
+or release that session while its watcher is authoritative. Prefer a
+primary-agent-owned session handle with Terra validating the binary, parent,
+tails, files, and cadence through read-only checks. A handoff is complete only
+after the receiver can poll the exact session handle; sharing a PID, run
+directory, lock file, or narrative status is insufficient. If this execution
+environment cannot transfer a live handle, keep the existing owner alive or
+promote a receiver-owned candidate with the overlap procedure below before the
+owner exits. Record any interval without a pollable authoritative handle as an
+observation gap rather than silently recreating the watcher.
+
 Continuous mode runs signals at their own cadences, limits ordinary probe
 concurrency, applies each alert's sustain count, and replaces the bounded log
 probe with one standing `warpctl logs ... -f` stream per active service. Confirm
@@ -282,6 +297,12 @@ requires a newly built watcher. Promote it as a controlled handoff:
 7. prove the new watcher remains alive and the old watcher and all of its tail
    children are gone; and
 8. update the ledger so there is exactly one authoritative watcher.
+
+Before step 6, prove that the candidate's execution-session handle is pollable
+from the agent that will own the continuous run after promotion. Do not allow a
+sub-agent to report success and finish while its private session owns the only
+candidate. Immediately after promotion, poll that same handle as well as the
+parent and tail processes; a PID-only check cannot certify durable ownership.
 
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
@@ -508,6 +529,18 @@ default zsh, and launch the test from that same shell so the verified resource
 exports reach it. Stop immediately if preflight fails. Use `exec` for the final
 test command or explicitly propagate its captured status; a later successful
 status message must never turn a failed preflight or test into a passing gate.
+If preflight finds a launcher lock without a readable current attestation, do
+not delete the lock, rewrite `/etc/hosts`, or stop an owner merely because it is
+old. Follow `local/README.md`: first prove whether a live `run-local.sh` and its
+children still own the exact healthy repository Compose services. When they
+do, preserve that launcher and run `local/run-suite-proxy.sh` in a durable
+primary-agent-owned session, with an absent private state path under
+`$BRINGYOUR_HOME/monitor` and explicit complete Vault and Config roots. Keep
+that proxy owner live through every test, revalidate its attestation before and
+after the gate, and stop it gracefully only after the last consumer exits. If
+there is no live owner, use the stale-state procedure in `local/README.md` rather
+than synthesizing readiness. A direct test that happened to pass without this
+preflight remains diagnostic evidence, not a formal gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
 

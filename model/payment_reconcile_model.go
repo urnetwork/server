@@ -9,6 +9,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -20,13 +21,15 @@ import (
 // instead of repairing: same evidence and details the real repair would
 // carry, tagged dry_run = true.
 const (
-	PaymentReconcileActionCredited     = "credited"
-	PaymentReconcileActionEnded        = "ended"
-	PaymentReconcileActionWouldCredit  = "would_credit"
-	PaymentReconcileActionWouldEnd     = "would_end"
-	PaymentReconcileActionSkippedStore = "skipped_store"
-	PaymentReconcileActionHeartbeat    = "heartbeat"
-	PaymentReconcileActionError        = "error"
+	PaymentReconcileActionCredited               = "credited"
+	PaymentReconcileActionEnded                  = "ended"
+	PaymentReconcileActionWouldCredit            = "would_credit"
+	PaymentReconcileActionWouldEnd               = "would_end"
+	PaymentReconcileActionEntitlementRepaired    = "entitlement_repaired"
+	PaymentReconcileActionWouldRepairEntitlement = "would_repair_entitlement"
+	PaymentReconcileActionSkippedStore           = "skipped_store"
+	PaymentReconcileActionHeartbeat              = "heartbeat"
+	PaymentReconcileActionError                  = "error"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the
@@ -288,6 +291,125 @@ type ReconcileSubscriptionRenewal struct {
 	TransactionId string
 }
 
+// RepairReconciledProEntitlement restores only the Pro metadata for an exact,
+// currently active supporter-renewal window that a caller has independently
+// confirmed against its authoritative payment provider. It never grants data
+// or revenue: the repair is a zero-byte, zero-revenue Pro marker with the same
+// window as the renewal. That exact window lets the existing end/revocation
+// path retire the marker with the subscription it represents.
+//
+// The provider confirmation deliberately does not live in this model helper;
+// callers must invoke it only from an adapter's authoritative-active branch.
+// Inside the transaction the renewal identity and owning network are re-read
+// and row-locked, so a deleted network, an ended/replaced renewal, or
+// mismatched store evidence cannot be repaired from stale local state. An
+// advisory lock plus a ReadCommitted post-lock recheck makes concurrent and
+// repeated calls idempotent, while the row locks serialize lifecycle updates.
+// In dryRun mode repaired means "would repair" and no balance or cache changes.
+func RepairReconciledProEntitlement(
+	ctx context.Context,
+	market SubscriptionMarket,
+	renewal *ReconcileSubscriptionRenewal,
+	now time.Time,
+	dryRun bool,
+) (repaired bool, err error) {
+	if renewal == nil {
+		return false, nil
+	}
+
+	lockKey := fmt.Sprintf(
+		"payment-entitlement-repair:%s:%s:%d:%d",
+		renewal.NetworkId,
+		market,
+		renewal.StartTime.UnixMicro(),
+		renewal.EndTime.UnixMicro(),
+	)
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Tx may retry this callback after a serialization failure. Never retain
+		// the outcome of an aborted attempt in the outer return value.
+		repaired = false
+		if !dryRun {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+				lockKey,
+			))
+		}
+
+		var renewalExists bool
+		var entitlementExists bool
+		result, queryErr := tx.Query(
+			ctx,
+			`
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM network
+					INNER JOIN subscription_renewal renewal
+						ON renewal.network_id = network.network_id
+					WHERE network.network_id = $1
+					  AND renewal.subscription_type = $2
+					  AND renewal.market = $3
+					  AND renewal.start_time = $4
+					  AND renewal.end_time = $5
+					  AND COALESCE(renewal.purchase_token, '') = $6
+					  AND COALESCE(renewal.transaction_id, '') = $7
+					  AND renewal.start_time <= $8
+					  AND $8 < renewal.end_time
+					FOR UPDATE OF network, renewal
+				),
+				EXISTS (
+					SELECT 1
+					FROM transfer_balance balance
+					WHERE balance.network_id = $1
+					  AND balance.start_time = $4
+					  AND balance.end_time = $5
+					  AND balance.pro
+				)
+			`,
+			renewal.NetworkId,
+			SubscriptionTypeSupporter,
+			market,
+			renewal.StartTime,
+			renewal.EndTime,
+			renewal.PurchaseToken,
+			renewal.TransactionId,
+			now,
+		)
+		server.WithPgResult(result, queryErr, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&renewalExists, &entitlementExists))
+			}
+		})
+		if !renewalExists || entitlementExists {
+			return
+		}
+
+		repaired = true
+		if dryRun {
+			return
+		}
+		AddTransferBalanceInTx(ctx, tx, &TransferBalance{
+			NetworkId:             renewal.NetworkId,
+			StartTime:             renewal.StartTime,
+			EndTime:               renewal.EndTime,
+			StartBalanceByteCount: 0,
+			NetRevenue:            0,
+			SubsidyNetRevenue:     0,
+			BalanceByteCount:      0,
+			PurchaseToken:         renewal.PurchaseToken,
+			Pro:                   true,
+		})
+	}, server.TxReadCommitted)
+
+	if repaired && !dryRun {
+		// The marker is committed. Refreshing earlier could publish a value from
+		// an uncommitted transaction or leave a rolled-back repair cached.
+		UpdateProNetwork(ctx, renewal.NetworkId)
+	}
+	return repaired, nil
+}
+
 // GetReconcileSubscriptionRenewals returns the market's supporter renewals
 // that are active now or ended after minEndTime (the ±48h reconcile window:
 // recently-expired rows are where a missed renewal or missed revocation
@@ -303,13 +425,14 @@ func GetReconcileSubscriptionRenewals(
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT network_id, start_time, end_time,
-			       COALESCE(purchase_token, ''), COALESCE(transaction_id, '')
-			FROM subscription_renewal
-			WHERE market = $1
-			  AND subscription_type = $2
-			  AND end_time > $3
-			ORDER BY end_time DESC
+			SELECT renewal.network_id, renewal.start_time, renewal.end_time,
+			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, '')
+			FROM subscription_renewal renewal
+			INNER JOIN network ON network.network_id = renewal.network_id
+			WHERE renewal.market = $1
+			  AND renewal.subscription_type = $2
+			  AND renewal.end_time > $3
+			ORDER BY renewal.end_time DESC
 			LIMIT $4
 			`,
 			market,
@@ -551,17 +674,31 @@ func IsAppleTransactionCredited(
 	ctx context.Context,
 	transactionId string,
 ) (credited bool) {
+	_, credited = GetAppleTransactionNetworkId(ctx, transactionId)
+	return
+}
+
+// GetAppleTransactionNetworkId reads the immutable credit owner as well as
+// ledger presence. A provider transaction can repair metadata only for the
+// same network that committed its original credit.
+func GetAppleTransactionNetworkId(
+	ctx context.Context,
+	transactionId string,
+) (networkId server.Id, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT 1 FROM apple_subscription_transaction
+			SELECT network_id FROM apple_subscription_transaction
 			WHERE transaction_id = $1
 			`,
 			transactionId,
 		)
 		server.WithPgResult(result, err, func() {
-			credited = result.Next()
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+				ok = true
+			}
 		})
 	})
 	return

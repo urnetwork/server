@@ -89,6 +89,16 @@ func migrationIdentity(migration any) (string, error) {
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
+// MigrationIdentity returns the immutable identity of the migration at index.
+// Runtime monitors use the same implementation as the migration runner so a
+// complete but reordered durable catalog cannot pass on count and range alone.
+func MigrationIdentity(index int) (string, error) {
+	if index < 0 || len(migrations) <= index {
+		return "", fmt.Errorf("migration index %d outside [0,%d)", index, len(migrations))
+	}
+	return migrationIdentity(migrations[index])
+}
+
 func migrationPrefixIdentity(count int) (string, error) {
 	if count < 0 || count > len(migrations) {
 		return "", fmt.Errorf("migration prefix count %d outside [0,%d]", count, len(migrations))

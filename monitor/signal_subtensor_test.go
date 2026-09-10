@@ -303,10 +303,10 @@ func TestSubtensorSignalDetectsZeroPeersAndFrozenHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alert := requireAlertClass(t, alerts, "subtensor-peers"); alert.Sustain != 3 {
-		t.Fatalf("peer sustain = %d", alert.Sustain)
+	if alert := requireAlertClass(t, alerts, "subtensor-peers"); alert.Sustain != 3 || alert.PageSustain != 5 {
+		t.Fatalf("peer escalation = %d/%d", alert.Sustain, alert.PageSustain)
 	}
-	if alert := requireAlertClass(t, alerts, "subtensor-progress"); alert.Frame != "archive" {
+	if alert := requireAlertClass(t, alerts, "subtensor-progress"); alert.Frame != "archive" || alert.Sustain != 3 || alert.PageSustain != 5 {
 		t.Fatalf("progress alert = %+v", alert)
 	}
 }

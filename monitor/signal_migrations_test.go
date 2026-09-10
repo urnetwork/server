@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -58,6 +59,24 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"attstattarget = 300",
 			"autovacuum_analyze_scale_factor=0",
 			"autovacuum_analyze_threshold=1000000",
+			"network_onboarding_offer",
+			"network_onboarding_apple_offer_code_available",
+			"network_onboarding_event_network_id_at",
+			"subscription_renewal",
+			"price_tier",
+			"stripe_customer",
+			"billing_country",
+			"network_onboarding_next_send_at",
+			"network_onboarding_email_network_id_sent_at",
+			"onboarding_results_daily",
+			"network_onboarding_experiment_state",
+			"network_onboarding_created_at",
+			"st_client_key_history_immutable",
+			"st_client_key_head_identity",
+			"st_client_key_retire_on_client_delete",
+			"competition_round_one_active_staging",
+			"competition_round_admission_closed_kind",
+			"epoch_metrics_available",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -166,6 +185,61 @@ func TestMigrationsSignalRejectsIncompleteIdentityCatalog(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "migration-schema-drift").Markdown()
 	if !strings.Contains(markdown, "migration_catalog identities@v600") {
 		t.Fatalf("incomplete durable migration catalog was not diagnosed:\n%s", markdown)
+	}
+}
+
+func TestMigrationsSignalAcceptsLexicallyReturnedCatalogRows(t *testing.T) {
+	head := server.MigrationCount()
+	catalogRows := syntheticMigrationCatalogRows(head)
+	sort.Slice(catalogRows, func(i, j int) bool {
+		return catalogRows[i][0] < catalogRows[j][0]
+	})
+	if catalogRows[2][0] != "10" {
+		t.Fatalf("synthetic lexical ordering did not reproduce 0,1,10: first rows are %v", catalogRows[:3])
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			// The production query pins numeric source-column order. The reducer
+			// additionally keys by the returned numeric value so row delivery
+			// order can never become migration-identity evidence.
+			if !strings.Contains(query, "SELECT migration_index, trim(identity_sha256)") {
+				t.Fatalf("catalog query casts the numeric index through an output alias:\n%s", query)
+			}
+			if !strings.Contains(query, "ORDER BY migration_catalog.migration_index") {
+				t.Fatalf("catalog query does not pin numeric source-column order:\n%s", query)
+			}
+			return catalogRows, nil
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("coherent catalog produced alerts: %+v", alerts)
+	}
+}
+
+func TestMigrationsSignalRejectsReorderedIdentityCatalog(t *testing.T) {
+	head := server.MigrationCount()
+	catalogRows := syntheticMigrationCatalogRows(head)
+	changedIndex := head - 1
+	catalogRows[changedIndex][1] = strings.Repeat("0", 64)
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return catalogRows, nil
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "migration-schema-drift").Markdown()
+	want := fmt.Sprintf("migration_catalog identity[%d]@v600", changedIndex)
+	if !strings.Contains(markdown, want) {
+		t.Fatalf("reordered durable migration catalog was not diagnosed as %q:\n%s", want, markdown)
 	}
 }
 
@@ -300,14 +374,14 @@ func TestMigrationsSignalDoesNotRequireFutureLeaderboardArtifactsAtVersion606(t 
 	}
 }
 
-func TestMigrationsSignalReportsMissingPublishedArtifacts614Through635(t *testing.T) {
+func TestMigrationsSignalReportsMissingPublishedArtifacts614ThroughHead(t *testing.T) {
 	head := server.MigrationCount()
-	if head < 635 {
-		t.Fatalf("test requires migration head 635 or newer, got %d", head)
+	if head < 654 {
+		t.Fatalf("test requires migration head 654 or newer, got %d", head)
 	}
 	tested := 0
 	for _, artifact := range migrationArtifacts {
-		if artifact.requiredVersion < 614 || 635 < artifact.requiredVersion {
+		if artifact.requiredVersion < 614 || head < artifact.requiredVersion {
 			continue
 		}
 		tested++
@@ -335,17 +409,18 @@ func TestMigrationsSignalReportsMissingPublishedArtifacts614Through635(t *testin
 			}
 		}
 	}
-	if tested != 22 {
-		t.Fatalf("tested %d artifacts for versions 614-635, want 22", tested)
+	wantTested := head - 614 + 1
+	if tested != wantTested {
+		t.Fatalf("tested %d artifacts for versions 614-%d, want %d", tested, head, wantTested)
 	}
 }
 
-func TestMigrationArtifactCatalogCoversEveryVersion614Through635(t *testing.T) {
+func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) {
 	byVersion := map[int][]migrationArtifact{}
 	for _, artifact := range migrationArtifacts {
 		byVersion[artifact.requiredVersion] = append(byVersion[artifact.requiredVersion], artifact)
 	}
-	for version := 614; version <= 635; version++ {
+	for version := 614; version <= server.MigrationCount(); version++ {
 		artifacts := byVersion[version]
 		if len(artifacts) != 1 {
 			t.Fatalf("version %d has %d artifact contracts, want 1: %+v", version, len(artifacts), artifacts)
@@ -426,5 +501,13 @@ func syntheticMigrationMissingArtifactRow(t *testing.T, head int, name string) R
 }
 
 func syntheticMigrationCatalogRows(head int) []Row {
-	return []Row{{fmt.Sprint(head), "0", fmt.Sprint(head - 1)}}
+	rows := make([]Row, 0, head)
+	for index := 0; index < head; index++ {
+		identity, err := server.MigrationIdentity(index)
+		if err != nil {
+			panic(err)
+		}
+		rows = append(rows, Row{fmt.Sprint(index), identity})
+	}
+	return rows
 }

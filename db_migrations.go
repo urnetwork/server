@@ -4780,12 +4780,14 @@ var migrations = []any{
 
 	// Audit trail for the hourly payment reconciliation task (UPGRADE.md §8).
 	// Every repair the reconciler makes -- a credit for a lost webhook, an
-	// entitlement ended because the store says it is already over -- is a row
-	// here, with the store evidence id it acted on. Operator visibility is the
-	// point: a spike in repair counts IS the alarm that webhooks are broken. A
+	// entitlement ended because the store says it is already over, or an exact
+	// provider-confirmed Pro-metadata restoration -- is a row here, with the
+	// store evidence id it acted on. Operator visibility is the point: a spike
+	// in repair counts IS the alarm that webhooks are broken. A
 	// run that repairs nothing writes only a heartbeat row (store = 'all'),
 	// and a store skipped for missing credentials writes a skipped_store row.
-	// action: credited | ended | skipped_store | heartbeat | error.
+	// action: credited | ended | entitlement_repaired | skipped_store |
+	// heartbeat | error.
 	newSqlMigration(`
 		CREATE TABLE payment_reconciliation_event (
 			event_id uuid NOT NULL PRIMARY KEY,
@@ -4822,8 +4824,9 @@ var migrations = []any{
 
 	// Dry-run audit support for manual reconciliation runs (bringyourctl
 	// payments reconcile --dry-run). A dry run records would_credit /
-	// would_end events -- the same evidence and details the real repair would
-	// carry -- plus its own heartbeat/error rows, all tagged dry_run = true.
+	// would_end / would_repair_entitlement events -- the same evidence and
+	// details the real repair would carry -- plus its own heartbeat/error rows,
+	// all tagged dry_run = true.
 	// The default false keeps every existing query correct: operator queries
 	// over real repairs, heartbeats, and errors exclude dry runs without
 	// changing.
@@ -7233,6 +7236,213 @@ var migrations = []any{
 			)
 	`),
 
+	// ----- onboarding program (mmm/onboarding/PLAN.md) -----
+
+	// The welcome offer: one row per network, issued once, never re-issued.
+	// expires_at = issued_at + onboarding.yml offer.validity_days. The purchase
+	// paths stamp redeemed_at + store; the per-store redemption handles are fixed
+	// at issue time.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_offer (
+			network_id uuid NOT NULL,
+			issued_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL,
+			issued_by varchar(16) NOT NULL,
+			surface varchar(32) NOT NULL DEFAULT '',
+			tier varchar(32) NOT NULL DEFAULT '',
+			percent_off int NOT NULL,
+			months_free int NOT NULL,
+			redeemed_at timestamp NULL,
+			store varchar(16) NULL,
+			stripe_coupon_id varchar(64) NULL,
+			apple_offer_code varchar(64) NULL,
+			play_offer_tag varchar(64) NULL,
+
+			PRIMARY KEY (network_id)
+		)
+	`),
+
+	// App Store Connect one-time offer code pool: loaded from the configured batch
+	// csv (and, later, from App Store Connect batch generation), one code handed
+	// to each issued offer.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_apple_offer_code (
+			code varchar(64) NOT NULL,
+			expires_at timestamp NOT NULL,
+			network_id uuid NULL,
+			assigned_at timestamp NULL,
+
+			PRIMARY KEY (code)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_apple_offer_code_available
+		ON network_onboarding_apple_offer_code (expires_at, code)
+		WHERE network_id IS NULL
+	`),
+
+	// Product events: POST /client/events (closed schema) plus the server-written
+	// attribution and outcome events. props is the closed per-name prop set.
+	// RETENTION: 400 days (model.OnboardingEventRetention); rows older than that
+	// are pruned by the nightly results job.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_event (
+			event_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			name varchar(64) NOT NULL,
+			at timestamp NOT NULL,
+			received_at timestamp NOT NULL,
+			platform varchar(16) NOT NULL DEFAULT '',
+			app_version varchar(64) NOT NULL DEFAULT '',
+			locale varchar(32) NOT NULL DEFAULT '',
+			tier varchar(32) NOT NULL DEFAULT '',
+			path varchar(8) NOT NULL DEFAULT '',
+			experiment varchar(64) NOT NULL DEFAULT '',
+			variant varchar(64) NOT NULL DEFAULT '',
+			session varchar(64) NOT NULL DEFAULT '',
+			props jsonb NULL,
+
+			PRIMARY KEY (event_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_event_network_id_at
+		ON network_onboarding_event (network_id, at)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_event_name_at
+		ON network_onboarding_event (name, at)
+	`),
+
+	// The regional price tier a subscription row was sold at (pro.yml
+	// pro.price_tiers name), recorded by every purchase path from now on.
+	newSqlMigration(`
+		ALTER TABLE subscription_renewal ADD COLUMN price_tier varchar(32) NULL
+	`),
+
+	// The Stripe customer's billing country (upper-case ISO alpha-2), cached from
+	// the card's billing details so the plan response resolves the price tier
+	// without a Stripe API call.
+	newSqlMigration(`
+		ALTER TABLE stripe_customer ADD COLUMN billing_country varchar(2) NULL
+	`),
+
+	// ----- onboarding campaign (mmm/onboarding/PLAN.md "THE EMAIL SEQUENCE") -----
+	// One row per network: which path it is on (A saw the in-app offer, B did
+	// not), whether it can receive email at all, the local time zone and locale
+	// used to place and render the sends, the email.sequence experiment variant,
+	// when each step went out, what is scheduled next, and why it stopped.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding (
+			network_id uuid NOT NULL,
+			created_at timestamp NOT NULL,
+			path varchar(1) NOT NULL DEFAULT '',
+			email bool NOT NULL,
+			time_zone varchar(64) NOT NULL DEFAULT '',
+			platform varchar(16) NOT NULL DEFAULT '',
+			locale varchar(32) NOT NULL DEFAULT '',
+			country varchar(2) NOT NULL DEFAULT '',
+			experiment_id varchar(64) NOT NULL DEFAULT '',
+			email_variant varchar(64) NOT NULL DEFAULT '',
+			e1_sent_at timestamp NULL,
+			e2_sent_at timestamp NULL,
+			e3_sent_at timestamp NULL,
+			e4_sent_at timestamp NULL,
+			e5_sent_at timestamp NULL,
+			last_step varchar(8) NOT NULL DEFAULT '',
+			next_step varchar(8) NOT NULL DEFAULT '',
+			next_send_at timestamp NULL,
+			exit_reason varchar(32) NOT NULL DEFAULT '',
+			exited_at timestamp NULL,
+			bounced bool NOT NULL DEFAULT false,
+			complained bool NOT NULL DEFAULT false,
+			complained_step varchar(8) NOT NULL DEFAULT '',
+			send_failures int NOT NULL DEFAULT 0,
+			last_send_error varchar(256) NOT NULL DEFAULT '',
+			PRIMARY KEY (network_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_next_send_at
+		ON network_onboarding (next_send_at)
+		WHERE next_send_at IS NOT NULL
+	`),
+	// One row per campaign email sent through Brevo, keyed by Brevo's message id
+	// so the transactional webhook events (delivered/opened/click/bounce/
+	// complaint) can be attributed to the network and step.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_email (
+			message_id varchar(256) NOT NULL,
+			network_id uuid NOT NULL,
+			step varchar(8) NOT NULL,
+			template varchar(32) NOT NULL,
+			variant varchar(32) NOT NULL,
+			experiment varchar(64) NOT NULL DEFAULT '',
+			experiment_variant varchar(64) NOT NULL DEFAULT '',
+			template_id int NOT NULL,
+			locale varchar(32) NOT NULL DEFAULT '',
+			sent_at timestamp NOT NULL,
+			PRIMARY KEY (message_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_email_network_id_sent_at
+		ON network_onboarding_email (network_id, sent_at)
+	`),
+	// onboarding results (PLAN.md "OPTIMIZATION LOOP" §3): the nightly aggregate
+	// per (cohort day, experiment, variant, surface, platform, tier, path).
+	// Counts are networks. matured_days is the cohort's age at computation.
+	newSqlMigration(`
+		CREATE TABLE onboarding_results_daily (
+			cohort_day timestamp NOT NULL,
+			experiment varchar(64) NOT NULL,
+			variant varchar(64) NOT NULL,
+			surface varchar(64) NOT NULL,
+			platform varchar(32) NOT NULL,
+			tier varchar(32) NOT NULL,
+			path varchar(16) NOT NULL,
+			exposures int NOT NULL DEFAULT 0,
+			sent int NOT NULL DEFAULT 0,
+			delivered int NOT NULL DEFAULT 0,
+			opened int NOT NULL DEFAULT 0,
+			clicked int NOT NULL DEFAULT 0,
+			landing_clicked int NOT NULL DEFAULT 0,
+			app_open_48h int NOT NULL DEFAULT 0,
+			connect_7d int NOT NULL DEFAULT 0,
+			widget_7d int NOT NULL DEFAULT 0,
+			feedback_7d int NOT NULL DEFAULT 0,
+			pro_start_14d int NOT NULL DEFAULT 0,
+			trial_to_paid_35d int NOT NULL DEFAULT 0,
+			refund_60d int NOT NULL DEFAULT 0,
+			retention_d7 int NOT NULL DEFAULT 0,
+			retention_d30 int NOT NULL DEFAULT 0,
+			unsubscribe int NOT NULL DEFAULT 0,
+			complaint int NOT NULL DEFAULT 0,
+			matured_days int NOT NULL DEFAULT 0,
+			computed_at timestamp NOT NULL,
+			PRIMARY KEY (cohort_day, experiment, variant, surface, platform, tier, path)
+		)
+	`),
+	// experiment-state overlay (§5): a paused variant is served control without
+	// editing the registry. Written by the guardrail check and bringyourctl.
+	newSqlMigration(`
+		CREATE TABLE network_onboarding_experiment_state (
+			experiment_id varchar(64) NOT NULL,
+			variant varchar(64) NOT NULL,
+			status varchar(16) NOT NULL,
+			reason varchar(256) NOT NULL DEFAULT '',
+			updated_at timestamp NOT NULL,
+			PRIMARY KEY (experiment_id, variant)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_onboarding_created_at
+		ON network_onboarding (created_at)
+	`),
+
 	// Preserve operator-signed key history independently of mutable Redis
 	// projection and retire current access atomically with client deletion.
 	newSqlMigration(clientKeyHistorySchemaSQL),
@@ -7371,5 +7581,13 @@ var migrations = []any{
 			RETURN NEW;
 		END
 		$competition_epoch_lifecycle_guard$;
+	`),
+
+	// A zero blocks/streak value is meaningful only after at least one finalized
+	// ST epoch was available to the rebuild. Keep that availability on the
+	// snapshot so API clients never render missing chain history as real zeroes.
+	newSqlMigration(`
+		ALTER TABLE network_points_leaderboard_snapshot
+		ADD COLUMN epoch_metrics_available boolean NOT NULL DEFAULT false
 	`),
 }

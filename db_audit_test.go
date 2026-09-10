@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -174,6 +175,61 @@ func TestAuditSchemaCleanOnFreshDb(t *testing.T) {
 	})
 }
 
+// Pending migrations are not drift. Reconstructing the local head here would
+// make --fix create only the catalog-visible pieces of a migration while
+// skipping its functions, triggers and data work, and would leave the recorded
+// version behind. Audit exactly the schema represented by the durable version.
+func TestAuditSchemaDoesNotSynthesizePendingMigrations(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		appliedVersion := MigrationCount() - 1
+		ApplyDbMigrationsUpTo(ctx, appliedVersion)
+
+		result := AuditSchema(ctx)
+		if result.DbVersion != appliedVersion || result.LocalVersion != MigrationCount() {
+			t.Fatalf(
+				"audit versions = db %d/local %d, want db %d/local %d",
+				result.DbVersion,
+				result.LocalVersion,
+				appliedVersion,
+				MigrationCount(),
+			)
+		}
+		if result.Diff.HasDifferences() {
+			t.Fatalf("pending migration was misclassified as schema drift:\n%s", result.Diff.Report())
+		}
+	})
+}
+
+// Schema comparison cannot be meaningful when the same numeric version names
+// different migration bytes. Audit must validate the durable catalog before it
+// creates an expected database or offers reconciliation SQL.
+func TestAuditSchemaRefusesChangedDurableMigrationIdentity(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		changedIndex := MigrationCount() - 1
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE migration_catalog SET identity_sha256 = $1 WHERE migration_index = $2`,
+				strings.Repeat("0", 64),
+				changedIndex,
+			))
+		})
+
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				t.Fatal("audit accepted a changed durable migration identity")
+			}
+			if !strings.Contains(fmt.Sprint(recovered), fmt.Sprintf("migration %d identity differs from durable catalog", changedIndex)) {
+				t.Fatalf("audit refused the wrong reason: %v", recovered)
+			}
+		}()
+		AuditSchema(ctx)
+	})
+}
+
 // TestApplySchemaFixCreatesMissingIndex drives the --fix apply path end to end:
 // drop an index, confirm the audit reports it missing, apply the fix, and
 // confirm the re-audit is clean.
@@ -326,6 +382,113 @@ func TestFixStatementsNoConstraintIndexDoubleCreate(t *testing.T) {
 			t.Fatalf("constraint index emitted as a standalone statement: %s", s)
 		}
 	}
+}
+
+// A child table sorts before its parent, reproducing the repair failure where
+// the child's foreign key ran as part of its CREATE TABLE while the referenced
+// table was still absent. All tables and candidate keys must be installed before
+// the foreign-key phase, independent of lexical table order.
+func TestFixStatementsDefersForeignKeysUntilReferencedTablesExist(t *testing.T) {
+	expected := &SchemaSnapshot{
+		tables: map[string]bool{
+			"audit_dependency_child":  true,
+			"audit_dependency_parent": true,
+		},
+		columns: map[string][]auditColumn{
+			"audit_dependency_child": {
+				{name: "id", typ: "bigint", notNull: true},
+				{name: "parent_id", typ: "bigint", notNull: true},
+			},
+			"audit_dependency_parent": {{name: "id", typ: "bigint", notNull: true}},
+		},
+		indexes: map[string]auditIndex{},
+		constraints: map[string][]auditConstraint{
+			"audit_dependency_child": {
+				{name: "audit_dependency_child_pkey", typ: "p", def: "PRIMARY KEY (id)"},
+				{name: "audit_dependency_child_parent_fkey", typ: "f", def: "FOREIGN KEY (parent_id) REFERENCES audit_dependency_parent(id)"},
+			},
+			"audit_dependency_parent": {{name: "audit_dependency_parent_pkey", typ: "p", def: "PRIMARY KEY (id)"}},
+		},
+	}
+	actual := &SchemaSnapshot{
+		tables:      map[string]bool{},
+		columns:     map[string][]auditColumn{},
+		indexes:     map[string]auditIndex{},
+		constraints: map[string][]auditConstraint{},
+	}
+
+	statements := diffSchemas(expected, actual).FixStatements()
+	if len(statements) != 3 {
+		t.Fatalf("FixStatements() returned %d statements, want two tables then one foreign key: %v", len(statements), statements)
+	}
+	if !strings.HasPrefix(statements[0], "CREATE TABLE audit_dependency_child") || strings.Contains(statements[0], "FOREIGN KEY") {
+		t.Fatalf("child CREATE TABLE must not install its foreign key: %s", statements[0])
+	}
+	if !strings.HasPrefix(statements[1], "CREATE TABLE audit_dependency_parent") {
+		t.Fatalf("second statement must create the referenced table: %s", statements[1])
+	}
+	wantForeignKey := "ALTER TABLE audit_dependency_child ADD CONSTRAINT audit_dependency_child_parent_fkey FOREIGN KEY (parent_id) REFERENCES audit_dependency_parent(id)"
+	if statements[2] != wantForeignKey {
+		t.Fatalf("last statement = %q, want %q", statements[2], wantForeignKey)
+	}
+
+	dryRun := diffSchemas(expected, actual).FixSql()
+	if strings.Index(dryRun, "CREATE TABLE audit_dependency_parent") > strings.Index(dryRun, wantForeignKey) {
+		t.Fatalf("dry-run SQL installs the foreign key before its referenced table:\n%s", dryRun)
+	}
+}
+
+// The generated sequence is executed against an isolated PostgreSQL database,
+// proving that the synthetic child-before-parent shape repairs successfully and
+// leaves a real validated foreign key rather than merely rendering plausible SQL.
+func TestApplySchemaFixDefersForeignKeysUntilReferencedTablesExist(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		expected := &SchemaSnapshot{
+			tables: map[string]bool{
+				"audit_dependency_child":  true,
+				"audit_dependency_parent": true,
+			},
+			columns: map[string][]auditColumn{
+				"audit_dependency_child": {
+					{name: "id", typ: "bigint", notNull: true},
+					{name: "parent_id", typ: "bigint", notNull: true},
+				},
+				"audit_dependency_parent": {{name: "id", typ: "bigint", notNull: true}},
+			},
+			indexes: map[string]auditIndex{},
+			constraints: map[string][]auditConstraint{
+				"audit_dependency_child": {
+					{name: "audit_dependency_child_pkey", typ: "p", def: "PRIMARY KEY (id)"},
+					{name: "audit_dependency_child_parent_fkey", typ: "f", def: "FOREIGN KEY (parent_id) REFERENCES audit_dependency_parent(id)"},
+				},
+				"audit_dependency_parent": {{name: "audit_dependency_parent_pkey", typ: "p", def: "PRIMARY KEY (id)"}},
+			},
+		}
+		actual := &SchemaSnapshot{
+			tables:      map[string]bool{},
+			columns:     map[string][]auditColumn{},
+			indexes:     map[string]auditIndex{},
+			constraints: map[string][]auditConstraint{},
+		}
+
+		ApplySchemaFix(ctx, diffSchemas(expected, actual), false, nil)
+
+		MaintenanceDb(ctx, func(conn PgConn) {
+			var validated bool
+			err := conn.QueryRow(ctx, `
+				SELECT convalidated
+				FROM pg_constraint
+				WHERE conname = 'audit_dependency_child_parent_fkey'
+			`).Scan(&validated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !validated {
+				t.Fatal("repaired foreign key is not validated")
+			}
+		})
+	})
 }
 
 // TestIntrospectExcludesConstraintIndexes verifies the introspection query

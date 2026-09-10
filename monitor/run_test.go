@@ -489,3 +489,60 @@ func TestCadenceAlertGateResetsStreakAfterHealthyTick(t *testing.T) {
 		t.Fatalf("second consecutive broken tick returned %d alert(s), want 1", len(got))
 	}
 }
+
+// A sustained fault keeps one identity while its urgency rises. Opening a
+// second PAGE identity would leave the warning independently unresolved and
+// make one frozen node look like two incidents.
+func TestCadenceAlertGatePromotesStableIdentityAtPageSustain(t *testing.T) {
+	gate := newCadenceAlertGate()
+	signal := &steppedAlertSignal{}
+	alert := Alert{
+		SignalID:    signal.ID(),
+		Class:       "frozen",
+		Target:      "synthetic-node",
+		Frame:       "archive",
+		Severity:    SeverityWarn,
+		Sustain:     3,
+		PageSustain: 5,
+	}
+	identity := alert.Identity()
+
+	for tick := 1; tick <= 6; tick++ {
+		ready := gate.filter(signal, Alerts{alert})
+		if tick < alert.Sustain {
+			if len(ready) != 0 {
+				t.Fatalf("tick %d returned %d alert(s) before sustain", tick, len(ready))
+			}
+			continue
+		}
+		if len(ready) != 1 {
+			t.Fatalf("tick %d returned %d alert(s), want one", tick, len(ready))
+		}
+		wantSeverity := SeverityWarn
+		if alert.PageSustain <= tick {
+			wantSeverity = SeverityPage
+		}
+		if ready[0].Severity != wantSeverity {
+			t.Fatalf("tick %d severity = %s, want %s", tick, ready[0].Severity, wantSeverity)
+		}
+		if ready[0].Identity() != identity {
+			t.Fatalf("tick %d identity = %q, want %q", tick, ready[0].Identity(), identity)
+		}
+	}
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("gate mutated source alert severity to %s", alert.Severity)
+	}
+
+	if ready := gate.filter(signal, nil); len(ready) != 0 {
+		t.Fatalf("healthy reset returned %d alert(s)", len(ready))
+	}
+	for tick := 1; tick < alert.Sustain; tick++ {
+		if ready := gate.filter(signal, Alerts{alert}); len(ready) != 0 {
+			t.Fatalf("post-reset tick %d retained the old streak", tick)
+		}
+	}
+	ready := gate.filter(signal, Alerts{alert})
+	if len(ready) != 1 || ready[0].Severity != SeverityWarn {
+		t.Fatalf("post-reset opening alert = %+v, want one warning", ready)
+	}
+}

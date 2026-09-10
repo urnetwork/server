@@ -13,8 +13,13 @@ WITH active_supporter AS (
     SELECT DISTINCT renewal.network_id, renewal.market, min(renewal.start_time) OVER (PARTITION BY renewal.network_id, renewal.market) AS first_start
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market IN ('apple', 'google', 'solana', 'stripe')
       AND renewal.start_time <= now()
       AND now() < renewal.end_time
+      AND EXISTS (
+          SELECT 1 FROM network
+          WHERE network.network_id = renewal.network_id
+      )
 ), missing_entitlement AS (
     SELECT active_supporter.market AS target,
            count(DISTINCT active_supporter.network_id)::bigint AS issue_count,
@@ -30,6 +35,21 @@ WITH active_supporter AS (
           AND now() < balance.end_time
     )
     GROUP BY active_supporter.market
+), orphan_renewal AS (
+    SELECT renewal.market AS target,
+           count(DISTINCT renewal.network_id)::bigint AS issue_count,
+           extract(epoch FROM now() - min(renewal.start_time))::bigint AS oldest_age,
+           extract(epoch FROM now() - max(renewal.start_time))::bigint AS newest_age
+    FROM subscription_renewal renewal
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market IN ('apple', 'google', 'stripe')
+      AND renewal.start_time <= now()
+      AND now() < renewal.end_time
+      AND NOT EXISTS (
+          SELECT 1 FROM network
+          WHERE network.network_id = renewal.network_id
+      )
+    GROUP BY renewal.market
 ), unfulfilled_solana AS (
     SELECT reason AS target,
            count(*)::bigint AS issue_count,
@@ -51,6 +71,9 @@ WITH active_supporter AS (
 )
 SELECT 'entitlement_missing' AS kind, target, issue_count, oldest_age, newest_age
 FROM missing_entitlement
+UNION ALL
+SELECT 'orphan_renewal' AS kind, target, issue_count, oldest_age, newest_age
+FROM orphan_renewal
 UNION ALL
 SELECT 'solana_unfulfilled' AS kind, target, issue_count, oldest_age, newest_age
 FROM unfulfilled_solana
@@ -118,7 +141,7 @@ func (paymentFailuresProbe) check(ctx context.Context, env *probeEnv) ([]finding
 func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int64) (finding, error) {
 	common := finding{
 		probeId: "pg/payment-failures", tier: tierPage, target: target, frame: "kind=" + kind, sustain: 1,
-		baseline: "No durable paid-but-unfulfilled payment, paying-account entitlement mismatch, unmatched refund, or legacy identity fallback remains unresolved.",
+		baseline: "No durable paid-but-unfulfilled payment, paying-account entitlement mismatch, orphaned active renewal, unmatched refund, or legacy identity fallback remains unresolved.",
 		observed: fmt.Sprintf("kind=%s target=%s count=%d oldest_age_seconds=%d newest_age_seconds=%d", kind, target, count, oldestAge, newestAge),
 		evidence: "Only aggregate kind/target counts and ages are selected. Network IDs, user identity, payment references, transaction signatures, provider evidence, stored details, and credentials never leave PostgreSQL.",
 		playbook: "SIGNALS.md §2.22",
@@ -131,8 +154,19 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.class = "payment-entitlement-missing"
 		common.symptom = fmt.Sprintf("%d active %s paying account(s) have no current Pro entitlement", count, target)
 		common.mechanism = "The authoritative local renewal window says the store is still billing, but no in-window transfer_balance with pro=true exists. Clients therefore receive free-tier behavior even though the account remains paid."
-		common.action = "Inspect the bounded renewal and entitlement write path for one affected account using privileged tooling, repair the idempotent grant path, and refresh the Pro cache. Do not infer entitlement from revenue alone or expose account identifiers in the alert."
-		common.verify = "Every active supporter renewal has an in-window pro=true entitlement, client JWT refresh reports Pro, and the aggregate remains zero through two payment-reconciliation runs."
+		common.action = "Confirm this store's reconciliation credentials and authoritative lookup are healthy, then allow the ordinary reconciler to validate the exact renewal and restore only its missing Pro metadata. Trace and fix the earlier write-path loss. Never grant from the local renewal alone or expose account identifiers in the alert."
+		common.verify = "The provider-confirmed reconciliation records one entitlement_repaired event, the Pro cache and a refreshed client JWT report Pro, and the aggregate remains zero through two later reconciliation runs without changing purchased bytes or revenue."
+	case "orphan_renewal":
+		if !map[string]bool{"apple": true, "google": true, "stripe": true}[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown orphan-renewal market")
+		}
+		common.tier = tierWarn
+		common.class = "payment-renewal-orphan"
+		common.symptom = fmt.Sprintf("%d deleted account(s) retain an active %s renewal", count, target)
+		common.mechanism = "Account deletion removed the owning network but retained one or more in-window local rows for a recurring subscription market. This is historical residue, not a paying account eligible for Pro repair. The aggregate counts distinct deleted owners rather than renewal rows, and local history alone cannot prove whether provider-side cancellation completed or which pre-fence write/delete ordering created it."
+		common.observed = fmt.Sprintf("kind=%s target=%s deleted_owner_count=%d oldest_renewal_start_age_seconds=%d newest_renewal_start_age_seconds=%d", kind, target, count, oldestAge, newestAge)
+		common.action = "Using authorized provider tooling, determine whether each deleted owner's provider subscription remains active and complete the supported cancellation or support workflow. Verify the deployed Server has the network-row deletion/credit fence; for Stripe, also require provider-confirmed cancellation-before-delete and failure propagation. Stripe subscriptions missing active local renewal metadata remain a separate discovery gap. Apple and Google disposition is separate policy, not evidence that Stripe cancellation covered them. Retain financial history; do not recreate the network, grant Pro, or infer current billing from the local row alone."
+		common.verify = "Every affected deleted owner has a provider-side disposition; a failed Stripe cancellation retains the network; delayed paid writers stop before consuming their ledger or intent; and no new deleted owner enters this aggregate through two reconciliation windows. Alert disappearance from natural expiry alone is not causal closure."
 	case "solana_unfulfilled":
 		if target != "no_intent" && target != "underpaid" {
 			return finding{}, fmt.Errorf("payment failures returned an unknown Solana reason")

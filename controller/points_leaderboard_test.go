@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestPointsLeaderboardRowFromModel(t *testing.T) {
 		LeaderboardPublic:       true,
 		PointsLeaderboardPublic: false,
 		ContainsProfanity:       true,
-	})
+	}, model.PointsLeaderboardSortPoints)
 	connect.AssertEqual(t, hidden.Anonymous, true)
 	connect.AssertEqual(t, hidden.NetworkName, "")
 	connect.AssertEqual(t, hidden.ContainsProfanity, false)
@@ -93,7 +94,7 @@ func TestPointsLeaderboardRowFromModel(t *testing.T) {
 		NetworkName:             "shown",
 		LeaderboardPublic:       false,
 		PointsLeaderboardPublic: true,
-	})
+	}, model.PointsLeaderboardSortPoints)
 	connect.AssertEqual(t, public.Anonymous, false)
 	connect.AssertEqual(t, public.NetworkName, "shown")
 }
@@ -166,6 +167,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, rebuilt.TotalRanked, int64(5))
 		connect.AssertEqual(t, rebuilt.LatestEpoch, uint64(5))
+		connect.AssertEqual(t, rebuilt.EpochMetricsAvailable, true)
 
 		// networks 0 and 1 show their names; the others stay anonymous.
 		// network 3 makes its name public on the DATA leaderboard, which must
@@ -205,6 +207,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, page.Me, (*PointsLeaderboardMe)(nil))
 		connect.AssertEqual(t, page.TotalRanked, int64(5))
 		connect.AssertEqual(t, page.LatestEpoch, uint64(5))
+		connect.AssertEqual(t, page.EpochMetricsAvailable, true)
 		connect.AssertEqual(t, len(page.Rows), 2)
 		// points order is (points, streak, blocks): n2 (90) is rank 1 and
 		// anonymous; n1 and n3 tie at 80 and streak 0, and the blocks
@@ -355,4 +358,205 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, len(fresh.Rows), 5)
 		connect.AssertEqual(t, fresh.NextCursor, "")
 	})
+}
+
+// Missing ST deployment/finalized epochs must not turn its structurally valid
+// zero values into measured zeroes. Total-points paging remains available,
+// while epoch-derived sorts fail explicitly. The main integration test above
+// is the available control, including networks with legitimate zero streaks.
+func TestPointsLeaderboardUnavailableEpochMetrics(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "points_unavailable", server.NewId())
+		model.Testing_InsertAccountPoint(ctx, networkId, model.PointsToNanoPoints(2), server.NowUtc())
+		anonymous := session.NewLocalClientSession(ctx, "source.invalid:0", nil)
+		defer anonymous.Cancel()
+
+		pointsLeaderboardDeploymentKeyFunc = func() (model.StDeploymentKey, bool) {
+			return "", false
+		}
+		defer func() { pointsLeaderboardDeploymentKeyFunc = StDeploymentKey }()
+
+		rebuilt, err := RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, rebuilt.TotalRanked, int64(1))
+		connect.AssertEqual(t, rebuilt.LatestEpoch, uint64(0))
+		connect.AssertEqual(t, rebuilt.EpochMetricsAvailable, false)
+
+		points, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: model.PointsLeaderboardSortPoints}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, points.Error, (*PointsLeaderboardError)(nil))
+		connect.AssertEqual(t, len(points.Rows), 1)
+		connect.AssertEqual(t, points.Rows[0].TotalPoints, 2.0)
+		connect.AssertEqual(t, points.EpochMetricsAvailable, false)
+
+		for _, unavailableSort := range []string{model.PointsLeaderboardSortBlocks, model.PointsLeaderboardSortStreak} {
+			result, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: unavailableSort}, anonymous)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertNotEqual(t, result.Error, (*PointsLeaderboardError)(nil))
+			connect.AssertEqual(t, len(result.Rows), 0)
+		}
+	})
+}
+
+// fakePointsLeaderboardPager is a pager over an in-memory snapshot of n rows
+// whose positions are 1..n in every sort, for the paging rules alone.
+func fakePointsLeaderboardPager(n int64) *pointsLeaderboardPager {
+	rowAt := func(pos int64) *model.PointsLeaderboardRow {
+		return &model.PointsLeaderboardRow{
+			PointsLeaderboardEntry: model.PointsLeaderboardEntry{
+				NetworkId: server.NewId(),
+				PosPoints: pos,
+				PosBlocks: pos,
+				PosStreak: pos,
+			},
+		}
+	}
+	return &pointsLeaderboardPager{
+		snapshotId:  server.NewId(),
+		sort:        model.PointsLeaderboardSortPoints,
+		totalRanked: n,
+		after: func(afterPosition int64, limit int) []*model.PointsLeaderboardRow {
+			rows := []*model.PointsLeaderboardRow{}
+			for pos := afterPosition + 1; pos <= n && len(rows) < limit; pos++ {
+				rows = append(rows, rowAt(pos))
+			}
+			return rows
+		},
+		before: func(beforePosition int64, limit int) []*model.PointsLeaderboardRow {
+			rows := []*model.PointsLeaderboardRow{}
+			for pos := beforePosition - 1; 1 <= pos && len(rows) < limit; pos-- {
+				rows = append(rows, rowAt(pos))
+			}
+			// ascending, like the query
+			for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+			return rows
+		},
+	}
+}
+
+func positionsOf(rows []*model.PointsLeaderboardRow) []int64 {
+	out := []int64{}
+	for _, row := range rows {
+		out = append(out, row.PosPoints)
+	}
+	return out
+}
+
+func mustDecodeCursor(t *testing.T, s string) *pointsLeaderboardCursor {
+	if s == "" {
+		return nil
+	}
+	cursor, err := decodePointsLeaderboardCursor(s)
+	connect.AssertEqual(t, err, nil)
+	return &cursor
+}
+
+func TestPointsLeaderboardPagerFirstPageUnchanged(t *testing.T) {
+	pager := fakePointsLeaderboardPager(120)
+	rows, prev, next := pager.page(nil, 0, 50)
+	connect.AssertEqual(t, positionsOf(rows)[0], int64(1))
+	connect.AssertEqual(t, len(rows), 50)
+	// the top has nothing before it
+	connect.AssertEqual(t, prev, "")
+	nextCursor := mustDecodeCursor(t, next)
+	connect.AssertEqual(t, nextCursor.Position, int64(50))
+	connect.AssertEqual(t, nextCursor.Backward, false)
+
+	// the last page: no next
+	rows, _, next = pager.page(&pointsLeaderboardCursor{Position: 100, Sort: pager.sort, SnapshotId: pager.snapshotId}, 0, 50)
+	connect.AssertEqual(t, len(rows), 20)
+	connect.AssertEqual(t, next, "")
+}
+
+func TestPointsLeaderboardPagerSeekClampsAndBounds(t *testing.T) {
+	pager := fakePointsLeaderboardPager(120)
+
+	// a seek in the middle starts exactly there and has both cursors
+	rows, prev, next := pager.page(nil, 61, 50)
+	connect.AssertEqual(t, positionsOf(rows)[0], int64(61))
+	connect.AssertEqual(t, positionsOf(rows)[len(rows)-1], int64(110))
+	connect.AssertEqual(t, mustDecodeCursor(t, prev).Position, int64(61))
+	connect.AssertEqual(t, mustDecodeCursor(t, prev).Backward, true)
+	connect.AssertEqual(t, mustDecodeCursor(t, next).Position, int64(110))
+
+	// below 1 and above the total clamp
+	rows, prev, _ = pager.page(nil, -5, 50)
+	connect.AssertEqual(t, positionsOf(rows)[0], int64(1))
+	connect.AssertEqual(t, prev, "")
+	rows, prev, next = pager.page(nil, 9999, 50)
+	connect.AssertEqual(t, positionsOf(rows), []int64{120})
+	connect.AssertEqual(t, mustDecodeCursor(t, prev).Position, int64(120))
+	connect.AssertEqual(t, next, "")
+
+	// a seek to the very top is the first page
+	_, prev, _ = pager.page(nil, 1, 50)
+	connect.AssertEqual(t, prev, "")
+}
+
+func TestPointsLeaderboardPagerBackward(t *testing.T) {
+	pager := fakePointsLeaderboardPager(120)
+	// the page before position 61: 11..60, with more before it
+	rows, prev, next := pager.page(&pointsLeaderboardCursor{Position: 61, Backward: true, Sort: pager.sort, SnapshotId: pager.snapshotId}, 0, 50)
+	connect.AssertEqual(t, positionsOf(rows)[0], int64(11))
+	connect.AssertEqual(t, positionsOf(rows)[len(rows)-1], int64(60))
+	connect.AssertEqual(t, mustDecodeCursor(t, prev).Position, int64(11))
+	connect.AssertEqual(t, mustDecodeCursor(t, next).Position, int64(60))
+	// one more page back reaches the top: no prev
+	rows, prev, _ = pager.page(mustDecodeCursor(t, prev), 0, 50)
+	connect.AssertEqual(t, positionsOf(rows)[0], int64(1))
+	connect.AssertEqual(t, len(rows), 10)
+	connect.AssertEqual(t, prev, "")
+}
+
+// A seek followed by forward paging to the end and backward paging to the top
+// covers every position exactly once.
+func TestPointsLeaderboardPagerSeekCoversAll(t *testing.T) {
+	for _, n := range []int64{1, 7, 50, 51, 120, 137} {
+		for _, seek := range []int64{1, 2, 25, 50, 51, 77, n} {
+			pager := fakePointsLeaderboardPager(n)
+			seen := map[int64]int{}
+			rows, prev, next := pager.page(nil, seek, 50)
+			for _, pos := range positionsOf(rows) {
+				seen[pos]++
+			}
+			for next != "" {
+				rows, _, next = pager.page(mustDecodeCursor(t, next), 0, 50)
+				for _, pos := range positionsOf(rows) {
+					seen[pos]++
+				}
+			}
+			for prev != "" {
+				rows, prev, _ = pager.page(mustDecodeCursor(t, prev), 0, 50)
+				for _, pos := range positionsOf(rows) {
+					seen[pos]++
+				}
+			}
+			connect.AssertEqual(t, int64(len(seen)), n)
+			for pos := int64(1); pos <= n; pos++ {
+				if seen[pos] != 1 {
+					t.Fatalf("n=%d seek=%d: position %d seen %d times", n, seek, pos, seen[pos])
+				}
+			}
+		}
+	}
+}
+
+func TestPointsLeaderboardCursorDirectionRoundTrip(t *testing.T) {
+	encoded := encodePointsLeaderboardCursor(pointsLeaderboardCursor{
+		SnapshotId: server.NewId(),
+		Sort:       model.PointsLeaderboardSortStreak,
+		Position:   9,
+		Backward:   true,
+	})
+	cursor, err := decodePointsLeaderboardCursor(encoded)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, cursor.Backward, true)
+	// a cursor minted before backward paging existed decodes as forward
+	legacy, err := decodePointsLeaderboardCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"s":"` + server.NewId().String() + `","o":"points","p":3}`)))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, legacy.Backward, false)
 }

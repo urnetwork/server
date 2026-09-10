@@ -170,6 +170,19 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
 		router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
 		router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+		// onboarding program (mmm/onboarding/PLAN.md): the welcome offer, the
+		// closed client event schema, the campaign token endpoints and the
+		// inline Stripe payment sheet
+		router.NewRoute("POST", "/onboarding/offer/issue", handlers.OnboardingOfferIssue),
+		router.NewRoute("POST", "/onboarding/click", handlers.OnboardingClick),
+		router.NewRoute("GET", "/onboarding/feedback/([^/]+)", handlers.OnboardingFeedbackToken),
+		router.NewRoute("POST", "/client/events", handlers.ClientEventsSend),
+		// the onboarding results side (PLAN.md "OPTIMIZATION LOOP"): the
+		// nightly aggregate and the registry, behind the vault admin bearers
+		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
+		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
+		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
+		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),
 		// the "Manage subscription" screen: every store billing the network with
 		// its paid-through date and auto-renew state; cancel/resume act on
 		// Stripe, the other stores are cancelled on the store itself

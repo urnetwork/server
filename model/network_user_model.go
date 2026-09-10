@@ -705,6 +705,28 @@ func addWalletAuth(
 	if err = validateWalletAuth(addWalletAuth.WalletAuth); err != nil {
 		return err
 	}
+	// Adding a wallet is proof of key possession, so it takes the same
+	// server-issued single-use challenge as wallet login and network create:
+	// the signed message must be the exact text issued by
+	// POST /auth/wallet-challenge (challenge value + timestamp), unexpired and
+	// unused. A signature over any other text is rejected here so a captured
+	// signature cannot be replayed to bind the wallet to another account.
+	walletAuth := addWalletAuth.WalletAuth
+	useResult, useErr := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+		Blockchain: walletAuth.Blockchain,
+		PublicKey:  walletAuth.PublicKey,
+		Message:    walletAuth.Message,
+		Signature:  walletAuth.Signature,
+	}, ctx)
+	if useErr != nil {
+		return useErr
+	}
+	if !useResult.Valid {
+		if useResult.Error != nil {
+			return errors.New(useResult.Error.Message)
+		}
+		return errors.New("401 invalid wallet challenge")
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		err = addWalletAuthInTx(tx, addWalletAuth, ctx)
 	})

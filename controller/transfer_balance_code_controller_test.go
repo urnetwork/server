@@ -18,6 +18,7 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, networkIdA)
 
 		userIdA := server.NewId()
 		guestMode := false

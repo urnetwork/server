@@ -66,7 +66,7 @@ SELECT event.store,
        extract(epoch FROM now() - max(event.event_time))::bigint
 FROM payment_reconciliation_event event
 INNER JOIN reconciliation_run ON reconciliation_run.run_id = event.run_id
-WHERE event.action IN ('credited', 'ended')
+WHERE event.action IN ('credited', 'ended', 'entitlement_repaired')
   AND NOT event.dry_run
   AND event.event_time >= now() - interval '24 hours'
 GROUP BY event.store, event.action
@@ -255,7 +255,7 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 
 func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 	allowedStores := map[string]bool{"apple": true, "google": true, "solana": true, "stripe": true}
-	allowedActions := map[string]bool{"credited": true, "ended": true}
+	allowedActions := map[string]bool{"credited": true, "ended": true, "entitlement_repaired": true}
 	findings := make([]finding, 0, len(rows))
 	seen := map[string]bool{}
 	for _, row := range rows {
@@ -279,17 +279,25 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 		if err != nil || age < 0 {
 			return nil, fmt.Errorf("payment reconciliation repairs returned an invalid age")
 		}
-		findings = append(findings, finding{
+		repair := finding{
 			probeId: "pg/payment-reconciliation", tier: tierWarn, class: "payment-reconciliation-repair", target: store, frame: "action=" + action, sustain: 1,
 			symptom:   fmt.Sprintf("The payment reconciler repaired %d missed %s %s event(s) in 24 hours", count, store, action),
-			mechanism: "The hourly safety net found authoritative store state that the ordinary notification/task path had not applied. The repair protects the account, but its existence is evidence of a lost, rejected, or incorrectly handled payment lifecycle event.",
-			baseline:  "Zero reconciler-originated credited or ended repairs; ordinary provider notifications apply each lifecycle event idempotently before reconciliation is needed.",
+			mechanism: "The hourly safety net found authoritative store state that the ordinary notification/task path had not applied. The repair protects the account, but its existence is evidence of a lost, rejected, or incorrectly handled payment lifecycle event or missing Pro metadata.",
+			baseline:  "Zero reconciler-originated credited, ended, or entitlement-metadata repairs; ordinary provider notifications apply each lifecycle event and its Pro metadata idempotently before reconciliation is needed.",
 			observed:  fmt.Sprintf("store=%s action=%s repairs_24h=%d latest_age_seconds=%d", store, action, count, age),
 			evidence:  "The query joins only run IDs that emitted a reconciliation heartbeat, then returns aggregate store/action counts and age. Run IDs, accounts, provider evidence, details, and credentials are excluded.",
 			action:    "Validate the repaired account state, then trace the provider notification, verification, idempotency ledger, task, and database path for the same bounded time window. Keep the safety-net repair and fix the earlier missing stage rather than replaying provider events manually.",
 			verify:    "The repaired entitlement matches authoritative store state exactly once, later notifications apply normally, and no new repair for this store/action appears through two complete reconciliation windows.",
 			playbook:  "SIGNALS.md §2.21",
-		})
+		}
+		if store == "stripe" && action == "ended" {
+			repair.symptom = fmt.Sprintf("The payment reconciler first applied %d terminal Stripe subscription state(s) in 24 hours", count)
+			repair.mechanism = "Stripe reported an existing local subscription as already terminal, and the hourly reconciliation safety net ended its remaining local renewal and matching Pro window. The current Stripe webhook has no real-time subscription-lifecycle consumer, so reconciliation is the first implemented application path; this aggregate does not prove a lost delivery from an implemented handler."
+			repair.baseline = "Zero terminal Stripe subscription states first applied by reconciliation; the local renewal and its matching Pro entitlement agree with authoritative provider state."
+			repair.action = "Confirm the authoritative terminal subscription state and the corresponding local end, then inspect the exact deployed artifact before changing anything. Treat the absent real-time Stripe subscription-lifecycle consumer as the source gap; do not search for a lifecycle idempotency ledger that does not exist or replay an aggregate event manually."
+			repair.verify = "Stripe still reports the subscription as terminal, the local renewal and matching Pro entitlement are ended, and no new stripe/ended repair appears through two complete reconciliation windows."
+		}
+		findings = append(findings, repair)
 	}
 	return findings, nil
 }

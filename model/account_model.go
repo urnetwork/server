@@ -111,54 +111,50 @@ func RemoveNetwork(
 	adminUserId *server.Id,
 ) (success bool, userAuths map[string]bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		if adminUserId != nil {
-			result, err := tx.Query(
-				ctx,
-				`
-				SELECT
-					admin_user_id
-				FROM network
-				WHERE network_id = $1
-				`,
-				networkId,
-			)
+		// Tx may rerun the callback after a transient database failure. Never let
+		// a value produced by an aborted attempt escape a later refusal.
+		success = false
+		userAuths = nil
 
-			adminMatch := false
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					var userId server.Id
-					server.Raise(result.Scan(&userId))
-					if *adminUserId == userId {
-						adminMatch = true
-					}
-				}
-			})
-
-			if !adminMatch {
-				return
-			}
+		// Serialize deletion against every renewal credit. The matching credit
+		// path takes FOR KEY SHARE before it consumes a provider idempotency
+		// ledger or payment intent. ReadCommitted below is required: if this
+		// waits behind a credit, the active-renewal query must see that credit's
+		// commit rather than retain a pre-wait RepeatableRead snapshot.
+		networkAdminUserId, networkFound := lockPaymentNetworkForRemoveInTx(tx, ctx, networkId)
+		if !networkFound || (adminUserId != nil && *adminUserId != networkAdminUserId) {
+			return
 		}
 
-		userIds := map[server.Id]bool{}
-		userAuths = map[string]bool{}
-
+		// Controller deletion cancels and closes Stripe renewals first. Keep
+		// this invariant in the model too, so direct CLI/model callers fail
+		// closed and a Stripe credit that won the row-lock race forces a retry.
+		activeStripeRenewal := false
 		result, err := tx.Query(
 			ctx,
 			`
-			SELECT
-				network.admin_user_id
-			FROM network
-			WHERE network_id = $1
+				SELECT EXISTS (
+					SELECT 1
+					FROM subscription_renewal
+					WHERE network_id = $1
+						AND market = $2
+						AND now() < end_time
+				)
 			`,
 			networkId,
+			SubscriptionMarketStripe,
 		)
 		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var userId server.Id
-				server.Raise(result.Scan(&userId))
-				userIds[userId] = true
+			if result.Next() {
+				server.Raise(result.Scan(&activeStripeRenewal))
 			}
 		})
+		if activeStripeRenewal {
+			return
+		}
+
+		userIds := map[server.Id]bool{networkAdminUserId: true}
+		userAuths = map[string]bool{}
 
 		server.CreateTempTableInTx(ctx, tx, "temp_user_id(user_id uuid)", slices.Collect(maps.Keys(userIds))...)
 
@@ -246,7 +242,7 @@ func RemoveNetwork(
 		networkNameSearch().RemoveInTx(ctx, networkId, tx)
 
 		success = true
-	})
+	}, server.TxReadCommitted)
 
 	if success {
 		// the networks stats series (ComputeStats) replays created/deleted
@@ -256,5 +252,32 @@ func RemoveNetwork(
 		auditNetworkEvent.NetworkId = networkId
 		AddAuditEvent(ctx, auditNetworkEvent)
 	}
+	return
+}
+
+// lockPaymentNetworkForRemoveInTx serializes owner deletion against paid
+// entitlement and data writers and returns the administrator under that lock.
+func lockPaymentNetworkForRemoveInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+) (networkAdminUserId server.Id, found bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+			/* payment-network-delete-lock */
+			SELECT admin_user_id
+			FROM network
+			WHERE network_id = $1
+			FOR UPDATE
+		`,
+		networkId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&networkAdminUserId))
+			found = true
+		}
+	})
 	return
 }

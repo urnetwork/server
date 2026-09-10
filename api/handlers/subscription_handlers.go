@@ -11,8 +11,16 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// SubscriptionBalance is the plan response. ?storefront_country=XX (the store's
+// storefront country, when the app knows it) resolves the regional price tier;
+// without it the tier is resolved from the Stripe billing country, else the
+// client ip as a display estimate.
 func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.SubscriptionBalance, w, r)
+	storefrontCountry := r.URL.Query().Get("storefront_country")
+	impl := func(clientSession *session.ClientSession) (*controller.SubscriptionBalanceResult, error) {
+		return controller.SubscriptionBalanceForStorefront(storefrontCountry, clientSession)
+	}
+	router.WrapRequireAuth(impl, w, r)
 }
 
 // SubscriptionDetails lists every store billing the caller's network with the

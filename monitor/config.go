@@ -454,9 +454,10 @@ func loadCredentialRequirements(environment string, stEnabled bool, services []s
 		{
 			key: "coinbase-payment", resource: "coinbase.yml", purpose: "Coinbase data-pack checkout and webhook verification", required: required,
 			fields: []credentialFieldSpec{
-				field("api.account_id", "api", "account_id"),
-				field("api.key_name", "api", "key_name"),
-				field("api.private_key", "api", "private_key"),
+				// The current exchange-rate client is unauthenticated and reads
+				// only api.host. account_id, key_name, and private_key are retained
+				// legacy configuration, not runtime credential prerequisites.
+				field("api.host", "api", "host"),
 				field("webhook.shared_secret", "webhook", "shared_secret"),
 			},
 		},
@@ -544,6 +545,24 @@ func loadCredentialRequirements(environment string, stEnabled bool, services []s
 				field("token_uri", "token_uri"),
 			},
 		},
+	}
+	if serviceEnabled("api") {
+		specs = append(specs,
+			credentialRequirementSpec{
+				key: "apple-sign-in", resource: "apple.yml", purpose: "Apple sign-in audience validation", required: required,
+				fields: []credentialFieldSpec{
+					field("client_id", "client_id"),
+				},
+			},
+			credentialRequirementSpec{
+				key: "google-sign-in", resource: "google.yml", purpose: "Google sign-in audience validation and browser authorization-code exchange", required: required,
+				fields: []credentialFieldSpec{
+					field("client_id", "client_id"),
+					field("sign_in_oauth.client_id", "sign_in_oauth", "client_id"),
+					field("sign_in_oauth.client_secret", "sign_in_oauth", "client_secret"),
+				},
+			},
+		)
 	}
 	if analyticsFields := enabledAnalyticsCredentialFields(); len(analyticsFields) != 0 {
 		specs = append(specs, credentialRequirementSpec{

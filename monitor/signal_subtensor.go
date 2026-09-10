@@ -521,7 +521,7 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 	if node.Direct.Health.Peers <= 0 {
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-peers",
-			target: target.name, frame: configured.Name, sustain: 3,
+			target: target.name, frame: configured.Name, sustain: 3, pageSustain: 5,
 			symptom:   fmt.Sprintf("%s has no retained Subtensor peer", identity),
 			mechanism: "A local RPC and listener can remain healthy while a zero-peer node freezes and eventually reports its own stale head as the sync target.",
 			baseline:  "Every node retains at least one peer; public inbound reachability and multiple peers are preferred.",
@@ -534,7 +534,7 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 	if secondHead <= firstHead {
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-progress",
-			target: target.name, frame: configured.Name, sustain: 3,
+			target: target.name, frame: configured.Name, sustain: 3, pageSustain: 5,
 			symptom:   fmt.Sprintf("%s did not advance across the bounded head sample", identity),
 			mechanism: "The RPC is serving a static local database; peer loss, import failure, or resource pressure can freeze it without closing the listener.",
 			baseline:  "The best head advances across the fifteen-second source-of-truth sample while the public chain advances.",

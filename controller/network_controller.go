@@ -57,6 +57,17 @@ func NetworkCreate(
 		verifyUseNumeric = true
 	}
 
+	// the sign-up form's product-updates line (default on). Persisted for the
+	// network now, whichever branch below runs, so a verification-pending
+	// sign-up keeps its choice until AuthVerify completes it.
+	productUpdates := ProductUpdatesFromCreateArgs(&networkCreate)
+	if result.Network != nil {
+		model.AccountPreferencesSetForNetwork(session.Ctx, result.Network.NetworkId, productUpdates)
+		WriteServerEvent(session, result.Network.NetworkId, model.EventSignupOptoutChanged, map[string]any{
+			"product_updates": productUpdates,
+		}, "")
+	}
+
 	// if verification required, send it
 	if result.VerificationRequired != nil {
 		verifySend := AuthVerifySendArgs{
@@ -78,11 +89,19 @@ func NetworkCreate(
 		if err == nil {
 			AccountPreferencesSet(
 				&model.AccountPreferencesSetArgs{
-					ProductUpdates: true,
+					ProductUpdates: productUpdates,
 				},
 				session.WithByJwt(byJwt),
 			)
 		}
+
+		// the onboarding campaign: the account exists and can be mailed now
+		// (a verification-pending sign-up enters from AuthVerify instead)
+		userAuth := ""
+		if result.UserAuth != nil {
+			userAuth = *result.UserAuth
+		}
+		StartOnboardingCampaign(session, result.Network.NetworkId, userAuth)
 
 	}
 
@@ -140,6 +159,27 @@ type NetworkRemoveResult struct {
 }
 
 func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
+	// Authorize before the provider call. RemoveNetwork repeats this check while
+	// holding the deletion row lock, but moving Stripe cancellation ahead of
+	// deletion must not let a non-admin cancel the network's subscription.
+	network := model.GetNetwork(session)
+	if network == nil || network.AdminUserId == nil || *network.AdminUserId != session.ByJwt.UserId {
+		return nil, fmt.Errorf("Could not remove network")
+	}
+
+	// Provider cancellation is the fail-closed prerequisite for deleting the
+	// local owner. Each confirmed cancellation closes only its own renewal, so
+	// partial progress is retryable and any remaining failure leaves the
+	// network and its authentication context intact.
+	if err := UnsubscribeStripe(session); err != nil {
+		glog.Errorf("Failed to unsubscribe Stripe: %v", err)
+		return &NetworkRemoveResult{
+			Error: &NetworkRemoveResultError{
+				Message: "Failed to unsubscribe Stripe",
+			},
+		}, nil
+	}
+
 	success, userAuths := model.RemoveNetwork(
 		session.Ctx,
 		session.ByJwt.NetworkId,
@@ -152,17 +192,6 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 				ScheduleRemoveProductUpdates(session, userAuth, tx)
 			}
 		})
-
-		// ensure we wrap up any Stripe subscriptions for the network
-		err := UnsubscribeStripe(session)
-		if err != nil {
-			glog.Errorf("Failed to unsubscribe Stripe: %v", err)
-			return &NetworkRemoveResult{
-				Error: &NetworkRemoveResultError{
-					Message: "Failed to unsubscribe Stripe",
-				},
-			}, nil
-		}
 
 		return &NetworkRemoveResult{}, nil
 	}

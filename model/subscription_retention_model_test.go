@@ -68,6 +68,8 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 	sourceId = server.NewId()
 	destinationNetworkId = server.NewId()
 	destinationId = server.NewId()
+	testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+	testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 	sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: sourceNetworkId,
@@ -91,10 +93,7 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 		"",
 	)
 	connect.AssertEqual(t, err, nil)
-	RedeemBalanceCode(&RedeemBalanceCodeArgs{
-		Secret:    balanceCode.Secret,
-		NetworkId: sourceSession.ByJwt.NetworkId,
-	}, sourceSession.Ctx)
+	testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 	// a wallet to receive the payout
 	walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
@@ -317,6 +316,8 @@ func TestSweepOrphanContractData(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -334,10 +335,7 @@ func TestSweepOrphanContractData(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		// a live contract with a close row that must survive the sweep
 		usedTransferByteCount := ByteCount(1024)
@@ -451,6 +449,8 @@ func TestSweepOrphanContractDataMultiSlice(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -467,10 +467,7 @@ func TestSweepOrphanContractDataMultiSlice(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		// several live contracts whose close + escrow rows must survive
 		liveCount := 4
@@ -567,6 +564,8 @@ func TestSweepOrphanContractDataResumesFromCursor(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -583,10 +582,7 @@ func TestSweepOrphanContractDataResumesFromCursor(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		// live contracts whose dependents must survive every resume
 		liveCount := 3
@@ -703,6 +699,8 @@ func TestSweepOrphanContractDataAdvancesWithNoOrphans(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -719,10 +717,7 @@ func TestSweepOrphanContractDataAdvancesWithNoOrphans(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		// only live contracts: every dependent row has its parent, so the sweep
 		// deletes nothing and cannot advance by deletion
@@ -1084,6 +1079,8 @@ func TestCancelHungAccountPayments(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -1106,10 +1103,7 @@ func TestCancelHungAccountPayments(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, sourceSession.Ctx)
+		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
 			NetworkId:        destinationNetworkId,

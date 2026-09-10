@@ -31,8 +31,8 @@ const (
 // Signal mimir-continuity implements SIGNALS.md §11.20. It uses an
 // always-emitted service identity metric to distinguish an observation gap
 // from real zero traffic and from a Grafana panel or datasource failure. A
-// repeated watcher observation then distinguishes a moving recent-store
-// boundary from a fixed gap.
+// repeated watcher observation then distinguishes restoring query/store
+// visibility from a fixed gap.
 func NewMimirContinuitySignal() Signal {
 	return &signalAdapter{
 		number: "11.20", key: "mimir-continuity", name: "Mimir historical sample continuity",
@@ -212,11 +212,12 @@ func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuity
 		classification := mimirContinuityUnclassified
 		if observedBefore {
 			stepMovement := missingStart.Sub(history.lastStart)
-			stepElapsed := now.Sub(history.lastObservedAt)
-			advancingWithClock := stepMovement > 0 &&
-				absDuration(stepMovement-stepElapsed) <= mimirContinuityStep
 			switch {
-			case advancingWithClock:
+			case stepMovement > 0:
+				// The fixed right edge identifies the same gap. Any forward
+				// movement means previously absent historical evaluations are
+				// readable now; store discovery may expose several steps in one
+				// batch rather than advancing at the watcher cadence.
 				history.recovering = true
 				history.stationaryTicks = 0
 				history.recoveryMovement = missingStart.Sub(history.anchorStart)
@@ -264,13 +265,6 @@ func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuity
 	}
 	p.history = next
 	return assessments
-}
-
-func absDuration(value time.Duration) time.Duration {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
 
 func mimirContinuityGapFinding(
@@ -330,7 +324,7 @@ func mimirContinuityGapFinding(
 			"Mimir is progressively restoring %d five-minute control evaluations across %d bounded query gap(s)",
 			totalMissing, len(assessments),
 		)
-		result.mechanism = "The same gap's right edge stayed fixed while its left edge advanced with wall clock. Previously absent historical evaluations therefore became readable without producer backfill. This is the deterministic Mimir recent-store cutoff signature after replacement ingesters lose the old generation's local head; it is not permanent raw-sample loss."
+		result.mechanism = "The same gap's right edge stayed fixed while its left edge advanced between observations. Previously absent historical evaluations therefore became readable without producer backfill. Query/store discovery can expose several steps in one batch, so individual movement need not match wall clock. This is query-store visibility recovery, not permanent raw-sample loss; an approximately wall-clock series is the stronger recent-store cutoff signature."
 		result.context = "Build-info is independent of user traffic and the range query bypasses the Grafana panel. The metrics front assigns receive time, so a current producer cannot recreate those old timestamps. Exact-process §11.21 values distinguish the known compacted-store cutoff from another store-visibility mechanism."
 		result.action = "Run §11.21 and preserve the moving boundaries. Do not zero the store horizons solely to clear this alert: Mimir 3.1.1 warns that doing so queries replicated non-compacted blocks. Choosing zero-horizon reads, a long read-only handoff, or a dedicated persistent Mimir tier is an operator architecture decision, not an automatic monitor repair."
 		result.verify = "The existing gap becomes fully queryable by its configured store-age boundary. After an explicitly selected replacement design is deployed, a controlled and full replacement creates no new bounded gap through its complete handoff and discovery window."
@@ -352,7 +346,7 @@ func mimirContinuityGapFinding(
 		)
 		result.mechanism = "One range response proves that historical control evaluations are currently unavailable, but cannot distinguish raw loss from a recent block that replacement ingesters no longer hold and the store path does not yet query. A repeated observation supplies the moving-versus-fixed discriminator."
 		result.context = "This is a Mimir observation gap, not zero throughput and not a Grafana panel failure. It deliberately makes no permanence claim on the first observation or before the configured/default recent-store boundary."
-		result.action = "Keep the standing watcher on the same query and run §11.21. An approximately wall-clock-moving left edge with a fixed right edge becomes mimir-query-store-visibility-gap; a consecutive fixed interval beyond the store-age boundary becomes mimir-ingestion-gap. Do not mutate or hide the range while classification is pending."
+		result.action = "Keep the standing watcher on the same query and run §11.21. A strictly advancing left edge on a repeatedly observed fixed-right-edge gap becomes mimir-query-store-visibility-gap even when store discovery exposes several steps in a batch; a consecutive fixed interval beyond the store-age boundary becomes mimir-ingestion-gap. Do not mutate or hide the range while classification is pending."
 		result.verify = "A subsequent cadence produces the explicit recovering or fixed classification, or every bounded gap becomes queryable and the signal clears."
 	}
 	return result

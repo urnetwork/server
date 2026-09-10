@@ -1573,6 +1573,292 @@ func TestNovelSampleBelongsToTopShapeAndRedactsID(t *testing.T) {
 	}
 }
 
+func TestWindowStallStructuredStatesStayOutOfNovel(t *testing.T) {
+	const privateCorrelation = "private-correlation-value"
+	nonterminalLine := "[edge-private][taskworker][g1][cid:" + privateCorrelation + "]" +
+		"[I][2026-09-08T21:56:22Z][ip_remote_multi_client_outcome.go:374][rel] event=window_stall window=quality reason=platform-unreachable failed=0"
+
+	quiet := newLogTailer("taskworker", nil)
+	quiet.classify(nonterminalLine)
+	quietFindings := quiet.drainWindow()
+	if finding := findingByClass(t, quietFindings, "window-stall"); !finding.healthy {
+		t.Fatalf("one nonterminal transition crossed the rate threshold: %+v", finding)
+	}
+	if novel := findingByClass(t, quietFindings, "novel"); !novel.healthy {
+		t.Fatalf("failed=0 became a generic novel error: %+v", novel)
+	}
+
+	atRate := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		atRate.classify(nonterminalLine)
+	}
+	atRateFindings := atRate.drainWindow()
+	stall := findingByClass(t, atRateFindings, "window-stall")
+	if stall.healthy {
+		t.Fatal("nonterminal window-stall transitions at rate were hidden")
+	}
+	for _, want := range []string{
+		"failed=0 is explicitly nonterminal",
+		"neither a count of failed windows nor an unclassified error",
+		"event=window_stall window=quality reason=platform-unreachable failed=0",
+		"Do not infer terminal user failure",
+	} {
+		if !strings.Contains(stall.evidence+stall.mechanism+stall.action, want) {
+			t.Fatalf("nonterminal window-stall finding lacks %q: %+v", want, stall)
+		}
+	}
+	if strings.Contains(stall.evidence, privateCorrelation) || strings.Contains(stall.evidence, "edge-private") {
+		t.Fatalf("window-stall sample retained private prefix: %q", stall.evidence)
+	}
+	if novel := findingByClass(t, atRateFindings, "novel"); !novel.healthy {
+		t.Fatalf("classified nonterminal transitions also became novel: %+v", novel)
+	}
+
+	terminal := newLogTailer("taskworker", nil)
+	terminal.classify(strings.Replace(nonterminalLine, "failed=0", "failed=1", 1))
+	terminalFindings := terminal.drainWindow()
+	terminalStall := findingByClass(t, terminalFindings, "window-stall-terminal")
+	if terminalStall.healthy || !strings.Contains(terminalStall.evidence, "failed=1") {
+		t.Fatalf("terminal window-stall state was not visible: %+v", terminalStall)
+	}
+	if nonterminal := findingByClass(t, terminalFindings, "window-stall"); !nonterminal.healthy {
+		t.Fatalf("terminal state was also counted as nonterminal: %+v", nonterminal)
+	}
+	if novel := findingByClass(t, terminalFindings, "novel"); !novel.healthy {
+		t.Fatalf("classified terminal transition also became novel: %+v", novel)
+	}
+
+	// Unknown flag values are schema drift, not a state the classifier may
+	// silently reinterpret. They remain in the generic novelty safety net.
+	ambiguous := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		ambiguous.classify(strings.Replace(nonterminalLine, "failed=0", "failed=unknown", 1))
+	}
+	ambiguousFindings := ambiguous.drainWindow()
+	if finding := findingByClass(t, ambiguousFindings, "window-stall"); !finding.healthy {
+		t.Fatalf("ambiguous state was classified as nonterminal: %+v", finding)
+	}
+	if finding := findingByClass(t, ambiguousFindings, "window-stall-terminal"); !finding.healthy {
+		t.Fatalf("ambiguous state was classified as terminal: %+v", finding)
+	}
+	if novel := findingByClass(t, ambiguousFindings, "novel"); novel.healthy {
+		t.Fatal("ambiguous window-stall schema drift disappeared from the novelty safety net")
+	}
+}
+
+// Connect's terminal outcome has its own event name. failOutcome logs this
+// line and calls SetStallStatus directly, so a window_stall failed=1 line is
+// not required for the terminal condition to remain visible.
+func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	line := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=window_failed window=quality reason=providers-unresponsive after=45000"
+
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify(line)
+	findings := tailer.drainWindow()
+	terminal := findingByClass(t, findings, "window-stall-terminal")
+	if terminal.healthy {
+		t.Fatal("authoritative window_failed event was hidden")
+	}
+	if nonterminal := findingByClass(t, findings, "window-stall"); !nonterminal.healthy {
+		t.Fatalf("terminal outcome was also counted as nonterminal: %+v", nonterminal)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified terminal outcome also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", terminal,
+	).Markdown()
+	for _, want := range []string{
+		"event=window_failed window=quality reason=providers-unresponsive after=45000",
+		"window_failed is authoritative terminal state",
+		"calls SetStallStatus directly",
+		"does not normally emit window_stall failed=1",
+		"do not restart or deploy from the terminal bit alone",
+		"No window_failed event or compatible failed=1 transition recurs",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("window_failed finding lacks %q: %+v", want, terminal)
+		}
+	}
+	for _, private := range []string{"synthetic-host", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("window_failed alert retained private value %q", private)
+		}
+	}
+
+	// A recovery event is healthy context, not a terminal or generic error.
+	recovered := newLogTailer("taskworker", nil)
+	recovered.classify("[I][2000-01-01T00:00:01Z][synthetic.go:2][rel] event=window_recovered window=quality after=46000")
+	recoveredFindings := recovered.drainWindow()
+	if terminal := findingByClass(t, recoveredFindings, "window-stall-terminal"); !terminal.healthy {
+		t.Fatalf("window recovery was classified as terminal: %+v", terminal)
+	}
+	if novel := findingByClass(t, recoveredFindings, "novel"); !novel.healthy {
+		t.Fatalf("window recovery became novel: %+v", novel)
+	}
+
+	// Unknown duration syntax is schema drift. The terminal matcher must not
+	// accept it merely because the event name contains the word failed.
+	malformed := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		malformed.classify("[I][2000-01-01T00:00:02Z][synthetic.go:3][rel] event=window_failed window=quality reason=providers-unresponsive after=unknown")
+	}
+	malformedFindings := malformed.drainWindow()
+	if terminal := findingByClass(t, malformedFindings, "window-stall-terminal"); !terminal.healthy {
+		t.Fatalf("malformed window_failed event was accepted as terminal: %+v", terminal)
+	}
+	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
+		t.Fatal("malformed window_failed event disappeared from the novelty safety net")
+	}
+}
+
+// The exact canceled-generator shapes belong to an artifact-bounded class,
+// not generic novelty. One line stays quiet; the production-rate population
+// remains paired with its independently structured nonterminal stall signal.
+func TestWindowGeneratorCanceledUsesArtifactBoundedClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	lines := []string{
+		"[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+			"[I][2000-01-01T00:00:00Z][synthetic.go:1][multi]window enumerate error timeout = generator call canceled",
+		"[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+			"[I][2000-01-01T00:00:01Z][synthetic.go:2][multi]create client args error = generator call canceled",
+	}
+	stallLine := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:02Z][synthetic.go:3][rel] event=window_stall window=quality reason=platform-unreachable failed=0"
+
+	quiet := newLogTailer("taskworker", nil)
+	quiet.classify(lines[0])
+	quietFindings := quiet.drainWindow()
+	if finding := findingByClass(t, quietFindings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("one canceled-generator diagnostic crossed the rate threshold: %+v", finding)
+	}
+	if finding := findingByClass(t, quietFindings, "novel"); !finding.healthy {
+		t.Fatalf("one classified canceled-generator diagnostic became novel: %+v", finding)
+	}
+
+	atRate := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		atRate.classify(lines[i%len(lines)])
+		atRate.classify(stallLine)
+	}
+	findings := atRate.drainWindow()
+	canceled := findingByClass(t, findings, "window-generator-canceled")
+	if canceled.healthy {
+		t.Fatal("canceled-generator diagnostics at rate were hidden")
+	}
+	if stall := findingByClass(t, findings, "window-stall"); stall.healthy {
+		t.Fatal("paired structured nonterminal stalls at rate were hidden")
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified cancellation and stall lines also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", canceled,
+	).Markdown()
+	for _, want := range []string{
+		"[multi]window enumerate error timeout = generator call canceled",
+		"line alone cannot prove outer-window cancellation",
+		"legacy log-before-context ordering",
+		"proved fixed artifact",
+		"outer context was live",
+		"recorded Connect build input",
+		"one teardown boundary",
+		"ten minutes",
+		"identical text is still logged and classified",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("canceled-generator finding lacks %q: %+v", want, canceled)
+		}
+	}
+	for _, private := range []string{"synthetic-host", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("canceled-generator alert retained private value %q", private)
+		}
+	}
+}
+
+// A wrapper abandonment is affirmative hung/deadline evidence and must never
+// be swallowed by the narrower exact canceled-generator class.
+func TestWindowGeneratorAbandonmentRemainsNovel(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify("[multi]window enumerate error timeout = generator call abandoned after 20s")
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("generator abandonment was mislabeled cancellation: %+v", finding)
+	}
+	if finding := findingByClass(t, findings, "novel"); finding.healthy {
+		t.Fatal("generator abandonment disappeared from the novelty safety net")
+	}
+}
+
+// A near-miss cancellation suffix can be a genuine inner/platform error. It
+// remains visible to generic novelty rather than being broadly suppressed.
+func TestWindowGeneratorCancellationNearMissRemainsNovel(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify("[multi]create client args error = generator call canceled by synthetic platform")
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "window-generator-canceled"); !finding.healthy {
+		t.Fatalf("non-exact inner error was mislabeled exact cancellation: %+v", finding)
+	}
+	if finding := findingByClass(t, findings, "novel"); finding.healthy {
+		t.Fatal("non-exact inner error disappeared from the novelty safety net")
+	}
+}
+
+// TestAutomaticBalanceCodeDeliveryFailurePagesPrivately pins the exact paid,
+// no-recovery error without retaining its provider or account details.
+func TestAutomaticBalanceCodeDeliveryFailurePagesPrivately(t *testing.T) {
+	line := "[synthetic-host][api][synthetic-generation][cid:synthetic-private]" +
+		"[E][2000-01-01T00:00:00Z][synthetic.go:1] Unexpected error: " +
+		"automatic balance-code delivery failed without email recovery: " +
+		"payment network does not exist id=00000000-0000-0000-0000-000000000001 " +
+		"secret=synthetic-code-secret email=synthetic@example.invalid"
+	tailer := newLogTailer("api", nil)
+	tailer.classify(line)
+	findings := tailer.drainWindow()
+	finding := findingByClass(t, findings, "payment-balance-code-undelivered")
+	if finding.healthy || finding.tier != tierPage {
+		t.Fatalf("undelivered balance-code finding = %+v", finding)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified balance-code failure also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", finding,
+	).Markdown()
+	for _, want := range []string{
+		"paid balance code was durably created",
+		"no email delivery fallback",
+		"Intentional operator-issued",
+		"privileged payment tooling",
+		"consumed at most once",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("undelivered balance-code alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{
+		"synthetic-host",
+		"synthetic-private",
+		"00000000-0000-0000-0000-000000000001",
+		"synthetic-code-secret",
+		"synthetic@example.invalid",
+	} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("undelivered balance-code alert retained %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
 func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
 	const entityID = "raw-customer-correlation"
 	line := "[edge-private][taskworker][g2][cid:" + entityID + "] providertunnel: tun read error: Done"

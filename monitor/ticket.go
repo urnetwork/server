@@ -119,6 +119,9 @@ func (self *ticketManager) ingestBroken(ctx context.Context, f finding) {
 	t.brokenStreak += 1
 	t.healthyStreak = 0
 	t.tier = f.tier
+	if 0 < f.pageSustain && f.pageSustain <= t.brokenStreak {
+		t.tier = tierPage
+	}
 	t.last = f
 	t.updated = now
 

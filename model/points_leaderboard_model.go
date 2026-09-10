@@ -44,10 +44,11 @@ type PointsEpochWindow struct {
 }
 
 type PointsLeaderboardSnapshot struct {
-	SnapshotId  server.Id `json:"snapshot_id"`
-	CreateTime  time.Time `json:"create_time"`
-	LatestEpoch uint64    `json:"latest_epoch"`
-	TotalRanked int64     `json:"total_ranked"`
+	SnapshotId            server.Id `json:"snapshot_id"`
+	CreateTime            time.Time `json:"create_time"`
+	LatestEpoch           uint64    `json:"latest_epoch"`
+	TotalRanked           int64     `json:"total_ranked"`
+	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
 }
 
 // PointsLeaderboardEntry is one stored row. rank_* is the competition rank
@@ -211,10 +212,11 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
 
 	snapshot := &PointsLeaderboardSnapshot{
-		SnapshotId:  server.NewId(),
-		CreateTime:  server.NowUtc(),
-		LatestEpoch: latestEpoch,
-		TotalRanked: int64(len(entries)),
+		SnapshotId:            server.NewId(),
+		CreateTime:            server.NowUtc(),
+		LatestEpoch:           latestEpoch,
+		TotalRanked:           int64(len(entries)),
+		EpochMetricsAvailable: 0 < len(windows),
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -226,13 +228,14 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 			ctx,
 			`
 				INSERT INTO network_points_leaderboard_snapshot
-				(snapshot_id, create_time, latest_epoch, total_ranked)
-				VALUES ($1, $2, $3, $4)
+				(snapshot_id, create_time, latest_epoch, total_ranked, epoch_metrics_available)
+				VALUES ($1, $2, $3, $4, $5)
 			`,
 			snapshot.SnapshotId,
 			snapshot.CreateTime,
 			int64(snapshot.LatestEpoch),
 			snapshot.TotalRanked,
+			snapshot.EpochMetricsAvailable,
 		))
 		const chunkSize = 5000
 		for start := 0; start < len(entries); start += chunkSize {
@@ -456,7 +459,7 @@ func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (
 }
 
 const pointsLeaderboardSnapshotSelect = `
-	SELECT snapshot_id, create_time, latest_epoch, total_ranked
+	SELECT snapshot_id, create_time, latest_epoch, total_ranked, epoch_metrics_available
 	FROM network_points_leaderboard_snapshot
 `
 
@@ -468,6 +471,7 @@ func scanPointsLeaderboardSnapshot(result server.PgResult) *PointsLeaderboardSna
 		&snapshot.CreateTime,
 		&latestEpoch,
 		&snapshot.TotalRanked,
+		&snapshot.EpochMetricsAvailable,
 	))
 	snapshot.LatestEpoch = uint64(latestEpoch)
 	return snapshot
@@ -616,6 +620,66 @@ func GetPointsLeaderboardPage(
 		})
 	})
 	return
+}
+
+// GetPointsLeaderboardPageBefore lists the rows of a snapshot before
+// `beforePosition` in the given sort, the `limit` closest ones, returned in
+// ascending position order (the caller pages backward from a jumped-to
+// window; see GetPointsLeaderboardPageFrom).
+func GetPointsLeaderboardPageBefore(
+	ctx context.Context,
+	snapshotId server.Id,
+	sortBy string,
+	beforePosition int64,
+	limit int,
+) (rows []*PointsLeaderboardRow) {
+	rows = []*PointsLeaderboardRow{}
+	column, ok := pointsLeaderboardPositionColumn(sortBy)
+	if !ok || limit <= 0 || beforePosition <= 1 {
+		return
+	}
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			pointsLeaderboardRowSelect+`
+				WHERE
+					network_points_leaderboard.snapshot_id = $1 AND
+					network_points_leaderboard.`+column+` < $2
+				ORDER BY network_points_leaderboard.`+column+` DESC
+				LIMIT $3
+			`,
+			snapshotId,
+			beforePosition,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				rows = append(rows, scanPointsLeaderboardRow(result))
+			}
+		})
+	})
+	// the query walked backward; hand the rows back in list order
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return
+}
+
+// GetPointsLeaderboardPageFrom lists the rows of a snapshot from
+// `fromPosition` (inclusive) in the given sort, at most `limit` rows: the
+// page a seek to that position lands on.
+func GetPointsLeaderboardPageFrom(
+	ctx context.Context,
+	snapshotId server.Id,
+	sortBy string,
+	fromPosition int64,
+	limit int,
+) (rows []*PointsLeaderboardRow) {
+	if fromPosition < 1 {
+		fromPosition = 1
+	}
+	return GetPointsLeaderboardPage(ctx, snapshotId, sortBy, fromPosition-1, limit)
 }
 
 // GetPointsLeaderboardNetworkRow is the network's own row in the snapshot;

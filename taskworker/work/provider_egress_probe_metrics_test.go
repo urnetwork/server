@@ -269,13 +269,15 @@ func TestEgressProbePassRecordsBatchMetricsAndRefreshesFleet(t *testing.T) {
 }
 
 func TestSetEgressProbeFleetGaugesClearsStaleDominantClass(t *testing.T) {
+	firstRefresh := time.Unix(1_700_000_000, 0)
 	setEgressProbeFleetGauges(egressProbeFleetSnapshot{
-		attemptTally:  map[string]int{"": 30, "tunnel_failed": 70},
+		outcomeTally:  map[string]int{"": 30, "tunnel_failed": 70},
 		healthStates:  map[string]int{"healthy": 20, "dead": 5},
 		blackholed:    2,
 		tlsAuthFailed: 1,
 		dominantClass: "tunnel_failed",
 		dominantShare: 0.7,
+		refreshedAt:   firstRefresh,
 	})
 	if got := testutil.ToFloat64(egressProbeFleetAttemptProviders.WithLabelValues("ok")); got != 30 {
 		t.Fatalf("fleet ok providers = %v, want 30", got)
@@ -287,13 +289,23 @@ func TestSetEgressProbeFleetGaugesClearsStaleDominantClass(t *testing.T) {
 		t.Fatalf("degraded = %v, want 0", got)
 	}
 	setEgressProbeFleetGauges(egressProbeFleetSnapshot{
-		attemptTally: map[string]int{"": 100},
+		outcomeTally: map[string]int{"": 100},
 		healthStates: map[string]int{},
+		refreshedAt:  firstRefresh.Add(time.Minute),
 	})
+	if got, want := testutil.CollectAndCount(
+		egressProbeFleetAttemptProviders,
+		"urnetwork_egress_probe_fleet_attempt_providers",
+	), len(egressProbeFleetOutcomeClasses); got != want {
+		t.Fatalf("fleet outcome series = %d, want fixed live set %d", got, want)
+	}
 	if got := testutil.ToFloat64(egressProbeFleetDominantFailure.WithLabelValues("tunnel_failed")); got != 0 {
 		t.Fatalf("dominant tunnel_failed after clear = %v, want 0", got)
 	}
 	if got := testutil.ToFloat64(egressProbeFleetAttemptProviders.WithLabelValues("ok")); got != 100 {
 		t.Fatalf("fleet ok providers after reset = %v, want 100", got)
+	}
+	if got := testutil.ToFloat64(egressProbeFleetSnapshotTimestamp); got != float64(firstRefresh.Add(time.Minute).Unix()) {
+		t.Fatalf("fleet snapshot timestamp = %v, want %d", got, firstRefresh.Add(time.Minute).Unix())
 	}
 }

@@ -148,6 +148,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: sourceNetworkId,
@@ -190,10 +192,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceSession.ByJwt.NetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
 		transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
 		connect.AssertEqual(t, err, nil)
@@ -388,6 +387,8 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		sourceId := server.NewId()
 		destinationNetworkId := server.NewId()
 		destinationId := server.NewId()
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
 
 		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: destinationNetworkId,
@@ -442,10 +443,7 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			"",
 		)
 		connect.AssertEqual(t, err, nil)
-		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: sourceNetworkId,
-		}, ctx)
+		testingRedeemPaymentBalanceCode(t, ctx, sourceNetworkId, balanceCode.Secret)
 
 		wallet1Address := "0x1111"
 		wallet1Id := model.CreateAccountWalletExternal(destinationSession, &model.CreateAccountWalletExternalArgs{

@@ -69,6 +69,13 @@ func ValidateReferralCode(
 
 	referralCode := validateReferralCode.ReferralCode
 
+	// This runs before an account exists (the sign-up screens check the bonus
+	// code while the form is still open), so there is no session to bill; the
+	// caller's address carries the budget instead.
+	if err := model.CheckReferralCodeValidateRateLimit(session); err != nil {
+		return nil, err
+	}
+
 	validationResult := model.ValidateReferralCode(session.Ctx, referralCode)
 
 	return &ValidateNetworkReferralCodeResult{

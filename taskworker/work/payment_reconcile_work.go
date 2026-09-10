@@ -19,11 +19,12 @@ type PaymentReconcileArgs struct {
 }
 
 type PaymentReconcileResult struct {
-	RunId         server.Id `json:"run_id"`
-	Credited      int       `json:"credited"`
-	Ended         int       `json:"ended"`
-	Errors        int       `json:"errors"`
-	SkippedStores []string  `json:"skipped_stores,omitempty"`
+	RunId                server.Id `json:"run_id"`
+	Credited             int       `json:"credited"`
+	Ended                int       `json:"ended"`
+	EntitlementsRepaired int       `json:"entitlements_repaired"`
+	Errors               int       `json:"errors"`
+	SkippedStores        []string  `json:"skipped_stores,omitempty"`
 }
 
 func SchedulePaymentReconcile(clientSession *session.ClientSession, tx server.PgTx) {
@@ -51,15 +52,16 @@ func PaymentReconcile(
 		return nil, err
 	}
 	glog.Infof(
-		"[reconcile]run %s: credited %d, ended %d, errors %d, skipped %v\n",
-		result.RunId, result.Credited, result.Ended, result.Errors, result.SkippedStores,
+		"[reconcile]run %s: credited %d, ended %d, entitlements repaired %d, errors %d, skipped %v\n",
+		result.RunId, result.Credited, result.Ended, result.EntitlementsRepaired, result.Errors, result.SkippedStores,
 	)
 	return &PaymentReconcileResult{
-		RunId:         result.RunId,
-		Credited:      result.Credited,
-		Ended:         result.Ended,
-		Errors:        result.Errors,
-		SkippedStores: result.SkippedStores,
+		RunId:                result.RunId,
+		Credited:             result.Credited,
+		Ended:                result.Ended,
+		EntitlementsRepaired: result.EntitlementsRepaired,
+		Errors:               result.Errors,
+		SkippedStores:        result.SkippedStores,
 	}, nil
 }
 

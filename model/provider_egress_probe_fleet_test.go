@@ -2,19 +2,20 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 )
 
-// TestDiagnoseProbeFleet is the pure rule behind the credential warning.
+// TestDiagnoseProbeFleet is the pure rule behind common-prober attribution.
 //
 // It is table-driven and needs no database, which is the point: this decides
 // whether a warning is EMITTED, and a warning that silently never fires is
-// exactly the class of fault this whole exercise is about. Testing the log call
-// is impossible here (nothing in this repo captures glog output), so the
-// decision is a pure function and the glog call is a one-line shell around it.
+// exactly the class of fault this whole exercise is about. The decision is a
+// pure function shared by the model, metrics, and monitor.
 //
 // The cases that carry the weight are the negative ones. Any predicate at all
 // fires on "100% no_consensus"; only a correct one stays quiet on a healthy
@@ -42,14 +43,10 @@ func TestDiagnoseProbeFleet(t *testing.T) {
 				ProbeAttemptSuccessClass: 152,
 			},
 			wantClass: "",
-			why: "successes are stored as probe_failure = '', so a NAIVE ARGMAX over the tally " +
-				"calls a perfectly healthy fleet '100% failing with class \"\"'. That is the most " +
-				"likely bug in this function and this case is the only thing standing in front of " +
-				"it. VERIFIED MUTATION: writing the naive argmax -- dropping BOTH the " +
-				"ProbeAttemptSuccessClass skip inside the loop AND the post-loop guard -- makes " +
-				"this case report class=\"\" 152/152. (Either guard alone still returns nil, so " +
-				"they are deliberate defence in depth; removing just one is not enough to break it " +
-				"and is not what this pins.)",
+			why: "successes are stored as probe_failure = '', so a naive argmax over a complete " +
+				"outcome tally calls a perfectly healthy fleet '100% failing with class \"\"'. " +
+				"This pins that the success bucket contributes to the eligible and observed " +
+				"denominators but can never become a failure class",
 		},
 		{
 			name: "healthy fleet with an ordinary minority of failures",
@@ -173,6 +170,97 @@ func TestDiagnoseProbeFleet(t *testing.T) {
 	}
 }
 
+// The population-aware assessment prevents the retained-attempt survivor bias
+// that originally made a six-hour failure cohort look like a fleet. Successes
+// may remain represented by trusted locations for seven days, while failures
+// retry every six hours; unobserved providers therefore stay in the eligible
+// denominator without being invented as either outcome.
+func TestAssessProbeFleetOutcomesUsesTheEligiblePopulation(t *testing.T) {
+	tests := []struct {
+		name             string
+		tally            map[string]int
+		wantHigh         bool
+		wantDominant     string
+		wantEligible     int
+		wantObserved     int
+		wantFailures     int
+		wantUnobserved   int
+		wantInconsistent int
+	}{
+		{
+			name: "common known failure with enough observed outcomes",
+			tally: map[string]int{
+				"no_consensus":            20,
+				ProbeFleetUnobservedClass: 2,
+			},
+			wantHigh: true, wantDominant: "no_consensus",
+			wantEligible: 22, wantObserved: 20, wantFailures: 20, wantUnobserved: 2,
+		},
+		{
+			name: "observed floor cannot replace the complete eligible denominator",
+			tally: map[string]int{
+				"no_consensus":            20,
+				ProbeFleetUnobservedClass: 3,
+			},
+			wantEligible: 23, wantObserved: 20, wantFailures: 20, wantUnobserved: 3,
+		},
+		{
+			name: "eligible floor does not replace the observed floor",
+			tally: map[string]int{
+				"no_consensus":            18,
+				ProbeFleetUnobservedClass: 2,
+			},
+			wantEligible: 20, wantObserved: 18, wantFailures: 18, wantUnobserved: 2,
+		},
+		{
+			name: "mixed failure can cross total share without false attribution",
+			tally: map[string]int{
+				"no_consensus":           10,
+				"locate_failed":          8,
+				ProbeAttemptSuccessClass: 2,
+			},
+			wantHigh:     true,
+			wantEligible: 20, wantObserved: 20, wantFailures: 18,
+		},
+		{
+			name: "collapsed unknown classes never establish common mode",
+			tally: map[string]int{
+				ProbeFleetUnknownFailureClass: 20,
+			},
+			wantHigh:     true,
+			wantEligible: 20, wantObserved: 20, wantFailures: 20,
+		},
+		{
+			name: "unobserved and inconsistent states are neutral",
+			tally: map[string]int{
+				ProbeFleetUnobservedClass:   30,
+				ProbeFleetInconsistentClass: 4,
+			},
+			wantEligible: 34, wantObserved: 0, wantUnobserved: 30, wantInconsistent: 4,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := AssessProbeFleetOutcomes(test.tally)
+			if got.Eligible != test.wantEligible || got.Observed != test.wantObserved ||
+				got.Failures != test.wantFailures || got.Unobserved != test.wantUnobserved ||
+				got.Inconsistent != test.wantInconsistent || got.FailureShareHigh != test.wantHigh {
+				t.Fatalf("assessment = %+v", got)
+			}
+			if test.wantDominant == "" {
+				if got.Dominant != nil {
+					t.Fatalf("dominant = %+v, want nil", got.Dominant)
+				}
+			} else if got.Dominant == nil || got.Dominant.DominantClass != test.wantDominant ||
+				got.Dominant.Eligible != test.wantEligible || got.Dominant.Attempts != test.wantObserved {
+				t.Fatalf("dominant = %+v, want class=%s eligible=%d observed=%d",
+					got.Dominant, test.wantDominant, test.wantEligible, test.wantObserved)
+			}
+		})
+	}
+}
+
 // The two failure classes that mean "the prober never got a tunnel up" must
 // point at credentials explicitly, by name.
 //
@@ -194,6 +282,10 @@ func TestProbeFleetHintNamesTheCredential(t *testing.T) {
 				class, hint)
 		}
 	}
+	if hint := probeFleetHint("no_consensus"); strings.Contains(hint, "UR_PROBER_BY_JWT") ||
+		!strings.Contains(hint, "prober_identity") {
+		t.Fatalf("credential hint does not describe the current persisted identity boundary: %q", hint)
+	}
 	// and the fallback still has to say something actionable rather than
 	// nothing, since an unknown class is precisely when an operator has least
 	// to go on
@@ -202,17 +294,15 @@ func TestProbeFleetHintNamesTheCredential(t *testing.T) {
 	}
 }
 
-// TestGetProviderEgressProbeAttemptTally pins the query the diagnosis reads.
+// TestGetProviderEgressProbeAttemptTally pins the raw retained-attempt
+// instrumentation query. Fleet diagnosis must use the population-aware query.
 //
 // Both halves matter and both are asserted: successes must be tallied under
-// ProbeAttemptSuccessClass (they are what the failure share is measured
-// against, so losing them inflates every ratio to 100%), and failures must be
-// tallied under their own class.
+// ProbeAttemptSuccessClass, and failures must be tallied under their own class.
 //
 // MUTATION THAT MUST BREAK THIS: change the GROUP BY to filter out the empty
 // class (`WHERE probe_failure != ”`), which is a plausible "tidy-up". The
-// success bucket vanishes, the assertion below fails -- and had it not, every
-// healthy fleet would have been diagnosed as 100% failing.
+// success bucket vanishes and the assertion below fails.
 func TestGetProviderEgressProbeAttemptTally(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -245,29 +335,133 @@ func TestGetProviderEgressProbeAttemptTally(t *testing.T) {
 					class, tally[class], n)
 			}
 		}
-		// called out separately because it is the bucket a "tidy-up" deletes:
-		// successes are stored as probe_failure = '' and are the denominator the
-		// failure share is measured against, so dropping them makes every fleet
-		// look 100% failing
+		// Called out separately because it is the bucket a "tidy-up" deletes.
+		// Production attribution does not consume this survivor-biased tally, but
+		// raw attempt instrumentation still has to represent successful rows.
 		if tally[ProbeAttemptSuccessClass] < wrote[ProbeAttemptSuccessClass] {
 			t.Errorf("successful attempts are not tallied under the empty class: "+
-				"tally[%q] = %d. They are the denominator the failure share is measured "+
-				"against, and without them every healthy fleet reads as 100%% failing",
+				"tally[%q] = %d; raw attempt instrumentation has lost successful rows",
 				ProbeAttemptSuccessClass, tally[ProbeAttemptSuccessClass])
 		}
 	})
 }
 
+// The fleet view must not mistake the six-hour failure retry cadence for the
+// current eligible population. This synthetic population exercises the exact
+// write-order and freshness boundaries used by the monitor query.
+func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		location := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Synthetic City",
+			Region:       "Synthetic Region",
+			Country:      "Synthetic Country",
+			CountryCode:  "zz",
+		}
+		CreateLocation(ctx, location)
+
+		freshOnly := server.NewId()
+		plainFailure := server.NewId()
+		currentFailure := server.NewId()
+		neverObserved := server.NewId()
+		ambiguousLaterLocation := server.NewId()
+		retainedFailure := server.NewId()
+		inconsistent := server.NewId()
+		ineligible := server.NewId()
+		for index, clientId := range []server.Id{
+			freshOnly, plainFailure, currentFailure, neverObserved, ambiguousLaterLocation,
+			retainedFailure, inconsistent,
+		} {
+			testing_connectProbeableProvider(
+				t, ctx, clientId, location.LocationId,
+				fmt.Sprintf("192.0.2.%d:0", index+1),
+				ProvideModePublic,
+			)
+		}
+		testing_connectProbeableProvider(
+			t, ctx, ineligible, location.LocationId, "198.51.100.1:0", ProvideModeNetwork,
+		)
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: freshOnly, LocationId: location.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: plainFailure, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: currentFailure, LocationId: location.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: currentFailure, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+		})
+		// Reprioritisation writes location.update_time without a successful
+		// probe. It must not make this current failure look healthy.
+		if !ReprioritiseProviderEgressProbe(ctx, currentFailure, now) {
+			t.Fatal("synthetic current failure location was not reprioritised")
+		}
+
+		// A location written after a retained failure is ambiguous because the
+		// attempt report for that later success may itself have failed. Remain
+		// conservative until a new success attempt replaces the failure.
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: ambiguousLaterLocation, AttemptAt: now.Add(-time.Hour), ProbeFailure: "tunnel_failed",
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: ambiguousLaterLocation, LocationId: location.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-30 * time.Minute),
+		})
+
+		// A retained failure newer than the location but outside the six-hour
+		// retry window is unobserved. It cannot resurrect the older success.
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: retainedFailure, LocationId: location.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: retainedFailure, AttemptAt: now.Add(-7 * time.Hour), ProbeFailure: "tunnel_failed",
+		})
+
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: inconsistent, AttemptAt: now.Add(-time.Hour), ProbeFailure: "",
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: ineligible, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+		})
+
+		got := GetProviderEgressProbeFleetOutcomeTally(ctx)
+		want := map[string]int{
+			ProbeAttemptSuccessClass:    1,
+			"no_consensus":              1,
+			ProbeFleetUnobservedClass:   4,
+			ProbeFleetInconsistentClass: 1,
+		}
+		for class, count := range want {
+			if got[class] != count {
+				t.Errorf("outcome tally[%q] = %d, want %d; all=%v", class, got[class], count, got)
+			}
+		}
+		if assessment := AssessProbeFleetOutcomes(got); assessment.Eligible != 7 ||
+			assessment.Observed != 2 || assessment.Failures != 1 ||
+			assessment.Inconsistent != 1 || assessment.Unobserved != 4 {
+			t.Fatalf("assessment = %+v, want eligible=7 observed=2 failures=1 inconsistent=1 unobserved=4", assessment)
+		}
+	})
+}
+
 // The database-backed diagnosis must agree with the pure rule applied to the
-// same table. This is the seam between the two halves: a query that returned
-// the right rows and a predicate that read them under different key names would
-// leave both unit tests green and the warning permanently silent.
+// reconstructed eligible population. It must never fall back to the retained,
+// survivor-biased attempt table.
 func TestDiagnoseProviderEgressProbeFleetMatchesTheTally(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		tally := GetProviderEgressProbeAttemptTally(ctx)
-		want := DiagnoseProbeFleet(tally)
+		tally := GetProviderEgressProbeFleetOutcomeTally(ctx)
+		want := AssessProbeFleetOutcomes(tally).Dominant
 		got := DiagnoseProviderEgressProbeFleet(ctx)
 
 		switch {

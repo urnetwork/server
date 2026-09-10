@@ -368,6 +368,12 @@ func solanaCreditDataPack(
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		credited = false
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(tx, clientSession.Ctx, networkId); err != nil {
+			returnErr = err
+			return
+		}
 		completed, err := model.MarkPaymentIntentCompletedInTx(
 			tx,
 			paymentSearchResult.PaymentReference,
@@ -397,7 +403,7 @@ func solanaCreditDataPack(
 			},
 		)
 		credited = true
-	})
+	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return false, returnErr
 	}

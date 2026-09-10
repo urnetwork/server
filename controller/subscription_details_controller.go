@@ -364,11 +364,12 @@ func boolPtr(b bool) *bool {
 
 // ----- stripe -----
 
-// the raw subscription object (the fields we read)
+// Carries the raw fields used by billing views and deletion discovery.
 type stripeCustomerSubscription struct {
-	Id                string `json:"id"`
-	Status            string `json:"status"`
-	CancelAtPeriodEnd bool   `json:"cancel_at_period_end"`
+	Id                string            `json:"id"`
+	Status            string            `json:"status"`
+	CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+	Metadata          map[string]string `json:"metadata"`
 	// on the subscription before API version 2025-03-31, on the items since
 	CurrentPeriodEnd int64 `json:"current_period_end"`
 	Created          int64 `json:"created"`
@@ -386,7 +387,9 @@ type stripeCustomerSubscription struct {
 }
 
 type stripeCustomerSubscriptionList struct {
-	Data []*stripeCustomerSubscription `json:"data"`
+	Data     []*stripeCustomerSubscription `json:"data"`
+	HasMore  bool                          `json:"has_more"`
+	NextPage string                        `json:"next_page"`
 }
 
 type stripeInvoiceWithSubscription struct {
@@ -453,29 +456,60 @@ func stripeAuthHeader(header http.Header) {
 	header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
 }
 
-// stripeListCustomerSubscriptions returns the customer's subscriptions, the
+// Returns every customer subscription across validated Stripe list pages, the
 // ones Stripe still bills first (latest period end first), then the rest
 // newest first.
 func stripeListCustomerSubscriptions(ctx context.Context, customerId string) ([]*stripeCustomerSubscription, error) {
-	listUrl := fmt.Sprintf(
-		"%s/v1/subscriptions?%s",
-		stripeApiBaseUrl,
-		url.Values{
+	const maxPages = 1000
+	subs := []*stripeCustomerSubscription{}
+	seenSubscriptionIds := map[string]bool{}
+	seenStartingAfter := map[string]bool{}
+	startingAfter := ""
+	for pageIndex := 0; ; pageIndex += 1 {
+		if maxPages <= pageIndex {
+			return nil, errors.New("list subscriptions exceeded the page limit")
+		}
+		query := url.Values{
 			"customer": []string{customerId},
 			"status":   []string{"all"},
-			"limit":    []string{"20"},
-		}.Encode(),
-	)
-	list, err := server.HttpGetRequireStatusOk[*stripeCustomerSubscriptionList](
-		ctx,
-		listUrl,
-		stripeAuthHeader,
-		server.ResponseJsonObject[*stripeCustomerSubscriptionList],
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list subscriptions: %w", err)
+			"limit":    []string{"100"},
+		}
+		if startingAfter != "" {
+			query.Set("starting_after", startingAfter)
+		}
+		list, err := server.HttpGetRequireStatusOk[*stripeCustomerSubscriptionList](
+			ctx,
+			fmt.Sprintf("%s/v1/subscriptions?%s", stripeApiBaseUrl, query.Encode()),
+			stripeAuthHeader,
+			server.ResponseJsonObject[*stripeCustomerSubscriptionList],
+		)
+		if err != nil {
+			return nil, fmt.Errorf("list subscriptions: %w", err)
+		}
+		if list == nil {
+			return nil, errors.New("list subscriptions returned no list")
+		}
+		for _, sub := range list.Data {
+			if sub == nil || sub.Id == "" || sub.Status == "" {
+				return nil, errors.New("list subscriptions returned a malformed subscription")
+			}
+			if !seenSubscriptionIds[sub.Id] {
+				seenSubscriptionIds[sub.Id] = true
+				subs = append(subs, sub)
+			}
+		}
+		if !list.HasMore {
+			break
+		}
+		if len(list.Data) == 0 {
+			return nil, errors.New("list subscriptions returned an empty continuing page")
+		}
+		startingAfter = list.Data[len(list.Data)-1].Id
+		if seenStartingAfter[startingAfter] {
+			return nil, errors.New("list subscriptions returned a pagination cycle")
+		}
+		seenStartingAfter[startingAfter] = true
 	}
-	subs := append([]*stripeCustomerSubscription{}, list.Data...)
 	sort.SliceStable(subs, func(i int, j int) bool {
 		a, b := subs[i], subs[j]
 		aBilling, bBilling := stripeSubscriptionBilling(a.Status), stripeSubscriptionBilling(b.Status)

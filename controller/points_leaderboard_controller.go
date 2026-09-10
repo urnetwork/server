@@ -45,8 +45,14 @@ const (
 type PointsLeaderboardArgs struct {
 	// Sort is one of "points" (default), "blocks", "streak".
 	Sort string `json:"sort,omitempty"`
-	// Cursor continues a previous page; omit for the first page.
+	// Cursor continues a previous page in either direction (a next_cursor
+	// or a prev_cursor); omit for the first page.
 	Cursor string `json:"cursor,omitempty"`
+	// SeekRank jumps: the page starts at the row whose position in the sort's
+	// total order is SeekRank (1-based, clamped to [1, total_ranked]). Used
+	// without a cursor. The response then carries both cursors so the jumped-to
+	// window pages in both directions.
+	SeekRank int64 `json:"seek_rank,omitempty"`
 	// Limit is the page size, default 50, max 200.
 	Limit int `json:"limit,omitempty"`
 }
@@ -69,6 +75,10 @@ type PointsLeaderboardRow struct {
 	RankPoints        int64   `json:"rank_points"`
 	RankBlocks        int64   `json:"rank_blocks"`
 	RankStreak        int64   `json:"rank_streak"`
+	// Position is the row's 1-based place in the requested sort's total
+	// order (ranks tie, positions never do): the seek_rank coordinate and the
+	// key a client keeps its loaded window by.
+	Position int64 `json:"position"`
 }
 
 // PointsLeaderboardMe is the caller's own row, named or not.
@@ -84,14 +94,18 @@ type PointsLeaderboardResult struct {
 	Rows []PointsLeaderboardRow `json:"rows"`
 	// NextCursor is absent on the last page.
 	NextCursor string `json:"next_cursor,omitempty"`
+	// PrevCursor pages backward from this page's first row; absent when the
+	// page starts at the top.
+	PrevCursor string `json:"prev_cursor,omitempty"`
 	// Restart is true when the cursor's snapshot is gone; the client reloads
 	// from the top.
-	Restart      bool                    `json:"restart,omitempty"`
-	TotalRanked  int64                   `json:"total_ranked"`
-	SnapshotTime *time.Time              `json:"snapshot_time,omitempty"`
-	LatestEpoch  uint64                  `json:"latest_epoch"`
-	Me           *PointsLeaderboardMe    `json:"me,omitempty"`
-	Error        *PointsLeaderboardError `json:"error,omitempty"`
+	Restart               bool                    `json:"restart,omitempty"`
+	TotalRanked           int64                   `json:"total_ranked"`
+	SnapshotTime          *time.Time              `json:"snapshot_time,omitempty"`
+	LatestEpoch           uint64                  `json:"latest_epoch"`
+	EpochMetricsAvailable bool                    `json:"epoch_metrics_available"`
+	Me                    *PointsLeaderboardMe    `json:"me,omitempty"`
+	Error                 *PointsLeaderboardError `json:"error,omitempty"`
 }
 
 type PointsLeaderboardError struct {
@@ -100,10 +114,14 @@ type PointsLeaderboardError struct {
 
 // pointsLeaderboardCursor pins the snapshot and the sort so a page sequence
 // stays consistent across rebuilds and cannot be replayed under another sort.
+// Backward is set on a prev_cursor: the page it opens ends just before
+// Position. A forward cursor (next_cursor, and every cursor minted before
+// backward paging existed) opens the page that starts just after Position.
 type pointsLeaderboardCursor struct {
 	SnapshotId server.Id `json:"s"`
 	Sort       string    `json:"o"`
 	Position   int64     `json:"p"`
+	Backward   bool      `json:"b,omitempty"`
 }
 
 func encodePointsLeaderboardCursor(cursor pointsLeaderboardCursor) string {
@@ -151,8 +169,9 @@ func pointsLeaderboardLimit(limit int) int {
 	return limit
 }
 
-func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow) PointsLeaderboardRow {
+func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow, sortBy string) PointsLeaderboardRow {
 	out := PointsLeaderboardRow{
+		Position:         row.Position(sortBy),
 		NetworkId:        row.NetworkId,
 		EmojiTag:         row.EmojiTag,
 		Anonymous:        !row.PointsLeaderboardPublic,
@@ -184,6 +203,11 @@ func pointsLeaderboardError(message string) *PointsLeaderboardResult {
 // with its own name for the caller's own card, whether or not that switch is
 // on; in the list itself the caller's row is anonymous like everyone else's
 // until it opts in, so the caller sees what everyone sees.
+//
+// Paging: the first page is the top; `next_cursor` continues forward and
+// `prev_cursor` backward; `seek_rank` opens the page at any position of the
+// sort's total order, with both cursors, so a scroll indicator can jump
+// anywhere and the list then loads in either direction from there.
 func GetPointsLeaderboard(
 	args *PointsLeaderboardArgs,
 	clientSession *session.ClientSession,
@@ -196,16 +220,16 @@ func GetPointsLeaderboard(
 	limit := pointsLeaderboardLimit(args.Limit)
 
 	var snapshot *model.PointsLeaderboardSnapshot
-	afterPosition := int64(0)
+	var cursor *pointsLeaderboardCursor
 	if args.Cursor != "" {
-		cursor, err := decodePointsLeaderboardCursor(args.Cursor)
+		decoded, err := decodePointsLeaderboardCursor(args.Cursor)
 		if err != nil {
 			return pointsLeaderboardError("Invalid cursor."), nil
 		}
-		if cursor.Sort != sortBy {
+		if decoded.Sort != sortBy {
 			return pointsLeaderboardError("The cursor belongs to another sort."), nil
 		}
-		snapshot = model.GetPointsLeaderboardSnapshot(ctx, cursor.SnapshotId)
+		snapshot = model.GetPointsLeaderboardSnapshot(ctx, decoded.SnapshotId)
 		if snapshot == nil {
 			// pruned: the client reloads from the top
 			return &PointsLeaderboardResult{
@@ -213,7 +237,7 @@ func GetPointsLeaderboard(
 				Restart: true,
 			}, nil
 		}
-		afterPosition = cursor.Position
+		cursor = &decoded
 	} else {
 		snapshot = model.GetLatestPointsLeaderboardSnapshot(ctx)
 	}
@@ -226,30 +250,112 @@ func GetPointsLeaderboard(
 		result.Me = pointsLeaderboardMe(ctx, nil, clientSession)
 		return result, nil
 	}
+	if sortBy != model.PointsLeaderboardSortPoints && !snapshot.EpochMetricsAvailable {
+		return pointsLeaderboardError("Finalized epoch metrics are not available yet."), nil
+	}
 	result.TotalRanked = snapshot.TotalRanked
 	snapshotTime := snapshot.CreateTime
 	result.SnapshotTime = &snapshotTime
 	result.LatestEpoch = snapshot.LatestEpoch
+	result.EpochMetricsAvailable = snapshot.EpochMetricsAvailable
 
-	// one extra row tells whether there is a next page
-	rows := model.GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, sortBy, afterPosition, limit+1)
-	hasMore := limit < len(rows)
-	if hasMore {
-		rows = rows[:limit]
+	pager := &pointsLeaderboardPager{
+		snapshotId:  snapshot.SnapshotId,
+		sort:        sortBy,
+		totalRanked: snapshot.TotalRanked,
+		after: func(afterPosition int64, n int) []*model.PointsLeaderboardRow {
+			return model.GetPointsLeaderboardPage(ctx, snapshot.SnapshotId, sortBy, afterPosition, n)
+		},
+		before: func(beforePosition int64, n int) []*model.PointsLeaderboardRow {
+			return model.GetPointsLeaderboardPageBefore(ctx, snapshot.SnapshotId, sortBy, beforePosition, n)
+		},
 	}
+	rows, prevCursor, nextCursor := pager.page(cursor, args.SeekRank, limit)
 	for _, row := range rows {
-		result.Rows = append(result.Rows, pointsLeaderboardRowFromModel(row))
+		result.Rows = append(result.Rows, pointsLeaderboardRowFromModel(row, sortBy))
 	}
-	if hasMore && 0 < len(rows) {
-		last := rows[len(rows)-1]
-		result.NextCursor = encodePointsLeaderboardCursor(pointsLeaderboardCursor{
-			SnapshotId: snapshot.SnapshotId,
-			Sort:       sortBy,
-			Position:   last.Position(sortBy),
-		})
-	}
+	result.PrevCursor = prevCursor
+	result.NextCursor = nextCursor
 	result.Me = pointsLeaderboardMe(ctx, snapshot, clientSession)
 	return result, nil
+}
+
+// pointsLeaderboardPager turns one request (first page, a cursor in either
+// direction, or a seek) into a page plus the cursors on both sides. The
+// reads are injected so the paging rules are testable without a database.
+type pointsLeaderboardPager struct {
+	snapshotId  server.Id
+	sort        string
+	totalRanked int64
+	// after lists up to n rows with position > afterPosition, ascending
+	after func(afterPosition int64, n int) []*model.PointsLeaderboardRow
+	// before lists the n rows closest below beforePosition, ascending
+	before func(beforePosition int64, n int) []*model.PointsLeaderboardRow
+}
+
+func (self *pointsLeaderboardPager) cursorAt(position int64, backward bool) string {
+	return encodePointsLeaderboardCursor(pointsLeaderboardCursor{
+		SnapshotId: self.snapshotId,
+		Sort:       self.sort,
+		Position:   position,
+		Backward:   backward,
+	})
+}
+
+// page returns the rows in ascending position order, the prev_cursor (empty
+// when the page starts at position 1) and the next_cursor (empty when the
+// page ends at the last row). One extra row is read on the far side to learn
+// whether more rows exist there; the near side is known from the position.
+func (self *pointsLeaderboardPager) page(
+	cursor *pointsLeaderboardCursor,
+	seekRank int64,
+	limit int,
+) (rows []*model.PointsLeaderboardRow, prevCursor string, nextCursor string) {
+	if cursor != nil && cursor.Backward {
+		// the page ends just before cursor.Position
+		rows = self.before(cursor.Position, limit+1)
+		hasBefore := limit < len(rows)
+		if hasBefore {
+			rows = rows[1:]
+		}
+		if 0 < len(rows) {
+			if hasBefore {
+				prevCursor = self.cursorAt(rows[0].Position(self.sort), true)
+			}
+			// the row at cursor.Position exists (the page before was read from it)
+			nextCursor = self.cursorAt(rows[len(rows)-1].Position(self.sort), false)
+		}
+		return
+	}
+
+	afterPosition := int64(0)
+	if cursor != nil {
+		afterPosition = cursor.Position
+	} else if 0 < seekRank {
+		// seek: the page starts at the clamped position
+		if self.totalRanked < seekRank {
+			seekRank = self.totalRanked
+		}
+		if seekRank < 1 {
+			seekRank = 1
+		}
+		afterPosition = seekRank - 1
+	}
+	rows = self.after(afterPosition, limit+1)
+	hasAfter := limit < len(rows)
+	if hasAfter {
+		rows = rows[:limit]
+	}
+	if 0 < len(rows) {
+		first := rows[0].Position(self.sort)
+		if 1 < first {
+			prevCursor = self.cursorAt(first, true)
+		}
+		if hasAfter {
+			nextCursor = self.cursorAt(rows[len(rows)-1].Position(self.sort), false)
+		}
+	}
+	return
 }
 
 // pointsLeaderboardMe is nil for signed-out callers.
@@ -277,7 +383,7 @@ func pointsLeaderboardMe(
 	}
 	if snapshot != nil {
 		if row := model.GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, networkId); row != nil {
-			me.PointsLeaderboardRow = pointsLeaderboardRowFromModel(row)
+			me.PointsLeaderboardRow = pointsLeaderboardRowFromModel(row, model.PointsLeaderboardSortPoints)
 			me.NetworkName = row.NetworkName
 			me.Anonymous = !row.PointsLeaderboardPublic
 			me.Ranked = true
@@ -357,9 +463,10 @@ type RebuildPointsLeaderboardArgs struct {
 }
 
 type RebuildPointsLeaderboardResult struct {
-	SnapshotId  server.Id `json:"snapshot_id"`
-	TotalRanked int64     `json:"total_ranked"`
-	LatestEpoch uint64    `json:"latest_epoch"`
+	SnapshotId            server.Id `json:"snapshot_id"`
+	TotalRanked           int64     `json:"total_ranked"`
+	LatestEpoch           uint64    `json:"latest_epoch"`
+	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
 }
 
 const (
@@ -421,16 +528,18 @@ func RebuildPointsLeaderboard(
 		return nil, err
 	}
 	glog.Infof(
-		"[points]leaderboard snapshot %s: %d ranked networks, %d finalized epochs, latest epoch %d\n",
+		"[points]leaderboard snapshot %s: %d ranked networks, %d finalized epochs, latest epoch %d, epoch metrics available %t\n",
 		snapshot.SnapshotId,
 		snapshot.TotalRanked,
 		len(windows),
 		snapshot.LatestEpoch,
+		snapshot.EpochMetricsAvailable,
 	)
 	return &RebuildPointsLeaderboardResult{
-		SnapshotId:  snapshot.SnapshotId,
-		TotalRanked: snapshot.TotalRanked,
-		LatestEpoch: snapshot.LatestEpoch,
+		SnapshotId:            snapshot.SnapshotId,
+		TotalRanked:           snapshot.TotalRanked,
+		LatestEpoch:           snapshot.LatestEpoch,
+		EpochMetricsAvailable: snapshot.EpochMetricsAvailable,
 	}, nil
 }
 

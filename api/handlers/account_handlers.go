@@ -16,8 +16,13 @@ func GetNetworkReferralCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetNetworkReferralCode, w, r)
 }
 
+// ValidateReferralCode answers the sign-up screens' "is this bonus code valid?"
+// check, which every app makes before an account exists, so it cannot require
+// a session; the address-scoped budget in the controller guards enumeration.
+// (The July 2026 spec audit made it RequireAuth to match the spec, which broke
+// referral entry at sign-up on every platform with a 401.)
 func ValidateReferralCode(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(controller.ValidateReferralCode, w, r)
+	router.WrapWithInputNoAuth(controller.ValidateReferralCode, w, r)
 }
 
 func GetAccountPoints(w http.ResponseWriter, r *http.Request) {

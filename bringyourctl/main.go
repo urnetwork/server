@@ -73,6 +73,12 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
+    bringyourctl onboarding status --network_id=<network_id>
+    bringyourctl onboarding preview --network_id=<network_id> --step=<step>
+    bringyourctl onboarding send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
+    bringyourctl onboarding webhook-ensure
+    bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
+    bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
@@ -240,6 +246,20 @@ Options:
 		} else if pending, _ := opts.Bool("pending"); pending {
 			payoutPending()
 		}
+	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
+		if status, _ := opts.Bool("status"); status {
+			onboardingStatus(opts)
+		} else if preview, _ := opts.Bool("preview"); preview {
+			onboardingPreview(opts)
+		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
+			onboardingSendTest(opts)
+		} else if webhookEnsure, _ := opts.Bool("webhook-ensure"); webhookEnsure {
+			onboardingWebhookEnsure()
+		} else if rollup, _ := opts.Bool("rollup"); rollup {
+			onboardingRollup(opts)
+		} else if experiments, _ := opts.Bool("experiments"); experiments {
+			onboardingExperiments(opts)
+		}
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
 			listPendingPayouts(opts)
@@ -382,8 +402,9 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 	fmt.Printf("Scrubbed %d task row(s) and %d audit blob(s).\n", scrubbedTaskCount, scrubbedAuditCount)
 }
 
-// dbAudit compares the live DB schema against the schema the full local
-// db_migrations head should produce.
+// dbAudit compares the live DB schema against the schema its recorded migration
+// version should produce. Pending migrations are reported separately and are
+// only applied by db migrate.
 //
 //	db audit                      report the drift, then print the reconciling
 //	                              SQL as a dry run (summary at top, SQL at bottom)
@@ -405,9 +426,9 @@ func dbAudit(opts docopt.Opts) {
 		return
 	}
 
-	// the expected schema is always the full local db_migrations head
 	result := server.AuditSchema(ctx)
 	fmt.Printf("DB recorded version: %d   local db_migrations head: %d\n", result.DbVersion, result.LocalVersion)
+	pendingMigrationCount := result.LocalVersion - result.DbVersion
 
 	if !fix {
 		// plain audit is the dry run: summary first, then the SQL --fix would run
@@ -416,7 +437,7 @@ func dbAudit(opts docopt.Opts) {
 			fmt.Print("\n")
 			fmt.Print(result.Diff.FixSql())
 		}
-		fmt.Printf("\n%d migration(s) need to be applied.\n", result.LocalVersion-result.DbVersion)
+		fmt.Printf("\n%d migration(s) need to be applied.\n", pendingMigrationCount)
 		return
 	}
 
@@ -448,6 +469,7 @@ func dbAudit(opts docopt.Opts) {
 		fmt.Print("\n")
 		fmt.Print(notApplied)
 	}
+	fmt.Printf("\n%d migration(s) need to be applied with `bringyourctl db migrate`.\n", pendingMigrationCount)
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
@@ -1465,12 +1487,12 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 // hand -- the same controller orchestrator the hourly task runs, never a
 // separate implementation. --dry-run audits what a real run WOULD repair
 // without changing anything: store reads happen for real, every write
-// (credit, ended entitlement, unfulfilled-record clearing, watermark advance)
-// is suppressed, and each suppressed repair is a would_credit/would_end audit
-// row tagged dry_run. A real run holds the same run-level advisory lock the
-// task path holds, so a CLI run and the hourly task can never interleave --
-// whichever starts second reports busy and exits. Exits non-zero if any store
-// errored.
+// (credit, ended entitlement, Pro-metadata repair, unfulfilled-record
+// clearing, watermark advance) is suppressed, and each suppressed repair is a
+// would_credit/would_end/would_repair_entitlement audit row tagged dry_run. A
+// real run holds the same run-level advisory lock the task path holds, so a CLI
+// run and the hourly task can never interleave -- whichever starts second
+// reports busy and exits. Exits non-zero if any store errored.
 func paymentsReconcile(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -1512,13 +1534,13 @@ func paymentsReconcile(opts docopt.Opts) {
 		fmt.Printf("payment reconciliation run %s\n", result.RunId)
 	}
 
-	creditLabel, endLabel := "credited", "ended"
+	creditLabel, endLabel, repairLabel := "credited", "ended", "repaired"
 	if result.DryRun {
-		creditLabel, endLabel = "would-credit", "would-end"
+		creditLabel, endLabel, repairLabel = "would-credit", "would-end", "would-repair"
 	}
 	fmt.Println()
-	fmt.Printf("%-8s %9s %13s %10s %7s  %s\n", "store", "examined", creditLabel, endLabel, "errors", "notes")
-	fmt.Println(strings.Repeat("-", 78))
+	fmt.Printf("%-8s %9s %13s %10s %14s %7s  %s\n", "store", "examined", creditLabel, endLabel, repairLabel, "errors", "notes")
+	fmt.Println(strings.Repeat("-", 93))
 	for _, store := range stores {
 		summary := result.StoreResults[store]
 		if summary == nil {
@@ -1535,8 +1557,8 @@ func paymentsReconcile(opts docopt.Opts) {
 			notes = append(notes, fmt.Sprintf("email fallbacks: %d", summary.EmailFallbacks))
 		}
 		fmt.Printf(
-			"%-8s %9d %13d %10d %7d  %s\n",
-			store, summary.Examined, summary.Credited, summary.Ended, summary.Errors,
+			"%-8s %9d %13d %10d %14d %7d  %s\n",
+			store, summary.Examined, summary.Credited, summary.Ended, summary.EntitlementsRepaired, summary.Errors,
 			strings.Join(notes, "; "),
 		)
 	}
@@ -1597,8 +1619,8 @@ func paymentsReconcile(opts docopt.Opts) {
 
 	fmt.Println()
 	fmt.Printf(
-		"%s %d, %s %d, errors %d, skipped %v\n",
-		creditLabel, result.Credited, endLabel, result.Ended, result.Errors, result.SkippedStores,
+		"%s %d, %s %d, %s %d, errors %d, skipped %v\n",
+		creditLabel, result.Credited, endLabel, result.Ended, repairLabel, result.EntitlementsRepaired, result.Errors, result.SkippedStores,
 	)
 	if 0 < result.Errors {
 		os.Exit(1)
@@ -2363,4 +2385,134 @@ func stFinalize(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
+}
+
+// ----- onboarding campaign (mmm/onboarding/PLAN.md) -----
+
+// onboardingStatus prints a network's campaign row, offer, sends, events and
+// the facts a step decision would see now.
+func onboardingStatus(opts docopt.Opts) {
+	ctx := context.Background()
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	status := controller.OnboardingCampaignStatus(ctx, networkId)
+	if status.Row == nil {
+		fmt.Printf("network %s is not in the onboarding campaign\n", networkId)
+	}
+	out, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingPreview renders the decision a step would make now and, when it
+// would send, the template id and params. Nothing is sent.
+func onboardingPreview(opts docopt.Opts) {
+	ctx := context.Background()
+	networkIdStr, _ := opts.String("--network_id")
+	step, _ := opts.String("--step")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	preview, err := controller.OnboardingCampaignPreview(ctx, networkId, step)
+	if err != nil {
+		panic(err)
+	}
+	out, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingSendTest sends one template to an explicit address with sample
+// data (the only send path outside the scheduler; behind onboarding.enabled).
+// onboardingRollup recomputes onboarding_results_daily for the cohort days
+// [--from, --to] (default: the configured window ending yesterday), exactly as
+// the nightly task does. The first backfill after deploy:
+//
+//	bringyourctl onboarding rollup --from=2026-09-01 --to=2026-09-30
+func onboardingRollup(opts docopt.Opts) {
+	ctx := context.Background()
+	parse := func(flag string) time.Time {
+		value, _ := opts.String(flag)
+		if value == "" {
+			return time.Time{}
+		}
+		t, err := time.Parse("2006-01-02", value)
+		if err != nil {
+			panic(fmt.Errorf("%s must be YYYY-MM-DD: %w", flag, err))
+		}
+		return t.UTC()
+	}
+	result, err := controller.RunOnboardingResultsRollup(ctx, parse("--from"), parse("--to"))
+	if err != nil {
+		panic(err)
+	}
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// onboardingExperiments prints the registry with the live variant states, or
+// with --resume / --pause changes one variant's state first.
+func onboardingExperiments(opts docopt.Opts) {
+	ctx := context.Background()
+	experiment, _ := opts.String("--experiment")
+	variant, _ := opts.String("--variant")
+	if resume, _ := opts.Bool("--resume"); resume {
+		if err := controller.ResumeExperimentVariant(ctx, experiment, variant); err != nil {
+			panic(err)
+		}
+		fmt.Printf("Resumed %s/%s\n", experiment, variant)
+	} else if pause, _ := opts.Bool("--pause"); pause {
+		reason, _ := opts.String("--reason")
+		if err := controller.PauseExperimentVariant(ctx, experiment, variant, reason); err != nil {
+			panic(err)
+		}
+		fmt.Printf("Paused %s/%s\n", experiment, variant)
+	}
+	out, err := json.MarshalIndent(controller.OnboardingExperimentsState(ctx), "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+func onboardingSendTest(opts docopt.Opts) {
+	ctx := context.Background()
+	email, _ := opts.String("--email")
+	template, _ := opts.String("--template")
+	variant, _ := opts.String("--variant")
+	locale, _ := opts.String("--locale")
+	messageId, err := controller.OnboardingCampaignSendTest(ctx, email, template, variant, locale)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Sent %s/%s/%s to %s (message id %s)\n", template, variant, locale, email, messageId)
+}
+
+// onboardingWebhookEnsure registers the Brevo transactional webhook once.
+// A disabled campaign is a refusal, not a fault: the gate exists so nothing
+// touches the live Brevo account until onboarding.enabled is set, so say what
+// to flip and exit non-zero without a stack trace.
+func onboardingWebhookEnsure() {
+	if !model.Onboarding().Enabled {
+		fmt.Fprintln(os.Stderr, "onboarding campaign is disabled: set onboarding.enabled: true in config/main/onboarding.yml (and deploy the config) before registering the Brevo webhook")
+		os.Exit(1)
+	}
+	ctx := context.Background()
+	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "onboarding webhook-ensure: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("%s\n", outcome)
 }

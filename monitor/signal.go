@@ -85,6 +85,7 @@ func alertFromFinding(settings SignalSettings, number, key, name string, f findi
 		Environment:  settings.Environment,
 		ObservedAt:   settings.Now(),
 		Sustain:      f.sustain,
+		PageSustain:  f.pageSustain,
 		Symptom:      f.symptom,
 		Mechanism:    mechanism,
 		Baseline:     f.baseline,
