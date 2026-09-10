@@ -129,9 +129,10 @@ type CompetitionLeaderboardResult struct {
 	CompetitionId string                        `json:"competition_id"`
 	RoundId       server.Id                     `json:"round_id"`
 	Epoch         int                           `json:"epoch"`
+	Staging       bool                          `json:"staging"`
 	Status        string                        `json:"status"`
 	FinalizedAt   time.Time                     `json:"finalized_at"`
-	WinnerJobId   *server.Id                    `json:"winner_job_id,omitempty"`
+	WinnerJobId   *server.Id                    `json:"winner_job_id"`
 	Entries       []CompetitionLeaderboardEntry `json:"entries"`
 }
 

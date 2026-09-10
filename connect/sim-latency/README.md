@@ -181,8 +181,11 @@ uses the same authenticated submission, immutable MinIO retention, canonical
 patch cache, Redis FIFO, isolated evaluator, scoring, embargo, and poll-result
 publication paths as production. It is fee-free, always evaluates against the
 frozen source epoch 0, and finalizes automatically with no winner after its
-window closes and all accepted work drains. Staging never creates leaderboard
-rows, honesty-review candidates, source promotion, or a production winner.
+window closes and all accepted work drains. The default production leaderboard
+excludes staging; `GET /competition/leaderboard?include_staging=true` exposes
+finalized staging rows with `staging: true` and `winner_job_id: null` so the
+Apex adapter can exercise its production reconciliation path. Staging never
+creates honesty-review candidates, source promotion, or a production winner.
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and

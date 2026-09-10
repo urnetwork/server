@@ -1636,12 +1636,33 @@ func InfoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func LeaderboardHandler(w http.ResponseWriter, r *http.Request) {
-	result, evalError := DefaultService().Leaderboards(r.Context())
+	includeStaging, queryError := leaderboardIncludeStaging(r)
+	if queryError != nil {
+		writeCompetitionJson(w, http.StatusBadRequest, queryError)
+		return
+	}
+	result, evalError := DefaultService().Leaderboards(r.Context(), includeStaging)
 	if evalError != nil {
 		writeCompetitionJson(w, http.StatusServiceUnavailable, evalError)
 		return
 	}
 	writeCompetitionJson(w, http.StatusOK, result)
+}
+
+// Keeps the public production view as the default while admitting one strict
+// opt-in used to reconcile the fee-free staging lifecycle.
+func leaderboardIncludeStaging(r *http.Request) (bool, *CompetitionError) {
+	values, present := r.URL.Query()["include_staging"]
+	if !present {
+		return false, nil
+	}
+	if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+		return false, submissionError(
+			"invalid_include_staging",
+			"include_staging must appear once with value true or false",
+		)
+	}
+	return values[0] == "true", nil
 }
 
 func GetRoundWorkloadHandler(w http.ResponseWriter, r *http.Request) {
@@ -3184,12 +3205,12 @@ func (self *Service) GenerateRound(ctx context.Context, args GenerateRoundArgs) 
 	return &round.RoundResult, nil
 }
 
-func (self *Service) Leaderboards(ctx context.Context) (*SeasonLeaderboardResult, *CompetitionError) {
+func (self *Service) Leaderboards(ctx context.Context, includeStaging bool) (*SeasonLeaderboardResult, *CompetitionError) {
 	settings, err := self.Settings()
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	result, err := self.store.Leaderboards(ctx, settings)
+	result, err := self.store.Leaderboards(ctx, settings, includeStaging)
 	if err != nil {
 		return nil, infrastructureError("storage_unavailable", "competition leaderboard storage is unavailable")
 	}
@@ -3482,7 +3503,7 @@ type Store interface {
 	GetRound(context.Context, *Settings, server.Id) (*roundRecord, error)
 	PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error)
 	RecordCandidateReview(context.Context, *Settings, int, CandidateReviewDecision) (*CandidateReviewState, error)
-	Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error)
+	Leaderboards(context.Context, *Settings, bool) (*SeasonLeaderboardResult, error)
 	Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string, string) (*queuedJob, bool, error)
 	GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error)
 	Readiness(context.Context, *Settings) (map[string]bool, error)
@@ -4457,23 +4478,40 @@ func (self PostgresStore) RequirePromotionDecision(
 	return candidate, err
 }
 
-func (self PostgresStore) Leaderboards(ctx context.Context, settings *Settings) (result *SeasonLeaderboardResult, err error) {
+func (self PostgresStore) Leaderboards(
+	ctx context.Context,
+	settings *Settings,
+	includeStaging bool,
+) (result *SeasonLeaderboardResult, err error) {
 	result = &SeasonLeaderboardResult{CompetitionId: settings.CompetitionId, Epochs: []LeaderboardResult{}}
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, queryErr := conn.Query(ctx, `
-				SELECT round_id, epoch_number, finalized_at, winner_job_id
+				SELECT round_id, epoch_number, staging, finalized_at, winner_job_id
 				FROM competition_round
-				WHERE competition_id = $1 AND canceled = false AND staging = false AND finalized_at IS NOT NULL
-				  AND reveal_at <= $2
-				ORDER BY epoch_number
-			`, settings.CompetitionId, self.nowUtc())
+				WHERE competition_id = $1 AND canceled = false AND finalized_at IS NOT NULL
+				  AND (staging = false OR $3)
+				  AND (
+				      (staging = false AND reveal_at <= $2) OR
+				      (staging = true AND admission_closed_at IS NOT NULL AND admission_closed_at <= $2)
+				  )
+				ORDER BY staging, epoch_number
+			`, settings.CompetitionId, self.nowUtc(), includeStaging)
 			server.WithPgResult(rows, queryErr, func() {
 				for rows.Next() {
 					var board LeaderboardResult
-					server.Raise(rows.Scan(&board.RoundId, &board.Epoch, &board.FinalizedAt, &board.WinnerJobId))
+					server.Raise(rows.Scan(
+						&board.RoundId,
+						&board.Epoch,
+						&board.Staging,
+						&board.FinalizedAt,
+						&board.WinnerJobId,
+					))
 					board.CompetitionId = settings.CompetitionId
 					board.Status = "finalized"
+					if board.Staging {
+						board.WinnerJobId = nil
+					}
 					board.Entries = []LeaderboardEntry{}
 					result.Epochs = append(result.Epochs, board)
 				}
@@ -5990,6 +6028,9 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 			if leaderboard.Status != "finalized" || leaderboard.RoundId == (server.Id{}) || leaderboard.FinalizedAt.IsZero() {
 				return errors.New("Apex reconciliation received a non-finalized leaderboard")
 			}
+			if leaderboard.Staging && leaderboard.WinnerJobId != nil {
+				return errors.New("Apex reconciliation received a staging winner")
+			}
 			for _, entry := range leaderboard.Entries {
 				if seenJobIds[entry.JobId] {
 					return errors.New("Apex reconciliation received a duplicate leaderboard job")
@@ -6001,6 +6042,12 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 				}
 				if record.RoundId != leaderboard.RoundId || record.CanonicalPatchSha256 != entry.PatchSha256 {
 					return errors.New("leaderboard changed an immutable Apex submission identity")
+				}
+				if record.Staging != leaderboard.Staging {
+					return errors.New("leaderboard changed the staging admission identity")
+				}
+				if leaderboard.Staging && (entry.Winner || entry.HonestyReview != "not_reviewed") {
+					return errors.New("Apex reconciliation received staging winner-review state")
 				}
 				if entry.Score.ScoreSchema != ScoreSchema || entry.Score.Significance == nil {
 					return errors.New("leaderboard score is missing its statistical record")
@@ -6363,11 +6410,23 @@ func (self *ApexAdapter) PollNext(ctx context.Context) (*ApexAdapterRecord, erro
 	return self.store.RecordPoll(record.SubmissionId, job, self.now())
 }
 
-// Reconcile fetches the public finalized leaderboards and atomically releases
-// only identities that match prior paid admissions.
+// Reconcile fetches the default production-only leaderboard and atomically
+// releases only identities that match prior paid admissions.
 func (self *ApexAdapter) Reconcile(ctx context.Context) (*SeasonLeaderboardResult, error) {
+	return self.reconcileLeaderboard(ctx, "/competition/leaderboard")
+}
+
+// Uses the same authenticated reconciliation path for finalized staging and
+// production rows while retaining their explicit era identities.
+func (self *ApexAdapter) ReconcileStaging(ctx context.Context) (*SeasonLeaderboardResult, error) {
+	return self.reconcileLeaderboard(ctx, "/competition/leaderboard?include_staging=true")
+}
+
+// Authenticates the complete public response before committing any local
+// publication state.
+func (self *ApexAdapter) reconcileLeaderboard(ctx context.Context, path string) (*SeasonLeaderboardResult, error) {
 	var leaderboards SeasonLeaderboardResult
-	if err := self.requestWithRetry(ctx, http.MethodGet, "/competition/leaderboard", nil, false, &leaderboards); err != nil {
+	if err := self.requestWithRetry(ctx, http.MethodGet, path, nil, false, &leaderboards); err != nil {
 		return nil, err
 	}
 	if err := self.store.ReconcileLeaderboard(leaderboards, self.now()); err != nil {

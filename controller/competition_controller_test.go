@@ -335,6 +335,39 @@ func testWorkerImageDigest() string {
 	return "sha256:" + strings.Repeat("7", 64)
 }
 
+func TestLeaderboardIncludeStagingParsesStrictBoolean(t *testing.T) {
+	cases := []struct {
+		rawQuery       string
+		includeStaging bool
+	}{
+		{rawQuery: "", includeStaging: false},
+		{rawQuery: "include_staging=false", includeStaging: false},
+		{rawQuery: "include_staging=true", includeStaging: true},
+	}
+	for _, c := range cases {
+		request := httptest.NewRequest(http.MethodGet, "/competition/leaderboard?"+c.rawQuery, nil)
+		includeStaging, evalError := leaderboardIncludeStaging(request)
+		if evalError != nil || includeStaging != c.includeStaging {
+			t.Fatalf("query %q = %t, %#v", c.rawQuery, includeStaging, evalError)
+		}
+	}
+}
+
+func TestLeaderboardIncludeStagingRejectsAmbiguousValues(t *testing.T) {
+	for _, rawQuery := range []string{
+		"include_staging=1",
+		"include_staging=TRUE",
+		"include_staging=",
+		"include_staging=true&include_staging=false",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/competition/leaderboard?"+rawQuery, nil)
+		if _, evalError := leaderboardIncludeStaging(request); evalError == nil ||
+			evalError.Code != "invalid_include_staging" {
+			t.Fatalf("query %q error = %#v", rawQuery, evalError)
+		}
+	}
+}
+
 func testScoreSignificance(significant bool) *ScoreSignificance {
 	baselineVariance := 4.0
 	candidateVariance := 4.0
@@ -1026,7 +1059,7 @@ func (f *fakeStore) RecordCandidateReview(context.Context, *Settings, int, Candi
 	return nil, errors.New("unused")
 }
 
-func (f *fakeStore) Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error) {
+func (f *fakeStore) Leaderboards(context.Context, *Settings, bool) (*SeasonLeaderboardResult, error) {
 	return &SeasonLeaderboardResult{CompetitionId: "test", Epochs: []LeaderboardResult{}}, nil
 }
 
@@ -3279,6 +3312,91 @@ func (self *apexConformanceFeeCollector) CollectOnce(
 	return receipt, nil
 }
 
+func TestApexAdapterReconcileStagingOptsIntoFinalizedEpochs(t *testing.T) {
+	roundId := server.RequireParseId("00000000-0000-0000-0000-000000000151")
+	finalizedAt := time.Date(2026, time.August, 29, 2, 0, 0, 0, time.UTC)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/competition/leaderboard" ||
+			request.URL.RawQuery != "include_staging=true" {
+			t.Errorf("staging reconciliation request = %s %s", request.Method, request.URL.String())
+			http.NotFound(response, request)
+			return
+		}
+		if request.Header.Get("Authorization") != "" {
+			t.Error("public staging leaderboard received a bearer token")
+		}
+		response.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(response).Encode(SeasonLeaderboardResult{
+			CompetitionId: "competition-test",
+			Epochs: []LeaderboardResult{{
+				CompetitionId: "competition-test",
+				RoundId:       roundId,
+				Epoch:         0,
+				Staging:       true,
+				Status:        "finalized",
+				FinalizedAt:   finalizedAt,
+				WinnerJobId:   nil,
+				Entries:       []LeaderboardEntry{},
+			}},
+		}); err != nil {
+			t.Errorf("encode staging leaderboard: %v", err)
+		}
+	}))
+	defer apiServer.Close()
+
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewApexAdapter(
+		apiServer.URL,
+		"submitter-test",
+		store,
+		&apexConformanceFeeCollector{receipts: map[string]string{}},
+		ApexAdapterOptions{HttpClient: apiServer.Client()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderboards, err := adapter.ReconcileStaging(context.Background())
+	if err != nil || len(leaderboards.Epochs) != 1 || !leaderboards.Epochs[0].Staging ||
+		leaderboards.Epochs[0].WinnerJobId != nil {
+		t.Fatalf("staging reconciliation = %#v, %v", leaderboards, err)
+	}
+}
+
+func TestApexAdapterReconciliationRejectsStagingWinner(t *testing.T) {
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	winnerJobId := server.RequireParseId("00000000-0000-0000-0000-000000000252")
+	err = store.ReconcileLeaderboard(SeasonLeaderboardResult{
+		CompetitionId: "competition-test",
+		Epochs: []LeaderboardResult{{
+			CompetitionId: "competition-test",
+			RoundId:       server.RequireParseId("00000000-0000-0000-0000-000000000152"),
+			Epoch:         0,
+			Staging:       true,
+			Status:        "finalized",
+			FinalizedAt:   time.Date(2026, time.August, 29, 2, 0, 0, 0, time.UTC),
+			WinnerJobId:   &winnerJobId,
+			Entries:       []LeaderboardEntry{},
+		}},
+	}, time.Date(2026, time.August, 29, 2, 1, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "staging winner") {
+		t.Fatalf("staging winner reconciliation error = %v", err)
+	}
+}
+
 // The emulator forces every adapter transition: durable fee intent, typed
 // backpressure, immutable admission, FIFO polling, embargo, finalized
 // leaderboard publication, and authenticated workload reveal.
@@ -4147,9 +4265,33 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if evalError != nil || workloadStatus != http.StatusOK || len(providers) == 0 || digest != first.ProvidersSha256 {
 			t.Fatalf("staging workload reveal bytes=%d digest=%q status=%d error=%#v", len(providers), digest, workloadStatus, evalError)
 		}
-		leaderboards, err := store.Leaderboards(ctx, settings)
+		leaderboards, err := store.Leaderboards(ctx, settings, false)
 		if err != nil || len(leaderboards.Epochs) != 0 {
 			t.Fatalf("staging production leaderboards = %#v, %v", leaderboards, err)
+		}
+		stagingLeaderboards, err := store.Leaderboards(ctx, settings, true)
+		if err != nil || len(stagingLeaderboards.Epochs) != 1 {
+			t.Fatalf("staging-inclusive leaderboards = %#v, %v", stagingLeaderboards, err)
+		}
+		stagingBoard := stagingLeaderboards.Epochs[0]
+		if !stagingBoard.Staging || stagingBoard.RoundId != first.RoundId ||
+			stagingBoard.Epoch != first.Epoch || stagingBoard.Status != "finalized" ||
+			stagingBoard.WinnerJobId != nil || len(stagingBoard.Entries) != 1 ||
+			stagingBoard.Entries[0].JobId != job.JobId ||
+			stagingBoard.Entries[0].Winner ||
+			stagingBoard.Entries[0].HonestyReview != "not_reviewed" {
+			t.Fatalf("published staging leaderboard = %#v", stagingBoard)
+		}
+		encodedBoard, err := json.Marshal(stagingBoard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wireBoard := map[string]any{}
+		if err := json.Unmarshal(encodedBoard, &wireBoard); err != nil {
+			t.Fatal(err)
+		}
+		if winnerJobId, present := wireBoard["winner_job_id"]; !present || winnerJobId != nil {
+			t.Fatalf("staging winner_job_id = %#v, present=%t", winnerJobId, present)
 		}
 
 		second, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
@@ -4535,7 +4677,7 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 		if queuedSignals != 0 {
 			t.Fatalf("Redis FIFO retained %d stale signals after finalization", queuedSignals)
 		}
-		leaderboards, err := store.Leaderboards(ctx, settings)
+		leaderboards, err := store.Leaderboards(ctx, settings, false)
 		if err != nil || len(leaderboards.Epochs) != 1 ||
 			len(leaderboards.Epochs[0].Entries) != 2 ||
 			leaderboards.Epochs[0].Entries[0].Winner ||
@@ -4670,7 +4812,7 @@ func TestCompetitionFullLifecycleNoWinnerCarryForward(t *testing.T) {
 		if candidate, err := store.RequirePromotionDecision(ctx, settings, round.Epoch, nil); err != nil || candidate != nil {
 			t.Fatalf("no-winner promotion decision: %v", err)
 		}
-		leaderboards, err := store.Leaderboards(ctx, settings)
+		leaderboards, err := store.Leaderboards(ctx, settings, false)
 		if err != nil || len(leaderboards.Epochs) != 1 ||
 			len(leaderboards.Epochs[0].Entries) != 1 || leaderboards.Epochs[0].Entries[0].Winner {
 			t.Fatalf("no-winner leaderboard = %#v, %v", leaderboards, err)

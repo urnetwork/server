@@ -25,8 +25,10 @@ multiple sequential epochs. A response carrying `staging: true` is fee-free
 and follows the production admission, cache, FIFO, isolated evaluation,
 scoring, embargo, and authenticated polling paths against frozen source epoch
 zero. After close and complete drain, it finalizes automatically with no winner
-and makes each job's score or typed failure visible through its status URL. It
-does not create a production leaderboard row, candidate review, or promotion.
+and makes each job's score or typed failure visible through its status URL.
+`GET /competition/leaderboard?include_staging=true` also publishes a clearly
+marked, null-winner staging entry for exact adapter-path testing. It does not
+create a production leaderboard row, candidate review, or promotion.
 
 UR creates or retrieves each identity with `run-main.sh staging`, then uses
 `run-main.sh advance-staging` to stop admission, drain all accepted work,
@@ -55,9 +57,9 @@ The adapter sends it as `Authorization: Bearer TOKEN`.
    5xx responses; use bounded exponential backoff and never resubmit under a
    new identity to bypass FIFO order or the fee boundary.
 5. Before finalization, non-operator responses expose state only. A finalized
-   staging epoch publishes each outcome at its status URL. After production
-   review finalizes an epoch, read its public leaderboard, reveal, and
-   authenticated workload.
+   staging epoch publishes each outcome at its status URL and in the opt-in
+   staging leaderboard. After production review finalizes an epoch, read its
+   default public leaderboard, reveal, and authenticated workload.
 
 The authoritative schema is
 [`sn/api/competition.yml`](../../../../sn/api/competition.yml). The Go Apex

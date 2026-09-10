@@ -75,8 +75,10 @@ scheduled/open/grading round. Share its `round_id` with the Apex integration.
 Fee-free staging patches traverse the real FIFO, isolation, evaluation,
 scoring, embargo, and authenticated polling paths. Every staging epoch uses
 frozen source epoch zero and automatically finalizes with no winner once it
-closes and the worker drains all accepted jobs. It creates no leaderboard,
-honesty-review, promotion, or production-winner state.
+closes and the worker drains all accepted jobs. The default leaderboard remains
+production-only; its `include_staging=true` view publishes the finalized
+staging epoch with `staging: true` and a null winner for adapter conformance.
+It creates no honesty-review, promotion, or production-winner state.
 
 Staging still produces the candidate's authenticated same-round baseline and
 score bundle, but it does not require the separately promoted host rebaseline

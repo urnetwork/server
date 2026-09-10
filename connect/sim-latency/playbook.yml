@@ -174,7 +174,7 @@ checklist:
   - id: staging_era
     status: implementation_complete_multi_epoch_apex_proof_pending
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh
-    lifecycle: fee_free_real_fifo_evaluation_against_source_epoch_zero_auto_finalize_no_winner_no_leaderboard
+    lifecycle: fee_free_real_fifo_evaluation_against_source_epoch_zero_auto_finalize_no_winner_opt_in_staging_leaderboard
   - id: six_epoch_immediate_fifo_lifecycle
     status: complete
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh

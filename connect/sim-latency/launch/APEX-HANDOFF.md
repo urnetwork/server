@@ -32,8 +32,10 @@ Before production epoch 1, the API can expose a staging era with sequential
 the real retention, cache, FIFO, evaluator, scoring, embargo, and polling paths
 against frozen source epoch zero. A staging round automatically finalizes with
 no winner after close and drain, then publishes each score or typed failure at
-the immutable job status URL. It never enters production ranking, honesty
-review, promotion, or leaderboard state. The first production-round commit
+the immutable job status URL. Its finalized result is also available through
+the opt-in `GET /competition/leaderboard?include_staging=true` view with
+`staging: true` and a null winner. It never enters production ranking, honesty
+review, promotion, or the default production leaderboard. The first production-round commit
 ends the era and atomically cancels queued staging work; it refuses to race a
 running evaluation. The adapter must prefer `active_round` once present and
 persist the returned `staging` boolean.
@@ -53,7 +55,8 @@ returned immutable job id.
 | Submit canonical text patch | `POST /competition/score` |
 | Persist accepted identity | Store `job_id`, `round_id`, `patch_sha256`, and `status_url` atomically |
 | Poll result | `GET /competition/score/{jobId}` using the returned status URL |
-| Publish completed epochs | `GET /competition/leaderboard` |
+| Publish completed production epochs | `GET /competition/leaderboard` |
+| Reconcile completed staging epochs | `GET /competition/leaderboard?include_staging=true` and select `staging: true` |
 | Reproduce after reveal | `GET /competition/round/{roundId}/providers.yml` and authenticate `X-Content-SHA256` |
 
 The adapter must send the exact patch text accepted from the player. It must
@@ -64,8 +67,9 @@ identity. Typed submission failures are terminal.
 
 Results remain embargoed while admission is open and while any accepted job is
 queued or running. Polling reports terminal work as outcome-neutral `completed`
-until finalization commits. Staging then publishes outcomes through polling;
-production publishes only its finalized leaderboard. Production rows identify
+until finalization commits. Staging then publishes outcomes through polling and
+the explicit staging-inclusive leaderboard; the default view remains production
+only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private
 review report.
 A winner must be placeable,
