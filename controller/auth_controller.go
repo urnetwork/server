@@ -240,7 +240,7 @@ func AuthVerify(
 				session.WithByJwt(byJwt),
 			)
 			// the onboarding campaign starts once the address is verified
-			StartOnboardingCampaign(session, byJwt.NetworkId, verify.UserAuth)
+			EnrollNetworkOnboarding(session, byJwt.NetworkId, verify.UserAuth, false)
 		}
 	}
 	return result, err

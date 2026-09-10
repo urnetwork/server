@@ -544,3 +544,29 @@ func decodeEventProps(propsJson string) map[string]any {
 	}
 	return props
 }
+
+// NetworkEnrollmentFacts is what the enrollment gate needs about a network
+// that has no campaign row yet: its admin user's login (empty for a
+// seed-phrase, wallet or phone account, or a missing user) and its creation
+// time. ok is false when the network does not exist.
+func NetworkEnrollmentFacts(ctx context.Context, networkId server.Id) (userAuth string, createTime time.Time, ok bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT coalesce(u.user_auth, ''), n.create_time
+				FROM network n
+				LEFT JOIN network_user u ON u.user_id = n.admin_user_id
+				WHERE n.network_id = $1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&userAuth, &createTime))
+				ok = true
+			}
+		})
+	})
+	return
+}
