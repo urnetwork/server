@@ -132,6 +132,8 @@ go test -race ./monitor
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_preflight_dir/monitor"
+test -x "$monitor_preflight_dir/monitor"
 ```
 
 Keep every disposable repository checkout or Git worktree under a per-run
@@ -190,6 +192,8 @@ install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapshot.XXXXXXXX")
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_snapshot_dir/monitor"
+test -x "$monitor_snapshot_dir/monitor"
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   >"$monitor_snapshot_dir/alerts.md" \
   2>"$monitor_snapshot_dir/stderr.log"
@@ -226,6 +230,8 @@ install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_run_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.watch.XXXXXXXX")
 go build -o "$monitor_run_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_run_dir/monitor"
+test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
 WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
   >"$monitor_run_dir/alerts.md" \
