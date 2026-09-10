@@ -15785,18 +15785,18 @@ millions-behind value therefore represents the still-running failed v1
 generation; the prepared v2 repair had not been deployed. This is direct
 runtime evidence and does not rely on argv or a stale preflight file.
 
-The ordinary `run-subtensor.sh` path also owns netplan, packages, nginx,
-Fluent Bit, and the archive container, so it is not an acceptable way to
-change only this lightnode while the archive's multi-day bootstrap must remain
-uninterrupted. Xops commit `0b1373b` adds
-`main/ansible/run-subtensor-lightnode.sh`: it verifies the exact remote host,
-refuses a nonempty inactive generation twice before activation, preserves the
-old database, runs Compose for only `subtensor-lightnode`, fails immediately on
-the warp-to-full startup discriminator, and asserts the archive container ID
-and start time remain unchanged through the near-head/runtime/gateway gates.
-That isolated runner was the prerequisite for the authorized v2 control below;
-its full readiness result remained pending until the new container's own
-verification window completed.
+At the time of the v2 experiment, Xops commit `0b1373b` added a separate
+lightnode-only runner. That historical runner supplied the isolated control
+below, but it is no longer standing operational guidance. Xops `a8c80af`
+removed both obsolete aliases; `main/ansible/run-subtensor.sh` is now the sole
+canonical runner and owns the archive, lightnode, and host configuration. It
+preserves a matching live lightnode exactly, refuses a nonempty inactive
+generation, deploys the lightnode only when no generation is running, and
+checks both nodes. Intentional replacement therefore requires an explicitly
+authorized preparation: record and preserve the failed container and data,
+remove only that failed lightnode container, select a new empty configured
+path, then run the canonical runner and prove the archive ID/start time did not
+change. The old runner name must not appear in a current alert action.
 
 The authorized isolated v2 rollout supplied a second, distinct failure
 discriminator. It created the previously unused
@@ -15850,15 +15850,16 @@ classification but is not required. The process-start block is the stronger
 generation discriminator because a bounded log query can lose an early line,
 while the generic zero-start cold-bootstrap case retains its 15-cadence noise
 guard. Preserve an advancing resumed generation and measure its lag slope.
-Xops' full-host playbook must
-reconcile only the archive, start rather than unconditionally restart the
-aggregate unit, require an existing lightnode image and `/data` path to match,
-and prove its container ID is unchanged. Intentional lightnode replacement
-remains exclusively owned by `run-subtensor-lightnode.sh`. Choose a new empty
-generation only if the current import stops or a newer independently verified
-checkpoint materially improves recovery. Faster sustained catch-up may still
-require storage/CPU capacity; neither the monitor nor a playbook can create that
-hardware capacity.
+Xops' full-host playbook must reconcile only the archive, start rather than
+unconditionally restart the aggregate unit, require an existing lightnode
+image and `/data` path to match, and prove its container ID is unchanged.
+Intentional lightnode replacement uses the same canonical
+`run-subtensor.sh`, but only after an explicitly authorized operator records
+and preserves the failed identity, removes that one failed container, and
+selects a new empty generation. Choose a new generation only if the current
+import stops or a newer independently verified checkpoint materially improves
+recovery. Faster sustained catch-up may still require storage/CPU capacity;
+neither the monitor nor a playbook can create that hardware capacity.
 
 The 2026-09-02 freeze supplied a narrower cause than peer scarcity or slow
 hardware. Both pinned containers start through `/entrypoint.sh` as root, which

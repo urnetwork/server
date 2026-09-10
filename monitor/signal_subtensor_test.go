@@ -61,10 +61,13 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if lightnode.Sustain != 1 {
 		t.Fatalf("lightnode fallback sustain = %d", lightnode.Sustain)
 	}
-	if !strings.Contains(lightnode.Action, "run-subtensor-lightnode.sh") ||
-		!strings.Contains(lightnode.Action, "recreate only subtensor-lightnode") ||
-		!strings.Contains(lightnode.Action, "Do not run the full run-subtensor.sh") {
+	if !strings.Contains(lightnode.Action, "canonical xops/main/ansible/run-subtensor.sh") ||
+		!strings.Contains(lightnode.Action, "remove only that failed container") ||
+		!strings.Contains(lightnode.Action, "retain the archive container identity") {
 		t.Fatalf("lightnode action is not root-cause specific: %s", lightnode.Action)
+	}
+	if strings.Contains(lightnode.Action, "run-subtensor-lightnode.sh") {
+		t.Fatalf("lightnode action retained removed runner: %s", lightnode.Action)
 	}
 	if !strings.Contains(lightnode.Verify, "unchanged archive container ID/start time") ||
 		!strings.Contains(lightnode.Verify, "live /data mount") {
@@ -186,11 +189,16 @@ func TestSubtensorSignalDistinguishesProgressedWarpResume(t *testing.T) {
 		"starting_block=6413262",
 		"Do not reset this progressing generation",
 		"full-host lightnode-preservation guard",
+		"canonical xops/main/ansible/run-subtensor.sh",
+		"record and preserve the failed lightnode identity",
 		"same live /data generation",
 	} {
 		if !strings.Contains(resume.Markdown(), want) {
 			t.Fatalf("warp resume alert missing %q:\n%s", want, resume.Markdown())
 		}
+	}
+	if strings.Contains(resume.Action, "run-subtensor-lightnode.sh") {
+		t.Fatalf("warp resume action retained removed runner: %s", resume.Action)
 	}
 	for _, alert := range alerts {
 		if alert.Class == "subtensor-warp-fallback" {
@@ -266,16 +274,23 @@ func TestSubtensorSignalDetectsHistoricalWarpCheckpointFailure(t *testing.T) {
 		"v448",
 		"add2b31a19ccf650ad50d79e8ba2668e6494f56f",
 		"0876234316a3b9107ce1eb0781b04ae55f5df89e",
-		"run-subtensor-lightnode.sh",
+		"canonical xops/main/ansible/run-subtensor.sh",
 	} {
 		if !strings.Contains(checkpoint.Markdown(), want) {
 			t.Fatalf("checkpoint alert missing %q:\n%s", want, checkpoint.Markdown())
 		}
 	}
+	if strings.Contains(checkpoint.Action, "run-subtensor-lightnode.sh") {
+		t.Fatalf("checkpoint action retained removed runner: %s", checkpoint.Action)
+	}
 	drift := requireAlertClass(t, alerts, "subtensor-deployment-drift")
 	if !strings.Contains(drift.Observed, "subtensor-lightnode-warp-v2") ||
 		!strings.Contains(drift.Observed, "subtensor-lightnode-warp-v3") {
 		t.Fatalf("deployment drift lost generation identity: %+v", drift)
+	}
+	if !strings.Contains(drift.Action, "canonical xops/main/ansible/run-subtensor.sh") ||
+		strings.Contains(drift.Action, "run-subtensor-lightnode.sh") {
+		t.Fatalf("deployment drift action does not use the sole canonical runner: %s", drift.Action)
 	}
 }
 
