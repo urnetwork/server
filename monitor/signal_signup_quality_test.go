@@ -9,8 +9,10 @@ import (
 func TestSignupQualitySignalSyntheticWave(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		for _, want := range []string{
-			"interval '3 days'",
-			"interval '2 days'",
+			"statement_timestamp() AT TIME ZONE 'UTC'",
+			"(utc_today - 3)::timestamp without time zone AS start_utc",
+			"(utc_today - 2)::timestamp without time zone AS end_utc",
+			"to_char(cohort_day, 'YYYY-MM-DD')",
 			"WHERE EXISTS (",
 			"nc.create_time < cohort.create_time + interval '48 hours'",
 		} {
@@ -49,6 +51,29 @@ func TestSignupQualitySignalSyntheticWave(t *testing.T) {
 	for _, forbidden := range []string{"network_id", "client_id"} {
 		if strings.Contains(alert.Markdown(), forbidden+"=") {
 			t.Fatalf("signup quality alert leaks an identifier: %s", alert.Markdown())
+		}
+	}
+}
+
+func TestSignupQualityQueryUsesUTCBoundsIndependentOfSessionTimezone(t *testing.T) {
+	for _, want := range []string{
+		"WITH clock AS MATERIALIZED",
+		"statement_timestamp() AT TIME ZONE 'UTC'",
+		"n.create_time >= b.start_utc",
+		"n.create_time < b.end_utc",
+		"to_char(cohort_day, 'YYYY-MM-DD')",
+	} {
+		if !strings.Contains(signupQualityQuery, want) {
+			t.Fatalf("signup quality query missing session-timezone-independent boundary %q:\n%s", want, signupQualityQuery)
+		}
+	}
+	for _, forbidden := range []string{
+		"date_trunc('day', now())",
+		"CURRENT_DATE",
+		"LOCALTIMESTAMP",
+	} {
+		if strings.Contains(signupQualityQuery, forbidden) {
+			t.Fatalf("signup quality query retains session-timezone-dependent expression %q:\n%s", forbidden, signupQualityQuery)
 		}
 	}
 }
@@ -96,10 +121,17 @@ func TestSignupQualitySignalSyntheticExactFloorIsHealthy(t *testing.T) {
 
 func TestSignupQualitySignalSyntheticMalformedRows(t *testing.T) {
 	for name, rows := range map[string][]Row{
-		"no rows":       {},
-		"short row":     {{"2026-08-24", "200"}},
-		"two rows":      {{"2026-08-24", "200", "100"}, {"2026-08-25", "200", "100"}},
-		"contradictory": {{"2026-08-24", "200", "300"}},
+		"no rows":          {},
+		"short row":        {{"2026-08-24", "200"}},
+		"extra column":     {{"2026-08-24", "200", "100", "unexpected"}},
+		"two rows":         {{"2026-08-24", "200", "100"}, {"2026-08-25", "200", "100"}},
+		"invalid day":      {{"2026-02-30", "200", "100"}},
+		"timestamp as day": {{"2026-08-24 00:00:00", "200", "100"}},
+		"nonnumeric count": {{"2026-08-24", "not-a-number", "0"}},
+		"decimal count":    {{"2026-08-24", "200.0", "100"}},
+		"overflow count":   {{"2026-08-24", "9223372036854775808", "0"}},
+		"negative count":   {{"2026-08-24", "-1", "0"}},
+		"contradictory":    {{"2026-08-24", "200", "300"}},
 	} {
 		rows := rows
 		source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return rows, nil }}

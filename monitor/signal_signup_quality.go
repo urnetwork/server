@@ -41,15 +41,24 @@ const (
 // clients, or a hash join with network_client, scans every client ever and
 // timed out at the statement deadline on Main.
 const signupQualityQuery = `
-	WITH cohort AS (
-	 SELECT network_id, create_time
-	 FROM network
+	WITH clock AS MATERIALIZED (
+	 SELECT (statement_timestamp() AT TIME ZONE 'UTC')::date AS utc_today
+	), bounds AS MATERIALIZED (
+	 SELECT
+	  (utc_today - 3)::date AS cohort_day,
+	  (utc_today - 3)::timestamp without time zone AS start_utc,
+	  (utc_today - 2)::timestamp without time zone AS end_utc
+	 FROM clock
+	), cohort AS (
+	 SELECT n.network_id, n.create_time
+	 FROM network n
+	 CROSS JOIN bounds b
 	 WHERE
-	  create_time >= date_trunc('day', now()) - interval '3 days' AND
-	  create_time < date_trunc('day', now()) - interval '2 days'
+	  n.create_time >= b.start_utc AND
+	  n.create_time < b.end_utc
 	)
 	SELECT
-	 (date_trunc('day', now()) - interval '3 days')::date AS day,
+	 (SELECT to_char(cohort_day, 'YYYY-MM-DD') FROM bounds) AS day,
 	 COUNT(*) AS networks,
 	 COUNT(*) FILTER (
 	  WHERE EXISTS (
@@ -63,21 +72,48 @@ const signupQualityQuery = `
 	FROM cohort;
 `
 
+type signupQualitySnapshot struct {
+	day            string
+	networks       int64
+	deviceNetworks int64
+}
+
+func parseSignupQualitySnapshot(rows []pgRow) (signupQualitySnapshot, error) {
+	if len(rows) != 1 || len(rows[0]) != 3 {
+		return signupQualitySnapshot{}, fmt.Errorf("signup quality query returned an invalid aggregate shape")
+	}
+	row := rows[0]
+	day := row.str(0)
+	parsedDay, err := time.Parse("2006-01-02", day)
+	if err != nil || parsedDay.Format("2006-01-02") != day {
+		return signupQualitySnapshot{}, fmt.Errorf("signup quality query returned an invalid UTC day")
+	}
+	networks, err := parseStrictInt64(row.str(1))
+	if err != nil {
+		return signupQualitySnapshot{}, fmt.Errorf("signup quality query returned an invalid network count")
+	}
+	deviceNetworks, err := parseStrictInt64(row.str(2))
+	if err != nil {
+		return signupQualitySnapshot{}, fmt.Errorf("signup quality query returned an invalid device-network count")
+	}
+	if networks < 0 || deviceNetworks < 0 || networks < deviceNetworks {
+		return signupQualitySnapshot{}, fmt.Errorf("signup quality query returned contradictory counts networks=%d device_networks=%d", networks, deviceNetworks)
+	}
+	return signupQualitySnapshot{day: day, networks: networks, deviceNetworks: deviceNetworks}, nil
+}
+
 func (pgSignupQualityProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	rows, err := env.runner.pg(ctx, signupQualityQuery)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) != 1 || len(rows[0]) < 3 {
-		return nil, fmt.Errorf("signup quality query returned %d malformed rows", len(rows))
+	snapshot, err := parseSignupQualitySnapshot(rows)
+	if err != nil {
+		return nil, err
 	}
-	row := rows[0]
-	day := row.str(0)
-	networks := atoiRow(row, 1)
-	deviceNetworks := atoiRow(row, 2)
-	if networks < 0 || deviceNetworks < 0 || networks < deviceNetworks {
-		return nil, fmt.Errorf("signup quality query returned contradictory counts networks=%d device_networks=%d", networks, deviceNetworks)
-	}
+	day := snapshot.day
+	networks := snapshot.networks
+	deviceNetworks := snapshot.deviceNetworks
 	if networks < signupQualityMinNetworks {
 		// too few sign-ups to call a wave either way
 		return []finding{healthyFinding("pg/signup-quality", tierWarn, "signup-quality", pgTarget(env))}, nil

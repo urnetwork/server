@@ -5405,6 +5405,19 @@ teardown, but an immutable Taskworker artifact must prove both exact sibling
 inputs because Server's local module replacements make its outer VCS stamp
 insufficient evidence.
 
+A later 2026-09-10 running-artifact discriminator found all eight fresh
+Taskworker slots on one generation with no fresh predecessor overlap. The exact
+extracted executable lacked both the Connect joined-remove signature and the
+Operator Proxy ordered control-plane-close signature. In a cohort beginning at
+the newest process start, 12,195 of 13,451 mature children remained active and
+disconnected (90.66%). The two code fixes were ready but were not in that
+artifact; this was a complete rollout of another legacy artifact, not merely
+six-hour carryover or a partial rollout. Closure requires a rebuilt Taskworker
+containing both fixes, convergence of every slot, a post-convergence cohort
+past the ten-minute grace, and finally a complete six-hour window plus grace.
+This paragraph records historical evidence and does not make that artifact's
+version standing deployment guidance.
+
 Do not bulk-delete or deactivate production children to clear this alert. The
 software fix prevents new leakage; historical active stock needs a separately
 reviewed, bounded reaper or operational cleanup. Begin an explicit post-rollout
@@ -5434,10 +5447,13 @@ login, or on its first device within 30 days, never with neither) keeps them
 out of the cohort, but every sizing, dashboard and store estimate that reads
 the raw sign-up count is misled while the wave runs.
 
-HOW: read-only, direct psql, bounded to one day. Cohort = `network` rows
-created on the day three days back (complete, and every network's 48-hour
-window has matured); per network an index-backed existence probe into
-`network_client` with the 48-hour bound inside the subquery. Never an
+HOW: read-only, direct psql, bounded to one day. A materialized PostgreSQL
+clock converts `statement_timestamp()` to UTC before deriving both naive
+timestamp bounds, and renders the day as exact `YYYY-MM-DD`; the database
+session timezone therefore cannot shift the cohort or its label. Cohort =
+`network` rows created on the day three days back (complete, and every
+network's 48-hour window has matured); per network an index-backed existence
+probe into `network_client` with the 48-hour bound inside the subquery. Never an
 aggregate over a network's clients and never a hash join with
 `network_client`: on 2026-09-10 a `min(create_time)` over the same cohort
 scanned every client ever and hit the 30-second statement deadline on Main
@@ -5468,7 +5484,10 @@ Implementation convention: SIGNALS.md §2.26 (`signup-quality`) maps to
 `signal_signup_quality.go` and `signal_signup_quality_test.go`. Synthetic
 tests cover the Main-shaped wave, a healthy quiet day, a day at the exact
 floor, a low-volume day that cannot decide, malformed and contradictory rows,
-the per-network probe shape of the query, and identifier-free Markdown.
+the session-timezone-independent UTC query shape, strict exact-row/date/int64
+parsing (including nonnumeric and overflow controls), the per-network probe
+shape of the query, and identifier-free Markdown. Malformed evidence fails the
+probe; it must never be coerced to a low-volume healthy result.
 
 ---
 
