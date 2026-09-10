@@ -38,6 +38,9 @@ github_timer_next=$(systemctl show github-backup-archive.timer -p NextElapseUSec
 github_timer_next_epoch=$(date -d "${github_timer_next}" +%s 2>/dev/null || true)
 github_timer_last=$(systemctl show github-backup-archive.timer -p LastTriggerUSec --value 2>/dev/null || true)
 github_timer_last_epoch=$(date -d "${github_timer_last}" +%s 2>/dev/null || true)
+github_environment=$(systemctl show github-backup-archive.service -p Environment --value 2>/dev/null || true)
+github_git_transfer_attempts=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_ATTEMPTS=//p' | tail -n 1)
+github_git_transfer_retry_seconds=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_RETRY_SECONDS=//p' | tail -n 1)
 remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
 remote_unit_substate=$(systemctl show remote-backup-archive.service -p SubState --value 2>/dev/null || true)
 remote_main_pid=$(systemctl show remote-backup-archive.service -p MainPID --value 2>/dev/null || true)
@@ -126,6 +129,8 @@ case "${github_timer_state}" in '') github_timer_state=unknown ;; esac
 case "${github_timer_unit_file_state}" in '') github_timer_unit_file_state=unknown ;; esac
 case "${github_timer_next_epoch}" in ''|*[!0-9]*) github_timer_next_epoch=0 ;; esac
 case "${github_timer_last_epoch}" in ''|*[!0-9]*) github_timer_last_epoch=0 ;; esac
+case "${github_git_transfer_attempts}" in ''|*[!0-9]*) github_git_transfer_attempts=0 ;; esac
+case "${github_git_transfer_retry_seconds}" in ''|*[!0-9]*) github_git_transfer_retry_seconds=0 ;; esac
 case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
 case "${remote_unit_substate}" in '') remote_unit_substate=unknown ;; esac
 case "${remote_main_pid}" in ''|*[!0-9]*) remote_main_pid=0 ;; esac
@@ -178,6 +183,8 @@ printf 'github_timer_state=%s\n' "${github_timer_state}"
 printf 'github_timer_unit_file_state=%s\n' "${github_timer_unit_file_state}"
 printf 'github_timer_next_epoch=%s\n' "${github_timer_next_epoch}"
 printf 'github_timer_last_epoch=%s\n' "${github_timer_last_epoch}"
+printf 'github_git_transfer_attempts=%s\n' "${github_git_transfer_attempts}"
+printf 'github_git_transfer_retry_seconds=%s\n' "${github_git_transfer_retry_seconds}"
 printf 'archive_root_observation=%s\n' "${archive_root_observation}"
 printf 'github_archive_path_state=%s\n' "${github_archive_path_state}"
 printf 'remote_archive_path_state=%s\n' "${remote_archive_path_state}"
@@ -316,55 +323,57 @@ type backupArchiveObservation struct {
 }
 
 type backupArchiveWriterObservation struct {
-	host                         string
-	unitState                    string
-	unitSubstate                 string
-	mainPID                      int64
-	result                       string
-	exitStatus                   int64
-	invocationID                 string
-	execStart                    int64
-	execStartAt                  time.Time
-	timerState                   string
-	timerUnitFileState           string
-	timerNext                    time.Time
-	timerLast                    time.Time
-	archiveRootObservation       string
-	githubArchivePathState       string
-	remoteArchivePathState       string
-	archivePathsMatch            bool
-	archiveMountsMatch           bool
-	archivePathsOnMount          bool
-	archivePathPermissionsSecure bool
-	remoteUnitState              string
-	remoteUnitSubstate           string
-	remoteMainPID                int64
-	remoteResult                 string
-	remoteRestart                string
-	remoteRestartDelay           string
-	remoteExitStatus             int64
-	remoteInvocationID           string
-	remoteExecStart              int64
-	remoteExecStartAt            time.Time
-	remoteTimerState             string
-	remoteTimerUnitFileState     string
-	remoteTimerNext              time.Time
-	remoteTimerLast              time.Time
-	remoteBoot                   time.Time
-	remotePGSource               string
-	remotePGPort                 int64
-	remoteRedisSource            string
-	remoteRedisPort              int64
-	remoteMount                  string
-	remoteMountPresent           bool
-	remoteMountState             string
-	remoteMountSource            string
-	remoteMountFSType            string
-	remoteMountOptions           string
-	remoteMountLineage           []string
-	clearanceState               string
-	storageReadable              bool
-	storageEvents                []backupArchiveStorageEvent
+	host                          string
+	unitState                     string
+	unitSubstate                  string
+	mainPID                       int64
+	result                        string
+	exitStatus                    int64
+	invocationID                  string
+	execStart                     int64
+	execStartAt                   time.Time
+	timerState                    string
+	timerUnitFileState            string
+	timerNext                     time.Time
+	timerLast                     time.Time
+	githubGitTransferAttempts     int64
+	githubGitTransferRetrySeconds int64
+	archiveRootObservation        string
+	githubArchivePathState        string
+	remoteArchivePathState        string
+	archivePathsMatch             bool
+	archiveMountsMatch            bool
+	archivePathsOnMount           bool
+	archivePathPermissionsSecure  bool
+	remoteUnitState               string
+	remoteUnitSubstate            string
+	remoteMainPID                 int64
+	remoteResult                  string
+	remoteRestart                 string
+	remoteRestartDelay            string
+	remoteExitStatus              int64
+	remoteInvocationID            string
+	remoteExecStart               int64
+	remoteExecStartAt             time.Time
+	remoteTimerState              string
+	remoteTimerUnitFileState      string
+	remoteTimerNext               time.Time
+	remoteTimerLast               time.Time
+	remoteBoot                    time.Time
+	remotePGSource                string
+	remotePGPort                  int64
+	remoteRedisSource             string
+	remoteRedisPort               int64
+	remoteMount                   string
+	remoteMountPresent            bool
+	remoteMountState              string
+	remoteMountSource             string
+	remoteMountFSType             string
+	remoteMountOptions            string
+	remoteMountLineage            []string
+	clearanceState                string
+	storageReadable               bool
+	storageEvents                 []backupArchiveStorageEvent
 }
 
 type backupArchiveStorageEvent struct {
@@ -539,6 +548,7 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		findings = append(findings, evaluateBackupArchiveUnsafeActiveWriter(now, writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRecoveryIdle(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveGitHubRun(writers[host.name]))
+		findings = append(findings, evaluateBackupArchiveGitTransferRetry(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveGitHubTimer(now, writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveDataTimer(now, writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
@@ -682,6 +692,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_timer_unit_file_state",
 		"github_timer_next_epoch",
 		"github_timer_last_epoch",
+		"github_git_transfer_attempts",
+		"github_git_transfer_retry_seconds",
 		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
@@ -829,6 +841,20 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
+	githubGitTransferAttempts, err := parseBackupArchiveNonnegativeInt64(
+		"github_git_transfer_attempts",
+		values["github_git_transfer_attempts"],
+	)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	githubGitTransferRetrySeconds, err := parseBackupArchiveNonnegativeInt64(
+		"github_git_transfer_retry_seconds",
+		values["github_git_transfer_retry_seconds"],
+	)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
 	archivePathBools := map[string]bool{}
 	for _, key := range []string{
 		"archive_paths_match",
@@ -896,47 +922,49 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote Redis port %q", values["remote_redis_port"])
 	}
 	return backupArchiveWriterObservation{
-		host:                         hostName,
-		unitState:                    values["github_unit_state"],
-		unitSubstate:                 values["github_unit_substate"],
-		mainPID:                      mainPID,
-		result:                       values["github_result"],
-		exitStatus:                   githubExitStatus,
-		invocationID:                 values["github_invocation_id"],
-		execStart:                    githubExecStart,
-		execStartAt:                  unixIntegerTime(githubExecStartEpoch),
-		timerState:                   values["github_timer_state"],
-		timerUnitFileState:           values["github_timer_unit_file_state"],
-		timerNext:                    unixIntegerTime(githubTimerNextEpoch),
-		timerLast:                    unixIntegerTime(githubTimerLastEpoch),
-		archiveRootObservation:       values["archive_root_observation"],
-		githubArchivePathState:       values["github_archive_path_state"],
-		remoteArchivePathState:       values["remote_archive_path_state"],
-		archivePathsMatch:            archivePathBools["archive_paths_match"],
-		archiveMountsMatch:           archivePathBools["archive_mounts_match"],
-		archivePathsOnMount:          archivePathBools["archive_paths_on_mount"],
-		archivePathPermissionsSecure: archivePathBools["archive_path_permissions_secure"],
-		remoteUnitState:              values["remote_unit_state"],
-		remoteUnitSubstate:           values["remote_unit_substate"],
-		remoteMainPID:                remoteMainPID,
-		remoteResult:                 values["remote_result"],
-		remoteRestart:                values["remote_restart"],
-		remoteRestartDelay:           values["remote_restart_delay"],
-		remoteExitStatus:             remoteExitStatus,
-		remoteInvocationID:           values["remote_invocation_id"],
-		remoteExecStart:              remoteExecStart,
-		remoteExecStartAt:            unixIntegerTime(remoteExecStartEpoch),
-		remoteTimerState:             values["remote_timer_state"],
-		remoteTimerUnitFileState:     values["remote_timer_unit_file_state"],
-		remoteTimerNext:              unixIntegerTime(remoteTimerNextEpoch),
-		remoteTimerLast:              unixIntegerTime(remoteTimerLastEpoch),
-		remoteBoot:                   unixIntegerTime(remoteBootEpoch),
-		remotePGSource:               values["remote_pg_source"],
-		remotePGPort:                 remotePGPort,
-		remoteRedisSource:            values["remote_redis_source"],
-		remoteRedisPort:              remoteRedisPort,
-		remoteMount:                  values["remote_mount"],
-		remoteMountPresent:           remoteMountPresent,
+		host:                          hostName,
+		unitState:                     values["github_unit_state"],
+		unitSubstate:                  values["github_unit_substate"],
+		mainPID:                       mainPID,
+		result:                        values["github_result"],
+		exitStatus:                    githubExitStatus,
+		invocationID:                  values["github_invocation_id"],
+		execStart:                     githubExecStart,
+		execStartAt:                   unixIntegerTime(githubExecStartEpoch),
+		timerState:                    values["github_timer_state"],
+		timerUnitFileState:            values["github_timer_unit_file_state"],
+		timerNext:                     unixIntegerTime(githubTimerNextEpoch),
+		timerLast:                     unixIntegerTime(githubTimerLastEpoch),
+		githubGitTransferAttempts:     githubGitTransferAttempts,
+		githubGitTransferRetrySeconds: githubGitTransferRetrySeconds,
+		archiveRootObservation:        values["archive_root_observation"],
+		githubArchivePathState:        values["github_archive_path_state"],
+		remoteArchivePathState:        values["remote_archive_path_state"],
+		archivePathsMatch:             archivePathBools["archive_paths_match"],
+		archiveMountsMatch:            archivePathBools["archive_mounts_match"],
+		archivePathsOnMount:           archivePathBools["archive_paths_on_mount"],
+		archivePathPermissionsSecure:  archivePathBools["archive_path_permissions_secure"],
+		remoteUnitState:               values["remote_unit_state"],
+		remoteUnitSubstate:            values["remote_unit_substate"],
+		remoteMainPID:                 remoteMainPID,
+		remoteResult:                  values["remote_result"],
+		remoteRestart:                 values["remote_restart"],
+		remoteRestartDelay:            values["remote_restart_delay"],
+		remoteExitStatus:              remoteExitStatus,
+		remoteInvocationID:            values["remote_invocation_id"],
+		remoteExecStart:               remoteExecStart,
+		remoteExecStartAt:             unixIntegerTime(remoteExecStartEpoch),
+		remoteTimerState:              values["remote_timer_state"],
+		remoteTimerUnitFileState:      values["remote_timer_unit_file_state"],
+		remoteTimerNext:               unixIntegerTime(remoteTimerNextEpoch),
+		remoteTimerLast:               unixIntegerTime(remoteTimerLastEpoch),
+		remoteBoot:                    unixIntegerTime(remoteBootEpoch),
+		remotePGSource:                values["remote_pg_source"],
+		remotePGPort:                  remotePGPort,
+		remoteRedisSource:             values["remote_redis_source"],
+		remoteRedisPort:               remoteRedisPort,
+		remoteMount:                   values["remote_mount"],
+		remoteMountPresent:            remoteMountPresent,
 		remoteMountState: backupArchiveMountState(
 			values["remote_mount"],
 			remoteMountPresent,
@@ -1552,6 +1580,39 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. The archive volume's hardware/filesystem clearance remains a separate prerequisite; clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
 		action:   "Keep the single-writer boundary. Read the bounded unit journal and classify the first failed dependency among archive clearance/mount state, GitHub authentication/API access, local capacity, repository transfer, compression, and atomic publication. Do not delete partial state, clear the failure as a substitute for repair, or manually start a writer while another archive job is active. After the cause and storage prerequisites are proven, obtain operator authorization before enabling a missed trigger or starting one catch-up invocation.",
 		verify:   "A subsequent authorized invocation has a new nonzero InvocationID and post-repair start boundary, runs as the sole writer, exits with Result=success and ExecMainStatus=0, validates both code tarballs and manifests, and publishes both new generations on two direct Mimir reads. The timer must independently pass its future-schedule gate.",
+		playbook: "SIGNALS.md §11.22",
+	}
+}
+
+// Requires the GitHub writer to absorb a bounded transient SSH failure inside
+// the same atomic organization build. The daily timer is not a sufficient
+// retry boundary: one reset would otherwise leave the unit failed for a day
+// while a still-young previous archive masks the lost generation.
+func evaluateBackupArchiveGitTransferRetry(observation backupArchiveWriterObservation) finding {
+	const class = "backup-archive-git-transfer-retry-disabled"
+	target := observation.host + "/github"
+	if observation.githubGitTransferAttempts == 4 && observation.githubGitTransferRetrySeconds == 30 {
+		return healthyFinding("observability/backup-archives", tierPage, class, target)
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: class, target: target,
+		frame: "unit=github-backup-archive.service", sustain: 1,
+		symptom: fmt.Sprintf(
+			"%s code archive writer lacks the bounded Git transfer recovery policy",
+			target,
+		),
+		mechanism: "Each organization archive depends on every repository mirror update, clone, and LFS fetch. Without an in-process bounded retry, one transient SSH reset aborts that organization's atomic publication, leaves the oneshot failed, and defers another attempt until the next daily timer even though the previous archive remains intact.",
+		baseline:  "The effective GitHub writer configures four attempts with 30 seconds between failed idempotent Git transfers. Publication and retention mutation are never retried blindly, and a persistent transfer failure remains unsuccessful after the fourth attempt.",
+		observed: fmt.Sprintf(
+			"git_transfer_attempts=%d git_transfer_retry_seconds=%d",
+			observation.githubGitTransferAttempts,
+			observation.githubGitTransferRetrySeconds,
+		),
+		evidence: "The monitor reduces only the two numeric BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_* values from the effective systemd Environment on the configured backup host. Credentials, key paths, repository names, command arguments, and journal text do not leave the host.",
+		context:  "On 2026-09-09, many repository updates and the second organization's archive succeeded, but one mirror update ended with a provider-side connection reset and broken pipe. This rules out global authentication, archive clearance, storage capacity, compression, and publication as that invocation's first failed boundary. Retry is software resilience; it does not repair persistent provider access, credentials, or hardware.",
+		action:   "When neither archive writer is active, deploy the current Xops Planetoid playbook so the next GitHub invocation uses the bounded transfer policy. Preserve existing mirror caches and completed tarballs. Do not clear the failed result as a substitute for repair or manually start a catch-up writer without explicit operator authorization.",
+		verify:   "Read the effective numeric environment values as 4 and 30. A deterministic first-attempt reset must recover inside one process and publish both atomic organization archives; a persistent failure must stop after exactly four attempts and preserve the prior archive. Then require the next authorized real invocation to exit successfully and publish both new generations on two direct Mimir reads.",
 		playbook: "SIGNALS.md §11.22",
 	}
 }

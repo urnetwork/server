@@ -10618,6 +10618,8 @@ Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads each archive writer directly on that backup host. For
 `github-backup-archive.service` it reads active state, substate, MainPID,
 result, exit status, current InvocationID presence, and monotonic start time;
+from that unit's effective environment it reduces only the numeric Git transfer
+attempt and retry-delay policy;
 for `github-backup-archive.timer` it reads active state, durable unit-file
 state, and its next realtime trigger. The effective
 `remote-backup-archive.service` contributes the equivalent execution identity,
@@ -10670,6 +10672,10 @@ timer is active, has durable `UnitFileState=enabled`, and either exposes a
 current/future next trigger or owns the exact still-running activation that
 consumed its elapsed trigger. A still-fresh previous code tarball does not
 satisfy either execution or scheduling health.
+The effective GitHub writer configures four attempts with a 30-second delay for
+each idempotent mirror update, clone, or LFS fetch. It retries no archive
+publication or retention mutation, and a persistent transfer failure remains
+failed after the bounded fourth attempt.
 The data-pull oneshot has effective `Restart=on-failure` and
 `RestartUSec=30min`, so a late encrypted-disk mount can recover without making
 successful pulls repeat. Its persistent daily timer is also active, durably
@@ -10813,6 +10819,16 @@ BROKEN:
   API/transfer, capacity, compression, and atomic-publication boundaries before
   retrying. Clearing systemd's failed marker is not repair. Keep the
   single-writer rule and obtain operator authorization before one catch-up run.
+- `backup-archive-git-transfer-retry-disabled` is immediate when the effective
+  GitHub writer does not configure exactly four transfer attempts with a
+  30-second delay. Every repository must succeed before its organization's
+  tarball is atomically published, so one transient SSH reset must be absorbed
+  inside the same process rather than leave the unit failed until tomorrow.
+  Retry only idempotent mirror update, clone, and LFS fetch operations. Preserve
+  the existing cache and completed tarball; persistent authentication,
+  authorization, or repository failures must still stop after the fourth
+  attempt. Deploy the current Planetoid playbook only when neither writer is
+  active, and obtain separate operator authorization before a catch-up run.
 - `backup-archive-timer-unscheduled` is immediate, independently for the code
   and PostgreSQL/Redis writers, when its timer is not active, is not durably
   enabled, or has neither a current/future next trigger nor an exact
@@ -11279,6 +11295,30 @@ state outlived that flow. Do not convert this correlation into a router or
 gateway verdict without simultaneous lifecycle/conntrack evidence from both
 boundaries.
 
+The 2026-09-09 GitHub invocation exposed a separate, narrower retry defect.
+Archive clearance was valid and read-write, many repositories updated, and the
+`urfoundation` organization completed and published. During the `urnetwork`
+organization, one existing mirror's `git remote update --prune` ended with a
+remote connection reset, broken pipe, and inability to read the repository.
+The writer immediately preserved the previous `urnetwork` tarball, continued
+the independent organization, and finally exited one. Those controls rule out
+global GitHub authentication, archive media, capacity, compression, and atomic
+publication as the first failed boundary. They do not establish why GitHub or
+the intervening Internet path reset that one SSH transport.
+
+The software defense is a finite retry around each idempotent Git network
+operation: four attempts separated by 30 seconds, with unique run-owned paths
+for clone attempts. Publication, rotation, and deletion remain outside the
+retry. A deterministic synthetic reset/broken-pipe control must succeed on the
+second attempt and publish both organizations; a persistent failure must stop
+after the configured bound and preserve the prior archive. The corresponding
+effective-unit policy is monitored independently of archive age. Deploying the
+script is a software/configuration closure, but a persistent provider, WAN, or
+routing failure remains an operator/provider closure and must not be hidden by
+unbounded retry. A successful next authorized invocation, validation of both
+tarballs and manifests, two matching direct Mimir generations, and a future
+timer event are still required to close the live writer failure.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
@@ -11536,6 +11576,57 @@ control, not applicable for a source-backed reason, or unverified with its
 missing prerequisite. A build-only result or an unavailable device cannot prove
 behavioral absence. This requirement also covers adjacent defects found during
 the investigation, not just the first reported symptom.
+
+**2026-09-09 iOS instant-account completion incident:** the main API and
+database were not the failing boundary. The load-balancer evidence contained
+one successful `/auth/network-create` response with a complete credential
+payload, followed by two successful `/network/auth-client` requests in the
+same short client sequence. The attached iPhone subsequently held a coherent
+auth envelope with distinct nonempty admin and client credentials and stable
+instance data. It had no contemporaneous app crash or jetsam, but its durable
+introduction predicate was false. Preserve these distinctions: a 200 create
+response proves server-side creation, a complete envelope proves client-auth
+publication, and neither proves that the UI classified the result as a newly
+created account.
+
+The exact Apple source mechanism combined two correctness defects. The saved
+seedphrase confirmation remained enabled while its SwiftUI cover dismissed
+asynchronously, so two quick confirmations could start two post-create login
+tasks. New-account classification was carried separately in a process-global,
+unsynchronized, consumable JWT set. The first completion consumed `true`; the
+second completion consumed `false`, performed client authentication again, and
+durably replaced the introduction decision with the existing-login value. The
+duplicate server requests and false device predicate match that ordering. The
+repair admits confirmation exactly once and carries an explicit immutable
+`created` or `existing` classification with the credential through the login
+handler. Do not reintroduce a global mark/consume side channel or infer account
+origin from credential bytes.
+
+The deterministic regression must call the actual completion gate twice with a
+synthetic credential, observe one created login and one rejection, and separately
+prove that an existing login cannot acquire created classification. Keep the
+credential synthetic; tests, diagnostics, and alerts must not contain production
+tokens, hostnames, addresses, account IDs, or device IDs. Native application
+compilation is required for both iOS and macOS because they share this source.
+An acceptance run should additionally require the introduction route after
+instant creation rather than treating arrival at any authenticated main view as
+success. A short-window rise in repeated client-auth calls immediately after a
+single successful instant creation is a forensic discriminator, not standalone
+proof: retries and process replacement must be excluded before alerting on an
+individual sequence.
+
+Cross-platform closure for this incident is source-scoped. iOS reproduced the
+ordering from live server and device evidence. macOS shares the affected
+SwiftUI source and receives the same gate/classification repair, but installed
+behavior remains unverified. Android's instant-account view model blocks a
+second submission with its in-progress/seedphrase state and passes an explicit
+`newNetwork=true`; Windows owns one pending instant credential and sets its
+new-network pending flag directly; Linux confirms and consumes its pending
+credential synchronously; and `mmm/ur.io` persists a network-keyed marker that
+is not consumed merely by mounting the authenticated view. Those source controls
+rule out this exact consumable-marker downgrade but are not live platform
+qualification. The browser extension has no instant-account creation UI, so
+this mechanism is not applicable there.
 
 The following correctness boundaries require deterministic regressions:
 
