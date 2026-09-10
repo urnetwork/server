@@ -2755,7 +2755,7 @@ return value
 	listKey, memberKey := competitionFifoKeys(settings)
 	var encoded string
 	err := captureRedisError(func() {
-		server.Redis(ctx, func(client server.RedisClient) {
+		server.RedisDoOnce(ctx, func(client server.RedisClient) {
 			value, popErr := client.Eval(ctx, dequeueScript, []string{listKey, memberKey}).Text()
 			if errors.Is(popErr, server.RedisNil) {
 				return
@@ -3479,7 +3479,8 @@ type Store interface {
 }
 
 type PostgresStore struct {
-	now func() time.Time
+	now                      func() time.Time
+	dequeueCompetitionSignal func(context.Context, *Settings) (*server.Id, error)
 }
 
 func (self PostgresStore) nowUtc() time.Time {
@@ -3487,6 +3488,13 @@ func (self PostgresStore) nowUtc() time.Time {
 		return self.now().UTC()
 	}
 	return server.NowUtc()
+}
+
+func (self PostgresStore) dequeueSignal(ctx context.Context, settings *Settings) (*server.Id, error) {
+	if self.dequeueCompetitionSignal != nil {
+		return self.dequeueCompetitionSignal(ctx, settings)
+	}
+	return dequeueCompetitionJob(ctx, settings)
 }
 
 type roundPolicySnapshot struct {
@@ -4787,8 +4795,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	now := self.nowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
 
-	if _, err := dequeueCompetitionJob(ctx, settings); err != nil {
-		return nil, err
+	if _, signalErr := self.dequeueSignal(ctx, settings); signalErr != nil {
+		glog.Warningf(
+			"[competition]Redis FIFO dequeue failed; falling back to authoritative PostgreSQL order: %s\n",
+			signalErr,
+		)
 	}
 	discarded := []server.Id{}
 	discardError, marshalErr := json.Marshal(submissionError(
@@ -4885,7 +4896,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	if err == nil {
 		for _, jobId := range discarded {
 			if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
-				return nil, removeErr
+				glog.Infof("[competition]discarded FIFO signal cleanup failed job=%s: %s\n", jobId, removeErr)
 			}
 		}
 	}
@@ -5028,7 +5039,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 		err = ErrLeaseLost
 	}
 	if err == nil && retry {
-		err = enqueueCompetitionJob(ctx, settings, jobId)
+		if signalErr := enqueueCompetitionJob(ctx, settings, jobId); signalErr != nil {
+			glog.Warningf(
+				"[competition]Redis FIFO retry signal failed; PostgreSQL retry remains queued job=%s: %s\n",
+				jobId,
+				signalErr,
+			)
+		}
 	}
 	return retry, err
 }

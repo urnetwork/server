@@ -4148,6 +4148,60 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 	})
 }
 
+func TestCompetitionClaimFallsBackToPostgresWhenRedisIndexIsUnavailable(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-redis-index-fallback"
+		currentTime := server.NowUtc()
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		fifoListKey, fifoMemberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, fifoListKey, fifoMemberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), fifoListKey, fifoMemberKey).Err()
+			})
+		})
+
+		round, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt:  currentTime.Add(-time.Minute),
+			ClosesAt: currentTime.Add(time.Hour),
+			RevealAt: currentTime.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("CreateRound: %v", err)
+		}
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("redis-index-fallback"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatalf("validate patch: %v", patchErr)
+		}
+		queued, cacheHit, err := store.Enqueue(
+			ctx,
+			settings,
+			round.RoundId,
+			patch,
+			"miner-a",
+			testApiImageDigest(),
+		)
+		if err != nil || cacheHit || queued == nil {
+			t.Fatalf("enqueue = %#v, hit=%t, err=%v", queued, cacheHit, err)
+		}
+
+		indexError := errors.New("synthetic Redis dispatch outage")
+		store.dequeueCompetitionSignal = func(context.Context, *Settings) (*server.Id, error) {
+			return nil, indexError
+		}
+		claimed, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || claimed == nil || claimed.JobId != queued.JobId {
+			t.Fatalf("PostgreSQL fallback claim = %#v, err=%v", claimed, err)
+		}
+	})
+}
+
 func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
