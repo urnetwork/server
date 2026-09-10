@@ -1,0 +1,55 @@
+package work
+
+import (
+	"time"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/task"
+
+	// "github.com/urnetwork/server/v2026/controller"
+	"github.com/urnetwork/server/v2026/session"
+)
+
+type IndexSearchLocationsArgs struct {
+}
+
+type IndexSearchLocationsResult struct {
+}
+
+func ScheduleIndexSearchLocations(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) {
+	task.ScheduleTaskInTx(
+		tx,
+		IndexSearchLocations,
+		&IndexSearchLocationsArgs{},
+		clientSession,
+		task.RunOnce("index_search_locations"),
+		task.MaxTime(4*time.Hour),
+	)
+}
+
+func IndexSearchLocations(
+	indexSearchLocations *IndexSearchLocationsArgs,
+	clientSession *session.ClientSession,
+) (*IndexSearchLocationsResult, error) {
+	cityLimit := 0
+	model.AddDefaultLocations(clientSession.Ctx, cityLimit)
+
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
+	})
+	return &IndexSearchLocationsResult{}, nil
+}
+
+func IndexSearchLocationsPost(
+	indexSearchLocations *IndexSearchLocationsArgs,
+	indexSearchLocationsResult *IndexSearchLocationsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	// do nothing
+	return nil
+}
