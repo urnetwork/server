@@ -120,7 +120,7 @@ func newPerfvarCorrectnessFixtureWithHooks(
 ) (*perfvarCorrectnessFixture, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	enableNetworkPeers := route == fullTunRouteP2pFast || route == fullTunRouteP2pLegacy
+	enableNetworkPeers := fullTunRouteHasP2p(route)
 	var configureHandlerSettings func(*connectserver.ConnectHandlerSettings)
 	if hooks != nil {
 		configureHandlerSettings = hooks.configureConnectHandlerSettings

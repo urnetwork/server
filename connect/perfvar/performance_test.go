@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,7 +151,23 @@ func combineRepeatedPerfvarLink(profile linkProfile, count int) linkProfile {
 // endpoint orientation is translated only at construction.
 func perfvarCalibrationProfile(scenario perfvarScenario) networkProfile {
 	profile := scenario.Profile
-	if scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy {
+	if fullTunRouteIsMixed(scenario.Route) && scenario.DeviceAccessProfile != nil {
+		// A mixed route is calibrated against its relay path: the exchange
+		// carrier is the throughput the direct lane must never pull below.
+		access := *scenario.DeviceAccessProfile
+		profile = access
+		profile.Forward = combinedExchangeLink(
+			access.Forward,
+			scenario.ProviderAccessProfile.Reverse,
+		)
+		profile.Reverse = combinedExchangeLink(
+			scenario.ProviderAccessProfile.Forward,
+			access.Reverse,
+		)
+		profile.SourceNote += "; mixed route calibrated on its exchange access and provider access segments"
+		return profile
+	}
+	if fullTunRouteForcesP2p(scenario.Route) {
 		if hopCount, ok := perfvarTopologyP2pHopCount(scenario.Topology); ok && 1 < hopCount {
 			profile.Forward = combineRepeatedPerfvarLink(profile.Forward, hopCount)
 			profile.Reverse = combineRepeatedPerfvarLink(profile.Reverse, hopCount)
@@ -3146,8 +3163,7 @@ func verifyPerfvarTopologyCarrier(
 		return fmt.Errorf("%s useful byte count=%d, expected positive workload", scenario.Topology, usefulByteCount)
 	}
 	hopCount, isP2pTopology := perfvarTopologyP2pHopCount(scenario.Topology)
-	if isP2pTopology && hopCount == 1 &&
-		(scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy) {
+	if isP2pTopology && hopCount == 1 && fullTunRouteHasP2p(scenario.Route) {
 		requireReverseProtocol := scenario.Workload != perfvarWorkloadUDP
 		dataPacketCount := carrier.P2PNetwork.ReversePacketCount
 		dataWireByteCount := carrier.P2PNetwork.ReverseWireByteCount
@@ -3306,7 +3322,7 @@ func verifyPerfvarOneHopP2pLane(
 		stats.FastReceiveQueueDropByteCount != 0 {
 		return fmt.Errorf("one-hop P2P %s had data-plane failures: %+v", endpointName, stats)
 	}
-	if route == fullTunRouteP2pFast {
+	if fullTunRouteUsesFastP2pLane(route) {
 		if (requireSend && (stats.FastSendMessageCount == 0 || stats.FastSendByteCount == 0)) ||
 			(requireReceive && (stats.FastReceiveMessageCount == 0 || stats.FastReceiveByteCount == 0)) ||
 			stats.LegacySendMessageCount != 0 || stats.LegacySendByteCount != 0 ||
@@ -3476,8 +3492,7 @@ func measurePerfvarRun(
 		environment = splitEnvironment.fullTunRouteView()
 		closeEnvironment = splitEnvironment.close
 	} else {
-		enableNetworkPeers := (executionScenario.Route == fullTunRouteP2pFast ||
-			executionScenario.Route == fullTunRouteP2pLegacy) && p2pHopCount == 1
+		enableNetworkPeers := fullTunRouteHasP2p(executionScenario.Route) && p2pHopCount == 1
 		environment = newRouteEnvironmentWithNetworkPeers(
 			ctx,
 			t,
@@ -3485,6 +3500,11 @@ func measurePerfvarRun(
 			enableNetworkPeers,
 		)
 		environment.deviceAccessProfile = executionScenario.Profile
+		if executionScenario.DeviceAccessProfile != nil {
+			// A mixed route conditions the direct P2P link with the scenario
+			// profile and the exchange access path with its own profile.
+			environment.deviceAccessProfile = *executionScenario.DeviceAccessProfile
+		}
 		environment.providerAccessProfile = executionScenario.ProviderAccessProfile
 		closeEnvironment = environment.close
 	}
@@ -3541,8 +3561,10 @@ func measurePerfvarRun(
 		return record, nil
 	}
 	workloadStart := time.Now()
+	progressSampler := startPerfvarProgressSampler(path, workloadStart)
 	tunneled, err := measurePerfvarFullTun(ctx, path, executionScenario)
 	workloadDuration := time.Since(workloadStart)
+	progress := progressSampler.stop()
 	if err == nil {
 		err = path.waitForPostWorkloadBoundary(ctx)
 	}
@@ -3558,6 +3580,7 @@ func measurePerfvarRun(
 		record.Tunneled = tunneled
 		record.Tunneled.Duration = workloadDuration
 		record.Carrier = carrier
+		record.Progress = progress
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "workload"
 		record.FailureReason = err.Error()
@@ -3585,6 +3608,7 @@ func measurePerfvarRun(
 	record := baseRecord()
 	record.Tunneled = tunneled
 	record.Carrier = carrier
+	record.Progress = progress
 	record.RouteSetupDuration = routeSetupDuration
 	record.Correct = verificationErr == nil
 	record.GoroutinesAfter = runtime.NumGoroutine()
@@ -3610,6 +3634,58 @@ func measurePerfvarRun(
 		record.WireEfficiency = float64(tunneled.UsefulByteCount) / float64(carrier.WireByteCount)
 	}
 	return record, nil
+}
+
+// perfvarProgressSampler reads the path's delivered payload counter on a
+// fixed interval for the duration of one measured workload.
+type perfvarProgressSampler struct {
+	stopOnce sync.Once
+	stopChan chan struct{}
+	done     chan []perfvarProgressSample
+}
+
+func startPerfvarProgressSampler(path *fullTunPath, start time.Time) *perfvarProgressSampler {
+	sampler := &perfvarProgressSampler{
+		stopChan: make(chan struct{}),
+		done:     make(chan []perfvarProgressSample, 1),
+	}
+	path.workloadProgressBytes.Store(0)
+	go func() {
+		ticker := time.NewTicker(perfvarProgressSampleInterval)
+		defer ticker.Stop()
+		samples := []perfvarProgressSample{{Offset: 0, ByteCount: 0}}
+		for {
+			select {
+			case <-sampler.stopChan:
+				samples = append(samples, perfvarProgressSample{
+					Offset:    time.Since(start),
+					ByteCount: path.workloadProgressBytes.Load(),
+				})
+				sampler.done <- samples
+				return
+			case now := <-ticker.C:
+				samples = append(samples, perfvarProgressSample{
+					Offset:    now.Sub(start),
+					ByteCount: path.workloadProgressBytes.Load(),
+				})
+			}
+		}
+	}()
+	return sampler
+}
+
+// stop ends sampling and returns the derived window observation. It is safe
+// to call more than once; later calls return an empty observation.
+func (self *perfvarProgressSampler) stop() perfvarProgressObservation {
+	var samples []perfvarProgressSample
+	self.stopOnce.Do(func() {
+		close(self.stopChan)
+		samples = <-self.done
+	})
+	if samples == nil {
+		return perfvarProgressObservation{FirstDeadWindowOffset: -1}
+	}
+	return perfvarProgressObservationFor(samples)
 }
 
 // Bulk impaired scenarios retain enough time for calibration and route work.
@@ -4179,11 +4255,13 @@ func perfvarMeasurementOrder(scenarios []perfvarScenario, runIndex int) ([]int, 
 		comparisonKeys[scenarioIndex] = comparisonPrefix(scenario) + "/" + trace.IdentityHash
 	}
 	routeRanks := map[fullTunRoute]int{
-		fullTunRouteExchangeAuto: 0,
-		fullTunRouteExchangeH1:   1,
-		fullTunRouteExchangeH3:   2,
-		fullTunRouteP2pFast:      3,
-		fullTunRouteP2pLegacy:    4,
+		fullTunRouteExchangeAuto:        0,
+		fullTunRouteExchangeH1:          1,
+		fullTunRouteExchangeH3:          2,
+		fullTunRouteP2pFast:             3,
+		fullTunRouteP2pLegacy:           4,
+		fullTunRouteP2pFastExchangeH1:   5,
+		fullTunRouteP2pLegacyExchangeH1: 6,
 	}
 	slices.SortFunc(indices, func(leftIndex int, rightIndex int) int {
 		left := scenarios[leftIndex]

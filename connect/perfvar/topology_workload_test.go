@@ -43,7 +43,7 @@ func fullTunOuterRoundTrip(path *fullTunPath) time.Duration {
 		return profile.BaseDelay + profile.ProcessingDelay
 	}
 	profile := path.environment.profile
-	if fullTunRouteIsExchange(path.route) {
+	if fullTunRouteHasExchangePath(path.route) {
 		roundTrip := linkDelay(path.environment.deviceAccessProfile.Forward) +
 			linkDelay(path.environment.providerAccessProfile.Reverse) +
 			linkDelay(path.environment.providerAccessProfile.Forward) +
