@@ -46,6 +46,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
+		{"onboarding app-open attribution", "[onboarding]app open attribution failed for network synthetic-private-network: ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)", "onboarding-app-open-attribution"},
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"escrow mirror write", "[netescrow]mirror write failed after reservation: i/o timeout", "netescrow-mirror-write"},
@@ -86,6 +87,39 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalRedactsOnboardingAppOpenAttribution(t *testing.T) {
+	const privateNetwork = "synthetic-private-network"
+	line := "[onboarding]app open attribution failed for network " + privateNetwork + ": ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)"
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-api", nil
+		}
+		return line, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "onboarding-app-open-attribution")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("onboarding attribution severity = %q, want warn", alert.Severity)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{"SQLSTATE 42P08", "network identifier omitted", "0aac4806", "exact flow_step"} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("onboarding attribution alert lacks %q: %s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, privateNetwork) {
+		t.Fatalf("onboarding attribution alert retained network evidence: %s", markdown)
+	}
+	for _, other := range alerts {
+		if other.Class == "novel" {
+			t.Fatalf("known onboarding attribution failure remained novel: %+v", other)
+		}
 	}
 }
 

@@ -311,6 +311,17 @@ var logClasses = []logClass{
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	{name: "onboarding-app-open-attribution", re: regexp.MustCompile(`\[onboarding\]app open attribution failed for network [^:\r\n]+: ERROR: inconsistent types deduced for parameter \$4 \(SQLSTATE 42P08\)`),
+		sample: func(string) string {
+			return "[onboarding]app open attribution failed: PostgreSQL parameter type conflict (SQLSTATE 42P08; network identifier omitted)"
+		},
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning:   "the API accepted an attributed app-open request but PostgreSQL rejected the event insert before it could record the engagement",
+		mechanism: "AttributeAppOpen reused parameters in INSERT output and comparison contexts without explicit PostgreSQL types. PostgreSQL inferred incompatible types for parameter $4 and rejected the complete statement with SQLSTATE 42P08. The request path deliberately logs and continues, so app use remains available while onboarding app-open engagement is silently absent unless this log boundary is monitored.",
+		context:   "The 2026-09-10 Main control repeated this exact failure on every API generation at hundreds of lines per minute. Server commit 0aac4806 gives every reused UUID, varchar, and timestamp parameter an explicit cast; its PostgreSQL synthetic test executes the real attribution statement and also proves duplicate app opens remain suppressed. This class uses a fixed sample so a network identifier never enters an alert.",
+		action:    "Build and deploy API from an intentional server checkout containing commit 0aac4806 after applying its required migrations through the normal release path. Do not replay raw client requests, insert synthetic engagement rows, or weaken event attribution to silence the error.",
+		verify:    "Every API block contains server commit 0aac4806; a deterministic PostgreSQL test passes the real app-open attribution statement; an attributed app open creates exactly one event with its exact flow_step; and zero onboarding-app-open-attribution lines occur for ten minutes after log-ingestion delay.",
+	},
 	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
 	// match that canonical first line rather than its paired body-write line so
 	// the alert rate remains one logical recovery boundary per occurrence.
