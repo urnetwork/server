@@ -175,12 +175,33 @@ var logClasses = []logClass{
 		action:    "Compare the exact running artifacts before deploying the Warp failed-target retry/status-timeout fix and the Server readiness-gated metrics fix. Install the corrected Warpctl on the build workstation and managed hosts, then restart resident workers only with operator authorization. Apply the exact candidate's prerequisite migrations before service activation; the historical rejected release required head 630 while PostgreSQL was at 627. Preserve random instance identity. Xops commit 30d14ce trims unused node-exporter collectors and removes a known floor of roughly 13340 systemd-state series; measure remaining headroom rather than raising the Mimir limit blindly. Check direct per-user-series discard deltas, memory-series creation/removal, live process cohorts, and immutable service/config identity without retaining raw series labels.",
 		verify:    "After authorized rollout and prerequisite completion, every relevant block converges to a proven artifact, rejected candidates start no metrics pusher, and no unchanged-target readiness failure recurs for 20 minutes. Require zero new per-user-series admission discards, healthy direct metric freshness, and series removal restoring measured headroom through a full two-hour recent-head observation window. Two fresh direct Mimir reads corroborate ingestion; historical continuity gaps remain independently governed by §11.20.",
 	},
+	// The fixed sample and frame deliberately omit the local endpoint. The
+	// emitting Grafana parent already names the owning service and generation;
+	// retaining its rotating child port would split one rollout defect into
+	// several identities and make a loopback address look like a Redis target.
+	{name: "grafana-mimir-push-refused", re: regexp.MustCompile(`Stats push error \(Post "https?://[^"\r\n]+/api/v1/push": dial tcp [^[:space:]\r\n]+: connect: connection refused\)`),
+		sample: func(string) string {
+			return "Stats push error: local Mimir /api/v1/push refused (endpoint omitted)"
+		},
+		groupBy:       func(string) string { return "local-mimir-push" },
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §11.21",
+		meaning:   "a Grafana ingestion front accepted a metrics push but its generation's co-located Mimir listener was unavailable, so that sample was not admitted",
+		mechanism: "During a rolling replacement, old and new Grafana parents share the stable publisher through SO_REUSEPORT. The legacy shutdown path canceled each parent's accepting fronts and children from one event. A retiring parent could therefore keep accepting or draining a push after its own Mimir child had already closed, returning 502 even while the replacement generation was healthy.",
+		context:   "This exact class is local Grafana-to-Mimir failure, not Redis §5.2 and not proof of a fleet-wide Mimir outage. On 2026-09-10, bounded Main logs placed each refusal after the same emitting parent's child shutdown/SIGTERM boundary during a fleet rollout; two successive generations on one block reproduced the ordering on alternating internal ports, while the converged fleet's direct Grafana, Mimir, and ingress controls were healthy. Diagnostic line rate counts rejected pushes, not failed parents or incidents. Outside a replacement boundary, the same class can instead expose a child crash or bind failure and must be checked directly.",
+		action:    "Match the emitting parent and local child generation, child shutdown/SIGTERM, HTTP-front shutdown, listener, and rollout boundary. If the artifact predates the drain-before-child-stop correction in Warp commit 6544fe1, deploy a Grafana artifact containing it only after proving ancestry. If it is current or occurs outside drain, diagnose the named generation's Mimir readiness, restart, bind, and OOM evidence. Do not restart Redis, suppress the push error, or treat a healthy replacement as proof that the rejected old-generation samples were delivered.",
+		verify:    "Every active Grafana artifact contains Warp commit 6544fe1; during a controlled rolling replacement every old HTTP front stops accepting and finishes in-flight requests (or is closed at the bounded deadline) before its Mimir/Loki children stop; no grafana-mimir-push-refused line occurs through the full rollout plus 10 steady minutes; every exact child /ready and front /status remains healthy; and fresh pushed metrics remain queryable without a new §11.20 continuity gap.",
+	},
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
 		meaning: "node accept path starving — process alive but event loop wedged (or syn drop)"},
 	{name: "connection-refused", re: regexp.MustCompile(`connect: connection refused`),
-		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
-		meaning: "port closed: process dead or bound to wrong interface after manual restart"},
+		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "an otherwise-unclassified TCP target had no accepting listener at the attempted address and instant",
+		mechanism: "TCP returned an active refusal, which distinguishes an absent/nonmatching listener from a silent SYN drop but does not identify the target service, namespace, exit cause, or rollout state. Service-specific signatures earlier in this taxonomy take precedence.",
+		context:   "Do not assume this is Redis, a manual restart, or a persistent outage from the generic text alone. Resolve the emitting process and attempted target from current inventory and bounded same-generation evidence; a loopback child, remote database, and public service have different owners and controls.",
+		action:    "Inspect the exact target process, listener address/namespace, generation, and start/exit boundary through the owning service playbook. If the listener is absent, diagnose its startup, exit, bind, or lifecycle ordering; if it is present, reproduce from the same network namespace. Do not restart an inferred service before attribution.",
+		verify:    "The exact target accepts from the original source path, its owning health signal remains healthy, and the class stays below threshold for 10 minutes through any relevant lifecycle transition.",
+	},
 	{name: "connect-tls-disabled", re: regexp.MustCompile(`\[c\]Could not initialize tls config\. Disabling transport\. = `),
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §16.5",
 		meaning:   "a legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could bind UDP while rejecting every QUIC ClientHello",

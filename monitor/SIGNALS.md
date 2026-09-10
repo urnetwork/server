@@ -6075,8 +6075,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | Class (grep) | Meaning | Action |
 |---|---|---|
 | `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters; correlate rejected-candidate pusher starts and steady exporter cardinality as context only. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through a complete two-hour window; historical gaps stay under §11.20. |
+| `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. | Match the emitting parent and child generation, child shutdown/SIGTERM, HTTP-front shutdown, and rollout boundary. A pre-`6544fe1` rolling shutdown can stop the child concurrently while its SO_REUSEPORT front still accepts; use §11.21. Outside replacement, inspect the exact child readiness, restart, bind, and OOM evidence. Never restart Redis from this signature. Require Warp `6544fe1` on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children, and no new §11.20 gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
-| `connect: connection refused` | Port closed: process dead or bound to wrong interface after manual restart. | `ss -lntp` on the host: absent → restart; bound 127.0.0.1-only → restart with correct conf. |
+| otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
 | `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
@@ -10734,6 +10735,42 @@ accepts only the allowlisted paths, including the effective direct
 remain local, and the full response and scalar values outside those six paths
 never cross the host boundary. Require a production-shaped synthetic plus one
 privacy-reduced live reducer control before promoting that candidate.
+
+The 2026-09-10 `2026.9.10+1042298530` fleet rollout exposed a separate write
+handoff defect. Two successive generations on one block were healthy until
+their own child shutdown boundary. The first replacement had latched every
+child ready before the prior generation received Mimir SIGTERM; that retiring
+parent then rejected five local metric pushes beginning 5.3 seconds later. The
+next replacement also latched ready before its predecessor received SIGTERM;
+the predecessor then rejected 22 local pushes beginning 2.9 seconds later and
+continuing for about 25 seconds. It had emitted zero refusals during its prior
+195-second serving interval, and the newest generation emitted none. The
+bounded window contained no Mimir supervised restart, unhealthy restart, OOM,
+kill, panic, or fatal signature. That strict post-SIGTERM reproduction rules
+out startup, persistent bind, Redis, and sustained Mimir failure.
+
+The cause was one cancellation event shared by the accepting HTTP fronts and
+all three children. During SO_REUSEPORT overlap, a retiring parent could still
+accept or drain a request after its own Mimir listener had stopped. Warp commit
+`6544fe1` gives the HTTP fronts and children separate events, initiates
+`Shutdown` concurrently on all HTTP fronts so a long request on one cannot
+leave another listener accepting, force-closes any front that exceeds the
+bounded drain, and only then stops the children. Ring TCP/UDP proxies remain
+event-cancelled and are outside this metric-push proof. Deterministic tests
+cover ordinary drain ordering, a listener-error path with one blocked front,
+concurrent listener closure, and forced close after graceful-drain failure.
+The code fix is ready but is not deployed by this observation; the running
+version was built before the local correction, and §8.13 must still prove the
+next artifact's ancestry.
+
+The standing log signal now classifies the exact privacy-bounded signature as
+`grafana-mimir-push-refused` before generic connection refusal, fixes its frame
+to `local-mimir-push`, and removes the rotating endpoint from its sample. One
+line pages because it proves a lost push; its rate is rejected samples, not
+incident or parent cardinality. Closure requires every Grafana block to contain
+Warp `6544fe1`, then one controlled rolling replacement with no recurrence,
+healthy exact children/fronts, fresh pushed metrics, and no new §11.20 gap
+through the complete rollout plus ten steady minutes.
 
 This alert is an architecture/operator decision gate. Keep each generation's
 TSDB private; never shared-mount a WAL/TSDB directory into overlapping
