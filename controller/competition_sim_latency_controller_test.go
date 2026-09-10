@@ -8,12 +8,22 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Sampling must round the multiplication before addition so every supported
+// architecture produces the amd64-frozen workload bytes.
+func TestSimLatencyRangeSampleUsesCanonicalRounding(t *testing.T) {
+	value := (simLatencyRange{Min: 10, Max: 40}).sample(newSimLatencyWorkloadRng(0))
+	if bits := math.Float64bits(value); bits != 0x40432d8d9f62d9b8 {
+		t.Fatalf("canonical sampled float bits = %016x", bits)
+	}
+}
 
 // Captures the ephemeral workload while delegating all other archive methods
 // to the ordinary deterministic test implementation.

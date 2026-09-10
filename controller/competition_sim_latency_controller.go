@@ -290,7 +290,11 @@ func (self simLatencyRange) sample(random *simLatencyWorkloadRng) float64 {
 	if self.Max <= self.Min {
 		return self.Min
 	}
-	return self.Min + random.float64()*(self.Max-self.Min)
+	// The explicit conversion is a required rounding boundary. Without it,
+	// Go may fuse the multiply and add on some architectures, changing the
+	// serialized workload's least-significant float bits.
+	scaled := float64(random.float64() * (self.Max - self.Min))
+	return self.Min + scaled
 }
 
 // Constructs the isolated deterministic random source.
