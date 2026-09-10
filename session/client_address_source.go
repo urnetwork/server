@@ -57,11 +57,16 @@ const (
 	clientAddressSourceUrHeader clientAddressSource = "ur_header"
 	// No header at all: an ingress that does not set it, or direct traffic.
 	clientAddressSourcePeerAbsent clientAddressSource = "peer_absent"
-	// More than one header value: an ingress appending instead of overwriting.
+	// More than one header LINE. Note this is not the usual shape of an
+	// appending ingress: nginx's $proxy_add_x_forwarded_for appends into a
+	// single comma-joined line, which arrives as one value and is therefore
+	// counted peer_malformed, not here.
 	clientAddressSourcePeerRepeated clientAddressSource = "peer_repeated"
 	// One empty value: an unresolved ingress variable, distinct from absent.
 	clientAddressSourcePeerEmpty clientAddressSource = "peer_empty"
-	// One value that is not an ip:port pair.
+	// One value that is not an ip:port pair. This is where an appending
+	// ingress lands (see peer_repeated), alongside genuine corruption and a
+	// client sending the header itself.
 	clientAddressSourcePeerMalformed clientAddressSource = "peer_malformed"
 )
 

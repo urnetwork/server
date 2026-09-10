@@ -8104,9 +8104,20 @@ counter over the branches of `session.ResolveClientAddress`: `ur_header`,
 `ur_header` falls back to the socket peer. Charted on `urnetwork / signals`.
 The server cannot decide `peer_absent` on its own - a deployment reached
 directly and one behind an ingress that never sets the header are identical at
-the request - so it is deliberately counted and never warned about. On this
-fleet Warp always overwrites the header, which makes any sustained
-`peer_absent` share on api or connect the collapse described above.
+the request - so it is deliberately counted and never warned about.
+
+Reading it on this fleet, where Warp always overwrites the header: a small
+`peer_absent` floor is NORMAL and not the collapse. `/status` builds a session
+unconditionally (`router/warp_handlers.go`), and warpctl and the §11.1 runbook
+both curl it against the container with no ingress in the path, so deploys and
+rollouts produce header-less resolutions by design. The collapse is
+`peer_absent` approaching the FULL resolution rate, or scaling with client
+traffic instead of with probe cadence.
+
+Scope: the counter covers api, connect's H1/websocket route, mcp, oauth and
+x402. Connect's QUIC/H3 listeners read the peer from `conn.RemoteAddr()`
+without entering the resolver, so a "share on connect" is computed over
+websocket connections and probes only.
 
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`

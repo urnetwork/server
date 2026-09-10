@@ -9,6 +9,11 @@ import (
 
 // The partition must stay closed: the resolver decides every value, so an
 // extra child means a branch started deriving a label from request content.
+//
+// This runs before any resolution, so it catches a deleted init() loop and a
+// label added to the const block -- not a branch that starts labelling from
+// request content at runtime. TestForwardedUrHeaderIsNotCountedAsPeerAbsent
+// is what fails for that; cardinality itself is bounded by the const block.
 func TestClientAddressResolutionPartitionIsBounded(t *testing.T) {
 	if count := testutil.CollectAndCount(clientAddressResolutionCounter); count != len(clientAddressSources) {
 		t.Fatalf("client address resolution series = %d, want %d", count, len(clientAddressSources))
