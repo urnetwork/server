@@ -7,4 +7,9 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 server="$(cd "$here/../.." && pwd)"
 cd "$server"
-exec go run ./connect/perfvar/flightgate -server "$server" "$@"
+subcommand="${1:-}"
+if [ "$subcommand" = "campaign" ]; then
+  shift
+  exec go run ./connect/perfvar/flightgate campaign -server "$server" "$@"
+fi
+exec go run ./connect/perfvar/flightgate "$@"
