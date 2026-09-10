@@ -14263,13 +14263,26 @@ pool miss, so it does not trade correctness or liveness for the lower ceiling.
 
 WARN `proxy-message-pool-metrics-invalid` when retained bytes exceed capacity
 or packet plus large-object retained bytes do not exactly reconstruct total
-retained bytes. Those fields come from one allocation-free aggregate snapshot;
-an invariant failure is collector/library or label drift, not evidence that a
-pool physically owns impossible memory. Counters and gauges have different
-meanings: `taken_total-returned_total`/`outstanding` describe live root
-ownership, while `retained_bytes` describes returned buffers held for reuse.
-Capacity is merely their configured retention ceiling. Establish adjacent
-rates before calling rising ownership a leak.
+retained bytes. Evaluate that invariant only when `timestamp(metric)` proves
+all five values came from one source scrape. A Mimir instant query otherwise
+reports its evaluation time, and during partial or rejected remote-write
+ingestion it can independently select adjacent scrapes for different metric
+families. WARN `proxy-message-pool-snapshot-unobservable` for that source-time
+skew instead of calling it accounting corruption. On 2026-09-10, the only
+invalid-looking observation contained opposite-sign, size-class-scale deltas
+on two Fireside processes; one minute later those exact identities alone were
+missing `retained_bytes`, concurrent with local Mimir push refusal, while later
+watchers did not reproduce the warning. This is the pinned mixed-scrape
+control. Preserve raw series privately and inspect the backend admission
+window; only a coherent same-scrape mismatch justifies library diagnosis.
+
+Within a coherent scrape, those fields come from one allocation-free aggregate
+snapshot; an invariant failure is collector/library or label drift, not
+evidence that a pool physically owns impossible memory. Counters and gauges
+have different meanings: `taken_total-returned_total`/`outstanding` describe
+live root ownership, while `retained_bytes` describes returned buffers held
+for reuse. Capacity is merely their configured retention ceiling. Establish
+adjacent rates before calling rising ownership a leak.
 
 This software correction can lower steady and rollout memory pressure, but it
 does not add RAM or increase the hard active-client slots available per proxy.
