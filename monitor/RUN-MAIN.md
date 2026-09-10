@@ -247,6 +247,18 @@ environment/mode/start timezone, alert/stderr objects, server commit/dirty
 state, expected tails, exclusions/reasons, boundaries, and deadlines. The
 session must support polling, graceful stop, and liveness proof.
 
+The ledger has one writer: the long-lived Terra runner. Each record is exactly
+one complete compact JSON object on one physical line. Canonicalize a prepared,
+privacy-reviewed record with `jq -ce .` before appending it, append the resulting
+single line once, then parse the exact final line and verify its `record_id` and
+`prior_record`. Never append `jq .` output or another indented object. If a
+historical producer already appended pretty-printed records, preserve those
+bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
+recovery. Append a compact format-defect/correction record and use compact
+records thereafter; never rewrite or truncate the evidence ledger merely to
+make its old physical layout valid JSONL. Do not allow two agents to append in
+parallel.
+
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a
 primary-agent-owned session handle with Terra validating the binary, parent,
