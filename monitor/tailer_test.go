@@ -1783,6 +1783,62 @@ func TestWindowTerminalCompatibilityOnlyKeepsUnknownCanonicalCardinality(t *test
 	}
 }
 
+// A natural evaluation-pass deadline has its own bounded, identity-free event.
+// It is diagnostic evidence about where admission stopped, not a terminal
+// window count or proof of the remote cause.
+func TestWindowEvaluationBudgetUsesStructuredClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	line := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0"
+
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify(line)
+	}
+	findings := tailer.drainWindow()
+	budget := findingByClass(t, findings, "window-evaluation-budget")
+	if budget.healthy {
+		t.Fatal("repeated evaluation-budget exhaustion was hidden")
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified evaluation-budget events also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", budget,
+	).Markdown()
+	for _, want := range []string{
+		"event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0",
+		"natural evaluation-budget boundary",
+		"not why the receiver stayed silent",
+		"Lifecycle cancellation",
+		"do not lengthen either timeout as an HMAC remedy",
+		"no-late-admission cleanup",
+		"exactly one terminal owner",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("evaluation-budget finding lacks %q: %+v", want, budget)
+		}
+	}
+	for _, private := range []string{"synthetic-host", "synthetic-generation", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("evaluation-budget alert retained private value %q", private)
+		}
+	}
+
+	malformed := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		malformed.classify(strings.Replace(line, "candidates=2", "candidates=unknown", 1))
+	}
+	malformedFindings := malformed.drainWindow()
+	if finding := findingByClass(t, malformedFindings, "window-evaluation-budget"); !finding.healthy {
+		t.Fatalf("malformed budget event was accepted: %+v", finding)
+	}
+	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
+		t.Fatal("malformed evaluation-budget schema drift disappeared")
+	}
+}
+
 // The exact canceled-generator shapes belong to an artifact-bounded class,
 // not generic novelty. One line stays quiet; the production-rate population
 // remains paired with its independently structured nonterminal stall signal.

@@ -5348,6 +5348,21 @@ succeeded, but destination bytes remained zero, matching rejection by the old
 receiver verifier. These dated counts are evidence for this incident, not
 permanent thresholds or current fleet assertions.
 
+The exact 2026-09-10 terminal-window pair closes the same boundary for the
+reported Operator Proxy failures rather than merely correlating a fleet
+aggregate. The two concurrent fixed-provider probes bypassed discovery and
+targeted two distinct receivers in the claimed-legacy cohort. API selection,
+derived-client authentication, tunnel setup, persistence, and 38 settled
+contracts completed, but every destination row carried zero bytes; both probes
+ended at 0/26 health destinations with no consensus. In the contemporaneous
+control, 2,598/2,598 checked claimed-legacy providers were dark while 738/767
+checked claimed-compatible providers passed. This identity-correlated split
+rules out a shared prober credential, API, discovery, framing, sustained
+transport, or resource-capacity failure for that exact pair and establishes
+legacy verification rejecting the standard post-cutover HMAC before payload
+forwarding. It does not prove that every Operator Proxy failure has this cause;
+future events must independently satisfy the behavioral controls above.
+
 Implementation convention: SIGNALS.md §2.24 (`hmac-cutover`) maps to
 `signal_hmac_cutover.go` and `signal_hmac_cutover_test.go`. Synthetic tests
 cover both exact behavioral thresholds, insufficient-control non-attribution,
@@ -6098,6 +6113,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly. That dispatch does not itself produce `window_stall failed=1`, but a later reason change can publish that compatibility transition while the failed latch remains set. The class rate intentionally counts both diagnostic lines; `failed_window_events` separately counts exact-replay-deduplicated authoritative events. Compatibility-only evidence keeps the alert but renders that cardinality unknown. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer incident size from the diagnostic line rate, terminal impact from `failed=0`, or a root cause from `window_failed` or compatible `failed=1` alone. Do not restart Taskworker or deploy a transport change from these lines. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
+| `[rel] event=evaluation_budget_exhausted ...` (`window-evaluation-budget`) | The owning expansion pass reached its natural deadline while one or more initial provider pings were unresolved. `candidates` is the pass-owned cleanup count; `effective_min` exposes the shortest candidate budget after clipping by the pass deadline, and `observed_max` is elapsed wall time. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement do not emit this event. It identifies the stage that stopped, not why the receiver stayed silent, and its line rate is neither candidate nor failed-window cardinality. | At 20/min WARN, correlate the same window and artifact with §2.24 HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal state. Do not lengthen timeouts as a legacy-HMAC remedy. Preserve pass ownership, no-late-admission cleanup, and exactly-once accounting. Require the rate below 20/min for ten minutes, provider addition or recovery, and deterministic pre/post-boundary and lifecycle-cancellation barriers. See §14.6. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
@@ -13414,6 +13430,32 @@ actionable: correlate its independently derived reason with provider progress
 and the fixed measurement workload, and require a real provider addition or
 `window_recovered` before declaring recovery.
 
+The identity-bounded 2026-09-10 follow-up resolved the underlying cause of the
+exact terminal pair. Both concurrent fixed targets belonged to the claimed
+legacy-only stored-contract HMAC cohort in §2.24. The fixed ProviderSpec path
+bypassed discovery; API and authentication work completed; 38 contracts
+settled; and destination usage remained exactly zero before both probes failed
+all 26 health destinations. A simultaneous compatible cohort remained about
+96% passing while the checked legacy cohort was 100% dark. Treat these two
+terminal events as §2.24 HMAC rejection, not generic provider unresponsiveness
+or fleet capacity. Keep the terminal classifier independent: another event
+without this identity-correlated contract/traffic/control proof remains open.
+
+That follow-up also found a separate evaluation-budget observability defect,
+not the HMAC cause. Defaults allow an initial evaluation ping 30 seconds but
+end the owning expansion pass after 15 seconds. Pass-boundary cleanup correctly
+prevents a delayed callback from admitting a client into a later pass, but it
+cancels every unresolved ping at the earlier boundary, so the configured ping
+timeout and its diagnostic cannot fire. A natural pass deadline must produce
+one structured `evaluation-budget-exhausted` result with the effective budget
+and exactly one provider-failure contribution. Evaluation-epoch rebuild,
+window retirement, and parent cancellation remain silent local lifecycle
+events. Preserve the no-late-admission and joined cleanup invariants; do not
+lengthen either timeout as an HMAC remedy. Deterministic barrier tests must
+cover pre-boundary success, post-boundary success rejection, natural expiry,
+rebuild/retirement cancellation, and the callback/expiry race with exactly one
+terminal owner.
+
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
 RPC/API access, H1 correctly pinned, and fill retries still running. The
@@ -16153,6 +16195,20 @@ binary has a distinct `ignoring RA (lifetime zero)` diagnostic, which was not
 present in the bounded event records. A timestamped ICMPv6 type 134 capture is
 therefore required to distinguish an intentional or erroneous withdrawal from
 RA refresh or local-link loss before selecting the router change.
+
+The 2026-09-10 recurrence rules out natural countdown from the last observed
+healthy advertisement for that event. A nonprivileged sampler retained a
+1,788-second primary-router lifetime at `09:39:54Z`; `configd` then reported
+the lifetime becoming zero at `09:42:39.862Z`, only 165 seconds later. The
+stored lifetime could not have expired by ordinary decrement during that
+interval. Wi-Fi requested reassociation for DNS recovery about eight seconds
+after IPv6 was removed, then restored link and solicited a router; it therefore
+acted as recovery, not the initiating cause. The lifetime became zero again
+about 14.6 seconds after the solicited advertisement, before IPv6 recovered.
+This narrows the exact event to either an on-wire zero/short-lifetime
+advertisement (including a competing router) or local RA-state invalidation.
+It still does not choose between them: retain the timestamped type-134 capture
+requirement and do not change the edge or router merely from `configd` text.
 
 The earlier events have the identical precursor. Local default-router lifetime
 expirations at 11:52:24.621Z, 11:53:35.584Z, and 11:59:40.537Z each removed

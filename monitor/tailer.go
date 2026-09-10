@@ -135,6 +135,7 @@ var (
 	windowFailedEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+(?:[[:space:]]|$)`)
 	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
 	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+	windowEvaluationBudgetRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=evaluation_budget_exhausted[[:space:]]+window=[a-z-]+[[:space:]]+candidates=[1-9][0-9]*[[:space:]]+effective_min=[0-9]+[[:space:]]+observed_max=[0-9]+[[:space:]]+ping_timeout=[0-9]+[[:space:]]+expand_timeout=[0-9]+[[:space:]]+suppressed=[0-9]+(?:[[:space:]]|$)`)
 	windowGeneratorCanceledRe = regexp.MustCompile(
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
@@ -146,6 +147,10 @@ func windowStallLogSample(line string) string {
 
 func windowTerminalLogSample(line string) string {
 	return strings.TrimSpace(windowTerminalRe.FindString(line))
+}
+
+func windowEvaluationBudgetLogSample(line string) string {
+	return strings.TrimSpace(windowEvaluationBudgetRe.FindString(line))
 }
 
 // Drops the Warp identity while retaining the complete exact diagnostic.
@@ -457,6 +462,15 @@ var logClasses = []logClass{
 		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
 		redactIDs: true,
 	},
+	{name: "window-evaluation-budget", re: windowEvaluationBudgetRe,
+		sample:        windowEvaluationBudgetLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "initial provider evaluations repeatedly consumed their effective expansion-pass budget without an acknowledgement; candidates is the number owned and canceled by that pass, not a customer or failed-window count",
+		mechanism: "Connect bounds each initial ping by both PingTimeout and the owning expansion-pass deadline. When the pass deadline wins, cleanup prevents late admission and emits one structured aggregate before recording each unresolved candidate exactly once as provider-unresponsive. effective_min is the shortest usable per-candidate budget; observed_max is elapsed wall time, while ping_timeout and expand_timeout expose the configured mismatch.",
+		context:   "This event establishes a natural evaluation-budget boundary, not why the receiver stayed silent. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement are excluded. Correlate the same window and artifact with HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal window state. A displayed rate counts throttled diagnostic lines, not candidates or incidents.",
+		action:    "Investigate the first corroborated stage. For the September 2026 legacy cohort, follow §2.24; do not lengthen either timeout as an HMAC remedy. If compatible providers reproduce it, verify actual effective budget and response latency before changing timing. Preserve pass ownership, no-late-admission cleanup, and exactly-once failure accounting.",
+		verify:    "The class stays below 20 lines/minute for ten minutes under comparable provider-window traffic, affected windows add providers or emit recovery, and deterministic barriers retain pre-boundary admission, reject post-boundary callbacks, suppress lifecycle cancellation, and assign exactly one terminal owner.",
+	},
 	{name: "window-stall-terminal", re: windowTerminalRe,
 		sample:        windowTerminalLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
@@ -517,7 +531,7 @@ var logClasses = []logClass{
 
 // errorShaped marks lines that count toward the novel class when no taxonomy
 // row matches.
-var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b`)
+var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b|\bevent=evaluation_budget_exhausted\b`)
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
