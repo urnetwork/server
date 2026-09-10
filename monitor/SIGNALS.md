@@ -5056,6 +5056,20 @@ incident-only monitor change. Keep that architectural decision separate; do
 not overstate the bounded discovery fix or infer provenance for historical
 orphan rows from their aggregate shape.
 
+The 2026-09-10 Main runtime audit found the five-owner Stripe aggregate stable
+across repeated samples, but every API and Taskworker block still reported
+release `2026.9.8+1040985530`. The immutable release snapshot preserves the old
+delete-first controller, has no payment network-row lock, and has no complete
+Stripe deletion-discovery implementation. It therefore predates current-main
+Server commit `2b28387a` (the deletion/credit fence and fail-closed
+cancellation ordering) and commit `df2ea15b` (bounded local/customer/metadata
+subscription discovery). The observed rows remain historical and cannot prove
+which old race created them, but the running fleet has not closed the defect:
+both API and Taskworker need attributable artifacts containing those
+capabilities before two clean reconciliation/deletion windows can verify the
+software boundary. Deployment and provider-side disposition remain explicit
+operator actions.
+
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
