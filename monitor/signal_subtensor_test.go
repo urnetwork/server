@@ -297,6 +297,8 @@ func TestSubtensorSignalDetectsHistoricalWarpCheckpointFailure(t *testing.T) {
 func TestSubtensorSignalCollectsContainerStartupDiscriminators(t *testing.T) {
 	for _, want := range []string{
 		`["sudo", "-n", "/usr/local/sbin/subtensor-monitor", name]`,
+		`SUBTENSOR_HELPER_TIMEOUT_SECONDS = 30`,
+		`timeout=SUBTENSOR_HELPER_TIMEOUT_SECONDS`,
 		`result = json.loads(output)`,
 		`"container_error"`,
 	} {
@@ -323,6 +325,154 @@ func TestSubtensorSignalDetectsZeroPeersAndFrozenHead(t *testing.T) {
 	}
 	if alert := requireAlertClass(t, alerts, "subtensor-progress"); alert.Frame != "archive" || alert.Sustain != 3 || alert.PageSustain != 5 {
 		t.Fatalf("progress alert = %+v", alert)
+	}
+}
+
+func TestSubtensorSignalKeepsOlderHelperAsCannotObserve(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Nodes[1].PeerDiagnostics = nil
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visibility := requireAlertClass(t, alerts, "cannot-observe")
+	if visibility.Target != "snow/lightnode/peer-diagnostics" ||
+		!strings.Contains(visibility.Observed, "installed helper predates") {
+		t.Fatalf("older helper did not retain an exact visibility boundary: %+v", visibility)
+	}
+}
+
+func TestSubtensorSignalLocalizesLitep2pNotificationFailureAgainstArchive(t *testing.T) {
+	observation := healthySubtensorObservation()
+	archive := &observation.Nodes[0]
+	archive.PeerDiagnostics.Metrics.BlockAnnounceOpenedTotal = 2_136
+	archive.PeerDiagnostics.Metrics.BlockAnnounceClosedTotal = 2_125
+	archive.PeerDiagnostics.Metrics.SyncRequestClosedTotal = 5
+
+	lightnode := &observation.Nodes[1]
+	lightnode.Direct.Health.Peers = 0
+	lightnode.Direct.Health.IsSyncing = false
+	lightnode.FirstHead = lightnode.SecondHead
+	lightnode.Direct.Head = lightnode.SecondHead
+	lightnode.Gateway.Head = lightnode.SecondHead
+	lightnode.PeerDiagnostics.Metrics.BlockAnnounceOpenedTotal = 13_897
+	lightnode.PeerDiagnostics.Metrics.BlockAnnounceClosedTotal = 13_897
+	lightnode.PeerDiagnostics.Metrics.RawDistinctOpenedTotal = 647_163
+	lightnode.PeerDiagnostics.Metrics.RawDistinctClosedTotal = 647_099
+	lightnode.PeerDiagnostics.Metrics.SyncRequestSuccessTotal = 39_930
+	lightnode.PeerDiagnostics.Metrics.SyncRequestClosedTotal = 9_477
+	lightnode.PeerDiagnostics.Metrics.PendingHandshakeFailureTotal = 7
+	lightnode.PeerDiagnostics.Metrics.PendingTransportFailureTotal = 13
+	// Historical tail alternatives must not outrank affirmative current-state
+	// metrics because the line-bounded tail is not event-time correlated.
+	lightnode.PeerDiagnostics.Log.Outcomes.DatabaseOrImportRejection = 2
+	lightnode.PeerDiagnostics.Log.Outcomes.ChainOrForkRejection = 3
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := requireAlertClass(t, alerts, "subtensor-peers")
+	if peer.Frame != "lightnode" ||
+		!strings.Contains(peer.Mechanism, "litep2p notification negotiation or peerset reconnect") ||
+		!strings.Contains(peer.Mechanism, "advancing, peer-connected archive") {
+		t.Fatalf("peer failure was not localized against archive: %+v", peer)
+	}
+	for want := range map[string]bool{
+		"block_announce_opened=13897": true,
+		"block_announce_closed=13897": true,
+		"raw_distinct_live=64":        true,
+		"sync_closed=9477":            true,
+		"archive_control=healthy":     true,
+		"block_announce_live=11":      true,
+	} {
+		if !strings.Contains(peer.Evidence, want) {
+			t.Fatalf("peer evidence missing %q: %s", want, peer.Evidence)
+		}
+	}
+	if !strings.Contains(peer.Action, "do not restart, reset") {
+		t.Fatalf("peer action lost preservation boundary: %s", peer.Action)
+	}
+	if !strings.Contains(peer.Mechanism, "no event-time correlation") ||
+		!strings.Contains(peer.Action, "timestamped bounded discriminator") {
+		t.Fatalf("peer alert promoted an uncorrelated log alternative: %+v", peer)
+	}
+	progress := requireAlertClass(t, alerts, "subtensor-progress")
+	if !strings.Contains(progress.Mechanism, "litep2p notification negotiation or peerset reconnect") ||
+		progress.Evidence != peer.Evidence {
+		t.Fatalf("static-head alert did not retain the peer discriminator: %+v", progress)
+	}
+}
+
+func TestSubtensorSignalSeparatesPeerRejectionAndContainerPathOutcomes(t *testing.T) {
+	tests := []struct {
+		name              string
+		alter             func(*subtensorPeerDiagnostics)
+		wantMechanism     string
+		dontWantMechanism string
+	}{
+		{
+			name: "database import rejection",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.Log.Outcomes.DatabaseOrImportRejection = 2
+			},
+			wantMechanism: "database/import rejection class",
+		},
+		{
+			name: "chain fork rejection",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.Log.Outcomes.ChainOrForkRejection = 3
+			},
+			wantMechanism: "chain/fork or block-announcement rejection class",
+		},
+		{
+			name: "container dns",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.ContainerDNSStatus = "timeout"
+			},
+			wantMechanism: "failing before a bootnode transport",
+		},
+		{
+			name: "bootnode tcp",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.BootnodeTCPStatus = "failed"
+			},
+			wantMechanism: "below notification negotiation and above name resolution",
+		},
+		{
+			name: "bootnode unconfigured",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.ContainerDNSStatus = "unconfigured"
+				diagnostics.BootnodeTCPStatus = "unconfigured"
+			},
+			wantMechanism:     "configuration/observation boundary",
+			dontWantMechanism: "cannot resolve",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation := healthySubtensorObservation()
+			node := &observation.Nodes[1]
+			node.Direct.Health.Peers = 0
+			test.alter(node.PeerDiagnostics)
+			alerts, err := runSyntheticSubtensor(t, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			peer := requireAlertClass(t, alerts, "subtensor-peers")
+			if !strings.Contains(peer.Mechanism, test.wantMechanism) {
+				t.Fatalf("mechanism=%q, want %q", peer.Mechanism, test.wantMechanism)
+			}
+			if test.dontWantMechanism != "" && strings.Contains(peer.Mechanism, test.dontWantMechanism) {
+				t.Fatalf("mechanism=%q unexpectedly contains %q", peer.Mechanism, test.dontWantMechanism)
+			}
+			if strings.Contains(test.name, "rejection") &&
+				(!strings.Contains(peer.Mechanism, "not event-time correlated") ||
+					!strings.Contains(peer.Action, "timestamped")) {
+				t.Fatalf("log-only outcome was not conservative: %+v", peer)
+			}
+		})
 	}
 }
 
@@ -599,6 +749,22 @@ func healthySubtensorNode(name, syncMode string, rpcPort, gatewayPort int, first
 	return subtensorNodeObservation{
 		Name: name, SyncMode: syncMode, RPCPort: rpcPort, GatewayPort: gatewayPort,
 		Direct: direct, Gateway: gateway, FirstHead: blockHex(first), SecondHead: blockHex(second), GatewayHTTP: 200,
+		PeerDiagnostics: healthySubtensorPeerDiagnostics(),
+	}
+}
+
+func healthySubtensorPeerDiagnostics() *subtensorPeerDiagnostics {
+	return &subtensorPeerDiagnostics{
+		Version: 1, ContainerDNSStatus: "ok", BootnodeTCPStatus: "ok", MetricsStatus: "ok",
+		Log: subtensorPeerLogDiagnostics{
+			Scope: "current-process-tail", EventTimeCorrelated: false,
+			TailLimit: 5000, LinesScanned: 120,
+		},
+		Metrics: subtensorPeerMetrics{
+			BlockAnnounceOpenedTotal: 20, BlockAnnounceClosedTotal: 12,
+			RawDistinctOpenedTotal: 30, RawDistinctClosedTotal: 20,
+			SyncRequestSuccessTotal: 100,
+		},
 	}
 }
 

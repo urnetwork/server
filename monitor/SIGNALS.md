@@ -15659,6 +15659,61 @@ record those as unobservable until an approved narrow discriminator or an
 independent WAN TCP/30333 test is available. Do not bypass that boundary or
 restart a progressing generation merely to collect broader logs.
 
+The 2026-09-10 recurrence supplied a narrower protocol boundary. The current
+lightnode episode fell to zero peers at 18:36:45Z; queued imports drained and
+its last best-head movement ended at 18:39:00Z on block 7,717,755. Across the
+same source window the co-resident archive retained 11 peers and advanced. The
+lightnode still accepted and initiated lower-level litep2p connections, had a
+populated discovery set and no banned peers, and reached the configured
+bootnode over host TCP, but its block-announcement notification counters were
+equal at 13,897 opened and 13,897 closed. Its process-generation sync request
+failures included 9,477 substream-close outcomes versus five on the healthy
+archive control. This localizes the observed failure above listener, TCP, and
+discovery and below synchronization-peer retention. It does not by itself
+choose between a chain/fork/database rejection and a litep2p notification
+negotiation or peerset reconnect defect; raw current-generation node logs and
+the live container resolver path were outside the then-installed restricted
+helper contract.
+
+The restricted `subtensor-monitor` helper therefore has a versioned peer
+diagnostic contract. It returns only fixed aggregate current-process counters:
+block-announcement notification opens/closes, raw distinct connection
+opens/closes, sync successes and bounded failure classes, pending handshake
+and transport failures, plus counts of a 5,000-line current-generation tail
+classified as chain/fork rejection, database/import rejection, notification
+negotiation failure, or reconnect/dial failure. It also returns only a bounded
+status (`ok`, `failed`, `timeout`, `unconfigured`, or `unavailable`) for
+in-container DNS and the configured bootnode TCP handshake. It never returns
+raw logs, protocol or peer IDs, addresses, DNS answers, or error text. Metric
+and log counts are paired with the exact container start boundary and are not
+cross-generation rates. Log classifications use exact literals audited against
+the pinned node source and are mutually exclusive per line, ordered as
+database/import, chain/fork, notification, then reconnect. The tail is bounded
+by line count and current process, not by event time: its counts are not proof
+that a matching historical line caused the current peer-loss episode.
+
+`subtensor-peers` keeps its stable alert identity and selects its mechanism
+from those aggregates. `unconfigured` means the helper could not extract one
+supported bootnode endpoint from the running command; it is a
+configuration/observation boundary and must not be rendered as DNS failure. A
+current failed container-DNS check precedes bootnode transport; successful DNS
+with failed bootnode TCP is a transport boundary. When both checks pass,
+lower-level distinct connections remain live, block-announcement opens equal
+closes, and notification/handshake/substream counters are present, current
+state localizes the boundary to litep2p notification negotiation or peerset
+reconnect handling. Database/import and chain/fork counts in the uncorrelated
+tail remain unresolved alternatives until a bounded timestamped observation
+ties them to the episode; they do not outrank those current-state
+discriminators. Treat an advancing, peer-connected full archive running the
+same image, with its own successful resolver and bootnode checks, as the
+same-host network, resource, and binary control. Do not use an unhealthy
+archive as that control. A server monitor running against the older helper must
+emit `cannot-observe` for the missing versioned diagnostic rather than decoding
+absent counters as zero; install the reviewed Xops helper before using the new
+discriminator for production attribution. None of these observations
+authorizes a restart, database reset, reserved-peer policy change, or
+deployment.
+
 ### 17.3 2026-08-20 incident signature
 
 Two independent faults were present:
