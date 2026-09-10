@@ -1675,7 +1675,10 @@ func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
 		"event=window_failed window=quality reason=providers-unresponsive after=45000",
 		"window_failed is authoritative terminal state",
 		"calls SetStallStatus directly",
-		"does not normally emit window_stall failed=1",
+		"does not itself emit window_stall failed=1",
+		"failed_window_events=1",
+		"diagnostic_lines=1",
+		"canonical_source=exact-replay-deduplicated-authoritative-window-failed-event",
 		"do not restart or deploy from the terminal bit alone",
 		"No window_failed event or compatible failed=1 transition recurs",
 	} {
@@ -1712,6 +1715,71 @@ func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
 	}
 	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
 		t.Fatal("malformed window_failed event disappeared from the novelty safety net")
+	}
+}
+
+// A failed window can produce the authoritative window_failed line and then a
+// compatibility window_stall failed=1 transition when its reason changes.
+// Both remain diagnostic evidence, but they are one failed-window event.
+func TestWindowTerminalCanonicalCardinalitySeparatesCompatibilityTransition(t *testing.T) {
+	prefix := "[synthetic-host][taskworker][synthetic-generation][cid:synthetic-correlation]"
+	authoritative := prefix +
+		"[I][2000-01-01T00:00:00.000001Z][synthetic.go:1][rel] event=window_failed window=quality reason=providers-unresponsive after=45021"
+	compatibility := prefix +
+		"[I][2000-01-01T00:00:00.008201Z][synthetic.go:2][rel] event=window_stall window=quality reason=platform-unreachable failed=1"
+
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify(authoritative)
+	tailer.classify(compatibility)
+	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
+	for _, want := range []string{
+		"rate=2/min",
+		"failed_window_events=1",
+		"diagnostic_lines=2",
+		"logical event count: 1 exact-replay-deduplicated authoritative window_failed event line(s) from 2 diagnostic line(s)",
+		"diagnostic_lines as terminal-class telemetry, not incident size",
+	} {
+		if !strings.Contains(terminal.observed+terminal.evidence+terminal.context, want) {
+			t.Fatalf("paired terminal finding lacks %q: %+v", want, terminal)
+		}
+	}
+
+	// Two windows can fail nearly simultaneously on one emitter. Their two
+	// distinct authoritative records must remain two logical events even when
+	// each is followed by its own compatibility transition.
+	two := newLogTailer("taskworker", nil)
+	for _, line := range []string{
+		authoritative,
+		strings.Replace(authoritative, "00.000001Z", "00.002141Z", 1),
+		compatibility,
+		strings.Replace(compatibility, "00.008201Z", "00.010601Z", 1),
+	} {
+		two.classify(line)
+	}
+	twoTerminal := findingByClass(t, two.drainWindow(), "window-stall-terminal")
+	for _, want := range []string{"rate=4/min", "failed_window_events=2", "diagnostic_lines=4"} {
+		if !strings.Contains(twoTerminal.observed, want) {
+			t.Fatalf("simultaneous terminal finding lacks %q: %+v", want, twoTerminal)
+		}
+	}
+}
+
+func TestWindowTerminalCompatibilityOnlyKeepsUnknownCanonicalCardinality(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify("[synthetic-host][taskworker][synthetic-generation][I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=window_stall window=quality reason=platform-unreachable failed=1")
+	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
+	if terminal.healthy {
+		t.Fatal("compatibility-only terminal transition was hidden")
+	}
+	for _, want := range []string{
+		"rate=1/min",
+		"failed_window_events=unknown",
+		"canonical_source=absent",
+		"logical event count: unknown; no authoritative window_failed event line was present among 1 diagnostic line(s)",
+	} {
+		if !strings.Contains(terminal.observed+terminal.evidence, want) {
+			t.Fatalf("compatibility-only finding lacks %q: %+v", want, terminal)
+		}
 	}
 }
 

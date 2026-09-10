@@ -53,6 +53,13 @@ type logBurst struct {
 type logCanonical struct {
 	eventRe *regexp.Regexp
 	name    string
+	// sourceToken and sourceLabel describe the selected canonical event. The
+	// defaults retain the task-evaluator wording used by payout classes.
+	sourceToken string
+	sourceLabel string
+	// Some legacy compatibility lines carry terminal evidence without the
+	// canonical source. Render that cardinality as unknown, never zero.
+	unknownWhenAbsent bool
 	// correlation optionally joins each canonical source second to canonical
 	// attempts already counted by another class's burst detector. This proves
 	// incident co-residency without treating a minute-wide rate as ordering or
@@ -119,11 +126,13 @@ var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: ba
 
 // Connect's relEvent grammar renders booleans as 0/1 and durations as integer
 // milliseconds. Keep nonterminal transitions separate from terminal outcomes:
-// failOutcome logs window_failed and then calls SetStallStatus directly, so it
-// does not normally emit a window_stall failed=1 line. Retain failed=1 as a
-// compatibility shape, and keep both out of the generic novel detector.
+// failOutcome logs window_failed and then calls SetStallStatus directly, so
+// that dispatch does not itself emit window_stall failed=1. A later reason
+// change can publish that compatibility transition while the failed latch is
+// still set. Retain both shapes and keep them out of the generic novel detector.
 var (
 	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
+	windowFailedEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+(?:[[:space:]]|$)`)
 	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
 	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
 	windowGeneratorCanceledRe = regexp.MustCompile(
@@ -451,11 +460,18 @@ var logClasses = []logClass{
 	{name: "window-stall-terminal", re: windowTerminalRe,
 		sample:        windowTerminalLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state for that window but does not identify the underlying failure branch",
-		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch updates the UI-facing terminal latch but does not normally emit window_stall failed=1; the latter remains an accepted compatibility shape. The reason names the current diagnostic branch, not a proven transport root cause.",
-		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
+		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state and failed_window_events is its logical-event cardinality, while the diagnostic line rate can also include a later compatibility transition",
+		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch does not itself emit window_stall failed=1, but a later reason change can publish that compatibility transition while the failed latch remains set. Both lines retain fail-safe class visibility; only exact-replay-deduplicated window_failed lines count as authoritative failed-window events. The reason names the current diagnostic branch, not a proven transport root cause.",
+		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. Read diagnostic_lines as terminal-class telemetry, not incident size. When only a compatibility failed=1 line is present, failed_window_events is unknown rather than zero. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
 		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
 		verify:    "No window_failed event or compatible failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
+		canonical: &logCanonical{
+			eventRe:           windowFailedEventRe,
+			name:              "failed_window_events",
+			sourceToken:       "authoritative-window-failed-event",
+			sourceLabel:       "authoritative window_failed event",
+			unknownWhenAbsent: true,
+		},
 	},
 	{name: "window-stall", re: windowStallNonterminalRe,
 		sample:        windowStallLogSample,
@@ -1592,17 +1608,41 @@ func (self *logTailer) drainWindow() []finding {
 			}
 			canonicalEvidence := ""
 			if c.canonical != nil {
-				observed += fmt.Sprintf(
-					" %s=%d diagnostic_lines=%d canonical_source=exact-replay-deduplicated-task-evaluator",
-					c.canonical.name,
-					self.canonicalCounts[key],
-					count,
-				)
-				canonicalEvidence = fmt.Sprintf(
-					"\nlogical event count: %d exact-replay-deduplicated task evaluator line(s) from %d diagnostic line(s)",
-					self.canonicalCounts[key],
-					count,
-				)
+				canonicalCount := self.canonicalCounts[key]
+				sourceToken := c.canonical.sourceToken
+				if sourceToken == "" {
+					sourceToken = "task-evaluator"
+				}
+				sourceLabel := c.canonical.sourceLabel
+				if sourceLabel == "" {
+					sourceLabel = "task evaluator"
+				}
+				if c.canonical.unknownWhenAbsent && canonicalCount == 0 {
+					observed += fmt.Sprintf(
+						" %s=unknown diagnostic_lines=%d canonical_source=absent",
+						c.canonical.name,
+						count,
+					)
+					canonicalEvidence = fmt.Sprintf(
+						"\nlogical event count: unknown; no %s line was present among %d diagnostic line(s), so the diagnostic class retains fail-safe visibility",
+						sourceLabel,
+						count,
+					)
+				} else {
+					observed += fmt.Sprintf(
+						" %s=%d diagnostic_lines=%d canonical_source=exact-replay-deduplicated-%s",
+						c.canonical.name,
+						canonicalCount,
+						count,
+						sourceToken,
+					)
+					canonicalEvidence = fmt.Sprintf(
+						"\nlogical event count: %d exact-replay-deduplicated %s line(s) from %d diagnostic line(s)",
+						canonicalCount,
+						sourceLabel,
+						count,
+					)
+				}
 				correlationObserved, correlationEvidence := self.canonicalCorrelationLocked(c, key)
 				observed += correlationObserved
 				canonicalEvidence += correlationEvidence
