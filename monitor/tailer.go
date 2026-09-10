@@ -322,6 +322,17 @@ var logClasses = []logClass{
 		action:    "Build and deploy API from an intentional server checkout containing commit 0aac4806 after applying its required migrations through the normal release path. Do not replay raw client requests, insert synthetic engagement rows, or weaken event attribution to silence the error.",
 		verify:    "Every API block contains server commit 0aac4806; a deterministic PostgreSQL test passes the real app-open attribution statement; an attributed app open creates exactly one event with its exact flow_step; and zero onboarding-app-open-attribution lines occur for ten minutes after log-ingestion delay.",
 	},
+	{name: "onboarding-connect-day-write", re: regexp.MustCompile(`\[onboarding\]connect\.day write failed for client [^:\r\n]+: ERROR: inconsistent types deduced for parameter \$3 \(SQLSTATE 42P08\)`),
+		sample: func(string) string {
+			return "[onboarding]connect.day write failed: PostgreSQL parameter type conflict (SQLSTATE 42P08; client identifier omitted)"
+		},
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning:   "a Connect session was already committed, but PostgreSQL rejected the separate daily onboarding-event insert before it recorded connect.day analytics",
+		mechanism: "RecordConnectDay reused parameter $3 as both INSERT output and a varchar comparison without an explicit PostgreSQL type. PostgreSQL inferred incompatible types and rejected the complete statement with SQLSTATE 42P08. Recovery preserves the connection and removes the client from the process-local daily cache, so the next connection retries the same failing statement and amplifies one analytics defect into repeated warnings.",
+		context:   "The 2026-09-10 persisted evidence was mislabeled Taskworker by its outer manifest: every selected private record named Connect and the exact RecordConnectDay source line, while a bounded current query found the exact source/SQLSTATE intersection on every sampled Connect generation and zero matching Taskworker lines. All sampled Connect status endpoints ran server release 2026.9.10+1042581110, which contains first-bad commit 821f8131. This class uses a fixed sample so the client identifier never enters an alert.",
+		action:    "Build and deploy Connect from an intentional server checkout containing the RecordConnectDay explicit UUID, varchar, and timestamp casts. Do not restart Taskworker, replay raw connection requests, or fabricate historical analytics rows; any historical repair is a separate product/data-policy decision.",
+		verify:    "A deterministic PostgreSQL test executes the real RecordConnectDay statement, records exactly one connect.day event per network and UTC day, and preserves retry after write failure; every Connect block runs the corrected artifact; and zero onboarding-connect-day-write or matching novel lines occur for ten minutes after log-ingestion delay while connections continue.",
+	},
 	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
 	// match that canonical first line rather than its paired body-write line so
 	// the alert rate remains one logical recovery boundary per occurrence.

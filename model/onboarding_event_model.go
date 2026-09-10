@@ -337,24 +337,24 @@ func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.
 					props
 				)
 				SELECT
-					$1,
+					$1::uuid,
 					nc.network_id,
-					$3,
-					$4,
-					$5,
+					$3::varchar(64),
+					$4::timestamp,
+					$5::timestamp,
 					'', '', '', '', '', '', '', '',
 					NULL
 				FROM network_client nc
 				WHERE
-					nc.client_id = $2 AND
+					nc.client_id = $2::uuid AND
 					NOT EXISTS (
 						SELECT 1
 						FROM network_onboarding_event e
 						WHERE
 							e.network_id = nc.network_id AND
-							e.name = $3 AND
-							$6 <= e.at AND
-							e.at < $7
+							e.name = $3::varchar(64) AND
+							$6::timestamp <= e.at AND
+							e.at < $7::timestamp
 					)
 			`,
 			server.NewId(),
