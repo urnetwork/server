@@ -141,7 +141,7 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 	}
 }
 
-func TestBlobArtifactArchiveRestoresRoundWorkloadByCommittedHash(t *testing.T) {
+func TestEvaluatorMaterializesArchivedRoundWorkloadInAttempt(t *testing.T) {
 	settings := validSettings()
 	settings.RetainUntil = server.NowUtc().Add(24 * time.Hour).Truncate(time.Second)
 	store := server.NewLocalBlobStore(t.TempDir(), "evidence").(server.RetainedBlobStore)
@@ -171,6 +171,31 @@ func TestBlobArtifactArchiveRestoresRoundWorkloadByCommittedHash(t *testing.T) {
 	restored, err := readRoundWorkload(context.Background(), settings, round)
 	if err != nil || string(restored) != string(providers) {
 		t.Fatalf("restored workload = %q, %v", restored, err)
+	}
+	attemptDirectory := t.TempDir()
+	providersPath, err := materializeRoundWorkload(attemptDirectory, restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := &queuedJob{Round: *round}
+	request := evaluatorRequestForJob(
+		settings,
+		job,
+		strings.Repeat("1", 64),
+		attemptDirectory,
+		filepath.Join(attemptDirectory, "canonical.patch"),
+		providersPath,
+	)
+	if request.ProvidersPath != filepath.Join(attemptDirectory, "providers.yml") {
+		t.Fatalf("providers path = %q, want attempt-local workload", request.ProvidersPath)
+	}
+	materialized, err := readRegularFile(request.ProvidersPath, maxProvidersFileSize)
+	if err != nil || !bytes.Equal(materialized, providers) {
+		t.Fatalf("materialized workload = %q, %v", materialized, err)
+	}
+	digest := sha256.Sum256(materialized)
+	if hex.EncodeToString(digest[:]) != request.ProvidersSha256 {
+		t.Fatalf("materialized workload hash does not match request")
 	}
 }
 
@@ -371,7 +396,14 @@ func TestEvaluatorRequestBindsControlPlaneImageDigests(t *testing.T) {
 		AttemptCount: 1,
 		Round:        roundRecord{RoundResult: RoundResult{Epoch: 1}},
 	}
-	request := evaluatorRequestForJob(settings, job, strings.Repeat("9", 64), "/tmp/attempt", "/tmp/attempt/canonical.patch")
+	request := evaluatorRequestForJob(
+		settings,
+		job,
+		strings.Repeat("9", 64),
+		"/tmp/attempt",
+		"/tmp/attempt/canonical.patch",
+		"/tmp/attempt/providers.yml",
+	)
 	if request.EvaluatorImageDigest != job.EvaluatorImageDigest ||
 		request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
 		t.Fatalf(
@@ -2706,7 +2738,14 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 			ProvidersPath: "/trusted/round/providers.yml",
 		},
 	}
-	request := evaluatorRequestForJob(settings, job, strings.Repeat("e", 64), "/artifacts/attempt-02", "/artifacts/attempt-02/canonical.patch")
+	request := evaluatorRequestForJob(
+		settings,
+		job,
+		strings.Repeat("e", 64),
+		"/artifacts/attempt-02",
+		"/artifacts/attempt-02/canonical.patch",
+		"/artifacts/attempt-02/providers.yml",
+	)
 	if request.PatchSha256 != job.PatchSha256 {
 		t.Fatalf("patch SHA-256 = %q, want %q", request.PatchSha256, job.PatchSha256)
 	}
@@ -2720,6 +2759,9 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 	if request.ConfigLocalDirectory != settings.ConfigLocalDirectory ||
 		request.VaultLocalDirectory != settings.VaultLocalDirectory {
 		t.Fatal("evaluator request did not bind the exact direct local directories")
+	}
+	if request.ProvidersPath != "/artifacts/attempt-02/providers.yml" {
+		t.Fatalf("providers path = %q, want attempt-local workload", request.ProvidersPath)
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {

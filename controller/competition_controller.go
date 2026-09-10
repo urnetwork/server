@@ -1096,7 +1096,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	if err != nil {
 		return infrastructureFailure("round_workload_unavailable", "committed round workload failed authentication")
 	}
-	clear(providers)
+	defer clear(providers)
 	seed, err := revealRoundSecret(settings, &job.Round)
 	if err != nil {
 		return infrastructureFailure("round_seed_unavailable", "hidden round seed could not be authenticated")
@@ -1118,10 +1118,14 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 		settings.EvaluationPolicy.Replicates,
 	)
 	defer stopProgressMetrics()
+	providersPath, err := materializeRoundWorkload(attemptDir, providers)
+	if err != nil {
+		return infrastructureFailure("artifact_create_failed", "round workload artifact could not be written")
+	}
 	if err := writeExclusiveFile(patchPath, job.Patch, 0400); err != nil {
 		return infrastructureFailure("artifact_create_failed", "canonical patch artifact could not be written")
 	}
-	request := evaluatorRequestForJob(settings, job, seed, attemptDir, patchPath)
+	request := evaluatorRequestForJob(settings, job, seed, attemptDir, patchPath, providersPath)
 	requestBytes, err := json.Marshal(request)
 	request.RoundSeedHex = ""
 	seed = ""
@@ -1220,7 +1224,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 }
 
 // Build the complete immutable handoff from the claimed queue row.
-func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir, patchPath string) evaluatorRequest {
+func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir, patchPath, providersPath string) evaluatorRequest {
 	return evaluatorRequest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		SourceEpoch: evaluationSourceEpoch(&job.Round),
@@ -1229,7 +1233,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
 		PatchSha256:   job.PatchSha256,
-		ProvidersPath: job.Round.ProvidersPath, ProvidersSha256: job.Round.ProvidersSha256,
+		ProvidersPath: providersPath, ProvidersSha256: job.Round.ProvidersSha256,
 		ArtifactDirectory:    attemptDir,
 		ConfigLocalDirectory: settings.ConfigLocalDirectory,
 		VaultLocalDirectory:  settings.VaultLocalDirectory,
@@ -1368,6 +1372,17 @@ func createAttemptDirectory(root, jobId string, attempt int) (string, error) {
 		return "", err
 	}
 	return attemptDir, nil
+}
+
+// The control API and evaluator worker may run on different hosts. Always
+// materialize the authenticated workload inside the private attempt directory
+// instead of handing the sandbox a control-plane-local path.
+func materializeRoundWorkload(attemptDir string, providers []byte) (string, error) {
+	providersPath := filepath.Join(attemptDir, "providers.yml")
+	if err := writeExclusiveFile(providersPath, providers, 0400); err != nil {
+		return "", err
+	}
+	return providersPath, nil
 }
 
 func writeExclusiveFile(path string, value []byte, mode os.FileMode) error {
