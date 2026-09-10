@@ -5037,8 +5037,8 @@ same snapshot retain their separate causes.
 
 That incident also exposed a local watermark bug: a store adapter could record
 per-object errors, return `complete=true`, and still advance its watermark,
-contrary to the error-free completion contract. The pending code correction
-snapshots each store's own error count and advances only when that count is
+contrary to the error-free completion contract. The code correction snapshots
+each store's own error count and advances only when that count is
 unchanged; an error in one store does not stop healthy siblings or the run
 heartbeat. It does not add an immediate retry or hide provider failures.
 Deterministic tests make a synthetic Google status read return HTTP 500 after
@@ -5047,6 +5047,22 @@ healthy Solana store advances, then require a later error-free Google pass to
 advance normally. After deployment, require two natural error-free runs and no
 new Google error; the alert clears only after the last failure leaves the
 complete three-hour window.
+
+A separate 2026-09-10 Solana cohort was a completed historical backfill. The
+first repair-capable Taskworker pass emitted 110 `entitlement_repaired` rows
+for 110 distinct active renewal windows (107 finalized provider signatures
+across 105 networks). The three signatures seen twice each mapped to two
+different renewal windows; no exact window was repaired twice. All rows joined
+one run heartbeat exactly once, excluding heartbeat-join amplification. The
+underlying intents and renewals predated the source correction that replaced
+the legacy short zero-revenue refresh balance with exact paid-window metadata.
+The reconciler revalidated every signature as finalized, restored one
+zero-byte and zero-revenue Pro marker per window, and left the bounded current
+cohort with 200 eligible completed windows and zero missing exact markers.
+Treat this as a source-of-truth metadata backfill, not a current provider,
+task, persistence, idempotency, or monitor-cardinality failure. Closure
+requires zero new Solana repairs across two natural hourly passes; the warning
+remains visible until the historical rows leave the 24-hour window.
 
 Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
 to `signal_payment_reconciliation.go` and
