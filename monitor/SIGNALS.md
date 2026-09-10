@@ -5421,6 +5421,55 @@ cover a production-shaped severe leak, exact warning/page thresholds, a
 connected control, missing singleton authority, missing deactivation time,
 contradictory aggregates, bounded private SQL, and detailed Markdown.
 
+### 2.26 Device-backed share of new networks (automated sign-up waves)
+Probe: `signup-quality`
+
+WHAT: of the networks created on one complete UTC day, the share that
+registered a device client within 48 hours. A seed-phrase account is created
+through the API with no device, so an automated wave of account creation
+raises the raw network count while the device-backed count stays flat. Those
+networks can neither see an onboarding offer screen nor be mailed; the
+campaign's enrollment gate (server `e4c34a21`: a network enters with an email
+login, or on its first device within 30 days, never with neither) keeps them
+out of the cohort, but every sizing, dashboard and store estimate that reads
+the raw sign-up count is misled while the wave runs.
+
+HOW: read-only, direct psql, bounded to one day. Cohort = `network` rows
+created on the day three days back (complete, and every network's 48-hour
+window has matured); per network an index-backed existence probe into
+`network_client` with the 48-hour bound inside the subquery. Never an
+aggregate over a network's clients and never a hash join with
+`network_client`: on 2026-09-10 a `min(create_time)` over the same cohort
+scanned every client ever and hit the 30-second statement deadline on Main
+twice, while the existence probe answered in seconds. Only the day and two
+counts leave the database.
+
+- HEALTHY: at least 50% device-backed on a day with at least 100 new
+  networks. The quiet week of 21–27 August 2026 ran at about 80% (265
+  networks a day, 234 with a device); the growth days of 13–20 August at
+  95%.
+- BROKEN (WARN, `automated-signup-wave`, sustain 1 at the hourly cadence):
+  under 50%. Observed 31 August to 9 September 2026: 8,000–14,500 networks
+  a day with 13–16% device-backed (about 1,600–2,300 real devices a day
+  under a flat wave of 10,000–12,000 API-created accounts).
+- Under 100 networks the share is noise and the probe stays healthy.
+- ACTION: confirm the source (API sign-up rate by auth type, the abuse
+  controls on network create) and rate-limit or gate it at network create;
+  do not size or judge an onboarding experiment on the raw sign-up count
+  while the share is under the floor (mmm/onboarding/RUN-MAIN.md sizes on
+  the device-backed count). No cohort repair is needed: the campaign row is
+  only created for networks with an email login or a device.
+
+A wave that also registers devices (emulated clients) passes this check; the
+§2.7 new-connection rate and the onboarding `exposure-integrity` readout are
+the next discriminators.
+
+Implementation convention: SIGNALS.md §2.26 (`signup-quality`) maps to
+`signal_signup_quality.go` and `signal_signup_quality_test.go`. Synthetic
+tests cover the Main-shaped wave, a healthy quiet day, a day at the exact
+floor, a low-volume day that cannot decide, malformed and contradictory rows,
+the per-network probe shape of the query, and identifier-free Markdown.
+
 ---
 
 ## 3. redis signal catalog

@@ -77,6 +77,7 @@ func NewSignals() []Signal {
 		NewEgressOutcomesSignal(),
 		NewHMACCutoverSignal(),
 		NewProbeCleanupSignal(),
+		NewSignupQualitySignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),
