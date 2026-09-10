@@ -225,6 +225,11 @@ func TestRemovedTaskTargetsAreNotRegistered(t *testing.T) {
 		// positive control: a literal alternate name registered in
 		// InitTaskWorkerWithSettings
 		connect.AssertEqual(t, taskWorker.HasTarget("main.TaskCleanup"), true)
+		connect.AssertEqual(
+			t,
+			taskWorker.HasTarget("github.com/urnetwork/server/controller.OnboardingEmailTrackerSync"),
+			true,
+		)
 
 		for _, functionName := range removedTaskTargets {
 			if taskWorker.HasTarget(functionName) {

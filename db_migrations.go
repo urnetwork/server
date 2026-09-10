@@ -7590,4 +7590,56 @@ var migrations = []any{
 		ALTER TABLE network_points_leaderboard_snapshot
 		ADD COLUMN epoch_metrics_available boolean NOT NULL DEFAULT false
 	`),
+
+	// One privacy-safe row per onboarding email send cohort and bounded
+	// dimension tuple. Counts are distinct networks, not events. A recurring
+	// task refreshes recent send days so late Brevo events and downstream app
+	// engagement mature in place; Grafana exports only step/outcome totals.
+	newSqlMigration(`
+		CREATE TABLE onboarding_email_tracker_daily (
+			send_day timestamp NOT NULL,
+			step varchar(8) NOT NULL,
+			template varchar(32) NOT NULL,
+			variant varchar(32) NOT NULL,
+			experiment varchar(64) NOT NULL DEFAULT '',
+			experiment_variant varchar(64) NOT NULL DEFAULT '',
+			platform varchar(16) NOT NULL DEFAULT '',
+			path varchar(8) NOT NULL DEFAULT '',
+			sent bigint NOT NULL DEFAULT 0,
+			delivered bigint NOT NULL DEFAULT 0,
+			opened bigint NOT NULL DEFAULT 0,
+			clicked bigint NOT NULL DEFAULT 0,
+			landing_clicked bigint NOT NULL DEFAULT 0,
+			app_opened bigint NOT NULL DEFAULT 0,
+			connected bigint NOT NULL DEFAULT 0,
+			widget_added bigint NOT NULL DEFAULT 0,
+			feedback_submitted bigint NOT NULL DEFAULT 0,
+			pro_started bigint NOT NULL DEFAULT 0,
+			engaged bigint NOT NULL DEFAULT 0,
+			bounced bigint NOT NULL DEFAULT 0,
+			unsubscribed bigint NOT NULL DEFAULT 0,
+			complained bigint NOT NULL DEFAULT 0,
+			attribution_ambiguous bigint NOT NULL DEFAULT 0,
+			computed_at timestamp NOT NULL,
+			CHECK (step IN ('e1', 'e2', 'e3', 'e4', 'e5')),
+			CHECK (
+				sent >= 0 AND delivered >= 0 AND opened >= 0 AND clicked >= 0 AND
+				landing_clicked >= 0 AND app_opened >= 0 AND connected >= 0 AND
+				widget_added >= 0 AND feedback_submitted >= 0 AND pro_started >= 0 AND
+				engaged >= 0 AND bounced >= 0 AND unsubscribed >= 0 AND
+				complained >= 0 AND attribution_ambiguous >= 0
+			),
+			PRIMARY KEY (
+				send_day, step, template, variant, experiment,
+				experiment_variant, platform, path
+			)
+		)
+	`),
+	newOnlineSqlMigration(`
+		CREATE INDEX CONCURRENTLY network_onboarding_email_sent_at
+		ON network_onboarding_email (sent_at, network_id, step)
+	`, `
+		CREATE INDEX network_onboarding_email_sent_at
+		ON network_onboarding_email (sent_at, network_id, step)
+	`),
 }

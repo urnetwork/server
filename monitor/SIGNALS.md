@@ -8694,6 +8694,8 @@ This is the version-to-artifact contract checked by the probe:
 | 652 | repeatable competition staging constraint/index lifecycle and removal of the old finalization block |
 | 653 | nullable `competition_round.admission_closed_at`, its check, and the updated immutable guard |
 | 654 | required `network_points_leaderboard_snapshot.epoch_metrics_available` |
+| 655 | privacy-safe `onboarding_email_tracker_daily` distinct-network aggregates |
+| 656 | online `network_onboarding_email_sent_at` tracker source index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -8717,6 +8719,14 @@ version-650 database must contain the final onboarding index, lack every
 post-650 artifact, and migrate normally through all four appends with all three
 client-key triggers present. Never use schema reconciliation to emulate pending
 migrations or edit `migration_audit` to make reordered source appear current.
+
+Versions 655–656 add the onboarding email tracker’s privacy-safe daily
+aggregate and its online send-time source index. The aggregate stores distinct
+network counts by bounded campaign dimensions; it must never contain a network,
+message, address, or session identifier. The recurring tracker task relies on
+the `(sent_at, network_id, step)` index to refresh its rolling window without
+ranking the lifetime send table. A recorded head at either version is not
+coherent unless the corresponding table or valid/ready index is present.
 
 The first live exact-identity probe exposed a separate detector-only failure:
 it selected `migration_index::text` and ordered by the unqualified

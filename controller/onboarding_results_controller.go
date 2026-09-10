@@ -31,7 +31,8 @@ import (
 //     the trial outcome backstop, the onboarding_results_daily recompute over
 //     the last `results.rollup_days` cohort days, the guardrail check with
 //     auto-pause, and the event retention prune
-//   - the admin endpoints GET /admin/onboarding/results and
+//   - the admin endpoints GET /admin/onboarding/results,
+//     GET /admin/onboarding/email-tracker, and
 //     GET /admin/onboarding/experiments behind the vault admin bearers
 //   - the experiment-state overlay commands behind bringyourctl
 
@@ -90,7 +91,7 @@ var onboardingAdminRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOp
 	Namespace: "urnetwork",
 	Subsystem: "onboarding",
 	Name:      "admin_requests_total",
-	Help:      "Requests to the admin results endpoints by endpoint and result: ok, unauthorized, forbidden, bad_request.",
+	Help:      "Requests to the admin onboarding endpoints by endpoint and result: ok, unauthorized, forbidden, bad_request.",
 }, []string{"endpoint", "result"})
 
 func init() {

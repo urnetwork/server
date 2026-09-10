@@ -115,8 +115,12 @@ func TestEventSchemaLists(t *testing.T) {
 	// the server may write any name, client names included
 	_, err = ValidateServerEvent(EventSignupOptoutChanged, map[string]any{"product_updates": true})
 	connect.AssertEqual(t, nil, err)
-	_, err = ValidateServerEvent(EventAppOpened, map[string]any{"step": "e1_connect"})
+	_, err = ValidateServerEvent(EventAppOpened, map[string]any{"step": "e1_connect", "flow_step": "e1"})
 	connect.AssertEqual(t, nil, err)
+	_, err = ValidateServerEvent(EventEmailOpened, map[string]any{"step": "e3_last_chance", "flow_step": "e5"})
+	connect.AssertEqual(t, nil, err)
+	_, err = ValidateServerEvent(EventEmailOpened, map[string]any{"step": "e3_last_chance", "flow_step": "e6"})
+	connect.AssertEqual(t, true, err != nil)
 	_, err = ValidateServerEvent(EventAppOpened, map[string]any{"token": "x"})
 	connect.AssertEqual(t, true, err != nil)
 }

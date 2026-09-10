@@ -152,11 +152,11 @@ func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.
 				props
 			)
 			SELECT
-				$1,
+				$1::uuid,
 				click.network_id,
-				$4,
-				$3,
-				$3,
+				$4::varchar(64),
+				$3::timestamp,
+				$3::timestamp,
 				'',
 				'',
 				'',
@@ -165,18 +165,21 @@ func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.
 				click.experiment,
 				click.variant,
 				'',
-				jsonb_build_object('step', click.props->>'step')
+				jsonb_strip_nulls(jsonb_build_object(
+					'step', click.props->>'step',
+					'flow_step', click.props->>'flow_step'
+				))
 			FROM (
 				SELECT network_id, at, tier, path, experiment, variant, props
 				FROM network_onboarding_event
-				WHERE network_id = $2 AND name = $5 AND $6 <= at AND at <= $3
+				WHERE network_id = $2::uuid AND name = $5::varchar(64) AND $6::timestamp <= at AND at <= $3::timestamp
 				ORDER BY at DESC
 				LIMIT 1
 			) click
 			WHERE NOT EXISTS (
 				SELECT 1
 				FROM network_onboarding_event opened
-				WHERE opened.network_id = $2 AND opened.name = $4 AND click.at <= opened.at
+				WHERE opened.network_id = $2::uuid AND opened.name = $4::varchar(64) AND click.at <= opened.at
 			)
 		`,
 		server.NewId(),

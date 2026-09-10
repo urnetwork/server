@@ -171,6 +171,7 @@ func purchaseProps() map[string]*EventPropSpec {
 func emailProps() map[string]*EventPropSpec {
 	return map[string]*EventPropSpec{
 		"step":       propToken(true),
+		"flow_step":  propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		"experiment": propToken(false),
 		"variant":    propToken(false),
 	}
@@ -222,10 +223,12 @@ var eventSpecs = func() map[string]*EventSpec {
 
 		// server-written
 		{Name: EventLandingClicked, ServerOnly: true, Owner: EventOwnerS1, Props: map[string]*EventPropSpec{
-			"step": propToken(true),
+			"step":      propToken(true),
+			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		}},
 		{Name: EventAppOpened, ServerOnly: true, Owner: EventOwnerS1, Props: map[string]*EventPropSpec{
-			"step": propToken(true),
+			"step":      propToken(true),
+			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		}},
 		{Name: EventEmailSent, ServerOnly: true, Owner: EventOwnerS2, Props: emailProps()},
 		{Name: EventEmailDelivered, ServerOnly: true, Owner: EventOwnerS2, Props: emailProps()},

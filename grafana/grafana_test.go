@@ -430,6 +430,45 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 	}
 }
 
+func TestOnboardingDashboardUsesFreshPrivacySafeEmailTracker(t *testing.T) {
+	dashboard := readTestDashboard(t, "onboarding.json")
+	if dashboard.Title != "urnetwork / onboarding" {
+		t.Fatalf("onboarding dashboard title = %q", dashboard.Title)
+	}
+	raw, err := dashboardsFs.ReadFile("dashboards/onboarding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(raw)
+	for _, required := range []string{
+		"urnetwork_onboarding_email_tracker_networks",
+		"urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds",
+		"/admin/onboarding/email-tracker",
+		"attribution_ambiguous",
+		"landing_clicked", "app_opened", "connected", "widget_added",
+		"feedback_submitted", "pro_started", "bounced", "unsubscribed", "complained",
+	} {
+		if !strings.Contains(document, required) {
+			t.Errorf("onboarding dashboard lacks %q", required)
+		}
+	}
+	for _, expression := range dashboardExpressions(dashboard) {
+		if !strings.Contains(expression, "urnetwork_onboarding_email_tracker_networks") {
+			continue
+		}
+		if !strings.Contains(expression, "topk(1,") ||
+			!strings.Contains(expression, "email_tracker_snapshot_timestamp_seconds") ||
+			!strings.Contains(expression, "time() - 1200") {
+			t.Errorf("email tracker query does not select one fresh taskworker snapshot: %s", expression)
+		}
+		for _, forbidden := range []string{"network_id", "message_id", "user_auth", "vector(0)"} {
+			if strings.Contains(expression, forbidden) {
+				t.Errorf("email tracker query contains forbidden %q: %s", forbidden, expression)
+			}
+		}
+	}
+}
+
 func TestWebAnalyticsDashboardPrivacyContract(t *testing.T) {
 	dashboard := readTestDashboard(t, "web-analytics.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {

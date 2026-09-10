@@ -180,6 +180,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// the onboarding results side (PLAN.md "OPTIMIZATION LOOP"): the
 		// nightly aggregate and the registry, behind the vault admin bearers
 		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
+		router.NewRoute("GET", "/admin/onboarding/email-tracker", handlers.AdminOnboardingEmailTracker),
 		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
 		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
 		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),

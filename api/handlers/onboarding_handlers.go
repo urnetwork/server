@@ -91,6 +91,30 @@ func AdminOnboardingResults(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+// AdminOnboardingEmailTracker pages the durable per-flow-step send and
+// engagement aggregate. It uses the same Vault admin bearer as results.
+func AdminOnboardingEmailTracker(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limit := 0
+	if v := query.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	args := &controller.AdminOnboardingEmailTrackerArgs{
+		From: query.Get("from"), To: query.Get("to"), Step: query.Get("step"),
+		Experiment: query.Get("experiment"), Platform: query.Get("platform"),
+		Path: query.Get("path"), Cursor: query.Get("cursor"), Limit: limit,
+	}
+	router.WrapNoAuth(
+		func(clientSession *session.ClientSession) (*controller.AdminOnboardingEmailTrackerResult, error) {
+			return controller.AdminOnboardingEmailTracker(args, clientSession)
+		},
+		w,
+		r,
+	)
+}
+
 // AdminOnboardingExperiments returns the experiment registry as loaded, with
 // the live variant states. Same auth as AdminOnboardingResults.
 func AdminOnboardingExperiments(w http.ResponseWriter, r *http.Request) {

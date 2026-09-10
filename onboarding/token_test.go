@@ -21,6 +21,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	claims := &TokenClaims{
 		NetworkId: networkId,
 		Step:      "e4_feedback",
+		FlowStep:  StepE4,
 		ExpiresAt: now.Add(30 * 24 * time.Hour).Unix(),
 		Rating:    4,
 		Reason:    "too_slow",
@@ -34,6 +35,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	connect.AssertEqual(t, nil, err)
 	connect.AssertEqual(t, networkId, parsed.NetworkId)
 	connect.AssertEqual(t, "e4_feedback", parsed.Step)
+	connect.AssertEqual(t, StepE4, parsed.FlowStep)
 	connect.AssertEqual(t, 4, parsed.Rating)
 	connect.AssertEqual(t, "too_slow", parsed.Reason)
 	connect.AssertEqual(t, claims.ExpiresAt, parsed.ExpiresAt)
@@ -78,6 +80,8 @@ func TestTokenRoundTrip(t *testing.T) {
 	connect.AssertEqual(t, ErrTokenInvalid, err)
 	_, err = SignToken(keyA, &TokenClaims{NetworkId: networkId, ExpiresAt: 1})
 	connect.AssertEqual(t, ErrTokenInvalid, err)
+	_, err = SignToken(keyA, &TokenClaims{NetworkId: networkId, Step: "e1_connect", FlowStep: "e99", ExpiresAt: 1})
+	connect.AssertEqual(t, ErrTokenInvalid, err)
 	_, err = SignToken(keyA, nil)
 	connect.AssertEqual(t, ErrTokenInvalid, err)
 
@@ -85,6 +89,13 @@ func TestTokenRoundTrip(t *testing.T) {
 	noExpiry, _ := SignToken(keyA, &TokenClaims{NetworkId: networkId, Step: "e1_connect"})
 	_, err = ParseToken([][]byte{keyA}, noExpiry, now)
 	connect.AssertEqual(t, ErrTokenExpired, err)
+
+	// Tokens minted before flow-step attribution remain valid.
+	legacy, err := SignToken(keyA, &TokenClaims{NetworkId: networkId, Step: "e3_last_chance", ExpiresAt: now.Add(time.Hour).Unix()})
+	connect.AssertEqual(t, nil, err)
+	legacyClaims, err := ParseToken([][]byte{keyA}, legacy, now)
+	connect.AssertEqual(t, nil, err)
+	connect.AssertEqual(t, "", legacyClaims.FlowStep)
 }
 
 func TestDestination(t *testing.T) {

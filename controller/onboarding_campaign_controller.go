@@ -544,6 +544,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	token, err := onboarding.NewToken(&onboarding.TokenClaims{
 		NetworkId: row.NetworkId,
 		Step:      decision.Template,
+		FlowStep:  step,
 		ExpiresAt: now.Add(30 * 24 * time.Hour).Unix(),
 	})
 	if err != nil {
@@ -731,15 +732,18 @@ func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboardi
 			SentAt:            now,
 		})
 	})
-	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, row.ExperimentId, row.EmailVariant, row.Platform, now)
+	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, step, row.ExperimentId, row.EmailVariant, row.Platform, now)
 	return "sent", nil
 }
 
 // writeOnboardingEmailEvent records an email.* event with the sequence
 // experiment stamped from the row (WriteServerEvent would stamp a per-step
 // surface instead). Never fails the caller.
-func writeOnboardingEmailEvent(ctx context.Context, networkId server.Id, name string, template string, experiment string, variant string, platform string, at time.Time) {
+func writeOnboardingEmailEvent(ctx context.Context, networkId server.Id, name string, template string, flowStep string, experiment string, variant string, platform string, at time.Time) {
 	props := map[string]any{"step": template}
+	if onboarding.IsFlowStep(flowStep) {
+		props["flow_step"] = flowStep
+	}
 	if experiment != "" {
 		props["experiment"] = experiment
 		props["variant"] = variant
@@ -883,7 +887,7 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 		at = time.Unix(args.TsEvent, 0).UTC()
 	}
 	onboardingWebhookEventsTotal.WithLabelValues(name, email.Template).Inc()
-	writeOnboardingEmailEvent(ctx, email.NetworkId, name, email.Template, email.Experiment, email.ExperimentVariant, "", at)
+	writeOnboardingEmailEvent(ctx, email.NetworkId, name, email.Template, email.Step, email.Experiment, email.ExperimentVariant, "", at)
 
 	switch name {
 	case model.EventEmailBounced:

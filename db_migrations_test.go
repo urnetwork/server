@@ -156,6 +156,38 @@ func TestPublishedMigrationPrefixIsImmutable(t *testing.T) {
 	}
 }
 
+func TestOnboardingEmailTrackerMigrationIsPrivacySafe(t *testing.T) {
+	index := migrationIndex(t, "CREATE TABLE onboarding_email_tracker_daily")
+	migration, ok := migrations[index].(*SqlMigration)
+	if !ok {
+		t.Fatalf("onboarding email tracker migration is %T, want *SqlMigration", migrations[index])
+	}
+	for _, required := range []string{
+		"CHECK (step IN ('e1', 'e2', 'e3', 'e4', 'e5'))",
+		"attribution_ambiguous bigint",
+		"PRIMARY KEY",
+	} {
+		if !strings.Contains(migration.sql, required) {
+			t.Errorf("onboarding email tracker migration lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{"network_id", "message_id", "email_address"} {
+		if strings.Contains(migration.sql, forbidden) {
+			t.Errorf("onboarding email tracker aggregate persists forbidden identifier %q", forbidden)
+		}
+	}
+	index++
+	performanceMigration, ok := migrations[index].(*OnlineSqlMigration)
+	if !ok {
+		t.Fatalf("onboarding email tracker source index is %T, want *OnlineSqlMigration", migrations[index])
+	}
+	for _, required := range []string{"CREATE INDEX CONCURRENTLY", "network_onboarding_email (sent_at, network_id, step)"} {
+		if !strings.Contains(performanceMigration.sql, required) {
+			t.Errorf("onboarding email tracker source index lacks %q", required)
+		}
+	}
+}
+
 // A pending migration can race ahead of the runtime fix that stopped blank
 // location names from being written. In that state a later blank region/city
 // can coexist with an older canonical row, and normalizing both full names to
