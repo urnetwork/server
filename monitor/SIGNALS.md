@@ -8096,6 +8096,29 @@ Healthy recovery is the correct known address from both family-specific
 endpoints on every active generation, no new malformed-value resolver lines,
 and no legacy untrusted-peer lines. `/hello` alone proves none of this.
 
+The absent-header case emits no resolver line at all, so this probe and the
+`source-attribution` log class both miss it. The lossless in-process signal is
+`urnetwork_session_client_address_resolutions_total{source}`, one bounded
+counter over the branches of `session.ResolveClientAddress`: `ur_header`,
+`peer_absent`, `peer_repeated`, `peer_empty`, `peer_malformed`. Everything but
+`ur_header` falls back to the socket peer. Charted on `urnetwork / signals`.
+The server cannot decide `peer_absent` on its own - a deployment reached
+directly and one behind an ingress that never sets the header are identical at
+the request - so it is deliberately counted and never warned about.
+
+Reading it on this fleet, where Warp always overwrites the header: a small
+`peer_absent` floor is NORMAL and not the collapse. `/status` builds a session
+unconditionally (`router/warp_handlers.go`), and warpctl and the §11.1 runbook
+both curl it against the container with no ingress in the path, so deploys and
+rollouts produce header-less resolutions by design. The collapse is
+`peer_absent` approaching the FULL resolution rate, or scaling with client
+traffic instead of with probe cadence.
+
+Scope: the counter covers api, connect's H1/websocket route, mcp, oauth and
+x402. Connect's QUIC/H3 listeners read the peer from `conn.RemoteAddr()`
+without entering the resolver, so a "share on connect" is computed over
+websocket connections and probes only.
+
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 
