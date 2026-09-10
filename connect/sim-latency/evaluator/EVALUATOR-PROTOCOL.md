@@ -146,7 +146,8 @@ and live kernel/cgroup/network/storage probes; it must not copy a caller-written
 attestation. `qualification_sha256` must equal the season-frozen digest of the
 host image, BIOS/microcode, kernel, SMT, governor/turbo, NUMA/affinity, IRQ,
 cgroup/sysctl, and backing-service facts. `kernel_release`,
-`microcode_revision`, and every named `checks` entry are mandatory.
+`microcode_revision`, the `irq_affinity_sha256` and `irq_policy_sha256`
+digests, and every named `checks` entry are mandatory.
 `rebaseline_passed` binds a recent same-round re-baseline on that specific host
 and image. A host may heartbeat as containment-eligible before a round exists;
 round generation ignores this one round-scoped field, while queue admission

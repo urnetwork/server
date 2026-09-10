@@ -1053,10 +1053,8 @@ func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) 
 	if err != nil {
 		return HostSelfCheck{}, fmt.Errorf("self-check command: %w", err)
 	}
-	var result HostSelfCheck
-	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
+	result, err := decodeHostSelfCheck(stdout.Bytes())
+	if err != nil {
 		return HostSelfCheck{}, fmt.Errorf("decode self-check: %w", err)
 	}
 	if exitCode != 0 {
@@ -5178,6 +5176,8 @@ type HostSelfCheck struct {
 	ImageDigest                 string          `json:"image_digest"`
 	KernelRelease               string          `json:"kernel_release"`
 	MicrocodeRevision           string          `json:"microcode_revision"`
+	IrqAffinitySha256           string          `json:"irq_affinity_sha256"`
+	IrqPolicySha256             string          `json:"irq_policy_sha256"`
 	LogicalCpuCount             int             `json:"logical_cpu_count"`
 	SMTDisabled                 bool            `json:"smt_disabled"`
 	GovernorPinned              bool            `json:"governor_pinned"`
@@ -5201,6 +5201,21 @@ type HostSelfCheck struct {
 	RebaselinePassed            bool            `json:"rebaseline_passed"`
 	RebaselineRoundId           *server.Id      `json:"rebaseline_round_id,omitempty"`
 	Checks                      map[string]bool `json:"checks"`
+}
+
+// Decodes exactly one checker-owned report while rejecting schema drift in
+// either direction.
+func decodeHostSelfCheck(content []byte) (HostSelfCheck, error) {
+	result := HostSelfCheck{}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return HostSelfCheck{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return HostSelfCheck{}, errors.New("self-check has trailing content")
+	}
+	return result, nil
 }
 
 func (self HostSelfCheck) Eligible(settings *Settings) bool {
@@ -5240,6 +5255,8 @@ func (self HostSelfCheck) commonContainmentEligible(settings *Settings) bool {
 	return self.Schema == 1 && self.HostId != "" &&
 		self.HardwareId == settings.EvaluationPolicy.HardwareId &&
 		self.KernelRelease != "" && self.MicrocodeRevision != "" &&
+		sha256Pattern.MatchString(self.IrqAffinitySha256) &&
+		sha256Pattern.MatchString(self.IrqPolicySha256) &&
 		self.LogicalCpuCount == 12 &&
 		self.SMTDisabled && self.GovernorPinned && self.TurboPinned && self.NumaPinned && self.IrqPinned &&
 		self.CgroupV2 && self.ServicesInJobCgroup && self.DefaultDenyNetwork &&

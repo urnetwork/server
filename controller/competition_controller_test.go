@@ -1077,13 +1077,39 @@ func passingHostCheck(settings *Settings) HostSelfCheck {
 	return HostSelfCheck{
 		Schema: 1, HostId: "box-a", HardwareId: settings.EvaluationPolicy.HardwareId,
 		QualificationSha256: settings.EvaluationPolicy.HostQualificationSha256,
-		ImageDigest:         settings.EvaluatorImageDigest, KernelRelease: "6.8.0", MicrocodeRevision: "0x42", LogicalCpuCount: 12,
+		ImageDigest:         settings.EvaluatorImageDigest, KernelRelease: "6.8.0", MicrocodeRevision: "0x42",
+		IrqAffinitySha256: strings.Repeat("c", 64), IrqPolicySha256: strings.Repeat("d", 64), LogicalCpuCount: 12,
 		SMTDisabled: true, GovernorPinned: true, TurboPinned: true, NumaPinned: true, IrqPinned: true,
 		CgroupV2: true, ServicesInJobCgroup: true, DefaultDenyNetwork: true, OfflineBuildCache: true,
 		TemplateDatabase: true, RedisReset: true, ArtifactStorage: true, ImmutableReports: true,
 		NoProductionSecrets: true, CleanupVerified: true, ResourceLimitsVerified: true,
 		ManagementCpuReserved: true, ManagementMemoryReserved: true, ResourceBombCleanupVerified: true,
 		RebaselinePassed: true, RebaselineRoundId: &rebaselineRoundId, Checks: map[string]bool{"all": true},
+	}
+}
+
+func TestDecodeHostSelfCheckAcceptsTrustedIrqDigestsAndRejectsSchemaDrift(t *testing.T) {
+	affinitySha256 := strings.Repeat("a", 64)
+	policySha256 := strings.Repeat("b", 64)
+	content := []byte(fmt.Sprintf(
+		`{"schema":1,"irq_affinity_sha256":%q,"irq_policy_sha256":%q}`,
+		affinitySha256,
+		policySha256,
+	))
+	check, err := decodeHostSelfCheck(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.IrqAffinitySha256 != affinitySha256 || check.IrqPolicySha256 != policySha256 {
+		t.Fatalf("IRQ digests = %q, %q", check.IrqAffinitySha256, check.IrqPolicySha256)
+	}
+	for _, invalid := range [][]byte{
+		append(append([]byte{}, content...), []byte(` {}`)...),
+		[]byte(`{"schema":1,"untrusted_field":true}`),
+	} {
+		if _, err := decodeHostSelfCheck(invalid); err == nil {
+			t.Errorf("invalid self-check was accepted: %s", invalid)
+		}
 	}
 }
 
