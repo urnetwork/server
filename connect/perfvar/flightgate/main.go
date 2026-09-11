@@ -71,6 +71,30 @@ campaign filters (comma-separated sets, same values as CONNECT_PERFVAR_*):
 type arm struct {
 	name        string
 	connectPath string
+	sdkPath     string
+}
+
+// armSdkFlag maps an arm name to the SDK tree its binary must build against
+// when the server module's default SDK replace is incompatible with that
+// arm's Connect tree.
+type armSdkFlag map[string]string
+
+func (self *armSdkFlag) String() string { return fmt.Sprint(map[string]string(*self)) }
+
+func (self *armSdkFlag) Set(value string) error {
+	name, path, ok := strings.Cut(value, "=")
+	if !ok || name == "" || path == "" {
+		return fmt.Errorf("arm-sdk %q must be name=/path/to/sdk", value)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if *self == nil {
+		*self = armSdkFlag{}
+	}
+	(*self)[name] = absolute
+	return nil
 }
 
 type armFlag []arm
@@ -109,6 +133,9 @@ type manifestArm struct {
 	Connect    string `json:"connect"`
 	ConnectRev string `json:"connect_revision"`
 	Dirty      bool   `json:"connect_dirty"`
+	Sdk        string `json:"sdk,omitempty"`
+	SdkRev     string `json:"sdk_revision,omitempty"`
+	SdkDirty   bool   `json:"sdk_dirty,omitempty"`
 	Binary     string `json:"binary"`
 }
 
@@ -127,6 +154,8 @@ func runCampaign(args []string) error {
 	out := flags.String("out", "", "campaign output directory (created)")
 	serverDir := flags.String("server", "", "server module directory")
 	flags.Var(&arms, "arm", "name=/path/to/connect (first arm is the control)")
+	var armSdks armSdkFlag
+	flags.Var(&armSdks, "arm-sdk", "name=/path/to/sdk (optional per-arm SDK tree)")
 	runs := flags.Int("runs", 5, "repetitions per arm")
 	seed := flags.Int64("seed", 20260910, "base seed")
 	filters := map[string]*string{}
@@ -185,17 +214,24 @@ func runCampaign(args []string) error {
 	// Build one test binary per arm against its Connect tree through a
 	// private modfile, so the server worktree's own go.mod is never edited.
 	for _, arm := range arms {
+		arm.sdkPath = armSdks[arm.name]
 		binary, err := buildArm(serverAbsolute, outAbsolute, arm)
 		if err != nil {
 			return fmt.Errorf("build arm %s: %w", arm.name, err)
 		}
-		manifest.Arms = append(manifest.Arms, manifestArm{
+		entry := manifestArm{
 			Name:       arm.name,
 			Connect:    arm.connectPath,
 			ConnectRev: gitRevision(arm.connectPath),
 			Dirty:      gitDirty(arm.connectPath),
 			Binary:     binary,
-		})
+		}
+		if arm.sdkPath != "" {
+			entry.Sdk = arm.sdkPath
+			entry.SdkRev = gitRevision(arm.sdkPath)
+			entry.SdkDirty = gitDirty(arm.sdkPath)
+		}
+		manifest.Arms = append(manifest.Arms, entry)
 		fmt.Printf("built %s -> %s\n", arm.name, binary)
 	}
 	writeManifest := func() {
@@ -254,8 +290,12 @@ func buildArm(serverDir string, outDir string, arm arm) (string, error) {
 			return "", err
 		}
 	}
-	edit := exec.Command("go", "mod", "edit", "-modfile="+modfile,
-		"-replace=github.com/urnetwork/connect="+arm.connectPath)
+	editArgs := []string{"mod", "edit", "-modfile=" + modfile,
+		"-replace=github.com/urnetwork/connect=" + arm.connectPath}
+	if arm.sdkPath != "" {
+		editArgs = append(editArgs, "-replace=github.com/urnetwork/sdk="+arm.sdkPath)
+	}
+	edit := exec.Command("go", editArgs...)
 	edit.Dir = serverDir
 	if output, err := edit.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("go mod edit: %v: %s", err, output)
