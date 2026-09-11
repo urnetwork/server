@@ -4,9 +4,12 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -20,10 +23,12 @@ const (
 	maximumSnAttemptRecordBytes   = model.StAttemptUploadMaximumObjectBytes
 	maximumSnAttemptProofBytes    = model.StAttemptUploadMaximumObjectBytes
 	maximumSnAttemptReaders       = 16
+	maximumSnAttemptReadDuration  = 10 * time.Minute
 )
 
 // Refuse excess public work immediately; each admitted request uses one fixed
-// 32-KiB copy buffer, with a deadline shorter than the API's write deadline.
+// 32-KiB copy buffer. The finite route deadline allows signed-row replay and
+// synchronous scratch writes between client reads of a bounded data chunk.
 var snAttemptReaderSlots = make(chan struct{}, maximumSnAttemptReaders)
 
 // The same route is used by the production API and sim-testnet module runner.
@@ -65,10 +70,18 @@ func serveSnAttemptArtifact(w http.ResponseWriter, r *http.Request, loadStore fu
 		http.Error(w, "Artifact reader busy.", http.StatusTooManyRequests)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), maximumSnAttemptReadDuration)
 	defer cancel()
 	if ctx.Err() != nil {
 		http.Error(w, "Request canceled.", http.StatusRequestTimeout)
+		return
+	}
+	deadline, _ := ctx.Deadline()
+	// Override the API's ordinary 30-second response deadline for this bounded
+	// streaming route. Non-network writers may lack this capability; an opaque
+	// network wrapper then retains the server's shorter, still finite deadline.
+	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		http.Error(w, "Artifact write deadline unavailable.", http.StatusServiceUnavailable)
 		return
 	}
 	store, ok := loadStore()
@@ -85,10 +98,14 @@ func serveSnAttemptArtifact(w http.ResponseWriter, r *http.Request, loadStore fu
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("ETag", `"`+contentHash+`"`)
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000, no-transform")
+	started := time.Now()
 	count, err := startifact.ReadAttemptObjectTo(ctx, store, bounds, kind, contentHash, w)
 	if err == nil {
 		return
 	}
+	// ErrAbortHandler is deliberately silent in net/http and bypasses router
+	// accounting. Preserve the real cause before terminating a partial body.
+	glog.Warningf("[sn-attempt] artifact stream failed: kind=%s hash=%s bytes=%d elapsed=%s context=%v error=%.1024s", kind, contentHash, count, time.Since(started), ctx.Err(), err.Error())
 	if count != 0 {
 		// net/http must terminate the response without a successful body EOF.
 		panic(http.ErrAbortHandler)

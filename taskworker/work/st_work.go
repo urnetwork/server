@@ -4,7 +4,7 @@ package work
 // on the Schedule/Task/TaskPost trio pattern of account_payment_work.go
 // with per-epoch RunOnce keys:
 //
-//   - StSyncChain (periodic ~1min): pokes rollEpochs when the lazy counter
+//   - StSyncChain (periodic ~5s): pokes rollEpochs when the lazy counter
 //     is behind, mirrors the contract epoch state into `st_epoch` + the
 //     redis summary cache, advances the event mirror in bounded ranges,
 //     and schedules the per-epoch tasks below. Task RunAt values are only
@@ -37,8 +37,9 @@ import (
 )
 
 const (
-	// stSyncChainInterval is the periodic chain sync cadence.
-	stSyncChainInterval = 1 * time.Minute
+	// Poll below the block cadence so discovery and queueing do not consume
+	// the five-block emission close window after its finalized boundary.
+	stSyncChainInterval = 5 * time.Second
 
 	// bounded retry budgets per epoch task chain. Commit retries are
 	// additionally cut off by the on-chain commit window; finalize by the
@@ -48,7 +49,7 @@ const (
 	stDepositMaxAttempts      = 8
 	stFinalizePokeMaxAttempts = 100
 
-	stEpochCloseRetryDelay   = 2 * time.Minute
+	stEpochCloseRetryDelay   = 5 * time.Second
 	stCommitRootRetryDelay   = 5 * time.Minute
 	stDepositRetryDelay      = 15 * time.Minute
 	stFinalizePokeRetryDelay = 5 * time.Minute

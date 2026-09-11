@@ -27,6 +27,7 @@ package controller
 //     every entry point checks it.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
@@ -1273,9 +1274,48 @@ func (self *CoreStClient) runTransactionIntent(
 	}
 }
 
+// A close that expired at a finalized block cannot become valid again. Retire
+// its nonce through the ordinary cancellation transaction so a later defer can
+// proceed without discarding the original intent or any signed attempt.
+func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.StTransactionIntent, finalized uint64) (bool, error) {
+	if self.coordinator == nil || intent.DeploymentKey != self.cfg.DeploymentKey() ||
+		!strings.EqualFold(intent.ToAddress, self.cfg.ContractAddress.Hex()) || len(intent.Calldata) != 68 {
+		return false, nil
+	}
+	epoch := new(big.Int).SetBytes(intent.Calldata[4:36])
+	noID := new(big.Int).SetBytes(intent.Calldata[36:68])
+	if !bytes.Equal(intent.Calldata, self.coordinator.PackCloseOperatorEpoch(epoch, noID)) {
+		return false, nil
+	}
+	if !epoch.IsUint64() || !noID.IsUint64() {
+		return false, errors.New("st: close intent epoch/operator exceeds supported range")
+	}
+	logicalKey, err := stTransactionLogicalKey(self.cfg, fmt.Sprintf("close:%d:%d", epoch.Uint64(), noID.Uint64()))
+	if err != nil || intent.LogicalKey != logicalKey || !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
+		return false, errors.New("st: close intent has inconsistent immutable operation identity")
+	}
+	policy, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackPolicyAt(epoch), self.coordinator.UnpackPolicyAt)
+	if err != nil {
+		return false, fmt.Errorf("st: close intent epoch policy: %w", err)
+	}
+	end, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackEpochEndBlock(epoch), self.coordinator.UnpackEpochEndBlock)
+	if err != nil {
+		return false, fmt.Errorf("st: close intent epoch end: %w", err)
+	}
+	if end == nil || !end.IsUint64() || end.Uint64() > math.MaxUint64-policy.CloseGraceBlocks {
+		return false, errors.New("st: close intent deadline exceeds supported range")
+	}
+	deadline := end.Uint64() + policy.CloseGraceBlocks
+	if finalized <= deadline {
+		return false, nil
+	}
+	glog.Infof("[st]cancel expired close intent %s nonce %d epoch %d operator %d finalized_block %d close_deadline %d", intent.IntentKey, intent.Nonce, epoch.Uint64(), noID.Uint64(), finalized, deadline)
+	return true, nil
+}
+
 // Drains every lower account nonce before a new operation can reserve one. An
-// active-deployment intent resumes its exact stored business transaction; a
-// stale coordinator is retired only by a same-nonce self-transaction.
+// active-deployment intent resumes its exact stored business transaction;
+// expired closes and stale coordinators use a same-nonce self-transaction.
 func (self *CoreStClient) reconcileAccountIntents(
 	ctx context.Context,
 	client *ethclient.Client,
@@ -1337,11 +1377,15 @@ func (self *CoreStClient) reconcileAccountIntents(
 		}
 
 		stale := intent.DeploymentKey != self.cfg.DeploymentKey()
+		expiredClose, err := self.expiredCloseIntent(ctx, intent, finalized.Number)
+		if err != nil {
+			return err
+		}
 		desiredKind := model.StTxAttemptExecution
-		if stale {
+		if stale || expiredClose {
 			desiredKind = model.StTxAttemptCancellation
 		}
-		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, stale)
+		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, stale || expiredClose)
 		if runErr != nil && !stale {
 			return runErr
 		}
