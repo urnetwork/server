@@ -515,6 +515,16 @@ boundary. `blackhole_except_stun` on a link profile requires `blackhole` and
 is meaningful only on P2P links, whose packets carry the modeled 28-byte outer
 header before the UDP payload.
 
+Every run also samples the test process's Go runtime once a second while the
+tunneled workload runs: heap plus stack in use (p95 and maximum), heap in use
+and `Sys` maxima, the samples above the 24 MiB MEMSTEADY ceiling, and the
+message-pool retained, capacity and outstanding counts at the end. Under
+`CONNECT_PERFVAR_RESOURCE=mobile-surrogate` these are the campaign's memory
+guardrails: a candidate whose heap+stack p95 rises above the control, or with
+any sample above 24 MiB where the control had none, is a REGRESSION for that
+item even when its throughput improved. The physical Android MEMSTEADY block
+remains the device-side gate.
+
 Every measured TCP payload workload samples delivered application bytes
 (client reads on download, server reads on upload) every 250 ms. The run
 record carries the samples and 5 s throughput windows; a window under

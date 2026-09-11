@@ -3571,7 +3571,7 @@ func measurePerfvarRun(
 	progressSampler := startPerfvarProgressSampler(path, workloadStart)
 	tunneled, err := measurePerfvarFullTun(ctx, path, executionScenario)
 	workloadDuration := time.Since(workloadStart)
-	progress := progressSampler.stop()
+	progress, memory := progressSampler.stop()
 	if err == nil {
 		err = path.waitForPostWorkloadBoundary(ctx)
 	}
@@ -3588,6 +3588,7 @@ func measurePerfvarRun(
 		record.Tunneled.Duration = workloadDuration
 		record.Carrier = carrier
 		record.Progress = progress
+		record.Memory = memory
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "workload"
 		record.FailureReason = err.Error()
@@ -3616,6 +3617,7 @@ func measurePerfvarRun(
 	record.Tunneled = tunneled
 	record.Carrier = carrier
 	record.Progress = progress
+	record.Memory = memory
 	record.RouteSetupDuration = routeSetupDuration
 	record.Correct = verificationErr == nil
 	record.GoroutinesAfter = runtime.NumGoroutine()
@@ -3648,51 +3650,88 @@ func measurePerfvarRun(
 type perfvarProgressSampler struct {
 	stopOnce sync.Once
 	stopChan chan struct{}
-	done     chan []perfvarProgressSample
+	done     chan perfvarSamplerResult
 }
+
+type perfvarSamplerResult struct {
+	progress []perfvarProgressSample
+	memory   []uint64
+	heapMax  uint64
+	sysMax   uint64
+}
+
+// perfvarMemorySampleEvery is how many progress ticks pass between runtime
+// memory reads; a MemStats read briefly stops the world, so it is taken
+// once a second rather than on every 250 ms progress tick.
+const perfvarMemorySampleEvery = 4
 
 func startPerfvarProgressSampler(path *fullTunPath, start time.Time) *perfvarProgressSampler {
 	sampler := &perfvarProgressSampler{
 		stopChan: make(chan struct{}),
-		done:     make(chan []perfvarProgressSample, 1),
+		done:     make(chan perfvarSamplerResult, 1),
 	}
 	path.workloadProgressBytes.Store(0)
 	go func() {
 		ticker := time.NewTicker(perfvarProgressSampleInterval)
 		defer ticker.Stop()
-		samples := []perfvarProgressSample{{Offset: 0, ByteCount: 0}}
+		result := perfvarSamplerResult{
+			progress: []perfvarProgressSample{{Offset: 0, ByteCount: 0}},
+		}
+		sampleMemory := func() {
+			var memory runtime.MemStats
+			runtime.ReadMemStats(&memory)
+			result.memory = append(result.memory, memory.HeapInuse+memory.StackInuse)
+			result.heapMax = max(result.heapMax, memory.HeapInuse)
+			result.sysMax = max(result.sysMax, memory.Sys)
+		}
+		sampleMemory()
+		tick := 0
 		for {
 			select {
 			case <-sampler.stopChan:
-				samples = append(samples, perfvarProgressSample{
+				result.progress = append(result.progress, perfvarProgressSample{
 					Offset:    time.Since(start),
 					ByteCount: path.workloadProgressBytes.Load(),
 				})
-				sampler.done <- samples
+				sampleMemory()
+				sampler.done <- result
 				return
 			case now := <-ticker.C:
-				samples = append(samples, perfvarProgressSample{
+				result.progress = append(result.progress, perfvarProgressSample{
 					Offset:    now.Sub(start),
 					ByteCount: path.workloadProgressBytes.Load(),
 				})
+				tick += 1
+				if tick%perfvarMemorySampleEvery == 0 {
+					sampleMemory()
+				}
 			}
 		}
 	}()
 	return sampler
 }
 
-// stop ends sampling and returns the derived window observation. It is safe
-// to call more than once; later calls return an empty observation.
-func (self *perfvarProgressSampler) stop() perfvarProgressObservation {
-	var samples []perfvarProgressSample
+// stop ends sampling and returns the derived window and memory observations.
+// It is safe to call more than once; later calls return empty observations.
+func (self *perfvarProgressSampler) stop() (perfvarProgressObservation, perfvarMemoryObservation) {
+	var result perfvarSamplerResult
+	stopped := false
 	self.stopOnce.Do(func() {
 		close(self.stopChan)
-		samples = <-self.done
+		result = <-self.done
+		stopped = true
 	})
-	if samples == nil {
-		return perfvarProgressObservation{FirstDeadWindowOffset: -1}
+	if !stopped {
+		return perfvarProgressObservation{FirstDeadWindowOffset: -1}, perfvarMemoryObservation{}
 	}
-	return perfvarProgressObservationFor(samples)
+	memory := perfvarMemoryObservationFor(result.memory, result.heapMax, result.sysMax)
+	taken, returned, _ := clientconnect.MessagePoolCounts()
+	memory.PoolOutstandingEnd = int64(taken) - int64(returned)
+	for _, stats := range clientconnect.GetMessagePoolClassStats() {
+		memory.PoolRetainedCountEnd += stats.Retained
+		memory.PoolCapacityEnd += stats.Capacity
+	}
+	return perfvarProgressObservationFor(result.progress), memory
 }
 
 // Bulk impaired scenarios retain enough time for calibration and route work.

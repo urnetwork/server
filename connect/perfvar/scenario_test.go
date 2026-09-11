@@ -368,6 +368,51 @@ func perfvarProgressObservationFor(samples []perfvarProgressSample) perfvarProgr
 	return observation
 }
 
+// perfvarMemoryObservation is the Go runtime and message-pool footprint of
+// the test process sampled once a second while one tunneled workload runs.
+// Under the mobile surrogate it is the program's memory guardrail
+// (connect/MEMSTEADY.md): a candidate whose heap+stack p95 rises above the
+// control, or that shows any sample above the 24 MiB ceiling where the
+// control stayed below, is a REGRESSION for that item.
+type perfvarMemoryObservation struct {
+	SampleCount          int    `json:"sample_count"`
+	HeapAndStackInuseP95 uint64 `json:"heap_and_stack_inuse_p95_bytes"`
+	HeapAndStackInuseMax uint64 `json:"heap_and_stack_inuse_max_bytes"`
+	HeapInuseMax         uint64 `json:"heap_inuse_max_bytes"`
+	SysMax               uint64 `json:"sys_max_bytes"`
+	PoolRetainedCountEnd int    `json:"pool_retained_count_end"`
+	PoolCapacityEnd      int    `json:"pool_capacity_end"`
+	PoolOutstandingEnd   int64  `json:"pool_outstanding_end"`
+	SamplesAboveCeiling  int    `json:"samples_above_ceiling"`
+	CeilingBytes         uint64 `json:"ceiling_bytes"`
+}
+
+// perfvarMemoryCeilingBytes is the MEMSTEADY hard gate (24 MiB).
+const perfvarMemoryCeilingBytes = uint64(24 * 1024 * 1024)
+
+func perfvarMemoryObservationFor(samples []uint64, heapMax uint64, sysMax uint64) perfvarMemoryObservation {
+	observation := perfvarMemoryObservation{
+		SampleCount:  len(samples),
+		HeapInuseMax: heapMax,
+		SysMax:       sysMax,
+		CeilingBytes: perfvarMemoryCeilingBytes,
+	}
+	if len(samples) == 0 {
+		return observation
+	}
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+	observation.HeapAndStackInuseMax = sorted[len(sorted)-1]
+	rank := max(1, (95*len(sorted)+99)/100)
+	observation.HeapAndStackInuseP95 = sorted[rank-1]
+	for _, sample := range samples {
+		if perfvarMemoryCeilingBytes < sample {
+			observation.SamplesAboveCeiling += 1
+		}
+	}
+	return observation
+}
+
 // Every run contains the calibration, tunneled result, and exact identities.
 type perfvarRunRecord struct {
 	SchemaVersion   int                       `json:"schema_version"`
@@ -385,6 +430,7 @@ type perfvarRunRecord struct {
 	// Progress is sampled only for the TCP payload workloads; other
 	// workloads leave it empty.
 	Progress           perfvarProgressObservation `json:"progress"`
+	Memory             perfvarMemoryObservation   `json:"memory"`
 	RouteSetupDuration time.Duration              `json:"route_setup_duration_nanoseconds"`
 	Efficiency         float64                    `json:"tunneled_underlay_efficiency"`
 	WireEfficiency     float64                    `json:"useful_wire_efficiency"`
@@ -424,12 +470,16 @@ type perfvarAggregateRecord struct {
 	DeadWindowRunCount int     `json:"dead_window_run_count"`
 	WindowCount        int     `json:"window_count"`
 	WorstWindowMbps    float64 `json:"worst_window_megabits_per_second"`
-	CorrectRunCount    int     `json:"correct_run_count"`
-	FailureRunCount    int     `json:"failure_run_count"`
-	InvalidRunCount    int     `json:"invalid_run_count"`
-	ValidRunCount      int     `json:"valid_run_count"`
-	IndividualCorrect  []bool  `json:"individual_run_correct"`
-	IndividualRunValid []bool  `json:"individual_run_valid"`
+	// Memory guardrails over every run, including failed ones.
+	MemoryP95MedianBytes      uint64 `json:"memory_heap_and_stack_p95_median_bytes"`
+	MemoryMaxBytes            uint64 `json:"memory_heap_and_stack_max_bytes"`
+	MemorySamplesAboveCeiling int    `json:"memory_samples_above_ceiling"`
+	CorrectRunCount           int    `json:"correct_run_count"`
+	FailureRunCount           int    `json:"failure_run_count"`
+	InvalidRunCount           int    `json:"invalid_run_count"`
+	ValidRunCount             int    `json:"valid_run_count"`
+	IndividualCorrect         []bool `json:"individual_run_correct"`
+	IndividualRunValid        []bool `json:"individual_run_valid"`
 }
 
 // A lookup function makes filter validation deterministic without mutating the
@@ -1331,7 +1381,15 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 	deadWindowRunCount := 0
 	windowCount := 0
 	worstWindowMbps := float64(0)
+	memoryP95s := make([]float64, 0, len(records))
+	memoryMax := uint64(0)
+	memoryAboveCeiling := 0
 	for recordIndex, record := range records {
+		if 0 < record.Memory.SampleCount {
+			memoryP95s = append(memoryP95s, float64(record.Memory.HeapAndStackInuseP95))
+		}
+		memoryMax = max(memoryMax, record.Memory.HeapAndStackInuseMax)
+		memoryAboveCeiling += record.Memory.SamplesAboveCeiling
 		deadWindowCount += record.Progress.DeadWindowCount
 		windowCount += record.Progress.WindowCount
 		if 0 < record.Progress.DeadWindowCount {
@@ -1367,34 +1425,37 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		durationWorst = slices.Max(durations)
 	}
 	return perfvarAggregateRecord{
-		SchemaVersion:      perfvarSchemaVersion,
-		ScheduleVersion:    first.ScheduleVersion,
-		RecordType:         "aggregate",
-		ScenarioHash:       first.ScenarioHash,
-		ProfileHash:        first.ProfileHash,
-		Scenario:           first.Scenario,
-		RunCount:           len(records),
-		GoodputMedianGbps:  perfvarPercentileFloat(goodputs, 50),
-		GoodputP95Gbps:     perfvarPercentileFloat(goodputs, 95),
-		GoodputWorstGbps:   goodputWorst,
-		DurationMedian:     perfvarPercentileDuration(durations, 50),
-		DurationP95:        perfvarPercentileDuration(durations, 95),
-		DurationWorst:      durationWorst,
-		SetupMedian:        perfvarPercentileDuration(setups, 50),
-		LatencyP95Median:   perfvarPercentileDuration(latencies, 50),
-		LoadedP95Median:    perfvarPercentileDuration(loadedLatencies, 50),
-		EfficiencyMedian:   perfvarPercentileFloat(efficiencies, 50),
-		WireEfficiency:     perfvarPercentileFloat(wireEfficiencies, 50),
-		DeadWindowCount:    deadWindowCount,
-		DeadWindowRunCount: deadWindowRunCount,
-		WindowCount:        windowCount,
-		WorstWindowMbps:    worstWindowMbps,
-		CorrectRunCount:    correctRunCount,
-		FailureRunCount:    failureRunCount,
-		InvalidRunCount:    invalidRunCount,
-		ValidRunCount:      len(records) - failureRunCount - invalidRunCount,
-		IndividualCorrect:  correct,
-		IndividualRunValid: valid,
+		SchemaVersion:             perfvarSchemaVersion,
+		ScheduleVersion:           first.ScheduleVersion,
+		RecordType:                "aggregate",
+		ScenarioHash:              first.ScenarioHash,
+		ProfileHash:               first.ProfileHash,
+		Scenario:                  first.Scenario,
+		RunCount:                  len(records),
+		GoodputMedianGbps:         perfvarPercentileFloat(goodputs, 50),
+		GoodputP95Gbps:            perfvarPercentileFloat(goodputs, 95),
+		GoodputWorstGbps:          goodputWorst,
+		DurationMedian:            perfvarPercentileDuration(durations, 50),
+		DurationP95:               perfvarPercentileDuration(durations, 95),
+		DurationWorst:             durationWorst,
+		SetupMedian:               perfvarPercentileDuration(setups, 50),
+		LatencyP95Median:          perfvarPercentileDuration(latencies, 50),
+		LoadedP95Median:           perfvarPercentileDuration(loadedLatencies, 50),
+		EfficiencyMedian:          perfvarPercentileFloat(efficiencies, 50),
+		WireEfficiency:            perfvarPercentileFloat(wireEfficiencies, 50),
+		DeadWindowCount:           deadWindowCount,
+		DeadWindowRunCount:        deadWindowRunCount,
+		WindowCount:               windowCount,
+		WorstWindowMbps:           worstWindowMbps,
+		MemoryP95MedianBytes:      uint64(perfvarPercentileFloat(memoryP95s, 50)),
+		MemoryMaxBytes:            memoryMax,
+		MemorySamplesAboveCeiling: memoryAboveCeiling,
+		CorrectRunCount:           correctRunCount,
+		FailureRunCount:           failureRunCount,
+		InvalidRunCount:           invalidRunCount,
+		ValidRunCount:             len(records) - failureRunCount - invalidRunCount,
+		IndividualCorrect:         correct,
+		IndividualRunValid:        valid,
 	}
 }
 

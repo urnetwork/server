@@ -351,6 +351,9 @@ type runRecord struct {
 	dead      int
 	firstDead time.Duration
 	worst     float64
+	memP95    float64
+	memMax    float64
+	memAbove  int
 	// counters keyed by name; provider and device are summed where the
 	// mechanism is symmetric and kept apart where the direction matters.
 	counters map[string]float64
@@ -464,6 +467,9 @@ func parseRecord(text string) (runRecord, bool) {
 		dead:      int(num(raw, "progress", "dead_window_count")),
 		firstDead: time.Duration(num(raw, "progress", "first_dead_window_offset_nanoseconds")),
 		worst:     num(raw, "progress", "worst_window_megabits_per_second"),
+		memP95:    num(raw, "memory", "heap_and_stack_inuse_p95_bytes"),
+		memMax:    num(raw, "memory", "heap_and_stack_inuse_max_bytes"),
+		memAbove:  int(num(raw, "memory", "samples_above_ceiling")),
 		counters:  map[string]float64{},
 	}
 	both := func(name string, path ...string) {
@@ -534,6 +540,9 @@ type cellSummary struct {
 	runs, correct, failed, invalid int
 	deadWindows, windows, deadRuns int
 	worst                          float64
+	memP95s                        []float64
+	memMax                         float64
+	memAbove                       int
 	goodputs                       []float64
 	stages                         map[string]int
 	counters                       map[string]float64
@@ -573,6 +582,11 @@ func summarize(records []runRecord) map[string]map[cellKey]*cellSummary {
 		if 0 < record.windows && record.worst < cell.worst {
 			cell.worst = record.worst
 		}
+		if 0 < record.memP95 {
+			cell.memP95s = append(cell.memP95s, record.memP95)
+		}
+		cell.memMax = math.Max(cell.memMax, record.memMax)
+		cell.memAbove += record.memAbove
 		for name, value := range record.counters {
 			cell.counters[name] += value
 		}
@@ -617,8 +631,8 @@ func renderReport(root string, records []runRecord) string {
 	fmt.Fprintf(&b, "%d run records, arms: %s (control: %s)\n\n", len(records), strings.Join(arms, ", "), control)
 	fmt.Fprintln(&b, "## Outcome per cell")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s |")
-	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |")
+	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
+	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for _, key := range cells {
 		for _, arm := range arms {
 			cell := summary[arm][key]
@@ -634,9 +648,10 @@ func renderReport(root string, records []runRecord) string {
 			if !math.IsInf(cell.worst, 1) {
 				worst = fmt.Sprintf("%.2f", cell.worst)
 			}
-			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d / %d | %d | %s | %.1f |\n",
+			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d / %d | %d | %s | %.1f | %.2f | %.2f | %d |\n",
 				key, arm, cell.runs, cell.correct, cell.failed, strings.Join(stages, " "),
-				cell.deadWindows, cell.windows, cell.deadRuns, worst, median(cell.goodputs))
+				cell.deadWindows, cell.windows, cell.deadRuns, worst, median(cell.goodputs),
+				median(cell.memP95s)/mib, cell.memMax/mib, cell.memAbove)
 		}
 	}
 	fmt.Fprintln(&b)
@@ -661,8 +676,8 @@ func renderReport(root string, records []runRecord) string {
 		fmt.Fprintln(&b)
 		fmt.Fprintf(&b, "## Attribution against %s (candidate minus control, per cell)\n", control)
 		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_timeouts_p2p |")
-		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
+		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
 		for _, key := range cells {
 			base := summary[control][key]
 			if base == nil {
@@ -679,7 +694,14 @@ func renderReport(root string, records []runRecord) string {
 				delta := func(name string) string {
 					return formatCounter(cell.counters[name] - base.counters[name])
 				}
-				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s |\n",
+				// MEMSTEADY guardrail: a candidate p95 above the control's, or any
+				// sample above 24 MiB where the control had none, is a REGRESSION
+				// for the item regardless of throughput.
+				memoryGate := "ok"
+				if median(cell.memP95s) > median(base.memP95s) || (0 < cell.memAbove && base.memAbove == 0) {
+					memoryGate = "REGRESSION"
+				}
+				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
 					key, arm,
 					cell.deadWindows-base.deadWindows,
 					cell.failed-base.failed,
@@ -691,6 +713,8 @@ func renderReport(root string, records []runRecord) string {
 					delta("timeout_resend_with_recent_progress"),
 					delta("ack_writes_p2p"),
 					delta("ack_timeouts_p2p"),
+					(median(cell.memP95s)-median(base.memP95s))/mib,
+					memoryGate,
 				)
 			}
 		}
@@ -712,6 +736,8 @@ func renderReport(root string, records []runRecord) string {
 	}
 	return b.String()
 }
+
+const mib = 1024 * 1024
 
 func formatCounter(value float64) string {
 	if value == math.Trunc(value) {

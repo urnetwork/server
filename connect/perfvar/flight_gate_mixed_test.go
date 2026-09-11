@@ -749,3 +749,38 @@ func TestPerfvarMixedRouteCorrectness(t *testing.T) {
 		}
 	})
 }
+
+// The memory observation reports the p95 and maximum of the heap+stack
+// samples and counts samples above the MEMSTEADY ceiling; the aggregate
+// carries the median p95, the maximum, and the total above the ceiling.
+func TestPerfvarMemoryObservationAndAggregate(t *testing.T) {
+	samples := make([]uint64, 0, 20)
+	for sample := uint64(1); sample <= 20; sample += 1 {
+		samples = append(samples, sample*1024*1024)
+	}
+	observation := perfvarMemoryObservationFor(samples, 7*1024*1024, 30*1024*1024)
+	if observation.SampleCount != 20 || observation.HeapAndStackInuseMax != 20*1024*1024 ||
+		observation.HeapAndStackInuseP95 != 19*1024*1024 || observation.HeapInuseMax != 7*1024*1024 ||
+		observation.SysMax != 30*1024*1024 || observation.CeilingBytes != perfvarMemoryCeilingBytes {
+		t.Fatalf("observation=%+v", observation)
+	}
+	// Samples 25 MiB and above exceed the 24 MiB ceiling; 24 MiB itself does not.
+	above := perfvarMemoryObservationFor([]uint64{24 * 1024 * 1024, 25 * 1024 * 1024, 26 * 1024 * 1024}, 0, 0)
+	if above.SamplesAboveCeiling != 2 {
+		t.Fatalf("above ceiling=%d", above.SamplesAboveCeiling)
+	}
+	if perfvarMemoryObservationFor(nil, 0, 0).SampleCount != 0 {
+		t.Fatal("empty samples produced an observation")
+	}
+	profile := initialNetworkProfiles(20260911)["clean-lan"]
+	scenario := perfvarScenario{Route: fullTunRouteP2pFastExchangeH1, Profile: profile, ProviderAccessProfile: profile}
+	records := []perfvarRunRecord{
+		{Scenario: scenario, Correct: true, Memory: perfvarMemoryObservation{SampleCount: 3, HeapAndStackInuseP95: 10, HeapAndStackInuseMax: 12}},
+		{Scenario: scenario, Correct: false, Memory: perfvarMemoryObservation{SampleCount: 3, HeapAndStackInuseP95: 30, HeapAndStackInuseMax: 40, SamplesAboveCeiling: 1}},
+		{Scenario: scenario, Correct: true, Memory: perfvarMemoryObservation{SampleCount: 3, HeapAndStackInuseP95: 20, HeapAndStackInuseMax: 21}},
+	}
+	aggregate := aggregatePerfvarRuns(records)
+	if aggregate.MemoryP95MedianBytes != 20 || aggregate.MemoryMaxBytes != 40 || aggregate.MemorySamplesAboveCeiling != 1 {
+		t.Fatalf("aggregate memory=%d/%d/%d", aggregate.MemoryP95MedianBytes, aggregate.MemoryMaxBytes, aggregate.MemorySamplesAboveCeiling)
+	}
+}
