@@ -835,7 +835,8 @@ func TestPatchValidationAndCanonicalIdentity(t *testing.T) {
 		t.Fatalf("valid patch rejected: %s", evalError)
 	}
 	digest := sha256.Sum256([]byte(valid))
-	if patch.Sha256 != hex.EncodeToString(digest[:]) || !reflect.DeepEqual(patch.Paths, []string{"connect/example.go"}) {
+	if string(patch.Bytes) != valid || patch.Sha256 != hex.EncodeToString(digest[:]) ||
+		!reflect.DeepEqual(patch.Paths, []string{"connect/example.go"}) {
 		t.Fatalf("unexpected canonical patch: %#v", patch)
 	}
 
@@ -852,6 +853,7 @@ func TestPatchValidationAndCanonicalIdentity(t *testing.T) {
 		{"rename", "diff --git a/connect/a.go b/connect/b.go\n", "invalid_patch_structure"},
 		{"crlf", strings.ReplaceAll(valid, "\n", "\r\n"), "noncanonical_patch"},
 		{"no-final-lf", strings.TrimSuffix(valid, "\n"), "noncanonical_patch"},
+		{"extra-final-lf", valid + "\n", "noncanonical_patch"},
 		{"forbidden-config", strings.ReplaceAll(valid, "connect/example.go", "connect/payment/card.go"), "path_not_allowed"},
 		{"hunk-count", strings.Replace(valid, "@@ -1 +1 @@", "@@ -1,2 +1 @@", 1), "invalid_patch_structure"},
 		{"trailing-metadata", valid + "new file mode 100644\n", "invalid_patch_structure"},

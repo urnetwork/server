@@ -26,6 +26,10 @@ Identical canonical patch bytes share one `(round_id, patch_sha256)` result and
 do not consume another noise draw. One score job has a three-hour hard execution
 limit; the adapter must therefore be asynchronous and tolerate an unbounded
 post-close grading window.
+One host supplies at most 56 worst-case three-hour slots during a seven-day
+admission window. A clean approximately 2.5-hour path yields roughly 67
+theoretical slots before overhead; this is planning capacity, not an admission
+cap, and excess accepted work remains queued through post-close grading.
 
 Before production epoch 1, the API can expose a staging era with sequential
 `staging_round` epochs beginning at zero. Its submissions are fee-free and use
@@ -64,6 +68,14 @@ not download repositories, accept player-built images, retry a transport-unknown
 submission under changed bytes, or submit a second identity to bypass a pending
 job. HTTP 429 is backpressure; typed retriable 5xx results retain the same
 identity. Typed submission failures are terminal.
+
+Patch serialization must preserve canonical bytes: UTF-8, LF-only line
+endings, exactly one final LF, no trailing blank line, and lexicographically
+sorted strict unified-diff sections. The server validates but does not repair
+the value. The adapter must read a patch as bytes/text directly into its JSON
+encoder; shell command substitution and trimming helpers are forbidden because
+they can remove the final LF. The byte-level rules and a safe `jq --rawfile`
+example are in `launch/ONBOARDING.md`.
 
 Results remain embargoed while admission is open and while any accepted job is
 queued or running. Polling reports terminal work as outcome-neutral `completed`

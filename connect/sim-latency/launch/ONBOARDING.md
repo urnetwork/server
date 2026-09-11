@@ -19,6 +19,12 @@ submission. There is no per-epoch submission-count cap. A duplicate canonical
 patch reuses the existing immutable job/cache identity and must not collect a
 second fee.
 
+One evaluator host can complete at most 56 jobs per seven-day admission window
+when every job reaches its three-hour bound. The measured clean path is
+expected near 2.5 hours (about 67 theoretical slots before operational
+overhead), but admission is intentionally unbounded: the FIFO continues in a
+private grading period after close until every accepted job is terminal.
+
 Before production epoch 1, `GET /competition/info` may expose the current
 `staging_round`. The staging era begins at epoch zero and can advance through
 multiple sequential epochs. A response carrying `staging: true` is fee-free
@@ -65,6 +71,48 @@ The authoritative schema is
 [`sn/api/competition.yml`](../../../../sn/api/competition.yml). The Go Apex
 adapter and conformance suite cover immutable job identity, FIFO polling,
 429/5xx retry, embargo, reveal, and leaderboard reconciliation.
+
+## Canonical patch bytes
+
+The `patch` JSON string is the exact submission and cache identity. The API
+validates it but never repairs or rewrites it. A canonical patch must:
+
+- be nonempty UTF-8 text with no NUL byte;
+- use LF (`0x0a`) line endings and contain no CR (`0x0d`) byte;
+- end in exactly one LF: its last byte is `0x0a`, and it does not end in
+  `0x0a 0x0a`;
+- contain no control character other than LF and tab;
+- use strict unified Git sections beginning `diff --git a/PATH b/PATH`, with
+  matching `--- a/PATH`, `+++ b/PATH`, and valid `@@` hunk counts;
+- sort multiple file sections lexicographically by path; and
+- modify only existing regular 100644 files on the published allowlist, with
+  no binary, create, delete, rename, copy, mode, submodule, or build-tag
+  operation.
+
+For this season the only allowed path is
+`connect/resident_contract_manager.go`. Generate and JSON-encode the patch
+without passing its contents through a shell variable:
+
+```sh
+git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ -- \
+  connect/resident_contract_manager.go > submission.patch
+
+test -s submission.patch
+test "$(tail -c 1 submission.patch | od -An -tu1 | tr -d ' ')" = 10
+test "$(tail -c 2 submission.patch | od -An -tu1 | tr -s ' ' | sed 's/^ //')" != "10 10"
+! LC_ALL=C grep -q $'\r' submission.patch
+
+jq -n --arg round_id "$ROUND_ID" --rawfile patch submission.patch \
+  '{round_id:$round_id,patch:$patch}' > submission.json
+curl --fail-with-body --header "Authorization: Bearer $SUBMITTER_TOKEN" \
+  --header 'Content-Type: application/json' --data-binary @submission.json \
+  https://api.bringyour.com/competition/score
+```
+
+Do not use `patch=$(git diff ...)`, `printf %s`, or a JSON helper that trims
+text: shell command substitution removes trailing newlines. A
+`noncanonical_patch` response is terminal for those bytes; correct the byte
+format and submit the intended canonical patch.
 
 ## What is scored
 

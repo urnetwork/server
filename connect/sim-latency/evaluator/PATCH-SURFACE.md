@@ -16,6 +16,21 @@ No wildcard or directory prefix is accepted. New files, deletions, renames,
 copies, mode changes, build constraints, binary patches, symlinks, and
 submodules are rejected structurally before a build begins.
 
+## Canonical wire format
+
+The API hashes the exact decoded JSON string and does not normalize it. Patch
+text must be valid nonempty UTF-8 without NUL, use LF-only line endings, and
+end with exactly one LF and no extra trailing blank line. Controls other than
+LF and tab are rejected. Each lexicographically path-sorted file section must
+use `diff --git a/PATH b/PATH`, matching `--- a/PATH` and `+++ b/PATH`
+headers, a regular `100644` index when present, and internally consistent
+unified-diff hunk counts.
+
+Generate the patch into a file and preserve its bytes with `jq --rawfile` and
+HTTP `--data-binary`. Do not capture patch text with shell command
+substitution: it strips the required final LF. The submitter-facing procedure
+and byte-level checks are in [`launch/ONBOARDING.md`](../launch/ONBOARDING.md).
+
 This file owns the resident-side active-contract lookup and its short-lived
 cache. It is on the measured Connect path and is the target exercised by the
 no-op, worse, and better reference patches. Its current direct imports are the

@@ -404,6 +404,11 @@ Operate with these expectations:
   the seven-day window as paid submissions require;
 - one job may legitimately remain active for about 2.5 hours and is terminated
   as failed at the three-hour submission-wide execution deadline;
+- one host therefore guarantees at most 56 three-hour evaluation slots in a
+  seven-day admission window. A clean approximately 2.5-hour path has a
+  theoretical ceiling of about 67 slots before build, transition, and recovery
+  overhead; admission remains unbounded, so excess work extends the private
+  grading interval after close rather than being dropped;
 - infrastructure failures retry under the same job/cache identity, up to
   three attempts within that same three-hour deadline;
 - structural/build/submission errors are terminal and do not get noise redraws;

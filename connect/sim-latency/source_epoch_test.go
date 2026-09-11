@@ -102,6 +102,28 @@ func sourceTestCommits(commit string) map[string]string {
 	return repositoryCommits
 }
 
+// The unprivileged scorer audits every authenticated read-only repository
+// mount. Each exact mount must be trusted without enabling wildcard trust.
+func TestEvaluatorBaseMarksEveryLockedRepositorySafe(t *testing.T) {
+	dockerfilePath := filepath.Join("evaluator", "container", "Dockerfile.base")
+	dockerfileBytes, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(dockerfileBytes)
+	if strings.Contains(dockerfile, "safe.directory '*'") ||
+		strings.Contains(dockerfile, "safe.directory \"*\"") ||
+		strings.Contains(dockerfile, "safe.directory *") {
+		t.Fatal("evaluator base enables wildcard Git repository trust")
+	}
+	for _, repository := range sourceRepositoryNames() {
+		configuration := "git config --system --add safe.directory /workspace/" + repository
+		if count := strings.Count(dockerfile, configuration); count != 1 {
+			t.Errorf("%s occurrence count = %d, want 1", configuration, count)
+		}
+	}
+}
+
 func validSourceSignificance() *sourceSignificance {
 	return &sourceSignificance{
 		ScoreSha256:                               strings.Repeat("b", 64),
