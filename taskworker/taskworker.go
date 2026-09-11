@@ -45,6 +45,7 @@ func InitTasks(ctx context.Context) {
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
+		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
@@ -394,6 +395,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.OnboardingEmailTrackerSync,
 			controller.OnboardingEmailTrackerSyncPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SubscriptionMetricsSync,
+			controller.SubscriptionMetricsSyncPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientLocations,

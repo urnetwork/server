@@ -420,7 +420,9 @@ func addContractPayoutTestClients(
 		for clientId, networkId := range clients {
 			server.RaisePgResult(tx.Exec(
 				ctx,
-				`INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`,
+				`INSERT INTO network_client (client_id, network_id, active)
+				 VALUES ($1, $2, true)
+				 ON CONFLICT (client_id) DO NOTHING`,
 				clientId,
 				networkId,
 			))

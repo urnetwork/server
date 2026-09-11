@@ -16,6 +16,7 @@ const (
 	proxyPoolByteLimit     = float64(8 << 30)
 	proxyPoolByteTolerance = float64(16 << 10)
 	proxyPoolFreshness     = 90 * time.Second
+	proxyPoolSourceSuffix  = "__source_timestamp"
 )
 
 // Signal proxy-pool implements SIGNALS.md §14.7a. It joins the newest
@@ -64,25 +65,49 @@ type proxyPoolMetrics struct {
 	large         float64
 	outstanding   float64
 	availableMask uint8
+	sourceMask    uint8
+	capacityAt    float64
+	retainedAt    float64
+	packetAt      float64
+	largeAt       float64
+	outstandingAt float64
 }
 
 func proxyPoolQuery(metricNames []string, environment string) string {
 	parts := make([]string, 0, len(metricNames))
 	for _, metricName := range metricNames {
+		rawSeries := fmt.Sprintf(
+			`%s{env=%s,job="proxy"}`,
+			metricName,
+			strconv.Quote(environment),
+		)
 		// monitor_metric keeps the seven independently filtered metric families
 		// distinct across PromQL's set union. Binary set matching otherwise
 		// ignores __name__ and collapses equal host/block/instance label sets.
 		series := fmt.Sprintf(
-			`label_replace(%s{env=%s,job="proxy"},"monitor_metric",%s,"job",".*")`,
-			metricName,
-			strconv.Quote(environment),
+			`label_replace(%s,"monitor_metric",%s,"job",".*")`,
+			rawSeries,
 			strconv.Quote(metricName),
 		)
+		fresh := fmt.Sprintf(`timestamp(%s) >= time() - %d`, rawSeries, int64(proxyPoolFreshness/time.Second))
 		parts = append(parts, fmt.Sprintf(
-			`(%s and on(monitor_metric,env,host,block,instance) (timestamp(%s) >= time() - %d))`,
+			`(%s and on(env,host,block,instance) (%s))`,
 			series,
-			series,
-			int64(proxyPoolFreshness/time.Second),
+			fresh,
+		))
+		// Instant-query result timestamps are evaluation time, not the selected
+		// sample's scrape time. Return timestamp(metric) as a companion value so
+		// the evaluator cannot compare independently visible remote-write
+		// generations during a partial Mimir ingestion window.
+		sourceTimestamp := fmt.Sprintf(
+			`label_replace(timestamp(%s),"monitor_metric",%s,"job",".*")`,
+			rawSeries,
+			strconv.Quote(metricName+proxyPoolSourceSuffix),
+		)
+		parts = append(parts, fmt.Sprintf(
+			`(%s and on(env,host,block,instance) (%s))`,
+			sourceTimestamp,
+			fresh,
 		))
 	}
 	return strings.Join(parts, " or ")
@@ -159,6 +184,26 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			process = &proxyPoolMetrics{host: host, block: block, instance: instance}
 			processes[key] = process
 		}
+		if strings.HasSuffix(metricName, proxyPoolSourceSuffix) {
+			switch strings.TrimSuffix(metricName, proxyPoolSourceSuffix) {
+			case "urnetwork_message_pool_capacity_bytes":
+				process.capacityAt = value
+				process.sourceMask |= proxyPoolMetricCapacity
+			case "urnetwork_message_pool_retained_bytes":
+				process.retainedAt = value
+				process.sourceMask |= proxyPoolMetricRetained
+			case "urnetwork_message_pool_packet_retained_bytes":
+				process.packetAt = value
+				process.sourceMask |= proxyPoolMetricPacketRetained
+			case "urnetwork_message_pool_large_object_retained_bytes":
+				process.largeAt = value
+				process.sourceMask |= proxyPoolMetricLargeRetained
+			case "urnetwork_message_pool_outstanding":
+				process.outstandingAt = value
+				process.sourceMask |= proxyPoolMetricOutstanding
+			}
+			continue
+		}
 		switch metricName {
 		case "process_resident_memory_bytes":
 			process.rss = value
@@ -194,6 +239,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	sort.Slice(current, func(i, j int) bool { return proxyPoolLabel(current[i]) < proxyPoolLabel(current[j]) })
 
 	missing := []string{}
+	incoherent := []string{}
 	oversized := []string{}
 	invalid := []string{}
 	for _, process := range current {
@@ -203,6 +249,18 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 				proxyPoolLabel(process),
 				strings.Join(proxyPoolMissingMetrics(process.availableMask), ","),
 			))
+			continue
+		}
+		if process.sourceMask&proxyPoolMetricAll != proxyPoolMetricAll {
+			incoherent = append(incoherent, fmt.Sprintf(
+				"%s[missing-source-times=%s]",
+				proxyPoolLabel(process),
+				strings.Join(proxyPoolMissingMetrics(process.sourceMask), ","),
+			))
+			continue
+		}
+		if !proxyPoolSameScrape(process) {
+			incoherent = append(incoherent, proxyPoolLabel(process)+"[source-time-skew]")
 			continue
 		}
 		row := proxyPoolObservation(process)
@@ -239,6 +297,27 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			playbook: "SIGNALS.md 14.7a",
 		})
 	}
+	if len(incoherent) > 0 {
+		findings = append(findings, finding{
+			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
+			class: "proxy-message-pool-snapshot-unobservable", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
+			symptom: fmt.Sprintf(
+				"%d of %d newest fresh proxy identities do not have a same-scrape message-pool gauge set",
+				len(incoherent), len(current),
+			),
+			mechanism: "Mimir can temporarily expose different latest scrape generations for metric families while a remote-write batch is only partly visible or rejected. An instant query reports evaluation time for every result, so equal labels and freshness alone cannot make independently selected values one library snapshot.",
+			baseline:  "Capacity, retained, packet-retained, large-object-retained, and outstanding values for each selected process carry one identical source scrape timestamp before any cross-field invariant is evaluated.",
+			observed: fmt.Sprintf(
+				"current_proxy_identities=%d incoherent_identities=%d incoherent=%s metrics_gateway=%s",
+				len(current), len(incoherent), strings.Join(incoherent, ";"), metricHost.name,
+			),
+			evidence: "The query returns timestamp(metric) as a companion value for every source gauge. Mixed source timestamps are affirmative backend visibility skew, not an impossible GetMessagePoolAggregateStats result.",
+			context:  "Do not diagnose an omitted pool class or accounting corruption from a mixed-scrape join. Preserve the raw series privately and correlate the exact window with scrape and Mimir remote-write admission; a later coherent sample is recovery of observability, not proof that rejected samples were stored.",
+			action:   "Restore complete Mimir scrape ingestion for the affected process identities, then wait for a coherent fresh gauge set. Inspect Connect accounting only if a same-source-timestamp set still violates the invariant.",
+			verify:   "Every newest identity has all five gauges at one source scrape timestamp for two consecutive scrapes; only a same-scrape retained/capacity or subtotal violation may emit proxy-message-pool-metrics-invalid.",
+			playbook: "SIGNALS.md 14.7a",
+		})
+	}
 	if len(oversized) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
@@ -268,7 +347,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			mechanism: "A single library snapshot defines capacity and retention. Total retained bytes must not exceed capacity, and packet plus large-object retained bytes must exactly reconstruct total retained bytes; violating either invariant makes deployment validation unsafe.",
 			baseline:  "capacity_bytes is positive, retained_bytes is no greater than capacity_bytes, and packet_retained_bytes + large_object_retained_bytes = retained_bytes.",
 			observed:  fmt.Sprintf("invalid_processes=%d invalid=%s metrics_gateway=%s", len(invalid), strings.Join(invalid, ";"), metricHost.name),
-			evidence:  "All compared values were fresh and carried the same host, block, and runtime-instance labels.",
+			evidence:  "All compared values were fresh and carried the same host, block, runtime-instance, and exact source scrape timestamp.",
 			context:   "Treat this as collector or label drift, not as proof that the pool physically owns impossible memory.",
 			action:    "Inspect the deployed root collector and its connect-library revision, preserve the raw series, and correct snapshot or label drift before using these gauges to approve a proxy rollout.",
 			verify:    "The invariant holds for every fresh proxy identity on two consecutive scrapes and the capacity limit remains at or below 8 GiB plus rounding.",
@@ -279,6 +358,13 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		return []finding{healthyFinding("runtime/proxy-message-pool-capacity", tierWarn, "proxy-message-pool-capacity", "proxy-fleet")}, nil
 	}
 	return findings, nil
+}
+
+func proxyPoolSameScrape(process *proxyPoolMetrics) bool {
+	return process.capacityAt == process.retainedAt &&
+		process.capacityAt == process.packetAt &&
+		process.capacityAt == process.largeAt &&
+		process.capacityAt == process.outstandingAt
 }
 
 func newestProxyPoolProcesses(processes map[string]*proxyPoolMetrics) ([]*proxyPoolMetrics, error) {

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -312,21 +313,42 @@ func TestParseAppleRootCertificates(t *testing.T) {
 }
 
 func TestConfiguredAppleRootCertificates(t *testing.T) {
-	certificates, err := parseAppleRootCertificates(server.Config.RequireBytes("apple_roots.pem"))
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, len(certificates), 3)
-
-	expectedCommonNames := map[string]bool{
-		"Apple Root CA":      true,
-		"Apple Root CA - G2": true,
-		"Apple Root CA - G3": true,
-	}
-	for _, certificate := range certificates {
-		commonName := certificate.Subject.CommonName
-		if !expectedCommonNames[commonName] {
-			t.Fatalf("unexpected configured Apple root %q", certificate.Subject.CommonName)
+	rootPem := server.Config.RequireBytes("apple_roots.pem")
+	var certificates []*x509.Certificate
+	if os.Getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") == "1" {
+		block, rest := pem.Decode(rootPem)
+		if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+			t.Fatal("portable Apple root fixture is not one complete PEM certificate")
 		}
-		delete(expectedCommonNames, commonName)
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if certificate.Subject.CommonName != "fixture.example" || len(certificate.Subject.Organization) != 0 {
+			t.Fatalf("portable Apple root fixture acquired a nonsynthetic identity: %s", certificate.Subject)
+		}
+		if _, err := parseAppleRootCertificates(rootPem); err == nil || !strings.Contains(err.Error(), "not issued by Apple Inc.") {
+			t.Fatalf("portable synthetic root passed the production Apple trust policy: %v", err)
+		}
+		certificates = []*x509.Certificate{certificate}
+	} else {
+		var err error
+		certificates, err = parseAppleRootCertificates(rootPem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(certificates) != len(appleRootUrls) {
+			t.Fatalf("configured Apple root count = %d, want %d", len(certificates), len(appleRootUrls))
+		}
+	}
+
+	seenCertificates := map[string]bool{}
+	for _, certificate := range certificates {
+		identity := string(certificate.Raw)
+		if seenCertificates[identity] {
+			t.Fatal("configured Apple roots contain a duplicate certificate")
+		}
+		seenCertificates[identity] = true
 		if !certificate.IsCA {
 			t.Fatalf("configured Apple root %q is not a CA", certificate.Subject.CommonName)
 		}
@@ -334,14 +356,10 @@ func TestConfiguredAppleRootCertificates(t *testing.T) {
 			t.Fatalf("configured Apple root %q is not self-signed: %v", certificate.Subject.CommonName, err)
 		}
 	}
-	if len(expectedCommonNames) != 0 {
-		t.Fatalf("configured Apple roots are missing common names: %v", expectedCommonNames)
-	}
-
 	tamperedRoot := *certificates[0]
 	tamperedRoot.Signature = append([]byte(nil), tamperedRoot.Signature...)
 	tamperedRoot.Signature[0] ^= 1
-	if err := validateAppleRootCertificate(&tamperedRoot); err == nil {
+	if err := verifyAppleRootSelfSignature(&tamperedRoot); err == nil {
 		t.Fatal("configured Apple root validation accepted a tampered self-signature")
 	}
 }

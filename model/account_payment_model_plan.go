@@ -1125,7 +1125,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 			self.ctx,
 			queuePoints,
 			scaledAccountPoints,
-			EnvSubsidyConfig().ReferralChildPayoutFraction,
+			self.subsidyConfig.ReferralChildPayoutFraction,
 			payment.NetworkId,
 			self.networkReferrals,
 			payment.PaymentPlanId,

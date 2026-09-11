@@ -51,7 +51,7 @@
       "type": "stat",
       "title": "current backup activity",
       "description": "One card per archive. BACKING UP identifies the archive currently running; the database and code jobs can overlap without hiding each other.",
-      "gridPos": {"h": 5, "w": 18, "x": 6, "y": 1},
+      "gridPos": {"h": 5, "w": 12, "x": 6, "y": 1},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {
         "defaults": {
@@ -69,6 +69,32 @@
           "refId": "A",
           "expr": "max by (archive) (urnetwork_backup_archive_in_progress{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})",
           "legendFormat": "{{archive}}",
+          "instant": true,
+          "range": false,
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Planetoid telemetry last seen (historical)",
+      "description": "Diagnostic only: last host/node sample found in the bounded 30-day history. This does not make current telemetry healthy; NO TELEMETRY IN 30D means even historical observation is absent, while the live status panels remain fail-closed when the exporter is offline.",
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "noValue": "NO TELEMETRY IN 30D",
+          "color": {"mode": "fixed", "fixedColor": "orange"}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(max_over_time(timestamp(node_uname_info{env=\"main\",host=\"planetoid\"})[30d:])) * 1000",
           "instant": true,
           "range": false,
           "datasource": {"type": "prometheus", "uid": "warp-mimir"}
@@ -130,46 +156,46 @@
     {
       "id": 9,
       "type": "stat",
-      "title": "latest PostgreSQL archive",
-      "description": "Newest complete PostgreSQL generation currently stored in planetoid/latest/pg.",
+      "title": "last-known PostgreSQL archive (historical)",
+      "description": "Newest complete PostgreSQL generation observed in bounded 30-day history. This value may be stale and is not current-storage proof; use the fail-closed freshness status above for health.",
       "gridPos": {"h": 6, "w": 6, "x": 0, "y": 11},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
-      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 10,
       "type": "stat",
-      "title": "latest Redis archive",
-      "description": "Newest complete Redis generation currently stored in planetoid/latest/redis.",
+      "title": "last-known Redis archive (historical)",
+      "description": "Newest complete Redis generation observed in bounded 30-day history. This value may be stale and is not current-storage proof; use the fail-closed freshness status above for health.",
       "gridPos": {"h": 6, "w": 6, "x": 6, "y": 11},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
-      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"redis\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"redis\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 11,
       "type": "stat",
-      "title": "latest urnetwork code archive",
-      "description": "Atomic tarball containing mirror clones of every repository returned by the urnetwork organization API.",
+      "title": "last-known urnetwork code archive (historical)",
+      "description": "Newest complete urnetwork organization tarball observed in bounded 30-day history. It may be stale and is not current-storage proof; use the fail-closed freshness status above for health.",
       "gridPos": {"h": 6, "w": 6, "x": 12, "y": 11},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
-      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urnetwork\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urnetwork\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 12,
       "type": "stat",
-      "title": "latest urfoundation code archive",
-      "description": "Atomic tarball containing mirror clones of every repository returned by the urfoundation organization API.",
+      "title": "last-known urfoundation code archive (historical)",
+      "description": "Newest complete urfoundation organization tarball observed in bounded 30-day history. It may be stale and is not current-storage proof; use the fail-closed freshness status above for health.",
       "gridPos": {"h": 6, "w": 6, "x": 18, "y": 11},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
-      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urfoundation\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urfoundation\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 13,

@@ -113,15 +113,15 @@ func TestStatsProviderPayoutsUseOwnedSweepWindow(t *testing.T) {
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		originNetworkId, providerNetworkId := server.NewId(), server.NewId()
+		originNetworkId, providerNetworkId, otherNetworkId := server.NewId(), server.NewId(), server.NewId()
 		clientSession := providerPayoutTestSession(ctx, providerNetworkId)
-		providerId := server.NewId()
+		providerId, otherProviderId := server.NewId(), server.NewId()
 		statsInsertNetworkClient(ctx, providerNetworkId, providerId)
 		statsInsertProvideKey(ctx, providerId, ProvideModePublic)
 		now := server.NowUtc()
 		sweepTime := now.Add(-time.Hour)
 		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, providerId, sweepTime, nil)
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, server.NewId(), providerId, sweepTime, nil)
+		addStProviderUsageTestSweep(t, ctx, originNetworkId, otherNetworkId, otherProviderId, sweepTime, nil)
 		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, providerId, now.Add(-48*time.Hour), nil)
 		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, providerId, now.Add(48*time.Hour), nil)
 		assertProviderPayoutStats(t, clientSession, map[server.Id]map[string]NanoCents{providerId: {dayKey(sweepTime): 121}}, map[string]NanoCents{dayKey(sweepTime): 121})

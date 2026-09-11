@@ -666,6 +666,8 @@ func TestCompanionStreamCloseLifecycle(t *testing.T) {
 		sourceId := server.NewId()
 		destinationId := server.NewId()
 		intermediaryId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), sourceId, "stream-source", "test")
+		Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "stream-destination", "test")
 
 		c := NewStreamHopAccumulator(
 			func(hop StreamHop) {},

@@ -1354,11 +1354,12 @@ type TaskWorker struct {
 	runCancel context.CancelFunc
 	// canceled by `Drain` after DrainFinishTimeout to abort the in-flight
 	// task function contexts (the eval/finalize machinery stays on ctx)
-	drainCtx    context.Context
-	drainCancel context.CancelFunc
-	runWg       sync.WaitGroup
-	targets     map[string]Target
-	settings    *TaskWorkerSettings
+	drainCtx          context.Context
+	drainCancel       context.CancelFunc
+	runWg             sync.WaitGroup
+	targets           map[string]Target
+	targetMetricNames map[string]string
+	settings          *TaskWorkerSettings
 
 	// These production-boundary functions are fields so tests can trigger a
 	// heartbeat and a pooled refresh panic with explicit barriers. Every worker
@@ -1390,6 +1391,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		drainCtx:                   drainCtx,
 		drainCancel:                drainCancel,
 		targets:                    map[string]Target{},
+		targetMetricNames:          map[string]string{},
 		settings:                   settings,
 		heartbeatAfter:             time.After,
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
@@ -1418,6 +1420,7 @@ func (self *TaskWorker) Run() {
 
 		finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := self.EvalTasks(self.settings.BatchSize)
 		if err != nil {
+			taskPollsTotal.WithLabelValues("error").Inc()
 			glog.Infof("[taskworker]error running tasks: %s\n", err)
 			select {
 			case <-self.runCtx.Done():
@@ -1425,6 +1428,7 @@ func (self *TaskWorker) Run() {
 			case <-time.After(self.settings.RetryTimeoutAfterError):
 			}
 		} else if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 {
+			taskPollsTotal.WithLabelValues("empty").Inc()
 			emptyCount += 1
 			if emptyCount%30 == 0 {
 				glog.Infof("[taskworker]take(0)\n")
@@ -1435,6 +1439,7 @@ func (self *TaskWorker) Run() {
 			case <-time.After(self.settings.PollTimeout):
 			}
 		} else {
+			taskPollsTotal.WithLabelValues("claimed").Inc()
 			emptyCount = 0
 		}
 	}
@@ -1569,11 +1574,23 @@ func (self *TaskWorker) HasTarget(functionName string) bool {
 
 func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 	for _, taskTarget := range taskTargets {
+		metricName := taskMetricName(taskTarget.TargetFunctionName())
 		self.targets[taskTarget.TargetFunctionName()] = taskTarget
+		self.targetMetricNames[taskTarget.TargetFunctionName()] = metricName
 		for _, alternateFunctionNames := range taskTarget.AlternateFunctionNames() {
 			self.targets[alternateFunctionNames] = taskTarget
+			self.targetMetricNames[alternateFunctionNames] = metricName
 		}
 	}
+}
+
+// metricName resolves only registered targets and aliases; an arbitrary stale
+// database function never becomes a Prometheus label.
+func (self *TaskWorker) metricName(functionName string) string {
+	if metricName, ok := self.targetMetricNames[functionName]; ok {
+		return metricName
+	}
+	return "unregistered"
 }
 
 // runs the post function for a finished taskId
@@ -1953,6 +1970,10 @@ func (self *TaskWorker) EvalTasks(n int) (
 			wg.Add(1)
 			go server.HandleError(func() {
 				defer wg.Done()
+				metricName := self.metricName(task.FunctionName)
+				attribution := taskMetricAttribution(task)
+				taskExecutionInflight.WithLabelValues(metricName, attribution).Inc()
+				defer taskExecutionInflight.WithLabelValues(metricName, attribution).Dec()
 
 				r := &result{
 					task: task,
@@ -2015,6 +2036,14 @@ func (self *TaskWorker) EvalTasks(n int) (
 				}
 
 				r.runEndTime = server.NowUtc()
+				recordTaskExecution(
+					metricName,
+					attribution,
+					len(task.ArgsJson),
+					len(r.resultJson),
+					r.runEndTime.Sub(r.runStartTime),
+					r.err,
+				)
 				select {
 				case results <- r:
 				case <-taskCtx.Done():
@@ -2276,6 +2305,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 	for taskId, _ := range postRescheduledTasks {
 		postRescheduledTaskIds = append(postRescheduledTaskIds, taskId)
 	}
+	taskFinalizationsTotal.WithLabelValues("succeeded").Add(float64(len(finishedTaskIds)))
+	taskFinalizationsTotal.WithLabelValues("rescheduled").Add(float64(len(rescheduledTaskIds)))
+	taskFinalizationsTotal.WithLabelValues("post_rescheduled").Add(float64(len(postRescheduledTaskIds)))
 
 	return
 }

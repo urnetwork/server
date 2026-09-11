@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -828,11 +829,51 @@ func matchChildLocation(
 	return matchLocationName(name, candidateIds, candidateNames)
 }
 
-// GetProviderEgressLocationDue returns the client ids of providers whose
-// egress location is due for a probe: no fresh success (newest probe older than
-// minObservedAt, or never probed) *and* no recent attempt (last attempt older
-// than minAttemptAt, or never attempted). Oldest first, so the
-// longest-unprobed are handed out first, capped at limit.
+const providerEgressStaleHealthDueQuery = `
+	SELECT
+		provider_egress_health.client_id,
+		provider_egress_health.measured_at
+	FROM provider_egress_health
+	INNER JOIN provider_egress_location ON
+		provider_egress_location.client_id = provider_egress_health.client_id
+	INNER JOIN network_client_location_reliability ON
+		network_client_location_reliability.client_id = provider_egress_health.client_id
+	INNER JOIN network_client ON
+		network_client.client_id = provider_egress_health.client_id
+
+	WHERE
+		provider_egress_health.measured_at < $2 AND
+		network_client.active = true AND
+		network_client.source_client_id IS NULL AND
+		network_client_location_reliability.connected = true AND
+		network_client_location_reliability.valid = true AND
+		EXISTS (
+			SELECT 1 FROM provide_key
+			WHERE
+				provide_key.client_id = provider_egress_health.client_id AND
+				provide_key.provide_mode = $1
+		) AND
+		NOT EXISTS (
+			SELECT 1 FROM provider_egress_probe_attempt
+			WHERE
+				provider_egress_probe_attempt.client_id = provider_egress_health.client_id AND
+				$3 <= provider_egress_probe_attempt.attempt_at
+		) AND
+		(
+			$5 <= 1 OR
+			((hashtext(provider_egress_health.client_id::text) % $5) + $5) % $5 = $6
+		)
+
+	ORDER BY
+		provider_egress_health.measured_at ASC,
+		provider_egress_health.client_id ASC
+	LIMIT $4
+`
+
+// GetProviderEgressLocationDue returns the client ids of providers whose full
+// egress probe is due: their location or health evidence is stale, their
+// location has no corresponding health evidence, or they have no location
+// evidence, and they have no attempt newer than minAttemptAt.
 //
 // This is the durable replacement for the prober's in-memory ttl cache: the
 // schedule lives in the database, so a prober restart resumes where it left
@@ -840,12 +881,10 @@ func matchChildLocation(
 //
 // Three things about the shape of this query matter.
 //
-// First, candidates are sourced from the live provider population: active
+// First, every lane is joined back to the live provider population: active
 // top-level clients with a connected + valid location-reliability row. The
-// egress row is LEFT JOINed on. The dominant case by far is a provider that has
-// *never* been probed and therefore has no provider_egress_location row at all;
-// selecting from provider_egress_location would return exactly the providers
-// that least need probing and none of the ones that most do.
+// unlocated lane is sourced from that population directly because its dominant
+// case has no provider_egress_location row at all.
 //
 // Second, only providers holding a Public provide key are returned. Probing
 // tunnels through the provider itself, which means opening a contract from
@@ -866,43 +905,42 @@ func matchChildLocation(
 // probe worked; moving the schedule server-side dropped that protection, and
 // provider_egress_probe_attempt is what restores it.
 //
-// Both cutoffs are computed by the caller in Go and bound as parameters:
-// observed_at and attempt_at are naive `timestamp` columns holding utc, and
-// comparing them against sql now() would cast through the session timezone and
-// silently skip a window.
+// The observed-at and attempt-at cutoffs are computed by the caller in Go and
+// bound as parameters. The health cutoff is likewise computed in Go from its
+// model lifetime. All three columns are naive `timestamp` values holding UTC;
+// comparing them to SQL now() would cast through the session timezone.
 //
-// # Two passes, not one
+// # Bounded indexed heads, not one outer-join sort
 //
-// Expressed as a single statement this is a scan of
-// network_client_location_reliability with two LEFT JOINs, sorted on
-// observed_at from an outer-joined table. That sort cannot use an index: the
-// column being ordered on does not exist for most of the rows being ordered.
-// At beta's 40 providers that is free. At 100k it is a full scan plus an
-// unindexable sort, on every poll.
+// A single statement over the complete live-provider population cannot use the
+// evidence timestamps' ordered indexes for a global deadline sort. Instead,
+// the location and health tables supply bounded oldest-evidence heads through
+// (timestamp, client_id). A third location-indexed head finds providers whose
+// accepted location has no health row, which is possible because health
+// reporting is non-fatal to location submission. The health head requires an
+// extant location, so retained health history after location cleanup remains
+// exclusively in the unlocated lane. Go deduplicates those heads and merges
+// them by absolute hard expiry: observed_at +
+// ProviderEgressLocationMaxAge, measured_at + ProviderEgressHealthMaxAge, or
+// observed_at + ProviderEgressHealthMaxAge for missing health. Equal deadlines
+// use client_id, so every limit is deterministic. Taking the requested limit
+// from each head is sufficient even when they overlap: a head that reaches the
+// limit alone supplies that many distinct rows, while a shorter head has
+// exposed all candidates in its lane.
 //
-// The ordering makes the split possible. `NULLS FIRST` means every never-probed
-// provider sorts ahead of every probed one, so the result is always the
-// concatenation of two independently ordered groups:
+// Urgent evidence refreshes are admitted before the unlocated lane. The latter
+// remains a separately bounded anti-join ordered by client_id and fills only
+// unused capacity. Its six-hour attempt floor still prevents an immediate
+// failed retry from occupying every poll. This ordering deliberately does not
+// choose the unresolved policy between first attempts and retries inside the
+// unlocated lane; retaining their latest attempt rows preserves the evidence a
+// later explicit policy can use.
 //
-//  1. never probed -- no provider_egress_location row at all. This is the
-//     dominant group (it is why the ordering is NULLS FIRST), and within it
-//     every observed_at is equally absent, so the order is client_id alone. As
-//     an anti-join with no outer-joined column in the ORDER BY it is an ordered
-//     index scan over (valid, connected, client_id) with a LIMIT: no sort, and
-//     it stops as soon as the batch is full.
-//  2. stale but probed -- has a row, older than minObservedAt. Only reached
-//     when pass 1 came up short of the limit. Driven from
-//     provider_egress_location itself, where observed_at is a real, indexable
-//     column: an ordered range scan over (observed_at, client_id).
+// Every head repeats the same active, top-level, connected, valid, Public-key,
+// recent-attempt, and normalized-shard predicates. Separate statements can see
+// a provider cross categories between snapshots, so the Go merge also
+// deduplicates unlocated rows before returning them.
 //
-// Both passes carry the same eligibility predicates, so the concatenation is
-// row-for-row what the single statement returned, in the same order, under the
-// same limit. `attempt_at IS NULL OR attempt_at < $n` becomes the equivalent
-// `NOT EXISTS (... AND $n <= attempt_at)` -- equivalent because client_id is the
-// primary key of provider_egress_probe_attempt, so there is at most one row to
-// quantify over. The same holds for `observed_at IS NULL` on
-// provider_egress_location, whose client_id is likewise a primary key and whose
-// observed_at is NOT NULL: the only way that test is true is that no row exists.
 // GetProviderEgressLocationDue is the unsharded queue: one prober takes the
 // whole fleet. Equivalent to GetProviderEgressLocationDueSharded with a single
 // shard, and kept so existing callers are unaffected.
@@ -941,14 +979,203 @@ func GetProviderEgressLocationDueSharded(
 ) []server.Id {
 	clientIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
-		// pass 1: never probed. Ordered by client_id alone -- every row in this
-		// group has no observed_at, so the ORDER BY's leading key is constant
-		// across it and the tie-break is the whole ordering.
-		//
-		// `limit` is passed through as given rather than clamped, so a
-		// nonsensical limit fails exactly as the single-statement version did
-		// (LIMIT 0 returns nothing; a negative limit is an error).
+		type dueCandidate struct {
+			clientId server.Id
+			deadline time.Time
+		}
+
+		// The urgent heads may overlap completely. A limit-sized head from each
+		// preserves a bounded top-limit union after deduplication.
+		headLimit := limit
+		urgentByClient := map[server.Id]dueCandidate{}
+		addUrgent := func(candidate dueCandidate) {
+			if previous, ok := urgentByClient[candidate.clientId]; !ok || candidate.deadline.Before(previous.deadline) {
+				urgentByClient[candidate.clientId] = candidate
+			}
+		}
+
+		// Stale location head. The composite observed_at/client_id index owns
+		// both the cutoff and the complete stable ordering.
 		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				provider_egress_location.client_id,
+				provider_egress_location.observed_at
+			FROM provider_egress_location
+			INNER JOIN network_client_location_reliability ON
+				network_client_location_reliability.client_id = provider_egress_location.client_id
+			INNER JOIN network_client ON
+				network_client.client_id = provider_egress_location.client_id
+
+			WHERE
+				provider_egress_location.observed_at < $2 AND
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
+				network_client_location_reliability.connected = true AND
+				network_client_location_reliability.valid = true AND
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE
+						provide_key.client_id = provider_egress_location.client_id AND
+						provide_key.provide_mode = $1
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_probe_attempt
+					WHERE
+						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
+						$3 <= provider_egress_probe_attempt.attempt_at
+				) AND
+				(
+					$5 <= 1 OR
+					((hashtext(provider_egress_location.client_id::text) % $5) + $5) % $5 = $6
+				)
+
+			ORDER BY
+				provider_egress_location.observed_at ASC,
+				provider_egress_location.client_id ASC
+			LIMIT $4
+			`,
+			ProvideModePublic,
+			minObservedAt.UTC(),
+			minAttemptAt.UTC(),
+			headLimit,
+			shardCount,
+			shardIndex,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var observedAt time.Time
+				server.Raise(result.Scan(&clientId, &observedAt))
+				addUrgent(dueCandidate{
+					clientId: clientId,
+					deadline: observedAt.Add(ProviderEgressLocationMaxAge),
+				})
+			}
+		})
+
+		// Stale health head. It requires a current location so a retained health
+		// row whose location was removed remains exclusively in the no-location
+		// lane. Located providers may overlap the stale-location head; a provider
+		// with both deadlines keeps the earlier one.
+		minMeasuredAt := server.NowUtc().Add(-ProviderEgressHealthMaxAge / 2)
+		result, err = conn.Query(
+			ctx,
+			providerEgressStaleHealthDueQuery,
+			ProvideModePublic,
+			minMeasuredAt.UTC(),
+			minAttemptAt.UTC(),
+			headLimit,
+			shardCount,
+			shardIndex,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var measuredAt time.Time
+				server.Raise(result.Scan(&clientId, &measuredAt))
+				addUrgent(dueCandidate{
+					clientId: clientId,
+					deadline: measuredAt.Add(ProviderEgressHealthMaxAge),
+				})
+			}
+		})
+
+		// Missing-health head. Location submission remains valid when the
+		// prober's independent health check is skipped or its non-fatal report
+		// fails, while provider publication fails closed without a health row.
+		// Drive this anti-join from the existing ordered location index and use
+		// the location observation as the start of the existing health lifetime.
+		// The common attempt predicate prevents an immediate retry after the
+		// normal path reports its just-completed full-probe attempt.
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT
+				provider_egress_location.client_id,
+				provider_egress_location.observed_at
+			FROM provider_egress_location
+			INNER JOIN network_client_location_reliability ON
+				network_client_location_reliability.client_id = provider_egress_location.client_id
+			INNER JOIN network_client ON
+				network_client.client_id = provider_egress_location.client_id
+
+			WHERE
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
+				network_client_location_reliability.connected = true AND
+				network_client_location_reliability.valid = true AND
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE
+						provide_key.client_id = provider_egress_location.client_id AND
+						provide_key.provide_mode = $1
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_health
+					WHERE
+						provider_egress_health.client_id = provider_egress_location.client_id
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_probe_attempt
+					WHERE
+						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
+						$2 <= provider_egress_probe_attempt.attempt_at
+				) AND
+				(
+					$4 <= 1 OR
+					((hashtext(provider_egress_location.client_id::text) % $4) + $4) % $4 = $5
+				)
+
+			ORDER BY
+				provider_egress_location.observed_at ASC,
+				provider_egress_location.client_id ASC
+			LIMIT $3
+			`,
+			ProvideModePublic,
+			minAttemptAt.UTC(),
+			headLimit,
+			shardCount,
+			shardIndex,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var observedAt time.Time
+				server.Raise(result.Scan(&clientId, &observedAt))
+				addUrgent(dueCandidate{
+					clientId: clientId,
+					deadline: observedAt.Add(ProviderEgressHealthMaxAge),
+				})
+			}
+		})
+
+		urgent := make([]dueCandidate, 0, len(urgentByClient))
+		for _, candidate := range urgentByClient {
+			urgent = append(urgent, candidate)
+		}
+		sort.Slice(urgent, func(i, j int) bool {
+			if urgent[i].deadline.Equal(urgent[j].deadline) {
+				return urgent[i].clientId.Less(urgent[j].clientId)
+			}
+			return urgent[i].deadline.Before(urgent[j].deadline)
+		})
+		for _, candidate := range urgent {
+			if len(clientIds) == limit {
+				break
+			}
+			clientIds = append(clientIds, candidate.clientId)
+		}
+
+		if len(clientIds) >= limit {
+			return
+		}
+
+		// Unlocated providers fill only capacity left by evidenced deadlines.
+		// Querying up to limit rather than just the remainder lets the Go-side
+		// dedupe survive a category transition between statement snapshots.
+		result, err = conn.Query(
 			ctx,
 			`
 			SELECT
@@ -979,12 +1206,8 @@ func GetProviderEgressLocationDueSharded(
 						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
 						$2 <= provider_egress_probe_attempt.attempt_at
 				) AND
-				-- shard partition. hashtext returns a SIGNED int32 and postgres
-				-- '%' keeps the sign of the dividend, so a bare
-				-- hashtext(...) % n = i never matches the negative half of the
-				-- hash space and roughly half the fleet would never be probed.
-				-- The extra (+ n) % n normalises into [0, n).
-				-- $4 <= 1 short-circuits to the unsharded behaviour.
+				-- hashtext is signed and '%' preserves the sign, so normalize
+				-- the modulo into [0, shardCount).
 				(
 					$4 <= 1 OR
 					((hashtext(network_client_location_reliability.client_id::text) % $4) + $4) % $4 = $5
@@ -1000,82 +1223,6 @@ func GetProviderEgressLocationDueSharded(
 			shardIndex,
 		)
 		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
-			}
-		})
-
-		remaining := limit - len(clientIds)
-		if remaining <= 0 {
-			// the batch is full from never-probed providers alone, which is the
-			// steady state until the population has been swept once. The
-			// single-statement version would have returned exactly these rows
-			// too: they all sort ahead of anything with an observed_at.
-			return
-		}
-
-		// pass 2: stale but probed. Driven from provider_egress_location, so
-		// observed_at is a real column of the driving table and the ORDER BY is
-		// an ordered index scan rather than a sort.
-		result, err = conn.Query(
-			ctx,
-			`
-			SELECT
-				provider_egress_location.client_id
-			FROM provider_egress_location
-
-			INNER JOIN network_client_location_reliability ON
-				network_client_location_reliability.client_id = provider_egress_location.client_id
-			INNER JOIN network_client ON
-				network_client.client_id = provider_egress_location.client_id
-
-			WHERE
-				provider_egress_location.observed_at < $2 AND
-				network_client.active = true AND
-				network_client.source_client_id IS NULL AND
-				network_client_location_reliability.connected = true AND
-				network_client_location_reliability.valid = true AND
-				EXISTS (
-					SELECT 1 FROM provide_key
-					WHERE
-						provide_key.client_id = provider_egress_location.client_id AND
-						provide_key.provide_mode = $1
-				) AND
-				NOT EXISTS (
-					SELECT 1 FROM provider_egress_probe_attempt
-					WHERE
-						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
-						$3 <= provider_egress_probe_attempt.attempt_at
-				) AND
-				-- the same shard partition as pass 1; see the note there for why
-				-- the modulo has to be normalised. $5 <= 1 is the unsharded case.
-				(
-					$5 <= 1 OR
-					((hashtext(provider_egress_location.client_id::text) % $5) + $5) % $5 = $6
-				)
-
-			-- oldest probe first, client_id breaking the tie, so batch
-			-- composition is deterministic instead of plan-dependent
-			ORDER BY
-				provider_egress_location.observed_at ASC,
-				provider_egress_location.client_id ASC
-			LIMIT $4
-			`,
-			ProvideModePublic,
-			minObservedAt.UTC(),
-			minAttemptAt.UTC(),
-			remaining,
-			shardCount,
-			shardIndex,
-		)
-		server.WithPgResult(result, err, func() {
-			// the two passes are separate statements and so separate snapshots.
-			// A provider that gains its first provider_egress_location row
-			// between them would be never-probed to pass 1 and stale to pass 2;
-			// the single-statement version could not do that, so screen it out
-			// rather than hand the prober the same client twice.
 			seen := map[server.Id]bool{}
 			for _, clientId := range clientIds {
 				seen[clientId] = true
@@ -1087,113 +1234,9 @@ func GetProviderEgressLocationDueSharded(
 					continue
 				}
 				clientIds = append(clientIds, clientId)
-			}
-		})
-
-		remaining = limit - len(clientIds)
-		if remaining <= 0 {
-			return
-		}
-
-		// pass 3: located and fresh, but its egress HEALTH has gone stale.
-		//
-		// Passes 1 and 2 both key off provider_egress_location, so a provider
-		// with a fresh location was never re-offered no matter how old its
-		// health tally was. That is the schedule that published blackholes:
-		// health decides whether a provider is advertised
-		// (providerCountFilter.passesHealth) but location decided when it was
-		// re-measured, and location outlives health by 7 days to 1. A provider
-		// probed once, then quietly stopping forwarding, kept its passing tally
-		// and its place in the list until its LOCATION aged out days later.
-		//
-		// Now that GetAllProviderEgressHealthCounts drops stale rows, this pass
-		// is what keeps the list populated rather than merely correct: without
-		// it, every gated provider would age out of the map after
-		// ProviderEgressHealthMaxAge and never be re-measured, and the list
-		// would drain to nothing.
-		//
-		// Scoped to providers that HAVE a health row which has aged out, not to
-		// every provider lacking fresh health. The difference matters: "no fresh
-		// health" is also true of a provider that has never been measured at
-		// all, and offering those here would re-probe a provider whose location
-		// was taken minutes ago purely because no health row accompanies it --
-		// which is what pass 1 and the attempt backoff already govern. It also
-		// silently broke TestGetProviderEgressLocationDue, whose fixtures write
-		// locations without health rows: every one of them became due.
-		//
-		// A provider with a location but no health row is therefore left to
-		// passes 1 and 2. It is excluded from the list meanwhile (passesHealth
-		// fails closed on a missing row) and is re-offered when its location
-		// goes stale, so it is not stranded -- only deferred.
-		//
-		// Ordered by client_id: the 6h attempt backoff, not the ordering, is
-		// what rotates the sweep across the population.
-		minMeasuredAt := server.NowUtc().Add(-ProviderEgressHealthMaxAge / 2)
-
-		result, err = conn.Query(
-			ctx,
-			`
-			SELECT
-				network_client_location_reliability.client_id
-			FROM network_client_location_reliability
-			INNER JOIN network_client ON
-				network_client.client_id = network_client_location_reliability.client_id
-
-			WHERE
-				network_client.active = true AND
-				network_client.source_client_id IS NULL AND
-				network_client_location_reliability.connected = true AND
-				network_client_location_reliability.valid = true AND
-				EXISTS (
-					SELECT 1 FROM provide_key
-					WHERE
-						provide_key.client_id = network_client_location_reliability.client_id AND
-						provide_key.provide_mode = $1
-				) AND
-				EXISTS (
-					SELECT 1 FROM provider_egress_health
-					WHERE
-						provider_egress_health.client_id = network_client_location_reliability.client_id AND
-						provider_egress_health.measured_at < $2
-				) AND
-				NOT EXISTS (
-					SELECT 1 FROM provider_egress_probe_attempt
-					WHERE
-						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
-						$3 <= provider_egress_probe_attempt.attempt_at
-				) AND
-				-- the same shard partition as passes 1 and 2; see pass 1 for
-				-- why the modulo has to be normalised.
-				(
-					$5 <= 1 OR
-					((hashtext(network_client_location_reliability.client_id::text) % $5) + $5) % $5 = $6
-				)
-
-			ORDER BY network_client_location_reliability.client_id ASC
-			LIMIT $4
-			`,
-			ProvideModePublic,
-			minMeasuredAt.UTC(),
-			minAttemptAt.UTC(),
-			remaining,
-			shardCount,
-			shardIndex,
-		)
-		server.WithPgResult(result, err, func() {
-			// Same separate-snapshot hazard as pass 2, and additionally this
-			// pass overlaps pass 1 by construction: a never-probed provider has
-			// no health row either, so it satisfies this predicate too.
-			seen := map[server.Id]bool{}
-			for _, clientId := range clientIds {
-				seen[clientId] = true
-			}
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				if seen[clientId] {
-					continue
+				if len(clientIds) == limit {
+					break
 				}
-				clientIds = append(clientIds, clientId)
 			}
 		})
 	})
@@ -1213,15 +1256,45 @@ func RemoveExpiredProviderEgressLocations(ctx context.Context, minObservedAt tim
 }
 
 // RemoveExpiredProviderEgressProbeAttempts drops attempts older than
-// minAttemptAt. An attempt only carries information for as long as it defers
-// the provider (ProviderEgressProbeAttemptBackoff); past that the row is just
-// storage held for a client id that may no longer exist.
+// minAttemptAt once their provider is located or is no longer an active,
+// top-level, connected, valid provider with a Public key. The latest attempt
+// for an otherwise eligible no-location provider is durable scheduling
+// evidence: deleting it would collapse first attempts and old retries into the
+// same state and prevent any explicit least-recent-service policy.
 func RemoveExpiredProviderEgressProbeAttempts(ctx context.Context, minAttemptAt time.Time) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
-			`DELETE FROM provider_egress_probe_attempt WHERE attempt_at < $1`,
+			`
+			DELETE FROM provider_egress_probe_attempt AS attempt
+			WHERE
+				attempt.attempt_at < $1 AND
+				(
+					EXISTS (
+						SELECT 1 FROM provider_egress_location
+						WHERE provider_egress_location.client_id = attempt.client_id
+					) OR
+					NOT EXISTS (
+						SELECT 1
+						FROM network_client_location_reliability
+						INNER JOIN network_client USING (client_id)
+						WHERE
+							network_client_location_reliability.client_id = attempt.client_id AND
+							network_client.active = true AND
+							network_client.source_client_id IS NULL AND
+							network_client_location_reliability.connected = true AND
+							network_client_location_reliability.valid = true AND
+							EXISTS (
+								SELECT 1 FROM provide_key
+								WHERE
+									provide_key.client_id = attempt.client_id AND
+									provide_key.provide_mode = $2
+							)
+					)
+				)
+			`,
 			minAttemptAt.UTC(),
+			ProvideModePublic,
 		))
 	})
 }

@@ -77,6 +77,13 @@ func migrationIdentity(migration any) (string, error) {
 		writeMigrationIdentityPart(digest, "online-sql")
 		writeMigrationIdentityPart(digest, value.sql)
 		writeMigrationIdentityPart(digest, value.auditSql)
+		// Preserve the identities of every already-published online migration,
+		// which has no recovery step. Restartable migrations bind their extra
+		// production statement without changing that historical prefix.
+		if value.recoverySql != "" {
+			writeMigrationIdentityPart(digest, "recovery-sql")
+			writeMigrationIdentityPart(digest, value.recoverySql)
+		}
 	case *CodeMigration:
 		if value == nil || value.callback == nil || strings.TrimSpace(value.id) == "" {
 			return "", fmt.Errorf("code migration has no stable identity or callback")

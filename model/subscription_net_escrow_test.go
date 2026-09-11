@@ -254,13 +254,11 @@ func TestNetEscrowReconcileRepairsExpiredBalanceWithOpenEscrow(t *testing.T) {
 		now := server.NowUtc()
 
 		sourceNetworkId := server.NewId()
-		sourceUserId := server.NewId()
 		sourceClientId := server.NewId()
 		destinationNetworkId := server.NewId()
-		destinationUserId := server.NewId()
 		destinationClientId := server.NewId()
-		Testing_CreateNetwork(ctx, sourceNetworkId, "expiry-source", sourceUserId)
-		Testing_CreateNetwork(ctx, destinationNetworkId, "expiry-destination", destinationUserId)
+		testingCreatePaymentClient(ctx, sourceNetworkId, sourceClientId)
+		testingCreatePaymentClient(ctx, destinationNetworkId, destinationClientId)
 
 		const balanceByteCount = ByteCount(1024 * 1024 * 1024)
 		const contractByteCount = ByteCount(32 * 1024 * 1024)

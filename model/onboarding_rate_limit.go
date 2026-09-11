@@ -87,9 +87,11 @@ func CheckOnboardingRateLimit(clientSession *session.ClientSession, limit *Onboa
 		server.IpRateLimitAttemptSettings{
 			KeyPrefix:       "onboarding." + limit.Action + ".",
 			AddressLookback: limit.AddressLookback,
-			AddressLimit:    limit.AddressLimit,
-			GlobalLookback:  limit.GlobalLookback,
-			GlobalLimit:     limit.GlobalLimit,
+			// The shared history includes the current request and rejects at its
+			// threshold; onboarding settings describe allowed requests.
+			AddressLimit:   limit.AddressLimit + 1,
+			GlobalLookback: limit.GlobalLookback,
+			GlobalLimit:    limit.GlobalLimit + 1,
 		},
 	)
 	server.Raise(err)

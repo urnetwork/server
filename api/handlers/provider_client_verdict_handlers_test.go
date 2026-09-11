@@ -326,8 +326,8 @@ func TestProviderClientVerdictQuorumMakesTheProviderDue(t *testing.T) {
 
 		reported := server.NewId()
 		quiet := server.NewId()
-		testing_connectProbeableProvider(t, ctx, reported, city.LocationId, "0.0.0.1:0")
-		testing_connectProbeableProvider(t, ctx, quiet, city.LocationId, "0.0.0.2:0")
+		testing_connectProbeableProvider(t, ctx, reported, city.LocationId, "192.0.2.1:0")
+		testing_connectProbeableProvider(t, ctx, quiet, city.LocationId, "192.0.2.2:0")
 		model.UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
 		// both probed an hour ago: neither is due, and neither has a probe
@@ -339,6 +339,10 @@ func TestProviderClientVerdictQuorumMakesTheProviderDue(t *testing.T) {
 				CountryCode: "us",
 				ObservedAt:  now.Add(-time.Hour),
 				Verdict:     "verified",
+			})
+			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now,
+				OKCount: 1, Total: 1,
 			})
 		}
 
@@ -420,7 +424,7 @@ func TestProviderClientVerdictQuorumDoesNotOverrideTheAttemptBackoff(t *testing.
 		model.CreateLocation(ctx, city)
 
 		clientId := server.NewId()
-		testing_connectProbeableProvider(t, ctx, clientId, city.LocationId, "0.0.0.3:0")
+		testing_connectProbeableProvider(t, ctx, clientId, city.LocationId, "192.0.2.3:0")
 		model.UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
 		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{

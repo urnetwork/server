@@ -424,10 +424,10 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 
 		// A1 and A2 share one ip -> valid_client_count = 2 (each contributes 1/2
 		// per block). A3 is alone on its ip. B1 is a different network/country.
-		hashA12 := testingConnectClientWithLocation(ctx, t, networkA, clientA1, "10.1.1.1:20001", us)
-		testingConnectClientWithLocation(ctx, t, networkA, clientA2, "10.1.1.1:20002", us)
-		hashA3 := testingConnectClientWithLocation(ctx, t, networkA, clientA3, "10.3.3.3:20003", us)
-		hashB1 := testingConnectClientWithLocation(ctx, t, networkB, clientB1, "10.2.2.2:20004", ca)
+		hashA12 := testingConnectClientWithLocation(ctx, t, networkA, clientA1, "192.0.2.1:20001", us)
+		testingConnectClientWithLocation(ctx, t, networkA, clientA2, "192.0.2.1:20002", us)
+		hashA3 := testingConnectClientWithLocation(ctx, t, networkA, clientA3, "192.0.2.17:20003", us)
+		hashB1 := testingConnectClientWithLocation(ctx, t, networkB, clientB1, "192.0.2.33:20004", ca)
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -581,7 +581,7 @@ func TestReliabilityRunningKeepsDegradedClassificationAcrossMedianFlip(t *testin
 			t,
 			networkId,
 			clientId,
-			"10.44.0.1:20001",
+			"192.0.2.44:20001",
 			location,
 		)
 

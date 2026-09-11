@@ -403,9 +403,142 @@ type providerEgressProbePass struct {
 	refreshFleet func(context.Context)
 }
 
-// run executes both independently due batches with one certificate-pin
-// snapshot. A failure in one batch is retained but does not suppress the other;
-// task retry then revisits only work whose server-side due state remains stale.
+type providerEgressBlackholeOutcome struct {
+	due          int
+	checked      int
+	dark         int
+	tunnelFailed int
+	full         bool
+	err          error
+}
+
+type providerEgressFullOutcome struct {
+	summary prober.Summary
+	err     error
+}
+
+// runBlackholeBatch owns the accounting and submission for one due batch.
+// Returning the summary with a submission error preserves the work that was
+// actually measured while preventing the caller from immediately measuring the
+// same still-due rows again.
+func (self *providerEgressProbePass) runBlackholeBatch(
+	ctx context.Context,
+	args *ProviderEgressProbeArgs,
+	pinSource fleetprobe.PinSource,
+	concurrency int,
+	clientIds []string,
+) (fleetprobe.BlackholeSummary, error) {
+	options := self.blackholeOptions
+	options.Pins = pinSource
+	options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
+	options.Concurrency = concurrency
+	startTime := time.Now()
+	summary, runErr := self.runBlackhole(ctx, clientIds, options)
+	egressProbePassSeconds.WithLabelValues("blackhole").Observe(time.Since(startTime).Seconds())
+	if runErr != nil {
+		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+		egressProbePassErrorsTotal.WithLabelValues("blackhole_run").Inc()
+		return fleetprobe.BlackholeSummary{}, fmt.Errorf("run blackhole batch: %w", runErr)
+	}
+
+	egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
+	egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(len(summary.Checks)))
+	egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(summary.Dark))
+	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
+	if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+		egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
+		return summary, fmt.Errorf("submit blackhole batch: %w", submitErr)
+	}
+	return summary, nil
+}
+
+func (self *providerEgressProbePass) runFullBatch(
+	ctx context.Context,
+	args *ProviderEgressProbeArgs,
+	pinSource fleetprobe.PinSource,
+	clientIds []string,
+) providerEgressFullOutcome {
+	options := self.fullOptions
+	options.Pins = pinSource
+	options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
+	options.Concurrency = args.Full.Concurrency
+	options.AllDestinations = args.Full.AllDestinations
+	startTime := time.Now()
+	summary, runErr := self.runFull(ctx, clientIds, options)
+	egressProbePassSeconds.WithLabelValues("full").Observe(time.Since(startTime).Seconds())
+	if runErr != nil {
+		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+		egressProbePassErrorsTotal.WithLabelValues("full_run").Inc()
+		return providerEgressFullOutcome{err: fmt.Errorf("run full-probe batch: %w", runErr)}
+	}
+
+	egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
+	egressProbePassProvidersTotal.WithLabelValues("full", "attempted").Add(float64(summary.Attempted))
+	egressProbePassProvidersTotal.WithLabelValues("full", "submitted").Add(float64(summary.Submitted))
+	egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
+	egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
+	recordEgressProbeGeolocationDiagnostics(summary)
+	return providerEgressFullOutcome{summary: summary}
+}
+
+// drainBlackhole runs the already-selected batch and, while a concurrent full
+// batch remains in flight, keeps selecting saturated successor batches. It
+// stops on the first error, partial batch, cancellation, or full completion so
+// the durable task remains bounded by its existing full-batch lifetime.
+func (self *providerEgressProbePass) drainBlackhole(
+	ctx context.Context,
+	args *ProviderEgressProbeArgs,
+	pinSource fleetprobe.PinSource,
+	concurrency int,
+	initialClientIds []string,
+	fullFinished <-chan struct{},
+) providerEgressBlackholeOutcome {
+	outcome := providerEgressBlackholeOutcome{}
+	clientIds := initialClientIds
+	for 0 < len(clientIds) {
+		outcome.due += len(clientIds)
+		outcome.full = outcome.full || len(clientIds) == args.Blackhole.Limit
+		summary, err := self.runBlackholeBatch(ctx, args, pinSource, concurrency, clientIds)
+		outcome.checked += len(summary.Checks)
+		outcome.dark += summary.Dark
+		outcome.tunnelFailed += summary.TunnelFailed
+		if err != nil {
+			outcome.err = err
+			break
+		}
+		if ctx.Err() != nil || len(clientIds) < args.Blackhole.Limit || fullFinished == nil {
+			break
+		}
+		select {
+		case <-fullFinished:
+			return outcome
+		default:
+		}
+
+		clientIds, err = self.blackholeDue(ctx, args.Blackhole.Limit)
+		egressProbePassDue.WithLabelValues("blackhole").Set(float64(len(clientIds)))
+		if err != nil {
+			egressProbePassErrorsTotal.WithLabelValues("blackhole_due").Inc()
+			outcome.err = fmt.Errorf("get blackhole due providers: %w", err)
+			break
+		}
+		// A full batch can finish during the bounded due lookup. Do not admit
+		// another tunnel batch after that closure boundary.
+		select {
+		case <-fullFinished:
+			return outcome
+		default:
+		}
+	}
+	return outcome
+}
+
+// run executes both independently due schedules with one certificate-pin
+// snapshot. When both queues have work and the configured blackhole pool can
+// reserve the full pool without raising the shard's prior peak concurrency,
+// full work and a repeated blackhole drain run together. A failure in one lane
+// is retained but does not suppress the other; task retry then revisits only
+// work whose server-side due state remains stale.
 func (self *providerEgressProbePass) run(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -450,66 +583,71 @@ func (self *providerEgressProbePass) run(
 	pinSource := func() map[string][]string {
 		return pins
 	}
-
-	if 0 < len(blackholeClientIds) {
-		options := self.blackholeOptions
-		options.Pins = pinSource
-		options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
-		options.Concurrency = args.Blackhole.Concurrency
-		startTime := time.Now()
-		summary, runErr := self.runBlackhole(ctx, blackholeClientIds, options)
-		egressProbePassSeconds.WithLabelValues("blackhole").Observe(time.Since(startTime).Seconds())
-		if runErr != nil {
-			egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
-			egressProbePassErrorsTotal.WithLabelValues("blackhole_run").Inc()
-			errList = append(errList, fmt.Errorf("run blackhole batch: %w", runErr))
-		} else {
-			egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
-			result.Checked = len(summary.Checks)
-			result.Dark = summary.Dark
-			result.TunnelFailed = summary.TunnelFailed
-			egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(result.Checked))
-			egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(result.Dark))
-			egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(result.TunnelFailed))
-			if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
-				egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
-				errList = append(errList, fmt.Errorf("submit blackhole batch: %w", submitErr))
-			}
-		}
-	}
-
-	// Cancellation is different from an isolated batch failure: starting more
-	// tunnels after task drain would extend shutdown and duplicate work after
-	// the lease is recovered by another worker.
 	if err := ctx.Err(); err != nil {
 		egressProbePassErrorsTotal.WithLabelValues("canceled").Inc()
 		errList = append(errList, err)
 		return result, errors.Join(errList...)
 	}
 
-	if 0 < len(fullClientIds) {
-		options := self.fullOptions
-		options.Pins = pinSource
-		options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
-		options.Concurrency = args.Full.Concurrency
-		options.AllDestinations = args.Full.AllDestinations
-		startTime := time.Now()
-		summary, runErr := self.runFull(ctx, fullClientIds, options)
-		egressProbePassSeconds.WithLabelValues("full").Observe(time.Since(startTime).Seconds())
-		if runErr != nil {
-			egressProbePassesTotal.WithLabelValues("full", "error").Inc()
-			egressProbePassErrorsTotal.WithLabelValues("full_run").Inc()
-			errList = append(errList, fmt.Errorf("run full-probe batch: %w", runErr))
-		} else {
-			egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
-			result.Attempted = summary.Attempted
-			result.Submitted = summary.Submitted
-			result.Failed = summary.Failed
-			egressProbePassProvidersTotal.WithLabelValues("full", "attempted").Add(float64(summary.Attempted))
-			egressProbePassProvidersTotal.WithLabelValues("full", "submitted").Add(float64(summary.Submitted))
-			egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
-			egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
-			recordEgressProbeGeolocationDiagnostics(summary)
+	blackholeConcurrency := args.Blackhole.Concurrency
+	parallel := 0 < len(blackholeClientIds) && 0 < len(fullClientIds) &&
+		args.Full.Concurrency < args.Blackhole.Concurrency
+	if parallel {
+		// Full probes retain their configured pool. Reserving those slots from
+		// blackhole work keeps the combined shard peak at the previously
+		// configured blackhole peak while allowing the cheap lane to advance.
+		blackholeConcurrency -= args.Full.Concurrency
+		start := make(chan struct{})
+		fullFinished := make(chan struct{})
+		blackholeOutcomeCh := make(chan providerEgressBlackholeOutcome, 1)
+		fullOutcomeCh := make(chan providerEgressFullOutcome, 1)
+		go func() {
+			<-start
+			blackholeOutcomeCh <- self.drainBlackhole(
+				ctx, args, pinSource, blackholeConcurrency, blackholeClientIds, fullFinished,
+			)
+		}()
+		go func() {
+			<-start
+			fullOutcomeCh <- self.runFullBatch(ctx, args, pinSource, fullClientIds)
+			close(fullFinished)
+		}()
+		close(start)
+
+		blackholeOutcome := <-blackholeOutcomeCh
+		fullOutcome := <-fullOutcomeCh
+		result.BlackholeDue = blackholeOutcome.due
+		result.Checked = blackholeOutcome.checked
+		result.Dark = blackholeOutcome.dark
+		result.TunnelFailed = blackholeOutcome.tunnelFailed
+		result.Full = result.Full || blackholeOutcome.full
+		result.Attempted = fullOutcome.summary.Attempted
+		result.Submitted = fullOutcome.summary.Submitted
+		result.Failed = fullOutcome.summary.Failed
+		errList = append(errList, blackholeOutcome.err, fullOutcome.err)
+	} else {
+		// A one-slot configuration cannot overlap two lanes without exceeding
+		// its prior peak. Preserve the old bounded order for that geometry.
+		if 0 < len(blackholeClientIds) {
+			blackholeOutcome := self.drainBlackhole(
+				ctx, args, pinSource, blackholeConcurrency, blackholeClientIds, nil,
+			)
+			result.BlackholeDue = blackholeOutcome.due
+			result.Checked = blackholeOutcome.checked
+			result.Dark = blackholeOutcome.dark
+			result.TunnelFailed = blackholeOutcome.tunnelFailed
+			result.Full = result.Full || blackholeOutcome.full
+			errList = append(errList, blackholeOutcome.err)
+		}
+		// Cancellation is different from an isolated batch failure: starting
+		// more tunnels after task drain would extend shutdown and duplicate
+		// work after the lease is recovered by another worker.
+		if ctx.Err() == nil && 0 < len(fullClientIds) {
+			fullOutcome := self.runFullBatch(ctx, args, pinSource, fullClientIds)
+			result.Attempted = fullOutcome.summary.Attempted
+			result.Submitted = fullOutcome.summary.Submitted
+			result.Failed = fullOutcome.summary.Failed
+			errList = append(errList, fullOutcome.err)
 		}
 	}
 	if err := ctx.Err(); err != nil {

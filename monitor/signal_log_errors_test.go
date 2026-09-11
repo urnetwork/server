@@ -47,6 +47,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
 		{"onboarding app-open attribution", "[onboarding]app open attribution failed for network synthetic-private-network: ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)", "onboarding-app-open-attribution"},
+		{"onboarding connect-day write", "[onboarding]connect.day write failed for client private-client.fixture.example: ERROR: inconsistent types deduced for parameter $3 (SQLSTATE 42P08)", "onboarding-connect-day-write"},
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"escrow mirror write", "[netescrow]mirror write failed after reservation: i/o timeout", "netescrow-mirror-write"},
@@ -119,6 +120,45 @@ func TestLogErrorsSignalRedactsOnboardingAppOpenAttribution(t *testing.T) {
 	for _, other := range alerts {
 		if other.Class == "novel" {
 			t.Fatalf("known onboarding attribution failure remained novel: %+v", other)
+		}
+	}
+}
+
+func TestLogErrorsSignalRedactsOnboardingConnectDayWrite(t *testing.T) {
+	const privateClient = "private-client.fixture.example"
+	line := "[onboarding]connect.day write failed for client " + privateClient + ": ERROR: inconsistent types deduced for parameter $3 (SQLSTATE 42P08)"
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-connect", nil
+		}
+		return line, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "onboarding-connect-day-write")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("onboarding connect-day severity = %q, want warn", alert.Severity)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"SQLSTATE 42P08",
+		"client identifier omitted",
+		"already committed",
+		"next connection retries",
+		"deploy Connect",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("onboarding connect-day alert lacks %q: %s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, privateClient) {
+		t.Fatalf("onboarding connect-day alert retained client evidence: %s", markdown)
+	}
+	for _, other := range alerts {
+		if other.Class == "novel" {
+			t.Fatalf("known onboarding connect-day failure remained novel: %+v", other)
 		}
 	}
 }

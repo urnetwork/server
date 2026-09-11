@@ -10,25 +10,27 @@ import (
 )
 
 type proxyPoolFixtureProcess struct {
-	host        string
-	block       string
-	instance    string
-	rss         float64
-	capacity    *float64
-	retained    *float64
-	packet      *float64
-	large       *float64
-	outstanding *float64
-	startTime   time.Time
-	sampleTime  time.Time
-	poolTime    time.Time
+	host               string
+	block              string
+	instance           string
+	rss                float64
+	capacity           *float64
+	retained           *float64
+	packet             *float64
+	large              *float64
+	outstanding        *float64
+	startTime          time.Time
+	sampleTime         time.Time
+	poolTime           time.Time
+	retainedTime       time.Time
+	omitRetainedSource bool
 }
 
 func TestProxyPoolSignalSyntheticMissingCollector(t *testing.T) {
 	now := time.Date(2026, 8, 31, 18, 0, 0, 0, time.UTC)
 	payload := proxyPoolFixtureJSON(t, now,
-		proxyPoolFixtureProcess{host: "fireside", block: "g1", instance: "proxy-a", rss: 5 << 30},
-		proxyPoolFixtureProcess{host: "fireside", block: "g2", instance: "proxy-b", rss: 5 << 30},
+		proxyPoolFixtureProcess{host: "host-a.example", block: "g1", instance: "proxy-a", rss: 5 << 30},
+		proxyPoolFixtureProcess{host: "host-a.example", block: "g2", instance: "proxy-b", rss: 5 << 30},
 	)
 	alerts := runProxyPoolFixture(t, now, payload)
 	alert := requireAlertClass(t, alerts, "proxy-message-pool-unobservable")
@@ -38,7 +40,7 @@ func TestProxyPoolSignalSyntheticMissingCollector(t *testing.T) {
 	for _, want := range []string{
 		"2 of 2 newest fresh proxy identities",
 		"missing_identities=2",
-		"fireside/g1#proxy-a[capacity,retained,packet-retained,large-retained,outstanding]",
+		"host-a.example/g1#proxy-a[capacity,retained,packet-retained,large-retained,outstanding]",
 		"actual scrape timestamp",
 		"not a live process-overlap measurement",
 		"controller, which proxy does not import",
@@ -65,10 +67,10 @@ func TestProxyPoolSignalSyntheticRolloutSelectsNewestFreshGeneration(t *testing.
 		}
 	}
 	payload := proxyPoolFixtureJSON(t, now,
-		proxyPoolFixtureProcess{host: "crisp", block: "g1", instance: "old-g1", rss: 5 << 30, startTime: now.Add(-2 * time.Hour)},
-		complete("crisp", "g1", "new-g1", now.Add(-time.Minute)),
-		complete("crisp", "g2", "old-g2", now.Add(-2*time.Hour)),
-		proxyPoolFixtureProcess{host: "crisp", block: "g2", instance: "new-g2", rss: 5 << 30, startTime: now.Add(-time.Minute)},
+		proxyPoolFixtureProcess{host: "host-b.example", block: "g1", instance: "old-g1", rss: 5 << 30, startTime: now.Add(-2 * time.Hour)},
+		complete("host-b.example", "g1", "new-g1", now.Add(-time.Minute)),
+		complete("host-b.example", "g2", "old-g2", now.Add(-2*time.Hour)),
+		proxyPoolFixtureProcess{host: "host-b.example", block: "g2", instance: "new-g2", rss: 5 << 30, startTime: now.Add(-time.Minute)},
 	)
 	alerts := runProxyPoolFixture(t, now, payload)
 	alert := requireAlertClass(t, alerts, "proxy-message-pool-unobservable")
@@ -76,7 +78,7 @@ func TestProxyPoolSignalSyntheticRolloutSelectsNewestFreshGeneration(t *testing.
 		"1 of 2 newest fresh proxy identities",
 		"current_proxy_identities=2",
 		"missing_identities=1",
-		"crisp/g2#new-g2[capacity,retained,packet-retained,large-retained,outstanding]",
+		"host-b.example/g2#new-g2[capacity,retained,packet-retained,large-retained,outstanding]",
 		"newest start time suppresses draining generations",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
@@ -98,7 +100,7 @@ func TestProxyPoolSignalSyntheticLegacyTwentyFourGiBCap(t *testing.T) {
 	large := retained - packet
 	outstanding := 125.0
 	payload := proxyPoolFixtureJSON(t, now, proxyPoolFixtureProcess{
-		host: "fireside", block: "g1", instance: "legacy", rss: 5 << 30,
+		host: "host-a.example", block: "g1", instance: "legacy", rss: 5 << 30,
 		capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
 	})
 	alerts := runProxyPoolFixture(t, now, payload)
@@ -125,7 +127,7 @@ func TestProxyPoolSignalSyntheticFixedCapHealthy(t *testing.T) {
 	large := retained - packet
 	outstanding := 48.0
 	payload := proxyPoolFixtureJSON(t, now, proxyPoolFixtureProcess{
-		host: "crisp", block: "g4", instance: "fixed", rss: 5 << 30,
+		host: "host-b.example", block: "g4", instance: "fixed", rss: 5 << 30,
 		capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
 	})
 	alerts := runProxyPoolFixture(t, now, payload)
@@ -143,21 +145,77 @@ func TestProxyPoolSignalSyntheticStaleAndInconsistentMetrics(t *testing.T) {
 	outstanding := 4.0
 	payload := proxyPoolFixtureJSON(t, now,
 		proxyPoolFixtureProcess{
-			host: "crisp", block: "g1", instance: "stale", rss: 5 << 30,
+			host: "host-b.example", block: "g1", instance: "stale", rss: 5 << 30,
 			capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
 			poolTime: now.Add(-2 * time.Minute),
 		},
 		proxyPoolFixtureProcess{
-			host: "crisp", block: "g2", instance: "invalid", rss: 5 << 30,
+			host: "host-b.example", block: "g2", instance: "invalid", rss: 5 << 30,
 			capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
 		},
 	)
 	alerts := runProxyPoolFixture(t, now, payload)
-	if missing := requireAlertClass(t, alerts, "proxy-message-pool-unobservable"); !strings.Contains(missing.Observed, "crisp/g1#stale") {
+	if missing := requireAlertClass(t, alerts, "proxy-message-pool-unobservable"); !strings.Contains(missing.Observed, "host-b.example/g1#stale") {
 		t.Fatalf("stale process not classified as missing: %+v", missing)
 	}
-	if invalid := requireAlertClass(t, alerts, "proxy-message-pool-metrics-invalid"); !strings.Contains(invalid.Observed, "crisp/g2#invalid") {
+	if invalid := requireAlertClass(t, alerts, "proxy-message-pool-metrics-invalid"); !strings.Contains(invalid.Observed, "host-b.example/g2#invalid") {
 		t.Fatalf("inconsistent process not classified: %+v", invalid)
+	}
+}
+
+func TestProxyPoolSignalSyntheticMixedScrapesAreNotAccountingCorruption(t *testing.T) {
+	now := time.Date(2026, 9, 10, 19, 32, 22, 0, time.UTC)
+	capacity := float64(8 << 30)
+	retained := float64(1515008)
+	packet := float64(863744)
+	large := float64(659456)
+	outstanding := 9.0
+	payload := proxyPoolFixtureJSON(t, now, proxyPoolFixtureProcess{
+		host: "proxy-1.example", block: "g3", instance: "mixed-scrape", rss: 600 << 20,
+		capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
+		retainedTime: now.Add(-15 * time.Second),
+	})
+	alerts := runProxyPoolFixture(t, now, payload)
+	alert := requireAlertClass(t, alerts, "proxy-message-pool-snapshot-unobservable")
+	for _, want := range []string{
+		"same-scrape message-pool gauge set",
+		"proxy-1.example/g3#mixed-scrape[source-time-skew]",
+		"remote-write batch",
+		"not an impossible GetMessagePoolAggregateStats result",
+		"only a same-scrape",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("mixed-scrape alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "proxy-message-pool-metrics-invalid" {
+			t.Fatalf("mixed scrapes were misclassified as accounting corruption: %+v", candidate)
+		}
+	}
+}
+
+func TestProxyPoolSignalSyntheticMissingSourceTimeIsNotAccountingCorruption(t *testing.T) {
+	now := time.Date(2026, 9, 10, 19, 33, 22, 0, time.UTC)
+	capacity := float64(8 << 30)
+	retained := float64(1515008)
+	packet := float64(863744)
+	large := float64(659456)
+	outstanding := 9.0
+	payload := proxyPoolFixtureJSON(t, now, proxyPoolFixtureProcess{
+		host: "proxy-1.example", block: "g3", instance: "missing-source-time", rss: 600 << 20,
+		capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
+		omitRetainedSource: true,
+	})
+	alerts := runProxyPoolFixture(t, now, payload)
+	alert := requireAlertClass(t, alerts, "proxy-message-pool-snapshot-unobservable")
+	if !strings.Contains(alert.Observed, "proxy-1.example/g3#missing-source-time[missing-source-times=retained]") {
+		t.Fatalf("missing source time was not preserved as ambiguous: %+v", alert)
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "proxy-message-pool-metrics-invalid" {
+			t.Fatalf("missing source time was misclassified as accounting corruption: %+v", candidate)
+		}
 	}
 }
 
@@ -166,8 +224,9 @@ func runProxyPoolFixture(t testing.TB, now time.Time, payload string) Alerts {
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "metrics-1" || !strings.Contains(command, "message_pool_capacity_bytes") ||
 			!strings.Contains(command, "%22synthetic%22") ||
-			!strings.Contains(command, "timestamp%28label_replace") ||
-			!strings.Contains(command, "monitor_metric") {
+			!strings.Contains(command, "label_replace%28timestamp%28urnetwork_message_pool") ||
+			!strings.Contains(command, "monitor_metric") ||
+			!strings.Contains(command, proxyPoolSourceSuffix) {
 			return "", fmt.Errorf("unexpected Mimir command on %s: %s", host.Name, command)
 		}
 		return payload, nil
@@ -200,6 +259,16 @@ func proxyPoolFixtureJSON(t testing.TB, now time.Time, processes ...proxyPoolFix
 				"value":  []any{float64(observedAt.Unix()), fmt.Sprintf("%.0f", value)},
 			})
 		}
+		addSourceTime := func(name string, sourceTime time.Time) {
+			metric := map[string]string{"monitor_metric": name + proxyPoolSourceSuffix}
+			for key, label := range labels {
+				metric[key] = label
+			}
+			result = append(result, map[string]any{
+				"metric": metric,
+				"value":  []any{float64(now.Unix()), fmt.Sprintf("%.9f", float64(sourceTime.UnixNano())/1e9)},
+			})
+		}
 		sampleTime := process.sampleTime
 		if sampleTime.IsZero() {
 			sampleTime = now
@@ -215,17 +284,26 @@ func proxyPoolFixtureJSON(t testing.TB, now time.Time, processes ...proxyPoolFix
 			poolTime = sampleTime
 		}
 		for _, metric := range []struct {
-			name  string
-			value *float64
+			name       string
+			value      *float64
+			time       time.Time
+			omitSource bool
 		}{
-			{"urnetwork_message_pool_capacity_bytes", process.capacity},
-			{"urnetwork_message_pool_retained_bytes", process.retained},
-			{"urnetwork_message_pool_packet_retained_bytes", process.packet},
-			{"urnetwork_message_pool_large_object_retained_bytes", process.large},
-			{"urnetwork_message_pool_outstanding", process.outstanding},
+			{"urnetwork_message_pool_capacity_bytes", process.capacity, poolTime, false},
+			{"urnetwork_message_pool_retained_bytes", process.retained, process.retainedTime, process.omitRetainedSource},
+			{"urnetwork_message_pool_packet_retained_bytes", process.packet, poolTime, false},
+			{"urnetwork_message_pool_large_object_retained_bytes", process.large, poolTime, false},
+			{"urnetwork_message_pool_outstanding", process.outstanding, poolTime, false},
 		} {
 			if metric.value != nil {
-				add(metric.name, *metric.value, poolTime)
+				metricTime := metric.time
+				if metricTime.IsZero() {
+					metricTime = poolTime
+				}
+				add(metric.name, *metric.value, metricTime)
+				if !metric.omitSource {
+					addSourceTime(metric.name, metricTime)
+				}
 			}
 		}
 	}

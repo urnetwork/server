@@ -59,6 +59,7 @@ func newMcpServer() *mcpsdk.Server {
 	// recovery must be first (outermost), see middleware.go
 	mcpServer.AddReceivingMiddleware(
 		createRecoveryMiddleware(),
+		createMetricsMiddleware(),
 		createLoggingMiddleware(),
 	)
 
@@ -132,8 +133,10 @@ func Routes() []*router.Route {
 // fetch tool budgets itself against.
 func HttpServerOptions() server.HttpServerOptions {
 	return server.HttpServerOptions{
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  5 * time.Minute,
+		ReadTimeout:           15 * time.Second,
+		WriteTimeout:          30 * time.Second,
+		IdleTimeout:           5 * time.Minute,
+		ShutdownTimeout:       60 * time.Second,
+		KeepaliveDrainTimeout: 10 * time.Second,
 	}
 }

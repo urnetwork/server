@@ -39,12 +39,42 @@ func newSqlMigration(sql string) *SqlMigration {
 // remain part of the expected schema instead of becoming invisible code
 // migrations.
 type OnlineSqlMigration struct {
-	sql      string
-	auditSql string
+	recoverySql string
+	sql         string
+	auditSql    string
 }
 
 func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
 	return &OnlineSqlMigration{sql: sql, auditSql: auditSql}
+}
+
+// newRestartableOnlineSqlMigration adds an independently committed recovery
+// statement before the online DDL. Each statement is sent in its own protocol
+// round trip: PostgreSQL forbids concurrent index operations even inside the
+// implicit transaction created by one multi-statement query.
+func newRestartableOnlineSqlMigration(recoverySql string, sql string, auditSql string) *OnlineSqlMigration {
+	return &OnlineSqlMigration{recoverySql: recoverySql, sql: sql, auditSql: auditSql}
+}
+
+func (m *OnlineSqlMigration) productionSqlSteps() []string {
+	steps := make([]string, 0, 2)
+	if m.recoverySql != "" {
+		steps = append(steps, m.recoverySql)
+	}
+	return append(steps, m.sql)
+}
+
+func executeOnlineSqlMigration(
+	ctx context.Context,
+	migration *OnlineSqlMigration,
+	exec func(context.Context, string) error,
+) error {
+	for _, sql := range migration.productionSqlSteps() {
+		if err := exec(ctx, sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // important these migration functions must be idempotent
@@ -175,7 +205,10 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
 			}
 			MaintenanceDb(ctx, func(conn PgConn) {
-				RaisePgResult(conn.Exec(ctx, v.sql))
+				Raise(executeOnlineSqlMigration(ctx, v, func(ctx context.Context, sql string) error {
+					_, err := conn.Exec(ctx, sql)
+					return err
+				}))
 			}, OptReadWrite(), OptNoRetry())
 		case *CodeMigration:
 			if DbMigrationVerbose {
@@ -7641,5 +7674,22 @@ var migrations = []any{
 	`, `
 		CREATE INDEX network_onboarding_email_sent_at
 		ON network_onboarding_email (sent_at, network_id, step)
+	`),
+
+	// The provider full-probe scheduler takes a bounded stale-health head in
+	// measured-at order and merges it with the independently indexed stale-
+	// location head in Go. Keep the complete cutoff/order key in one index so
+	// that urgent health selection does not restore the fleet-wide sort the
+	// split scheduler was designed to avoid. Appended after every published
+	// migration; never insert this into the historical slice.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_egress_health_measured_at_client_id
+	`, `
+		CREATE INDEX CONCURRENTLY provider_egress_health_measured_at_client_id
+		ON provider_egress_health (measured_at, client_id)
+	`, `
+		DROP INDEX IF EXISTS provider_egress_health_measured_at_client_id;
+		CREATE INDEX provider_egress_health_measured_at_client_id
+		ON provider_egress_health (measured_at, client_id)
 	`),
 }

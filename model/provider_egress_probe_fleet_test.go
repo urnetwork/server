@@ -381,7 +381,7 @@ func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *tes
 			)
 		}
 		testing_connectProbeableProvider(
-			t, ctx, ineligible, location.LocationId, "198.51.100.1:0", ProvideModeNetwork,
+			t, ctx, ineligible, location.LocationId, "192.0.2.200:0", ProvideModeNetwork,
 		)
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 

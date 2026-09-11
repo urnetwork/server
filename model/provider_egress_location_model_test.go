@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,10 +275,10 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 		// contract would be refused, so it must never be offered to the prober
 		nonPublic := server.NewId()
 
-		testing_connectProbeableProvider(t, ctx, fresh, city.LocationId, "0.0.0.1:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, stale, city.LocationId, "0.0.0.2:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, never, city.LocationId, "0.0.0.3:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, nonPublic, city.LocationId, "0.0.0.4:0", ProvideModeNetwork)
+		testing_connectProbeableProvider(t, ctx, fresh, city.LocationId, "192.0.2.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, stale, city.LocationId, "192.0.2.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, never, city.LocationId, "192.0.2.3:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, nonPublic, city.LocationId, "192.0.2.4:0", ProvideModeNetwork)
 
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
@@ -289,6 +290,12 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 			ClientId: stale, LocationId: city.LocationId,
 			CountryCode: "us", ObservedAt: now.Add(-72 * time.Hour),
 		})
+		for _, clientId := range []server.Id{fresh, stale} {
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now,
+				OKCount: 1, Total: 1,
+			})
+		}
 		// `never` and `nonPublic` deliberately get no row at all
 
 		// no attempt rows exist in this test, so the attempt cutoff never
@@ -311,12 +318,12 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 			t.Fatalf("due = %v, must not contain the provider without a Public provide key (%s)", due, nonPublic)
 		}
 
-		// oldest first, so the longest-unprobed are probed first: the
-		// never-probed provider sorts ahead of the three-days-stale one
+		// A stale evidenced provider has a hard expiry; it is admitted before
+		// unlocated work even when the unlocated backlog can fill the batch.
 		neverIndex := slices.Index(due, never)
 		staleIndex := slices.Index(due, stale)
-		if staleIndex < neverIndex {
-			t.Fatalf("never-probed provider at %d must sort before the stale one at %d", neverIndex, staleIndex)
+		if neverIndex < staleIndex {
+			t.Fatalf("stale provider at %d must sort before the unlocated one at %d", staleIndex, neverIndex)
 		}
 
 		// limit is honoured
@@ -324,8 +331,8 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 		if len(limited) != 1 {
 			t.Fatalf("len(due) = %d for limit 1, want 1", len(limited))
 		}
-		if limited[0] != never {
-			t.Fatalf("due[0] = %s for limit 1, want the never-probed provider %s", limited[0], never)
+		if limited[0] != stale {
+			t.Fatalf("due[0] = %s for limit 1, want the urgent stale provider %s", limited[0], stale)
 		}
 	})
 }
@@ -360,8 +367,8 @@ func TestGetProviderEgressLocationDueDefersRecentlyAttempted(t *testing.T) {
 		// provider that actually needs the next probe slot
 		healthyStale := server.NewId()
 
-		testing_connectProbeableProvider(t, ctx, dead, city.LocationId, "0.0.0.1:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, healthyStale, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, dead, city.LocationId, "192.0.2.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, healthyStale, city.LocationId, "192.0.2.2:0", ProvideModePublic)
 
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
@@ -435,17 +442,17 @@ func TestGetProviderEgressLocationDueRequiresConnectedAndValid(t *testing.T) {
 		disconnected := server.NewId()
 		invalid := server.NewId()
 
-		testing_connectProbeableProvider(t, ctx, good, city.LocationId, "0.0.0.1:0", ProvideModePublic)
-		disconnectedConnectionId := testing_connectProbeableProvider(t, ctx, disconnected, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, good, city.LocationId, "192.0.2.1:0", ProvideModePublic)
+		disconnectedConnectionId := testing_connectProbeableProvider(t, ctx, disconnected, city.LocationId, "192.0.2.2:0", ProvideModePublic)
 
 		// `invalid` holds two simultaneous connections from two different
 		// addresses, which makes client_address_hash_count = 2 and so the
 		// generated `valid` column false. The two addresses must be in
 		// different /29s: server.ClientIpHash buckets ipv4 to the /29 network,
-		// so e.g. 0.0.0.3 and 0.0.0.4 would hash the same and count as one.
-		testing_connectProbeableProvider(t, ctx, invalid, city.LocationId, "0.0.0.3:0", ProvideModePublic)
+		// so e.g. 192.0.2.3 and 192.0.2.4 would hash the same and count as one.
+		testing_connectProbeableProvider(t, ctx, invalid, city.LocationId, "192.0.2.3:0", ProvideModePublic)
 		secondHandlerId := CreateNetworkClientHandler(ctx)
-		secondConnectionId, _, _, _, err := ConnectNetworkClient(ctx, invalid, "0.0.8.3:0", secondHandlerId)
+		secondConnectionId, _, _, _, err := ConnectNetworkClient(ctx, invalid, "192.0.2.11:0", secondHandlerId)
 		if err != nil {
 			t.Fatalf("connect second address: %s", err)
 		}
@@ -477,10 +484,10 @@ func TestGetProviderEgressLocationDueRequiresConnectedAndValid(t *testing.T) {
 	})
 }
 
-// The due queue has three independent SQL passes: never located, stale
-// location, and fresh location with stale health. Every pass reads the
-// materialized provider population directly and must reject derivative and
-// inactive clients even while their connected rows and Public keys remain.
+// The due queue has independent SQL heads for never located, stale location,
+// stale health, and located-without-health providers. Every head reads the live
+// provider population directly and must reject derivative and inactive clients
+// even while their connected rows and Public keys remain.
 func TestGetProviderEgressLocationDueExcludesDerivedAndInactiveClients(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -607,39 +614,74 @@ func TestProviderEgressProbeAttemptUpsertIgnoresOlderReplay(t *testing.T) {
 func TestRemoveExpiredProviderEgressProbeAttempts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-
-		keep := server.NewId()
-		drop := server.NewId()
-		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: keep, AttemptAt: server.NowUtc(),
-		})
-		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: drop, AttemptAt: server.NowUtc().Add(-30 * 24 * time.Hour),
-		})
-
-		RemoveExpiredProviderEgressProbeAttempts(ctx, server.NowUtc().Add(-24*time.Hour))
-
-		if GetProviderEgressProbeAttempt(ctx, keep) == nil {
-			t.Fatal("recent attempt must survive the sweep")
+		now := server.NowUtc()
+		networkId := server.NewId()
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Synthetic City",
+			Region:       "Synthetic Region",
+			Country:      "Synthetic Country",
+			CountryCode:  "zz",
 		}
-		if GetProviderEgressProbeAttempt(ctx, drop) != nil {
-			t.Fatal("old attempt must be swept")
+		CreateLocation(ctx, city)
+
+		eligibleNoLocation := testingCreateProviderClient(ctx, networkId, nil, true)
+		located := testingCreateProviderClient(ctx, networkId, nil, true)
+		inactive := testingCreateProviderClient(ctx, networkId, nil, false)
+		ineligible := testingCreateProviderClient(ctx, networkId, nil, true)
+		orphan := server.NewId()
+		recentLocated := testingCreateProviderClient(ctx, networkId, nil, true)
+		for _, clientId := range []server.Id{
+			eligibleNoLocation, located, inactive, ineligible, recentLocated,
+		} {
+			testingInsertProviderLocationReliability(ctx, clientId, networkId, city)
+		}
+		SetProvide(ctx, ineligible, map[ProvideMode][]byte{
+			ProvideModeNetwork: []byte("synthetic-network-secret"),
+		})
+		for _, clientId := range []server.Id{located, recentLocated} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "zz", ObservedAt: now,
+			})
+		}
+
+		old := now.Add(-30 * 24 * time.Hour)
+		for _, clientId := range []server.Id{
+			eligibleNoLocation, located, inactive, ineligible, orphan,
+		} {
+			SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+				ClientId: clientId, AttemptAt: old,
+			})
+		}
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: recentLocated, AttemptAt: now,
+		})
+
+		RemoveExpiredProviderEgressProbeAttempts(ctx, now.Add(-24*time.Hour))
+
+		if GetProviderEgressProbeAttempt(ctx, eligibleNoLocation) == nil {
+			t.Fatal("old attempt for an active eligible no-location provider must be retained")
+		}
+		if GetProviderEgressProbeAttempt(ctx, recentLocated) == nil {
+			t.Fatal("recent located attempt must survive the age cutoff")
+		}
+		for label, clientId := range map[string]server.Id{
+			"located": located, "inactive": inactive,
+			"ineligible": ineligible, "orphan": orphan,
+		} {
+			if GetProviderEgressProbeAttempt(ctx, clientId) != nil {
+				t.Errorf("old %s attempt must be swept", label)
+			}
 		}
 	})
 }
 
-// GetProviderEgressLocationDue is served by two statements -- never-probed
-// first, then stale-but-probed only when the first came up short -- because the
-// single-statement form sorts on observed_at from an outer-joined table, which
-// cannot use an index and becomes a full scan plus an unindexable sort at 100k
-// providers.
-//
-// The split is only safe if the concatenation is row-for-row what one statement
-// returned, at every limit. That is what this asserts: it builds one population
-// covering every eligibility case and then walks the limit from 0 past the end,
-// requiring each result to be exactly the prefix of the full ordering. Limit 3
-// is the seam (pass one exactly fills the batch) and limit 4 is the first that
-// crosses into pass two.
+// The due queue takes bounded location, existing-health, and missing-health
+// heads, merges their absolute hard deadlines in Go, and only then fills unused
+// slots from the unlocated lane. This reproduces the saturated-backlog failure:
+// every limit below the unlocated population used to return only unlocated
+// rows, making every urgent lane unreachable.
 func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -654,23 +696,22 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 		}
 		CreateLocation(ctx, city)
 
-		// three never-probed providers: the dominant group, and the reason the
-		// ordering is NULLS FIRST
-		never := []server.Id{server.NewId(), server.NewId(), server.NewId()}
-		// two stale ones, at different ages -- the older must be handed out first
-		staleOlder := server.NewId()
-		staleNewer := server.NewId()
-		// probed an hour ago: not due
+		// More unlocated providers than the smallest tested batch reproduce the
+		// production saturation boundary.
+		unlocated := []server.Id{
+			server.NewId(), server.NewId(), server.NewId(), server.NewId(),
+		}
+		healthWithoutLocation := server.NewId()
+		crossedDeadlines := server.NewId()
+		overlap := server.NewId()
+		healthFirst := server.NewId()
+		missingHealth := server.NewId()
+		locationSecond := server.NewId()
+		locationTie := server.NewId()
+		healthTie := server.NewId()
 		fresh := server.NewId()
-		// never probed, but attempted seconds ago: deferred by the backoff, and
-		// the case that would otherwise starve the queue
 		attempted := server.NewId()
-		// probed long ago AND attempted seconds ago. This one is only screened
-		// by the backoff predicate on the stale-but-probed pass -- the
-		// never-probed pass never sees it, because it has an egress row. Drop
-		// that predicate and it reappears in the batch.
 		staleAttempted := server.NewId()
-		// no Public provide key: unprobeable at any freshness
 		nonPublic := server.NewId()
 
 		address := 0
@@ -678,14 +719,18 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 			address += 1
 			testing_connectProbeableProvider(
 				t, ctx, clientId, city.LocationId,
-				fmt.Sprintf("0.0.%d.1:0", address), provideMode,
+				fmt.Sprintf("192.0.2.%d:0", address), provideMode,
 			)
 		}
-		for _, clientId := range never {
+		for _, clientId := range unlocated {
 			connectProvider(clientId, ProvideModePublic)
 		}
-		connectProvider(staleOlder, ProvideModePublic)
-		connectProvider(staleNewer, ProvideModePublic)
+		connectProvider(healthWithoutLocation, ProvideModePublic)
+		for _, clientId := range []server.Id{
+			crossedDeadlines, overlap, healthFirst, missingHealth, locationSecond, locationTie, healthTie,
+		} {
+			connectProvider(clientId, ProvideModePublic)
+		}
 		connectProvider(fresh, ProvideModePublic)
 		connectProvider(attempted, ProvideModePublic)
 		connectProvider(staleAttempted, ProvideModePublic)
@@ -693,13 +738,67 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
+		// Location cleanup deliberately does not delete the independently useful
+		// health history. Such a provider belongs to the no-location lane, not
+		// stale health, even when its retained health row is the oldest evidence
+		// in the database.
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
-			ClientId: staleOlder, LocationId: city.LocationId,
-			CountryCode: "us", ObservedAt: now.Add(-100 * time.Hour),
+			ClientId: healthWithoutLocation, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-30 * 24 * time.Hour),
 		})
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: healthWithoutLocation, MeasuredAt: now.Add(-30 * 24 * time.Hour),
+			OKCount: 1, Total: 1,
+		})
+		RemoveExpiredProviderEgressLocations(ctx, now.Add(-28*24*time.Hour))
+		if GetProviderEgressLocation(ctx, healthWithoutLocation) != nil {
+			t.Fatal("expired location must be removed for the health-without-location control")
+		}
+		if GetProviderEgressHealth(ctx, healthWithoutLocation) == nil {
+			t.Fatal("location cleanup must retain independent health evidence")
+		}
+		unlocated = append(unlocated, healthWithoutLocation)
+
+		// Hard deadlines, in order:
+		// crossed health (-1h), overlap health (+5m), healthFirst (+10m), missing health (+15m),
+		// locationSecond (+20m), then locationTie/healthTie (+30m,
+		// client_id tie-break).
+		locationTimes := map[server.Id]time.Time{
+			crossedDeadlines: now.Add(-90 * time.Hour),
+			overlap:          now.Add(-ProviderEgressLocationMaxAge + 40*time.Minute),
+			locationSecond:   now.Add(-ProviderEgressLocationMaxAge + 20*time.Minute),
+			locationTie:      now.Add(-ProviderEgressLocationMaxAge + 30*time.Minute),
+		}
+		for clientId, observedAt := range locationTimes {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "us", ObservedAt: observedAt,
+			})
+		}
+		healthTimes := map[server.Id]time.Time{
+			// Both crossedDeadlines lanes are due, but its 25-hour-old
+			// health expires before its 90-hour-old location. The merge and
+			// monitor category must follow that earlier absolute deadline.
+			crossedDeadlines: now.Add(-25 * time.Hour),
+			overlap:          now.Add(-ProviderEgressHealthMaxAge + 5*time.Minute),
+			healthFirst:      now.Add(-ProviderEgressHealthMaxAge + 10*time.Minute),
+			healthTie:        now.Add(-ProviderEgressHealthMaxAge + 30*time.Minute),
+		}
+		for clientId, measuredAt := range healthTimes {
+			if clientId != overlap && clientId != crossedDeadlines {
+				SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+					ClientId: clientId, LocationId: city.LocationId,
+					CountryCode: "us", ObservedAt: now.Add(-time.Hour),
+				})
+			}
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: measuredAt,
+				OKCount: 1, Total: 1,
+			})
+		}
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
-			ClientId: staleNewer, LocationId: city.LocationId,
-			CountryCode: "us", ObservedAt: now.Add(-50 * time.Hour),
+			ClientId: missingHealth, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-ProviderEgressHealthMaxAge + 15*time.Minute),
 		})
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId: fresh, LocationId: city.LocationId,
@@ -709,6 +808,12 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 			ClientId: staleAttempted, LocationId: city.LocationId,
 			CountryCode: "us", ObservedAt: now.Add(-200 * time.Hour),
 		})
+		for _, clientId := range []server.Id{locationSecond, locationTie, fresh, staleAttempted} {
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now,
+				OKCount: 1, Total: 1,
+			})
+		}
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
 			ClientId: attempted, AttemptAt: now.Add(-5 * time.Second),
 			ProbeFailure: "tunnel_failed",
@@ -720,30 +825,132 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 			ProbeFailure: "tunnel_failed",
 		})
 
-		minObservedAt := now.Add(-24 * time.Hour)
+		minObservedAt := now.Add(-ProviderEgressLocationMaxAge / 2)
 		minAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff)
 
-		// the never-probed group ties on a missing observed_at, so client_id
-		// alone orders it -- and postgres orders uuid by bytes, which is what
-		// server.Id.Cmp does
-		expected := slices.Clone(never)
-		slices.SortFunc(expected, func(a server.Id, b server.Id) int { return a.Cmp(b) })
-		// ... then the probed group, oldest probe first
-		expected = append(expected, staleOlder, staleNewer)
+		tied := []server.Id{locationTie, healthTie}
+		slices.SortFunc(tied, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		expected := []server.Id{crossedDeadlines, overlap, healthFirst, missingHealth, locationSecond}
+		expected = append(expected, tied...)
+		slices.SortFunc(unlocated, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		expected = append(expected, unlocated...)
 
 		due := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 100)
 		if !slices.Equal(due, expected) {
-			t.Fatalf("due = %v, want %v (never-probed by client_id, then stale oldest-first; fresh/attempted/stale-attempted/non-public excluded)", due, expected)
+			t.Fatalf("due = %v, want EDF urgent rows then unlocated rows %v", due, expected)
+		}
+		overlapCount := 0
+		for _, clientId := range due {
+			if clientId == overlap {
+				overlapCount += 1
+			}
+		}
+		if overlapCount != 1 {
+			t.Fatalf("overlapping location/health candidate appears %d times, want once", overlapCount)
 		}
 
-		// every limit must return exactly the prefix of that ordering. limit 3
-		// is the pass-one/pass-two seam; 4 is the first to cross it.
+		// Every limit is the exact prefix of the same stable ordering. Limits 1
+		// through 4 are all smaller than the saturated unlocated backlog and
+		// therefore fail under the former fixed-pass precedence.
 		for limit := 0; limit <= len(expected)+2; limit += 1 {
 			want := expected[:min(limit, len(expected))]
 			got := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, limit)
 			if !slices.Equal(got, want) {
 				t.Errorf("limit %d: due = %v, want %v", limit, got, want)
 			}
+		}
+	})
+}
+
+func TestProviderEgressStaleHealthDueQueryRequiresLocation(t *testing.T) {
+	normalized := strings.Join(strings.Fields(providerEgressStaleHealthDueQuery), " ")
+	for _, want := range []string{
+		"FROM provider_egress_health INNER JOIN provider_egress_location ON provider_egress_location.client_id = provider_egress_health.client_id",
+		"ORDER BY provider_egress_health.measured_at ASC, provider_egress_health.client_id ASC LIMIT $4",
+	} {
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("stale-health query lacks %q: %s", want, normalized)
+		}
+	}
+}
+
+func TestGetProviderEgressLocationDueAdvancesAfterAttempt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Synthetic City",
+			Region:       "Synthetic Region",
+			Country:      "Synthetic Country",
+			CountryCode:  "zz",
+		}
+		CreateLocation(ctx, city)
+
+		first := server.NewId()
+		second := server.NewId()
+		for i, clientId := range []server.Id{first, second} {
+			testing_connectProbeableProvider(
+				t, ctx, clientId, city.LocationId,
+				fmt.Sprintf("192.0.2.%d:0", i+1), ProvideModePublic,
+			)
+		}
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: first, LocationId: city.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-ProviderEgressLocationMaxAge + time.Minute),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: second, LocationId: city.LocationId,
+			CountryCode: "zz", ObservedAt: now.Add(-ProviderEgressLocationMaxAge + 2*time.Minute),
+		})
+		for _, clientId := range []server.Id{first, second} {
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now,
+				OKCount: 1, Total: 1,
+			})
+		}
+
+		minObservedAt := now.Add(-ProviderEgressLocationMaxAge / 2)
+		minAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff)
+		if got := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 1); !slices.Equal(got, []server.Id{first}) {
+			t.Fatalf("first due = %v, want earliest deadline %s", got, first)
+		}
+
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: first, AttemptAt: now, ProbeFailure: "synthetic_failure",
+		})
+		if got := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 1); !slices.Equal(got, []server.Id{second}) {
+			t.Fatalf("second due = %v, want next deadline %s after recording the first attempt", got, second)
+		}
+	})
+}
+
+func TestProviderEgressHealthDeadlineIndex(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var definition string
+		var valid, ready, nonPartial bool
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT
+					regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g'),
+					index_record.indisvalid,
+					index_record.indisready,
+					index_record.indpred IS NULL
+				FROM pg_index AS index_record
+				JOIN pg_class AS index_relation ON index_relation.oid = index_record.indexrelid
+				WHERE index_relation.oid = to_regclass('provider_egress_health_measured_at_client_id')
+			`)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&definition, &valid, &ready, &nonPartial))
+				}
+			})
+		})
+		const expected = "CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (measured_at, client_id)"
+		if definition != expected || !valid || !ready || !nonPartial {
+			t.Fatalf("stale-health deadline index = (%q, valid=%t, ready=%t, non_partial=%t), want exact valid/ready non-partial definition %q", definition, valid, ready, nonPartial, expected)
 		}
 	})
 }
@@ -902,8 +1109,8 @@ func TestGetProviderEgressLocationDueOffersStaleHealth(t *testing.T) {
 		staleHealth := server.NewId()
 		freshHealth := server.NewId()
 
-		testing_connectProbeableProvider(t, ctx, staleHealth, city.LocationId, "0.0.0.1:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, freshHealth, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, staleHealth, city.LocationId, "192.0.2.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, freshHealth, city.LocationId, "192.0.2.2:0", ProvideModePublic)
 
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
@@ -942,16 +1149,11 @@ func TestGetProviderEgressLocationDueOffersStaleHealth(t *testing.T) {
 	})
 }
 
-// A provider that has a location but has NEVER been health-measured is left to
-// the location-driven passes, not offered by the health pass.
-//
-// Scoping matters: "lacks fresh health" is also true of a provider measured
-// never, and offering those would re-probe a provider whose location was taken
-// minutes ago purely because no health row accompanies it. Such a provider is
-// excluded from the list meanwhile (passesHealth fails closed on a missing row)
-// and returns via pass 2 when its location goes stale, so it is deferred rather
-// than stranded.
-func TestGetProviderEgressLocationDueLeavesNeverMeasuredToLocationPasses(t *testing.T) {
+// A location report can succeed while the independent health check is skipped
+// or its non-fatal report fails. Publication fails closed on that missing row,
+// so the scheduler must retry it through an urgent, attempt-backed-off lane
+// rather than waiting for the seven-day location lifecycle.
+func TestGetProviderEgressLocationDueOffersMissingHealthAfterAttemptBackoff(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
@@ -965,17 +1167,51 @@ func TestGetProviderEgressLocationDueLeavesNeverMeasuredToLocationPasses(t *test
 		}
 		CreateLocation(ctx, city)
 
-		noHealthRow := server.NewId()
-		testing_connectProbeableProvider(t, ctx, noHealthRow, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		missingUnattempted := server.NewId()
+		missingRecentlyAttempted := server.NewId()
+		healthy := server.NewId()
+		for i, clientId := range []server.Id{missingUnattempted, missingRecentlyAttempted, healthy} {
+			testing_connectProbeableProvider(
+				t, ctx, clientId, city.LocationId,
+				fmt.Sprintf("192.0.2.%d:0", i+1), ProvideModePublic,
+			)
+		}
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
-		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
-			ClientId: noHealthRow, LocationId: city.LocationId,
-			CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+		for _, clientId := range []server.Id{missingUnattempted, missingRecentlyAttempted, healthy} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+			})
+		}
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: healthy, MeasuredAt: now,
+			OKCount: 1, Total: 1,
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: missingRecentlyAttempted, AttemptAt: now,
+			ProbeFailure: "synthetic_health_report_failure",
 		})
 
-		if due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 100); slices.Contains(due, noHealthRow) {
-			t.Errorf("due = %v, must not contain the never-measured provider with a fresh location (%s)", due, noHealthRow)
+		due := GetProviderEgressLocationDue(
+			ctx, now.Add(-ProviderEgressLocationMaxAge/2),
+			now.Add(-ProviderEgressProbeAttemptBackoff), 100,
+		)
+		if !slices.Contains(due, missingUnattempted) {
+			t.Errorf("due = %v, must contain the fresh-location provider with no health row (%s)", due, missingUnattempted)
+		}
+		if slices.Contains(due, missingRecentlyAttempted) {
+			t.Errorf("due = %v, must defer the missing-health provider attempted moments ago (%s)", due, missingRecentlyAttempted)
+		}
+		if slices.Contains(due, healthy) {
+			t.Errorf("due = %v, must not contain the provider with fresh location and health (%s)", due, healthy)
+		}
+
+		afterBackoff := GetProviderEgressLocationDue(
+			ctx, now.Add(-ProviderEgressLocationMaxAge/2), now.Add(time.Second), 100,
+		)
+		if !slices.Contains(afterBackoff, missingRecentlyAttempted) {
+			t.Errorf("due = %v, must contain the missing-health provider after its attempt backoff (%s)", afterBackoff, missingRecentlyAttempted)
 		}
 	})
 }

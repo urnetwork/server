@@ -1,73 +1,64 @@
 package server
 
 import (
-	cryptorand "crypto/rand"
 	"fmt"
-	mathrand "math/rand"
 	"net"
 	"net/netip"
-	"time"
-
+	"os"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
 
+const portableIpInfoIpv4 = "192.0.2.1"
+const portableIpInfoIpv6 = "2001:db8::1"
+
+// The portable suite intentionally replaces the external location databases
+// with synthetic documentation-subnet overrides. A developer using external
+// resources keeps that separate integration boundary instead of silently
+// testing different lookup data here.
+func requirePortableIpInfoFixture(t *testing.T) {
+	t.Helper()
+	if os.Getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") != "1" {
+		t.Skip("requires the portable synthetic ip override fixture")
+	}
+	for _, rawIp := range []string{portableIpInfoIpv4, portableIpInfoIpv6} {
+		if ipOverrideFor(netip.MustParseAddr(rawIp)) == nil {
+			t.Fatalf("portable fixture does not override documentation address %s", rawIp)
+		}
+	}
+}
+
 func TestIpInfo(t *testing.T) {
-	ip1 := net.ParseIP("65.19.157.62")
-	ipInfo1, err := GetIpInfoFromIp(ip1)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, ipInfo1, nil)
-
-	connect.AssertEqual(t, ipInfo1.CountryCode, "us")
-	connect.AssertEqual(t, ipInfo1.Country, "United States")
-	connect.AssertEqual(t, ipInfo1.Region, "California")
-	connect.AssertEqual(t, ipInfo1.UserType, UserTypeHosting)
-	connect.AssertNotEqual(t, ipInfo1.Longitude, float64(0.0))
-	connect.AssertNotEqual(t, ipInfo1.Latitude, float64(0.0))
-
-	ip2 := net.ParseIP("2001:470:173::52")
-	ipInfo2, err := GetIpInfoFromIp(ip2)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, ipInfo2, nil)
-
-	connect.AssertEqual(t, ipInfo2.CountryCode, "us")
-	connect.AssertEqual(t, ipInfo2.Country, "United States")
-	connect.AssertEqual(t, ipInfo2.Region, "California")
-	connect.AssertEqual(t, ipInfo2.UserType, UserTypeHosting)
-	connect.AssertNotEqual(t, ipInfo2.Longitude, float64(0.0))
-	connect.AssertNotEqual(t, ipInfo2.Latitude, float64(0.0))
-
-	ip3 := net.ParseIP("1.1.1.1")
-	ipInfo3, err := GetIpInfoFromIp(ip3)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, ipInfo3, nil)
-
-	connect.AssertEqual(t, ipInfo3.UserType, UserTypeHosting)
-	connect.AssertEqual(t, ipInfo3.Hosting, true)
-	connect.AssertNotEqual(t, ipInfo3.Longitude, float64(0.0))
-	connect.AssertNotEqual(t, ipInfo3.Latitude, float64(0.0))
-
+	requirePortableIpInfoFixture(t)
+	for _, rawIp := range []string{portableIpInfoIpv4, portableIpInfoIpv6} {
+		ipInfo, err := GetIpInfoFromIp(net.ParseIP(rawIp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ipInfo == nil || ipInfo.CountryCode != "zz" || ipInfo.Country != "Fixture Country" ||
+			ipInfo.Region != "Fixture Region" || ipInfo.City != "Fixture City" ||
+			ipInfo.UserType != UserTypeConsumer || ipInfo.Hosting || ipInfo.Latitude != 0 || ipInfo.Longitude != 0 {
+			t.Fatalf("documentation address %s resolved to unexpected synthetic info: %+v", rawIp, ipInfo)
+		}
+	}
 }
 
 func TestIpInfoPerf(t *testing.T) {
-	Warmup(WarmupTargetIPDatabase)
+	requirePortableIpInfoFixture(t)
+	ips := []net.IP{net.ParseIP(portableIpInfoIpv4), net.ParseIP(portableIpInfoIpv6)}
+	for _, ip := range ips {
+		if _, err := GetIpInfoFromIp(ip); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	n := 100000
 	startTime := time.Now()
-	for range n {
-		if mathrand.Intn(2) == 0 {
-			ipv6Bytes := make([]byte, 16)
-			cryptorand.Read(ipv6Bytes)
-			ipv6 := net.IP(ipv6Bytes)
-			_, err := GetIpInfoFromIp(ipv6)
-			connect.AssertEqual(t, err, nil)
-		} else {
-			ipv4Bytes := make([]byte, 4)
-			cryptorand.Read(ipv4Bytes)
-			ipv4 := net.IP(ipv4Bytes)
-			_, err := GetIpInfoFromIp(ipv4)
-			connect.AssertEqual(t, err, nil)
+	for index := range n {
+		if _, err := GetIpInfoFromIp(ips[index%len(ips)]); err != nil {
+			t.Fatal(err)
 		}
 	}
 	endTime := time.Now()
@@ -145,9 +136,9 @@ func TestDistance(t *testing.T) {
 }
 
 func TestParseClientAddress(t *testing.T) {
-	addrPort, err := ParseClientAddress("[2001:470:99:57:e643:4bff:fe23:a343]:443")
+	addrPort, err := ParseClientAddress("[2001:db8:99:57:e643:4bff:fe23:a343]:443")
 	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, addrPort.Addr().String(), "2001:470:99:57:e643:4bff:fe23:a343")
+	connect.AssertEqual(t, addrPort.Addr().String(), "2001:db8:99:57:e643:4bff:fe23:a343")
 	connect.AssertEqual(t, int(addrPort.Port()), 443)
 
 	addrPort, err = ParseClientAddress("127.0.0.1:443")
@@ -165,20 +156,16 @@ func TestParseClientAddress(t *testing.T) {
 }
 
 func TestArinInfo(t *testing.T) {
-	ip1 := net.ParseIP("65.19.157.62")
-	arinInfo1, err := GetArinInfoFromIp(ip1)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, arinInfo1, nil)
-
-	connect.AssertEqual(t, arinInfo1.OrgCountryCodes[0], "us")
-
-	ip2 := net.ParseIP("2001:4200::1")
-	arinInfo2, err := GetArinInfoFromIp(ip2)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, arinInfo2, nil)
-
-	connect.AssertEqual(t, arinInfo2.OrgCountryCodes[0], "mu")
-
+	requirePortableIpInfoFixture(t)
+	for _, rawIp := range []string{portableIpInfoIpv4, portableIpInfoIpv6} {
+		arinInfo, err := GetArinInfoFromIp(net.ParseIP(rawIp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if arinInfo == nil || len(arinInfo.OrgCountryCodes) != 1 || arinInfo.OrgCountryCodes[0] != "zz" {
+			t.Fatalf("documentation address %s resolved to unexpected synthetic registration: %+v", rawIp, arinInfo)
+		}
+	}
 }
 
 func TestParseIpOverrides(t *testing.T) {
@@ -231,5 +218,5 @@ func TestParseIpOverrides(t *testing.T) {
 	connect.AssertEqual(t, ipInfo.Longitude, 20.5)
 
 	// outside every override subnet
-	connect.AssertEqual(t, find("198.20.0.1") == nil, true)
+	connect.AssertEqual(t, find("203.0.113.1") == nil, true)
 }

@@ -111,8 +111,28 @@ type FindLocationsArgs struct {
 	Query string `json:"query,omitempty" jsonschema:"Location name to search for (e.g. 'New York', 'Tokyo', 'US East'). Supports fuzzy matching. An empty or missing query returns a list of available countries."`
 }
 
-// Handles the providerLocations tool call.
+// Handles the providerLocations tool call and records only aggregate input,
+// output, and location counts.
 func getProviderLocations(ctx context.Context, req *mcpsdk.CallToolRequest, findLocations FindLocationsArgs) (*mcpsdk.CallToolResult, *ProviderLocationsResult, error) {
+	mcpToolBytesTotal.WithLabelValues("providerLocations", "input").Add(float64(len(findLocations.Query)))
+	callResult, out, err := getProviderLocationsImpl(ctx, req, findLocations)
+	resultClass := "succeeded"
+	if err != nil {
+		resultClass = "error"
+	} else if callResult != nil && callResult.IsError {
+		resultClass = "tool_error"
+	}
+	if callResult != nil {
+		mcpToolBytesTotal.WithLabelValues("providerLocations", "output").Add(float64(mcpContentBytes(callResult.Content)))
+	}
+	if out != nil {
+		mcpToolItemsTotal.WithLabelValues("providerLocations", "location", resultClass).Add(float64(len(out.Locations)))
+	}
+	return callResult, out, err
+}
+
+// getProviderLocationsImpl resolves and renders provider locations.
+func getProviderLocationsImpl(ctx context.Context, req *mcpsdk.CallToolRequest, findLocations FindLocationsArgs) (*mcpsdk.CallToolResult, *ProviderLocationsResult, error) {
 	if !tokenHasScope(ctx, oauth.ScopeMcpRead) {
 		return insufficientScopeResult(oauth.ScopeMcpRead), nil, nil
 	}

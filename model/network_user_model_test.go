@@ -8,8 +8,6 @@ import (
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkUser(t *testing.T) {
@@ -127,32 +125,23 @@ func TestAddUserAuthWallet(t *testing.T) {
 
 		networkId := server.NewId()
 		userId := server.NewId()
-		clientId := server.NewId()
 		networkName := "abcdef"
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId: networkId,
-			ClientId:  &clientId,
-			UserId:    userId,
-		})
-
-		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
-
-		args := WalletAuthArgs{
-			PublicKey:  pk,
-			Signature:  "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw==",
-			Message:    "Welcome to URnetwork",
-			Blockchain: "solana",
-		}
+		signer := newSolanaAcceptanceWalletSigner(t)
+		walletAuth := signedAcceptanceWalletChallenge(
+			t,
+			ctx,
+			signer,
+		)
 
 		err := addWalletAuth(
 			&AddWalletAuthArgs{
-				WalletAuth: &args,
+				WalletAuth: walletAuth,
 				UserId:     userId,
 			},
-			session.Ctx,
+			ctx,
 		)
 		assert.Equal(t, err, nil)
 
@@ -162,23 +151,23 @@ func TestAddUserAuthWallet(t *testing.T) {
 		networkUser := GetNetworkUser(ctx, userId)
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, len(networkUser.WalletAuths), 1)
-		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, walletAuth.PublicKey)
 
 		/**
 		 * Overwrite the wallet auth with a different public key
 		 */
-		pk = "26acoTqfWANX72SUvcTdPkDXdZXYCcHbRDLkFThViPLk"
-
-		args = WalletAuthArgs{
-			PublicKey:  pk,
-			Signature:  "xQLllMyvXMb6zAp0DWOsViESau6WL/OPeT1nKmyD+OD8yjfxf5TY5AmfiO4edykSgbnFRhTKjjM9cLoPAFXMCw==",
-			Message:    "Welcome to URnetwork",
-			Blockchain: "solana",
-		}
+		firstWalletAddress := walletAuth.PublicKey
+		signer = newSolanaAcceptanceWalletSigner(t)
+		walletAuth = signedAcceptanceWalletChallenge(
+			t,
+			ctx,
+			signer,
+		)
+		assert.NotEqual(t, walletAuth.PublicKey, firstWalletAddress)
 
 		err = addWalletAuth(
 			&AddWalletAuthArgs{
-				WalletAuth: &args,
+				WalletAuth: walletAuth,
 				UserId:     userId,
 			},
 			ctx,
@@ -188,7 +177,7 @@ func TestAddUserAuthWallet(t *testing.T) {
 		networkUser = GetNetworkUser(ctx, userId)
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, len(networkUser.WalletAuths), 1)
-		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, walletAuth.PublicKey)
 
 	})
 }

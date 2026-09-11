@@ -19,8 +19,8 @@ func TestAuditNetworkCreateStoresAddressHash(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		clientAddress := "9.8.7.6:4321"
-		expectedHash, err := server.ClientIpHash("9.8.7.6")
+		clientAddress := "192.0.2.6:4321"
+		expectedHash, err := server.ClientIpHash("192.0.2.6")
 		assert.Equal(t, err, nil)
 
 		clientSession := session.NewLocalClientSession(ctx, clientAddress, nil)
@@ -54,7 +54,7 @@ func TestAuditNetworkCreateStoresAddressHash(t *testing.T) {
 		})
 
 		// the raw address must not appear anywhere in the stored blob
-		if strings.Contains(eventDetails, "9.8.7.6") {
+		if strings.Contains(eventDetails, "192.0.2.6") {
 			t.Fatalf("audit event details contain the raw client ip: %s", eventDetails)
 		}
 

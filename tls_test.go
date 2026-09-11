@@ -208,10 +208,9 @@ func TestTransportTlsWildcardFallsBackFromPartialRotations(t *testing.T) {
 }
 
 func TestTransportTls(t *testing.T) {
-
-	// create from config
-
-	// get various certs that should exist
+	if os.Getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") != "1" {
+		t.Skip("requires the portable synthetic TLS fixture")
+	}
 
 	settings := &TransportTlsSettings{
 		EnableSelfSign: false,
@@ -219,26 +218,13 @@ func TestTransportTls(t *testing.T) {
 	transportTls, err := NewTransportTlsFromConfig(settings)
 	connect.AssertEqual(t, err, nil)
 
-	tlsConfig, err := transportTls.GetTlsConfig("ur.network")
+	tlsConfig, err := transportTls.GetTlsConfig("fixture.example")
 	connect.AssertEqual(t, err, nil)
 	connect.AssertNotEqual(t, tlsConfig, nil)
 
-	tlsConfig, err = transportTls.GetTlsConfig("bringyour.com")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("main-connect.ur.network")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("main-connect.bringyour.com")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("foo.ur.network")
+	tlsConfig, err = transportTls.GetTlsConfig("unlisted.fixture.example")
 	connect.AssertNotEqual(t, err, nil)
 	connect.AssertEqual(t, tlsConfig, nil)
-
 }
 
 func TestTransportTlsSelfSign(t *testing.T) {
@@ -249,28 +235,13 @@ func TestTransportTlsSelfSign(t *testing.T) {
 	transportTls, err := NewTransportTlsFromConfig(settings)
 	connect.AssertEqual(t, err, nil)
 
-	tlsConfig, err := transportTls.GetTlsConfig("ur.network")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("bringyour.com")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("main-connect.ur.network")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("main-connect.bringyour.com")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("foo.ur.network")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
-	tlsConfig, err = transportTls.GetTlsConfig("foo2.bar.ur.network")
-	connect.AssertEqual(t, err, nil)
-	connect.AssertNotEqual(t, tlsConfig, nil)
-
+	for _, hostName := range []string{
+		"fixture.example",
+		"unlisted.fixture.example",
+		"deep.unlisted.fixture.example",
+	} {
+		tlsConfig, err := transportTls.GetTlsConfig(hostName)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, tlsConfig, nil)
+	}
 }

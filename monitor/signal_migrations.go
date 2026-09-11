@@ -38,6 +38,12 @@ type migrationArtifact struct {
 	rowColumn      int
 }
 
+// pg_get_indexdef is normalized to single spaces before it is compared with
+// this catalog value. Pinning the complete definition (rather than only the
+// relation name) prevents an invalid, not-yet-ready, partial, differently
+// ordered, or otherwise look-alike index from arming the deadline scheduler.
+const providerEgressHealthDeadlineIndexDefinition = "CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (measured_at, client_id)"
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -106,6 +112,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
 	{name: "onboarding_email_tracker_daily", requiredVersion: 655, rowColumn: 66},
 	{name: "network_onboarding_email_sent_at", requiredVersion: 656, rowColumn: 67},
+	{name: "provider_egress_health measured_at/client_id deadline index", requiredVersion: 657, rowColumn: 68},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -736,6 +743,14 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           WHERE table_name = 'network_onboarding_email'
 		             AND index_name = 'network_onboarding_email_sent_at'
 		             AND definition LIKE '%(sent_at, network_id, step)%'
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'provider_egress_health'
+		             AND index_name = 'provider_egress_health_measured_at_client_id'
+		             AND definition = '`+providerEgressHealthDeadlineIndexDefinition+`'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       )
 		FROM version;

@@ -845,6 +845,14 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
+		subsidyConfig := *EnvSubsidyConfig()
+		subsidyConfig.Days = 2
+		subsidyConfig.MinDaysFraction = 0
+		subsidyConfig.MinPayoutUsd = 1
+		subsidyConfig.MinWalletPayoutUsd = 0
+		subsidyConfig.UsdPerActiveUser = 0
+		subsidyConfig.SubscriptionNetRevenueFraction = 0
+		subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0
 
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
 		netRevenue := UsdToNanoCents(10.00)
@@ -937,16 +945,18 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 		err = CloseContract(ctx, escrowB.ContractId, providerBClientId, usedTransferByteCount, false)
 		connect.AssertEqual(t, err, nil)
 
-		// backdate the contracts so the subsidy covers half an epoch
+		// Backdate the contracts by half of the configured epoch. The test owns
+		// the payout threshold/cadence overrides above, so a portable fixture's
+		// intentionally short epoch cannot turn this into a withholding test.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`UPDATE transfer_contract SET create_time = $1`,
-				server.NowUtc().Add(-15*24*time.Hour),
+				server.NowUtc().Add(-subsidyConfig.Duration()/2),
 			))
 		})
 
-		paymentPlan, err := PlanPayments(ctx)
+		paymentPlan, err := PlanPaymentsWithConfig(ctx, &subsidyConfig)
 		connect.AssertEqual(t, err, nil)
 
 		subsidyPayment := GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
@@ -971,10 +981,10 @@ func TestPaymentPlanSubsidyEqualWeight(t *testing.T) {
 		connect.AssertEqual(t, subsidyPayment.NetPayout, paymentA.SubsidyPayout+paymentB.SubsidyPayout)
 
 		// approximately half of the min payout pot (0.5 scale of the epoch)
-		minExpected := UsdToNanoCents(0.499 * EnvSubsidyConfig().MinPayoutUsd)
-		maxExpected := UsdToNanoCents(0.502 * EnvSubsidyConfig().MinPayoutUsd)
+		minExpected := UsdToNanoCents(0.499 * subsidyConfig.MinPayoutUsd)
+		maxExpected := UsdToNanoCents(0.502 * subsidyConfig.MinPayoutUsd)
 		if subsidyPayment.NetPayout < minExpected || maxExpected < subsidyPayment.NetPayout {
-			connect.AssertEqual(t, subsidyPayment.NetPayout, UsdToNanoCents(0.5*EnvSubsidyConfig().MinPayoutUsd))
+			connect.AssertEqual(t, subsidyPayment.NetPayout, UsdToNanoCents(0.5*subsidyConfig.MinPayoutUsd))
 		}
 
 		// the payments also carry the wallets owned by each provider

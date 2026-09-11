@@ -36,9 +36,9 @@ func RemoveExpiredProviderEgressLocations(
 	now := server.NowUtc()
 	minObservedAt := now.Add(-4 * model.ProviderEgressLocationMaxAge)
 	model.RemoveExpiredProviderEgressLocations(clientSession.Ctx, minObservedAt)
-	// probe attempts stop meaning anything once they no longer defer the
-	// provider; same reasoning as above, a looser multiple of the window that
-	// actually matters.
+	// Old attempts remain scheduling evidence for active eligible no-location
+	// providers. The model sweep removes only located, ineligible, inactive, or
+	// orphaned rows past this storage horizon.
 	minAttemptAt := now.Add(-4 * model.ProviderEgressProbeAttemptBackoff)
 	model.RemoveExpiredProviderEgressProbeAttempts(clientSession.Ctx, minAttemptAt)
 	return &RemoveExpiredProviderEgressLocationsResult{}, nil

@@ -51,12 +51,12 @@ func TestSignProxyId(t *testing.T) {
 }
 
 func TestSignProxyIdHosts(t *testing.T) {
-
-	host := "06ds11j8v14jm3kuoig10h95j8tt7gdefb33jnap47jbiq1paapoheo8e8.connect.bringyour.com"
+	proxyId := server.NewId()
+	host := SignProxyId(proxyId) + ".proxy.example"
 	hostProxyId := strings.SplitN(host, ".", 2)[0]
-	_, err := ParseSignedProxyId(hostProxyId)
+	parsedProxyId, err := ParseSignedProxyId(hostProxyId)
 	connect.AssertEqual(t, err, nil)
-
+	connect.AssertEqual(t, parsedProxyId, proxyId)
 }
 
 func TestCreateProxyClient(t *testing.T) {

@@ -249,7 +249,7 @@ func TestProviderEgressLocationDueAcceptsCorrectSecret(t *testing.T) {
 		model.CreateLocation(ctx, city)
 
 		due := server.NewId()
-		testing_connectDueProvider(t, ctx, due, city.LocationId, "0.0.0.1:0")
+		testing_connectDueProvider(t, ctx, due, city.LocationId, "192.0.2.1:0")
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=10", nil)
@@ -297,8 +297,8 @@ func TestProviderEgressLocationDueHonoursLimit(t *testing.T) {
 		}
 		model.CreateLocation(ctx, city)
 
-		testing_connectDueProvider(t, ctx, server.NewId(), city.LocationId, "0.0.0.1:0")
-		testing_connectDueProvider(t, ctx, server.NewId(), city.LocationId, "0.0.0.2:0")
+		testing_connectDueProvider(t, ctx, server.NewId(), city.LocationId, "192.0.2.1:0")
+		testing_connectDueProvider(t, ctx, server.NewId(), city.LocationId, "192.0.2.2:0")
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=1", nil)
@@ -345,8 +345,8 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 
 		fresh := server.NewId()
 		stale := server.NewId()
-		testing_connectDueProvider(t, ctx, fresh, city.LocationId, "0.0.0.1:0")
-		testing_connectDueProvider(t, ctx, stale, city.LocationId, "0.0.0.2:0")
+		testing_connectDueProvider(t, ctx, fresh, city.LocationId, "192.0.2.1:0")
+		testing_connectDueProvider(t, ctx, stale, city.LocationId, "192.0.2.2:0")
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		now := server.NowUtc()
@@ -360,6 +360,12 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 			ClientId: stale, LocationId: city.LocationId,
 			CountryCode: "us", ObservedAt: now.Add(-providerEgressDueAge - time.Hour),
 		})
+		for _, clientId := range []server.Id{fresh, stale} {
+			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now,
+				OKCount: 1, Total: 1,
+			})
+		}
 
 		req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=100", nil)
 		req.Header.Set(operatorSecretHeader, secret)
@@ -441,7 +447,7 @@ func TestProviderEgressLocationAttemptDefersProvider(t *testing.T) {
 		model.CreateLocation(ctx, city)
 
 		dead := server.NewId()
-		testing_connectDueProvider(t, ctx, dead, city.LocationId, "0.0.0.1:0")
+		testing_connectDueProvider(t, ctx, dead, city.LocationId, "192.0.2.1:0")
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		if !slices.Contains(due(t, secret), dead) {

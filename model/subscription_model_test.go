@@ -80,8 +80,13 @@ func TestNanoCents(t *testing.T) {
 func planPassThroughPayments(ctx context.Context) (*PaymentPlan, error) {
 	subsidyConfig := *EnvSubsidyConfig()
 	// MinPayoutUsd is a floor inside the planner's max(), so it must be
-	// zeroed too or it becomes the whole subsidy
+	// zeroed too or it becomes the whole subsidy. The minimum window is also
+	// zeroed: these tests exercise ledger settlement, not an environment's
+	// payout cadence, and a strict fixture cadence may legitimately defer it.
 	subsidyConfig.MinPayoutUsd = 0
+	subsidyConfig.Days = 1
+	subsidyConfig.MinDaysFraction = 0
+	subsidyConfig.ActiveUserByteCountThresholdHumanReadable = "1b"
 	subsidyConfig.UsdPerActiveUser = 0
 	subsidyConfig.SubscriptionNetRevenueFraction = 0
 	subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0

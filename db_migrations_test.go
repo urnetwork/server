@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,177 @@ func TestOnboardingEmailTrackerMigrationIsPrivacySafe(t *testing.T) {
 			t.Errorf("onboarding email tracker source index lacks %q", required)
 		}
 	}
+}
+
+func providerEgressHealthDeadlineMigration(t testing.TB) *OnlineSqlMigration {
+	t.Helper()
+	index := migrationIndex(t, "provider_egress_health_measured_at_client_id")
+	if index+1 != 657 {
+		t.Fatalf("provider-egress health deadline migration version = %d, want 657", index+1)
+	}
+	if index != len(migrations)-1 {
+		t.Fatalf("provider-egress health deadline migration index = %d, want append-only head %d", index, len(migrations)-1)
+	}
+	migration, ok := migrations[index].(*OnlineSqlMigration)
+	if !ok {
+		t.Fatalf("provider-egress health deadline migration is %T, want *OnlineSqlMigration", migrations[index])
+	}
+	return migration
+}
+
+func TestProviderEgressHealthDeadlineMigrationRecoversConcurrentIndexResidue(t *testing.T) {
+	migration := providerEgressHealthDeadlineMigration(t)
+	steps := migration.productionSqlSteps()
+	if len(steps) != 2 {
+		t.Fatalf("production SQL steps = %d, want separate recovery and create statements", len(steps))
+	}
+	normalize := func(sql string) string {
+		return strings.Join(strings.Fields(sql), " ")
+	}
+	if got, want := normalize(steps[0]), "DROP INDEX CONCURRENTLY IF EXISTS provider_egress_health_measured_at_client_id"; got != want {
+		t.Fatalf("recovery SQL = %q, want %q", got, want)
+	}
+	if got, want := normalize(steps[1]), "CREATE INDEX CONCURRENTLY provider_egress_health_measured_at_client_id ON provider_egress_health (measured_at, client_id)"; got != want {
+		t.Fatalf("create SQL = %q, want %q", got, want)
+	}
+	auditSql := normalize(migration.auditSql)
+	for _, want := range []string{
+		"DROP INDEX IF EXISTS provider_egress_health_measured_at_client_id;",
+		"CREATE INDEX provider_egress_health_measured_at_client_id ON provider_egress_health (measured_at, client_id)",
+	} {
+		if !strings.Contains(auditSql, want) {
+			t.Fatalf("audit SQL lacks %q: %s", want, auditSql)
+		}
+	}
+	if strings.Contains(auditSql, "CONCURRENTLY") {
+		t.Fatalf("transactional schema audit SQL contains CONCURRENTLY: %s", auditSql)
+	}
+
+	// The fake index state pins the two restart boundaries that matter in
+	// production. A failed concurrent build may leave an invalid same-name
+	// index, while a successful build may crash before migration_audit records
+	// success. Replaying the exact production executor must recover both.
+	type indexState string
+	const (
+		indexAbsent  indexState = "absent"
+		indexInvalid indexState = "invalid"
+		indexValid   indexState = "valid"
+	)
+	state := indexAbsent
+	failCreate := true
+	apply := func() error {
+		return executeOnlineSqlMigration(context.Background(), migration, func(_ context.Context, sql string) error {
+			switch {
+			case strings.HasPrefix(normalize(sql), "DROP INDEX CONCURRENTLY IF EXISTS"):
+				state = indexAbsent
+				return nil
+			case strings.HasPrefix(normalize(sql), "CREATE INDEX CONCURRENTLY"):
+				if state != indexAbsent {
+					return errors.New("same-name index still exists")
+				}
+				if failCreate {
+					failCreate = false
+					state = indexInvalid
+					return errors.New("synthetic interrupted concurrent build")
+				}
+				state = indexValid
+				return nil
+			default:
+				return errors.New("unexpected online migration statement")
+			}
+		})
+	}
+	if err := apply(); err == nil || state != indexInvalid {
+		t.Fatalf("interrupted create: err=%v state=%s, want error and invalid residue", err, state)
+	}
+	if err := apply(); err != nil || state != indexValid {
+		t.Fatalf("invalid-residue replay: err=%v state=%s, want valid", err, state)
+	}
+	// A valid state with no durable success record is indistinguishable from a
+	// post-create crash. Its replay drops and recreates rather than failing on
+	// the duplicate name.
+	if err := apply(); err != nil || state != indexValid {
+		t.Fatalf("post-create/pre-record replay: err=%v state=%s, want valid", err, state)
+	}
+}
+
+func TestProviderEgressHealthDeadlineMigrationReplaysAgainstPostgres(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		migration := providerEgressHealthDeadlineMigration(t)
+		const indexName = "provider_egress_health_measured_at_client_id"
+		const expectedDefinition = "CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (measured_at, client_id)"
+
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `
+				CREATE TABLE provider_egress_health (
+					client_id uuid NOT NULL,
+					measured_at timestamp NOT NULL
+				);
+				CREATE INDEX provider_egress_health_measured_at_client_id
+				ON provider_egress_health (client_id);
+			`))
+		})
+
+		assertExactIndex := func(conn PgConn, label string, expected string) {
+			t.Helper()
+			var definition string
+			var valid bool
+			var ready bool
+			var nonPartial bool
+			err := conn.QueryRow(ctx, `
+				SELECT
+					regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g'),
+					index_record.indisvalid,
+					index_record.indisready,
+					index_record.indpred IS NULL
+				FROM pg_index AS index_record
+				JOIN pg_class AS index_relation ON index_relation.oid = index_record.indexrelid
+				JOIN pg_class AS table_relation ON table_relation.oid = index_record.indrelid
+				JOIN pg_namespace AS namespace ON namespace.oid = table_relation.relnamespace
+				WHERE namespace.nspname = 'public'
+				  AND table_relation.relname = 'provider_egress_health'
+				  AND index_relation.relname = $1
+			`, indexName).Scan(&definition, &valid, &ready, &nonPartial)
+			if err != nil {
+				t.Fatalf("%s index lookup: %v", label, err)
+			}
+			if definition != expected || !valid || !ready || !nonPartial {
+				t.Fatalf("%s index = (%q valid=%t ready=%t non_partial=%t), want exact %q and true flags", label, definition, valid, ready, nonPartial, expected)
+			}
+		}
+
+		MaintenanceDb(ctx, func(conn PgConn) {
+			assertExactIndex(
+				conn,
+				"synthetic valid wrong-shape residue",
+				"CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (client_id)",
+			)
+			apply := func(label string) {
+				t.Helper()
+				err := executeOnlineSqlMigration(ctx, migration, func(ctx context.Context, sql string) error {
+					_, err := conn.Exec(ctx, sql)
+					return err
+				})
+				if err != nil {
+					t.Fatalf("%s: %v", label, err)
+				}
+				assertExactIndex(conn, label, expectedDefinition)
+			}
+			apply("wrong-shape residue recovery")
+			// The index now exists exactly but no migration success row was
+			// recorded. Replaying models a crash after create and before audit.
+			apply("create-before-audit-record replay")
+		}, OptReadWrite(), OptNoRetry())
+
+		// Schema audit deliberately uses ordinary DDL in one transaction.
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, migration.auditSql))
+		})
+		MaintenanceDb(ctx, func(conn PgConn) {
+			assertExactIndex(conn, "transactional audit replay", expectedDefinition)
+		}, OptReadOnly(), OptNoRetry())
+	})
 }
 
 // A pending migration can race ahead of the runtime fix that stopped blank
