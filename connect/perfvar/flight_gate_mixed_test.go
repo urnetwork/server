@@ -857,21 +857,34 @@ func TestPerfvarFeatureSelection(t *testing.T) {
 		t.Fatal("an empty feature selection changed the scenario identity")
 	}
 	// Both polarities reach the endpoint Clients on a tree that has the
-	// settings, whatever their defaults are on that tree.
-	on := fullTunClientSettingsWithFeatures(
+	// settings, whatever their defaults are on that tree. The fields are read
+	// by name because this file also compiles against revisions without them.
+	read := func(settings *clientconnect.ClientSettings) (bool, bool, bool) {
+		defer_, deferOk := perfvarBoolField(
+			settings.SendBufferSettings,
+			"DeferTimeoutResendWhileCumulativeProgress",
+		)
+		sizeAware, sizeOk := perfvarBoolField(
+			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings,
+			"FastPathSizeAwareAdmission",
+		)
+		return defer_, sizeAware, deferOk && sizeOk
+	}
+	if _, _, present := read(fullTunClientSettings(fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0)); !present {
+		t.Skip("this Connect revision predates the settings under measurement")
+	}
+	onDefer, onSize, _ := read(fullTunClientSettingsWithFeatures(
 		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
 		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
-	)
-	if !on.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
-		!on.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
+	))
+	if !onDefer || !onSize {
 		t.Fatal("a selected feature did not reach the Client settings")
 	}
-	off := fullTunClientSettingsWithFeatures(
+	offDefer, offSize, _ := read(fullTunClientSettingsWithFeatures(
 		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
 		[]string{perfvarFeatureNoDeferTimeoutResend, perfvarFeatureNoFastPathSizeAware},
-	)
-	if off.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
-		off.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
+	))
+	if offDefer || offSize {
 		t.Fatal("a negative feature did not reach the Client settings")
 	}
 	// A revision without the setting must fail the run, not measure the default.

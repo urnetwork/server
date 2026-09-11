@@ -3411,6 +3411,20 @@ func fullTunClientSettingsWithFeatures(
 	return settings
 }
 
+// perfvarBoolField reads one named bool field from a settings pointer;
+// the second result is false when this Connect revision has no such field.
+func perfvarBoolField(target any, name string) (bool, bool) {
+	settings := reflect.ValueOf(target)
+	if settings.Kind() != reflect.Pointer || settings.IsNil() {
+		return false, false
+	}
+	field := settings.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Bool {
+		return false, false
+	}
+	return field.Bool(), true
+}
+
 // setPerfvarBoolField sets one named bool field on a settings pointer. A
 // missing field means this Connect revision predates the setting.
 func setPerfvarBoolField(target any, name string, value bool) error {
