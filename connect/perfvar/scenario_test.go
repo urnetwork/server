@@ -151,9 +151,13 @@ type perfvarConfig struct {
 // Opt-in production settings under measurement. Each ships off by default
 // (connect/FLIGHTGATEFIX.md §13.5 and §13.6) and needs its own A/B before a
 // default can flip.
+// A setting under measurement may ship off (measure it on) or on (measure it
+// off), so each has both polarities.
 const (
-	perfvarFeatureDeferTimeoutResend = "defer-timeout-resend"
-	perfvarFeatureFastPathSizeAware  = "fast-path-size-aware"
+	perfvarFeatureDeferTimeoutResend   = "defer-timeout-resend"
+	perfvarFeatureNoDeferTimeoutResend = "no-defer-timeout-resend"
+	perfvarFeatureFastPathSizeAware    = "fast-path-size-aware"
+	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
 )
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -389,6 +393,7 @@ func perfvarProgressObservationFor(samples []perfvarProgressSample) perfvarProgr
 // control stayed below, is a REGRESSION for that item.
 type perfvarMemoryObservation struct {
 	SampleCount          int    `json:"sample_count"`
+	HeapAndStackInuseP50 uint64 `json:"heap_and_stack_inuse_p50_bytes"`
 	HeapAndStackInuseP95 uint64 `json:"heap_and_stack_inuse_p95_bytes"`
 	HeapAndStackInuseMax uint64 `json:"heap_and_stack_inuse_max_bytes"`
 	HeapInuseMax         uint64 `json:"heap_inuse_max_bytes"`
@@ -416,8 +421,8 @@ func perfvarMemoryObservationFor(samples []uint64, heapMax uint64, sysMax uint64
 	sorted := slices.Clone(samples)
 	slices.Sort(sorted)
 	observation.HeapAndStackInuseMax = sorted[len(sorted)-1]
-	rank := max(1, (95*len(sorted)+99)/100)
-	observation.HeapAndStackInuseP95 = sorted[rank-1]
+	observation.HeapAndStackInuseP50 = sorted[max(1, (50*len(sorted)+99)/100)-1]
+	observation.HeapAndStackInuseP95 = sorted[max(1, (95*len(sorted)+99)/100)-1]
 	for _, sample := range samples {
 		if perfvarMemoryCeilingBytes < sample {
 			observation.SamplesAboveCeiling += 1
@@ -484,6 +489,7 @@ type perfvarAggregateRecord struct {
 	WindowCount        int     `json:"window_count"`
 	WorstWindowMbps    float64 `json:"worst_window_megabits_per_second"`
 	// Memory guardrails over every run, including failed ones.
+	MemoryP50MedianBytes      uint64 `json:"memory_heap_and_stack_p50_median_bytes"`
 	MemoryP95MedianBytes      uint64 `json:"memory_heap_and_stack_p95_median_bytes"`
 	MemoryMaxBytes            uint64 `json:"memory_heap_and_stack_max_bytes"`
 	MemorySamplesAboveCeiling int    `json:"memory_samples_above_ceiling"`
@@ -623,7 +629,12 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 	}
 	featureSet, err := parseSet(
 		"CONNECT_PERFVAR_FEATURE",
-		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
+		[]string{
+			perfvarFeatureDeferTimeoutResend,
+			perfvarFeatureNoDeferTimeoutResend,
+			perfvarFeatureFastPathSizeAware,
+			perfvarFeatureNoFastPathSizeAware,
+		},
 		[]string{},
 	)
 	if err != nil {
@@ -1406,11 +1417,13 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 	deadWindowRunCount := 0
 	windowCount := 0
 	worstWindowMbps := float64(0)
+	memoryP50s := make([]float64, 0, len(records))
 	memoryP95s := make([]float64, 0, len(records))
 	memoryMax := uint64(0)
 	memoryAboveCeiling := 0
 	for recordIndex, record := range records {
 		if 0 < record.Memory.SampleCount {
+			memoryP50s = append(memoryP50s, float64(record.Memory.HeapAndStackInuseP50))
 			memoryP95s = append(memoryP95s, float64(record.Memory.HeapAndStackInuseP95))
 		}
 		memoryMax = max(memoryMax, record.Memory.HeapAndStackInuseMax)
@@ -1472,6 +1485,7 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		DeadWindowRunCount:        deadWindowRunCount,
 		WindowCount:               windowCount,
 		WorstWindowMbps:           worstWindowMbps,
+		MemoryP50MedianBytes:      uint64(perfvarPercentileFloat(memoryP50s, 50)),
 		MemoryP95MedianBytes:      uint64(perfvarPercentileFloat(memoryP95s, 50)),
 		MemoryMaxBytes:            memoryMax,
 		MemorySamplesAboveCeiling: memoryAboveCeiling,

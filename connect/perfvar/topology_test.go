@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -3385,14 +3386,47 @@ func fullTunClientSettingsWithFeatures(
 		settings.WebRtcSettings.MemoryBudget = clientconnect.NewTransferMemoryBudget(0)
 	}
 	for _, feature := range features {
+		// The harness builds against several Connect revisions in one
+		// campaign, and a setting that ships off by default exists only from
+		// the commit that introduced it. Set it by name, and fail the run
+		// loudly when an arm cannot honor a requested feature rather than
+		// silently measuring the default.
+		var target any
+		var field string
+		value := true
 		switch feature {
-		case perfvarFeatureDeferTimeoutResend:
-			settings.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress = true
-		case perfvarFeatureFastPathSizeAware:
-			p2pSettings.FastPathSizeAwareAdmission = true
+		case perfvarFeatureDeferTimeoutResend, perfvarFeatureNoDeferTimeoutResend:
+			target, field = settings.SendBufferSettings, "DeferTimeoutResendWhileCumulativeProgress"
+			value = feature == perfvarFeatureDeferTimeoutResend
+		case perfvarFeatureFastPathSizeAware, perfvarFeatureNoFastPathSizeAware:
+			target, field = p2pSettings, "FastPathSizeAwareAdmission"
+			value = feature == perfvarFeatureFastPathSizeAware
+		default:
+			panic(fmt.Sprintf("unknown PERFVAR feature %q", feature))
+		}
+		if err := setPerfvarBoolField(target, field, value); err != nil {
+			panic(fmt.Sprintf("PERFVAR feature %q: %v", feature, err))
 		}
 	}
 	return settings
+}
+
+// setPerfvarBoolField sets one named bool field on a settings pointer. A
+// missing field means this Connect revision predates the setting.
+func setPerfvarBoolField(target any, name string, value bool) error {
+	settings := reflect.ValueOf(target)
+	if settings.Kind() != reflect.Pointer || settings.IsNil() {
+		return fmt.Errorf("settings target for %s is not a non-nil pointer", name)
+	}
+	field := settings.Elem().FieldByName(name)
+	if !field.IsValid() {
+		return fmt.Errorf("this Connect revision has no %s", name)
+	}
+	if field.Kind() != reflect.Bool || !field.CanSet() {
+		return fmt.Errorf("%s is not a settable bool", name)
+	}
+	field.SetBool(value)
+	return nil
 }
 
 // One settings constructor keeps every existing caller on the production

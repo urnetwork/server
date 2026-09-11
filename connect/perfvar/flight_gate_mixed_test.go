@@ -856,12 +856,8 @@ func TestPerfvarFeatureSelection(t *testing.T) {
 	if baselineHash != withoutFeature {
 		t.Fatal("an empty feature selection changed the scenario identity")
 	}
-	// Both settings reach the endpoint Clients, and neither is on by default.
-	off := fullTunClientSettings(fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0)
-	if off.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
-		off.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
-		t.Fatal("an opt-in setting is on by default")
-	}
+	// Both polarities reach the endpoint Clients on a tree that has the
+	// settings, whatever their defaults are on that tree.
 	on := fullTunClientSettingsWithFeatures(
 		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
 		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
@@ -869,5 +865,18 @@ func TestPerfvarFeatureSelection(t *testing.T) {
 	if !on.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
 		!on.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
 		t.Fatal("a selected feature did not reach the Client settings")
+	}
+	off := fullTunClientSettingsWithFeatures(
+		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
+		[]string{perfvarFeatureNoDeferTimeoutResend, perfvarFeatureNoFastPathSizeAware},
+	)
+	if off.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
+		off.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
+		t.Fatal("a negative feature did not reach the Client settings")
+	}
+	// A revision without the setting must fail the run, not measure the default.
+	type older struct{ Unrelated bool }
+	if err := setPerfvarBoolField(&older{}, "DeferTimeoutResendWhileCumulativeProgress", true); err == nil {
+		t.Fatal("a missing setting was accepted silently")
 	}
 }

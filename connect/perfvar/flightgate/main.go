@@ -424,6 +424,8 @@ func runReadout(args []string) error {
 	flags := flag.NewFlagSet("readout", flag.ContinueOnError)
 	out := flags.String("out", "", "campaign output directory")
 	markdown := flags.String("md", "", "write the markdown report to this file as well")
+	control := flags.String("control", "", "arm to attribute against (default: stock, else the first arm)")
+	extra := flags.String("extra", "", "comma-separated campaign directories to fold in as extra arms")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -434,10 +436,25 @@ func runReadout(args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, directory := range strings.Split(*extra, ",") {
+		directory = strings.TrimSpace(directory)
+		if directory == "" {
+			continue
+		}
+		more, err := loadRecords(directory)
+		if err != nil {
+			return err
+		}
+		suffix := filepath.Base(directory)
+		for index := range more {
+			more[index].arm = more[index].arm + "@" + suffix
+		}
+		records = append(records, more...)
+	}
 	if len(records) == 0 {
 		return fmt.Errorf("no [perfvar] run records under %s", *out)
 	}
-	report := renderReport(*out, records)
+	report := renderReport(*out, records, *control)
 	fmt.Print(report)
 	if *markdown != "" {
 		return os.WriteFile(*markdown, []byte(report), 0o644)
@@ -643,17 +660,24 @@ func median(values []float64) float64 {
 	return sorted[(len(sorted)-1)/2]
 }
 
-func renderReport(root string, records []runRecord) string {
+func renderReport(root string, records []runRecord, controlArm string) string {
 	summary := summarize(records)
 	arms := make([]string, 0, len(summary))
 	for arm := range summary {
 		arms = append(arms, arm)
 	}
 	sort.Strings(arms)
-	// The control is "stock" when present, otherwise the first arm.
+	// The control is the requested arm, else "stock" when present, else the
+	// first arm in name order.
 	control := arms[0]
 	if slices.Contains(arms, "stock") {
 		control = "stock"
+	}
+	if controlArm != "" {
+		if !slices.Contains(arms, controlArm) {
+			return fmt.Sprintf("control arm %q is not one of %s\n", controlArm, strings.Join(arms, ", "))
+		}
+		control = controlArm
 	}
 	cellSet := map[cellKey]bool{}
 	for _, cells := range summary {
@@ -716,8 +740,8 @@ func renderReport(root string, records []runRecord) string {
 		fmt.Fprintln(&b)
 		fmt.Fprintf(&b, "## Attribution against %s (candidate minus control, per cell)\n", control)
 		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
-		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | selective_gap_writes | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
+		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
 		for _, key := range cells {
 			base := summary[control][key]
 			if base == nil {
@@ -741,11 +765,12 @@ func renderReport(root string, records []runRecord) string {
 				if median(cell.memP95s) > median(base.memP95s) || (0 < cell.memAbove && base.memAbove == 0) {
 					memoryGate = "REGRESSION"
 				}
-				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
+				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
 					key, arm,
 					cell.deadWindows-base.deadWindows,
 					cell.failed-base.failed,
 					median(cell.goodputs)-median(base.goodputs),
+					delta("selective_gap_writes"),
 					delta("flight_wait"),
 					delta("flight_blocked_with_reliable_capacity"),
 					delta("flight_gap_reorder_suspected"),
