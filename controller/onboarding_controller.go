@@ -674,9 +674,11 @@ func OnboardingClick(
 	if err != nil || claims == nil {
 		return &OnboardingClickResult{Ok: false, Error: "invalid"}, nil
 	}
-	WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, map[string]any{
-		"step": claims.Step,
-	}, "")
+	props := map[string]any{"step": claims.Step}
+	if onboarding.IsFlowStep(claims.FlowStep) {
+		props["flow_step"] = claims.FlowStep
+	}
+	WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
 	return &OnboardingClickResult{
 		Ok:          true,
 		Step:        claims.Step,

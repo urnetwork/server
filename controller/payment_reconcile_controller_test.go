@@ -659,6 +659,107 @@ func TestPaymentReconcileStoreFailureIsolated(t *testing.T) {
 	})
 }
 
+func TestPaymentReconcileStoreWatermarkDecision(t *testing.T) {
+	for _, test := range []struct {
+		name                      string
+		complete, dryRun          bool
+		errorsBefore, errorsAfter int
+		want                      bool
+	}{
+		{name: "healthy complete store", complete: true, want: true},
+		{name: "per-object error", complete: true, errorsAfter: 1, want: false},
+		{name: "prior store error is isolated", complete: true, errorsBefore: 7, errorsAfter: 7, want: true},
+		{name: "current store error after prior error", complete: true, errorsBefore: 7, errorsAfter: 8, want: false},
+		{name: "budget incomplete", complete: false, want: false},
+		{name: "dry run", complete: true, dryRun: true, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := paymentReconcileStoreCanAdvanceWatermark(
+				test.complete,
+				test.dryRun,
+				test.errorsBefore,
+				test.errorsAfter,
+			)
+			connect.AssertEqual(t, got, test.want)
+		})
+	}
+}
+
+func TestPaymentReconcileStoreErrorCountDoesNotCreateResult(t *testing.T) {
+	run := &paymentReconcileRun{
+		storeResults: map[string]*PaymentReconcileStoreResult{},
+	}
+	connect.AssertEqual(t, run.storeErrorCount(model.SubscriptionMarketGoogle), 0)
+	connect.AssertEqual(t, len(run.storeResults), 0)
+
+	run.storeResult(model.SubscriptionMarketGoogle).Errors = 2
+	connect.AssertEqual(t, run.storeErrorCount(model.SubscriptionMarketGoogle), 2)
+}
+
+// A store can finish iterating while recording per-object errors. That is not
+// an error-free pass and must not consume the store's retry frontier. Other
+// stores and the global heartbeat still continue through the ordinary
+// isolation boundary.
+func TestPaymentReconcilePerObjectErrorDoesNotAdvanceStoreWatermark(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		playEnv := newPlayWebhookTestEnv(t, map[string]*Sku{
+			"supporter_monthly": {Supporter: true},
+		})
+		newSolanaReconcileTestEnv(t)
+		previousHasCredentials := playReconcileHasCredentials
+		playReconcileHasCredentials = func() bool { return true }
+		t.Cleanup(func() { playReconcileHasCredentials = previousHasCredentials })
+
+		now := server.NowUtc().Truncate(time.Microsecond)
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "reconcileplaystatusfailure", server.NewId())
+		purchaseToken := "play-reconcile-status-failure"
+		startTime := now.Add(-24 * time.Hour)
+		endTime := now.Add(24 * time.Hour)
+		connect.AssertEqual(t, model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			PurchaseToken:      purchaseToken,
+			SubscriptionMarket: model.SubscriptionMarketGoogle,
+		}), nil)
+		playEnv.subscriptions[purchaseToken] = playTestSubscription(
+			networkId,
+			"supporter_monthly",
+			startTime,
+			endTime,
+		)
+
+		priorWatermark := now.Add(-6 * time.Hour)
+		connect.AssertEqual(t, model.SetPaymentReconcileWatermark(ctx, model.SubscriptionMarketGoogle, priorWatermark), nil)
+		playEnv.statusFailures[purchaseToken] = http.StatusInternalServerError
+
+		failed, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, failed.Errors, 1)
+		failedEvents := model.GetPaymentReconciliationEvents(ctx, failed.RunId)
+		connect.AssertEqual(t, countReconcileEvents(failedEvents, model.SubscriptionMarketGoogle, model.PaymentReconcileActionError), 1)
+		connect.AssertEqual(t, countReconcileEvents(failedEvents, model.PaymentReconcileStoreAll, model.PaymentReconcileActionHeartbeat), 1)
+		watermark, ok := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketGoogle)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, watermark.Equal(priorWatermark), true)
+		_, solanaWatermarkSet := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketSolana)
+		connect.AssertEqual(t, solanaWatermarkSet, true)
+
+		delete(playEnv.statusFailures, purchaseToken)
+		playEnv.subscriptions[purchaseToken].SubscriptionState = "SUBSCRIPTION_STATE_CANCELED"
+		healthy, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, healthy.Errors, 0)
+		watermark, ok = model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketGoogle)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, watermark.After(priorWatermark), true)
+	})
+}
+
 // TestPaymentReconcileStripeCreditsMissedInvoice pins the stripe credit
 // direction: a paid subscription invoice Stripe knows and our stripe_invoice
 // ledger does not is credited THROUGH the webhook path (same network

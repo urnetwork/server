@@ -1675,7 +1675,10 @@ func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
 		"event=window_failed window=quality reason=providers-unresponsive after=45000",
 		"window_failed is authoritative terminal state",
 		"calls SetStallStatus directly",
-		"does not normally emit window_stall failed=1",
+		"does not itself emit window_stall failed=1",
+		"failed_window_events=1",
+		"diagnostic_lines=1",
+		"canonical_source=exact-replay-deduplicated-authoritative-window-failed-event",
 		"do not restart or deploy from the terminal bit alone",
 		"No window_failed event or compatible failed=1 transition recurs",
 	} {
@@ -1712,6 +1715,127 @@ func TestWindowFailedUsesStableTerminalWindowClass(t *testing.T) {
 	}
 	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
 		t.Fatal("malformed window_failed event disappeared from the novelty safety net")
+	}
+}
+
+// A failed window can produce the authoritative window_failed line and then a
+// compatibility window_stall failed=1 transition when its reason changes.
+// Both remain diagnostic evidence, but they are one failed-window event.
+func TestWindowTerminalCanonicalCardinalitySeparatesCompatibilityTransition(t *testing.T) {
+	prefix := "[synthetic-host][taskworker][synthetic-generation][cid:synthetic-correlation]"
+	authoritative := prefix +
+		"[I][2000-01-01T00:00:00.000001Z][synthetic.go:1][rel] event=window_failed window=quality reason=providers-unresponsive after=45021"
+	compatibility := prefix +
+		"[I][2000-01-01T00:00:00.008201Z][synthetic.go:2][rel] event=window_stall window=quality reason=platform-unreachable failed=1"
+
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify(authoritative)
+	tailer.classify(compatibility)
+	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
+	for _, want := range []string{
+		"rate=2/min",
+		"failed_window_events=1",
+		"diagnostic_lines=2",
+		"logical event count: 1 exact-replay-deduplicated authoritative window_failed event line(s) from 2 diagnostic line(s)",
+		"diagnostic_lines as terminal-class telemetry, not incident size",
+	} {
+		if !strings.Contains(terminal.observed+terminal.evidence+terminal.context, want) {
+			t.Fatalf("paired terminal finding lacks %q: %+v", want, terminal)
+		}
+	}
+
+	// Two windows can fail nearly simultaneously on one emitter. Their two
+	// distinct authoritative records must remain two logical events even when
+	// each is followed by its own compatibility transition.
+	two := newLogTailer("taskworker", nil)
+	for _, line := range []string{
+		authoritative,
+		strings.Replace(authoritative, "00.000001Z", "00.002141Z", 1),
+		compatibility,
+		strings.Replace(compatibility, "00.008201Z", "00.010601Z", 1),
+	} {
+		two.classify(line)
+	}
+	twoTerminal := findingByClass(t, two.drainWindow(), "window-stall-terminal")
+	for _, want := range []string{"rate=4/min", "failed_window_events=2", "diagnostic_lines=4"} {
+		if !strings.Contains(twoTerminal.observed, want) {
+			t.Fatalf("simultaneous terminal finding lacks %q: %+v", want, twoTerminal)
+		}
+	}
+}
+
+func TestWindowTerminalCompatibilityOnlyKeepsUnknownCanonicalCardinality(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify("[synthetic-host][taskworker][synthetic-generation][I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=window_stall window=quality reason=platform-unreachable failed=1")
+	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
+	if terminal.healthy {
+		t.Fatal("compatibility-only terminal transition was hidden")
+	}
+	for _, want := range []string{
+		"rate=1/min",
+		"failed_window_events=unknown",
+		"canonical_source=absent",
+		"logical event count: unknown; no authoritative window_failed event line was present among 1 diagnostic line(s)",
+	} {
+		if !strings.Contains(terminal.observed+terminal.evidence, want) {
+			t.Fatalf("compatibility-only finding lacks %q: %+v", want, terminal)
+		}
+	}
+}
+
+// A natural evaluation-pass deadline has its own bounded, identity-free event.
+// It is diagnostic evidence about where admission stopped, not a terminal
+// window count or proof of the remote cause.
+func TestWindowEvaluationBudgetUsesStructuredClass(t *testing.T) {
+	const privateCorrelation = "synthetic-private-correlation"
+	line := "[synthetic-host][taskworker][synthetic-generation][cid:" + privateCorrelation + "]" +
+		"[I][2000-01-01T00:00:00Z][synthetic.go:1][rel] event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0"
+
+	tailer := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		tailer.classify(line)
+	}
+	findings := tailer.drainWindow()
+	budget := findingByClass(t, findings, "window-evaluation-budget")
+	if budget.healthy {
+		t.Fatal("repeated evaluation-budget exhaustion was hidden")
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("classified evaluation-budget events also became novel: %+v", novel)
+	}
+	markdown := alertFromFinding(
+		SignalSettings{Environment: "synthetic", Now: time.Now},
+		"1.5", "log-errors", "Log error-class rates", budget,
+	).Markdown()
+	for _, want := range []string{
+		"event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0",
+		"natural evaluation-budget boundary",
+		"not why the receiver stayed silent",
+		"Lifecycle cancellation",
+		"do not lengthen either timeout as an HMAC remedy",
+		"no-late-admission cleanup",
+		"exactly one terminal owner",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("evaluation-budget finding lacks %q: %+v", want, budget)
+		}
+	}
+	for _, private := range []string{"synthetic-host", "synthetic-generation", privateCorrelation} {
+		if strings.Contains(markdown, private) {
+			t.Fatalf("evaluation-budget alert retained private value %q", private)
+		}
+	}
+
+	malformed := newLogTailer("taskworker", nil)
+	for i := 0; i < novelRateThreshold; i++ {
+		malformed.classify(strings.Replace(line, "candidates=2", "candidates=unknown", 1))
+	}
+	malformedFindings := malformed.drainWindow()
+	if finding := findingByClass(t, malformedFindings, "window-evaluation-budget"); !finding.healthy {
+		t.Fatalf("malformed budget event was accepted: %+v", finding)
+	}
+	if novel := findingByClass(t, malformedFindings, "novel"); novel.healthy {
+		t.Fatal("malformed evaluation-budget schema drift disappeared")
 	}
 }
 

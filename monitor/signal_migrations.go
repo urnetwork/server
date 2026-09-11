@@ -104,6 +104,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "repeatable competition staging lifecycle", requiredVersion: 652, rowColumn: 63},
 	{name: "competition_round.admission_closed_at and guard", requiredVersion: 653, rowColumn: 64},
 	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
+	{name: "onboarding_email_tracker_daily", requiredVersion: 655, rowColumn: 66},
+	{name: "network_onboarding_email_sent_at", requiredVersion: 656, rowColumn: 67},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -712,6 +714,29 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND column_name = 'epoch_metrics_available'
 		             AND data_type = 'boolean' AND is_nullable = 'NO'
 		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
+		       ),
+		       (
+		           to_regclass('public.onboarding_email_tracker_daily') IS NOT NULL
+		           AND EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'onboarding_email_tracker_daily'
+		                 AND column_name = 'attribution_ambiguous'
+		                 AND data_type = 'bigint' AND is_nullable = 'NO'
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'onboarding_email_tracker_daily'
+		                 AND column_name IN ('network_id', 'message_id', 'email_address')
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_onboarding_email'
+		             AND index_name = 'network_onboarding_email_sent_at'
+		             AND definition LIKE '%(sent_at, network_id, step)%'
+		             AND indisvalid AND indisready
 		       )
 		FROM version;
 	`)

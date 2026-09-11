@@ -871,24 +871,27 @@ func deactivateNetworkClientsInTx(
 		return 0, nil
 	}
 
-	// Capture the lifecycle timestamp only after every target row is locked.
-	// A concurrent contract holding FOR SHARE must remain ordered before this
-	// deactivation in both database state and recorded time.
-	deactivateTime := server.NowUtc()
+	// Read the primary database clock in the UPDATE only after every target row
+	// is locked. A concurrent contract holding FOR SHARE must remain ordered
+	// before this deactivation in both database state and recorded time, even
+	// when the two API calls run on hosts whose application clocks differ.
 	tag, err := tx.Exec(
 		ctx,
 		`
+			WITH lifecycle_clock AS MATERIALIZED (
+				SELECT clock_timestamp() AT TIME ZONE 'UTC' AS deactivate_time
+			)
 			UPDATE network_client
 			SET
 				active = false,
-				deactivate_time = $3
+				deactivate_time = lifecycle_clock.deactivate_time
+			FROM lifecycle_clock
 			WHERE
-				client_id = ANY($1) AND
-				network_id = $2
+				network_client.client_id = ANY($1) AND
+				network_client.network_id = $2
 		`,
 		lockedClientIds,
 		networkId,
-		deactivateTime,
 	)
 	if err != nil {
 		return 0, err
@@ -2351,9 +2354,9 @@ func ConnectNetworkClient(
 		expectedLatencyMillis = int(2.5*distanceMillis + 0.5)
 	}
 
+	connectTime := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
-		connectTime := server.NowUtc()
 
 		host, _ := server.Host()
 		service, _ := server.Service()
@@ -2431,6 +2434,12 @@ func ConnectNetworkClient(
 			connectTime.Add(-clientAuthTimeRefreshMinInterval),
 		))
 	})
+
+	// the durable connection history for the onboarding results: one
+	// connect.day event per network per UTC day, its own transaction after
+	// the connection is committed, cached per process, never failing this
+	// connect (RecordConnectDay)
+	RecordConnectDay(ctx, clientId, connectTime)
 
 	return
 }
@@ -2598,19 +2607,25 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				return
 			}
 
-			// The ordered FOR UPDATE above has completed before this timestamp
-			// is captured, so a lifecycle reader that won the row lock remains
-			// earlier than the deactivation it delayed.
-			deactivateTime := server.NowUtc()
+			// The ordered FOR UPDATE above completes before the UPDATE reads the
+			// primary database clock, so a lifecycle reader that won the row lock
+			// remains earlier than the deactivation it delayed even across hosts.
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
+					WITH lifecycle_clock AS MATERIALIZED (
+						SELECT clock_timestamp() AT TIME ZONE 'UTC' AS deactivate_time
+					)
 					UPDATE network_client
-					SET active = false, deactivate_time = $2
-					WHERE client_id = ANY($1) AND active = true
+					SET
+						active = false,
+						deactivate_time = lifecycle_clock.deactivate_time
+					FROM lifecycle_clock
+					WHERE
+						network_client.client_id = ANY($1) AND
+						network_client.active = true
 				`,
 				clientIds,
-				deactivateTime,
 			))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)

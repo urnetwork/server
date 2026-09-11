@@ -30,6 +30,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 	}{
 		{"dial timeout", "dial tcp 192.0.2.1:6380: i/o timeout", "dial-io-timeout"},
 		{"connection refused", "connect: connection refused", "connection-refused"},
+		{"Grafana local Mimir refusal", `Stats push error (Post "http://synthetic-mimir.invalid:14818/api/v1/push": dial tcp synthetic-mimir.invalid:14818: connect: connection refused)`, "grafana-mimir-push-refused"},
 		{"Connect TLS disabled", "[c]Could not initialize tls config. Disabling transport. = synthetic loader failure", "connect-tls-disabled"},
 		{"port exhaustion", "connect: cannot assign requested address", "port-exhaustion"},
 		{"pool timeout", "redis: connection pool timeout", "pool-timeout"},
@@ -45,6 +46,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
+		{"onboarding app-open attribution", "[onboarding]app open attribution failed for network synthetic-private-network: ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)", "onboarding-app-open-attribution"},
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"escrow mirror write", "[netescrow]mirror write failed after reservation: i/o timeout", "netescrow-mirror-write"},
@@ -85,6 +87,127 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalRedactsOnboardingAppOpenAttribution(t *testing.T) {
+	const privateNetwork = "synthetic-private-network"
+	line := "[onboarding]app open attribution failed for network " + privateNetwork + ": ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)"
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-api", nil
+		}
+		return line, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "onboarding-app-open-attribution")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("onboarding attribution severity = %q, want warn", alert.Severity)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{"SQLSTATE 42P08", "network identifier omitted", "0aac4806", "exact flow_step"} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("onboarding attribution alert lacks %q: %s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, privateNetwork) {
+		t.Fatalf("onboarding attribution alert retained network evidence: %s", markdown)
+	}
+	for _, other := range alerts {
+		if other.Class == "novel" {
+			t.Fatalf("known onboarding attribution failure remained novel: %+v", other)
+		}
+	}
+}
+
+func TestLogErrorsSignalAttributesGrafanaMimirPushRefusalWithoutEndpoint(t *testing.T) {
+	line := `[synthetic-edge.invalid][grafana][g1][cid:synthetic-container][2026-09-10T11:20:08Z] Stats push error (Post "http://synthetic-mimir.invalid:14818/api/v1/push": dial tcp synthetic-mimir.invalid:14818: connect: connection refused)`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return line, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "grafana-mimir-push-refused")
+	if alert.Severity != SeverityPage {
+		t.Fatalf("Grafana/Mimir refusal severity = %q, want PAGE", alert.Severity)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"frame=local-mimir-push",
+		"co-located Mimir listener was unavailable",
+		"SO_REUSEPORT",
+		"not Redis §5.2",
+		"child shutdown/SIGTERM boundary",
+		"two successive generations on one block",
+		"counts rejected pushes, not failed parents or incidents",
+		"drain-before-child-stop",
+		"6544fe1",
+		"Do not restart Redis",
+		"closed at the bounded deadline",
+		"full rollout plus 10 steady minutes",
+		"§11.20 continuity gap",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("Grafana/Mimir refusal alert omitted %q:\n%s", want, markdown)
+		}
+	}
+	for _, private := range []string{
+		"synthetic-edge.invalid",
+		"synthetic-container",
+		"synthetic-mimir.invalid",
+		"14818",
+	} {
+		if strings.Contains(markdown, private) {
+			t.Errorf("Grafana/Mimir refusal retained endpoint detail %q:\n%s", private, markdown)
+		}
+	}
+	for _, other := range alerts {
+		if other.Class == "connection-refused" || other.Class == "novel" {
+			t.Errorf("specific Grafana/Mimir refusal escaped into %s", other.Class)
+		}
+	}
+}
+
+func TestLogErrorsSignalGenericConnectionRefusalDoesNotAssumeRedis(t *testing.T) {
+	line := `synthetic request to service.invalid failed: connect: connection refused`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-service", nil
+		}
+		return strings.Repeat(line+"\n", 10), nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "connection-refused").Markdown()
+	for _, want := range []string{
+		"otherwise-unclassified TCP target",
+		"does not identify the target service",
+		"Do not assume this is Redis",
+		"same network namespace",
+		"Do not restart an inferred service",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("generic refusal alert omitted %q:\n%s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"SIGNALS.md 5.2",
+		"after manual restart",
+		"restart with correct conf",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Errorf("generic refusal retained stale attribution %q:\n%s", stale, markdown)
+		}
 	}
 }
 

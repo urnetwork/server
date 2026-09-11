@@ -53,6 +53,13 @@ type logBurst struct {
 type logCanonical struct {
 	eventRe *regexp.Regexp
 	name    string
+	// sourceToken and sourceLabel describe the selected canonical event. The
+	// defaults retain the task-evaluator wording used by payout classes.
+	sourceToken string
+	sourceLabel string
+	// Some legacy compatibility lines carry terminal evidence without the
+	// canonical source. Render that cardinality as unknown, never zero.
+	unknownWhenAbsent bool
 	// correlation optionally joins each canonical source second to canonical
 	// attempts already counted by another class's burst detector. This proves
 	// incident co-residency without treating a minute-wide rate as ordering or
@@ -119,13 +126,16 @@ var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: ba
 
 // Connect's relEvent grammar renders booleans as 0/1 and durations as integer
 // milliseconds. Keep nonterminal transitions separate from terminal outcomes:
-// failOutcome logs window_failed and then calls SetStallStatus directly, so it
-// does not normally emit a window_stall failed=1 line. Retain failed=1 as a
-// compatibility shape, and keep both out of the generic novel detector.
+// failOutcome logs window_failed and then calls SetStallStatus directly, so
+// that dispatch does not itself emit window_stall failed=1. A later reason
+// change can publish that compatibility transition while the failed latch is
+// still set. Retain both shapes and keep them out of the generic novel detector.
 var (
 	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
+	windowFailedEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+(?:[[:space:]]|$)`)
 	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
 	windowStallEventRe        = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=[01](?:[[:space:]]|$)`)
+	windowEvaluationBudgetRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=evaluation_budget_exhausted[[:space:]]+window=[a-z-]+[[:space:]]+candidates=[1-9][0-9]*[[:space:]]+effective_min=[0-9]+[[:space:]]+observed_max=[0-9]+[[:space:]]+ping_timeout=[0-9]+[[:space:]]+expand_timeout=[0-9]+[[:space:]]+suppressed=[0-9]+(?:[[:space:]]|$)`)
 	windowGeneratorCanceledRe = regexp.MustCompile(
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
@@ -137,6 +147,10 @@ func windowStallLogSample(line string) string {
 
 func windowTerminalLogSample(line string) string {
 	return strings.TrimSpace(windowTerminalRe.FindString(line))
+}
+
+func windowEvaluationBudgetLogSample(line string) string {
+	return strings.TrimSpace(windowEvaluationBudgetRe.FindString(line))
 }
 
 // Drops the Warp identity while retaining the complete exact diagnostic.
@@ -161,12 +175,33 @@ var logClasses = []logClass{
 		action:    "Compare the exact running artifacts before deploying the Warp failed-target retry/status-timeout fix and the Server readiness-gated metrics fix. Install the corrected Warpctl on the build workstation and managed hosts, then restart resident workers only with operator authorization. Apply the exact candidate's prerequisite migrations before service activation; the historical rejected release required head 630 while PostgreSQL was at 627. Preserve random instance identity. Xops commit 30d14ce trims unused node-exporter collectors and removes a known floor of roughly 13340 systemd-state series; measure remaining headroom rather than raising the Mimir limit blindly. Check direct per-user-series discard deltas, memory-series creation/removal, live process cohorts, and immutable service/config identity without retaining raw series labels.",
 		verify:    "After authorized rollout and prerequisite completion, every relevant block converges to a proven artifact, rejected candidates start no metrics pusher, and no unchanged-target readiness failure recurs for 20 minutes. Require zero new per-user-series admission discards, healthy direct metric freshness, and series removal restoring measured headroom through a full two-hour recent-head observation window. Two fresh direct Mimir reads corroborate ingestion; historical continuity gaps remain independently governed by §11.20.",
 	},
+	// The fixed sample and frame deliberately omit the local endpoint. The
+	// emitting Grafana parent already names the owning service and generation;
+	// retaining its rotating child port would split one rollout defect into
+	// several identities and make a loopback address look like a Redis target.
+	{name: "grafana-mimir-push-refused", re: regexp.MustCompile(`Stats push error \(Post "https?://[^"\r\n]+/api/v1/push": dial tcp [^[:space:]\r\n]+: connect: connection refused\)`),
+		sample: func(string) string {
+			return "Stats push error: local Mimir /api/v1/push refused (endpoint omitted)"
+		},
+		groupBy:       func(string) string { return "local-mimir-push" },
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §11.21",
+		meaning:   "a Grafana ingestion front accepted a metrics push but its generation's co-located Mimir listener was unavailable, so that sample was not admitted",
+		mechanism: "During a rolling replacement, old and new Grafana parents share the stable publisher through SO_REUSEPORT. The legacy shutdown path canceled each parent's accepting fronts and children from one event. A retiring parent could therefore keep accepting or draining a push after its own Mimir child had already closed, returning 502 even while the replacement generation was healthy.",
+		context:   "This exact class is local Grafana-to-Mimir failure, not Redis §5.2 and not proof of a fleet-wide Mimir outage. On 2026-09-10, bounded Main logs placed each refusal after the same emitting parent's child shutdown/SIGTERM boundary during a fleet rollout; two successive generations on one block reproduced the ordering on alternating internal ports, while the converged fleet's direct Grafana, Mimir, and ingress controls were healthy. Diagnostic line rate counts rejected pushes, not failed parents or incidents. Outside a replacement boundary, the same class can instead expose a child crash or bind failure and must be checked directly.",
+		action:    "Match the emitting parent and local child generation, child shutdown/SIGTERM, HTTP-front shutdown, listener, and rollout boundary. If the artifact predates the drain-before-child-stop correction in Warp commit 6544fe1, deploy a Grafana artifact containing it only after proving ancestry. If it is current or occurs outside drain, diagnose the named generation's Mimir readiness, restart, bind, and OOM evidence. Do not restart Redis, suppress the push error, or treat a healthy replacement as proof that the rejected old-generation samples were delivered.",
+		verify:    "Every active Grafana artifact contains Warp commit 6544fe1; during a controlled rolling replacement every old HTTP front stops accepting and finishes in-flight requests (or is closed at the bounded deadline) before its Mimir/Loki children stop; no grafana-mimir-push-refused line occurs through the full rollout plus 10 steady minutes; every exact child /ready and front /status remains healthy; and fresh pushed metrics remain queryable without a new §11.20 continuity gap.",
+	},
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
 		meaning: "node accept path starving — process alive but event loop wedged (or syn drop)"},
 	{name: "connection-refused", re: regexp.MustCompile(`connect: connection refused`),
-		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
-		meaning: "port closed: process dead or bound to wrong interface after manual restart"},
+		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "an otherwise-unclassified TCP target had no accepting listener at the attempted address and instant",
+		mechanism: "TCP returned an active refusal, which distinguishes an absent/nonmatching listener from a silent SYN drop but does not identify the target service, namespace, exit cause, or rollout state. Service-specific signatures earlier in this taxonomy take precedence.",
+		context:   "Do not assume this is Redis, a manual restart, or a persistent outage from the generic text alone. Resolve the emitting process and attempted target from current inventory and bounded same-generation evidence; a loopback child, remote database, and public service have different owners and controls.",
+		action:    "Inspect the exact target process, listener address/namespace, generation, and start/exit boundary through the owning service playbook. If the listener is absent, diagnose its startup, exit, bind, or lifecycle ordering; if it is present, reproduce from the same network namespace. Do not restart an inferred service before attribution.",
+		verify:    "The exact target accepts from the original source path, its owning health signal remains healthy, and the class stays below threshold for 10 minutes through any relevant lifecycle transition.",
+	},
 	{name: "connect-tls-disabled", re: regexp.MustCompile(`\[c\]Could not initialize tls config\. Disabling transport\. = `),
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §16.5",
 		meaning:   "a legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could bind UDP while rejecting every QUIC ClientHello",
@@ -276,6 +311,17 @@ var logClasses = []logClass{
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	{name: "onboarding-app-open-attribution", re: regexp.MustCompile(`\[onboarding\]app open attribution failed for network [^:\r\n]+: ERROR: inconsistent types deduced for parameter \$4 \(SQLSTATE 42P08\)`),
+		sample: func(string) string {
+			return "[onboarding]app open attribution failed: PostgreSQL parameter type conflict (SQLSTATE 42P08; network identifier omitted)"
+		},
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning:   "the API accepted an attributed app-open request but PostgreSQL rejected the event insert before it could record the engagement",
+		mechanism: "AttributeAppOpen reused parameters in INSERT output and comparison contexts without explicit PostgreSQL types. PostgreSQL inferred incompatible types for parameter $4 and rejected the complete statement with SQLSTATE 42P08. The request path deliberately logs and continues, so app use remains available while onboarding app-open engagement is silently absent unless this log boundary is monitored.",
+		context:   "The 2026-09-10 Main control repeated this exact failure on every API generation at hundreds of lines per minute. Server commit 0aac4806 gives every reused UUID, varchar, and timestamp parameter an explicit cast; its PostgreSQL synthetic test executes the real attribution statement and also proves duplicate app opens remain suppressed. This class uses a fixed sample so a network identifier never enters an alert.",
+		action:    "Build and deploy API from an intentional server checkout containing commit 0aac4806 after applying its required migrations through the normal release path. Do not replay raw client requests, insert synthetic engagement rows, or weaken event attribution to silence the error.",
+		verify:    "Every API block contains server commit 0aac4806; a deterministic PostgreSQL test passes the real app-open attribution statement; an attributed app open creates exactly one event with its exact flow_step; and zero onboarding-app-open-attribution lines occur for ten minutes after log-ingestion delay.",
+	},
 	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
 	// match that canonical first line rather than its paired body-write line so
 	// the alert rate remains one logical recovery boundary per occurrence.
@@ -448,14 +494,30 @@ var logClasses = []logClass{
 		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
 		redactIDs: true,
 	},
+	{name: "window-evaluation-budget", re: windowEvaluationBudgetRe,
+		sample:        windowEvaluationBudgetLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "initial provider evaluations repeatedly consumed their effective expansion-pass budget without an acknowledgement; candidates is the number owned and canceled by that pass, not a customer or failed-window count",
+		mechanism: "Connect bounds each initial ping by both PingTimeout and the owning expansion-pass deadline. When the pass deadline wins, cleanup prevents late admission and emits one structured aggregate before recording each unresolved candidate exactly once as provider-unresponsive. effective_min is the shortest usable per-candidate budget; observed_max is elapsed wall time, while ping_timeout and expand_timeout expose the configured mismatch.",
+		context:   "This event establishes a natural evaluation-budget boundary, not why the receiver stayed silent. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement are excluded. Correlate the same window and artifact with HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal window state. A displayed rate counts throttled diagnostic lines, not candidates or incidents.",
+		action:    "Investigate the first corroborated stage. For the September 2026 legacy cohort, follow §2.24; do not lengthen either timeout as an HMAC remedy. If compatible providers reproduce it, verify actual effective budget and response latency before changing timing. Preserve pass ownership, no-late-admission cleanup, and exactly-once failure accounting.",
+		verify:    "The class stays below 20 lines/minute for ten minutes under comparable provider-window traffic, affected windows add providers or emit recovery, and deterministic barriers retain pre-boundary admission, reject post-boundary callbacks, suppress lifecycle cancellation, and assign exactly one terminal owner.",
+	},
 	{name: "window-stall-terminal", re: windowTerminalRe,
 		sample:        windowTerminalLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state for that window but does not identify the underlying failure branch",
-		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch updates the UI-facing terminal latch but does not normally emit window_stall failed=1; the latter remains an accepted compatibility shape. The reason names the current diagnostic branch, not a proven transport root cause.",
-		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
+		meaning:   "a provider window crossed both bounded outcome deadlines with no provider added; window_failed is authoritative terminal state and failed_window_events is its logical-event cardinality, while the diagnostic line rate can also include a later compatibility transition",
+		mechanism: "Connect failOutcome logs one structured window_failed event and then calls SetStallStatus directly. That dispatch does not itself emit window_stall failed=1, but a later reason change can publish that compatibility transition while the failed latch remains set. Both lines retain fail-safe class visibility; only exact-replay-deduplicated window_failed lines count as authoritative failed-window events. The reason names the current diagnostic branch, not a proven transport root cause.",
+		context:   "Keep this distinct from window_stall failed=0, which means the window is still trying. Read diagnostic_lines as terminal-class telemetry, not incident size. When only a compatibility failed=1 line is present, failed_window_events is unknown rather than zero. A taskworker log locates the embedded Connect observer, not a customer or provider identity. The event alone cannot choose among platform reachability, provider response, rate limiting, or authentication causes.",
 		action:    "Correlate the exact reason and window with provider-window progress, explicit transport/framer/auth/rate-limit classes, peer availability, and the emitting artifact identity. Preserve the event and natural retry state; do not restart or deploy from the terminal bit alone.",
 		verify:    "No window_failed event or compatible failed=1 transition recurs for ten minutes under comparable provider-window traffic, affected windows add providers or emit their ordinary recovery transition, and the independently identified causal control remains healthy.",
+		canonical: &logCanonical{
+			eventRe:           windowFailedEventRe,
+			name:              "failed_window_events",
+			sourceToken:       "authoritative-window-failed-event",
+			sourceLabel:       "authoritative window_failed event",
+			unknownWhenAbsent: true,
+		},
 	},
 	{name: "window-stall", re: windowStallNonterminalRe,
 		sample:        windowStallLogSample,
@@ -501,7 +563,7 @@ var logClasses = []logClass{
 
 // errorShaped marks lines that count toward the novel class when no taxonomy
 // row matches.
-var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b`)
+var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail(ed|ure)\b|\bevent=window_failed\b|\bevent=evaluation_budget_exhausted\b`)
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
@@ -1592,17 +1654,41 @@ func (self *logTailer) drainWindow() []finding {
 			}
 			canonicalEvidence := ""
 			if c.canonical != nil {
-				observed += fmt.Sprintf(
-					" %s=%d diagnostic_lines=%d canonical_source=exact-replay-deduplicated-task-evaluator",
-					c.canonical.name,
-					self.canonicalCounts[key],
-					count,
-				)
-				canonicalEvidence = fmt.Sprintf(
-					"\nlogical event count: %d exact-replay-deduplicated task evaluator line(s) from %d diagnostic line(s)",
-					self.canonicalCounts[key],
-					count,
-				)
+				canonicalCount := self.canonicalCounts[key]
+				sourceToken := c.canonical.sourceToken
+				if sourceToken == "" {
+					sourceToken = "task-evaluator"
+				}
+				sourceLabel := c.canonical.sourceLabel
+				if sourceLabel == "" {
+					sourceLabel = "task evaluator"
+				}
+				if c.canonical.unknownWhenAbsent && canonicalCount == 0 {
+					observed += fmt.Sprintf(
+						" %s=unknown diagnostic_lines=%d canonical_source=absent",
+						c.canonical.name,
+						count,
+					)
+					canonicalEvidence = fmt.Sprintf(
+						"\nlogical event count: unknown; no %s line was present among %d diagnostic line(s), so the diagnostic class retains fail-safe visibility",
+						sourceLabel,
+						count,
+					)
+				} else {
+					observed += fmt.Sprintf(
+						" %s=%d diagnostic_lines=%d canonical_source=exact-replay-deduplicated-%s",
+						c.canonical.name,
+						canonicalCount,
+						count,
+						sourceToken,
+					)
+					canonicalEvidence = fmt.Sprintf(
+						"\nlogical event count: %d exact-replay-deduplicated %s line(s) from %d diagnostic line(s)",
+						canonicalCount,
+						sourceLabel,
+						count,
+					)
+				}
 				correlationObserved, correlationEvidence := self.canonicalCorrelationLocked(c, key)
 				observed += correlationObserved
 				canonicalEvidence += correlationEvidence

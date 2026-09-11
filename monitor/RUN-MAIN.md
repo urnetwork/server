@@ -132,6 +132,8 @@ go test -race ./monitor
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_preflight_dir/monitor"
+test -x "$monitor_preflight_dir/monitor"
 ```
 
 Keep every disposable repository checkout or Git worktree under a per-run
@@ -190,6 +192,8 @@ install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapshot.XXXXXXXX")
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_snapshot_dir/monitor"
+test -x "$monitor_snapshot_dir/monitor"
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   >"$monitor_snapshot_dir/alerts.md" \
   2>"$monitor_snapshot_dir/stderr.log"
@@ -226,6 +230,8 @@ install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 monitor_run_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.watch.XXXXXXXX")
 go build -o "$monitor_run_dir/monitor" ./cli/monitor
+chmod 700 "$monitor_run_dir/monitor"
+test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
 WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
   >"$monitor_run_dir/alerts.md" \
@@ -246,6 +252,18 @@ recollect evidence. Watcher records also carry binary path/hash, PID/session,
 environment/mode/start timezone, alert/stderr objects, server commit/dirty
 state, expected tails, exclusions/reasons, boundaries, and deadlines. The
 session must support polling, graceful stop, and liveness proof.
+
+The ledger has one writer: the long-lived Terra runner. Each record is exactly
+one complete compact JSON object on one physical line. Canonicalize a prepared,
+privacy-reviewed record with `jq -ce .` before appending it, append the resulting
+single line once, then parse the exact final line and verify its `record_id` and
+`prior_record`. Never append `jq .` output or another indented object. If a
+historical producer already appended pretty-printed records, preserve those
+bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
+recovery. Append a compact format-defect/correction record and use compact
+records thereafter; never rewrite or truncate the evidence ledger merely to
+make its old physical layout valid JSONL. Do not allow two agents to append in
+parallel.
 
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a

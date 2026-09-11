@@ -3,8 +3,10 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -150,11 +152,11 @@ func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.
 				props
 			)
 			SELECT
-				$1,
+				$1::uuid,
 				click.network_id,
-				$4,
-				$3,
-				$3,
+				$4::varchar(64),
+				$3::timestamp,
+				$3::timestamp,
 				'',
 				'',
 				'',
@@ -163,18 +165,21 @@ func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.
 				click.experiment,
 				click.variant,
 				'',
-				jsonb_build_object('step', click.props->>'step')
+				jsonb_strip_nulls(jsonb_build_object(
+					'step', click.props->>'step',
+					'flow_step', click.props->>'flow_step'
+				))
 			FROM (
 				SELECT network_id, at, tier, path, experiment, variant, props
 				FROM network_onboarding_event
-				WHERE network_id = $2 AND name = $5 AND $6 <= at AND at <= $3
+				WHERE network_id = $2::uuid AND name = $5::varchar(64) AND $6::timestamp <= at AND at <= $3::timestamp
 				ORDER BY at DESC
 				LIMIT 1
 			) click
 			WHERE NOT EXISTS (
 				SELECT 1
 				FROM network_onboarding_event opened
-				WHERE opened.network_id = $2 AND opened.name = $4 AND click.at <= opened.at
+				WHERE opened.network_id = $2::uuid AND opened.name = $4::varchar(64) AND click.at <= opened.at
 			)
 		`,
 		server.NewId(),
@@ -237,4 +242,128 @@ func PruneOnboardingEvents(ctx context.Context, now time.Time, limit int) (remov
 		removed = tag.RowsAffected()
 	}, server.TxReadCommitted)
 	return
+}
+
+// ----- connection history: connect.day -----
+
+// The client connection path writes one connect.day event per (network, UTC
+// day) with at least one connection. This is the durable connection history
+// the rollup reads for connect_7d, retention_d7 and retention_d30:
+// network_client_connection rows are pruned 8 h after disconnect
+// (RemoveDisconnectedNetworkClients), so they cover days, not the 31-day
+// window the outcomes need. History starts at the deploy of this writer.
+//
+// The hot path pays nothing for a client whose day is already recorded (an
+// in-process set, reset when the UTC day changes) and one index-backed
+// conditional insert otherwise.
+
+// ConnectDayStart is the UTC day a connection time falls in.
+func ConnectDayStart(at time.Time) time.Time {
+	return at.UTC().Truncate(24 * time.Hour)
+}
+
+// connectDayMaxCached bounds the per-process set of clients already recorded
+// today; past it the set is cleared and a repeated connect pays the
+// conditional insert again (which then matches zero rows).
+const connectDayMaxCached = 250_000
+
+type connectDayCache struct {
+	mutex sync.Mutex
+	day   time.Time
+	seen  map[server.Id]struct{}
+}
+
+var connectDaySeen = &connectDayCache{}
+
+// remember returns false when the client's connection for this UTC day is
+// already recorded, true (and remembers it) when it still has to be written.
+func (c *connectDayCache) remember(clientId server.Id, day time.Time) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if !c.day.Equal(day) || c.seen == nil || connectDayMaxCached <= len(c.seen) {
+		c.day = day
+		c.seen = map[server.Id]struct{}{}
+	}
+	if _, ok := c.seen[clientId]; ok {
+		return false
+	}
+	c.seen[clientId] = struct{}{}
+	return true
+}
+
+// forget drops a client from the day's set, so a failed write is retried on
+// the next connect.
+func (c *connectDayCache) forget(clientId server.Id, day time.Time) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.day.Equal(day) && c.seen != nil {
+		delete(c.seen, clientId)
+	}
+}
+
+// RecordConnectDay writes the client's network's connect.day event for the
+// day of `connectTime` unless one exists. Its own short transaction after the
+// connection is committed, so a failure here never fails or delays the
+// connection: it is logged and retried on the client's next connect.
+func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.Time) {
+	day := ConnectDayStart(connectTime)
+	if !connectDaySeen.remember(clientId, day) {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			connectDaySeen.forget(clientId, day)
+			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", clientId, r)
+		}
+	}()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_onboarding_event (
+					event_id,
+					network_id,
+					name,
+					at,
+					received_at,
+					platform,
+					app_version,
+					locale,
+					tier,
+					path,
+					experiment,
+					variant,
+					session,
+					props
+				)
+				SELECT
+					$1,
+					nc.network_id,
+					$3,
+					$4,
+					$5,
+					'', '', '', '', '', '', '', '',
+					NULL
+				FROM network_client nc
+				WHERE
+					nc.client_id = $2 AND
+					NOT EXISTS (
+						SELECT 1
+						FROM network_onboarding_event e
+						WHERE
+							e.network_id = nc.network_id AND
+							e.name = $3 AND
+							$6 <= e.at AND
+							e.at < $7
+					)
+			`,
+			server.NewId(),
+			clientId,
+			EventConnectDay,
+			connectTime,
+			server.NowUtc(),
+			day,
+			day.Add(24*time.Hour),
+		))
+	}, server.TxReadCommitted)
 }

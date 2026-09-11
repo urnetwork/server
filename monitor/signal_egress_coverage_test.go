@@ -155,9 +155,10 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 			activityQuery = query
 			return []Row{
 				// shard, eligible, full due, blackhole due, newest full age,
-				// newest blackhole age, current full, current blackhole
-				{"0", "22000", "8", "250", "3600", "4200", "400", "18000"},
-				{"1", "21900", "0", "0", "200", "120", "390", "18100"},
+				// newest blackhole age, current full, current blackhole,
+				// blackhole checks in the last hour
+				{"0", "22000", "8", "250", "3600", "4200", "400", "18000", "9000"},
+				{"1", "21900", "0", "0", "200", "120", "390", "18100", "9000"},
 			}, nil
 		default:
 			t.Fatalf("unexpected provider coverage query: %s", query)
@@ -192,6 +193,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 		"interval '6 hours'",
 		"interval '90 minutes'",
 		"interval '3 hours'",
+		"interval '1 hour'",
 	} {
 		if !strings.Contains(activityQuery, want) {
 			t.Fatalf("activity query missing %q:\n%s", want, activityQuery)
@@ -208,7 +210,7 @@ func TestEgressCoverageSignalSyntheticHealthyNoDueWork(t *testing.T) {
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH shards AS"):
 			// Old evidence is allowed when the corresponding due queues are empty.
-			return []Row{{"0", "12", "0", "0", "604800", "10800", "12", "12"}}, nil
+			return []Row{{"0", "12", "0", "0", "604800", "10800", "12", "12", "1"}}, nil
 		default:
 			t.Fatalf("unexpected provider coverage query: %s", query)
 			return nil, nil
@@ -220,6 +222,145 @@ func TestEgressCoverageSignalSyntheticHealthyNoDueWork(t *testing.T) {
 	}
 	if len(alerts) != 0 {
 		t.Fatalf("healthy empty due queues returned alerts: %+v", alerts)
+	}
+}
+
+func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "pg_attribute"):
+			return []Row{{"t"}}, nil
+		case strings.Contains(query, "FROM pending_task"):
+			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
+		case strings.Contains(query, "WITH shards AS"):
+			// Activity is fresh, so shard liveness is healthy. At 100 checks/hour,
+			// 301 providers require just over the three-hour verdict lifetime.
+			return []Row{{"0", "301", "0", "201", "10", "10", "10", "200", "100"}}, nil
+		default:
+			t.Fatalf("unexpected provider coverage query: %s", query)
+			return nil, nil
+		}
+	}}
+	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want one capacity alert: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "egress-blackhole-capacity")
+	for _, want := range []string{
+		"66.4%",
+		"projected_sweep=3h0m36s",
+		"required_per_hour=101",
+		"configured_total_concurrency=4",
+		"timeout_only_ceiling_per_hour=960",
+		"minimum_concurrency_from_observed_rate=5",
+		"deadline_only_minimum_concurrency=1",
+		"becomes selectable again without a successful recheck",
+		"Run §2.23 and §2.24 first",
+		"above both reported minimum-concurrency bounds",
+		"not proof that Proxy hosts need more active-client hardware",
+		"Provider, network, task, endpoint, and failure identities never leave",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("capacity alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
+	const shardCount = 3
+	taskRows := make([]Row, 0, shardCount)
+	for shardIndex := range shardCount {
+		args := egressCoverageTaskArgs{
+			ShardIndex: shardIndex, ShardCount: shardCount,
+			IdleDelaySeconds: 120, MaxTimeSeconds: 900,
+			Full: egressCoverageBatchArgs{
+				Limit: 6, Concurrency: 2, ProbeTimeoutSeconds: 60,
+			},
+			Blackhole: egressCoverageBatchArgs{
+				Limit: 90, Concurrency: 5, ProbeTimeoutSeconds: 20,
+			},
+			APIURL:      "https://api.example.invalid",
+			PlatformURL: "wss://connect.example.invalid",
+		}
+		taskRows = append(taskRows, syntheticEgressCoverageTaskWithArgs(t, args))
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "pg_attribute"):
+			return []Row{{"t"}}, nil
+		case strings.Contains(query, "FROM pending_task"):
+			return taskRows, nil
+		case strings.Contains(query, "WITH shards AS"):
+			return []Row{
+				{"0", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+				{"1", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+				{"2", "2000", "0", "1500", "10", "10", "100", "1000", "200"},
+			}, nil
+		default:
+			t.Fatalf("unexpected provider coverage query: %s", query)
+			return nil, nil
+		}
+	}}
+	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "egress-blackhole-capacity")
+	for _, want := range []string{
+		"configured_shards=3",
+		"configured_concurrency_per_shard=5",
+		"configured_total_concurrency=15",
+		"probe_timeout_seconds=20",
+		"timeout_only_ceiling_per_hour=2700",
+		"minimum_concurrency_from_observed_rate=50",
+		"deadline_only_minimum_concurrency=12",
+		"both reported concurrency requirements are lower bounds",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("configured capacity alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		eligible string
+		current  string
+		want     int
+	}{
+		{name: "exact three hours", eligible: "300", current: "299", want: 0},
+		{name: "complete despite quiet hour", eligible: "301", current: "301", want: 0},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				switch {
+				case strings.Contains(query, "pg_attribute"):
+					return []Row{{"t"}}, nil
+				case strings.Contains(query, "FROM pending_task"):
+					return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
+				case strings.Contains(query, "WITH shards AS"):
+					blackholeDue := "1"
+					if testCase.current == testCase.eligible {
+						blackholeDue = "0"
+					}
+					return []Row{{"0", testCase.eligible, "0", blackholeDue, "10", "10", "10", testCase.current, "100"}}, nil
+				default:
+					t.Fatalf("unexpected provider coverage query: %s", query)
+					return nil, nil
+				}
+			}}
+			alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != testCase.want {
+				t.Fatalf("alerts = %d, want %d: %+v", len(alerts), testCase.want, alerts)
+			}
+		})
 	}
 }
 
@@ -317,14 +458,22 @@ func TestInspectEgressCoverageTasksRejectsInvalidBandwidthTimeout(t *testing.T) 
 
 func TestParseEgressCoverageActivityRejectsAmbiguousRows(t *testing.T) {
 	for name, rows := range map[string][]pgRow{
-		"missing shard": {{"0", "1", "0", "0", "1", "1", "1", "1"}},
+		"missing shard": {{"0", "1", "0", "0", "1", "1", "1", "1", "1"}},
 		"negative count": {
-			{"0", "1", "-1", "0", "1", "1", "1", "1"},
-			{"1", "1", "0", "0", "1", "1", "1", "1"},
+			{"0", "1", "-1", "0", "1", "1", "1", "1", "1"},
+			{"1", "1", "0", "0", "1", "1", "1", "1", "1"},
 		},
 		"duplicate shard": {
-			{"0", "1", "0", "0", "1", "1", "1", "1"},
-			{"0", "1", "0", "0", "1", "1", "1", "1"},
+			{"0", "1", "0", "0", "1", "1", "1", "1", "1"},
+			{"0", "1", "0", "0", "1", "1", "1", "1", "1"},
+		},
+		"current exceeds eligible": {
+			{"0", "1", "0", "0", "1", "1", "1", "2", "1"},
+			{"1", "1", "0", "0", "1", "1", "1", "1", "1"},
+		},
+		"last hour exceeds current": {
+			{"0", "1", "0", "0", "1", "1", "1", "1", "2"},
+			{"1", "1", "0", "0", "1", "1", "1", "1", "1"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

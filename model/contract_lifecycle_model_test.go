@@ -4,13 +4,159 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
+
+// Cross-host wall-clock skew is not portable to induce in a unit process. The
+// behavioral lock tests below prove serialization; this source-level guard
+// independently proves that every serialized writer takes its timestamp from
+// PostgreSQL after the lock marker instead of reintroducing an application
+// clock argument.
+func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) {
+	type parsedSource struct {
+		filename string
+		data     []byte
+		fileSet  *token.FileSet
+		file     *ast.File
+	}
+	sources := []parsedSource{}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileSet := token.NewFileSet()
+		file, err := parser.ParseFile(fileSet, entry.Name(), data, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources = append(sources, parsedSource{
+			filename: entry.Name(),
+			data:     data,
+			fileSet:  fileSet,
+			file:     file,
+		})
+	}
+
+	functionSource := func(filename string, functionName string) string {
+		for _, source := range sources {
+			if source.filename != filename {
+				continue
+			}
+			for _, declaration := range source.file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if !ok || function.Name.Name != functionName {
+					continue
+				}
+				start := source.fileSet.Position(function.Pos()).Offset
+				end := source.fileSet.Position(function.End()).Offset
+				return string(source.data[start:end])
+			}
+		}
+		t.Fatalf("%s: function %s not found", filename, functionName)
+		return ""
+	}
+
+	boundaries := []struct {
+		filename     string
+		functionName string
+		lockMarker   string
+		writeMarker  string
+	}{
+		{filename: "subscription_model.go", functionName: "createTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
+		{filename: "subscription_model.go", functionName: "createContractNoEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
+		{filename: "network_client_model.go", functionName: "deactivateNetworkClientsInTx", lockMarker: "/* network_client_deactivation_write_boundary */", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
+		{filename: "network_client_model.go", functionName: "RemoveDisconnectedNetworkClients", lockMarker: "FOR UPDATE OF network_client", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
+	}
+
+	for _, boundary := range boundaries {
+		source := functionSource(boundary.filename, boundary.functionName)
+		for markerName, marker := range map[string]string{
+			"lock":  boundary.lockMarker,
+			"write": boundary.writeMarker,
+			"clock": "clock_timestamp() AT TIME ZONE 'UTC'",
+		} {
+			if count := strings.Count(source, marker); count != 1 {
+				t.Errorf("%s: %s marker count = %d, want 1", boundary.functionName, markerName, count)
+			}
+		}
+		lockIndex := strings.Index(source, boundary.lockMarker)
+		writeIndex := strings.Index(source, boundary.writeMarker)
+		clockIndex := strings.Index(source, "clock_timestamp() AT TIME ZONE 'UTC'")
+		if lockIndex < 0 || writeIndex <= lockIndex || clockIndex <= writeIndex {
+			t.Errorf(
+				"%s: want lock (%d) before write (%d) before database clock (%d)",
+				boundary.functionName,
+				lockIndex,
+				writeIndex,
+				clockIndex,
+			)
+		}
+	}
+
+	contractWriters := []string{}
+	deactivationWriters := []string{}
+	for _, source := range sources {
+		ast.Inspect(source.file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(literal.Value)
+			if err != nil {
+				t.Fatalf("%s: parse string literal: %v", source.filename, err)
+			}
+			normalized := strings.ToUpper(strings.Join(strings.Fields(value), " "))
+			if strings.Contains(normalized, "INSERT INTO TRANSFER_CONTRACT") {
+				contractWriters = append(contractWriters, normalized)
+			}
+			if strings.Contains(normalized, "UPDATE NETWORK_CLIENT") && strings.Contains(normalized, "ACTIVE = FALSE") {
+				deactivationWriters = append(deactivationWriters, normalized)
+			}
+			return true
+		})
+	}
+	if len(contractWriters) != 2 {
+		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 2 reviewed writers", len(contractWriters))
+	}
+	for writerIndex, writer := range contractWriters {
+		if !strings.Contains(writer, "CLOCK_TIMESTAMP() AT TIME ZONE 'UTC'") {
+			t.Errorf("transfer_contract writer %d does not use the primary database clock", writerIndex)
+		}
+	}
+	if len(deactivationWriters) != 2 {
+		t.Fatalf("production network_client active=false writers = %d, want exactly 2 reviewed writers", len(deactivationWriters))
+	}
+	for writerIndex, writer := range deactivationWriters {
+		for _, want := range []string{
+			"LIFECYCLE_CLOCK AS MATERIALIZED",
+			"CLOCK_TIMESTAMP() AT TIME ZONE 'UTC'",
+			"DEACTIVATE_TIME = LIFECYCLE_CLOCK.DEACTIVATE_TIME",
+		} {
+			if !strings.Contains(writer, want) {
+				t.Errorf("network_client deactivation writer %d missing %q", writerIndex, want)
+			}
+		}
+	}
+}
 
 type contractLifecycleTestResult struct {
 	contractId server.Id
@@ -624,7 +770,13 @@ func TestDeactivationTimestampFollowsLifecycleLock(t *testing.T) {
 		default:
 		}
 
-		releaseTime := server.NowUtc()
+		var releaseTime time.Time
+		if err := readerTx.QueryRow(
+			ctx,
+			`SELECT clock_timestamp() AT TIME ZONE 'UTC'`,
+		).Scan(&releaseTime); err != nil {
+			t.Fatal(err)
+		}
 		if err := readerTx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}

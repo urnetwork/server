@@ -186,6 +186,7 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, networkId)
 
 		before := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(before), 0)
@@ -197,7 +198,7 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 			model.UsdToNanoCents(5.00),
 			"test-checkout-session-signed-in",
 			"test-record",
-			"buyer@bringyour.com",
+			"buyer@example.invalid",
 			&networkId, // signed in: we know the network
 		)
 		connect.AssertEqual(t, err, nil)
@@ -222,6 +223,7 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, networkId)
 
 		purchaseEventId := "test-checkout-session-retried"
 
@@ -233,7 +235,7 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 				model.UsdToNanoCents(5.00),
 				purchaseEventId, // the SAME purchase event, delivered three times
 				"test-record",
-				"buyer@bringyour.com",
+				"buyer@example.invalid",
 				&networkId,
 			)
 			connect.AssertEqual(t, err, nil)
@@ -310,6 +312,7 @@ func TestStripeCheckoutFulfillsEveryLineAndQuantity(t *testing.T) {
 		defer func() { stripeSkusFunc = prevSkus }()
 
 		networkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, networkId)
 
 		// two line items on one session, the first with quantity 2, NO email --
 		// the network is known, so the credit must land anyway

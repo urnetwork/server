@@ -1,6 +1,6 @@
 {
   "uid": "urnetwork-onboarding",
-  "title": "urnetwork / onboarding campaign",
+  "title": "urnetwork / onboarding",
   "tags": [
     "urnetwork",
     "onboarding",
@@ -16,7 +16,7 @@
   },
   "graphTooltip": 1,
   "editable": true,
-  "description": "The onboarding email campaign: starts, step outcomes, exits, Brevo delivery events and the App Store one-time offer code pool. S3 adds the results table and the experiment readout.",
+  "description": "Onboarding email delivery, flow-step engagement, experiment results and offer operations. Durable network-level cohorts are synchronized into privacy-safe aggregate metrics and a research API.",
   "templating": {
     "list": [
       {
@@ -63,7 +63,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Onboarding campaign** (mmm/onboarding/PLAN.md). Server-driven emails E1\u2013E5 through Brevo, one scheduled task per network and step, re-evaluated at send time. `starts` = networks entering (email true/false, sequence variant); `emails` = step outcomes (sent / skipped = condition not met / dry_run = `onboarding.enabled` false / failed = Brevo error, retried); `exits` = why a network left; `webhook events` = Brevo delivery events attributed to a campaign send. The nightly results rollup (02:00 UTC, `OnboardingResultsRollup`) writes the retention and trial-outcome events, recomputes `onboarding_results_daily` for the last `results.rollup_days` cohort days, checks the registry guardrails (a breach pauses the variant: `variants paused`) and prunes old events; `outcome events` = server-written trial.converted / trial.cancelled / refund / retention.* by store (`server` = the rollup, `unknown` = the backstop); `admin results requests` = GET /admin/onboarding/results|experiments by auth result. The per-cohort funnel itself is read from `onboarding_results_daily` through the admin endpoint (mmm/onboarding/analyze.mjs), not from Prometheus. Every `urnetwork_onboarding_*` metric is on this page."
+        "content": "**Onboarding** (mmm/onboarding/PLAN.md). Server-driven emails E1\u2013E5 go through Brevo, one scheduled task per network and flow step, re-evaluated at send time. The live counters below explain campaign execution. The durable **email tracker** further counts distinct networks sent each flow step and their later behavior; it refreshes every 15 minutes and exports one bounded 28-day snapshot. `engaged` means click, landing click, attributed app open, connection, widget, feedback, or Pro start; an open alone is excluded because mailbox privacy prefetch can manufacture opens. E3 and E5 may share a template, so new events carry a separate exact `flow_step`; historical shared-template events are reported as `attribution_ambiguous`, never guessed. Detailed privacy-safe daily dimensions are available to the research loop at `GET /admin/onboarding/email-tracker`; raw network and message identifiers never enter Grafana or that endpoint. The nightly results rollup (02:00 UTC, `OnboardingResultsRollup`) remains the account-cohort experiment and retention source at `GET /admin/onboarding/results`."
       }
     },
     {
@@ -1182,6 +1182,193 @@
           "expr": "sum by (result) (increase(urnetwork_onboarding_apple_offer_code_batches_total{env=\"$env\"}[1d]))",
           "refId": "A",
           "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "email flow tracker (distinct networks, rolling 28 days)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "tracker definitions and research source",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Each send is deduplicated by network + flow step. Delivery corrections are accepted for 30 days. Product engagement belongs to the most recent preceding email until the next send, capped at 14 days. All charts select exactly one fresh taskworker snapshot; a missing or stale exporter remains **no data**, not a false zero. Open-only activity is shown but is not `engaged`. `attribution_ambiguous` is the number of networks with historical template-only evidence that could belong to more than one flow step. Research clients use the authenticated aggregate endpoint `GET /admin/onboarding/email-tracker?from=YYYY-MM-DD&to=YYYY-MM-DD` with optional `step`, `experiment`, `platform`, `path`, `cursor`, and `limit`."
+      }
+    },
+    {
+      "type": "stat",
+      "title": "tracker snapshot age",
+      "description": "Must remain below 20 minutes. No series means no taskworker has completed the tracker sync.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 79
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1200}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "time() - max(urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "networks sent",
+      "description": "Distinct network/flow-step exposures in the rolling 28-day send cohort.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 79},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum(urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=\"sent\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "high-intent engagement rate",
+      "description": "Engaged networks divided by sent networks; mailbox-open-only activity is excluded.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 79},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum(urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=\"engaged\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) / clamp_min(sum(urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=\"sent\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))), 1)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "ambiguous legacy attribution",
+      "description": "Networks whose historical template-only event could not safely distinguish E3 from E5. This is uncertainty, not engagement.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 79},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum(urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=\"attribution_ambiguous\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "networks sent by flow step",
+      "description": "The denominator for every per-step engagement rate.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 83},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "always", "stacking": "none"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum by (step) (urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=\"sent\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{step}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "email funnel by flow step",
+      "description": "Distinct networks at each delivery stage. Open is diagnostic and is not itself high-intent engagement.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 83},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum by (step, outcome) (urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=~\"sent|delivered|opened|clicked|engaged\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{step}} {{outcome}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "downstream engagement by flow step",
+      "description": "What sent networks did within the step's bounded attribution window.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum by (step, outcome) (urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=~\"landing_clicked|app_opened|connected|widget_added|feedback_submitted|pro_started\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{step}} {{outcome}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "delivery risk and attribution quality by flow step",
+      "description": "Safety outcomes and historical attribution uncertainty; all are distinct-network counts.",
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+          "expr": "sum by (step, outcome) (urnetwork_onboarding_email_tracker_networks{env=\"$env\",outcome=~\"bounced|unsubscribed|complained|attribution_ambiguous\"} and on(env,service,block,host,instance) topk(1, (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_onboarding_email_tracker_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{step}} {{outcome}}",
+          "instant": true
         }
       ]
     }

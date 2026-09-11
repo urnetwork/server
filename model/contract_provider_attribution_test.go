@@ -131,11 +131,15 @@ func assertContractPayoutTestProviderAllocations(t testing.TB, ctx context.Conte
 func addStProviderUsageTestSweep(t testing.TB, ctx context.Context, originNetworkId, providerNetworkId, providerId server.Id, sweepTime time.Time, allocations any) server.Id {
 	t.Helper()
 	originId := server.NewId()
-	contractId, err := CreateContractNoEscrow(ctx, originNetworkId, originId, providerNetworkId, providerId, 121)
-	if err != nil {
-		t.Fatal(err)
-	}
+	contractId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
+		// Seed immutable history directly: these fixtures may predate or differ
+		// from current client membership, which contract creation now validates.
+		server.RaisePgResult(tx.Exec(ctx, `
+            INSERT INTO transfer_contract (contract_id, source_network_id, source_id,
+                destination_network_id, destination_id, transfer_byte_count, create_time)
+            VALUES ($1, $2, $3, $4, $5, 121, $6)
+        `, contractId, originNetworkId, originId, providerNetworkId, providerId, server.NowUtc()))
 		server.RaisePgResult(tx.Exec(ctx, `
             INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, destination_id,
                 payout_byte_count, payout_net_revenue_nano_cents, sweep_time, provider_payouts)

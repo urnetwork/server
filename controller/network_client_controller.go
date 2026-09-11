@@ -33,6 +33,9 @@ func AuthNetworkClient(
 		// onboarding attribution: an app open that follows a campaign landing
 		// click within 48h (one cheap query, never fails the caller)
 		AttributeAppOpen(clientSession, clientSession.ByJwt.NetworkId)
+		// the device path of campaign enrollment: a network without an email
+		// login enters on its first device (one row lookup per auth-client)
+		EnrollNetworkOnboarding(clientSession, clientSession.ByJwt.NetworkId, "", true)
 		// the device's zone, locale and platform place and render the
 		// onboarding campaign's emails
 		RecordOnboardingClientContext(clientSession, clientSession.ByJwt.NetworkId, authClient.TimeZone, authClient.Locale, authClient.DeviceSpec)

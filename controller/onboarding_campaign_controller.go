@@ -120,22 +120,53 @@ func onboardingSendWindow() onboarding.SendWindow {
 
 // ----- entering the campaign -----
 
-// StartOnboardingCampaign enters a new network into the campaign. Called once
-// the account exists and can be mailed: from NetworkCreate when no verification
-// is required, and from AuthVerify when it completes; instant and phone accounts
-// get a row that exits as no_email so the results job can count them. A second
+// EnrollNetworkOnboarding enters a network into the campaign: one row, the
+// cohort time being the enrollment time. Two entry points, one gate
+// (onboarding.Enroll, decision 2026-09-10 from the research readout):
+//
+//   - the account path (viaDevice false): NetworkCreate when no verification is
+//     required, and AuthVerify when it completes, with the login the account
+//     was created with. A network enters when that login is an email address;
+//     the sequence can mail it. One without an email login is left to the
+//     device path.
+//   - the device path (viaDevice true): the network's first device client
+//     (AuthNetworkClient). A network without an email login enters here, as a
+//     row that exits at once as no_email, so the results job counts it among
+//     the real population; a network older than onboarding.EnrollmentHorizon
+//     does not enter at all.
+//
+// A network with neither an email login nor a device never enters: on Main
+// about 85% of new networks are created through the API and never register a
+// device, and they can neither see an offer screen nor be mailed. A second
 // call for the same network is a no-op. Never fails the caller.
-func StartOnboardingCampaign(clientSession *session.ClientSession, networkId server.Id, userAuth string) {
+func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId server.Id, userAuth string, viaDevice bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			glog.Errorf("[onboarding]campaign start failed for network %s: %v\n", networkId, r)
+			glog.Errorf("[onboarding]campaign enrollment failed for network %s: %v\n", networkId, r)
 		}
 	}()
 	now := server.NowUtc()
 	cfg := model.Onboarding()
 
+	createdAt := now
+	if viaDevice {
+		// the device path pays one row lookup, and one facts lookup only for a
+		// network that has no row yet
+		if model.GetNetworkOnboarding(clientSession.Ctx, networkId) != nil {
+			return
+		}
+		auth, createTime, ok := model.NetworkEnrollmentFacts(clientSession.Ctx, networkId)
+		if !ok {
+			return
+		}
+		userAuth = auth
+		createdAt = createTime
+	}
 	_, authType := model.NormalUserAuth(userAuth)
 	hasEmail := authType == model.UserAuthTypeEmail
+	if !onboarding.Enroll(hasEmail, viaDevice, createdAt, now) {
+		return
+	}
 
 	row := &model.NetworkOnboarding{
 		NetworkId: networkId,
@@ -513,6 +544,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	token, err := onboarding.NewToken(&onboarding.TokenClaims{
 		NetworkId: row.NetworkId,
 		Step:      decision.Template,
+		FlowStep:  step,
 		ExpiresAt: now.Add(30 * 24 * time.Hour).Unix(),
 	})
 	if err != nil {
@@ -700,15 +732,18 @@ func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboardi
 			SentAt:            now,
 		})
 	})
-	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, row.ExperimentId, row.EmailVariant, row.Platform, now)
+	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, step, row.ExperimentId, row.EmailVariant, row.Platform, now)
 	return "sent", nil
 }
 
 // writeOnboardingEmailEvent records an email.* event with the sequence
 // experiment stamped from the row (WriteServerEvent would stamp a per-step
 // surface instead). Never fails the caller.
-func writeOnboardingEmailEvent(ctx context.Context, networkId server.Id, name string, template string, experiment string, variant string, platform string, at time.Time) {
+func writeOnboardingEmailEvent(ctx context.Context, networkId server.Id, name string, template string, flowStep string, experiment string, variant string, platform string, at time.Time) {
 	props := map[string]any{"step": template}
+	if onboarding.IsFlowStep(flowStep) {
+		props["flow_step"] = flowStep
+	}
 	if experiment != "" {
 		props["experiment"] = experiment
 		props["variant"] = variant
@@ -852,7 +887,7 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 		at = time.Unix(args.TsEvent, 0).UTC()
 	}
 	onboardingWebhookEventsTotal.WithLabelValues(name, email.Template).Inc()
-	writeOnboardingEmailEvent(ctx, email.NetworkId, name, email.Template, email.Experiment, email.ExperimentVariant, "", at)
+	writeOnboardingEmailEvent(ctx, email.NetworkId, name, email.Template, email.Step, email.Experiment, email.ExperimentVariant, "", at)
 
 	switch name {
 	case model.EventEmailBounced:

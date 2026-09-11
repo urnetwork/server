@@ -22,53 +22,55 @@ type backupArchiveFixture struct {
 }
 
 type backupArchiveWriterFixture struct {
-	unitState                    string
-	unitSubstate                 string
-	mainPID                      int64
-	result                       string
-	exitStatus                   int64
-	invocationID                 string
-	execStart                    int64
-	execStartEpoch               int64
-	timerState                   string
-	timerUnitFileState           string
-	timerNext                    *int64
-	timerLast                    int64
-	archiveRootObservation       string
-	githubArchivePathState       string
-	remoteArchivePathState       string
-	archivePathsMatch            *bool
-	archiveMountsMatch           *bool
-	archivePathsOnMount          *bool
-	archivePathPermissionsSecure *bool
-	remoteUnitState              string
-	remoteUnitSubstate           string
-	remoteMainPID                int64
-	remoteResult                 string
-	remoteRestart                string
-	remoteRestartDelay           string
-	remoteExitStatus             int64
-	remoteInvocationID           string
-	remoteExecStart              int64
-	remoteExecStartEpoch         int64
-	remoteTimerState             string
-	remoteTimerUnitFileState     string
-	remoteTimerNext              int64
-	remoteTimerLast              int64
-	remoteBoot                   int64
-	remotePGSource               string
-	remotePGPort                 int64
-	remoteRedisSource            string
-	remoteRedisPort              int64
-	remoteMount                  string
-	remoteMountPresent           *bool
-	remoteMountSource            string
-	remoteMountFSType            string
-	remoteMountOptions           string
-	remoteMountLineage           string
-	clearanceState               string
-	storageReadable              *bool
-	storageEvents                []backupArchiveStorageEventFixture
+	unitState                     string
+	unitSubstate                  string
+	mainPID                       int64
+	result                        string
+	exitStatus                    int64
+	invocationID                  string
+	execStart                     int64
+	execStartEpoch                int64
+	timerState                    string
+	timerUnitFileState            string
+	timerNext                     *int64
+	timerLast                     int64
+	githubGitTransferAttempts     int64
+	githubGitTransferRetrySeconds int64
+	archiveRootObservation        string
+	githubArchivePathState        string
+	remoteArchivePathState        string
+	archivePathsMatch             *bool
+	archiveMountsMatch            *bool
+	archivePathsOnMount           *bool
+	archivePathPermissionsSecure  *bool
+	remoteUnitState               string
+	remoteUnitSubstate            string
+	remoteMainPID                 int64
+	remoteResult                  string
+	remoteRestart                 string
+	remoteRestartDelay            string
+	remoteExitStatus              int64
+	remoteInvocationID            string
+	remoteExecStart               int64
+	remoteExecStartEpoch          int64
+	remoteTimerState              string
+	remoteTimerUnitFileState      string
+	remoteTimerNext               int64
+	remoteTimerLast               int64
+	remoteBoot                    int64
+	remotePGSource                string
+	remotePGPort                  int64
+	remoteRedisSource             string
+	remoteRedisPort               int64
+	remoteMount                   string
+	remoteMountPresent            *bool
+	remoteMountSource             string
+	remoteMountFSType             string
+	remoteMountOptions            string
+	remoteMountLineage            string
+	clearanceState                string
+	storageReadable               *bool
+	storageEvents                 []backupArchiveStorageEventFixture
 }
 
 type backupArchiveStorageEventFixture struct {
@@ -1097,7 +1099,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 46 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 48 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
@@ -1113,6 +1115,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
 		{name: "invocation", output: strings.Replace(valid, "remote_invocation_id=present", "remote_invocation_id=not-a-state", 1), want: "invalid remote_invocation_id"},
 		{name: "timer epoch", output: strings.Replace(valid, "remote_timer_next_epoch=2000000000", "remote_timer_next_epoch=tomorrow", 1), want: "invalid remote_timer_next_epoch"},
+		{name: "Git transfer attempts", output: strings.Replace(valid, "github_git_transfer_attempts=4", "github_git_transfer_attempts=many", 1), want: "invalid github_git_transfer_attempts"},
 		{name: "mount present", output: strings.Replace(valid, "remote_mount_present=true", "remote_mount_present=maybe", 1), want: "invalid remote_mount_present"},
 		{name: "mount options", output: strings.Replace(valid, "remote_mount_options=rw,nosuid,nodev,relatime,errors=remount-ro", "remote_mount_options=rw secret", 1), want: "invalid remote_mount_options"},
 		{name: "mount lineage", output: strings.Replace(valid, "remote_mount_lineage=dm-2,sda1,sda", "remote_mount_lineage=dm-2,sda1,sda;bad", 1), want: "invalid remote_mount_lineage"},
@@ -1124,6 +1127,48 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
 		if err == nil || !strings.Contains(err.Error(), testCase.want) {
 			t.Fatalf("%s: parse error=%v, want substring %q", testCase.name, err, testCase.want)
+		}
+	}
+}
+
+// Reproduces the September 9 boundary: one repository SSH update reset while
+// prior updates and the other organization succeeded. A daily timer does not
+// make that transfer resilient inside the current atomic archive invocation.
+func TestBackupArchivesSignalSyntheticDetectsDisabledGitTransferRetry(t *testing.T) {
+	now := time.Date(2026, 9, 9, 13, 30, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		githubGitTransferAttempts:     1,
+		githubGitTransferRetrySeconds: 1,
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(
+		t,
+		alerts,
+		"backup-archive-git-transfer-retry-disabled",
+		"backup-1/github",
+	)
+	if alert.Sustain != 1 || alert.Severity != SeverityPage {
+		t.Fatalf("Git transfer retry urgency=%s/%d, want page/1", alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"git_transfer_attempts=1",
+		"git_transfer_retry_seconds=1",
+		"one transient SSH reset",
+		"four attempts with 30 seconds",
+		"provider-side connection reset and broken pipe",
+		"Preserve existing mirror caches",
+		"explicit operator authorization",
+		"SIGNALS.md §11.22",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("disabled Git transfer retry alert missing %q:\n%s", want, alert.Markdown())
 		}
 	}
 }
@@ -1443,6 +1488,12 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		timerNext := int64(2_000_000_000)
 		fixture.timerNext = &timerNext
 	}
+	if fixture.githubGitTransferAttempts == 0 {
+		fixture.githubGitTransferAttempts = 4
+	}
+	if fixture.githubGitTransferRetrySeconds == 0 {
+		fixture.githubGitTransferRetrySeconds = 30
+	}
 	if fixture.archiveRootObservation == "" {
 		fixture.archiveRootObservation = "observable"
 	}
@@ -1567,6 +1618,8 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"github_timer_unit_file_state=%s\n"+
 			"github_timer_next_epoch=%d\n"+
 			"github_timer_last_epoch=%d\n"+
+			"github_git_transfer_attempts=%d\n"+
+			"github_git_transfer_retry_seconds=%d\n"+
 			"archive_root_observation=%s\n"+
 			"github_archive_path_state=%s\n"+
 			"remote_archive_path_state=%s\n"+
@@ -1613,6 +1666,8 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.timerUnitFileState,
 		*fixture.timerNext,
 		fixture.timerLast,
+		fixture.githubGitTransferAttempts,
+		fixture.githubGitTransferRetrySeconds,
 		fixture.archiveRootObservation,
 		fixture.githubArchivePathState,
 		fixture.remoteArchivePathState,

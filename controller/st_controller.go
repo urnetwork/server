@@ -961,17 +961,18 @@ func (self *CoreStClient) buildTransactionAttempt(
 	}
 	chainId := new(big.Int).SetUint64(intent.ChainId)
 
-	callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-	defer cancel()
 	if gasLimit != 0 {
 		// intrinsic gas was selected by the cancellation payload
 	} else if previous != nil {
 		gasLimit = previous.GasLimit
-	} else {
-		estimated, err := client.EstimateGas(callCtx, ethereum.CallMsg{From: from, To: &to, Data: calldata})
-		if err != nil {
-			return nil, fmt.Errorf("st: estimate gas: %w", err)
-		}
+	}
+	estimate := gasLimit == 0 && previous == nil
+	prepared, err := readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
+	if err != nil {
+		return nil, err
+	}
+	if estimate {
+		estimated := prepared.estimatedGas
 		// A stable 20% margin avoids a replacement changing gas limit because
 		// unrelated state shifted between attempts.
 		if estimated > ^uint64(0)/6*5 {
@@ -980,20 +981,12 @@ func (self *CoreStClient) buildTransactionAttempt(
 		gasLimit = estimated + (estimated+4)/5
 	}
 
-	header, err := client.HeaderByNumber(callCtx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("st: latest fee header: %w", err)
-	}
 	var unsigned *types.Transaction
 	attempt := &model.StTransactionAttempt{
 		IntentId: intent.IntentId, Attempt: intent.AttemptCount + 1, Kind: kind, GasLimit: gasLimit,
 	}
-	useLegacy := header.BaseFee == nil || (previous != nil && previous.GasPrice != nil)
-	if useLegacy {
-		price, err := client.SuggestGasPrice(callCtx)
-		if err != nil {
-			return nil, fmt.Errorf("st: suggest gas price: %w", err)
-		}
+	if prepared.legacy {
+		price := prepared.fee
 		if previous != nil {
 			price = stReplacementFee(previous.GasPrice, price)
 		}
@@ -1003,11 +996,8 @@ func (self *CoreStClient) buildTransactionAttempt(
 			Value: new(big.Int), Data: append([]byte(nil), calldata...),
 		})
 	} else {
-		tip, err := client.SuggestGasTipCap(callCtx)
-		if err != nil {
-			return nil, fmt.Errorf("st: suggest gas tip: %w", err)
-		}
-		fee := new(big.Int).Mul(header.BaseFee, big.NewInt(2))
+		tip := prepared.fee
+		fee := new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
 		fee.Add(fee, tip)
 		if previous != nil {
 			tip = stReplacementFee(previous.GasTipCap, tip)

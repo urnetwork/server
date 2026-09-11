@@ -77,6 +77,10 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"competition_round_one_active_staging",
 			"competition_round_admission_closed_kind",
 			"epoch_metrics_available",
+			"onboarding_email_tracker_daily",
+			"attribution_ambiguous",
+			"network_onboarding_email_sent_at",
+			"(sent_at, network_id, step)",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)

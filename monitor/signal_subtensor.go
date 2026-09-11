@@ -57,29 +57,67 @@ type subtensorRPCObservation struct {
 }
 
 type subtensorNodeObservation struct {
-	Name                   string                  `json:"name"`
-	SyncMode               string                  `json:"sync_mode"`
-	RPCPort                int                     `json:"rpc_port"`
-	GatewayPort            int                     `json:"gateway_port"`
-	Direct                 subtensorRPCObservation `json:"direct"`
-	Gateway                subtensorRPCObservation `json:"gateway"`
-	FirstHead              string                  `json:"first_head"`
-	SecondHead             string                  `json:"second_head"`
-	GatewayHTTP            int                     `json:"gateway_http"`
-	ContainerImage         string                  `json:"container_image"`
-	ContainerStarted       string                  `json:"container_started"`
-	DataPath               string                  `json:"data_path"`
-	RuntimeUID             int64                   `json:"runtime_uid"`
-	RuntimeGID             int64                   `json:"runtime_gid"`
-	DataPathUID            int64                   `json:"data_path_uid"`
-	DataPathGID            int64                   `json:"data_path_gid"`
-	DataPathMode           int64                   `json:"data_path_mode"`
-	DataPermissionObserved bool                    `json:"data_permission_observed"`
-	DataRuntimeWritable    bool                    `json:"data_runtime_writable"`
-	DataPermissionError    bool                    `json:"data_permission_error"`
-	WarpFallback           bool                    `json:"warp_fallback"`
-	WarpProofStarted       bool                    `json:"warp_proof_started"`
-	ContainerError         string                  `json:"container_error"`
+	Name                   string                    `json:"name"`
+	SyncMode               string                    `json:"sync_mode"`
+	RPCPort                int                       `json:"rpc_port"`
+	GatewayPort            int                       `json:"gateway_port"`
+	Direct                 subtensorRPCObservation   `json:"direct"`
+	Gateway                subtensorRPCObservation   `json:"gateway"`
+	FirstHead              string                    `json:"first_head"`
+	SecondHead             string                    `json:"second_head"`
+	GatewayHTTP            int                       `json:"gateway_http"`
+	ContainerImage         string                    `json:"container_image"`
+	ContainerStarted       string                    `json:"container_started"`
+	DataPath               string                    `json:"data_path"`
+	RuntimeUID             int64                     `json:"runtime_uid"`
+	RuntimeGID             int64                     `json:"runtime_gid"`
+	DataPathUID            int64                     `json:"data_path_uid"`
+	DataPathGID            int64                     `json:"data_path_gid"`
+	DataPathMode           int64                     `json:"data_path_mode"`
+	DataPermissionObserved bool                      `json:"data_permission_observed"`
+	DataRuntimeWritable    bool                      `json:"data_runtime_writable"`
+	DataPermissionError    bool                      `json:"data_permission_error"`
+	WarpFallback           bool                      `json:"warp_fallback"`
+	WarpProofStarted       bool                      `json:"warp_proof_started"`
+	PeerDiagnostics        *subtensorPeerDiagnostics `json:"peer_diagnostics"`
+	ContainerError         string                    `json:"container_error"`
+}
+
+type subtensorPeerDiagnostics struct {
+	Version            int                         `json:"version"`
+	ContainerDNSStatus string                      `json:"container_dns_status"`
+	BootnodeTCPStatus  string                      `json:"bootnode_tcp_status"`
+	Log                subtensorPeerLogDiagnostics `json:"log"`
+	MetricsStatus      string                      `json:"metrics_status"`
+	Metrics            subtensorPeerMetrics        `json:"metrics"`
+}
+
+type subtensorPeerLogDiagnostics struct {
+	Scope               string                   `json:"scope"`
+	EventTimeCorrelated bool                     `json:"event_time_correlated"`
+	TailLimit           int64                    `json:"tail_limit"`
+	LinesScanned        int64                    `json:"lines_scanned"`
+	Outcomes            subtensorPeerLogOutcomes `json:"outcomes"`
+}
+
+type subtensorPeerLogOutcomes struct {
+	ChainOrForkRejection           int64 `json:"chain_or_fork_rejection"`
+	DatabaseOrImportRejection      int64 `json:"database_or_import_rejection"`
+	NotificationNegotiationFailure int64 `json:"notification_negotiation_failure"`
+	ReconnectOrDialFailure         int64 `json:"reconnect_or_dial_failure"`
+}
+
+type subtensorPeerMetrics struct {
+	BlockAnnounceOpenedTotal           int64 `json:"block_announce_opened_total"`
+	BlockAnnounceClosedTotal           int64 `json:"block_announce_closed_total"`
+	RawDistinctOpenedTotal             int64 `json:"raw_distinct_opened_total"`
+	RawDistinctClosedTotal             int64 `json:"raw_distinct_closed_total"`
+	SyncRequestSuccessTotal            int64 `json:"sync_request_success_total"`
+	SyncRequestClosedTotal             int64 `json:"sync_request_closed_total"`
+	SyncRequestNegotiationFailureTotal int64 `json:"sync_request_negotiation_failure_total"`
+	SyncRequestDialFailureTotal        int64 `json:"sync_request_dial_failure_total"`
+	PendingHandshakeFailureTotal       int64 `json:"pending_handshake_failure_total"`
+	PendingTransportFailureTotal       int64 `json:"pending_transport_failure_total"`
 }
 
 type subtensorRuntimeVersion struct {
@@ -188,6 +226,7 @@ import time
 import urllib.request
 
 config = json.loads(os.environ["SUBTENSOR_MONITOR_CONFIG"])
+SUBTENSOR_HELPER_TIMEOUT_SECONDS = 30
 
 def rpc(url, method, params=None):
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}).encode()
@@ -229,7 +268,7 @@ def inspect_container(node):
         output = subprocess.check_output(
             ["sudo", "-n", "/usr/local/sbin/subtensor-monitor", name],
             text=True, stderr=subprocess.STDOUT,
-            timeout=10,
+            timeout=SUBTENSOR_HELPER_TIMEOUT_SECONDS,
         )
         result = json.loads(output)
         if not isinstance(result, dict):
@@ -310,6 +349,189 @@ func parseSubtensorObservation(output string) (subtensorObservation, error) {
 	return observation, nil
 }
 
+type subtensorArchivePeerControl struct {
+	Healthy         bool
+	Peers           int64
+	Image           string
+	PeerDiagnostics *subtensorPeerDiagnostics
+}
+
+func buildSubtensorArchivePeerControl(settings *SubtensorHostSettings, configured map[string]SubtensorNodeSettings, nodes []subtensorNodeObservation) subtensorArchivePeerControl {
+	for _, node := range nodes {
+		configuredNode, ok := configured[node.Name]
+		if !ok || configuredNode.SyncMode != "full" || len(subtensorIdentityProblems(settings, node.Direct, false)) > 0 {
+			continue
+		}
+		firstHead, firstErr := subtensorHex(node.FirstHead)
+		secondHead, secondErr := subtensorHex(node.SecondHead)
+		return subtensorArchivePeerControl{
+			Healthy:         firstErr == nil && secondErr == nil && secondHead > firstHead && node.Direct.Health.Peers > 0,
+			Peers:           node.Direct.Health.Peers,
+			Image:           node.ContainerImage,
+			PeerDiagnostics: node.PeerDiagnostics,
+		}
+	}
+	return subtensorArchivePeerControl{}
+}
+
+func subtensorPeerDiagnosticsProblem(diagnostics *subtensorPeerDiagnostics) error {
+	if diagnostics == nil {
+		return fmt.Errorf("versioned peer diagnostics are absent; the installed helper predates this observation contract")
+	}
+	if diagnostics.Version != 1 {
+		return fmt.Errorf("unsupported peer diagnostics version=%d", diagnostics.Version)
+	}
+	if diagnostics.Log.Scope != "current-process-tail" || diagnostics.Log.EventTimeCorrelated || diagnostics.Log.TailLimit != 5000 || diagnostics.Log.LinesScanned < 0 || diagnostics.Log.LinesScanned > diagnostics.Log.TailLimit {
+		return fmt.Errorf("peer log aggregate bounds are invalid")
+	}
+	for _, count := range []int64{
+		diagnostics.Log.Outcomes.ChainOrForkRejection,
+		diagnostics.Log.Outcomes.DatabaseOrImportRejection,
+		diagnostics.Log.Outcomes.NotificationNegotiationFailure,
+		diagnostics.Log.Outcomes.ReconnectOrDialFailure,
+	} {
+		if count < 0 {
+			return fmt.Errorf("peer log aggregate contains a negative count")
+		}
+	}
+	for _, observation := range []struct {
+		name   string
+		status string
+	}{
+		{name: "container_dns", status: diagnostics.ContainerDNSStatus},
+		{name: "bootnode_tcp", status: diagnostics.BootnodeTCPStatus},
+	} {
+		switch observation.status {
+		case "ok", "failed", "timeout", "unconfigured":
+		case "unavailable":
+			return fmt.Errorf("%s observation is unavailable", observation.name)
+		default:
+			return fmt.Errorf("%s observation has invalid status=%q", observation.name, observation.status)
+		}
+	}
+	if diagnostics.MetricsStatus != "ok" {
+		return fmt.Errorf("peer metrics observation status=%q", diagnostics.MetricsStatus)
+	}
+	for _, count := range []int64{
+		diagnostics.Metrics.BlockAnnounceOpenedTotal,
+		diagnostics.Metrics.BlockAnnounceClosedTotal,
+		diagnostics.Metrics.RawDistinctOpenedTotal,
+		diagnostics.Metrics.RawDistinctClosedTotal,
+		diagnostics.Metrics.SyncRequestSuccessTotal,
+		diagnostics.Metrics.SyncRequestClosedTotal,
+		diagnostics.Metrics.SyncRequestNegotiationFailureTotal,
+		diagnostics.Metrics.SyncRequestDialFailureTotal,
+		diagnostics.Metrics.PendingHandshakeFailureTotal,
+		diagnostics.Metrics.PendingTransportFailureTotal,
+	} {
+		if count < 0 {
+			return fmt.Errorf("peer metric aggregate contains a negative count")
+		}
+	}
+	return nil
+}
+
+func subtensorPeerDiagnosticsUsable(diagnostics *subtensorPeerDiagnostics) bool {
+	return subtensorPeerDiagnosticsProblem(diagnostics) == nil
+}
+
+func subtensorCounterRemainder(opened, closed int64) int64 {
+	if opened <= closed {
+		return 0
+	}
+	return opened - closed
+}
+
+func subtensorPeerFindingDetails(node subtensorNodeObservation, archive subtensorArchivePeerControl) (string, string, string, string) {
+	mechanism := "A local RPC and listener can remain healthy while a zero-peer node freezes and eventually reports its own stale head as the sync target."
+	evidenceParts := []string{"peer_diagnostics=unavailable"}
+	action := "Install the matching restricted Subtensor helper if diagnostics are unavailable; otherwise verify its aggregate container DNS, bootnode TCP, notification-session, and current-generation log outcomes before changing the node."
+	verify := "Require peers above zero and advancing heads for more than one sample; do not accept isSyncing=false alone."
+	diagnostics := node.PeerDiagnostics
+	if !subtensorPeerDiagnosticsUsable(diagnostics) {
+		if archive.Healthy {
+			evidenceParts = append(evidenceParts, fmt.Sprintf("archive_control=healthy peers=%d", archive.Peers))
+		}
+		return mechanism, strings.Join(evidenceParts, " "), action, verify
+	}
+
+	metrics := diagnostics.Metrics
+	outcomes := diagnostics.Log.Outcomes
+	notificationLive := subtensorCounterRemainder(metrics.BlockAnnounceOpenedTotal, metrics.BlockAnnounceClosedTotal)
+	rawLive := subtensorCounterRemainder(metrics.RawDistinctOpenedTotal, metrics.RawDistinctClosedTotal)
+	evidenceParts = []string{fmt.Sprintf(
+		"peer_diagnostics=v%d dns=%s bootnode_tcp=%s log_scope=%s log_event_time_correlated=%t log_lines=%d chain_or_fork=%d database_or_import=%d notification_negotiation=%d reconnect_or_dial=%d block_announce_opened=%d block_announce_closed=%d block_announce_live=%d raw_distinct_opened=%d raw_distinct_closed=%d raw_distinct_live=%d sync_success=%d sync_closed=%d sync_negotiation_failure=%d sync_dial_failure=%d pending_handshake_failure=%d pending_transport_failure=%d",
+		diagnostics.Version, diagnostics.ContainerDNSStatus, diagnostics.BootnodeTCPStatus,
+		diagnostics.Log.Scope, diagnostics.Log.EventTimeCorrelated, diagnostics.Log.LinesScanned,
+		outcomes.ChainOrForkRejection, outcomes.DatabaseOrImportRejection,
+		outcomes.NotificationNegotiationFailure, outcomes.ReconnectOrDialFailure,
+		metrics.BlockAnnounceOpenedTotal, metrics.BlockAnnounceClosedTotal, notificationLive,
+		metrics.RawDistinctOpenedTotal, metrics.RawDistinctClosedTotal, rawLive,
+		metrics.SyncRequestSuccessTotal, metrics.SyncRequestClosedTotal,
+		metrics.SyncRequestNegotiationFailureTotal, metrics.SyncRequestDialFailureTotal,
+		metrics.PendingHandshakeFailureTotal, metrics.PendingTransportFailureTotal,
+	)}
+	archiveComparable := archive.Healthy && archive.Image != "" && archive.Image == node.ContainerImage && subtensorPeerDiagnosticsUsable(archive.PeerDiagnostics)
+	if archive.Healthy {
+		control := fmt.Sprintf("archive_control=healthy peers=%d same_image=%t", archive.Peers, archive.Image != "" && archive.Image == node.ContainerImage)
+		if subtensorPeerDiagnosticsUsable(archive.PeerDiagnostics) {
+			archiveMetrics := archive.PeerDiagnostics.Metrics
+			control += fmt.Sprintf(
+				" dns=%s bootnode_tcp=%s block_announce_live=%d sync_closed=%d",
+				archive.PeerDiagnostics.ContainerDNSStatus,
+				archive.PeerDiagnostics.BootnodeTCPStatus,
+				subtensorCounterRemainder(archiveMetrics.BlockAnnounceOpenedTotal, archiveMetrics.BlockAnnounceClosedTotal),
+				archiveMetrics.SyncRequestClosedTotal,
+			)
+		}
+		evidenceParts = append(evidenceParts, control)
+	}
+	controlConclusion := ""
+	if archiveComparable && archive.PeerDiagnostics.ContainerDNSStatus == "ok" && archive.PeerDiagnostics.BootnodeTCPStatus == "ok" {
+		controlConclusion = " The advancing, peer-connected archive on the same host and image, with its own successful resolver and bootnode checks, is the healthy control; the fault is specific to this node generation or its peer protocol state."
+	}
+	tailCaveat := ""
+	if outcomes.DatabaseOrImportRejection > 0 || outcomes.ChainOrForkRejection > 0 || outcomes.NotificationNegotiationFailure > 0 || outcomes.ReconnectOrDialFailure > 0 {
+		tailCaveat = " The log counts come from a line-bounded current-process tail with no event-time correlation; they remain historical alternatives unless a separately bounded timestamped observation ties them to this peer-loss episode."
+	}
+
+	switch {
+	case diagnostics.ContainerDNSStatus == "unconfigured" || diagnostics.BootnodeTCPStatus == "unconfigured":
+		mechanism = "The helper could not extract exactly one supported bootnode endpoint from the running container command. This is a bootnode configuration/observation boundary, not evidence that an attempted DNS lookup failed." + controlConclusion + tailCaveat
+		action = "Compare the running container command with the rendered digest-pinned Xops bootnode setting. Extend the restricted parser for an intentionally supported command shape or reconcile proven configuration drift; do not restart or reset chain data merely to make the diagnostic parse."
+		verify = "The helper reports a concrete DNS and bootnode TCP result for the intended endpoint, then peers remain above zero and the head advances across multiple samples."
+	case diagnostics.ContainerDNSStatus != "ok":
+		mechanism = "The restricted in-container resolver check cannot resolve the configured bootnode within its bounded gate, so peer establishment is failing before a bootnode transport or notification handshake." + controlConclusion + tailCaveat
+		action = "Repair the affected container's rendered resolver inputs through the owning Xops configuration, then repeat the bounded in-container DNS and bootnode TCP checks; do not restart or reset chain data as diagnosis."
+		verify = "Container DNS and bootnode TCP both return ok, then peers remain above zero and the head advances across multiple samples."
+	case diagnostics.BootnodeTCPStatus != "ok":
+		mechanism = "Container DNS succeeds but the configured bootnode TCP handshake does not, localizing the peer-establishment failure below notification negotiation and above name resolution." + controlConclusion + tailCaveat
+		action = "Inspect the affected container's route/NAT/firewall and bootnode transport path using bounded checks. Repair the first proven path owner; do not reset the database or blame notification negotiation before TCP succeeds."
+		verify = "The in-container bootnode TCP handshake returns ok, then peers remain above zero and the head advances across multiple samples."
+	case notificationLive == 0 && rawLive > 0 && (metrics.SyncRequestNegotiationFailureTotal > 0 || metrics.SyncRequestClosedTotal > 0 || metrics.PendingHandshakeFailureTotal > 0):
+		mechanism = "The container resolves and reaches the bootnode and retains lower-level peer connections, but has no live block-announcement notification stream. Current live connection/notification state plus process-generation handshake/substream counters localize the boundary above TCP discovery and below synchronization peer retention, at litep2p notification negotiation or peerset reconnect handling." + controlConclusion + tailCaveat
+		action = "Preserve the process and database generation. Compare bounded counter deltas with the archive and reproduce the pinned litep2p notification-open/close and peerset backoff path before testing an upstream-compatible fix or release update. If the uncorrelated log tail contains chain or database alternatives, obtain a timestamped bounded discriminator first; do not restart, reset, add arbitrary peers, or change NAT to manufacture recovery."
+		verify = "Without a reset, block-announcement opened minus closed stays positive, RPC peers remain above zero, sync substream-close/negotiation growth returns to the archive control band, and the head advances across the full observation window."
+	case notificationLive == 0 && (metrics.SyncRequestDialFailureTotal > 0 || metrics.PendingTransportFailureTotal > 0):
+		mechanism = "Container DNS and the direct bootnode TCP handshake succeed, but process-generation reconnect/dial counters accompany no live block-announcement notification stream. This supports a litep2p peer-selection/reconnect or post-connect transport boundary, not a listener or DNS fault." + controlConclusion + tailCaveat
+		action = "Preserve the generation and compare bounded dial, raw-connection, and block-announcement counter deltas with the archive control. Reproduce the pinned peerset retry path before changing bootnodes, reserved peers, or the node process."
+		verify = "A notification stream remains live, peers stay above zero, reconnect/dial failure growth returns to the archive control band, and the head advances without a reset."
+	case outcomes.DatabaseOrImportRejection > 0:
+		mechanism = "The line-bounded current-process tail contains a source-proven database/import rejection class, but it is not event-time correlated. It is an unresolved local chain-state alternative, not proof that the historical line caused this peer-loss episode." + controlConclusion
+		action = "Preserve the database and process generation. Obtain a bounded timestamped database/import discriminator and correlate it with the last accepted/finalized block before choosing repair; do not reset or replace the generation from this tail count alone."
+		verify = "A timestamped sample proves whether database/import rejection coincides with the incident; recovery still requires retained peers and advancing best/finalized heads against archive/public controls."
+	case outcomes.ChainOrForkRejection > 0:
+		mechanism = "The line-bounded current-process tail contains a source-proven chain/fork or block-announcement rejection class, but it is not event-time correlated. It is an unresolved handshake/state alternative, not proof that the historical line caused this peer-loss episode." + controlConclusion
+		action = "Preserve the generation and obtain a bounded timestamped rejection discriminator before changing its chain spec, database, or binary. Compare genesis and finalized ancestry with the archive and public reference."
+		verify = "A timestamped sample proves whether the rejection coincides with the incident; recovery still requires a retained block-announcement session, peers above zero, and advancing heads."
+	default:
+		mechanism = "Container DNS and bootnode TCP are healthy, but the bounded aggregate outcomes do not yet distinguish chain-state rejection from notification negotiation or reconnect failure." + controlConclusion + tailCaveat
+		action = "Preserve the generation and collect another bounded helper sample while the zero-peer state remains active. Do not infer a DNS, NAT, database, or litep2p repair without a matching aggregate outcome."
+	}
+
+	return mechanism, strings.Join(evidenceParts, " "), action, verify
+}
+
 func evaluateSubtensor(target *host, observation subtensorObservation) []finding {
 	settings := target.subtensor
 	findings := []finding{}
@@ -378,6 +600,7 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 	for _, node := range settings.Nodes {
 		configuredNodes[node.Name] = node
 	}
+	archiveControl := buildSubtensorArchivePeerControl(settings, configuredNodes, observation.Nodes)
 	seen := map[string]bool{}
 	for _, node := range observation.Nodes {
 		configured, ok := configuredNodes[node.Name]
@@ -386,7 +609,7 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 			continue
 		}
 		seen[node.Name] = true
-		findings = append(findings, evaluateSubtensorNode(target, configured, node, publicHead, publicHeadErr)...)
+		findings = append(findings, evaluateSubtensorNodeWithArchiveControl(target, configured, node, publicHead, publicHeadErr, archiveControl)...)
 	}
 	for name := range configuredNodes {
 		if !seen[name] {
@@ -397,6 +620,10 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 }
 
 func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node subtensorNodeObservation, publicHead int64, publicHeadErr error) []finding {
+	return evaluateSubtensorNodeWithArchiveControl(target, configured, node, publicHead, publicHeadErr, subtensorArchivePeerControl{})
+}
+
+func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorNodeSettings, node subtensorNodeObservation, publicHead int64, publicHeadErr error, archiveControl subtensorArchivePeerControl) []finding {
 	settings := target.subtensor
 	findings := []finding{}
 	identity := target.name + "/" + configured.Name
@@ -423,6 +650,9 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		if node.ContainerError != "" {
 			findings = append(findings, cannotObserveFinding(identity+"/container-identity", fmt.Errorf("%s", node.ContainerError)))
 		} else {
+			if err := subtensorPeerDiagnosticsProblem(node.PeerDiagnostics); err != nil {
+				findings = append(findings, cannotObserveFinding(identity+"/peer-diagnostics", err))
+			}
 			if !node.DataPermissionObserved {
 				findings = append(findings, cannotObserveFinding(identity+"/data-permission", fmt.Errorf("runtime and bind-mount ownership are unavailable")))
 			} else if !node.DataRuntimeWritable || (node.DataPermissionError && secondHead <= firstHead) {
@@ -461,7 +691,7 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 			if len(deploymentProblems) > 0 {
 				action := "Reconcile the digest-pinned image and data generation through the owning Subtensor playbook, then re-read the live container identity."
 				if configured.SyncMode == "warp" {
-					action = "After explicit operational authorization, run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old generations, recreate only subtensor-lightnode, and prove the archive container identity did not change."
+					action = "After explicit operational authorization, record and preserve the failed lightnode container and data generation, remove only that failed container, select a new empty generation, and run canonical xops/main/ansible/run-subtensor.sh from the committed Xops revision. Its generation guards must refuse a nonempty inactive path and prove the archive container identity did not change."
 				}
 				findings = append(findings, finding{
 					probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-deployment-drift",
@@ -519,28 +749,42 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		findings = append(findings, subtensorIdentityFinding(target.name, configured.Name, problems, node.Direct))
 	}
 	if node.Direct.Health.Peers <= 0 {
+		mechanism, evidence, action, verify := subtensorPeerFindingDetails(node, archiveControl)
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-peers",
 			target: target.name, frame: configured.Name, sustain: 3, pageSustain: 5,
 			symptom:   fmt.Sprintf("%s has no retained Subtensor peer", identity),
-			mechanism: "A local RPC and listener can remain healthy while a zero-peer node freezes and eventually reports its own stale head as the sync target.",
+			mechanism: mechanism,
 			baseline:  "Every node retains at least one peer; public inbound reachability and multiple peers are preferred.",
 			observed:  fmt.Sprintf("peers=%d is_syncing=%t head=%d", node.Direct.Health.Peers, node.Direct.Health.IsSyncing, secondHead),
-			action:    "Verify container DNS and bootnode TCP, then independently test the node's public P2P port and inspect incoming-connection counters.",
-			verify:    "Require peers above zero and advancing heads for more than one sample; do not accept isSyncing=false alone.",
+			evidence:  evidence,
+			action:    action,
+			verify:    verify,
 			playbook:  "SIGNALS.md §17.2",
 		})
 	}
 	if secondHead <= firstHead {
+		mechanism := "The RPC is serving a static local database; peer loss, import failure, or resource pressure can freeze it without closing the listener."
+		evidence := ""
+		action := "Inspect peer state and bounded aggregate import outcomes, then distinguish a frozen node from an unusually long block interval with a longer sample."
+		verify := "Require repeated head progress and a nonzero peer population."
+		if node.Direct.Health.Peers <= 0 {
+			peerMechanism, peerEvidence, peerAction, peerVerify := subtensorPeerFindingDetails(node, archiveControl)
+			mechanism = "The static head is co-resident with complete peer loss. " + peerMechanism
+			evidence = peerEvidence
+			action = peerAction
+			verify = peerVerify
+		}
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-progress",
 			target: target.name, frame: configured.Name, sustain: 3, pageSustain: 5,
 			symptom:   fmt.Sprintf("%s did not advance across the bounded head sample", identity),
-			mechanism: "The RPC is serving a static local database; peer loss, import failure, or resource pressure can freeze it without closing the listener.",
+			mechanism: mechanism,
 			baseline:  "The best head advances across the fifteen-second source-of-truth sample while the public chain advances.",
 			observed:  fmt.Sprintf("first_head=%d second_head=%d peers=%d", firstHead, secondHead, node.Direct.Health.Peers),
-			action:    "Inspect peer state and recent import errors, then distinguish a frozen node from an unusually long block interval with a longer sample.",
-			verify:    "Require repeated head progress and a nonzero peer population.",
+			evidence:  evidence,
+			action:    action,
+			verify:    verify,
 			playbook:  "SIGNALS.md §17.2",
 		})
 	}
@@ -562,27 +806,27 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		sustain := 15
 		mechanism := "The node is configured for warp sync but has not reached the near-head band. Startup evidence is required to distinguish a normal cold bootstrap from a database fallback or a historical finality-proof failure."
 		evidence := fmt.Sprintf("startup_fallback=%t finality_proof_download=%t starting_block=%d image=%q data_path=%q", node.WarpFallback, node.WarpProofStarted, node.Direct.Sync.StartingBlock, node.ContainerImage, node.DataPath)
-		context := "A cold warp may be behind briefly. Do not reuse or delete a failed data generation, and do not restart the full archive playbook to repair only this lightnode."
+		context := "A cold warp may be behind briefly. Do not reuse or delete a failed data generation, and do not replace a progressing lightnode merely to rerun the canonical full-host playbook."
 		action := "Keep the lightnode out of cutover and inspect its bounded startup log, live image provenance, /data mount, peers, and head progression before choosing a new generation."
 		verify := "Require the live /data mount to equal the configured new generation, a post-rollout lightnode identity, unchanged archive container ID/start time, no cold-start warp fallback, a near-current head, nonzero peers, current runtime identity, and successful gateway RPC."
 		if node.Direct.Sync.StartingBlock > 0 {
 			sustain = 1
 			class = "subtensor-warp-resume"
 			mechanism = "The process started from an already-progressed database, so this is a same-generation resume rather than a cold warp bootstrap. The nonzero process-start block is authoritative even when the bounded startup-log helper no longer retains an early explicit fallback line. This proves a container or host lifecycle interruption after the generation had acquired state; it does not prove the original empty-generation warp failed."
-			context = "This is an operational lifecycle boundary. An advancing resumed generation retains useful state; replacing it solely to remove a fallback line can discard progress and repeat the same historical checkpoint. The full-host Xops playbook must preserve an existing lightnode, while generation replacement remains isolated."
-			action = "Do not reset this progressing generation solely because the process resumed retained state. Use the committed full-host lightnode-preservation guard, keep tracking head and lag slope, and select a new empty generation with run-subtensor-lightnode.sh only if progress stops or a newer proven checkpoint materially improves the recovery boundary."
-			verify = "The same live /data generation and container continue advancing with nonzero peers and shrinking lag; a subsequent full-host configuration run preserves the exact lightnode ID, and any intentional replacement uses the isolated runner without changing the archive identity."
+			context = "This is an operational lifecycle boundary. An advancing resumed generation retains useful state; replacing it solely to remove a fallback line can discard progress and repeat the same historical checkpoint. The canonical full-host Xops playbook must preserve an existing matching lightnode; intentional replacement requires a separately authorized preserve/remove/select-empty preparation before that same playbook runs."
+			action = "Do not reset this progressing generation solely because the process resumed retained state. Use the committed full-host lightnode-preservation guard and keep tracking head and lag slope. Only if progress stops or a newer proven checkpoint materially improves the recovery boundary, record and preserve the failed lightnode identity, remove only that container, select a new empty generation, and run canonical xops/main/ansible/run-subtensor.sh with explicit operational authorization."
+			verify = "The same live /data generation and container continue advancing with nonzero peers and shrinking lag; a subsequent full-host configuration run preserves the exact lightnode ID, and any intentional replacement through the canonical runner retains the archive identity."
 		} else if node.WarpFallback {
 			sustain = 1
 			class = "subtensor-warp-fallback"
 			mechanism = "The startup discriminator proves Subtensor rejected a partially synced database and falls back to full sync before establishing a retained starting block. The configured command can still say --sync=warp."
 			context = "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state."
-			action = "After explicit operational authorization, select the next empty generation and run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old paths and recreate only subtensor-lightnode. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted."
+			action = "After explicit operational authorization, record and preserve the failed lightnode container and path, remove only that failed container, select the next empty generation, and run canonical xops/main/ansible/run-subtensor.sh from the committed Xops revision. Its guards must reject a nonempty inactive generation and retain the archive container identity."
 		} else if node.WarpProofStarted && secondHead <= 1 {
 			class = "subtensor-warp-checkpoint"
 			mechanism = "The node reached peers and entered GRANDPA finality-proof download without falling back, but remained at genesis. This is the testnet historical-checkpoint failure reproduced with v447, which predates the corrected checkpoint transition and signing sets in v448."
 			context = "This is a pinned-node-binary defect plus an operational generation change, not a Grafana exporter error, peer-install failure, or reason to erase either failed database."
-			action = "Pin an attested upstream release containing commits add2b31a19ccf650ad50d79e8ba2668e6494f56f and 0876234316a3b9107ce1eb0781b04ae55f5df89e, select the next empty generation, and deploy only with xops/main/ansible/run-subtensor-lightnode.sh."
+			action = "Pin an attested upstream release containing commits add2b31a19ccf650ad50d79e8ba2668e6494f56f and 0876234316a3b9107ce1eb0781b04ae55f5df89e, record and preserve the failed lightnode identity, remove only that failed container, select the next empty generation, and deploy with canonical xops/main/ansible/run-subtensor.sh while retaining the archive identity."
 		}
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierWarn, class: class,

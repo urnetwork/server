@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 const providerEgressProbeTaskFunction = "github.com/urnetwork/server/taskworker/work.ProviderEgressProbe"
@@ -53,10 +55,12 @@ type egressCoverageTaskArgs struct {
 }
 
 type egressCoverageGeometry struct {
-	shardCount       int
-	idleDelaySeconds int
-	maxTimeSeconds   int
-	indices          []int
+	shardCount              int
+	idleDelaySeconds        int
+	maxTimeSeconds          int
+	blackholeConcurrency    int
+	blackholeTimeoutSeconds int
+	indices                 []int
 }
 
 type egressCoverageConfig struct {
@@ -157,6 +161,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	findings := []finding{
 		healthyFinding("pg/egress-coverage", tierWarn, "egress-probe-unarmed", target),
 		healthyFinding("pg/egress-coverage", tierPage, "egress-probe-shards", target),
+		healthyFinding("pg/egress-coverage", tierPage, "egress-blackhole-capacity", target),
 	}
 	for _, snapshot := range activity {
 		frame := fmt.Sprintf("shard-%d-of-%d", snapshot.shardIndex, geometry.shardCount)
@@ -176,6 +181,9 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		} else {
 			findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-blackhole-stalled", target))
 		}
+	}
+	if capacity, ok := egressBlackholeCapacityFinding(target, geometry, activity); ok {
+		findings[2] = capacity
 	}
 	return findings, nil
 }
@@ -224,6 +232,8 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			geometry.shardCount = args.ShardCount
 			geometry.idleDelaySeconds = args.IdleDelaySeconds
 			geometry.maxTimeSeconds = args.MaxTimeSeconds
+			geometry.blackholeConcurrency = args.Blackhole.Concurrency
+			geometry.blackholeTimeoutSeconds = args.Blackhole.ProbeTimeoutSeconds
 			expected = config
 		} else if expected != config {
 			problems = append(problems, fmt.Sprintf("row_%d_mixed_settings", rowIndex+1))
@@ -302,7 +312,8 @@ func egressCoverageActivityQuery(shardCount int) string {
 		        max(GREATEST(pel.observed_at, pea.attempt_at, peh.measured_at)) AS latest_full,
 		        max(pbc.checked_at) AS latest_blackhole,
 		        count(e.client_id) FILTER (WHERE pel.observed_at >= (now() AT TIME ZONE 'UTC') - interval '7 days') AS full_current,
-		        count(e.client_id) FILTER (WHERE pbc.checked_at >= (now() AT TIME ZONE 'UTC') - interval '3 hours') AS blackhole_current
+		        count(e.client_id) FILTER (WHERE pbc.checked_at >= (now() AT TIME ZONE 'UTC') - interval '3 hours') AS blackhole_current,
+		        count(e.client_id) FILTER (WHERE pbc.checked_at >= (now() AT TIME ZONE 'UTC') - interval '1 hour') AS blackhole_checked_last_hour
 		 FROM shards s
 		 LEFT JOIN eligible e USING (shard_index)
 		 LEFT JOIN provider_egress_location pel USING (client_id)
@@ -314,7 +325,7 @@ func egressCoverageActivityQuery(shardCount int) string {
 		SELECT shard_index::text, eligible::text, full_due::text, blackhole_due::text,
 		       COALESCE(floor(extract(epoch FROM ((now() AT TIME ZONE 'UTC') - latest_full)))::bigint, -1)::text,
 		       COALESCE(floor(extract(epoch FROM ((now() AT TIME ZONE 'UTC') - latest_blackhole)))::bigint, -1)::text,
-		       full_current::text, blackhole_current::text
+		       full_current::text, blackhole_current::text, blackhole_checked_last_hour::text
 		FROM snapshot
 		ORDER BY shard_index;
 	`, shardCount, shardCount, shardCount, shardCount)
@@ -329,6 +340,7 @@ type egressCoverageSnapshot struct {
 	blackholeAgeSeconds int64
 	fullCurrent         int64
 	blackholeCurrent    int64
+	blackholeLastHour   int64
 }
 
 func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverageSnapshot, error) {
@@ -338,10 +350,10 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 	snapshots := make([]egressCoverageSnapshot, 0, shardCount)
 	seen := map[int]bool{}
 	for _, row := range rows {
-		if len(row) != 8 {
+		if len(row) != 9 {
 			return nil, fmt.Errorf("provider egress activity returned an invalid row shape")
 		}
-		values := make([]int64, 8)
+		values := make([]int64, 9)
 		for i := range row {
 			value, err := strconv.ParseInt(strings.TrimSpace(row.str(i)), 10, 64)
 			if err != nil || (i != 4 && i != 5 && value < 0) || ((i == 4 || i == 5) && value < -1) {
@@ -354,13 +366,71 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 			return nil, fmt.Errorf("provider egress activity returned invalid shard index %d", shardIndex)
 		}
 		seen[shardIndex] = true
-		snapshots = append(snapshots, egressCoverageSnapshot{
+		snapshot := egressCoverageSnapshot{
 			shardIndex: shardIndex, eligible: values[1], fullDue: values[2], blackholeDue: values[3],
 			fullAgeSeconds: values[4], blackholeAgeSeconds: values[5], fullCurrent: values[6], blackholeCurrent: values[7],
-		})
+			blackholeLastHour: values[8],
+		}
+		if snapshot.fullDue > snapshot.eligible || snapshot.blackholeDue > snapshot.eligible ||
+			snapshot.fullCurrent > snapshot.eligible || snapshot.blackholeCurrent > snapshot.eligible ||
+			snapshot.blackholeLastHour > snapshot.blackholeCurrent {
+			return nil, fmt.Errorf("provider egress activity returned contradictory shard counts")
+		}
+		snapshots = append(snapshots, snapshot)
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].shardIndex < snapshots[j].shardIndex })
 	return snapshots, nil
+}
+
+func egressBlackholeCapacityFinding(
+	target string,
+	geometry egressCoverageGeometry,
+	snapshots []egressCoverageSnapshot,
+) (finding, bool) {
+	var eligible, current, checkedLastHour int64
+	for _, snapshot := range snapshots {
+		eligible += snapshot.eligible
+		current += snapshot.blackholeCurrent
+		checkedLastHour += snapshot.blackholeLastHour
+	}
+	if eligible == 0 || current >= eligible || checkedLastHour <= 0 {
+		return finding{}, false
+	}
+	maxAgeSeconds := int64(model.ProviderBlackholeCheckMaxAge / time.Second)
+	projectedSweepSeconds := (eligible*int64(time.Hour/time.Second) + checkedLastHour - 1) / checkedLastHour
+	if projectedSweepSeconds <= maxAgeSeconds {
+		return finding{}, false
+	}
+	requiredPerHour := (eligible*int64(time.Hour/time.Second) + maxAgeSeconds - 1) / maxAgeSeconds
+	configuredConcurrency := int64(geometry.shardCount) * int64(geometry.blackholeConcurrency)
+	probeTimeoutSeconds := int64(geometry.blackholeTimeoutSeconds)
+	timeoutOnlyCeilingPerHour := configuredConcurrency * int64(time.Hour/time.Second) / probeTimeoutSeconds
+	minimumConcurrencyFromObservedRate := (configuredConcurrency*requiredPerHour + checkedLastHour - 1) / checkedLastHour
+	deadlineOnlyMinimumConcurrency := (requiredPerHour*probeTimeoutSeconds + int64(time.Hour/time.Second) - 1) / int64(time.Hour/time.Second)
+	coveragePercent := 100 * float64(current) / float64(eligible)
+	return finding{
+		probeId: "pg/egress-coverage", tier: tierPage,
+		class: "egress-blackhole-capacity", target: target, frame: "fleet-refresh", sustain: 2,
+		symptom: fmt.Sprintf(
+			"Provider blackhole checks cover %.1f%% of the eligible fleet, and the last-hour rate projects a %s sweep beyond the %s verdict lifetime.",
+			coveragePercent, (time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
+		),
+		mechanism: "Shard timestamps are advancing, but aggregate production is too slow to refresh the complete eligible population before verdicts expire. A known-dark provider therefore ages out of the exclusion set and becomes selectable again without a successful recheck; shard-local liveness alone cannot see this chronic under-capacity state.",
+		baseline:  fmt.Sprintf("The measured one-hour blackhole-check rate is at least %d providers/hour, so one complete fleet sweep fits inside the %s verdict lifetime, or current coverage is already complete.", requiredPerHour, model.ProviderBlackholeCheckMaxAge),
+		observed: fmt.Sprintf(
+			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_concurrency_per_shard=%d configured_total_concurrency=%d probe_timeout_seconds=%d timeout_only_ceiling_per_hour=%d minimum_concurrency_from_observed_rate=%d deadline_only_minimum_concurrency=%d",
+			eligible, current, coveragePercent, checkedLastHour, requiredPerHour,
+			(time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
+			geometry.shardCount, geometry.blackholeConcurrency, configuredConcurrency,
+			probeTimeoutSeconds, timeoutOnlyCeilingPerHour,
+			minimumConcurrencyFromObservedRate, deadlineOnlyMinimumConcurrency,
+		),
+		evidence: "The query counts one latest row per eligible provider inside PostgreSQL and joins those aggregate rates only to the complete common execution geometry parsed from the durable task arguments. Provider, network, task, endpoint, and failure identities never leave the database.",
+		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full per-probe deadline and depress throughput even while every shard keeps moving. The timeout-only rate is a ceiling before setup and teardown overhead, and both reported concurrency requirements are lower bounds; measured throughput remains authoritative because setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
+		action:   "Run §2.23 and §2.24 first and remove any proved common timeout cause. Then capacity-test a total blackhole concurrency above both reported minimum-concurrency bounds with explicit overhead and database, API, Taskworker memory, and Taskworker CPU headroom, and update the durable shard/concurrency geometry. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
+		verify:   "For two complete verdict lifetimes, every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable.",
+		playbook: "SIGNALS.md §2.19, §2.23, and §2.24",
+	}, true
 }
 
 func egressCoverageStallFinding(target, frame, kind string, due, age, eligible, current, stallSeconds int64) finding {

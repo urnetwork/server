@@ -54,6 +54,12 @@ const (
 	EventRefund         = "refund"
 	EventRetentionD7    = "retention.d7"
 	EventRetentionD30   = "retention.d30"
+	// EventConnectDay is written by the client connection path once per
+	// network per UTC day with at least one connection: the durable
+	// connection history the rollup's connect_7d, retention_d7 and
+	// retention_d30 read (network_client_connection is pruned 8 h after
+	// disconnect and cannot back them).
+	EventConnectDay = "connect.day"
 )
 
 // Event platforms (the `platform` field of every client event).
@@ -165,6 +171,7 @@ func purchaseProps() map[string]*EventPropSpec {
 func emailProps() map[string]*EventPropSpec {
 	return map[string]*EventPropSpec{
 		"step":       propToken(true),
+		"flow_step":  propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		"experiment": propToken(false),
 		"variant":    propToken(false),
 	}
@@ -216,10 +223,12 @@ var eventSpecs = func() map[string]*EventSpec {
 
 		// server-written
 		{Name: EventLandingClicked, ServerOnly: true, Owner: EventOwnerS1, Props: map[string]*EventPropSpec{
-			"step": propToken(true),
+			"step":      propToken(true),
+			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		}},
 		{Name: EventAppOpened, ServerOnly: true, Owner: EventOwnerS1, Props: map[string]*EventPropSpec{
-			"step": propToken(true),
+			"step":      propToken(true),
+			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
 		}},
 		{Name: EventEmailSent, ServerOnly: true, Owner: EventOwnerS2, Props: emailProps()},
 		{Name: EventEmailDelivered, ServerOnly: true, Owner: EventOwnerS2, Props: emailProps()},
@@ -243,6 +252,7 @@ var eventSpecs = func() map[string]*EventSpec {
 		{Name: EventRetentionD7, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{
 			"connect_days": propInt(false, 0, 7),
 		}},
+		{Name: EventConnectDay, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{}},
 		{Name: EventRetentionD30, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{
 			"connect_days": propInt(false, 0, 30),
 		}},

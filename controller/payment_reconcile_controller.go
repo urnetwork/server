@@ -434,6 +434,10 @@ type paymentReconcileRun struct {
 	emailFallbackEvents []*model.PaymentReconciliationEvent
 }
 
+func paymentReconcileStoreCanAdvanceWatermark(complete bool, dryRun bool, errorsBefore int, errorsAfter int) bool {
+	return complete && !dryRun && errorsAfter == errorsBefore
+}
+
 func (self *paymentReconcileRun) record(
 	store string,
 	action string,
@@ -574,6 +578,13 @@ func (self *paymentReconcileRun) storeResult(store string) *PaymentReconcileStor
 		self.storeResults[store] = summary
 	}
 	return summary
+}
+
+func (self *paymentReconcileRun) storeErrorCount(store string) int {
+	if summary := self.storeResults[store]; summary != nil {
+		return summary.Errors
+	}
+	return 0
 }
 
 func (self *paymentReconcileRun) storeDetail(store string) map[string]any {
@@ -733,6 +744,7 @@ func runPaymentReconciliation(
 
 		run.budget = paymentReconcileApiBudget
 		since := run.sinceWatermark(storeReconcile.store)
+		storeErrorsBefore := run.storeErrorCount(storeReconcile.store)
 
 		// one store's failure -- error or panic -- never stops the others
 		func() {
@@ -759,7 +771,12 @@ func runPaymentReconciliation(
 					"",
 					map[string]any{"error": err.Error()},
 				)
-			} else if complete && !run.dryRun {
+			} else if paymentReconcileStoreCanAdvanceWatermark(
+				complete,
+				run.dryRun,
+				storeErrorsBefore,
+				run.storeErrorCount(storeReconcile.store),
+			) {
 				// the next run's listing starts here (minus the overlap
 				// backoff); a dry run never advances the watermark -- the
 				// un-eaten window is what the later real run reconciles

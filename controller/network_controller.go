@@ -101,7 +101,7 @@ func NetworkCreate(
 		if result.UserAuth != nil {
 			userAuth = *result.UserAuth
 		}
-		StartOnboardingCampaign(session, result.Network.NetworkId, userAuth)
+		EnrollNetworkOnboarding(session, result.Network.NetworkId, userAuth, false)
 
 	}
 
