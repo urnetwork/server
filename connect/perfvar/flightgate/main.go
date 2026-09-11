@@ -408,6 +408,7 @@ var counterNames = []string{
 	"flight_reduction",
 	"timeout_resend_writes",
 	"timeout_resend_with_recent_progress",
+	"timeout_resend_deferred",
 	"selective_gap_writes",
 	"ack_writes_p2p",
 	"ack_writes_h1",
@@ -541,6 +542,7 @@ func parseRecord(text string) (runRecord, bool) {
 	both("flight_reduction", "send_recovery", "unreliable_flight_reduction_count")
 	both("timeout_resend_writes", "send_recovery", "timeout_resend_write_count")
 	both("timeout_resend_with_recent_progress", "send_recovery", "timeout_resend_with_recent_cumulative_progress")
+	both("timeout_resend_deferred", "send_recovery", "timeout_resend_defer_count")
 	both("selective_gap_writes", "send_recovery", "selective_gap_write_count")
 	both("ack_writes_p2p", "receive_handoff", "ack_route_write_count_by_transport", "p2p")
 	both("ack_writes_h1", "receive_handoff", "ack_route_write_count_by_transport", "h1")

@@ -1335,6 +1335,9 @@ type perfvarSendRecoveryCounters struct {
 	UnreliableFlightGapReorderSuspected         uint64        `json:"unreliable_flight_gap_reorder_suspected"`
 	TimeoutResendWithRecentCumulativeProgress   uint64        `json:"timeout_resend_with_recent_cumulative_progress"`
 	UnreliableCarrierLastAckAge                 time.Duration `json:"unreliable_carrier_last_ack_age_nanoseconds"`
+	// TimeoutResendDeferCount exists only on revisions that carry the
+	// deferred retransmit; it is read by name so every arm builds.
+	TimeoutResendDeferCount uint64 `json:"timeout_resend_defer_count"`
 }
 
 type perfvarSendRecoveryObservation struct {
@@ -1365,6 +1368,7 @@ type perfvarSendRecoveryObservation struct {
 	UnreliableFlightBlockedWithReliableCapacity uint64 `json:"unreliable_flight_blocked_with_reliable_capacity"`
 	UnreliableFlightGapReorderSuspected         uint64 `json:"unreliable_flight_gap_reorder_suspected"`
 	TimeoutResendWithRecentCumulativeProgress   uint64 `json:"timeout_resend_with_recent_cumulative_progress"`
+	TimeoutResendDeferCount                     uint64 `json:"timeout_resend_defer_count"`
 }
 
 // A carrier boundary snapshots every route-specific counter at one instant so
@@ -1766,7 +1770,22 @@ func perfvarSendRecoveryCountersFor(
 		UnreliableFlightGapReorderSuspected:         snapshot.UnreliableFlightGapReorderSuspected,
 		TimeoutResendWithRecentCumulativeProgress:   snapshot.TimeoutResendWithRecentCumulativeProgress,
 		UnreliableCarrierLastAckAge:                 snapshot.UnreliableCarrierLastAckAge,
+		TimeoutResendDeferCount:                     perfvarUint64Field(&snapshot, "TimeoutResendDeferCount"),
 	}
+}
+
+// perfvarUint64Field reads one named uint64 field, or zero when this Connect
+// revision has no such field.
+func perfvarUint64Field(target any, name string) uint64 {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return 0
+	}
+	field := value.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Uint64 {
+		return 0
+	}
+	return field.Uint()
 }
 
 func subtractPerfvarClientSendRecovery(
@@ -1809,6 +1828,7 @@ func subtractPerfvarClientSendRecovery(
 		start.UnreliableFlightGapReorderSuspected
 	observation.TimeoutResendWithRecentCumulativeProgress = end.TimeoutResendWithRecentCumulativeProgress -
 		start.TimeoutResendWithRecentCumulativeProgress
+	observation.TimeoutResendDeferCount = end.TimeoutResendDeferCount - start.TimeoutResendDeferCount
 	return observation
 }
 
