@@ -394,6 +394,10 @@ type runRecord struct {
 	memP95    float64
 	memMax    float64
 	memAbove  int
+	// latency-under-load primary: probe latency and delivery under load
+	loadedP95     float64 // ms
+	loadedSuccess float64
+	loadedAttempt float64
 	// counters keyed by name; provider and device are summed where the
 	// mechanism is symmetric and kept apart where the direction matters.
 	counters map[string]float64
@@ -510,25 +514,28 @@ func parseRecord(text string) (runRecord, bool) {
 		return runRecord{}, false
 	}
 	record := runRecord{
-		scenario:  str(raw, "scenario_hash"),
-		route:     str(raw, "scenario", "route"),
-		profile:   str(raw, "scenario", "application_access_and_p2p_profile", "name"),
-		workload:  str(raw, "scenario", "workload"),
-		dir:       str(raw, "scenario", "direction"),
-		correct:   boolean(raw, "correct"),
-		stage:     str(raw, "failure_stage"),
-		reason:    str(raw, "failure_reason"),
-		invalid:   str(raw, "invalid_reason"),
-		goodput:   num(raw, "tunneled", "goodput_gigabits_per_second") * 1000,
-		duration:  time.Duration(num(raw, "tunneled", "duration_nanoseconds")),
-		windows:   int(num(raw, "progress", "window_count")),
-		dead:      int(num(raw, "progress", "dead_window_count")),
-		firstDead: time.Duration(num(raw, "progress", "first_dead_window_offset_nanoseconds")),
-		worst:     num(raw, "progress", "worst_window_megabits_per_second"),
-		memP95:    num(raw, "memory", "heap_and_stack_inuse_p95_bytes"),
-		memMax:    num(raw, "memory", "heap_and_stack_inuse_max_bytes"),
-		memAbove:  int(num(raw, "memory", "samples_above_ceiling")),
-		counters:  map[string]float64{},
+		scenario:      str(raw, "scenario_hash"),
+		route:         str(raw, "scenario", "route"),
+		profile:       str(raw, "scenario", "application_access_and_p2p_profile", "name"),
+		workload:      str(raw, "scenario", "workload"),
+		dir:           str(raw, "scenario", "direction"),
+		correct:       boolean(raw, "correct"),
+		stage:         str(raw, "failure_stage"),
+		reason:        str(raw, "failure_reason"),
+		invalid:       str(raw, "invalid_reason"),
+		goodput:       num(raw, "tunneled", "goodput_gigabits_per_second") * 1000,
+		duration:      time.Duration(num(raw, "tunneled", "duration_nanoseconds")),
+		windows:       int(num(raw, "progress", "window_count")),
+		dead:          int(num(raw, "progress", "dead_window_count")),
+		firstDead:     time.Duration(num(raw, "progress", "first_dead_window_offset_nanoseconds")),
+		worst:         num(raw, "progress", "worst_window_megabits_per_second"),
+		memP95:        num(raw, "memory", "heap_and_stack_inuse_p95_bytes"),
+		memMax:        num(raw, "memory", "heap_and_stack_inuse_max_bytes"),
+		memAbove:      int(num(raw, "memory", "samples_above_ceiling")),
+		loadedP95:     num(raw, "tunneled", "loaded_latency", "p95_nanoseconds") / float64(time.Millisecond),
+		loadedSuccess: num(raw, "tunneled", "loaded_probe_success_count"),
+		loadedAttempt: num(raw, "tunneled", "loaded_probe_attempt_count"),
+		counters:      map[string]float64{},
 	}
 	both := func(name string, path ...string) {
 		record.counters[name] = num(raw, append([]string{"carrier", "device_" + path[0]}, path[1:]...)...) +
@@ -609,6 +616,8 @@ type cellSummary struct {
 	worst                          float64
 	memP95s                        []float64
 	memMax                         float64
+	loadedP95s                     []float64
+	loadedSuccess, loadedAttempt   float64
 	memAbove                       int
 	goodputs                       []float64
 	stages                         map[string]int
@@ -633,6 +642,11 @@ func summarize(records []runRecord) map[string]map[cellKey]*cellSummary {
 		if record.correct {
 			cell.correct += 1
 			cell.goodputs = append(cell.goodputs, record.goodput)
+			if 0 < record.loadedAttempt {
+				cell.loadedP95s = append(cell.loadedP95s, record.loadedP95)
+				cell.loadedSuccess += record.loadedSuccess
+				cell.loadedAttempt += record.loadedAttempt
+			}
 			if record.invalid != "" {
 				cell.invalid += 1
 				if strings.Contains(record.invalid, "calibration") {
@@ -707,8 +721,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 	fmt.Fprintf(&b, "%d run records, arms: %s (control: %s)\n\n", len(records), strings.Join(arms, ", "), control)
 	fmt.Fprintln(&b, "## Outcome per cell")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Harness-invalid (calibration) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
-	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Harness-invalid (calibration) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Loaded p95 ms | Loaded probes delivered % | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
+	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for _, key := range cells {
 		for _, arm := range arms {
 			cell := summary[arm][key]
@@ -728,10 +742,15 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 			if 0 < len(cell.goodputs) {
 				goodput = fmt.Sprintf("%.1f", median(cell.goodputs))
 			}
-			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d (%d) | %d / %d | %d | %s | %s | %.2f | %.2f | %d |\n",
+			loadedP95, delivered := "–", "–"
+			if 0 < cell.loadedAttempt {
+				loadedP95 = fmt.Sprintf("%.0f", median(cell.loadedP95s))
+				delivered = fmt.Sprintf("%.1f", 100*cell.loadedSuccess/cell.loadedAttempt)
+			}
+			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d (%d) | %d / %d | %d | %s | %s | %s | %s | %.2f | %.2f | %d |\n",
 				key, arm, cell.runs, cell.correct, cell.failed, strings.Join(stages, " "),
 				cell.invalid, cell.headroomInvalid,
-				cell.deadWindows, cell.windows, cell.deadRuns, worst, goodput,
+				cell.deadWindows, cell.windows, cell.deadRuns, worst, goodput, loadedP95, delivered,
 				median(cell.memP95s)/mib, cell.memMax/mib, cell.memAbove)
 		}
 	}
@@ -757,8 +776,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 		fmt.Fprintln(&b)
 		fmt.Fprintf(&b, "## Attribution against %s (candidate minus control, per cell)\n", control)
 		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | selective_gap_writes | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_writes_relay | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
-		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | selective_gap_writes | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_writes_relay | ack_timeouts_p2p | Loaded p95 ms | Loaded delivered % | Memory p95 median MiB | Memory gate |")
+		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
 		for _, key := range cells {
 			base := summary[control][key]
 			if base == nil {
@@ -782,7 +801,7 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 				if median(cell.memP95s) > median(base.memP95s) || (0 < cell.memAbove && base.memAbove == 0) {
 					memoryGate = "REGRESSION"
 				}
-				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
+				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
 					key, arm,
 					cell.deadWindows-base.deadWindows,
 					cell.failed-base.failed,
@@ -796,6 +815,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 					delta("ack_writes_p2p"),
 					delta("ack_writes_relay"),
 					delta("ack_timeouts_p2p"),
+					loadedDelta(cell, base),
+					deliveredDelta(cell, base),
 					(median(cell.memP95s)-median(base.memP95s))/mib,
 					memoryGate,
 				)
@@ -821,6 +842,22 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 }
 
 const mib = 1024 * 1024
+
+// loadedDelta and deliveredDelta render the latency-under-load primary
+// against the control, or a dash for cells without probes.
+func loadedDelta(cell *cellSummary, base *cellSummary) string {
+	if cell.loadedAttempt == 0 || base.loadedAttempt == 0 {
+		return "–"
+	}
+	return fmt.Sprintf("%+.0f", median(cell.loadedP95s)-median(base.loadedP95s))
+}
+
+func deliveredDelta(cell *cellSummary, base *cellSummary) string {
+	if cell.loadedAttempt == 0 || base.loadedAttempt == 0 {
+		return "–"
+	}
+	return fmt.Sprintf("%+.1f", 100*cell.loadedSuccess/cell.loadedAttempt-100*base.loadedSuccess/base.loadedAttempt)
+}
 
 func formatCounter(value float64) string {
 	if value == math.Trunc(value) {
