@@ -1313,9 +1313,43 @@ func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.
 	return true, nil
 }
 
+// An unsigned deposit whose encoded deadline has finalized cannot execute in a
+// later epoch. Keep its immutable intent and consume its EVM nonce through the
+// existing real cancellation path; the coordinator deposit nonce is untouched.
+func (self *CoreStClient) expiredUnsignedDepositIntent(intent *model.StTransactionIntent, attempts []*model.StTransactionAttempt, from common.Address, finalized uint64) (bool, error) {
+	if self.cfg == nil || self.coordinator == nil || self.cfg.DepositKey == nil || intent == nil ||
+		intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.CurrentTxHash != nil || len(attempts) != 0 ||
+		intent.Profile != self.cfg.Profile || intent.DeploymentId != self.cfg.DeploymentId || intent.DeploymentKey != self.cfg.DeploymentKey() || intent.ChainId != self.cfg.ChainId ||
+		!strings.EqualFold(intent.GenesisHash, "0x"+hex.EncodeToString(self.cfg.GenesisHash[:])) ||
+		from != crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey) || !strings.EqualFold(intent.FromAddress, from.Hex()) ||
+		!strings.EqualFold(intent.ToAddress, self.cfg.ContractAddress.Hex()) || len(intent.Calldata) != 132 {
+		return false, nil
+	}
+	noID := new(big.Int).SetBytes(intent.Calldata[4:36])
+	amount := new(big.Int).SetBytes(intent.Calldata[36:68])
+	nonce := new(big.Int).SetBytes(intent.Calldata[68:100])
+	deadline := new(big.Int).SetBytes(intent.Calldata[100:132])
+	if !noID.IsUint64() || noID.Uint64() != self.cfg.NoId || amount.Sign() <= 0 || !deadline.IsUint64() || deadline.Sign() == 0 {
+		return false, nil
+	}
+	canonical, err := self.coordinator.TryPackDeposit(noID, amount, nonce, deadline.Uint64())
+	if err != nil || !bytes.Equal(intent.Calldata, canonical) {
+		return false, nil
+	}
+	if !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
+		return false, errors.New("st: unsigned deposit intent has inconsistent immutable calldata hash")
+	}
+	if finalized <= deadline.Uint64() {
+		return false, nil
+	}
+	glog.Infof("[st]cancel expired unsigned deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
+	return true, nil
+}
+
 // Drains every lower account nonce before a new operation can reserve one. An
 // active-deployment intent resumes its exact stored business transaction;
-// expired closes and stale coordinators use a same-nonce self-transaction.
+// expired closes, unsigned deposits and stale coordinators use a same-nonce
+// self-transaction.
 func (self *CoreStClient) reconcileAccountIntents(
 	ctx context.Context,
 	client *ethclient.Client,
@@ -1381,11 +1415,16 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
+		expiredDeposit, err := self.expiredUnsignedDepositIntent(intent, attempts, from, finalized.Number)
+		if err != nil {
+			return err
+		}
+		cancelIntent := stale || expiredClose || expiredDeposit
 		desiredKind := model.StTxAttemptExecution
-		if stale || expiredClose {
+		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
 		}
-		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, stale || expiredClose)
+		_, runErr := self.runTransactionIntent(ctx, client, key, intent, desiredKind, cancelIntent)
 		if runErr != nil && !stale {
 			return runErr
 		}
@@ -3416,6 +3455,19 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 		publishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit)
 		stResolvePublish(ctx, publishId, outcome)
 		return outcome, nil
+	}
+
+	if core, ok := client.(*CoreStClient); ok {
+		if err := core.preflightDepositRuntimeMinimum(ctx, amount); err != nil {
+			outcome := &StPublishOutcome{
+				Status: model.StPublishStatusFailed,
+				Reason: err.Error(),
+				Retry:  !errors.Is(err, errStDepositBelowRuntimeMinimum),
+			}
+			publishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit)
+			stResolvePublish(ctx, publishId, outcome)
+			return outcome, nil
+		}
 	}
 
 	// STAGE: move alpha into this NO's unique coordinator-owned deposit
