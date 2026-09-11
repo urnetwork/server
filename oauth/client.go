@@ -373,7 +373,7 @@ func publicAddr(addr netip.Addr) bool {
 // gap that a url-only check leaves open: a hostname that passes validation can
 // still resolve to a private address.
 func cimdHttpClient() *http.Client {
-	dialer := &net.Dialer{Timeout: cimdFetchTimeout}
+	dialer := server.NewDialer(cimdFetchTimeout)
 
 	return &http.Client{
 		Timeout: cimdFetchTimeout,

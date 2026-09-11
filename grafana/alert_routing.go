@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -74,7 +76,8 @@ func newGrafanaProvisioningClient(grafanaUrl string, username string, password s
 		username: username,
 		password: password,
 		http: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: server.NewHttpTransport(),
+			Timeout:   30 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},

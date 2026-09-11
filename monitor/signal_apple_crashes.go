@@ -15,6 +15,8 @@ import (
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -268,8 +270,8 @@ func newAppleReportingClients(settings AppleReportingSettings, now func() time.T
 	if now == nil {
 		now = time.Now
 	}
-	base := &http.Client{Timeout: 30 * time.Second, CheckRedirect: providerSameOriginRedirect}
-	download := &http.Client{Timeout: 30 * time.Second, CheckRedirect: providerHTTPSDownloadRedirect}
+	base := &http.Client{Transport: server.NewHttpTransport(), Timeout: 30 * time.Second, CheckRedirect: providerSameOriginRedirect}
+	download := &http.Client{Transport: server.NewHttpTransport(), Timeout: 30 * time.Second, CheckRedirect: providerHTTPSDownloadRedirect}
 	return appleReportingClients{
 		api: newProviderHTTP(&appleAuthDoer{
 			client: base, key: key, issuerID: settings.IssuerID, keyID: settings.KeyID, now: now,

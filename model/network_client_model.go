@@ -2320,11 +2320,36 @@ const clientAuthTimeRefreshMinInterval = time.Hour
 // if attempt claim fails, connect to the next (repeat until a successful connection)
 
 // returns a connection_id
+//
+// The connection is recorded as a legacy, family-agnostic transport (intent
+// 0), which the reliability aggregation counts as proof of v4. A
+// family-pinned transport records its declared family through
+// ConnectNetworkClientWithIpFamily.
 func ConnectNetworkClient(
 	ctx context.Context,
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
+) (
+	connectionId server.Id,
+	clientIp string,
+	clientPort int,
+	clientIpHash [32]byte,
+	err error,
+) {
+	return ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, 0)
+}
+
+// ConnectNetworkClientWithIpFamily is ConnectNetworkClient with the address
+// family the transport declared it intends to prove: 0 (legacy), 4 or 6. The
+// observed family is derived here from the client address and stored beside
+// the intent; see ConnectionProvenIpFamily for how the pair is judged.
+func ConnectNetworkClientWithIpFamily(
+	ctx context.Context,
+	clientId server.Id,
+	clientAddress string,
+	handlerId server.Id,
+	ipFamilyIntent int,
 ) (
 	connectionId server.Id,
 	clientIp string,
@@ -2341,6 +2366,13 @@ func ConnectNetworkClient(
 	if err != nil {
 		return
 	}
+
+	// ClientIpHash parsed the ip above, so this is always 4 or 6 here
+	ipVersion := 0
+	if addr, parseErr := netip.ParseAddr(clientIp); parseErr == nil {
+		ipVersion = server.IpVersionForAddr(addr)
+	}
+	ipFamilyIntent = normalizeIpFamilyIntent(ipFamilyIntent)
 
 	var expectedLatencyMillis int
 	if ipInfo, err := server.GetIpInfoFromString(clientIp); err == nil {
@@ -2375,9 +2407,11 @@ func ConnectNetworkClient(
 					client_address_hash,
 					client_address_port,
 					handler_id,
-					expected_latency_ms
+					expected_latency_ms,
+					ip_version,
+					ip_family_intent
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			`,
 			clientId,
 			connectionId,
@@ -2389,6 +2423,8 @@ func ConnectNetworkClient(
 			clientPort,
 			handlerId,
 			expectedLatencyMillis,
+			ipVersion,
+			ipFamilyIntent,
 		))
 
 		// refresh auth_time as a durable last-seen marker. connection rows are

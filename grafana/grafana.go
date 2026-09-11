@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 //go:embed dashboards/*.json
@@ -54,9 +56,7 @@ type PublicDashboard struct {
 func LoadDefaults(ctx context.Context, grafanaUrl string, username string, password string) ([]string, []PublicDashboard, error) {
 	grafanaUrl = strings.TrimSuffix(grafanaUrl, "/")
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	httpClient := server.NewHttpClient(30 * time.Second)
 
 	do := func(method string, path string, requestBody any) (int, []byte, error) {
 		var bodyReader io.Reader

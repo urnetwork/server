@@ -678,6 +678,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 				locationGroupIds,
 				server.Id{},
 				100,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, len(clientScoresNoMatch), 1)
@@ -700,6 +701,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 				locationGroupIds,
 				usLocationId,
 				100,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, clientScoresNoMatch, clientScoresUs)
@@ -715,6 +717,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 				locationGroupIds,
 				usLocationId,
 				100,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, len(clientScoresStrict), 0)
@@ -1905,6 +1908,7 @@ func TestUpdateClientScoresCountsOnlyPublicProviders(t *testing.T) {
 			map[server.Id]bool{},
 			server.Id{},
 			100,
+			[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(clientScores), 2)
@@ -2002,6 +2006,7 @@ func TestUpdateClientScoresGroupCarriesNetworkProvidersTagged(t *testing.T) {
 			},
 			server.Id{},
 			100,
+			[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(clientScores), 2)
@@ -2023,6 +2028,7 @@ func TestUpdateClientScoresGroupCarriesNetworkProvidersTagged(t *testing.T) {
 			map[server.Id]bool{networkOnlyGroup.LocationGroupId: true},
 			server.Id{},
 			100,
+			[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(networkOnlyGroupClientScores), 1)
@@ -2177,6 +2183,7 @@ func TestUpdateClientScoresRollsCityProviderUpToRegionAndCountry(t *testing.T) {
 				map[server.Id]bool{},
 				server.Id{},
 				100,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
 			return clientScores
@@ -2691,6 +2698,7 @@ func TestUpdateClientScoresPoolExcludesStreamOnlyAndKeylessProviders(t *testing.
 			map[server.Id]bool{},
 			server.Id{},
 			100,
+			[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 		)
 		connect.AssertEqual(t, err, nil)
 
@@ -2826,6 +2834,7 @@ func TestUpdateClientScoresExcludesDerivedAndInactiveClients(t *testing.T) {
 				source.locationGroupIds,
 				server.Id{},
 				100,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
 			if _, ok := clientScores[activeClientId]; !ok {
@@ -2904,6 +2913,7 @@ func TestUpdateClientScoresGroupPoolExcludesStreamOnlyAndKeylessProviders(t *tes
 			map[server.Id]bool{group.LocationGroupId: true},
 			server.Id{},
 			100,
+			[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 		)
 		connect.AssertEqual(t, err, nil)
 
@@ -3125,6 +3135,7 @@ func testing_selectableClientScores(
 		map[server.Id]bool{},
 		server.Id{},
 		100,
+		[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 	)
 	connect.AssertEqual(t, err, nil)
 	return clientScores

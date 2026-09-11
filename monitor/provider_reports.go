@@ -22,6 +22,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -109,7 +111,7 @@ type providerHTTP struct {
 
 func newProviderHTTP(doer providerHTTPDoer) *providerHTTP {
 	if doer == nil {
-		doer = &http.Client{Timeout: 30 * time.Second}
+		doer = server.NewHttpClient(30 * time.Second)
 	}
 	return &providerHTTP{doer: doer, wait: waitProviderRetry}
 }

@@ -1113,6 +1113,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		headerAppVersion := r.Header.Get("X-UR-AppVersion")
 		headerInstanceId := r.Header.Get("X-UR-InstanceId")
 		headerTransportVersion := r.Header.Get("X-UR-TransportVersion")
+		headerIpFamily := r.Header.Get(connect.HeaderIpFamily)
 
 		transportVersion := 0
 		if i, err := strconv.Atoi(headerTransportVersion); err == nil {
@@ -1130,6 +1131,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					ByJwt:      jwt,
 					InstanceId: instanceId.Bytes(),
 					AppVersion: headerAppVersion,
+					IpFamily:   ipFamilyIntentFromHeader(headerIpFamily),
 				}, transportVersion
 			} else {
 				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
@@ -1221,6 +1223,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// the declared family rides with the connection record; the observed
+	// family is re-derived from the same address at the model
+	_, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
+
 	connectionId := server.NewId()
 	self.exchange.registerConnection(clientId, connectionId, handleCancel)
 	defer self.exchange.unregisterConnection(clientId, connectionId)
@@ -1240,12 +1246,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		} else {
 			testConfig = DefaultTestConfig()
 		}
-		announce := NewConnectionAnnounce(
+		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
 			clientId,
 			clientAddress,
+			ipFamilyIntent,
 			self.handlerId,
 			announceTimeout,
 			testConfig,
@@ -1793,6 +1800,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var clientId server.Id
 	var instanceId server.Id
 	var connectionId server.Id
+	ipFamilyIntent := 0
 	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
@@ -1832,6 +1840,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if networkId == nil || *networkId != byJwt.NetworkId {
 				return fmt.Errorf("Client id is not part of network.")
 			}
+
+			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 
 			connectionId = server.NewId()
 			self.exchange.registerConnection(clientId, connectionId, handleCancel)
@@ -1874,12 +1884,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
 		}
-		announce := NewConnectionAnnounce(
+		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
 			clientId,
 			clientAddress,
+			ipFamilyIntent,
 			self.handlerId,
 			announceTimeout,
 			V0TestConfig(),
