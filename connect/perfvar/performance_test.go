@@ -1828,7 +1828,8 @@ func subtractPerfvarClientSendRecovery(
 		start.UnreliableFlightGapReorderSuspected
 	observation.TimeoutResendWithRecentCumulativeProgress = end.TimeoutResendWithRecentCumulativeProgress -
 		start.TimeoutResendWithRecentCumulativeProgress
-	observation.TimeoutResendDeferCount = end.TimeoutResendDeferCount - start.TimeoutResendDeferCount
+	observation.TimeoutResendDeferCount = observation.EndLifetime.TimeoutResendDeferCount -
+		observation.StartLifetime.TimeoutResendDeferCount
 	return observation
 }
 
