@@ -740,7 +740,11 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 			}
 			goodput := "n/a"
 			if 0 < len(cell.goodputs) {
+				// Low-bar cells run at tens to hundreds of kbit/s.
 				goodput = fmt.Sprintf("%.1f", median(cell.goodputs))
+				if median(cell.goodputs) < 1 {
+					goodput = fmt.Sprintf("%.3f", median(cell.goodputs))
+				}
 			}
 			loadedP95, delivered := "–", "–"
 			if 0 < cell.loadedAttempt {
