@@ -51,18 +51,20 @@ func (self *Route) String() string {
 type pathValuesKey struct{}
 
 type Router struct {
-	ctx    context.Context
-	routes []*Route
-	trie   *routeTrie
-	stats  *RouterStats
+	ctx     context.Context
+	routes  []*Route
+	trie    *routeTrie
+	stats   *RouterStats
+	metrics *httpMetrics
 }
 
 func NewRouter(ctx context.Context, routes []*Route) *Router {
 	return &Router{
-		ctx:    ctx,
-		routes: routes,
-		trie:   newRouteTrie(routes),
-		stats:  NewRouterStats(ctx, 60*time.Second),
+		ctx:     ctx,
+		routes:  routes,
+		trie:    newRouteTrie(routes),
+		stats:   NewRouterStats(ctx, 60*time.Second),
+		metrics: defaultHttpMetrics,
 	}
 }
 
@@ -77,19 +79,26 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route, allowedMethods := self.trie.match(r.Method, r.URL.Path)
 	if route == nil {
 		if 0 < len(allowedMethods) {
-			w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-			http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
+			observation, writer := beginHttpRequest(self.metrics, "method_not_allowed", w, r)
+			writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+			http.Error(writer, "Method not allowed.", http.StatusMethodNotAllowed)
+			observation.finish("method_not_allowed")
 		} else {
-			http.NotFound(w, r)
+			observation, writer := beginHttpRequest(self.metrics, "not_found", w, r)
+			http.NotFound(writer, r)
+			observation.finish("not_found")
 		}
 		return
 	}
+
+	observation, writer := beginHttpRequest(self.metrics, route.id, w, r)
 
 	defer func() {
 		if err := recover(); err != nil {
 			// Preserve net/http's exact transport-abort signal, including after
 			// a flushed prefix. An error response would forge a clean EOF.
 			if err == http.ErrAbortHandler {
+				observation.finish("aborted")
 				panic(err)
 			}
 			if server.IsDoneError(err) {
@@ -98,6 +107,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// net/http no longer owns that connection and any attempted error
 				// response produces a write-after-hijack warning. Consume the
 				// lifecycle signal without falling through to http.Error.
+				observation.finish("canceled")
 				return
 			}
 			self.stats.Error(route.id)
@@ -109,9 +119,12 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			func() {
 				// note the connection might be hijacked in this case
 				defer recover()
-				http.Error(w, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
+				http.Error(writer, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
 			}()
+			observation.finish("panic")
+			return
 		}
+		observation.finish(httpRequestOutcome(r.Context()))
 	}()
 
 	req := r
@@ -126,7 +139,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startTime := time.Now()
-	route.handler(w, req)
+	route.handler(writer, req)
 	endTime := time.Now()
 	self.stats.Success(route.id, endTime.Sub(startTime))
 }

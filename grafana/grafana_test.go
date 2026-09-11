@@ -64,6 +64,7 @@ type testPanel struct {
 		Y int `json:"y"`
 	} `json:"gridPos"`
 	Options struct {
+		Content       string `json:"content"`
 		ReduceOptions struct {
 			Calcs []string `json:"calcs"`
 		} `json:"reduceOptions"`
@@ -233,7 +234,6 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		"urnetwork_backup_archive_in_progress",
 		"urnetwork_backup_archive_storage_bytes",
 		"urnetwork_backup_archive_volume_free_bytes",
-		`host="planetoid"`,
 		`archive="pg"`,
 		`archive="redis"`,
 		`archive="github-urnetwork"`,
@@ -286,9 +286,31 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		panel := dashboardPanelById(dashboard, panelID)
 		if panel == nil || len(panel.Targets) != 1 ||
 			!strings.Contains(panel.Targets[0].Expr, "topk(1") ||
+			!strings.Contains(panel.Targets[0].Expr, "max_over_time(") ||
+			!strings.Contains(panel.Targets[0].Expr, "[30d]") ||
 			!strings.Contains(panel.Targets[0].Expr, "* 1000") {
-			t.Errorf("latest stored archive panel %d is missing or does not select the newest generation", panelID)
+			t.Errorf("historical archive panel %d is missing or does not select the bounded last-known generation", panelID)
+			continue
 		}
+		if !strings.Contains(strings.ToLower(panel.Title+" "+panel.Description), "historical") ||
+			!strings.Contains(strings.ToLower(panel.Description), "stale") ||
+			!strings.Contains(strings.ToLower(panel.Description), "fail-closed") {
+			t.Errorf("historical archive panel %d does not disclose stale/non-health semantics", panelID)
+		}
+	}
+
+	telemetryLastSeen := dashboardPanelById(dashboard, 16)
+	if telemetryLastSeen == nil || len(telemetryLastSeen.Targets) != 1 {
+		t.Fatal("backup host telemetry last-seen panel is missing")
+	}
+	for _, required := range []string{"node_uname_info", "timestamp(", "max_over_time(", "[30d:]", "* 1000"} {
+		if !strings.Contains(telemetryLastSeen.Targets[0].Expr, required) {
+			t.Errorf("backup host telemetry last-seen query omits %q: %s", required, telemetryLastSeen.Targets[0].Expr)
+		}
+	}
+	if !strings.Contains(strings.ToLower(telemetryLastSeen.Description), "diagnostic only") ||
+		!strings.Contains(strings.ToLower(telemetryLastSeen.Description), "fail-closed") {
+		t.Error("backup host telemetry last-seen panel could be mistaken for current health")
 	}
 
 	storage := dashboardPanelById(dashboard, 15)
@@ -465,6 +487,389 @@ func TestOnboardingDashboardUsesFreshPrivacySafeEmailTracker(t *testing.T) {
 			if strings.Contains(expression, forbidden) {
 				t.Errorf("email tracker query contains forbidden %q: %s", forbidden, expression)
 			}
+		}
+	}
+}
+
+func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) {
+	dashboard := readTestDashboard(t, "subscriptions.json")
+	if dashboard.Uid != "urnetwork-subscriptions" || dashboard.Title != "urnetwork / subscriptions" {
+		t.Fatalf("subscriptions dashboard identity = %q / %q", dashboard.Uid, dashboard.Title)
+	}
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("subscriptions dashboard must remain authenticated")
+	}
+
+	documentBytes, err := dashboardsFs.ReadFile("dashboards/subscriptions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(documentBytes)
+	for _, required := range []string{
+		`"query": "24h,7d,30d"`,
+		"upgrades / new paid accounts",
+		"current paid accounts by store",
+		"paid subscriber engagement by store",
+		"observed churn: expiry or cancellation",
+		"provider-confirmed terminal events",
+		"reconciliation repairs",
+		"data packs fulfilled",
+		"data-pack bytes fulfilled",
+		"Raw cancellation intent is not durably available",
+		"never renders an invented cancellation-intent zero",
+	} {
+		if !strings.Contains(document, required) {
+			t.Errorf("subscriptions dashboard lacks %q", required)
+		}
+	}
+	for _, metric := range []string{
+		"urnetwork_subscription_active_accounts",
+		"urnetwork_subscription_new_paid_accounts",
+		"urnetwork_subscription_engaged_accounts",
+		"urnetwork_subscription_churned_accounts",
+		"urnetwork_subscription_reconciliation_events",
+		"urnetwork_subscription_reconciliation_source_timestamp_seconds",
+		"urnetwork_subscription_data_pack_fulfillments",
+		"urnetwork_subscription_data_pack_bytes",
+		"urnetwork_subscription_snapshot_timestamp_seconds",
+	} {
+		if !strings.Contains(document, metric) {
+			t.Errorf("subscriptions dashboard does not cover %s", metric)
+		}
+	}
+	if !strings.Contains(document, "Google Play / Android") {
+		t.Error("subscriptions dashboard does not name the google series as Google Play / Android")
+	}
+
+	expressions := dashboardExpressions(dashboard)
+	if len(expressions) == 0 {
+		t.Fatal("subscriptions dashboard has no Prometheus queries")
+	}
+	for _, expression := range expressions {
+		for _, contract := range []string{
+			"urnetwork_subscription_snapshot_timestamp_seconds",
+			"topk(1,",
+			`service="taskworker"`,
+			"time() - 1200",
+			"time() + 30",
+		} {
+			if !strings.Contains(expression, contract) {
+				t.Errorf("subscription query omits fresh single-snapshot contract %q: %s", contract, expression)
+			}
+		}
+		for _, forbidden := range []string{
+			"vector(0)", "network_id", "user_id", "client_id", "purchase_event_id",
+			"transaction_id", "invoice", "purchase_token", "email", "users_24h",
+		} {
+			if strings.Contains(expression, forbidden) {
+				t.Errorf("subscription query contains forbidden %q: %s", forbidden, expression)
+			}
+		}
+	}
+
+	// Every business series is joined to the exact identity labels selected by
+	// the fleet-wide snapshot. Snapshot age itself starts from that selector.
+	for _, expression := range expressions {
+		withoutSnapshot := strings.ReplaceAll(expression, "urnetwork_subscription_snapshot_timestamp_seconds", "")
+		if strings.Contains(withoutSnapshot, "urnetwork_subscription_") &&
+			!strings.Contains(expression, "and on(env,service,block,host,instance)") {
+			t.Errorf("subscription query is not tied to one publisher identity: %s", expression)
+		}
+	}
+
+	active := dashboardPanelById(dashboard, 8)
+	engagement := dashboardPanelById(dashboard, 9)
+	upgrades := dashboardPanelById(dashboard, 21)
+	churn := dashboardPanelById(dashboard, 11)
+	if active == nil || len(active.Targets) != 1 ||
+		!strings.Contains(active.Targets[0].Expr, `store=~"apple|google|stripe|solana"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded four-store active view")
+	}
+	if upgrades == nil || len(upgrades.Targets) != 1 ||
+		!strings.Contains(upgrades.Targets[0].Expr, `store=~"apple|google|stripe|solana"`) ||
+		!strings.Contains(upgrades.Targets[0].Expr, `window="$window"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded four-store upgrade view")
+	}
+	upgradeTotal := dashboardPanelById(dashboard, 6)
+	if upgradeTotal == nil || len(upgradeTotal.Targets) != 1 ||
+		!strings.Contains(upgradeTotal.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the first-ever deduplicated upgrade total")
+	}
+	for _, panel := range []*testPanel{engagement, churn} {
+		if panel == nil || len(panel.Targets) != 1 ||
+			!strings.Contains(panel.Targets[0].Expr, `store=~"apple|google|stripe|solana|deduplicated"`) ||
+			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
+			t.Fatal("subscriptions dashboard lacks a bounded store/window account view")
+		}
+	}
+
+	terminal := dashboardPanelById(dashboard, 13)
+	repairs := dashboardPanelById(dashboard, 14)
+	for _, panel := range []*testPanel{terminal, repairs} {
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatal("subscriptions reconciliation panel is missing")
+		}
+		expression := panel.Targets[0].Expr
+		for _, required := range []string{
+			`store="all"`,
+			`store=~"apple|google|stripe|solana"`,
+			"time() - 9000",
+			"time() - 10800",
+			"and on(env,service,block,host,instance,store)",
+		} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("reconciliation panel %q omits source gate %q: %s", panel.Title, required, expression)
+			}
+		}
+	}
+	if !strings.Contains(terminal.Targets[0].Expr, `action=~"ended|refunded|disputed|revoked"`) {
+		t.Errorf("terminal event panel has an unbounded or incomplete action set: %s", terminal.Targets[0].Expr)
+	}
+	if !strings.Contains(repairs.Targets[0].Expr, `action=~"credited|ended|entitlement_repaired"`) {
+		t.Errorf("repair panel has an unbounded or incomplete action set: %s", repairs.Targets[0].Expr)
+	}
+
+	for _, panelID := range []int{17, 18} {
+		panel := dashboardPanelById(dashboard, panelID)
+		if panel == nil || len(panel.Targets) != 1 ||
+			!strings.Contains(panel.Targets[0].Expr, `source=~"balance_code|direct_balance|deduplicated"`) ||
+			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
+			t.Errorf("data-pack panel %d lacks the bounded deduplicated source/window contract", panelID)
+		}
+	}
+
+	cancellation := dashboardPanelById(dashboard, 12)
+	if cancellation == nil || cancellation.Type != "text" ||
+		!strings.Contains(cancellation.Options.Content, "not durably available") ||
+		!strings.Contains(cancellation.Options.Content, "never renders") {
+		t.Fatal("subscriptions dashboard must explicitly disclose unavailable cancellation-intent attribution")
+	}
+}
+
+func TestProxyDashboardCoversBoundedServiceTrafficAndCapacity(t *testing.T) {
+	dashboard := readTestDashboard(t, "proxy.json")
+	if dashboard.Uid != "urnetwork-proxy" || dashboard.Title != "urnetwork / proxy" {
+		t.Fatalf("proxy dashboard identity = %q / %q", dashboard.Uid, dashboard.Title)
+	}
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("proxy dashboard must remain authenticated")
+	}
+
+	documentBytes, err := dashboardsFs.ReadFile("dashboards/proxy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(documentBytes)
+	for _, required := range []string{
+		"client-boundary relay bytes / s",
+		"admissions by protocol and outcome",
+		"bounded HTTP / SOCKS library events / s",
+		"WireGuard packets / s by direction and outcome",
+		"WireGuard queue drops and receiver failures / s",
+		"aggregate devices, peers, prewarm, and lifecycle",
+		"platform transport byte capacity",
+		"WireGuard return backpressure",
+		"caller-lock cache occupancy",
+		"control and device-RPC HTTP outcomes",
+		"process CPU, memory, goroutines, and file descriptors",
+		"Missing or stale telemetry remains no-data",
+	} {
+		if !strings.Contains(document, required) {
+			t.Errorf("proxy dashboard lacks %q", required)
+		}
+	}
+	for _, metric := range []string{
+		"urnetwork_proxy_ready",
+		"urnetwork_proxy_drain_active_remaining",
+		"urnetwork_proxy_ingress_admissions_total",
+		"urnetwork_proxy_sessions_total",
+		"urnetwork_proxy_session_duration_seconds",
+		"urnetwork_proxy_sessions_active",
+		"urnetwork_proxy_session_bytes_total",
+		"urnetwork_proxy_ingress_events_total",
+		"urnetwork_proxy_ingress_active",
+		"urnetwork_proxy_session_interval_max_seconds",
+		"urnetwork_proxy_session_interval_max_timestamp_seconds",
+		"urnetwork_proxy_wireguard_packets_total",
+		"urnetwork_proxy_wireguard_bytes_total",
+		"urnetwork_proxy_devices_live",
+		"urnetwork_proxy_prewarmed_devices",
+		"urnetwork_proxy_wg_peers",
+		"urnetwork_proxy_device_memory_tracked_used_bytes",
+		"urnetwork_proxy_platform_transports_pending_h1",
+		"urnetwork_proxy_wireguard_return_backpressure_total",
+		"urnetwork_proxy_lock_cache_entries",
+		"urnetwork_http_requests_total",
+		"urnetwork_pg_pool_connections",
+		"process_resident_memory_bytes",
+	} {
+		if !strings.Contains(document, metric) {
+			t.Errorf("proxy dashboard does not cover %s", metric)
+		}
+	}
+
+	expressions := dashboardExpressions(dashboard)
+	if len(expressions) == 0 {
+		t.Fatal("proxy dashboard has no Prometheus queries")
+	}
+	for _, expression := range expressions {
+		for _, required := range []string{
+			`env="$env"`, `service="proxy"`, `block=~"$block"`,
+			`host=~"$host"`, `instance!=""`,
+		} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("proxy query omits scope %q: %s", required, expression)
+			}
+		}
+		for _, forbidden := range []string{
+			"vector(0)", "proxy_id", "client_id", "device_id", "user_id",
+			"remote_addr", "destination=", "credential=", "error_text",
+		} {
+			if strings.Contains(expression, forbidden) {
+				t.Errorf("proxy query contains forbidden %q: %s", forbidden, expression)
+			}
+		}
+	}
+
+	maximum := dashboardPanelById(dashboard, 9)
+	if maximum == nil || len(maximum.Targets) != 1 {
+		t.Fatal("proxy fresh maximum panel is missing")
+	}
+	for _, required := range []string{
+		"urnetwork_proxy_session_interval_max_timestamp_seconds",
+		"and on (env, service, block, host, instance, protocol)",
+		"time() - 120", "time() + 30",
+	} {
+		if !strings.Contains(maximum.Targets[0].Expr, required) {
+			t.Errorf("proxy maximum omits freshness contract %q: %s", required, maximum.Targets[0].Expr)
+		}
+	}
+	directional := dashboardPanelById(dashboard, 12)
+	if directional == nil || len(directional.Targets) != 1 ||
+		!strings.Contains(directional.Targets[0].Expr, "sum by (direction, outcome)") {
+		t.Fatal("proxy dashboard does not preserve WireGuard direction and outcome")
+	}
+	rpc := dashboardPanelById(dashboard, 22)
+	if rpc == nil || len(rpc.Targets) != 1 ||
+		!strings.Contains(rpc.Targets[0].Expr, "sum by (route, status, outcome)") {
+		t.Fatal("proxy dashboard does not preserve bounded control/RPC route outcomes")
+	}
+}
+
+func TestMcpDashboardCoversBoundedCallsFetchAndCapacity(t *testing.T) {
+	dashboard := readTestDashboard(t, "mcp.json")
+	if dashboard.Uid != "urnetwork-mcp" || dashboard.Title != "urnetwork / mcp" {
+		t.Fatalf("MCP dashboard identity = %q / %q", dashboard.Uid, dashboard.Title)
+	}
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("MCP dashboard must remain authenticated")
+	}
+
+	documentBytes, err := dashboardsFs.ReadFile("dashboards/mcp.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(documentBytes)
+	for _, required := range []string{
+		"protocol calls by method, tool, and outcome",
+		"HTTP authentication and transport outcomes",
+		"tool input and output bytes / s",
+		"providerLocations output / s",
+		"fetch resource outputs / s",
+		"active authenticated callers (process-local)",
+		"fetch concurrency and capacity",
+		"fetch gate waiters and admission outcomes",
+		"fetch result, HTTP status, and continuation classes",
+		"PostgreSQL acquire and lifecycle pressure",
+		"HTTP drain outcomes",
+		"Missing or stale telemetry remains no-data",
+	} {
+		if !strings.Contains(document, required) {
+			t.Errorf("MCP dashboard lacks %q", required)
+		}
+	}
+	for _, metric := range []string{
+		"urnetwork_mcp_ready",
+		"urnetwork_mcp_calls_total",
+		"urnetwork_mcp_call_duration_seconds",
+		"urnetwork_mcp_calls_inflight",
+		"urnetwork_mcp_call_interval_max_seconds",
+		"urnetwork_mcp_call_interval_max_timestamp_seconds",
+		"urnetwork_mcp_tool_bytes_total",
+		"urnetwork_mcp_tool_items_total",
+		"urnetwork_mcp_active_callers",
+		"urnetwork_mcp_fetch_concurrency",
+		"urnetwork_mcp_fetch_waiters",
+		"urnetwork_mcp_fetch_wait_duration_seconds",
+		"urnetwork_mcp_fetch_admissions_total",
+		"urnetwork_mcp_fetch_results_total",
+		"urnetwork_http_requests_total",
+		"urnetwork_http_request_bytes_total",
+		"urnetwork_http_response_bytes_total",
+		"urnetwork_http_request_duration_seconds",
+		"urnetwork_http_server_draining",
+		"urnetwork_pg_pool_connections",
+		"process_resident_memory_bytes",
+	} {
+		if !strings.Contains(document, metric) {
+			t.Errorf("MCP dashboard does not cover %s", metric)
+		}
+	}
+
+	expressions := dashboardExpressions(dashboard)
+	if len(expressions) == 0 {
+		t.Fatal("MCP dashboard has no Prometheus queries")
+	}
+	for _, expression := range expressions {
+		for _, required := range []string{
+			`env="$env"`, `service="mcp"`, `block=~"$block"`,
+			`host=~"$host"`, `instance!=""`,
+		} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("MCP query omits scope %q: %s", required, expression)
+			}
+		}
+		for _, forbidden := range []string{
+			"vector(0)", "user_id", "client_id", "network_id", "proxy_id",
+			"remote_addr", "url=", "identity=", "error_text", "error_message",
+		} {
+			if strings.Contains(expression, forbidden) {
+				t.Errorf("MCP query contains forbidden %q: %s", forbidden, expression)
+			}
+		}
+	}
+
+	maximum := dashboardPanelById(dashboard, 11)
+	if maximum == nil || len(maximum.Targets) != 1 {
+		t.Fatal("MCP fresh maximum panel is missing")
+	}
+	for _, required := range []string{
+		"urnetwork_mcp_call_interval_max_timestamp_seconds",
+		"and on (env, service, block, host, instance, method, tool)",
+		"time() - 120", "time() + 30",
+	} {
+		if !strings.Contains(maximum.Targets[0].Expr, required) {
+			t.Errorf("MCP maximum omits freshness contract %q: %s", required, maximum.Targets[0].Expr)
+		}
+	}
+	callers := dashboardPanelById(dashboard, 15)
+	if callers == nil || len(callers.Targets) != 1 ||
+		!strings.Contains(callers.Targets[0].Expr, "max by (window)") ||
+		strings.Contains(callers.Targets[0].Expr, "sum by (window)") {
+		t.Fatal("MCP dashboard invents a fleet-distinct caller count")
+	}
+	concurrency := dashboardPanelById(dashboard, 16)
+	if concurrency == nil || len(concurrency.Targets) != 1 ||
+		!strings.Contains(concurrency.Targets[0].Expr, `scope=~"global_active|global_capacity|per_identity_active|per_identity_capacity|active_identities"`) {
+		t.Fatal("MCP dashboard lacks the bounded fetch concurrency scope set")
+	}
+	fetch := dashboardPanelById(dashboard, 19)
+	if fetch == nil || len(fetch.Targets) != 1 {
+		t.Fatal("MCP fetch-result panel is missing")
+	}
+	for _, dimension := range []string{"outcome", "status_class", "truncated", "continuation", "payment"} {
+		if !strings.Contains(fetch.Targets[0].Expr, dimension) {
+			t.Errorf("MCP fetch-result panel omits %s: %s", dimension, fetch.Targets[0].Expr)
 		}
 	}
 }

@@ -156,8 +156,55 @@ type storedCookie struct {
 	Value string `json:"v"`
 }
 
-// Handles the fetch tool call.
+// Handles the fetch tool call and records bounded aggregate I/O/result
+// classes from values the implementation already constructed.
 func fetchTool(
+	ctx context.Context,
+	req *mcpsdk.CallToolRequest,
+	args FetchArgs,
+) (callResult *mcpsdk.CallToolResult, out *FetchResult, err error) {
+	mcpToolBytesTotal.WithLabelValues("fetch", "input").Add(float64(fetchInputBytes(args)))
+	callResult, out, err = fetchToolImpl(ctx, req, args)
+	resultClass := "succeeded"
+	if err != nil {
+		resultClass = "error"
+	} else if callResult != nil && callResult.IsError {
+		resultClass = "tool_error"
+	}
+	if callResult != nil {
+		mcpToolBytesTotal.WithLabelValues("fetch", "output").Add(float64(mcpContentBytes(callResult.Content)))
+	}
+	status := 0
+	truncated := false
+	continuation := false
+	payment := false
+	if out != nil {
+		status = out.Status
+		truncated = out.Truncated
+		continuation = out.Continuation != ""
+		payment = out.PaymentRequired != nil
+		for _, resource := range out.Resources {
+			itemClass := "link"
+			if resource.Error != "" {
+				itemClass = "error"
+			} else if resource.Embedded {
+				itemClass = "embedded"
+			}
+			mcpToolItemsTotal.WithLabelValues("fetch", itemClass, resultClass).Inc()
+		}
+	}
+	mcpFetchResultsTotal.WithLabelValues(
+		resultClass,
+		mcpStatusClass(status),
+		boolMetricLabel(truncated),
+		boolMetricLabel(continuation),
+		boolMetricLabel(payment),
+	).Inc()
+	return callResult, out, err
+}
+
+// fetchToolImpl executes one bounded fetch operation.
+func fetchToolImpl(
 	ctx context.Context,
 	req *mcpsdk.CallToolRequest,
 	args FetchArgs,

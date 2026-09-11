@@ -173,7 +173,11 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 }
 
 // Sets authentication claims or returns an authentication error.
-func (self *ClientSession) Auth(req *http.Request) error {
+func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
+	method := requestAuthMethod(req)
+	defer func() {
+		recordSessionAuth(method, self.ByJwt, returnErr)
+	}()
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]

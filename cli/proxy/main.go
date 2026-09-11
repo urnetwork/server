@@ -131,7 +131,7 @@ Options:
 	// expands the full search tables into millions of alias/histogram objects.
 	server.Warmup(proxyWarmupTargets()...)
 
-	server.StartStatsPusher(ctx)
+	flushStats := server.StartStatsPusher(ctx)
 
 	socks5Server := proxy.NewSocks5Server(
 		ctx,
@@ -160,6 +160,7 @@ Options:
 		proxyDeviceManager,
 		settings,
 	)
+	proxy.StartIngressMetrics(socks5Server, httpServer)
 	// Advertise this replacement generation before readiness. The old
 	// instance tags its drain-end export for this generation, and the
 	// post-readiness sequence below waits for it (the drain-complete
@@ -304,6 +305,7 @@ Options:
 	select {
 	case <-ctx.Done():
 	}
+	flushStats()
 
 	if drainCoordinator.Drained() {
 		// a graceful drained shutdown; exit promptly and cleanly so `docker

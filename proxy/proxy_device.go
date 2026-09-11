@@ -969,12 +969,15 @@ func (self *ProxyDevice) deliverWireGuardReturn(receive chan []byte, receiveNoti
 	select {
 	case <-self.ctx.Done():
 		connect.MessagePoolReturn(sharedPacket)
+		observeWireGuardPacket("destination_to_client", "dropped", len(packet))
 		return false
 	case <-receiveNotify:
 		connect.MessagePoolReturn(sharedPacket)
+		observeWireGuardPacket("destination_to_client", "dropped", len(packet))
 		return false
 	case receive <- sharedPacket:
 		self.UpdateActivity()
+		observeWireGuardPacket("destination_to_client", "delivered", len(packet))
 		return true
 	default:
 	}
@@ -989,18 +992,22 @@ func (self *ProxyDevice) deliverWireGuardReturn(receive chan []byte, receiveNoti
 	select {
 	case <-self.ctx.Done():
 		connect.MessagePoolReturn(sharedPacket)
+		observeWireGuardPacket("destination_to_client", "dropped", len(packet))
 		return false
 	case <-receiveNotify:
 		connect.MessagePoolReturn(sharedPacket)
+		observeWireGuardPacket("destination_to_client", "dropped", len(packet))
 		return false
 	case receive <- sharedPacket:
 		self.UpdateActivity()
+		observeWireGuardPacket("destination_to_client", "delivered", len(packet))
 		return true
 	}
 }
 
 func (self *ProxyDevice) Send(packet []byte) bool {
 	if !self.UpdateActivity() {
+		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
 		return false
 	}
 	ownedPacket := connect.MessagePoolCopy(packet)
@@ -1011,9 +1018,11 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 		sent = self.deviceLocal.SendPacketNoCopy(ownedPacket, int32(len(ownedPacket)))
 	}
 	if sent {
+		observeWireGuardPacket("client_to_destination", "delivered", len(packet))
 		return true
 	}
 	connect.MessagePoolReturn(ownedPacket)
+	observeWireGuardPacket("client_to_destination", "dropped", len(packet))
 	return false
 }
 
@@ -1021,6 +1030,7 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 // handing it to the asynchronous DeviceLocal group path.
 func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 	if !self.UpdateActivity() {
+		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
 		return 0
 	}
 	ownedPackets := make([][]byte, len(packets))
@@ -1035,11 +1045,16 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 		for _, ownedPacket := range ownedPackets[sentPacketCount:] {
 			connect.MessagePoolReturn(ownedPacket)
 		}
+		observeWireGuardPackets("client_to_destination", "delivered", packets[:sentPacketCount], offset)
+		observeWireGuardPackets("client_to_destination", "dropped", packets[sentPacketCount:], offset)
 		return sentPacketCount
 	}
 	// DeviceLocal's batch contract consumes every pooled packet, including
 	// members rejected by the selected route.
-	return self.deviceLocal.SendPacketsNoCopy(ownedPackets)
+	sentPacketCount := min(max(0, self.deviceLocal.SendPacketsNoCopy(ownedPackets)), len(packets))
+	observeWireGuardPackets("client_to_destination", "delivered", packets[:sentPacketCount], offset)
+	observeWireGuardPackets("client_to_destination", "dropped", packets[sentPacketCount:], offset)
+	return sentPacketCount
 }
 
 func (self *ProxyDevice) SetReceive(receive chan []byte) {

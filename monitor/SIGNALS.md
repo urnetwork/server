@@ -5713,6 +5713,62 @@ parsing (including nonnumeric and overflow controls), the per-network probe
 shape of the query, and identifier-free Markdown. Malformed evidence fails the
 probe; it must never be coerced to a low-volume healthy result.
 
+### 2.27 Subscription dashboard snapshot liveness
+Probe: `subscription-metrics`
+
+The authenticated `urnetwork / subscriptions` dashboard is produced by one
+fleet-wide `SubscriptionMetricsSync` RunOnce task every 15 minutes. Its
+business series and `urnetwork_subscription_snapshot_timestamp_seconds` come
+from one custom Prometheus collector generation: the Taskworker materializes
+the complete bounded sample set before one pointer swap, and a concurrent
+scrape retains either the prior generation or the replacement. A writer-only
+mutex around separate GaugeVec resets is insufficient because Prometheus
+collects independently registered collectors concurrently and can otherwise
+pair an old nonzero timestamp with partially replaced business values.
+
+Observe all three layers every five minutes:
+
+- PostgreSQL contains exactly one pending row whose `function_name` is the
+  canonical fully qualified `SubscriptionMetricsSync` target, no reschedule
+  error, and no failed Post on the latest completion in the bounded two-hour
+  horizon. The query returns only counts, a completion age, and Boolean Post
+  state; it never selects a task id, arguments, results, client identity, or
+  error text.
+- Mimir returns the fleet-wide `topk(1)` completed snapshot across Taskworker
+  instances. The source sample itself must be actual-scrape-fresh within 90
+  seconds. The snapshot value must be nonzero, no more than 30 minutes old,
+  and no more than 30 seconds in the future. Do not require every Taskworker
+  to hold a nonzero value: only the singleton executor publishes each refresh.
+  If a successful finished-task time is newer than the metric by more than two
+  minutes, classify a publication gap after execution; if both are old, the
+  task/query path owns the stale snapshot. Business value zero is legitimate
+  and is never a liveness condition.
+- Grafana's authenticated stable-UID lookup for
+  `urnetwork-subscriptions` returns HTTP 2xx with exact title
+  `urnetwork / subscriptions`. A missing UID means the supported
+  `grafana load-defaults` path omitted the dashboard even if the exporter and
+  datasources are healthy. Missing/denied authentication, missing UID, other
+  HTTP status, malformed response, and wrong UID/title stay distinct. Only
+  status and identity-match Booleans enter findings; the credential and
+  response body never do.
+
+PAGE after two consecutive probes for `subscription-metrics-task-chain`,
+`subscription-metrics-snapshot-stale`,
+`subscription-metrics-publication-gap`, or any live-dashboard contract
+failure. A future timestamp is the same fail-closed two-tick page: repair
+clock/timestamp publication rather than extending the freshness range. Restore
+the exact task chain, exporter/scrape path, or load-defaults owner identified
+by the three-way discriminator. Never seed a second task, replace missing
+telemetry with zero, make the dashboard public, or hand-edit a colliding UID.
+
+Implementation convention: SIGNALS.md §2.27 (`subscription-metrics`) maps to
+`signal_subscription_metrics.go` and `signal_subscription_metrics_test.go`.
+Synthetic tests force healthy, absent/duplicate/errored/Post-failed task
+states; fresh, absent, stale, future, malformed, and post-completion-lost
+snapshot states; exact top-one and bounded SQL contracts; authenticated exact
+dashboard identity plus missing/auth/HTTP/body-redaction cases; and complete
+identifier-free findings.
+
 ---
 
 ## 3. redis signal catalog
@@ -11953,6 +12009,38 @@ validate on mounted media, and two consecutive direct Mimir reads show the same
 new generation inside the five-day band. The Grafana dashboard must agree with
 those raw inputs, but it is never the proof source.
 
+On 2026-09-11 the dashboard exposed a distinct whole-exporter outage as blank
+instant panels. Planetoid's last host/node scrape was
+`2026-09-10T20:29:10.524Z` and its last archive sample was
+`2026-09-10T20:28:55.528Z`; after Mimir's instant-query lookback elapsed, both
+correctly disappeared from current queries. The final archive sample still
+reported PostgreSQL in progress and the other three writers idle. Bounded
+history retained PostgreSQL and Redis generations from September 6 and both
+code-organization generations from September 10. Those last values establish
+what the exporter most recently observed, not what remains on the archive
+volume now.
+
+Both the management tunnel and the last-known local path were unreachable. A
+local neighbor lookup remained incomplete and a bounded same-subnet SSH scan
+found no endpoint presenting the backup host's known host identity. This
+localizes the first unavailable boundary to the whole host, power, or physical
+link; it is not evidence that archive files were deleted and does not select
+among those operational causes. Safe closure requires restoring the host/link,
+then observing current host and archive heartbeats, directly validating the
+mounted read-write archive root, and re-running the ordinary archive freshness
+and writer-state contract. Do not start or restart a writer solely because its
+exporter is offline.
+
+The dashboard therefore keeps overall status, per-archive freshness, current
+activity, and storage as current fail-closed queries. Separately labeled
+historical diagnostics use a fixed 30-day `max_over_time` window to show the
+host telemetry last-seen time and the last-known completed generation for each
+archive. Every such panel says that the value may be stale and cannot satisfy
+health; after 30 days even that historical value becomes no-data. Never apply
+`last_over_time`, `max_over_time`, or an absent-to-zero fallback to the current
+health panels, because doing so would turn an offline exporter into a healthy
+archive claim.
+
 ---
 
 ## 12. Taskworker drain (deploy) — TASKDRAIN1
@@ -17514,6 +17602,59 @@ service, router state, carrier NAT, or physical links. A hardware replacement,
 router configuration repair, or carrier operation may be required. Verify
 recovery from the server-side session inventory, the dedicated direct-path
 control, and dependent host probes rather than from one successful ping.
+
+### 21.2 Stationary-host power policy and removable failure domains
+
+Probe: `hostpower`
+
+Scope every enabled host with role `backup` or `stationary`. Every five minutes,
+the probe reads the effective layered `systemd/sleep.conf` and
+`systemd/logind.conf`, the locked GNOME power values, and at most 128 matching
+kernel suspend entry/exit records from the current boot and last 30 days. It
+also calls one root-owned Xops helper whose only output is a bounded topology
+class and media-health class. Raw journal text, interface/block names, sysfs
+paths, MACs, serials, stable disk identifiers, SMART output, and addresses never
+leave the host.
+
+HEALTHY requires all systemd suspend/hibernate paths denied, logind idle/lid
+actions ignored, locked GNOME AC/battery idle and lid actions set to `nothing`,
+and no current-boot kernel suspend entry. On a backup host, the archive device
+and active management uplink must resolve to a concrete ancestry class. A
+`shared-removable` result is a warning even when both devices currently work:
+one Thunderbolt/USB dock, cable, bus, or power failure can remove the recovery
+path and archive storage together. This is an operational/hardware class, not a
+software-fixable topology claim. Separate the failure domains or retain a
+tested independently powered management path.
+
+`hostpower-suspend-policy-unsafe` pages immediately because a stationary
+server must stay observable on its battery/UPS during an AC or dock failure.
+`hostpower-suspend-observed` warns on a short paired current-boot transition and
+pages when an entry is unmatched or a paired suspend lasts at least five
+minutes. The history remains evidence until reboot; fixing policy does not
+rewrite the boot journal. `hostpower-shared-removable-domain` warns on the
+privacy-reduced shared ancestor. `hostpower-topology-unobservable` warns after
+two probes when the device/uplink or helper cannot produce a concrete class.
+
+`hostpower-media-health-failed` pages on an explicit failing SMART state.
+`hostpower-media-health-unobservable` warns after two probes when the archive
+bridge/device does not expose both detailed error and self-test logs. A SCSI
+bridge summary of `Health=OK` without those mandatory sources is UNKNOWN, not
+healthy. Install `smartmontools`, but do not clear logs or exercise a disruptive
+self-test from monitoring. §11.22 independently owns stable archive identity,
+offline filesystem clearance, mount state, writer/timer state, freshness, and
+reconciliation; hostpower must not turn their absence into a green disk.
+
+The 2026-09-10 Planetoid incident demonstrates both boundaries. On the same
+boot, the removable dock link disappeared while archive writes were active;
+the filesystem journal aborted, and the management NIC and archive SSD were
+lost together. Fifteen minutes later the effective battery idle policy ordered
+suspend, and the kernel stayed in s2idle for nearly 19 hours. After the dock
+returned, the SSD enumerated as a new block-device generation while the stale
+mapper referenced the missing generation. A bridge-level SCSI health summary
+was available, but detailed SMART counters, error log, and self-test log were
+not, so media health remains unobservable. The archive stays locked and every
+writer/timer stays stopped until local unlock plus §11.22 recovery; applying
+the no-suspend policy does not authorize disk recovery or writer restart.
 
 ---
 

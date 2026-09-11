@@ -74,7 +74,48 @@ func (self RunOptions) Validate() error {
 // the command and integration harness on the same readiness, claim, and final
 // handback implementation.
 func Run(ctx context.Context, options RunOptions) error {
-	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher, server.HttpListenAndServeWithReusePort)
+	return runWithDependencies(
+		ctx,
+		options,
+		router.StartupReadiness,
+		server.StartStatsPusher,
+		server.HttpListenAndServeWithReusePort,
+		startTaskworkerRuntime,
+	)
+}
+
+// taskworkerRuntime is the lifecycle surface needed after startup. Tests use
+// it to prove terminal metrics flush ordering without opening a database.
+type taskworkerRuntime interface {
+	InflightCount() int
+	DrainCanceledCount() int
+	Drain()
+	WaitFinalHandback() bool
+}
+
+// startTaskworkerRuntime initializes the registered tasks, queue collector,
+// and execution loops after readiness has admitted this process.
+func startTaskworkerRuntime(ctx context.Context, cancel context.CancelFunc, options RunOptions) taskworkerRuntime {
+	controller.StartStatsCollector(ctx)
+	InitTasks(ctx)
+	settings := task.DefaultTaskWorkerSettings()
+	settings.BatchSize = options.BatchSize
+	worker := InitTaskWorkerWithSettings(ctx, settings)
+	task.StartQueueMetrics(ctx)
+	for range options.Count {
+		go server.HandleError(func() {
+			defer cancel()
+			for {
+				server.HandleError(worker.Run)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+			}
+		})
+	}
+	return worker
 }
 
 func runWithDependencies(
@@ -83,6 +124,7 @@ func runWithDependencies(
 	readiness func(context.Context) error,
 	startStatsPusher func(context.Context) func(),
 	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+	startRuntime func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime,
 ) error {
 	if ctx == nil {
 		return errors.New("taskworker run context is nil")
@@ -95,33 +137,17 @@ func runWithDependencies(
 
 	glog.Infof("[taskworker]starting %s %s %d task workers with batch size %d\n", server.RequireEnv(), server.RequireVersion(), options.Count, options.BatchSize)
 
-	var worker *task.TaskWorker
+	var worker taskworkerRuntime
+	flushStats := func() {}
 	if err := readiness(runCtx); err != nil {
 		glog.Infof("[taskworker]not ready (%s)\n", err)
 		readyGauge.Set(0)
 	} else {
-		controller.StartStatsCollector(runCtx)
-		InitTasks(runCtx)
-		settings := task.DefaultTaskWorkerSettings()
-		settings.BatchSize = options.BatchSize
-		worker = InitTaskWorkerWithSettings(runCtx, settings)
-		for index := 0; index < options.Count; index++ {
-			go server.HandleError(func() {
-				defer cancel()
-				for {
-					server.HandleError(worker.Run)
-					select {
-					case <-runCtx.Done():
-						return
-					case <-time.After(time.Second):
-					}
-				}
-			})
-		}
+		worker = startRuntime(runCtx, cancel, options)
 		readyGauge.Set(1)
 		// Failed readiness keeps /status visible without publishing a new
 		// process cohort or starting the DB/chain stats collector.
-		startStatsPusher(runCtx)
+		flushStats = startStatsPusher(runCtx)
 	}
 
 	draining := make(chan struct{})
@@ -168,6 +194,10 @@ func runWithDependencies(
 	if err != nil {
 		glog.Infof("[taskworker]status server shutdown error (%s)\n", err)
 	}
+	// Drain and final claim handback have completed before runCtx is canceled.
+	// Push once more so those terminal execution, queue, and drain samples are
+	// not lost with the process.
+	flushStats()
 	glog.Infof("[taskworker]close\n")
 	return nil
 }

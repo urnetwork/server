@@ -78,6 +78,7 @@ func NewSignals() []Signal {
 		NewHMACCutoverSignal(),
 		NewProbeCleanupSignal(),
 		NewSignupQualitySignal(),
+		NewSubscriptionMetricsSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),
@@ -126,6 +127,7 @@ func NewSignals() []Signal {
 		NewPlayCrashesSignal(),
 		NewAppleCrashesSignal(),
 		NewVPNSessionsSignal(),
+		NewHostpowerSignal(),
 	}
 }
 

@@ -272,12 +272,22 @@ func (self *socks5Server) ActiveCount() int {
 	return self.socksProxy.ActiveCount()
 }
 
+// Stats exposes the sibling library's bounded process snapshot.
+func (self *socks5Server) Stats() proxy.SocksStatsSnapshot {
+	return self.socksProxy.Stats()
+}
+
 func (self *socks5Server) WaitIdle(ctx context.Context) bool {
 	return self.socksProxy.WaitIdle(ctx)
 }
 
 func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
-	validUser := func(username string, password string, userAddr string) bool {
+	validUser := func(username string, password string, userAddr string) (valid bool) {
+		defer func() {
+			if !valid {
+				recordProxyAdmissionFailure("socks", true)
+			}
+		}()
 		proxyId, err := model.ParseSignedProxyId(username)
 		if err != nil {
 			return false
@@ -307,7 +317,8 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 		}
 
-		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+		valid = self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+		return valid
 	}
 
 	connectDial := func(ctx context.Context, r proxy.SocksRequest, network string, addr string) (net.Conn, error) {
@@ -327,10 +338,16 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 		if err != nil {
+			recordProxyAdmissionFailure("socks", false)
 			return nil, err
 		}
 
-		return pd.DialContext(ctx, network, addr)
+		conn, err := pd.DialContext(ctx, network, addr)
+		if err != nil {
+			recordProxyAdmissionFailure("socks", false)
+			return nil, err
+		}
+		return instrumentProxyConnection("socks", conn), nil
 	}
 
 	socksSettings := proxy.DefaultSocksProxySettings()
@@ -422,6 +439,11 @@ func (self *httpServer) ActiveCount() int {
 	return self.httpProxy.ActiveCount()
 }
 
+// Stats exposes the sibling library's bounded process snapshot.
+func (self *httpServer) Stats() proxy.HttpStatsSnapshot {
+	return self.httpProxy.Stats()
+}
+
 func (self *httpServer) WaitIdle(ctx context.Context) bool {
 	return self.httpProxy.WaitIdle(ctx)
 }
@@ -444,15 +466,18 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
 		proxyId, err := authProxyId(r)
 		if err != nil {
+			recordProxyAdmissionFailure("http", true)
 			return nil, err
 		}
 
 		addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err != nil {
+			recordProxyAdmissionFailure("http", true)
 			return nil, err
 		}
 
 		if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
+			recordProxyAdmissionFailure("http", true)
 			return nil, fmt.Errorf("Not authorized")
 		}
 
@@ -461,15 +486,22 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		// on an assumption about what the plan happens to contain.
 		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureHttpsProxy) {
 			glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
+			recordProxyAdmissionFailure("http", true)
 			return nil, fmt.Errorf("Not authorized")
 		}
 
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 		if err != nil {
+			recordProxyAdmissionFailure("http", false)
 			return nil, err
 		}
 
-		return pd.DialContext(ctx, network, addr)
+		conn, err := pd.DialContext(ctx, network, addr)
+		if err != nil {
+			recordProxyAdmissionFailure("http", false)
+			return nil, err
+		}
+		return instrumentProxyConnection("http", conn), nil
 	}
 
 	httpSettings := proxy.DefaultHttpProxySettings()

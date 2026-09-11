@@ -230,6 +230,11 @@ func TestRemovedTaskTargetsAreNotRegistered(t *testing.T) {
 			taskWorker.HasTarget("github.com/urnetwork/server/controller.OnboardingEmailTrackerSync"),
 			true,
 		)
+		connect.AssertEqual(
+			t,
+			taskWorker.HasTarget("github.com/urnetwork/server/controller.SubscriptionMetricsSync"),
+			true,
+		)
 
 		for _, functionName := range removedTaskTargets {
 			if taskWorker.HasTarget(functionName) {

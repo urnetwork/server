@@ -1,0 +1,891 @@
+{
+  "uid": "urnetwork-subscriptions",
+  "title": "urnetwork / subscriptions",
+  "tags": [
+    "urnetwork",
+    "subscriptions",
+    "payments"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "editable": true,
+  "description": "Authenticated, privacy-safe payment and paid-subscriber operations. One fleet-wide Taskworker refreshes a complete aggregate snapshot every 15 minutes; every business panel selects one snapshot and goes no-data after 20 minutes instead of turning missing or stale telemetry into zero. Store and window are closed label sets, and no customer, purchase, invoice, transaction, network, user, or client identifier enters Prometheus.",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_subscription_snapshot_timestamp_seconds, env)",
+        "definition": "label_values(urnetwork_subscription_snapshot_timestamp_seconds, env)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "window",
+        "label": "rolling window",
+        "type": "custom",
+        "query": "24h,7d,30d",
+        "current": {
+          "selected": true,
+          "text": "7d",
+          "value": "7d"
+        },
+        "options": [
+          {
+            "selected": false,
+            "text": "24h",
+            "value": "24h"
+          },
+          {
+            "selected": true,
+            "text": "7d",
+            "value": "7d"
+          },
+          {
+            "selected": false,
+            "text": "30d",
+            "value": "30d"
+          }
+        ],
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "definitions and visibility",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "title": "what these numbers mean",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Paid accounts** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, and Solana. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all four stores. **New paid accounts / upgrades** count a network's first supporter window per store, while `deduplicated` is its first-ever window across all tracked stores; renewals and store switches never inflate that overall total. **Engaged** means a currently paid network has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry and cancellation because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
+      }
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "paid accounts and engagement",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "snapshot age",
+      "description": "Age of the newest complete fleet-wide Taskworker snapshot. It disappears after 20 minutes or when its clock is more than 30 seconds in the future.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "current paid accounts",
+      "description": "Distinct networks with a current tracked-store supporter window, deduplicated across Apple, Google Play / Android, Stripe, and Solana.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_active_accounts{env=\"$env\",service=\"taskworker\",store=\"deduplicated\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "upgrades / new paid accounts",
+      "description": "Distinct networks whose first tracked-store supporter window began in the selected rolling window.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_new_paid_accounts{env=\"$env\",service=\"taskworker\",store=\"deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "engaged paid accounts",
+      "description": "Current paid accounts with an active top-level client authentication inside the selected rolling window, deduplicated across stores.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_engaged_accounts{env=\"$env\",service=\"taskworker\",store=\"deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "current paid accounts by store",
+      "description": "Distinct currently paid networks in each store. A network billed by more than one store appears once in each relevant store; use current paid accounts above for the deduplicated total.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (urnetwork_subscription_active_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "paid subscriber engagement by store",
+      "description": "Distinct currently paid networks with an active top-level client authentication inside the selected rolling window. `deduplicated` counts each paid network once across stores.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (urnetwork_subscription_engaged_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "bargauge",
+      "title": "upgrades / new paid accounts by store",
+      "description": "Distinct networks whose first supporter window in each store began inside the selected rolling window. A later switch to a new store appears once for that destination store but never inflates the separate first-ever deduplicated total above; repeated renewals in one store count once.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (urnetwork_subscription_new_paid_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "churn, cancellation evidence, and reconciliation",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "bargauge",
+      "title": "observed churn: expiry or cancellation",
+      "description": "Latest tracked supporter window ended in the selected rolling window and remains inactive. Store series are network-store pairs; `deduplicated` excludes a network that remains paid through another tracked store. This deliberately combines natural expiry and cancellation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (urnetwork_subscription_churned_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "text",
+      "title": "cancellation attribution visibility",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Raw cancellation intent is not durably available.** Store cancellation requests either change provider state or send the user to provider account management; the server does not retain one complete cross-store cancellation-intent ledger. Therefore this dashboard never renders an invented cancellation-intent zero. Use **observed churn** for accounts whose paid window ended and remained inactive, and **provider-confirmed terminal events** for the narrower set of ended, refunded, disputed, or revoked events recorded by reconciliation and webhooks. These sources answer different questions and must not be added together."
+      }
+    },
+    {
+      "id": 13,
+      "type": "bargauge",
+      "title": "provider-confirmed terminal events",
+      "description": "Non-dry-run ended, refunded, disputed, and revoked audit events in the selected rolling window. Requires both a reconciliation heartbeat newer than 150 minutes and the matching store's successful watermark newer than 3 hours; otherwise that store is no-data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",action=~\"ended|refunded|disputed|revoked\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} > time() - 10800))",
+          "refId": "A",
+          "legendFormat": "{{store}} / {{action}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "bargauge",
+      "title": "reconciliation repairs",
+      "description": "Non-dry-run credits, provider-confirmed entitlement ends, and entitlement-metadata repairs recovered by the durable payment audit stream in the selected rolling window. The ended series also appears in the terminal-event view because it is both a repair and terminal evidence; the panels do not add these events together. Source freshness gates fail closed per store.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, action) ((urnetwork_subscription_reconciliation_events{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\",action=~\"credited|ended|entitlement_repaired\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))) and on(env,service,block,host,instance) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=\"all\"} > time() - 9000) and on(env,service,block,host,instance,store) (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana\"} > time() - 10800))",
+          "refId": "A",
+          "legendFormat": "{{store}} / {{action}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "reconciliation source age",
+      "description": "Age of the global run heartbeat (`all`) and each store's last successfully advanced watermark. This diagnostic remains visible when a source is stale, but only from the same fresh Taskworker snapshot.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 9000
+              },
+              {
+                "color": "red",
+                "value": 10800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (time() - (urnetwork_subscription_reconciliation_source_timestamp_seconds{env=\"$env\",service=\"taskworker\",store=~\"all|apple|google|stripe|solana\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30))))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "data-pack fulfillment",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 17,
+      "type": "bargauge",
+      "title": "data packs fulfilled",
+      "description": "Gross paid data-only ledger rows in the selected rolling window. `balance_code` and `direct_balance` are disjoint: a redeemed code's balance is excluded from direct. `deduplicated` is their sum. One code row is one fulfillment even when the upstream line represented multiple units.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (source) (urnetwork_subscription_data_pack_fulfillments{env=\"$env\",service=\"taskworker\",source=~\"balance_code|direct_balance|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{source}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "bargauge",
+      "title": "data-pack bytes fulfilled",
+      "description": "Gross bytes granted by the same deduplicated paid data-only fulfillment rows in the selected rolling window. Provider/product attribution is unavailable across all historical ledger paths.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (source) (urnetwork_subscription_data_pack_bytes{env=\"$env\",service=\"taskworker\",source=~\"balance_code|direct_balance|deduplicated\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{source}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "all-time data-pack fulfillments",
+      "description": "All paid data-only fulfillment rows in the surviving ledgers, deduplicated across code-backed and direct balance paths. This is gross fulfillment, not net of refunds.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_data_pack_fulfillments{env=\"$env\",service=\"taskworker\",source=\"deduplicated\",window=\"all\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "all-time data-pack bytes",
+      "description": "Gross bytes in the same surviving deduplicated fulfillment ledgers. Refund/dispute/revocation evidence is reported in the reconciliation section rather than subtracted here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_data_pack_bytes{env=\"$env\",service=\"taskworker\",source=\"deduplicated\",window=\"all\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    }
+  ]
+}
