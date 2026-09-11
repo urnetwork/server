@@ -1208,9 +1208,16 @@ func perfvarClientReceiveBoundaryEqual(
 	before perfvarClientReceiveBoundary,
 	after perfvarClientReceiveBoundary,
 ) bool {
+	// UnreliableCarrierLastAckAge is a clock read, not a counter: two quiet
+	// samples differ by the time between them, so it is excluded from the
+	// stability comparison and reported only as a lifetime value.
+	beforeRecovery := before.sendRecovery
+	afterRecovery := after.sendRecovery
+	beforeRecovery.UnreliableCarrierLastAckAge = 0
+	afterRecovery.UnreliableCarrierLastAckAge = 0
 	return before.client == after.client &&
 		reflect.DeepEqual(before.stats, after.stats) &&
-		reflect.DeepEqual(before.sendRecovery, after.sendRecovery) &&
+		reflect.DeepEqual(beforeRecovery, afterRecovery) &&
 		before.directAffinity == after.directAffinity
 }
 
