@@ -26,10 +26,12 @@ Identical canonical patch bytes share one `(round_id, patch_sha256)` result and
 do not consume another noise draw. One score job has a three-hour hard execution
 limit; the adapter must therefore be asynchronous and tolerate an unbounded
 post-close grading window.
-One host supplies at most 56 worst-case three-hour slots during a seven-day
-admission window. A clean approximately 2.5-hour path yields roughly 67
-theoretical slots before overhead; this is planning capacity, not an admission
-cap, and excess accepted work remains queued through post-close grading.
+A continuously available host supplies 56 full worst-case three-hour slots
+during a seven-day admission window. The first complete 18-replicate staging
+pass reached scoring in about 2 hours 33 minutes, or roughly 65 theoretical
+slots before scoring and operational overhead. These are planning capacities,
+not admission caps; excess accepted work remains queued through post-close
+grading.
 
 Before production epoch 1, the API can expose a staging era with sequential
 `staging_round` epochs beginning at zero. Its submissions are fee-free and use

@@ -19,11 +19,12 @@ submission. There is no per-epoch submission-count cap. A duplicate canonical
 patch reuses the existing immutable job/cache identity and must not collect a
 second fee.
 
-One evaluator host can complete at most 56 jobs per seven-day admission window
-when every job reaches its three-hour bound. The measured clean path is
-expected near 2.5 hours (about 67 theoretical slots before operational
-overhead), but admission is intentionally unbounded: the FIFO continues in a
-private grading period after close until every accepted job is terminal.
+A continuously available evaluator host has 56 full three-hour slots per
+seven-day admission window. The first complete 18-replicate staging pass
+reached scoring in about 2 hours 33 minutes (about 65 theoretical slots before
+scoring and operational overhead), but admission is intentionally unbounded:
+the FIFO continues in a private grading period after close until every
+accepted job is terminal.
 
 Before production epoch 1, `GET /competition/info` may expose the current
 `staging_round`. The staging era begins at epoch zero and can advance through
