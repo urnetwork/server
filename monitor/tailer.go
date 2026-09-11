@@ -154,6 +154,47 @@ var (
 	)
 )
 
+var (
+	signalSendLegacyRe = regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ->` +
+			`[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}[[:space:]]*$`,
+	)
+	signalSendStructuredRe = regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\](\[signal\]send failed mode=(sender|receive-reply) ` +
+			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other))[[:space:]]*$`,
+	)
+)
+
+func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
+	return regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ` +
+			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) + `[[:space:]]*$`,
+	)
+}
+
+// Omits the destination that made the legacy line private while preserving
+// the only result that old source established.
+func signalSendLegacyLogSample(string) string {
+	return "[signal]send failed (legacy destination omitted; result unavailable)"
+}
+
+// Retains only the fixed mode/reason suffix from current Connect output.
+func signalSendStructuredLogSample(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 4 {
+		return "[signal]send failed (malformed structured result omitted)"
+	}
+	return match[1]
+}
+
+func signalSendLogMode(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 4 {
+		return "unknown"
+	}
+	return match[2]
+}
+
 func windowStallLogSample(line string) string {
 	return strings.TrimSpace(windowStallEventRe.FindString(line))
 }
@@ -519,6 +560,60 @@ var logClasses = []logClass{
 		context:   "The 2026-09-04 authoritative Taskworker tail reported this exact normalized shape at about 65/min, but the line and the locally inspected release tag do not prove which artifact emitted it. A separate monitor defect could pair a novel alert's top shape with the first sample from another shape; this dedicated class and the shape-keyed novel samples prevent that misleading evidence. Do not generalize this classification to any other TUN read error.",
 		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
 		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
+	},
+	{name: "signal-send-unclassified", re: signalSendLegacyRe,
+		sample:        signalSendLegacyLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a legacy Connect signaling send failed at rate, but the boolean-only caller discarded whether admission, encryption readiness, or lifecycle/sequence closure caused it",
+		mechanism: "Legacy ClientSignalSender called SendWithTimeout, which collapses every detailed error into false. A receive-originated reply uses timeout zero and can return false with no error when bounded admission is full; a sender-owned call can instead end with its client, generation, or sequence; and the required-encryption gate has a distinct typed refusal. The retained line cannot choose among those paths.",
+		context:   "The emitting service hosts this Connect code; a Taskworker selector identifies the host process, not the owning package or a failed task. In the bounded September 11 cohort, 5,441 lines spanned all eight Taskworker processes with no process start inside the captured interval, and the alerting burst began before the later fleet drain. That rejects restart as the demonstrated onset but does not prove send capacity healthy. The historical September 10 novel-log record cited by the recurrence manifest was subsequently corrected from Taskworker to Connect and is not ancestry for this event. Do not infer pressure, lifecycle, transport failure, or a Connect revision from this legacy line.",
+		action:    "Use §8.12 to prove the emitting service's embedded Connect build input. If the line is legacy, deploy the identity-free structured sender diagnostic before selecting a behavioral fix. Then branch only on its bounded mode and reason. Do not increase queues, block a receive callback, restart Taskworker, or claim that later transport-pressure commits repair this cohort from the legacy result alone.",
+		verify:    "Every relevant service runs a Connect descendant that emits bounded mode/reason fields, this legacy class stays zero, and the resulting reason-specific class remains below 20/min for ten minutes under comparable signaling traffic. Receive-originated replies retain zero-wait admission and pooled-frame ownership tests.",
+		redactIDs: true,
+	},
+	{name: "signal-send-not-admitted", re: signalSendStructuredReasonRe("not-admitted"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send returned false without an error; mode identifies whether this was the receive-reply zero-wait boundary or the ordinary sender path",
+		mechanism: "A receive-reply send deliberately offers into bounded admission with timeout zero so one peer cannot block the shared receive callback. A full admission boundary therefore refuses that reply and leaves retry machinery to recover it. Sender mode does not use that zero-wait policy and requires a separate send-budget audit.",
+		context:   "This result identifies admission refusal, not CPU, memory, transport, or provider failure. Correlate it with the exact mode, send-admission controls, negotiation retry/recovery, and artifact ancestry. A burst distributed across processes is not by itself proof that their resources are saturated.",
+		action:    "For receive-reply mode, inspect bounded send-admission pressure and retry recovery without changing the nonblocking callback contract. For sender mode, verify its effective wait and owning generation. Prove any proposed queue, lane, or carrier correction with a deterministic admission test; do not block the receive path or enlarge a queue from this log alone.",
+		verify:    "The class stays below 20/min for ten minutes under comparable signaling traffic, refused receive replies recover through ordinary negotiation retry, and deterministic full-admission tests retain zero-wait callback behavior and exact pooled-frame return.",
+		redactIDs: true,
+	},
+	{name: "signal-send-encryption-not-ready", re: signalSendStructuredReasonRe("encryption-not-ready"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the typed required-encryption entry gate refused the signaling frame because the selected session was not established",
+		mechanism: "SendWithTimeoutDetailed preserved ErrEncryptionRequiredNotEstablished instead of collapsing it into the legacy boolean. This identifies the local entry gate; it does not establish why encryption setup was incomplete or make legacy stored-contract HMAC incompatibility the cause.",
+		context:   "Correlate the mode and selected logical lane with encryption-session establishment, TLS/key classes, and exact artifact ancestry. Keep this distinct from transfer admission pressure and lifecycle closure.",
+		action:    "Audit why signaling selected a required-but-unestablished session and preserve fail-closed encryption. Repair only the proven lane/session or handshake boundary; do not bypass encryption, lengthen provider-window timeouts, or infer HMAC incompatibility without §2.24 controls.",
+		verify:    "The class stays below 20/min for ten minutes under comparable encrypted signaling, the selected session establishes before application admission, and deterministic typed-error tests keep the result distinct from admission and closure.",
+		redactIDs: true,
+	},
+	{name: "signal-send-canceled-or-closed", re: signalSendStructuredReasonRe("canceled-or-closed"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send ended at a client, peer-generation, sequence, or capability closure represented by the legacy bounded Done result",
+		mechanism: "The transfer layer does not yet expose a typed owner for every Done path, so the sender deliberately groups them rather than claiming client cancellation, generation replacement, or sequence closure from text alone.",
+		context:   "A bounded burst during a proved service drain or peer-generation replacement can be expected lifecycle. The same rate with stable process generations needs sequence/capability and peer-lifecycle discrimination. The class does not prove transport or resource failure.",
+		action:    "Correlate the exact source seconds with service drain/start and peer-generation transition controls. If no lifecycle boundary exists, inspect sequence/capability withdrawal and preserve the sender's generation-bound cancellation. Do not restart a stable service or convert receive replies into blocking sends.",
+		verify:    "Outside a proved drain or replacement, the class stays below 20/min for ten minutes under comparable signaling; during lifecycle tests, cancellation releases blocked sends without leaking pooled frames or delaying shutdown.",
+		redactIDs: true,
+	},
+	{name: "signal-send-other", re: signalSendStructuredReasonRe("other"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the detailed Connect signaling send returned an error outside the fixed admission, encryption-readiness, and closure vocabulary",
+		mechanism: "The public log intentionally retains no raw error or identity. This bounded fallback keeps an unexpected result visible without turning arbitrary error text into labels or alert evidence.",
+		context:   "Treat this as an unresolved source-level result, not a transport diagnosis. Reproduce against the proved Connect input or add a typed bounded result at the owning layer before refining the taxonomy.",
+		action:    "Inspect the exact source and deterministic local reproduction for the emitting artifact, then promote only a stable typed outcome into the bounded vocabulary. Do not log raw errors, destination ids, session ids, or payloads to classify it.",
+		verify:    "The class stays below 20/min for ten minutes, the owning typed result has a deterministic privacy-safe regression, and malformed or unknown structured fields remain visible through generic novelty rather than being silently accepted.",
+		redactIDs: true,
 	},
 	{name: "window-generator-canceled", re: windowGeneratorCanceledRe,
 		sample:        windowGeneratorCanceledLogSample,

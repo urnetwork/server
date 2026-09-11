@@ -60,6 +60,11 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"redis ttl", "[redis][ttl] suspicious ttl on key", "redis-ttl-suspect"},
 		{"taskworker drain", "[taskworker]drain gave up with 2 tasks", "taskworker-drain-gave-up"},
 		{"legacy database maintenance", "[db]maintenance reindex[16/22] contract_close", "db-maintenance-legacy-reindex"},
+		{"legacy signal send", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:149][signal]send failed ->11111111-1111-1111-1111-111111111111", "signal-send-unclassified"},
+		{"signal admission", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:164][signal]send failed mode=receive-reply reason=not-admitted", "signal-send-not-admitted"},
+		{"signal encryption", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:164][signal]send failed mode=sender reason=encryption-not-ready", "signal-send-encryption-not-ready"},
+		{"signal closure", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:164][signal]send failed mode=sender reason=canceled-or-closed", "signal-send-canceled-or-closed"},
+		{"other signal error", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:164][signal]send failed mode=sender reason=other", "signal-send-other"},
 		{"tls identity", "CONTRACT vs FETCHED peer client public key MISMATCH", "tls-key-mitm"},
 		{"tls rotation", "peer client public key mismatch with prior commitment", "tls-key-rotate-refused"},
 		{"tls publication", "Invalid PEM in certificate chain", "tls-cert-publish-invalid"},
@@ -88,6 +93,119 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalKeepsLegacySignalSendCausallyUnclassifiedAndPrivate(t *testing.T) {
+	const privateDestination = "11111111-1111-1111-1111-111111111111"
+	line := "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z]" +
+		"[transport_p2p_webrtc.go:149][signal]send failed ->" + privateDestination
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return strings.Repeat(line+"\n", novelRateThreshold), nil
+	}}
+
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "signal-send-unclassified").Markdown()
+	for _, want := range []string{
+		"legacy destination omitted; result unavailable",
+		"boolean-only caller discarded",
+		"does not prove send capacity healthy",
+		"corrected from Taskworker to Connect",
+		"Do not infer pressure, lifecycle, transport failure",
+		"structured sender diagnostic",
+		"below 20/min for ten minutes",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("legacy signal-send alert missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, privateDestination) {
+		t.Fatalf("legacy signal-send alert retained destination id:\n%s", markdown)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "novel" {
+			t.Fatalf("legacy signal-send line remained novel: %+v", alert)
+		}
+	}
+}
+
+func TestLogErrorsSignalClassifiesStructuredSignalSendReasons(t *testing.T) {
+	tests := []struct {
+		mode   string
+		reason string
+		class  string
+	}{
+		{mode: "receive-reply", reason: "not-admitted", class: "signal-send-not-admitted"},
+		{mode: "sender", reason: "encryption-not-ready", class: "signal-send-encryption-not-ready"},
+		{mode: "sender", reason: "canceled-or-closed", class: "signal-send-canceled-or-closed"},
+		{mode: "sender", reason: "other", class: "signal-send-other"},
+	}
+	for _, test := range tests {
+		line := fmt.Sprintf(
+			"[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z]"+
+				"[transport_p2p_webrtc.go:164][signal]send failed mode=%s reason=%s",
+			test.mode,
+			test.reason,
+		)
+		source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+			if len(args) > 1 && args[0] == "ls" {
+				return "repo names synthetic-taskworker", nil
+			}
+			return strings.Repeat(line+"\n", novelRateThreshold), nil
+		}}
+
+		alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, test.class)
+		if !strings.Contains(alert.Observed, "frame="+test.mode) {
+			t.Errorf("%s alert omitted bounded mode: %+v", test.class, alert)
+		}
+		if !strings.Contains(alert.Markdown(), "mode="+test.mode+" reason="+test.reason) {
+			t.Errorf("%s alert omitted bounded sample: %s", test.class, alert.Markdown())
+		}
+		for _, other := range alerts {
+			if other.Class == "novel" {
+				t.Errorf("structured %s signal-send line remained novel: %+v", test.reason, other)
+			}
+		}
+	}
+}
+
+func TestLogErrorsSignalLeavesMalformedSignalSendNovel(t *testing.T) {
+	line := "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z]" +
+		"[transport_p2p_webrtc.go:164][signal]send failed mode=receive-reply reason=network-error"
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return strings.Repeat(line+"\n", novelRateThreshold), nil
+	}}
+
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "novel")
+	for _, class := range []string{
+		"signal-send-unclassified",
+		"signal-send-not-admitted",
+		"signal-send-encryption-not-ready",
+		"signal-send-canceled-or-closed",
+		"signal-send-other",
+	} {
+		for _, alert := range alerts {
+			if alert.Class == class {
+				t.Fatalf("malformed signal-send line entered %s: %+v", class, alert)
+			}
+		}
 	}
 }
 
