@@ -956,6 +956,23 @@ matching Redis alert rules. A partially blank dashboard with live `redis_up`
 and gauge panels is a query-window visibility failure, not a Redis outage; an
 entirely blank dashboard still follows §11.14.
 
+On 2026-09-11 the monitor host received three router advertisements that set
+the IPv6 default-router lifetime to zero. The first public Grafana definition
+read was reset during that transition; later Redis-definition and Mimir
+datasource requests both failed through the same cached IPv6 socket while the
+direct loopback Mimir observation still showed complete fresh Redis coverage.
+That is an observer-route failure, not evidence of a Redis or Mimir outage.
+Public Grafana observations therefore use signal-private connection pools and
+replay a logically read-only request once on a fresh IPv4 transport only after
+a route-unreachable, connection-reset, or timeout transport result. HTTP
+responses, JSON failures, and Grafana application/plugin errors are never
+retried. The primary keeps its established ten-second budget; the failure-only
+path may spend one additional ten-second IPv4 attempt unless the probe's parent
+context ends first. If both transports fail, evidence retains only bounded
+transport classes and no URL or socket address. IPv6 route and exact
+certificate state remain owned by §18.1 and §18.2; an IPv4 fallback must not
+resolve either.
+
 - HEALTHY: fresh raw `commands_processed`, `evicted_keys`, and `expired_keys`
   counters and their five-minute rates each cover all configured Redis nodes;
   dashboard panels 8, 9, and 11 contain their five required fixed `[5m]`
@@ -5789,6 +5806,12 @@ Observe all three layers every five minutes:
   status and identity-match Booleans enter findings; the credential and
   response body never do.
 
+The dashboard lookup uses the same signal-private Grafana transport contract
+as §1.4a and §11.15. A route/reset/timeout result gets one fresh IPv4 replay;
+HTTP and dashboard-identity failures do not. Each attempt has its own
+ten-second bound, the parent context cancels both, and a dual transport failure
+retains bounded classes rather than URL or socket details.
+
 PAGE after two consecutive probes for `subscription-metrics-task-chain`,
 `subscription-metrics-snapshot-stale`,
 `subscription-metrics-publication-gap`, or any live-dashboard contract
@@ -10469,6 +10492,20 @@ browser state; if the request persists, use that browser's developer tools to
 capture only `queries[].datasource.type` and `queries[].datasource.uid`, then
 require ten minutes with zero strict 404s while both datasource controls remain
 healthy.
+
+The 2026-09-11 monitor-host IPv6 default-route withdrawal also crossed this
+probe. A Mimir datasource request and the Redis-definition probe failed on the
+same process-wide cached IPv6 connection even though a direct loopback Mimir
+query had just succeeded. This is why Grafana observations do not share
+`http.DefaultTransport`: every signal owns its connection pool, and a bounded
+route/reset/timeout failure gets one fresh IPv4 replay. The replay preserves
+the exact authenticated query and request body, so it is safe only for these
+read-only controls. It does not retry an HTTP response, embedded datasource
+error, plugin failure, parse failure, or caller cancellation. The primary and
+fallback each retain a ten-second attempt budget; the failure-only maximum is
+twenty seconds unless the parent ends earlier. A failed replay reports only
+the primary and IPv4 transport classes; use §18.1/§18.2 for the independent
+IPv6 observation-path incident.
 
 The decisive check is an authenticated query through Grafana itself, not a
 direct storage read:

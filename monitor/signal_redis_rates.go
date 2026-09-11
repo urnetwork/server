@@ -28,10 +28,10 @@ const (
 // definitions so an undersized rate range cannot masquerade as missing Redis
 // telemetry.
 func NewRedisRatesSignal() Signal {
-	return newRedisRatesSignal(server.NewHttpClient(10*time.Second), "")
+	return newRedisRatesSignal(newGrafanaObservationHTTPClient(10*time.Second), "")
 }
 
-func newRedisRatesSignal(client grafanaDatasourceHTTPClient, endpoint string) Signal {
+func newRedisRatesSignal(client grafanaHTTPClient, endpoint string) Signal {
 	return &signalAdapter{
 		number: "1.4a", key: "redis-rates", name: "Redis counter-rate visibility",
 		probe: redisRatesProbe{client: client, endpoint: endpoint},
@@ -39,7 +39,7 @@ func newRedisRatesSignal(client grafanaDatasourceHTTPClient, endpoint string) Si
 }
 
 type redisRatesProbe struct {
-	client   grafanaDatasourceHTTPClient
+	client   grafanaHTTPClient
 	endpoint string
 }
 
@@ -168,7 +168,7 @@ func (p redisRatesProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	}
 	client := p.client
 	if client == nil {
-		client = server.NewHttpClient(10 * time.Second)
+		client = newGrafanaObservationHTTPClient(10 * time.Second)
 	}
 	endpoint := strings.TrimRight(p.endpoint, "/")
 	if endpoint == "" {
@@ -305,7 +305,7 @@ func parseRedisRateCoverage(output string, expected int) (redisRateCoverage, err
 
 func getBoundedGrafanaJSON(
 	ctx context.Context,
-	client grafanaDatasourceHTTPClient,
+	client grafanaHTTPClient,
 	endpoint string,
 	adminPassword string,
 	destination any,
