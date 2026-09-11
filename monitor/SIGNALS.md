@@ -14845,40 +14845,115 @@ pressure, and newest-generation selection during rollout.
 Context: clients can enable per-peer post-quantum e2e sessions (the "Post
 Quantum Encryption" toggle; opportunistic — a peer without support falls back
 to plaintext at that layer), and providers always enable the responder side.
-A provider running the e2e-enabled build publishes its TLS cert commitment on
-connect (oob `EncryptedKey` → `client_tls_certificate`, one row per client_id,
-`set_time` refreshed on publication; validated in
-`controller.SetEncryptedKey`). The platform cannot see inside sessions (by
-design). What it CAN see: key publications (pg), the unauthenticated
-`/key/<client_id>` cross-check api, and the client-side `[tls]`/`[key]` log
-lines of the connect stacks the server itself hosts — the proxy service's
-devices are the tailer's vantage point for §15.2/15.3.
+An e2e-enabled provider publishes its TLS cert commitment when its encryption
+session manager becomes ready and again on explicit key rotation (oob
+`EncryptedKey` → `client_tls_certificate`, one row per client_id, `set_time`
+refreshed on publication; validated in `controller.SetEncryptedKey`). An
+ordinary transport reconnect does not require a new publication. The platform
+cannot see inside sessions (by design). What it CAN see: key publications
+(pg), the unauthenticated `/key/<client_id>` cross-check api, and the
+client-side `[tls]`/`[key]` log lines of the connect stacks the server itself
+hosts — the proxy service's devices are the tailer's vantage point for
+§15.2/15.3.
 
-### 15.1 Key-publication coverage — the provider e2e rollout/health proxy
+### 15.1 Key-publication coverage — provider rollout and shared-path freshness
 Probe: `key-publication`
 
 ```sql
--- coverage among recently-connected clients (probe pg/e2e-key-publication)
-SELECT count(DISTINCT ncc.client_id) AS active,
-       count(DISTINCT ctc.client_id) AS covered
-FROM network_client_connection ncc
-LEFT JOIN client_tls_certificate ctc ON ctc.client_id = ncc.client_id
-WHERE ncc.connect_time >= now() - interval '1 hour';
-
--- publication freshness (upserts in the last hour)
-SELECT count(*) FROM client_tls_certificate
-WHERE set_time >= now() - interval '1 hour';
+WITH provider_clients AS MATERIALIZED (
+  SELECT pk.client_id, pk.provide_mode
+  FROM provide_key pk
+  JOIN network_client nc USING (client_id)
+  WHERE pk.provide_mode IN (1, 2, 3)
+    AND nc.active AND nc.source_client_id IS NULL
+    AND nc.auth_time >= now() - interval '2 hours'
+    AND EXISTS (
+      SELECT 1 FROM network_client_connection ncc
+      WHERE ncc.client_id = pk.client_id
+        AND ncc.connect_time >= now() - interval '1 hour'
+    )
+), provider_counts AS (
+  SELECT pc.provide_mode, count(*) AS active,
+         count(ctc.client_id) AS covered
+  FROM provider_clients pc
+  LEFT JOIN client_tls_certificate ctc USING (client_id)
+  GROUP BY pc.provide_mode
+), current_certificates AS (
+  SELECT DISTINCT pc.client_id, ctc.set_time
+  FROM provider_clients pc
+  JOIN client_tls_certificate ctc USING (client_id)
+), freshness AS (
+  SELECT count(*) FILTER (
+           WHERE set_time >= now() - interval '15 minutes') AS fresh_15m,
+         count(*) FILTER (
+           WHERE set_time >= now() - interval '1 hour') AS fresh_1h,
+         coalesce(extract(epoch FROM now() - max(set_time))::bigint, -1)
+           AS newest_age_seconds
+  FROM current_certificates
+)
+SELECT modes.provide_mode,
+       coalesce(provider_counts.active, 0),
+       coalesce(provider_counts.covered, 0),
+       freshness.fresh_15m, freshness.fresh_1h,
+       freshness.newest_age_seconds
+FROM (VALUES (1), (2), (3)) AS modes(provide_mode)
+LEFT JOIN provider_counts USING (provide_mode)
+CROSS JOIN freshness
+ORDER BY modes.provide_mode;
 ```
-- HEALTHY: coverage ratchets up with the fleet rollout, then holds (diurnal
-  wobble fine). Publications track the connect rate of updated providers.
-- BROKEN: coverage < 50% of its own trailing 24h median, sustained 3 probes
-  (the probe arms only once the median reaches 5%, so pre-rollout zeros are
-  quiet): providers stopped publishing — EncryptedKey oob regression, a
-  `tls-cert-publish-invalid` spike (bad client build), or a fleet rollback.
-- Action: correlate with deploys (§8) and `tls-cert-publish-invalid`; run
-  the freshness query; if fresh publications are healthy but coverage fell,
-  the active-client mix changed (old builds reconnecting) rather than the
-  publish path breaking.
+- Coverage is `covered / active` from `provider_counts`. The alert denominator
+  is Public mode; Network and Friends are rendered as bounded controls. Stream
+  is excluded because ordinary return-path clients advertise it too. Starting
+  from active top-level provider keys and the partial `auth_time` index bounds
+  the candidate set before the recent-connection check uses
+  `(client_id, connect_time)`. `ConnectNetworkClient` either refreshes
+  `auth_time` to `connect_time` or proves the prior value was no more than one hour
+  old in the same transaction, so the inclusive two-hour range cannot remove a
+  client with a connection in the exact one-hour window. The exact `EXISTS`
+  remains authoritative; the `auth_time` range only prevents a full
+  connection-history hash/scan.
+  Certificate existence is coverage: `set_time` need not follow a later
+  transport reconnect. Freshness is reduced over the same bounded eligible
+  provider cohort, avoiding an unindexed scan of the full certificate table.
+- HEALTHY: Public-provider certificate coverage holds at or above half its own
+  established 24-hour median. The median must reach 5%, span at least 45
+  minutes, and contain at least 12 samples before the probe arms. Cohorts below
+  100 are neither evaluated nor recorded into that baseline. Once established,
+  the expected coverage is persisted and an active regression is not recorded
+  as normal, so a prolonged outage cannot erase its own expectation.
+- BROKEN `e2e-key-coverage`: Public-provider coverage falls below half that
+  baseline for three probes with at least 100 eligible Public providers.
+  Correlate bounded provider/build aggregates, exact artifact ancestry, and
+  `tls-cert-publish-invalid`; current provider-cohort publications rule out a
+  complete shared-path outage but not a Public-provider generation regression.
+- BROKEN `e2e-key-publication-stalled`: after Public coverage establishes the
+  durable feature arm, no eligible provider certificate was published in the
+  last 15 minutes and the newest is older than 15 minutes, sustained three
+  probes. The arm does not depend on successes remaining in the current hour,
+  so a complete outage remains visible. Determine whether EncryptedKey frames
+  stopped arriving, failed validation, or failed at the PostgreSQL upsert
+  boundary.
+- DIAGNOSTIC ONLY: the former all-recent-client ratio. It mixes child,
+  outbound, and Stream-only identities and must not page or assign a client
+  rollback; it is retained in dated incident evidence, not the recurring
+  query. Network and Friends mode ratios remain rendered controls until a
+  durable publisher-capability marker exists.
+
+The 2026-09-11 apparent collapse proved why the denominator matters. The
+all-client ratio fell from 2.7% to 2.0% when a one-hour cohort aged out, while
+Public coverage remained about 57.4%, the table had 2,399 publications in the
+last hour, and the newest publication was current. Most recent identities were
+child/Stream identities: `provide_key` presence alone was therefore not an e2e
+provider capability marker. Similar cohort churn had produced a prior
+one-hour rise and fall. This was a monitor false attribution, not evidence of
+a TLS outage or a reason to deploy API, Connect, Proxy, or Taskworker.
+
+Do not require `client_tls_certificate.set_time` to be newer than the latest
+connection. Publication is tied to encryption-manager readiness and rotation,
+not every carrier reconnect, so that condition would mark healthy retained
+keys as missing. After changing this signal, retain a full 24-hour baseline
+window before declaring the coverage branch fully revalidated; the separate
+freshness and malformed-publication controls remain effective immediately.
 
 ### 15.2 Identity-key cross-check mismatch — the MITM early-warning (page)
 Log class `tls-key-mitm`: `CONTRACT vs FETCHED peer client public key
