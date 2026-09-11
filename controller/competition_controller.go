@@ -4071,9 +4071,14 @@ func (self PostgresStore) FinalizeStagingRound(
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_round
-				SET finalized_at = $2, winner_job_id = NULL
+				SET admission_closed_at = COALESCE(admission_closed_at, closes_at),
+					finalized_at = $2, winner_job_id = NULL
 				WHERE round_id = $1
 			`, round.RoundId, now))
+			if round.AdmissionClosedAt == nil {
+				admissionClosedAt := round.ClosesAt
+				round.AdmissionClosedAt = &admissionClosedAt
+			}
 			round.FinalizedAt = &now
 			finalized = true
 		})

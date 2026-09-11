@@ -4334,6 +4334,55 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 	})
 }
 
+func TestCompetitionNaturalStagingClosePublishesLeaderboard(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.ArtifactRoot = t.TempDir()
+		settings.EvaluationPolicy.ProviderCount = 5
+		settings.workloadGenerator = nil
+		settings.artifactArchive = &blobArtifactArchive{
+			store: server.NewLocalBlobStore(t.TempDir(), "competition").(server.RetainedBlobStore),
+		}
+		settings.CompetitionId += "-natural-staging-close"
+		currentTime := server.NowUtc().Add(-2 * time.Hour).Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt:  currentTime,
+			ClosesAt: currentTime.Add(time.Hour),
+			RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		currentTime = currentTime.Add(2 * time.Hour)
+		finalized, err := store.FinalizeStagingRound(ctx, settings, round.Epoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if finalized.FinalizedAt == nil || finalized.AdmissionClosedAt == nil ||
+			!finalized.AdmissionClosedAt.Equal(round.ClosesAt) {
+			t.Fatalf("naturally finalized staging round = %#v", finalized)
+		}
+
+		leaderboards, err := store.Leaderboards(ctx, settings, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(leaderboards.Epochs) != 1 ||
+			leaderboards.Epochs[0].RoundId != round.RoundId ||
+			!leaderboards.Epochs[0].Staging ||
+			leaderboards.Epochs[0].WinnerJobId != nil {
+			t.Fatalf("natural-close staging leaderboard = %#v", leaderboards)
+		}
+	})
+}
+
 func TestCompetitionClaimFallsBackToPostgresWhenRedisIndexIsUnavailable(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
