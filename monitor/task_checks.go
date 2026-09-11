@@ -477,6 +477,9 @@ const taskFailureSummarySQL = `
 		       left(coalesce(reschedule_error,''),160) AS last_error,
 		       run_max_time_seconds,
 		       CASE
+		         WHEN split_part(function_name,'.',3) = 'CloseExpiredContracts'
+		           AND coalesce(reschedule_error,'') ~* '^force close contract [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} at index [0-9]+: Contract already closed with outcome settled: [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}->[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+		           THEN 'concurrent-settled'
 		         WHEN split_part(function_name,'.',3) = 'Payout'
 		           AND lower(coalesce(reschedule_error,'')) LIKE '%no empty local buffer available%'
 		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 53000%'
@@ -910,6 +913,8 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
+		closeExpiredAlreadySettled := task == "CloseExpiredContracts" &&
+			causeClassCount == 1 && causeSummary == fmt.Sprintf("concurrent-settled=%d", familyCount)
 		localBufferExhaustion := task == "Payout" &&
 			(strings.Contains(causeSummary, "postgres-local-buffer-exhaustion=") ||
 				(strings.Contains(lowerError, "no empty local buffer available") &&
@@ -948,6 +953,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				alertAction = "Investigate and remediate each listed cause class independently; do not apply the representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 			}
+		} else if closeExpiredAlreadySettled {
+			alertMechanism = "CloseExpiredContracts selected an open snapshot immediately before a live or concurrent close settled the same contract. The sweep then observed the exact already-terminal settled outcome. That is successful convergence, not malformed escrow and not a conflicting terminal result."
+			alertContext += " Current source distinguishes this exact settled duplicate, skips quarantine, and clears it only after the existing terminal-row verification and Redis stream cleanup both succeed. Other close errors and other terminal outcomes remain failures."
+			alertAction = "Deploy Taskworker from source containing the typed concurrent-settlement convergence handling. Do not quarantine the settled contract, edit the task row, replay settlement, or suppress other force-close errors."
+			alertVerify = "Every Taskworker contains the exact settled-duplicate handling; a deterministic stale-open-snapshot regression preserves malformed and cleanup errors; a later live close race removes the stream entry without incrementing reschedule_error_count; and this task family returns to zero failing rows on the next cadence."
+			alertPlaybook = "SIGNALS.md §1.2"
 		} else if localBufferExhaustion {
 			alertMechanism = "PostgreSQL 18.4's read-stream lookahead can pin every local buffer while a high-I/O-concurrency transaction scans a temporary relation, then fail with SQLSTATE 53000 `no empty local buffer available`. This Payout stack reaches PaymentPlanner.finalizePayments while scanning its temporary planning tables, matching the upstream PostgreSQL 18 defect fixed in 18.6."
 			alertContext += fmt.Sprintf(" The connected server reports server_version=%s, effective_io_concurrency=%s, and temp_buffers=%s. The high I/O concurrency setting is valuable globally; the safe application containment is transaction-local to the affected payment plan.", r.str(10), r.str(11), r.str(12))

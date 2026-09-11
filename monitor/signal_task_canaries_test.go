@@ -1089,6 +1089,91 @@ func TestTaskCanariesSignalExplainsLiteralTaskDeadlineTimeout(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalClassifiesConcurrentExpiredContractSettlement(t *testing.T) {
+	var failureQuery string
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			failureQuery = query
+			return []Row{{
+				"CloseExpiredContracts", "1", "0", "1", "1", "-3",
+				"force close contract <task-id> at index 7: Contract already closed with outcome settled: <task-id> <task-id> <task-id>-><task-id>",
+				"1800", "1", "concurrent-settled=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"selected an open snapshot immediately before a live or concurrent close settled",
+		"successful convergence",
+		"not malformed escrow",
+		"skips quarantine",
+		"terminal-row verification and Redis stream cleanup both succeed",
+		"Other close errors and other terminal outcomes remain failures",
+		"typed concurrent-settlement convergence handling",
+		"without incrementing reschedule_error_count",
+		"SIGNALS.md §1.2",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("concurrent close diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, reject := range []string{"smaller checkpointed batch"} {
+		if strings.Contains(markdown, reject) {
+			t.Fatalf("concurrent close diagnosis retained unsafe guidance %q: %s", reject, markdown)
+		}
+	}
+	for _, want := range []string{"THEN 'concurrent-settled'", "^force close contract", "[0-9a-f]{12}$"} {
+		if !strings.Contains(failureQuery, want) {
+			t.Fatalf("task failure SQL lacks exact concurrent-settled contract %q", want)
+		}
+	}
+}
+
+func TestTaskCanariesSignalDoesNotClassifyJoinedSettledAndCleanupErrorAsBenign(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"CloseExpiredContracts", "1", "0", "1", "1", "-3",
+				"force close contract <task-id> at index 7: Contract already closed with outcome settled: <task-id>\nsynthetic stream cleanup failed",
+				"1800", "1", "other=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	if strings.Contains(markdown, "successful convergence") || strings.Contains(markdown, "skips quarantine") {
+		t.Fatalf("joined cleanup error received benign guidance: %s", markdown)
+	}
+	for _, want := range []string{"synthetic stream cleanup failed", "Follow SIGNALS.md 5.7"} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("joined cleanup error lacks actionable generic evidence %q: %s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalDoesNotInferReliabilityPhaseFromCleanupError(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

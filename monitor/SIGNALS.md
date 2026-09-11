@@ -274,6 +274,16 @@ FROM failures GROUP BY task;
   error class/target instead. A mutation that truly needs the identifier must
   obtain it through the protected operator lookup and must not copy it into an
   alert, transcript, test failure, commit, or agent response.
+- `CloseExpiredContracts ... Contract already closed with outcome settled` can
+  be a benign selection race: the sweep read an open snapshot immediately
+  before a live close settled that contract. Current source types only this
+  exact settled duplicate, skips malformed-contract quarantine, and accepts it
+  only after the independent terminal-row check and Redis stream cleanup both
+  succeed. Other terminal outcomes, malformed settlement, missing rows, and
+  cleanup failures remain visible. A pre-fix Taskworker can briefly persist one
+  `reschedule_error` even though the same pass removed the finalized stream;
+  deploy the convergence handling and do not edit the task row or replay the
+  settlement.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
