@@ -1094,6 +1094,20 @@ func (self *platformRouteManagerLockProbeTransport) MatchesSend(
 	return self.Transport.MatchesSend(destination)
 }
 
+// TransportType forwards the wrapped carrier's type. The route manager
+// classifies a transport only through this optional method; without it every
+// route that carries the send-route controllers labelled its platform route
+// "unknown" in packet stats and ACK route maps (found 2026-09-11 on the mixed
+// routes, where the exchange lane read as unknown and h1 as zero).
+func (self *platformDataSendTransport) TransportType() clientconnect.TransportType {
+	if typed, ok := self.Transport.(interface {
+		TransportType() clientconnect.TransportType
+	}); ok {
+		return typed.TransportType()
+	}
+	return clientconnect.TransportTypeUnknown
+}
+
 // Once forced, the provider destination fails closed across P2P disconnects;
 // unrelated destinations and the zero-id control destination remain available.
 func (self *platformDataSendTransport) MatchesSend(destination clientconnect.TransferPath) bool {

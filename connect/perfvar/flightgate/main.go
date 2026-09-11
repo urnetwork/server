@@ -411,14 +411,14 @@ var counterNames = []string{
 	"timeout_resend_deferred",
 	"selective_gap_writes",
 	"ack_writes_p2p",
-	"ack_writes_h1",
+	"ack_writes_relay",
 	"ack_wait_p2p_ms",
 	"ack_timeouts_p2p",
 	"fast_send_msgs",
 	"fast_recv_msgs",
 	"reassembly_evictions",
 	"egress_pkts_p2p",
-	"egress_pkts_h1",
+	"egress_pkts_relay",
 }
 
 func runReadout(args []string) error {
@@ -545,7 +545,12 @@ func parseRecord(text string) (runRecord, bool) {
 	both("timeout_resend_deferred", "send_recovery", "timeout_resend_defer_count")
 	both("selective_gap_writes", "send_recovery", "selective_gap_write_count")
 	both("ack_writes_p2p", "receive_handoff", "ack_route_write_count_by_transport", "p2p")
-	both("ack_writes_h1", "receive_handoff", "ack_route_write_count_by_transport", "h1")
+	// The exchange lane of a mixed route was labelled "unknown" by campaigns
+	// recorded before the harness wrapper exposed its transport type, and
+	// "h1" afterwards; both are the relay.
+	both("ack_writes_relay", "receive_handoff", "ack_route_write_count_by_transport", "h1")
+	record.counters["ack_writes_relay"] += num(raw, "carrier", "device_receive_handoff", "ack_route_write_count_by_transport", "unknown") +
+		num(raw, "carrier", "provider_receive_handoff", "ack_route_write_count_by_transport", "unknown")
 	both("ack_wait_p2p_ms", "receive_handoff", "ack_route_write_wait_by_transport_nanoseconds", "p2p")
 	record.counters["ack_wait_p2p_ms"] /= float64(time.Millisecond)
 	both("ack_timeouts_p2p", "receive_handoff", "ack_route_write_timeout_by_transport", "p2p")
@@ -553,7 +558,9 @@ func parseRecord(text string) (runRecord, bool) {
 	both("fast_recv_msgs", "p2p", "FastReceiveMessageCount")
 	both("reassembly_evictions", "p2p", "FastReassemblyEvictionCount")
 	both("egress_pkts_p2p", "packet_stats", "transport_stats", "p2p", "remote_egress_packet_count")
-	both("egress_pkts_h1", "packet_stats", "transport_stats", "h1", "remote_egress_packet_count")
+	both("egress_pkts_relay", "packet_stats", "transport_stats", "h1", "remote_egress_packet_count")
+	record.counters["egress_pkts_relay"] += num(raw, "carrier", "device_packet_stats", "transport_stats", "unknown", "remote_egress_packet_count") +
+		num(raw, "carrier", "provider_packet_stats", "transport_stats", "unknown", "remote_egress_packet_count")
 	return record, true
 }
 
@@ -597,6 +604,7 @@ func (self cellKey) String() string {
 
 type cellSummary struct {
 	runs, correct, failed, invalid int
+	headroomInvalid                int
 	deadWindows, windows, deadRuns int
 	worst                          float64
 	memP95s                        []float64
@@ -624,10 +632,12 @@ func summarize(records []runRecord) map[string]map[cellKey]*cellSummary {
 		cell.runs += 1
 		if record.correct {
 			cell.correct += 1
+			cell.goodputs = append(cell.goodputs, record.goodput)
 			if record.invalid != "" {
 				cell.invalid += 1
-			} else {
-				cell.goodputs = append(cell.goodputs, record.goodput)
+				if strings.Contains(record.invalid, "calibration") {
+					cell.headroomInvalid += 1
+				}
 			}
 		} else {
 			cell.failed += 1
@@ -697,8 +707,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 	fmt.Fprintf(&b, "%d run records, arms: %s (control: %s)\n\n", len(records), strings.Join(arms, ", "), control)
 	fmt.Fprintln(&b, "## Outcome per cell")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
-	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+	fmt.Fprintln(&b, "| Cell | Arm | Runs | Correct | Failed (stage) | Harness-invalid (calibration) | Dead windows / windows | Runs with dead window | Worst window Mbit/s | Median goodput Mbit/s | Memory p95 median MiB | Memory max MiB | Samples > 24 MiB |")
+	fmt.Fprintln(&b, "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 	for _, key := range cells {
 		for _, arm := range arms {
 			cell := summary[arm][key]
@@ -714,9 +724,14 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 			if !math.IsInf(cell.worst, 1) {
 				worst = fmt.Sprintf("%.2f", cell.worst)
 			}
-			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d / %d | %d | %s | %.1f | %.2f | %.2f | %d |\n",
+			goodput := "n/a"
+			if 0 < len(cell.goodputs) {
+				goodput = fmt.Sprintf("%.1f", median(cell.goodputs))
+			}
+			fmt.Fprintf(&b, "| %s | %s | %d | %d | %d (%s) | %d (%d) | %d / %d | %d | %s | %s | %.2f | %.2f | %d |\n",
 				key, arm, cell.runs, cell.correct, cell.failed, strings.Join(stages, " "),
-				cell.deadWindows, cell.windows, cell.deadRuns, worst, median(cell.goodputs),
+				cell.invalid, cell.headroomInvalid,
+				cell.deadWindows, cell.windows, cell.deadRuns, worst, goodput,
 				median(cell.memP95s)/mib, cell.memMax/mib, cell.memAbove)
 		}
 	}
@@ -742,8 +757,8 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 		fmt.Fprintln(&b)
 		fmt.Fprintf(&b, "## Attribution against %s (candidate minus control, per cell)\n", control)
 		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | selective_gap_writes | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
-		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+		fmt.Fprintln(&b, "| Cell | Candidate | Dead windows | Failed runs | Median goodput Mbit/s | selective_gap_writes | flight_wait | blocked_with_reliable_capacity | gap_reorder_suspected | flight_timeout | timeout_resend_recent_progress | ack_writes_p2p | ack_writes_relay | ack_timeouts_p2p | Memory p95 median MiB | Memory gate |")
+		fmt.Fprintln(&b, "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
 		for _, key := range cells {
 			base := summary[control][key]
 			if base == nil {
@@ -767,7 +782,7 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 				if median(cell.memP95s) > median(base.memP95s) || (0 < cell.memAbove && base.memAbove == 0) {
 					memoryGate = "REGRESSION"
 				}
-				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
+				fmt.Fprintf(&b, "| %s | %s | %+d | %+d | %+.1f | %s | %s | %s | %s | %s | %s | %s | %s | %s | %+.2f | %s |\n",
 					key, arm,
 					cell.deadWindows-base.deadWindows,
 					cell.failed-base.failed,
@@ -779,6 +794,7 @@ func renderReport(root string, records []runRecord, controlArm string) string {
 					delta("flight_timeout"),
 					delta("timeout_resend_with_recent_progress"),
 					delta("ack_writes_p2p"),
+					delta("ack_writes_relay"),
 					delta("ack_timeouts_p2p"),
 					(median(cell.memP95s)-median(base.memP95s))/mib,
 					memoryGate,
