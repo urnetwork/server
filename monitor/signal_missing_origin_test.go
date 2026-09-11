@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,10 @@ func TestMissingOriginSignalSyntheticFallbackFromNormalBeforeDetailRollout(t *te
 		"original wire bit",
 		"active top-level providers",
 		"maximum client-window lifetime",
+		"Connect commit ec34ce1",
+		"Connect commit 55daddb",
+		"do not identify a product or artifact",
+		"still-installed older client can reconnect",
 		"provider return paths and same-network peers",
 		"§2.20 reports zero successful contracts",
 		"server commit c8dfe570",
@@ -40,6 +45,31 @@ func TestMissingOriginSignalSyntheticFallbackFromNormalBeforeDetailRollout(t *te
 	} {
 		if !strings.Contains(fallback.Markdown(), want) {
 			t.Fatalf("fallback alert missing %q:\n%s", want, fallback.Markdown())
+		}
+	}
+}
+
+func TestMissingOriginSignalDocumentationContract(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	sectionStart := strings.Index(catalog, "### 2.17 Missing companion-origin contract rate")
+	sectionEnd := strings.Index(catalog, "### 2.18 Stale contract destination rejection")
+	if sectionStart < 0 || sectionEnd <= sectionStart {
+		t.Fatal("SIGNALS.md does not contain a bounded §2.17 section")
+	}
+	section := strings.Join(strings.Fields(catalog[sectionStart:sectionEnd]), " ")
+	for _, want := range []string{
+		"Selected/discovery windows additionally require `ec34ce1`",
+		"Provider-return source owners additionally require `55daddb`",
+		"Neither this signal's lifecycle/relationship cohorts nor `companion=false` identify a product, application, or artifact",
+		"A still-installed older client can reconnect and create another legacy window indefinitely",
+		"elapsed time alone is not artifact convergence",
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("SIGNALS.md §2.17 missing %q:\n%s", want, section)
 		}
 	}
 }

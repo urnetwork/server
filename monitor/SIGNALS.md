@@ -4368,6 +4368,17 @@ key must match the channel tail, so a result cannot poison a neighboring exit.
 Older clients safely ignore the new action and retain their existing timeout
 behavior.
 
+The Connect ancestry must match the request owner, not merely the basic
+Reliability reaction. Commit `5b33c91` introduces the channel-scoped reaction.
+Selected/discovery windows additionally require `ec34ce1`, which installs the
+failed-destination exclusion before resize/refill, makes concurrent failures a
+single channel transition, and bounds runtime discovery exclusions.
+Provider-return source owners additionally require `55daddb`, which closes the
+exact shared source gate before later UDP, TCP, ICMP, queued, or live-flow work
+can return it. While the path remains unattributed, require both fixes. Neither
+this signal's lifecycle/relationship cohorts nor `companion=false` identify a
+product, application, or artifact.
+
 The 2026-09-03 current control demonstrates the rollout distinction. The
 coarse `companion=false` rate was 1,738.899/min through a healthy Mimir gateway,
 but the bounded detail query returned an empty vector and both initialized
@@ -4381,11 +4392,16 @@ already become inactive. This confirms the existing API deployment boundary;
 it does not justify inferring the missing-failure cohort before complete detail
 is observable.
 
-Verification requires the API fix first and a Connect-bearing client build for
-the window reaction. After API convergence, successful contracts to already
-inactive destinations must fall to zero and the missing-origin rate must return
-to its calibrated band. After Connect rollout, a synthetic or observed
-Reliability result must remove only its emitting exit and refill that window;
+Verification requires the API fix first and independently proven adoption of
+the applicable Connect ancestry: `ec34ce1` for selected/discovery windows,
+`55daddb` for provider-return source owners, or both while the path remains
+unattributed. Only then does a maximum client-window lifetime become a useful
+observation interval. A still-installed older client can reconnect and create
+another legacy window indefinitely, so elapsed time alone is not artifact
+convergence. After API convergence, successful contracts to already-inactive
+destinations must fall to zero and the missing-origin rate must return to its
+calibrated band. After Connect rollout, a synthetic or observed Reliability
+result must remove only its emitting exit and refill that window;
 InsufficientBalance and every non-Reliability result must leave window health
 unchanged. Do not substitute a longer contract timeout, provider-capacity
 hardware, or manual cache deletion for either invariant.
@@ -4481,25 +4497,36 @@ commit `c8dfe570` or a descendant so an inactive destination cannot pass mode
 selection or the final active-only write check and receives the additive
 `ContractError_Reliability` result. Then rebuild affected Connect-bearing
 clients from Connect commit `5b33c91` or a descendant. That client binds the
-status to the exact emitting channel, excludes it from new-flow selection,
-records a terminal route error, and wakes the normal resize/refill path. An old
-client remains wire-compatible but can keep retrying its stale exit, so an API
-rollout alone protects contract correctness without necessarily removing the
-retry load. Causal use of the new joint cohorts additionally requires an API
-artifact containing the detail consumer and every relevant Connect-bearing
-requester to contain `f8b1b60`; otherwise the family must remain absent or its
-`sender_role=absent` cohort remains explicitly unattributed.
+status to the exact emitting channel, records a terminal route error, and
+wakes the normal resize/refill path. Selected/discovery-window requesters also
+require Connect commit `ec34ce1`, which installs the failed-destination
+exclusion before refill and makes concurrent Reliability failures one channel
+transition. Provider-return source owners also require Connect commit
+`55daddb`, which closes the exact shared source gate before later return work
+is admitted. An old client remains wire-compatible but can keep retrying its
+stale exit, so an API rollout alone protects contract correctness without
+necessarily removing the retry load. Causal use of the new joint cohorts
+additionally requires an API artifact containing the detail consumer and every
+relevant Connect-bearing requester to contain `f8b1b60`; otherwise the family
+must remain absent or its `sender_role=absent` cohort remains explicitly
+unattributed. Even a concrete `sender_role` proves only the sequence lane and
+capability; it does not prove `ec34ce1`, `55daddb`, an application, or an
+artifact version.
 
 The 2026-09-02 main API, Connect, Proxy, and Taskworker artifacts were built at
 14:56–15:12Z from modified base `2d6f27c`, while the two repair commits were
 created at 18:05Z. Those artifacts therefore predate this repair. Before calling
 the incident fixed, prove exact running API and affected client artifacts carry
-the commits, let two full rate windows elapse, and require the inactive-success
-cohort to remain zero. If rejection remains high after the deployed client
-window lifetime, use §2.8, §2.9, §2.15, §2.16, and bounded lifecycle/relationship
-cohorts joined to the sender sequence lane to distinguish a client/default
-request lane from a server/reply lane. Do not infer a product caller from that
-lane. Do not delete Redis provide keys, weaken
+`ec34ce1` for selected/discovery windows and `55daddb` for provider-return
+sources, or both while the path remains unattributed; then let two full rate
+windows elapse and require the inactive-success cohort to remain zero. Start a
+deployed client-window lifetime only after that artifact/adoption convergence:
+a still-installed older client can reconnect and create another legacy window
+indefinitely. If rejection remains high after that post-convergence lifetime,
+use §2.8, §2.9, §2.15, §2.16, and bounded lifecycle/relationship cohorts joined
+to the sender sequence lane to distinguish a client/default request lane from
+a server/reply lane. Do not infer a product caller or artifact ancestry from
+that lane. Do not delete Redis provide keys, weaken
 lifecycle checks, lengthen contract timeouts, or restart clients merely to
 clear the graph.
 
