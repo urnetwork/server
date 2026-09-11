@@ -797,6 +797,16 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 	if lag < 0 {
 		lag = 0
 	}
+	// Runtime, health, EVM, and eth_getLogs are sampled with firstHead. Do not
+	// infer current-head identity from system_syncState alone: a peerless node
+	// can collapse highestBlock to its stale currentBlock and report
+	// isSyncing=false. Both local head samples must instead be near an
+	// observable public head before the current-runtime pin applies.
+	currentRuntimeConvergenceObserved := publicHeadErr == nil &&
+		absInt64(publicHead-firstHead) <= 128 &&
+		absInt64(publicHead-secondHead) <= 128 &&
+		lag <= 128 &&
+		!node.Direct.Health.IsSyncing
 	warpMaxLag := settings.WarpMaxLag
 	if warpMaxLag <= 0 {
 		warpMaxLag = 4096
@@ -860,7 +870,7 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 			verify:    "Require the lag to reach the configured near-head band and every current-runtime interface gate to pass.",
 			playbook:  "SIGNALS.md §17.2",
 		})
-	} else {
+	} else if currentRuntimeConvergenceObserved {
 		currentProblems := []string{}
 		if node.Direct.Runtime.SpecVersion != settings.ExpectedSpecVersion {
 			currentProblems = append(currentProblems, fmt.Sprintf("specVersion=%d expected=%d", node.Direct.Runtime.SpecVersion, settings.ExpectedSpecVersion))

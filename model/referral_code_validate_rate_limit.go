@@ -56,9 +56,11 @@ func CheckReferralCodeValidateRateLimit(clientSession *session.ClientSession) er
 		server.IpRateLimitAttemptSettings{
 			KeyPrefix:       referralCodeValidateRedisKeyPrefix,
 			AddressLookback: ReferralCodeValidateAddressLookback,
-			AddressLimit:    ReferralCodeValidateAddressLimit,
-			GlobalLookback:  ReferralCodeValidateGlobalLookback,
-			GlobalLimit:     ReferralCodeValidateGlobalLimit,
+			// The shared history includes the current check and rejects at its
+			// threshold; this route's constants describe allowed checks.
+			AddressLimit:   ReferralCodeValidateAddressLimit + 1,
+			GlobalLookback: ReferralCodeValidateGlobalLookback,
+			GlobalLimit:    ReferralCodeValidateGlobalLimit + 1,
 		},
 	)
 	server.Raise(err)

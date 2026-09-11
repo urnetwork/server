@@ -71,7 +71,7 @@ func testSetNetworkClientAuthTime(ctx context.Context, clientId server.Id, authT
 func testCreateParentChildClients(ctx context.Context, t testing.TB) (networkId server.Id, parentId server.Id, childId server.Id) {
 	networkId = server.NewId()
 	adminUserId := server.NewId()
-	Testing_CreateNetwork(ctx, networkId, "statstest", adminUserId)
+	Testing_CreateNetwork(ctx, networkId, "synthetic-stats-"+networkId.String(), adminUserId)
 	userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: networkId,
 		UserId:    adminUserId,
@@ -118,8 +118,7 @@ func TestBlockUsersContractUsage(t *testing.T) {
 
 		networkId, parentId, childId := testCreateParentChildClients(ctx, t)
 
-		destNetworkId := server.NewId()
-		destId := server.NewId()
+		destNetworkId, _, destId := testCreateParentChildClients(ctx, t)
 
 		// no contracts yet: no users, no matter how recently clients authed
 		blockStart := server.NowUtc()
@@ -210,7 +209,7 @@ func TestConnectNetworkClientBumpsParentAuthTime(t *testing.T) {
 		testSetNetworkClientAuthTime(ctx, parentId, staleTime)
 		testSetNetworkClientAuthTime(ctx, childId, staleTime)
 
-		_, _, _, _, err := ConnectNetworkClient(ctx, childId, "1.2.3.4:5678", server.NewId())
+		_, _, _, _, err := ConnectNetworkClient(ctx, childId, "192.0.2.4:5678", server.NewId())
 		connect.AssertEqual(t, err, nil)
 
 		parentAuthTime := testGetNetworkClientAuthTime(ctx, parentId)
@@ -219,13 +218,13 @@ func TestConnectNetworkClientBumpsParentAuthTime(t *testing.T) {
 		// within the throttle interval a child connect leaves the parent alone
 		recentTime := server.NowUtc().Add(-30 * time.Minute)
 		testSetNetworkClientAuthTime(ctx, parentId, recentTime)
-		_, _, _, _, err = ConnectNetworkClient(ctx, childId, "1.2.3.4:5679", server.NewId())
+		_, _, _, _, err = ConnectNetworkClient(ctx, childId, "192.0.2.4:5679", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		parentAuthTime = testGetNetworkClientAuthTime(ctx, parentId)
 		connect.AssertEqual(t, parentAuthTime.Sub(recentTime).Abs() < time.Millisecond, true)
 
 		// a top-level connect has no parent to bump and must not error
-		_, _, _, _, err = ConnectNetworkClient(ctx, parentId, "1.2.3.4:5680", server.NewId())
+		_, _, _, _, err = ConnectNetworkClient(ctx, parentId, "192.0.2.4:5680", server.NewId())
 		connect.AssertEqual(t, err, nil)
 	})
 }

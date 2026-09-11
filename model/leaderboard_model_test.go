@@ -46,6 +46,9 @@ func TestLeaderboard(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkIdA, "shit_contains_profanity", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 		Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
+		Testing_CreateDevice(ctx, networkIdA, server.NewId(), userIdA, "synthetic-leaderboard-provider-a", "synthetic")
+		Testing_CreateDevice(ctx, networkIdB, server.NewId(), userIdB, "synthetic-leaderboard-provider-b", "synthetic")
+		Testing_CreateDevice(ctx, networkIdC, server.NewId(), userIdC, "synthetic-leaderboard-caller", "synthetic")
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
 			jwt.NewByJwt(networkIdC, userIdC, "c", false, isPro),
@@ -109,7 +112,10 @@ func TestLeaderboard(t *testing.T) {
 		/**
 		 * Plan payments
 		 */
-		_, err = PlanPayments(ctx)
+		subsidyConfig := *EnvSubsidyConfig()
+		subsidyConfig.Days = 1
+		subsidyConfig.MinDaysFraction = 0
+		_, err = PlanPaymentsWithConfig(ctx, &subsidyConfig)
 		connect.AssertEqual(t, err, nil)
 
 		/**

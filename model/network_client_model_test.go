@@ -150,7 +150,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
-			"0.0.0.0:0",
+			"192.0.2.1:0",
 			handlerId,
 		)
 		connect.AssertEqual(t, err, nil)
@@ -194,7 +194,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
-			"2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894",
+			"2001:db8:4683:4e00:3a76:dcec:7cb:f180:40894",
 			handlerId,
 		)
 		connect.AssertEqual(t, err, nil)
@@ -234,7 +234,7 @@ func TestCloseExpiredNetworkClientHandlersClosesOrphanedConnections(t *testing.T
 		orphanConnectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			server.NewId(),
-			"10.0.0.1:20000",
+			"192.0.2.1:20000",
 			orphanHandlerId,
 		)
 		connect.AssertEqual(t, err, nil)
@@ -243,7 +243,7 @@ func TestCloseExpiredNetworkClientHandlersClosesOrphanedConnections(t *testing.T
 		liveConnectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			server.NewId(),
-			"10.0.0.2:20000",
+			"192.0.2.2:20000",
 			liveHandlerId,
 		)
 		connect.AssertEqual(t, err, nil)
@@ -277,7 +277,7 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
-			"0.0.0.0:0",
+			"192.0.2.1:0",
 			handlerId,
 		)
 		connect.AssertEqual(t, err, nil)
@@ -1689,12 +1689,12 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 		liveClientId := server.NewId()
 		liveDeviceId := server.NewId()
 		Testing_CreateDevice(ctx, server.NewId(), liveDeviceId, liveClientId, "test", "test")
-		liveConnectionId := newConnectionData(liveClientId, "10.1.1.1:20000")
+		liveConnectionId := newConnectionData(liveClientId, "192.0.2.1:20000")
 		SetClientTlsCertificateWithSignature(ctx, liveClientId, []byte("live-pem"), nil)
 
 		// orphan the dependent rows: delete the connection row directly,
 		// simulating a deletion path that did not cascade
-		orphanConnectionId := newConnectionData(server.NewId(), "10.2.2.2:20000")
+		orphanConnectionId := newConnectionData(server.NewId(), "192.0.2.17:20000")
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -1973,7 +1973,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 
 		// a disconnected connection with location/latency/speed rows, which
 		// must be cascaded with the connection delete
-		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.7.8.9:20000", server.NewId())
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.9:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -2235,7 +2235,7 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 
 		// stale auth time but currently connected: must not be marked
 		connectedClientId := newClient()
-		_, _, _, _, err := ConnectNetworkClient(ctx, connectedClientId, "127.0.0.1:20000", server.NewId())
+		_, _, _, _, err := ConnectNetworkClient(ctx, connectedClientId, "192.0.2.1:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		setAuthTime(connectedClientId, idleAuthTime)
 
@@ -2358,7 +2358,7 @@ func TestConnectNetworkClientAuthTimeThrottle(t *testing.T) {
 
 		// a fresh auth_time is not refreshed on connect, and the throttled
 		// connect still succeeds
-		_, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.0.0.1:20000", server.NewId())
+		_, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, authTime().Equal(initialAuthTime), true)
 
@@ -2366,7 +2366,7 @@ func TestConnectNetworkClientAuthTimeThrottle(t *testing.T) {
 		// refreshed to ~now on connect
 		staleAuthTime := server.NowUtc().Add(-2 * clientAuthTimeRefreshMinInterval)
 		setAuthTime(staleAuthTime)
-		_, _, _, _, err = ConnectNetworkClient(ctx, clientId, "10.0.0.1:20001", server.NewId())
+		_, _, _, _, err = ConnectNetworkClient(ctx, clientId, "192.0.2.1:20001", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		refreshedAuthTime := authTime()
 		connect.AssertEqual(t, staleAuthTime.Before(refreshedAuthTime), true)
@@ -2436,7 +2436,7 @@ func TestRemoveDisconnectedChildReapBumpsConnected(t *testing.T) {
 
 		// stale child with a live connection: bumped out of the band, not reaped
 		connectedChildId := newClient(&parentClientId)
-		_, _, _, _, err := ConnectNetworkClient(ctx, connectedChildId, "10.0.0.2:20000", server.NewId())
+		_, _, _, _, err := ConnectNetworkClient(ctx, connectedChildId, "192.0.2.2:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		setAuthTime(connectedChildId, staleAuthTime)
 

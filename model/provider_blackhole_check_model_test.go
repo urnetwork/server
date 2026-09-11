@@ -130,9 +130,9 @@ func TestGetProviderBlackholeCheckDue(t *testing.T) {
 		stale := server.NewId()
 		fresh := server.NewId()
 
-		testing_connectProbeableProvider(t, ctx, never, city.LocationId, "0.0.0.1:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, stale, city.LocationId, "0.0.0.2:0", ProvideModePublic)
-		testing_connectProbeableProvider(t, ctx, fresh, city.LocationId, "0.0.0.3:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, never, city.LocationId, "192.0.2.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, stale, city.LocationId, "192.0.2.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, fresh, city.LocationId, "192.0.2.3:0", ProvideModePublic)
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 
 		SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{

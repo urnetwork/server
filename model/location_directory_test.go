@@ -3,10 +3,295 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
+
+// A non-blocking directory refresh can outlive TestEnv teardown. Force its
+// cache read to remain in flight until reset cancels the captured generation.
+// It must not continue into the replacement database/shared-cache stages,
+// publish a snapshot, or clear the replacement generation's load claim.
+func TestLocationDirectoryResetCancelsInFlightLoad(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+
+	state := newLocationDirectoryState()
+	oldGeneration, started := state.startLoad()
+	if !started {
+		t.Fatal("old generation did not acquire the load claim")
+	}
+
+	oldLocationId := server.NewId()
+	newLocationId := server.NewId()
+	oldEntries := map[server.Id]*locationDirectoryEntry{
+		oldLocationId: {
+			Name:        "Old Fixture City",
+			CountryCode: "xo",
+		},
+	}
+	newEntries := map[server.Id]*locationDirectoryEntry{
+		newLocationId: {
+			Name:        "New Fixture City",
+			CountryCode: "xn",
+		},
+	}
+
+	oldLoadStarted := make(chan struct{})
+	oldLoadDone := make(chan struct{})
+	databaseTouched := make(chan struct{}, 1)
+	sharedCacheTouched := make(chan struct{}, 1)
+	go func() {
+		defer close(oldLoadDone)
+		defer state.finishLoad(oldGeneration)
+		loadLocationDirectoryForGenerationWith(
+			state,
+			oldGeneration,
+			func(ctx context.Context) map[server.Id]*locationDirectoryEntry {
+				close(oldLoadStarted)
+				<-ctx.Done()
+				return nil
+			},
+			func(context.Context) map[server.Id]*locationDirectoryEntry {
+				databaseTouched <- struct{}{}
+				return oldEntries
+			},
+			func(context.Context, map[server.Id]*locationDirectoryEntry, time.Duration) {
+				sharedCacheTouched <- struct{}{}
+			},
+		)
+	}()
+	select {
+	case <-oldLoadStarted:
+	case <-testCtx.Done():
+		t.Fatalf("old generation did not enter the cache read: %v", testCtx.Err())
+	}
+
+	state.reset()
+	select {
+	case <-oldGeneration.ctx.Done():
+	default:
+		t.Fatal("reset did not cancel the old generation")
+	}
+	newGeneration, started := state.startLoad()
+	if !started {
+		t.Fatal("new generation did not acquire the load claim")
+	}
+	if !state.publish(newGeneration, newEntries) {
+		t.Fatal("current generation did not publish")
+	}
+
+	select {
+	case <-oldLoadDone:
+	case <-testCtx.Done():
+		t.Fatalf("canceled old generation did not return: %v", testCtx.Err())
+	}
+	select {
+	case <-databaseTouched:
+		t.Fatal("obsolete generation touched the database after reset")
+	default:
+	}
+	select {
+	case <-sharedCacheTouched:
+		t.Fatal("obsolete generation touched the shared cache after reset")
+	default:
+	}
+	if state.loading.Load() != newGeneration {
+		t.Fatal("obsolete generation cleared the current load claim")
+	}
+	snapshot := state.snapshot.Load()
+	if snapshot == nil {
+		t.Fatal("current generation did not publish a snapshot")
+	}
+	if _, ok := snapshot.entries[newLocationId]; !ok {
+		t.Fatal("current generation snapshot was replaced")
+	}
+	if _, ok := snapshot.entries[oldLocationId]; ok {
+		t.Fatal("obsolete generation entered the current snapshot")
+	}
+
+	state.finishLoad(newGeneration)
+	if state.loading.Load() != nil {
+		t.Fatal("current generation did not release its load claim")
+	}
+}
+
+// Cancellation cannot forcibly stop an external callback that has already
+// entered its operation. Hold the old generation inside that database stage,
+// reset and publish a replacement generation, then release the old result. The
+// post-operation generation fence must discard it before either publication.
+func TestLocationDirectoryResetFencesInFlightDatabaseResult(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+
+	state := newLocationDirectoryState()
+	oldGeneration, started := state.startLoad()
+	if !started {
+		t.Fatal("old generation did not acquire the load claim")
+	}
+	oldLocationId := server.NewId()
+	newLocationId := server.NewId()
+	oldEntries := map[server.Id]*locationDirectoryEntry{
+		oldLocationId: {
+			Name:        "Retired Fixture City",
+			CountryCode: "xr",
+		},
+	}
+	newEntries := map[server.Id]*locationDirectoryEntry{
+		newLocationId: {
+			Name:        "Replacement Fixture City",
+			CountryCode: "xp",
+		},
+	}
+
+	databaseStarted := make(chan struct{})
+	releaseDatabase := make(chan struct{})
+	oldLoadDone := make(chan struct{})
+	sharedCacheTouched := make(chan struct{}, 1)
+	released := false
+	defer func() {
+		if !released {
+			close(releaseDatabase)
+		}
+	}()
+	go func() {
+		defer close(oldLoadDone)
+		defer state.finishLoad(oldGeneration)
+		loadLocationDirectoryForGenerationWith(
+			state,
+			oldGeneration,
+			func(context.Context) map[server.Id]*locationDirectoryEntry { return nil },
+			func(context.Context) map[server.Id]*locationDirectoryEntry {
+				close(databaseStarted)
+				<-releaseDatabase
+				return oldEntries
+			},
+			func(context.Context, map[server.Id]*locationDirectoryEntry, time.Duration) {
+				sharedCacheTouched <- struct{}{}
+			},
+		)
+	}()
+	select {
+	case <-databaseStarted:
+	case <-testCtx.Done():
+		t.Fatalf("old generation did not enter the database read: %v", testCtx.Err())
+	}
+
+	state.reset()
+	newGeneration, started := state.startLoad()
+	if !started {
+		t.Fatal("new generation did not acquire the load claim")
+	}
+	if !state.publish(newGeneration, newEntries) {
+		t.Fatal("current generation did not publish")
+	}
+
+	close(releaseDatabase)
+	released = true
+	select {
+	case <-oldLoadDone:
+	case <-testCtx.Done():
+		t.Fatalf("obsolete database result did not return: %v", testCtx.Err())
+	}
+	select {
+	case <-sharedCacheTouched:
+		t.Fatal("obsolete database result was written to the shared cache")
+	default:
+	}
+	if state.loading.Load() != newGeneration {
+		t.Fatal("obsolete database result cleared the current load claim")
+	}
+	snapshot := state.snapshot.Load()
+	if snapshot == nil {
+		t.Fatal("current generation snapshot is missing")
+	}
+	if _, ok := snapshot.entries[newLocationId]; !ok {
+		t.Fatal("obsolete database result replaced the current snapshot")
+	}
+	if _, ok := snapshot.entries[oldLocationId]; ok {
+		t.Fatal("obsolete database result entered the current snapshot")
+	}
+
+	state.finishLoad(newGeneration)
+	if state.loading.Load() != nil {
+		t.Fatal("current generation did not release its load claim")
+	}
+}
+
+// Publishing the immutable local snapshot precedes the optional Redis write.
+// Hold that write behind a channel and prove both the reader-visible snapshot
+// and reset complete before it is released; no wall-clock scheduling luck or
+// external service is involved.
+func TestLocationDirectorySharedCacheWriteDoesNotBlockReadersOrReset(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+
+	state := newLocationDirectoryState()
+	generation, started := state.startLoad()
+	if !started {
+		t.Fatal("generation did not acquire the load claim")
+	}
+	locationId := server.NewId()
+	entries := map[server.Id]*locationDirectoryEntry{
+		locationId: {
+			Name:        "Synthetic Fixture City",
+			CountryCode: "xs",
+		},
+	}
+	sharedWriteStarted := make(chan struct{})
+	sharedWriteCanceled := make(chan struct{})
+	loadDone := make(chan struct{})
+	go func() {
+		defer close(loadDone)
+		defer state.finishLoad(generation)
+		loadLocationDirectoryForGenerationWith(
+			state,
+			generation,
+			func(context.Context) map[server.Id]*locationDirectoryEntry { return nil },
+			func(context.Context) map[server.Id]*locationDirectoryEntry { return entries },
+			func(ctx context.Context, _ map[server.Id]*locationDirectoryEntry, _ time.Duration) {
+				close(sharedWriteStarted)
+				<-ctx.Done()
+				close(sharedWriteCanceled)
+			},
+		)
+	}()
+	select {
+	case <-sharedWriteStarted:
+	case <-testCtx.Done():
+		t.Fatalf("shared cache write did not start: %v", testCtx.Err())
+	}
+
+	snapshot := state.snapshot.Load()
+	if snapshot == nil || snapshot.entries[locationId] == nil {
+		t.Fatal("local directory snapshot was not readable during shared cache write")
+	}
+	resetDone := make(chan struct{})
+	go func() {
+		state.reset()
+		close(resetDone)
+	}()
+	select {
+	case <-resetDone:
+	case <-testCtx.Done():
+		t.Fatalf("reset blocked behind shared cache I/O: %v", testCtx.Err())
+	}
+	if state.snapshot.Load() != nil {
+		t.Fatal("reset retained the preceding generation's snapshot")
+	}
+
+	select {
+	case <-sharedWriteCanceled:
+	case <-testCtx.Done():
+		t.Fatalf("reset did not cancel the shared cache write: %v", testCtx.Err())
+	}
+	select {
+	case <-loadDone:
+	case <-testCtx.Done():
+		t.Fatalf("shared cache writer did not return: %v", testCtx.Err())
+	}
+}
 
 // testingInsertLocationReliability inserts one reliability row with the given
 // location chain. Any of the ids may be the zero Id, which is written as NULL —

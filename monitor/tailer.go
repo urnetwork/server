@@ -124,6 +124,19 @@ type logReconcileQuery func(ctx context.Context, start time.Time, blocks []strin
 
 var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
 
+// The final error text alone is ambiguous. This exact deployed stack shape
+// proves txWithPool first panicked on its transient-error rollback and then
+// replaced that panic by rolling the already-closed transaction back again.
+// Keep both line-numbered frames so an ordinary pgx.ErrTxClosed remains under
+// generic panic diagnosis rather than inheriting this incident's cause.
+var txRollbackMaskRe = regexp.MustCompile(
+	`"error":"\*errors\.errorString=tx is closed"[^\r\n]*` +
+		`github\.com/urnetwork/server(?:/v[0-9]+)?\.txWithPool\.func1\.1\(\)[^\r\n]*` +
+		`github\.com/urnetwork/server(?:/v[0-9]+)?/db\.go:676\b[^\r\n]*` +
+		`github\.com/urnetwork/server(?:/v[0-9]+)?\.txWithPool\.func1\([^)]*\)[^\r\n]*` +
+		`github\.com/urnetwork/server(?:/v[0-9]+)?/db\.go:718\b`,
+)
+
 // Connect's relEvent grammar renders booleans as 0/1 and durations as integer
 // milliseconds. Keep nonterminal transitions separate from terminal outcomes:
 // failOutcome logs window_failed and then calls SetStallStatus directly, so
@@ -381,6 +394,18 @@ var logClasses = []logClass{
 		context:   "This exact error is emitted only for failed automatic delivery without email recovery. Intentional operator-issued, no-email, unredeemed codes do not emit it and cannot be distinguished safely from database columns alone. An emailed code remains recoverable and therefore does not use this class when only its optional automatic application fails.",
 		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
 		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
+	},
+	{name: "tx-rollback-mask", re: txRollbackMaskRe,
+		sample: func(string) string {
+			return "txWithPool rollback cleanup replaced an existing transaction error (details omitted)"
+		},
+		groupBy:       func(string) string { return "txWithPool-dual-rollback" },
+		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4", redactIDs: true,
+		meaning:   "txWithPool replaced an existing transient transaction error and its first rollback failure with pgx.ErrTxClosed",
+		mechanism: "The transient branch panicked when Rollback returned an error. Its surrounding panic cleanup then called Rollback on the transaction a second time; pgx had already marked the transaction closed, so the second call returned ErrTxClosed and erased both earlier causes.",
+		context:   "This class requires the exact final pgx error and both deployed txWithPool rollback frames. The initiating SQLSTATE was erased and must not be inferred; an ordinary tx-is-closed panic, a single matching frame, or a different line number remains generic panic evidence. The fixed sample and frame retain no route, host, generation, correlation, customer, or raw stack data.",
+		action:    "Deploy a server artifact whose bounded cancellation-detached rollback cleanup is best-effort whenever an original panic or transient error already owns the outcome. Do not restart PostgreSQL, tune pools, or assign an initiating SQLSTATE from this stack. Diagnose any original error exposed after rollout as a separate causal boundary.",
+		verify:    "Every affected service runs the corrected server artifact, rollback regression tests preserve canceled transient and nontransient outcomes, and this exact dual-frame class remains zero for ten minutes after log-ingestion delay under comparable transaction traffic.",
 	},
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",

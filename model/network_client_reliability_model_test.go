@@ -64,7 +64,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 					"",
 					"",
 				)
-				clientAddress := "127.0.0.1:20000"
+				clientAddress := "192.0.2.1:20000"
 				handlerId := CreateNetworkClientHandler(ctx)
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 				connect.AssertEqual(t, err, nil)
@@ -213,7 +213,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 					ctx,
 					byJwt,
 				)
-				clientSession.ClientAddress = "1.1.1.1:90000"
+				clientSession.ClientAddress = "192.0.2.1:90000"
 
 				reliabilityWindow, err := GetNetworkReliabilityWindow(clientSession)
 				connect.AssertEqual(t, err, nil)
@@ -328,7 +328,7 @@ func TestRecordClientReliabilityStatsRollup(t *testing.T) {
 
 		networkId := server.NewId()
 		clientId := server.NewId()
-		ip := netip.MustParseAddr("10.11.12.13")
+		ip := netip.MustParseAddr("192.0.2.13")
 		clientAddressHash := server.ClientIpHashForAddr(ip)
 
 		now := server.NowUtc()
@@ -420,7 +420,7 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		// connect the client with a location so
 		// network_client_location_reliability marks it valid
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
-		clientAddress := "127.0.0.1:20000"
+		clientAddress := "192.0.2.1:20000"
 		handlerId := CreateNetworkClientHandler(ctx)
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 		connect.AssertEqual(t, err, nil)
@@ -500,12 +500,12 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 		Testing_CreateDevice(ctx, networkId, server.NewId(), validClientId, "", "")
 		Testing_CreateDevice(ctx, networkId, server.NewId(), invalidClientId, "", "")
 
-		sharedAddressHash := connectHash(validClientId, "10.1.2.3:20000")
+		sharedAddressHash := connectHash(validClientId, "192.0.2.3:20000")
 		// the invalid client is connected from two different ips, so its
 		// client_address_hash_count is 2 and its location reliability is
 		// invalid
-		connectHash(invalidClientId, "10.1.2.3:20001")
-		connectHash(invalidClientId, "10.99.2.3:20002")
+		connectHash(invalidClientId, "192.0.2.3:20001")
+		connectHash(invalidClientId, "192.0.2.19:20002")
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -596,7 +596,7 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "10.5.6.7:20000", handlerId)
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "192.0.2.7:20000", handlerId)
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -747,7 +747,7 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		// network_client_location_reliability marks it valid
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "127.0.0.1:20000", handlerId)
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:20000", handlerId)
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -833,7 +833,7 @@ func TestClientReliabilityReconnectTolerated(t *testing.T) {
 		defer cancel()
 
 		networkId := server.NewId()
-		ip := netip.MustParseAddr("10.20.30.40")
+		ip := netip.MustParseAddr("192.0.2.40")
 		clientAddressHash := server.ClientIpHashForAddr(ip)
 
 		now := server.NowUtc()
@@ -979,7 +979,7 @@ func TestClientReliabilityExcusedNewValid(t *testing.T) {
 		defer cancel()
 
 		networkId := server.NewId()
-		ip := netip.MustParseAddr("10.11.12.14")
+		ip := netip.MustParseAddr("192.0.2.14")
 		clientAddressHash := server.ClientIpHashForAddr(ip)
 
 		now := server.NowUtc()
@@ -1072,9 +1072,9 @@ func TestUpdateClientLocationReliabilitiesExcludesOrphanHandler(t *testing.T) {
 		}
 
 		orphanHandlerId := CreateNetworkClientHandler(ctx)
-		orphanClientId := connectAtLocation("10.30.0.1:20000", orphanHandlerId)
+		orphanClientId := connectAtLocation("192.0.2.1:20000", orphanHandlerId)
 		liveHandlerId := CreateNetworkClientHandler(ctx)
-		liveClientId := connectAtLocation("10.30.0.2:20000", liveHandlerId)
+		liveClientId := connectAtLocation("192.0.2.2:20000", liveHandlerId)
 
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
@@ -1114,7 +1114,7 @@ func TestUpdateClientLocationReliabilitiesKeepsDisconnectedFallbackDisconnected(
 		clientId := server.NewId()
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.31.0.1:20000", handlerId)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.31:20000", handlerId)
 		connect.AssertEqual(t, err, nil)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
 		connect.AssertEqual(t, err, nil)

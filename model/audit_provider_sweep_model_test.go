@@ -27,7 +27,7 @@ func createSweepTestProvider(
 	Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 
 	handlerId := CreateNetworkClientHandler(ctx)
-	connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "0.0.0.0:0", handlerId)
+	connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 	if err != nil {
 		t.Fatalf("connect client: %v", err)
 	}
@@ -684,11 +684,11 @@ func TestSweepDeviceAuditEvents(t *testing.T) {
 		clientA := server.NewId()
 		Testing_CreateDevice(ctx, networkA, server.NewId(), clientA, "", "")
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionA1, _, _, _, err := ConnectNetworkClient(ctx, clientA, "0.0.0.0:0", handlerId)
+		connectionA1, _, _, _, err := ConnectNetworkClient(ctx, clientA, "192.0.2.1:0", handlerId)
 		if err != nil {
 			t.Fatalf("connect a1: %v", err)
 		}
-		connectionA2, _, _, _, err := ConnectNetworkClient(ctx, clientA, "0.0.0.0:0", handlerId)
+		connectionA2, _, _, _, err := ConnectNetworkClient(ctx, clientA, "192.0.2.1:0", handlerId)
 		if err != nil {
 			t.Fatalf("connect a2: %v", err)
 		}
@@ -697,7 +697,7 @@ func TestSweepDeviceAuditEvents(t *testing.T) {
 		networkB := server.NewId()
 		clientB := server.NewId()
 		Testing_CreateDevice(ctx, networkB, server.NewId(), clientB, "", "")
-		_, _, _, _, err = ConnectNetworkClient(ctx, clientB, "0.0.0.0:0", handlerId)
+		_, _, _, _, err = ConnectNetworkClient(ctx, clientB, "192.0.2.1:0", handlerId)
 		if err != nil {
 			t.Fatalf("connect b: %v", err)
 		}

@@ -64,8 +64,22 @@ func TestAccountPoints(t *testing.T) {
 func TestAccountPointsPerPayout(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		subsidyConfigCopy := *EnvSubsidyConfig()
+		ambientChildPayoutFraction := subsidyConfigCopy.ReferralChildPayoutFraction
+		injectedChildPayoutFraction := 0.125
+		if injectedChildPayoutFraction == ambientChildPayoutFraction {
+			injectedChildPayoutFraction = 0.375
+		}
 		subsidyConfigCopy.ForcePoints = true
+		subsidyConfigCopy.Days = 1
+		subsidyConfigCopy.MinDaysFraction = 0
+		subsidyConfigCopy.AccountPointsPerPayout = 1_000_000
+		subsidyConfigCopy.ReferralParentPayoutFraction = 0.25
+		subsidyConfigCopy.ReferralChildPayoutFraction = injectedChildPayoutFraction
+		subsidyConfigCopy.SeekerHolderMultiplier = 2
 		subsidyConfig := &subsidyConfigCopy
+		if subsidyConfig.ReferralChildPayoutFraction == ambientChildPayoutFraction {
+			t.Fatal("synthetic child payout fraction must differ from the ambient configuration")
+		}
 
 		ctx := context.Background()
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
@@ -126,6 +140,9 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkIdF, "f", userIdF)
 		Testing_CreateNetwork(ctx, networkIdG, "g", userIdG)
 		Testing_CreateNetwork(ctx, networkIdH, "h", userIdH)
+		Testing_CreateDevice(ctx, networkIdA, server.NewId(), userIdA, "synthetic-points-provider-a", "synthetic")
+		Testing_CreateDevice(ctx, networkIdB, server.NewId(), userIdB, "synthetic-points-provider-b", "synthetic")
+		Testing_CreateDevice(ctx, networkIdC, server.NewId(), userIdC, "synthetic-points-caller", "synthetic")
 
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
@@ -293,7 +310,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * Assert Network A + Network B points add up to 250_000
 		 */
 		totalPoints := networkPointsA[0].PointValue + networkPointsB[0].PointValue
-		connect.AssertEqual(t, NanoPoints(totalPoints), PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout)))
+		connect.AssertEqual(t, NanoPoints(totalPoints), PointsToNanoPoints(float64(subsidyConfig.AccountPointsPerPayout)))
 
 		expectedPointsA := PointsToNanoPoints(float64(400_000))
 
@@ -334,15 +351,16 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		connect.AssertEqual(t, len(networkPointsD), 1)
 		connect.AssertEqual(t, networkPointsD[0].NetworkId, networkIdD)
 		connect.AssertEqual(t, networkPointsD[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		connect.AssertEqual(t, networkPointsD[0].PointValue, NanoPoints(float64(expectedPointsA)*0.25*subsidyConfig.SeekerHolderMultiplier))
+		connect.AssertEqual(t, networkPointsD[0].PointValue, NanoPoints(float64(expectedPointsA)*subsidyConfig.ReferralParentPayoutFraction*subsidyConfig.SeekerHolderMultiplier))
 		connect.AssertEqual(t, networkPointsD[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		connect.AssertEqual(t, networkPointsD[0].LinkedNetworkId, networkIdA)
 		connect.AssertEqual(t, networkPointsD[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
-		 * Network A child Network E should get expectedPointsA (150_000) * 0.25 * seeker multiplier = 75_000 points
+		 * Network A child Network E receives the injected child fraction of
+		 * Network A's multiplier-adjusted points.
 		 */
-		expectedPointsE := NanoPoints(float64(expectedPointsA) * 0.25 * subsidyConfig.SeekerHolderMultiplier)
+		expectedPointsE := NanoPoints(float64(expectedPointsA) * subsidyConfig.ReferralChildPayoutFraction * subsidyConfig.SeekerHolderMultiplier)
 		glog.Infof("Expected points E: %d", expectedPointsE)
 		networkPointsE := FetchAccountPoints(ctx, networkIdE)
 		connect.AssertEqual(t, len(networkPointsE), 1)
@@ -354,21 +372,22 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		connect.AssertEqual(t, networkPointsE[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
-		 * Network A child Network F should get expectedPointsA * 0.25 * seeker multiplier = 75_000 points
+		 * Network A child Network F receives the same injected child fraction.
 		 */
 		networkPointsF := FetchAccountPoints(ctx, networkIdF)
 		connect.AssertEqual(t, len(networkPointsF), 1)
 		connect.AssertEqual(t, networkPointsF[0].NetworkId, networkIdF)
 		connect.AssertEqual(t, networkPointsF[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		connect.AssertEqual(t, networkPointsF[0].PointValue, NanoPoints(float64(expectedPointsA)*0.25*subsidyConfig.SeekerHolderMultiplier))
+		connect.AssertEqual(t, networkPointsF[0].PointValue, NanoPoints(float64(expectedPointsA)*subsidyConfig.ReferralChildPayoutFraction*subsidyConfig.SeekerHolderMultiplier))
 		connect.AssertEqual(t, networkPointsF[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		connect.AssertEqual(t, networkPointsF[0].LinkedNetworkId, networkIdA)
 		connect.AssertEqual(t, networkPointsF[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
-		 * Network E child Network G should get expectedPointsA * seeker multipler * 0.125
+		 * Network E child Network G receives half the first-level injected
+		 * child fraction.
 		 */
-		expectedPointsG := NanoPoints(float64(expectedPointsA) * subsidyConfig.SeekerHolderMultiplier * 0.125)
+		expectedPointsG := NanoPoints(float64(expectedPointsA) * subsidyConfig.SeekerHolderMultiplier * subsidyConfig.ReferralChildPayoutFraction * 0.5)
 		networkPointsG := FetchAccountPoints(ctx, networkIdG)
 		connect.AssertEqual(t, len(networkPointsG), 1)
 		connect.AssertEqual(t, networkPointsG[0].NetworkId, networkIdG)
@@ -379,13 +398,13 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		connect.AssertEqual(t, networkPointsG[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
-		 * Network H should get expectedPointsB * 0.25 = 150_000 * 0.25 points = 37_500 points
+		 * Network H receives the injected child fraction of Network B's points.
 		 */
 		networkPointsH := FetchAccountPoints(ctx, networkIdH)
 		connect.AssertEqual(t, len(networkPointsH), 1)
 		connect.AssertEqual(t, networkPointsH[0].NetworkId, networkIdH)
 		connect.AssertEqual(t, networkPointsH[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		connect.AssertEqual(t, networkPointsH[0].PointValue, NanoPoints(float64(expectedPointsB)*0.25))
+		connect.AssertEqual(t, networkPointsH[0].PointValue, NanoPoints(float64(expectedPointsB)*subsidyConfig.ReferralChildPayoutFraction))
 		connect.AssertEqual(t, networkPointsH[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		connect.AssertEqual(t, networkPointsH[0].LinkedNetworkId, networkIdB)
 		connect.AssertEqual(t, networkPointsH[0].AccountPaymentId, &paymentNetworkB.PaymentId)
@@ -419,7 +438,7 @@ func TestReliabilityPoints(t *testing.T) {
 				"",
 				"",
 			)
-			clientAddress := "127.0.0.1:20000"
+			clientAddress := "192.0.2.1:20000"
 			handlerId := CreateNetworkClientHandler(ctx)
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			connect.AssertEqual(t, err, nil)

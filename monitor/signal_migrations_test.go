@@ -81,6 +81,9 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"attribution_ambiguous",
 			"network_onboarding_email_sent_at",
 			"(sent_at, network_id, step)",
+			"provider_egress_health_measured_at_client_id",
+			providerEgressHealthDeadlineIndexDefinition,
+			"predicate_definition IS NULL",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -100,6 +103,36 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("migration-behind Markdown missing %q:\n%s", want, markdown)
 		}
+	}
+}
+
+func TestMigrationsSignalRequiresExactReadyProviderEgressHealthDeadlineIndex(t *testing.T) {
+	head := server.MigrationCount()
+	if head != 657 {
+		t.Fatalf("test pins provider-egress deadline index at migration 657, got head %d", head)
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		for _, want := range []string{
+			"definition = '" + providerEgressHealthDeadlineIndexDefinition + "'",
+			"predicate_definition IS NULL",
+			"indisvalid AND indisready",
+		} {
+			if !strings.Contains(query, want) {
+				t.Fatalf("migration coherence query is missing exact deadline-index guard %q:\n%s", want, query)
+			}
+		}
+		return []Row{syntheticMigrationMissingArtifactRow(t, head, "provider_egress_health measured_at/client_id deadline index")}, nil
+	}}
+	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "migration-schema-drift").Markdown()
+	if !strings.Contains(markdown, "provider_egress_health measured_at/client_id deadline index@v657") {
+		t.Fatalf("malformed/not-ready deadline index did not retain the migration gate:\n%s", markdown)
 	}
 }
 

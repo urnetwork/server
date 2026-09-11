@@ -552,27 +552,113 @@ type locationDirectorySnapshot struct {
 	loadTime time.Time
 }
 
+// Each reset installs a unique non-zero-sized token. A loader may publish only
+// while its captured token is still current, and may clear only its own loading
+// claim. This matters when Reset replaces the database/redis resources while a
+// non-blocking directory refresh from the previous environment is still in
+// flight: the previous bool allowed that old refresh to overwrite the new
+// snapshot and to clear a newer refresh's claim after reset.
+type locationDirectoryGeneration struct {
+	marker byte
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type locationDirectoryState struct {
+	generation  atomic.Pointer[locationDirectoryGeneration]
+	loading     atomic.Pointer[locationDirectoryGeneration]
+	snapshot    atomic.Pointer[locationDirectorySnapshot]
+	publishLock sync.Mutex
+}
+
+func newLocationDirectoryState() *locationDirectoryState {
+	state := &locationDirectoryState{}
+	state.reset()
+	return state
+}
+
+func (self *locationDirectoryState) reset() {
+	generationCtx, generationCancel := context.WithCancel(context.Background())
+	generation := &locationDirectoryGeneration{
+		ctx:    generationCtx,
+		cancel: generationCancel,
+	}
+
+	// Cancel the old generation before replacing it. Every external operation
+	// carries that context, so an old loader cannot move from a cache miss into
+	// the replacement environment's Redis or PostgreSQL resources after reset.
+	// Cancellation is process-local and non-blocking; no external operation is
+	// performed while this lock is held.
+	self.publishLock.Lock()
+	defer self.publishLock.Unlock()
+
+	if previous := self.generation.Load(); previous != nil {
+		previous.cancel()
+	}
+	self.generation.Store(generation)
+	self.snapshot.Store(nil)
+	self.loading.Store(nil)
+}
+
+func (self *locationDirectoryState) startLoad() (*locationDirectoryGeneration, bool) {
+	// Pair the claim with reset's generation/loading swap. This path runs only
+	// on a missing or 30-minute-stale snapshot, so the short lock is not on the
+	// steady-state request path.
+	self.publishLock.Lock()
+	defer self.publishLock.Unlock()
+
+	generation := self.generation.Load()
+	if generation == nil || generation.ctx.Err() != nil || !self.loading.CompareAndSwap(nil, generation) {
+		return nil, false
+	}
+	return generation, true
+}
+
+func (self *locationDirectoryState) finishLoad(generation *locationDirectoryGeneration) {
+	// An old generation must not clear a newer generation's in-flight claim.
+	self.loading.CompareAndSwap(generation, nil)
+}
+
+func (self *locationDirectoryState) current(generation *locationDirectoryGeneration) bool {
+	return generation != nil && generation.ctx.Err() == nil && self.generation.Load() == generation
+}
+
+func (self *locationDirectoryState) publish(
+	generation *locationDirectoryGeneration,
+	entries map[server.Id]*locationDirectoryEntry,
+) bool {
+	self.publishLock.Lock()
+	defer self.publishLock.Unlock()
+
+	if !self.current(generation) {
+		return false
+	}
+	self.snapshot.Store(&locationDirectorySnapshot{
+		entries:  entries,
+		loadTime: server.NowUtc(),
+	})
+	return true
+}
+
 // refresh matches the `clientLocationKey` ttl
 const locationDirectoryStaleAfter = 30 * time.Minute
 
-var locationDirectoryValue atomic.Pointer[locationDirectorySnapshot]
-var locationDirectoryLoading atomic.Bool
+var currentLocationDirectory = newLocationDirectoryState()
 
 func resetLocationDirectory() {
-	locationDirectoryValue.Store(nil)
-	locationDirectoryLoading.Store(false)
+	currentLocationDirectory.reset()
 }
 
 // the current location directory without blocking the caller.
 // nil until the first load completes (callers omit locations), and a stale
 // snapshot is served while a single background reload runs.
 func locationDirectory() map[server.Id]*locationDirectoryEntry {
-	snapshot := locationDirectoryValue.Load()
+	snapshot := currentLocationDirectory.snapshot.Load()
 	if snapshot == nil || locationDirectoryStaleAfter <= time.Since(snapshot.loadTime) {
-		if locationDirectoryLoading.CompareAndSwap(false, true) {
+		if generation, started := currentLocationDirectory.startLoad(); started {
 			go connect.HandleError(func() {
-				defer locationDirectoryLoading.Store(false)
-				loadLocationDirectory()
+				defer currentLocationDirectory.finishLoad(generation)
+				loadLocationDirectoryForGeneration(generation)
 			})
 		}
 	}
@@ -662,18 +748,49 @@ func setLocationDirectoryCache(
 }
 
 func loadLocationDirectory() {
-	ctx := context.Background()
+	loadLocationDirectoryForGeneration(currentLocationDirectory.generation.Load())
+}
 
-	entries := getLocationDirectoryCache(ctx)
-	if entries == nil {
-		entries = queryLocationDirectory(ctx)
-		setLocationDirectoryCache(ctx, entries, locationDirectoryStaleAfter)
+func loadLocationDirectoryForGeneration(generation *locationDirectoryGeneration) {
+	loadLocationDirectoryForGenerationWith(
+		currentLocationDirectory,
+		generation,
+		getLocationDirectoryCache,
+		queryLocationDirectory,
+		setLocationDirectoryCache,
+	)
+}
+
+func loadLocationDirectoryForGenerationWith(
+	state *locationDirectoryState,
+	generation *locationDirectoryGeneration,
+	readShared func(context.Context) map[server.Id]*locationDirectoryEntry,
+	readDatabase func(context.Context) map[server.Id]*locationDirectoryEntry,
+	writeShared func(context.Context, map[server.Id]*locationDirectoryEntry, time.Duration),
+) {
+	if !state.current(generation) {
+		return
 	}
+	ctx := generation.ctx
 
-	locationDirectoryValue.Store(&locationDirectorySnapshot{
-		entries:  entries,
-		loadTime: server.NowUtc(),
-	})
+	entries := readShared(ctx)
+	if !state.current(generation) {
+		return
+	}
+	publishShared := false
+	if entries == nil {
+		entries = readDatabase(ctx)
+		publishShared = true
+	}
+	if !state.publish(generation, entries) {
+		return
+	}
+	// The local immutable snapshot is available before the optional shared
+	// cache write. A slow Redis write therefore cannot block stale/nil readers
+	// or reset; reset cancellation stops it before replacement resources exist.
+	if publishShared && state.current(generation) {
+		writeShared(ctx, entries, locationDirectoryStaleAfter)
+	}
 }
 
 func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirectoryEntry {

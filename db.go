@@ -36,11 +36,26 @@ uses a private connection pool local to the current service:
 
 var DbContextDoneError = errors.New("Done")
 
+// Bounds PostgreSQL connection establishment and authentication.
 const PgConnectTimeout = 30 * time.Second
+
+// Bounds validation of an established PostgreSQL connection. Protocol reads
+// need a shorter budget than dialing so a stale socket cannot consume the
+// caller's remaining work horizon.
+const PgPingTimeout = 5 * time.Second
+
+// Bounds best-effort disposal of an unusable PostgreSQL connection.
+const PgCloseTimeout = 5 * time.Second
 
 // PgCommitTimeout bounds the commit round trip, which runs on a context
 // detached from the caller (see the commit in `txWithPool`).
 const PgCommitTimeout = 30 * time.Second
+
+// PgRollbackTimeout bounds transaction cleanup after the caller's context is
+// canceled. Rollback is best-effort when another error already owns the
+// outcome, but it still needs a live context so PostgreSQL can release the
+// transaction promptly instead of waiting for a broken connection to close.
+const PgRollbackTimeout = 30 * time.Second
 
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
@@ -416,11 +431,9 @@ func AcquireMaintenanceDbConn(ctx context.Context) (PgConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.Ping(ctx); err != nil {
+	if err := pingPgConnection(ctx, conn); err != nil {
 		pgxConn := conn.Hijack()
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), PgConnectTimeout)
-		_ = pgxConn.Close(closeCtx)
-		closeCancel()
+		closePgConnection(ctx, pgxConn)
 		return nil, err
 	}
 	return conn, nil
@@ -465,6 +478,29 @@ func ReplicaDb(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
+// Validates a pooled connection within a finite protocol budget. A socket can
+// stall after dialing, so connect_timeout alone does not bound this round trip.
+func pingPgConnection(ctx context.Context, conn interface {
+	Ping(context.Context) error
+}) error {
+	pingCtx, pingCancel := context.WithTimeout(ctx, PgPingTimeout)
+	defer pingCancel()
+	return conn.Ping(pingCtx)
+}
+
+// Disposes a bad connection with a detached finite cleanup budget. Its error
+// stays secondary to the Ping or callback error that proved the connection bad.
+func closePgConnection(ctx context.Context, conn interface {
+	Close(context.Context) error
+}) {
+	closeCtx, closeCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		PgCloseTimeout,
+	)
+	defer closeCancel()
+	_ = conn.Close(closeCtx)
+}
+
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
@@ -501,11 +537,11 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			panic(connErr)
 		}
 
-		connErr = conn.Ping(ctx)
+		connErr = pingPgConnection(ctx, conn)
 		if connErr != nil {
 			// take the bad connection out of the pool
 			pgxConn := conn.Hijack()
-			pgxConn.Close(ctx)
+			closePgConnection(ctx, pgxConn)
 			conn = nil
 
 			if retryOptions.rerunOnConnectionError {
@@ -543,7 +579,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				if connErr != nil {
 					// take the bad connection out of the pool
 					pgxConn := conn.Hijack()
-					pgxConn.Close(ctx)
+					closePgConnection(ctx, pgxConn)
 					conn = nil
 				} else {
 					conn.Release()
@@ -629,6 +665,20 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 	}
 }
 
+// rollbackTx preserves the error or panic that caused cleanup. pgx marks a
+// transaction closed after a rollback attempt even when that attempt returns
+// an error; retrying Rollback from an outer recovery then yields ErrTxClosed
+// and can replace the owning failure. Use a detached, bounded context and
+// deliberately leave the rollback result secondary to the existing outcome.
+func rollbackTx(ctx context.Context, tx PgTx) {
+	rollbackCtx, rollbackCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		PgRollbackTimeout,
+	)
+	defer rollbackCancel()
+	_ = tx.Rollback(rollbackCtx)
+}
+
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
@@ -672,9 +722,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			// }
 			defer func() {
 				if err := recover(); err != nil {
-					if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-						panic(rollbackErr)
-					}
+					rollbackTx(ctx, tx)
 					panic(err)
 				}
 			}()
@@ -714,9 +762,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				commitErr = tx.Commit(commitCtx)
 				commitCancel()
 			} else {
-				if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-					panic(rollbackErr)
-				}
+				rollbackTx(ctx, tx)
 			}
 		}, options...)
 

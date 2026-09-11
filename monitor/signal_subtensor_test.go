@@ -75,6 +75,100 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	}
 }
 
+func TestSubtensorSignalDoesNotInferCurrentRuntimeWhenPublicHeadIsUnavailable(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Head = ""
+	observation.Public.Errors["head"] = "synthetic reference unavailable"
+	observation.Public.Runtime.SpecVersion = 455
+
+	archive := &observation.Nodes[0]
+	archive.Direct.Runtime.SpecVersion = 443
+	archive.Direct.Health.IsSyncing = true
+	archive.Direct.Sync.HighestBlock = 8_120_000
+
+	lightnode := &observation.Nodes[1]
+	lightnode.Direct.Runtime.SpecVersion = 443
+	lightnode.Direct.Health = subtensorHealth{Peers: 0, IsSyncing: false}
+	lightnode.Direct.Sync.HighestBlock = lightnode.Direct.Sync.CurrentBlock
+
+	alerts, err := runSyntheticSubtensorAtRuntime(t, observation, 455)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visibility := requireAlertClass(t, alerts, "cannot-observe")
+	if !strings.Contains(visibility.Target, "subtensor-public-reference") || visibility.Sustain != 2 {
+		t.Fatalf("public-head visibility finding = %+v", visibility)
+	}
+	archiveLag := requireAlertClass(t, alerts, "subtensor-sync-lag")
+	if archiveLag.Frame != "archive" || !strings.Contains(archiveLag.Observed, "target_head=8120000") {
+		t.Fatalf("archive target control = %+v", archiveLag)
+	}
+	peers := requireAlertClass(t, alerts, "subtensor-peers")
+	if peers.Frame != "lightnode" || !strings.Contains(peers.Observed, "is_syncing=false") {
+		t.Fatalf("peer-loss control = %+v", peers)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-identity" && alert.Frame == "lightnode-current-runtime" {
+			t.Fatalf("unobservable convergence applied the current-runtime pin: %+v", alert)
+		}
+	}
+}
+
+func TestSubtensorSignalDoesNotMixHistoricalRuntimeWithSecondHeadConvergence(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Head = blockHex(8_120_000)
+	observation.Public.Runtime.SpecVersion = 455
+	for i := range observation.Nodes {
+		observation.Nodes[i].Direct.Runtime.SpecVersion = 455
+	}
+
+	lightnode := &observation.Nodes[1]
+	lightnode.FirstHead = blockHex(7_910_000)
+	lightnode.SecondHead = blockHex(8_119_999)
+	lightnode.Direct.Head = lightnode.FirstHead
+	lightnode.Direct.Runtime.SpecVersion = 443
+	lightnode.Direct.Sync = subtensorSyncState{
+		CurrentBlock: 7_910_000,
+		HighestBlock: 8_120_000,
+	}
+	lightnode.Gateway.Head = lightnode.SecondHead
+
+	alerts, err := runSyntheticSubtensorAtRuntime(t, observation, 455)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-identity" && alert.Frame == "lightnode-current-runtime" {
+			t.Fatalf("first-sample historical runtime was applied to the converged second head: %+v", alert)
+		}
+	}
+}
+
+func TestSubtensorSignalChecksCurrentRuntimeAfterStableConvergence(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Runtime.SpecVersion = 455
+	for i := range observation.Nodes {
+		observation.Nodes[i].Direct.Runtime.SpecVersion = 455
+	}
+	lightnode := &observation.Nodes[1]
+	lightnode.Direct.Runtime.SpecVersion = 443
+	lightnode.Direct.EVMChainID = "0xsynthetic-mismatch"
+
+	alerts, err := runSyntheticSubtensorAtRuntime(t, observation, 455)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := requireAlertClass(t, alerts, "subtensor-identity")
+	if identity.Frame != "lightnode-current-runtime" {
+		t.Fatalf("stable current-runtime identity frame = %+v", identity)
+	}
+	for _, want := range []string{"specVersion=443 expected=455", `evm_chain_id="0xsynthetic-mismatch" expected="0x3b1"`} {
+		if !strings.Contains(identity.Observed, want) {
+			t.Fatalf("stable current-runtime identity missing %q: %+v", want, identity)
+		}
+	}
+}
+
 func TestSubtensorSignalDetectsRevokedRuntimeDataPermission(t *testing.T) {
 	observation := healthySubtensorObservation()
 	node := &observation.Nodes[1]

@@ -1029,6 +1029,21 @@ Corroborate with bounded, remotely reduced Mimir admission-discard and
 in-memory-series counters as described in §11.20; do not infer a producer or
 rollout cause from this text alone.
 
+The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
+takes precedence over generic `panic`. It requires the final
+`*errors.errorString=tx is closed` together with both deployed `txWithPool`
+frames: `txWithPool.func1.1` at `db.go:676` and `txWithPool.func1` at
+`db.go:718`. That dual frame proves cleanup replaced an already-owning
+transaction failure; it does not recover the initiating SQLSTATE, which was
+irrecoverably erased. An ordinary `tx is closed`, either frame alone, or a
+different line pair remains generic panic evidence. The correction performs
+rollback once with a cancellation-detached, bounded context and treats its
+result as best-effort whenever an original error or panic already owns the
+outcome. After deploying a containing API artifact to every active generation,
+require this exact class to remain zero for ten minutes after log-ingestion
+delay under comparable transaction traffic. Any original error newly exposed
+by the correction is a separate causal boundary, not recurrence of the mask.
+
 The 2026-09-04 Taskworker tail exposed both sides of that invariant. Its top
 unmatched shape was exact `providertunnel: tun read error: Done` at about
 65/min, while several alert samples came from unrelated `[rel]`, evaluation,
@@ -4615,7 +4630,19 @@ it reports only bounded structural reasons such as `missing_shard_1`,
 work: it is `egress-probe-unarmed`. The same rollout alert remains open until
 the append-only `provider_egress_health.tls_authentication_failure` field
 exists, because the new full-probe ingestion path cannot satisfy its integrity
-contract without that schema.
+contract without that schema. The deadline scheduler additionally requires
+migration 657's `provider_egress_health_measured_at_client_id` index to be a
+valid, ready, non-partial btree over exactly `(measured_at, client_id)`. Index
+absence or a same-name malformed/not-ready index emits an additive rollout
+finding; it does not suppress the existing geometry, liveness, capacity, or
+fairness queries.
+
+Migration 657 is restart-safe at both concurrent-index interruption boundaries.
+Each production attempt sends the concurrent drop and create as separate
+autocommit statements, while schema audit uses their transaction-safe
+equivalents. If a build leaves an invalid same-name index, or succeeds before
+its migration success record is durable, rerun the append-only migration
+runner; never hand-repair or hand-create the index.
 
 After geometry is valid, assign each eligible active, top-level, connected,
 valid Public provider to the exact normalized PostgreSQL partition used by the
@@ -4627,23 +4654,35 @@ due APIs:
 
 For each shard, aggregate without exporting identifiers:
 
-- full due: no egress location, or location older than 84 hours, AND no probe
-  attempt in six hours;
+- mutually exclusive full-due categories, all with no probe attempt in six
+  hours: no egress location; or, for a provider with a location, the eligible
+  location, existing-health, or missing-health lane with the earliest absolute
+  deadline. Location becomes due after 84 hours and expires at seven days;
+  existing health becomes due after 12 hours and expires at 24 hours. Missing
+  health is an urgent lane whose 24-hour deadline is anchored at the accepted
+  location timestamp; this prioritizes restoring evidence and does not claim
+  that a health verdict ever existed. A retained health row without an extant
+  location stays exclusively in the no-location lane. An exact location/health
+  deadline tie is assigned to location, matching the scheduler's stable merge;
 - blackhole due: no check, or a check older than 90 minutes;
 - newest full activity: the newest location, attempt, or health timestamp in
   that same shard;
 - newest blackhole activity: the newest blackhole check in that shard; and
 - current coverage: locations inside seven days and blackhole checks inside
-  three hours, plus the number of unique latest blackhole checks written in the
-  last hour.
+  three hours, plus the number of unique latest full attempts and blackhole
+  checks written in the last hour. The full-attempt count is success-inclusive:
+  a successful probe may leave its former due category, so classifying attempts
+  by the provider's current category would manufacture zero progress.
 
-The due ages are the application contract: full refresh begins at half the
-seven-day location lifetime, failed attempts back off for six hours, and the
-cheap blackhole sweep becomes due at half its three-hour maximum age. Do not
-invent a percentage floor while a large first sweep is catching up. Instead,
-when `due > 0`, require the corresponding shard-local newest timestamp to be no
-older than its durable `max_time + idle_delay` plus one five-minute monitor
-cadence. Old evidence is healthy when the exact due count is zero.
+The due ages are the application contract: full location refresh begins at
+half the seven-day location lifetime, existing-health refresh begins at half
+its 24-hour lifetime, a missing-health row is eligible after the common attempt
+backoff, failed attempts back off for six hours, and the cheap blackhole sweep
+becomes due at half its three-hour maximum age. Do not invent a percentage
+floor while a large first sweep is catching up. Instead, when `due > 0`,
+require the corresponding shard-local newest timestamp to be no older than its
+durable `max_time + idle_delay` plus one five-minute monitor cadence. Old
+evidence is healthy when the exact due count is zero.
 
 Shard activity is necessary but not sufficient. Sum the eligible, current, and
 last-hour blackhole counts across the complete geometry. When current coverage
@@ -4674,6 +4713,36 @@ projection is longer than the verdict lifetime. In that state an already-dark
 provider ages out of `GetAllProviderBlackholedClientIds` and becomes selectable
 again without a successful recheck.
 
+Apply the analogous measured-rate check to full probes. Sum the mutually
+exclusive full-due categories and gross success-inclusive latest attempts over
+the complete shard geometry:
+
+```text
+required_per_hour = ceil(full_due / 168 hours)
+projected_drain = ceil(full_due / full_attempted_last_hour) hours
+```
+
+When full coverage is incomplete and the measured rate is nonzero,
+`projected_drain` must fit inside the seven-day location lifetime. This is an
+execution-capacity bound, not proof of a particular failure mechanism and not a
+policy for sharing the unlocated lane between first attempts and retries.
+
+The category-local fairness check is narrower. For stale-location,
+stale-health, and missing-health separately, export due count, count past the
+category's absolute deadline, and oldest deadline-anchor age in each shard.
+When both existing location and health are due, classify the provider under
+the earlier absolute deadline rather than hiding an earlier health miss behind
+location priority. Missing health uses the accepted location as its anchor and
+the existing 24-hour health lifetime. A category pages when its deadline has
+already passed, or when even the optimistic allocation of *every* gross full
+attempt to that one category cannot serve it inside the oldest row's remaining
+window. This success-inclusive best-case bound is affirmative without
+persisting lane-at-attempt metadata. A saturated unlocated head on all shards
+is diagnostic evidence of the historical fixed-pass starvation only when
+joined to a running API artifact with that precedence; it is not by itself a
+post-EDF fault. The scheduler contract still does not choose a maximum retry
+delay or a first-attempt-versus-retry allocation inside the unlocated lane.
+
 - `egress-probe-shards` (PAGE): missing, duplicate, malformed, or
   mixed-generation durable geometry. Let the normal bootstrap/post path
   converge it; never clone, delete, or rewrite pending rows by hand.
@@ -4692,13 +4761,30 @@ again without a successful recheck.
   and Taskworker headroom. Keeping a failed verdict until a successful recheck
   is a separate correctness/availability decision; never hide the fault by
   merely lengthening the maximum age or deleting rows.
+- `egress-full-capacity` (PAGE after two samples): gross full attempts are
+  advancing, but the complete due population projects beyond the seven-day
+  location lifetime. First converge the deadline scheduler and independent
+  blackhole drain; then capacity-test any remaining deficit against PostgreSQL,
+  PgBouncer, API, Taskworker, and Proxy headroom. Do not infer weights or raise
+  concurrency from this aggregate alone.
+- `egress-full-fairness` (PAGE after two samples, one shard/category frame):
+  stale-location, stale-health, or missing-health work is already past its
+  absolute deadline, or the success-inclusive all-capacity lower bound still
+  misses the oldest row's remaining window. Missing health means an accepted
+  location has no corresponding health row; it is not described as expired
+  evidence. The unlocated-saturation field is context, not an independent page
+  predicate. Preserve the open first-attempt-versus-retry SLA decision rather
+  than calling this complete scheduler fairness.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
-  durable tasks are absent. When the schema is absent, apply migrations before
-  deploying a Taskworker artifact from an intentional server checkout
-  containing commit `49b51eeb` or later. When the schema is already armed, name
-  that Taskworker rollout as the immediate next boundary instead of asking the
-  operator to repeat the completed migration. In either case, let normal task
-  initialization schedule the rows; never create or repair shard rows by hand.
+  durable tasks are absent, or the exact migration-657 deadline index is not
+  valid and ready. TLS-schema or task absence stops the dependent activity
+  query; index absence alone is additive and retains all prior monitoring
+  coverage. Apply migration 657 before activating the EDF API scheduler, then
+  deploy the API correction and the selective attempt cleanup in Taskworker
+  from the same intentional source boundary. When schema is already armed,
+  name the remaining service rollout rather than asking the operator to repeat
+  migrations. Let normal task initialization schedule rows; never create or
+  repair shard rows or indexes by hand.
 
 The 2026-09-03 main incident is a dated rollout control, not a permanent
 version assertion: the TLS-integrity field was present but zero durable probe
@@ -4802,6 +4888,40 @@ two complete three-hour verdict lifetimes; also require measured throughput at
 or above the live requirement and a projected sweep inside three hours. A
 current-zero or one quiet sample is not recovery.
 
+The separate full-fairness diagnosis frozen on 2026-09-10 established an older
+API selection defect rather than a new task architecture requirement. Of
+71,747 eligible providers, 70,113 were full-due: 69,571 had no location, 543
+had stale location evidence, and 139 were stale-health-only. The old API ran
+the no-location query first with limit eight and returned as soon as it filled;
+the latter two passes were therefore structurally unreachable under the
+saturated head. The measured 372 full attempts/hour was also below the roughly
+418/hour needed to drain that snapshot inside seven days. The correction keeps
+the durable shards and database indexes: it takes bounded oldest location and
+health heads, merges absolute hard expiries in Go with client-ID stable ties
+and deduplication, admits that urgent union before unlocated work, and retains
+the latest attempt for each active eligible no-location provider. Cleanup still
+removes attempts for located, inactive, ineligible, derived, disconnected,
+invalid, and orphan providers. Migration 657 must converge before the corrected
+API becomes active; then converge API and Taskworker and require zero expired
+urgent rows plus optimistic category drains inside their remaining lifetimes
+for two samples and a complete seven-day sweep. This dated population is not
+standing guidance, and the first-attempt-versus-retry SLA remains unresolved.
+
+The adjacent missing-health audit on 2026-09-10 found a source-level path that
+the two-evidence scheduler must cover. Operator Proxy can accept and report a
+location when health checking is skipped, produces a structural error, or its
+non-fatal result submission fails; Server publication independently fails
+closed when the health row is absent. The bounded current Main aggregate was a
+healthy dormant control: all four shards had zero fresh-location/missing-health
+rows (0 of 688 fresh-location rows), so this was not attributed to the current
+capacity page. The correction nevertheless adds a bounded location-indexed
+anti-health head, applies the same six-hour attempt backoff, assigns the
+location timestamp plus the existing 24-hour health lifetime as its ordering
+deadline, and deduplicates it with location work. No new weight or concurrency
+is introduced. After deployment, require missing-health to remain zero or to
+advance after backoff while the stale-location and stale-health deadline gates
+remain healthy; the first-attempt-versus-retry SLA remains unresolved.
+
 Connect commit `66aaad4` (the patch-identical rebased successor of historical
 commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a
 short-lived probe's final derived-client removal part of joined tunnel
@@ -4824,11 +4944,19 @@ that the independent Proxy active-client ceiling is adequate.
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 `signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
 tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
-boundary, a missing shard, complete execution-setting drift, unknown-field and
-malformed-secret redaction, an invalid bandwidth timeout, shard-local
-full/blackhole stalls hidden by a healthy sibling, healthy empty due queues,
-normalized signed hashing, the exact complete-sweep rate boundary, a complete
-coverage/quiet-hour control, and ambiguous aggregate rejection.
+boundary, exact valid/ready/non-partial migration-657 index coherence, additive
+index-unarmed plus capacity visibility, a missing shard, complete execution-
+setting drift, unknown-field and malformed-secret redaction, an invalid
+bandwidth timeout, shard-local full/blackhole stalls hidden by a healthy
+sibling, healthy empty due queues, normalized signed hashing, exact blackhole
+and full complete-sweep rate boundaries, earliest-deadline category assignment,
+missing-health hard-deadline visibility, success-inclusive optimistic
+projection boundaries, a complete coverage/quiet-hour control, and ambiguous
+aggregate rejection. Model regressions reproduce a saturated unlocated head,
+pin crossed location/health deadlines and stable ties, admit missing health
+after attempt backoff, deduplicate overlap, prove attempt-driven advancement,
+retain eligible no-location attempts, and sweep located/ineligible/inactive/
+orphan attempts.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -6280,6 +6408,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly. That dispatch does not itself produce `window_stall failed=1`, but a later reason change can publish that compatibility transition while the failed latch remains set. The class rate intentionally counts both diagnostic lines; `failed_window_events` separately counts exact-replay-deduplicated authoritative events. Compatibility-only evidence keeps the alert but renders that cardinality unknown. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer incident size from the diagnostic line rate, terminal impact from `failed=0`, or a root cause from `window_failed` or compatible `failed=1` alone. Do not restart Taskworker or deploy a transport change from these lines. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | `[rel] event=evaluation_budget_exhausted ...` (`window-evaluation-budget`) | The owning expansion pass reached its natural deadline while one or more initial provider pings were unresolved. `candidates` is the pass-owned cleanup count; `effective_min` exposes the shortest candidate budget after clipping by the pass deadline, and `observed_max` is elapsed wall time. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement do not emit this event. It identifies the stage that stopped, not why the receiver stayed silent, and its line rate is neither candidate nor failed-window cardinality. | At 20/min WARN, correlate the same window and artifact with §2.24 HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal state. Do not lengthen timeouts as a legacy-HMAC remedy. Preserve pass ownership, no-late-admission cleanup, and exactly-once accounting. Require the rate below 20/min for ten minutes, provider addition or recovery, and deterministic pre/post-boundary and lifecycle-cancellation barriers. See §14.6. |
+| `*errors.errorString=tx is closed` plus `txWithPool.func1.1` at `db.go:676` and `txWithPool.func1` at `db.go:718` (`tx-rollback-mask`) | The exact deployed dual frame proves transaction cleanup replaced an already-owning failure with `pgx.ErrTxClosed`. The initiating SQLSTATE was irrecoverably erased. Ordinary `tx is closed`, one frame, or any other line pair remains generic panic evidence. | Deploy the API correction that runs one best-effort rollback with a cancellation-detached, bounded context and never replaces the original error or panic. Require every active API generation to contain it, then require zero exact-class events for ten minutes after ingestion delay under comparable transaction traffic. Diagnose any newly visible original error independently. See §1.5. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `[onboarding]app open attribution failed ... inconsistent types deduced for parameter $4 (SQLSTATE 42P08)` (`onboarding-app-open-attribution`) | The API request remained usable, but PostgreSQL rejected the complete attributed app-open insert because one untyped parameter appeared in incompatible INSERT-output and comparison contexts. On 2026-09-10 every Main API generation repeated this at hundreds of lines/minute, which made app-open engagement disappear from the onboarding tracker while ordinary app use continued. | Deploy an API artifact containing server `0aac4806`, whose statement casts every reused UUID, varchar, and timestamp parameter explicitly. Do not replay requests or manufacture analytics rows. The fixed alert sample omits the network identifier. Verify the real PostgreSQL synthetic attribution test, exactly one attributed event with the exact `flow_step`, full API convergence, and zero recurrence for ten minutes after ingestion delay. |
 | `[onboarding]connect.day write failed ... inconsistent types deduced for parameter $3 (SQLSTATE 42P08)` (`onboarding-connect-day-write`) | The Connect session was already committed and remains usable, but the separate `RecordConnectDay` transaction was rejected before it wrote analytics. The same untyped parameter was used as INSERT output and a varchar comparison. Recovery deliberately forgets the process-local cache entry, so the next connection retries and amplifies the defect. The 2026-09-10 persistence manifest's outer identity said Taskworker, but every selected private record and the focused snapshot named Connect; a bounded current discriminator found the exact source/SQLSTATE intersection throughout sampled Connect generations and zero matching Taskworker lines. All sampled Connect endpoints ran `2026.9.10+1042581110`, containing first-bad server commit `821f8131`. | Deploy Connect from a server checkout whose real statement explicitly casts every reused UUID, varchar, and timestamp parameter. Do not restart Taskworker, replay raw connections, or fabricate missing historical events; backfill is a separate product/data-policy decision. The fixed alert sample omits the client identifier. Verify the PostgreSQL test records exactly one `connect.day` event per network per UTC day, every Connect block runs the corrected artifact, and neither this class nor its former `novel` shape recurs for ten minutes after ingestion delay while connections continue. |
@@ -15677,6 +15806,24 @@ artifact was compared byte-for-byte. Preserve the recorded on-chain code hash
 and compare it with the v455 artifact when publication completes. Vault and
 Xops were reconciled to 455/1 without replacing either progressing node.
 
+At the 2026-09-10 19:24:45 America/Chicago observation, the lightnode remained
+about 210,000 blocks behind and correctly reported historical runtime 443
+while the current-runtime pin was 455. Its new zero-peer episode made
+`system_health.isSyncing=false` and collapsed its
+`system_syncState.highestBlock` to its own current block. The public-head read
+failed for that cadence, so its `cannot-observe` identity had not yet reached
+the two-cadence threshold, while the archive retained a credible higher sync
+target. The old catch-all branch consequently emitted a false
+`lightnode-current-runtime` identity page. Current-runtime, transaction, EVM,
+and `eth_getLogs` checks now require an observed public head and require both
+the first local head that owns those sampled values and the second local head
+to be within the near-head band. A missing public head leaves convergence
+unobservable; it cannot promote a collapsed local sync target to current-head
+identity. Chain, genesis, and runtime-name identity remain unconditional, and
+all current-head identity checks remain strict after two-sample near-head
+evidence. The peer, progress, lag, and public-reference visibility findings
+remain independent.
+
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
 public-path proof):
@@ -15721,8 +15868,9 @@ set `system_syncState.highestBlock` equal to its own stale `currentBlock` and
 therefore report false even though the public chain is millions of blocks
 ahead. Require all of: peers > 0, two advancing head samples, the expected
 current runtime, and a comparison against the official RPC head before
-declaring convergence. For the P2P layer, distinguish TCP reachability from a
-retained peer session:
+declaring convergence.
+
+For the P2P layer, distinguish TCP reachability from a retained peer session:
 ```
 getent ahosts bootnode.test.finney.opentensor.ai
 nc -vz -w 5 bootnode.test.finney.opentensor.ai 30333
@@ -15831,6 +15979,22 @@ absent counters as zero; install the reviewed Xops helper before using the new
 discriminator for production attribution. None of these observations
 authorizes a restart, database reset, reserved-peer policy change, or
 deployment.
+
+A later 2026-09-10 control held the lightnode at zero peers from 18:48:00
+through 19:04:15 CDT. Its queued imports fell from 1,792 to zero while the head
+initially advanced, then the head remained fixed at 7,763,899 for 34
+15-second samples; that early movement was queued drain, not peer recovery.
+Lower-level connections continued and each of three new block-announcement
+streams closed, while the same-image archive retained 13 peers and advanced
+3,750 blocks. The unchanged lightnode generation spontaneously recovered one
+peer at 19:04:30 and resumed advancement. This proves a transient peer-session
+retention boundary, but still does not choose between litep2p notification or
+peerset reconnect handling and a lightnode-specific chain/fork or
+database/import rejection. The installed restricted helper predated diagnostic
+version 1, so container DNS, configured-bootnode TCP, and current-process log
+classes remained unobservable. Until the reviewed Xops `eda3ff4` helper
+contract is present, preserve that attribution boundary and the recovered
+generation.
 
 ### 17.3 2026-08-20 incident signature
 
@@ -16295,20 +16459,40 @@ An hourly snapshot rebuild can therefore succeed and publish valid total-point
 ranks while the epoch-derived plane is unavailable. An open epoch, a finalized
 row from a retired deployment, or a legacy payout period is not a substitute.
 
-Read the latest `network_points_leaderboard_snapshot` header and its exact
-ranked-row census in one bounded PostgreSQL statement. Require header
-`total_ranked` to equal its snapshot row count and age to be at most two hours;
-epoch finalization and point writes trigger rebuilds, with an hourly fallback.
-Independently enumerate the bounded `st_epoch` deployment census, then compare
-the configured deployment key in memory. Never render that key, contract
-address, network identity, or any ranked network identifier into an alert.
+Read the latest `network_points_leaderboard_snapshot` header, its persisted
+`epoch_metrics_available` bit, and its exact ranked-row census in one bounded
+PostgreSQL statement. Require header `total_ranked` to equal its snapshot row
+count and age to be at most two hours; epoch finalization and point writes
+trigger rebuilds, with an hourly fallback. Independently enumerate the bounded
+`st_epoch` deployment census, then compare the configured deployment key in
+memory. Never render that key, contract address, network identity, or any
+ranked network identifier into an alert.
 
 Availability is not encoded by `latest_epoch != 0`: epoch zero is a legitimate
-finalized epoch. It is available when the configured ST subsystem is enabled,
-the exact configured deployment has at least one finalized row, and the
-snapshot's latest epoch equals that deployment's maximum finalized epoch. Once
-that condition is true, zero Blocks or Streak can be a meaningful measurement
-for a network and must not alert merely for being zero.
+finalized epoch. Before the enabled exact active deployment has any finalized
+row, the persisted bit must be false. Stored numeric measure/rank columns are
+then inert and semantically unavailable; the contract does not require every
+physical column to be absent. The false-bit snapshot must not carry an
+affirmative latest epoch or positive Blocks/Streak payload. Once at least one
+finalized row has been incorporated by a rebuild, the bit must be true and the
+snapshot's latest epoch must equal that deployment's maximum finalized epoch.
+Zero Blocks or Streak can then be a meaningful measurement for a network and
+must not alert merely for being zero.
+
+Finalization and snapshot publication are separate transactions joined by an
+asynchronous durable task. The bounded source census therefore includes only a
+nullable latest-finalization timestamp, reduced in PostgreSQL to an age with a
+UTC-normalized database clock; it never exports the timestamp or deployment
+key. A source maximum ahead of the snapshot is
+`points-epoch-rebuild-pending` WARN while the latest finalization is at most two
+hours old. This remains WARN even when the snapshot create time is newer: the
+rebuild reads epoch inputs before it assigns create time, so a concurrent
+finalization can legitimately be omitted from a later-published snapshot. Null
+timestamp provenance, a future application timestamp, or an ordering inside
+the complete command-timeout plus one-second quantization bound also stays WARN.
+It becomes PAGE only when a known latest-finalization age exceeds two hours. A
+snapshot epoch ahead of its active finalized source is immediately impossible
+and PAGE.
 
 - `points-leaderboard-unavailable` warns immediately when no snapshot exists.
 - `points-leaderboard-incomplete` pages immediately when the latest header and
@@ -16316,18 +16500,30 @@ for a network and must not alert merely for being zero.
 - `points-leaderboard-stale` warns after two consecutive observations when the
   latest snapshot is future-dated or older than two hours.
 - `points-epoch-metrics-unavailable` warns immediately when ranked total points
-  exist but the ST subsystem/deployment/finalized-epoch source is unavailable.
-  This is not evidence that every network measured zero Blocks or Streak.
-- `points-epoch-snapshot-drift` pages immediately when a configured deployment
-  has finalized rows but its maximum epoch differs from the snapshot header.
+  exist but the ST subsystem/deployment/finalized-epoch source is unavailable
+  and the snapshot bit is correctly false. This is not evidence that every
+  network measured zero Blocks or Streak.
+- `points-epoch-rebuild-pending` warns immediately when the active finalized
+  source is newer than the immutable snapshot within the two-hour rebuild
+  budget, or nullable/future/bounded-skew evidence cannot prove ordering. Let
+  the normal idempotent task finish; do not edit either source by hand.
+- `points-epoch-availability-drift` pages immediately when the persisted bit
+  is true without an exact active finalized source, a false-bit snapshot carries
+  affirmative epoch-derived values, or a first-finalization rebuild is
+  affirmatively overdue. Preserve the snapshot and repair the
+  active-source/rebuild boundary; never flip the bit or rows by hand.
+- `points-epoch-snapshot-drift` pages immediately when the snapshot is ahead of
+  its exact active finalized source, or when a source-newer epoch mismatch is
+  older than the rebuild budget.
 
-The unavailable class has separate closures. The software correction is a
-snapshot-consistent availability or finalized-count field carried through the
-Server API, shared SDK, and every app. Clients label or hide Blocks, Streak,
-Longest Streak, and their ranks until it is true while preserving usable total
-points. Do not use `latest_epoch == 0` as a sentinel. The operational closure is
-the reviewed Main ST deployment, caught-up node path, contract/policy identity,
-keys, funding, migrations, and at least one legitimately finalized epoch. A
+The unavailable class now has only an operational closure. The
+snapshot-consistent bit is implemented and deployed through the Server API,
+shared SDK, and apps; clients label or hide Blocks, Streak, Longest Streak, and
+their ranks while it is false, while preserving usable total points. Do not use
+`latest_epoch == 0` as a sentinel or ask operators to add the existing field.
+Closure requires the reviewed Main ST deployment, caught-up node path,
+contract/policy identity, keys, funding, migrations, and at least one
+legitimately finalized epoch, followed by a normal snapshot rebuild. Another
 Server/API/Taskworker deployment cannot invent that history; do not enable an
 unready deployment or insert synthetic `st_epoch` rows to silence the signal.
 This can require operator, finance, network, or additional node hardware work
@@ -16345,6 +16541,14 @@ missing history from a legitimate zero on an available epoch, and the shared
 SDK test covers unavailable presentation, sort rejection, and later recovery.
 Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
 `signal_points_readiness.go` and `signal_points_readiness_test.go`.
+
+The 2026-09-11 deployed control returned `total_ranked=25708` with
+`epoch_metrics_available=false` from a live public points request, and Blocks
+and Streak sorts explicitly rejected the request as unavailable. The bounded
+direct monitor census simultaneously found ST disabled and unconfigured with
+`finalized_epochs=0`. That joins the public behavior to the persisted contract:
+the software availability correction is deployed, and the current correctly
+false state has only the reviewed ST/finalized-epoch operational closure.
 
 On 2026-09-08 the public API and direct database snapshot agreed: the latest
 snapshot contained 25,708 ranked networks with populated positive total points,
