@@ -3283,12 +3283,13 @@ func TestFullTunPlatformSettingsUseIndependentEndpointBudgets(t *testing.T) {
 }
 
 // Client settings select exactly one production P2P data plane when requested.
-func fullTunClientSettings(
+func fullTunClientSettingsWithFeatures(
 	route fullTunRoute,
 	stats *clientconnect.P2pDataPlaneStats,
 	noAckSends *noAckSendTracker,
 	packSends *sendPackLifecycleTracker,
 	logicalDataLaneCount int,
+	features []string,
 ) *clientconnect.ClientSettings {
 	settings := clientconnect.DefaultClientSettings()
 	settings.SendBufferSettings.LogicalDataLaneCount = logicalDataLaneCount
@@ -3383,7 +3384,34 @@ func fullTunClientSettings(
 		// when server network-peer announcements are disabled.
 		settings.WebRtcSettings.MemoryBudget = clientconnect.NewTransferMemoryBudget(0)
 	}
+	for _, feature := range features {
+		switch feature {
+		case perfvarFeatureDeferTimeoutResend:
+			settings.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress = true
+		case perfvarFeatureFastPathSizeAware:
+			p2pSettings.FastPathSizeAwareAdmission = true
+		}
+	}
 	return settings
+}
+
+// One settings constructor keeps every existing caller on the production
+// defaults while the measured campaigns opt features in explicitly.
+func fullTunClientSettings(
+	route fullTunRoute,
+	stats *clientconnect.P2pDataPlaneStats,
+	noAckSends *noAckSendTracker,
+	packSends *sendPackLifecycleTracker,
+	logicalDataLaneCount int,
+) *clientconnect.ClientSettings {
+	return fullTunClientSettingsWithFeatures(
+		route,
+		stats,
+		noAckSends,
+		packSends,
+		logicalDataLaneCount,
+		nil,
+	)
 }
 
 // Retains production reliability normally while keeping race instrumentation
@@ -3738,12 +3766,13 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageSourceTrackers); err != nil {
 		return nil, err
 	}
-	providerSettings := fullTunClientSettings(
+	providerSettings := fullTunClientSettingsWithFeatures(
 		route,
 		providerStats,
 		providerNoAckSends,
 		providerPackSends,
 		resources.LogicalDataLaneCount,
+		resources.Features,
 	)
 	if hooks != nil && hooks.configureProviderClientSettings != nil {
 		hooks.configureProviderClientSettings(providerSettings)
@@ -3901,12 +3930,13 @@ func tryNewFullTunPathWithTopologyHooks(
 	deviceStats := &clientconnect.P2pDataPlaneStats{}
 	deviceRouteStateTrace := newP2pRouteStateTrace()
 	clientSettingsGenerator := func() *clientconnect.ClientSettings {
-		settings := fullTunClientSettings(
+		settings := fullTunClientSettingsWithFeatures(
 			route,
 			deviceStats,
 			deviceNoAckSends,
 			devicePackSends,
 			resources.LogicalDataLaneCount,
+			resources.Features,
 		)
 		if deviceSendRoutes != nil {
 			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.RouteStateObserver =

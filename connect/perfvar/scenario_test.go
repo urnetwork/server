@@ -105,12 +105,16 @@ type perfvarScenario struct {
 	// ApplicationMtu is the advertised VPN-interface MTU, distinct from the
 	// profile's physical-path inner limit. Recording it prevents a product MTU
 	// change from being compared under the same scenario identity.
-	ApplicationMtu   int   `json:"application_mtu"`
-	Seed             int64 `json:"seed"`
-	RunCount         int   `json:"run_count"`
-	PayloadByteCount int64 `json:"payload_byte_count"`
-	WarmupByteCount  int64 `json:"warmup_byte_count,omitempty"`
-	FlowCount        int   `json:"flow_count"`
+	ApplicationMtu int `json:"application_mtu"`
+	// Features are opt-in production settings that ship off by default and
+	// are under measurement. An empty set keeps every existing scenario
+	// identity unchanged; a non-empty one is part of the identity.
+	Features         []string `json:"features,omitempty"`
+	Seed             int64    `json:"seed"`
+	RunCount         int      `json:"run_count"`
+	PayloadByteCount int64    `json:"payload_byte_count"`
+	WarmupByteCount  int64    `json:"warmup_byte_count,omitempty"`
+	FlowCount        int      `json:"flow_count"`
 	// LogicalDataLaneCount is the bounded Transfer sequence fan-out used for
 	// exact five-tuple isolation. Zero is the production-compatible disabled
 	// baseline; measured candidates are 1, 4, and 8.
@@ -136,12 +140,21 @@ type perfvarConfig struct {
 	InternalProfiles     map[string]bool
 	ExtenderCount        int
 	Resources            map[string]bool
+	Features             []string
 	Seed                 int64
 	RunCount             int
 	PayloadBytes         int64
 	PayloadSet           bool
 	LogicalDataLaneCount int
 }
+
+// Opt-in production settings under measurement. Each ships off by default
+// (connect/FLIGHTGATEFIX.md §13.5 and §13.6) and needs its own A/B before a
+// default can flip.
+const (
+	perfvarFeatureDeferTimeoutResend = "defer-timeout-resend"
+	perfvarFeatureFastPathSizeAware  = "fast-path-size-aware"
+)
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
 // exchange is intentionally not a P2P hop count.
@@ -608,6 +621,16 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 	if err != nil {
 		return perfvarConfig{}, err
 	}
+	featureSet, err := parseSet(
+		"CONNECT_PERFVAR_FEATURE",
+		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
+		[]string{},
+	)
+	if err != nil {
+		return perfvarConfig{}, err
+	}
+	features := slices.Sorted(maps.Keys(featureSet))
+
 	runCount, err := parsePositiveInt("CONNECT_PERFVAR_RUN_COUNT", 5)
 	if err != nil {
 		return perfvarConfig{}, err
@@ -655,6 +678,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 		InternalProfiles:     internalProfiles,
 		ExtenderCount:        extenderCount,
 		Resources:            resources,
+		Features:             features,
 		Seed:                 seed,
 		RunCount:             runCount,
 		PayloadBytes:         payloadBytes,
@@ -773,6 +797,7 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 									Topology:              topology,
 									ExtenderCount:         config.ExtenderCount,
 									Resource:              perfvarResource(resourceName),
+									Features:              config.Features,
 									ApplicationMtu:        min(clientconnect.DefaultMtu, profile.InnerMtu),
 									Seed:                  config.Seed,
 									RunCount:              config.RunCount,

@@ -159,7 +159,7 @@ func runCampaign(args []string) error {
 	runs := flags.Int("runs", 5, "repetitions per arm")
 	seed := flags.Int64("seed", 20260910, "base seed")
 	filters := map[string]*string{}
-	for _, name := range []string{"route", "profile", "workload", "direction", "topology", "resource", "byte-count", "lanes"} {
+	for _, name := range []string{"route", "profile", "workload", "direction", "topology", "resource", "byte-count", "lanes", "feature"} {
 		filters[name] = flags.String(name, "", "CONNECT_PERFVAR_"+strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
 	}
 	if err := flags.Parse(args); err != nil {

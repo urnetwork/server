@@ -724,11 +724,20 @@ CONNECT_PERFVAR_SEED=<decimal integer>
 CONNECT_PERFVAR_RUN_COUNT=<positive decimal integer>
 CONNECT_PERFVAR_BYTE_COUNT=<positive decimal byte count>
 CONNECT_PERFVAR_LOGICAL_LANES=0|1|4|8
+CONNECT_PERFVAR_FEATURE=defer-timeout-resend|fast-path-size-aware
 ```
 
 Defaults are all four routes, `clean-lan`, `tcp`, both directions, `one-hop`, no
-extenders, default resources, seed `20260810`, five fresh repetitions, and a
-32 MiB payload subject to the profile-specific reductions described above.
+extenders, default resources, no features, seed `20260810`, five fresh
+repetitions, and a 32 MiB payload subject to the profile-specific reductions
+described above. `CONNECT_PERFVAR_FEATURE` selects production settings that
+ship off by default and are under measurement (connect/FLIGHTGATEFIX.md §13.5
+and §13.6): `defer-timeout-resend` sets
+`SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress` and
+`fast-path-size-aware` sets
+`P2pTransportSettings.FastPathSizeAwareAdmission` on both endpoint Clients. An
+empty selection leaves every existing scenario identity unchanged; a non-empty
+one is part of the identity and of the profile hash.
 Logical Transfer data lanes default to `0` (disabled). A nonzero selection is
 applied to both full-TUN endpoints but not to direct underlay calibration, and
 is recorded in the scenario identity. Use `1` to isolate the cost of sequence

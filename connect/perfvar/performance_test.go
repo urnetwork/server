@@ -3518,6 +3518,7 @@ func measurePerfvarRun(
 	resources := perfvarTunResources(executionScenario.Resource)
 	resources.ApplicationMtu = executionScenario.ApplicationMtu
 	resources.LogicalDataLaneCount = executionScenario.LogicalDataLaneCount
+	resources.Features = executionScenario.Features
 	path, setupErr := tryNewFullTunPathWithTopology(
 		ctx,
 		t,

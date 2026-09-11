@@ -784,3 +784,90 @@ func TestPerfvarMemoryObservationAndAggregate(t *testing.T) {
 		t.Fatalf("aggregate memory=%d/%d/%d", aggregate.MemoryP95MedianBytes, aggregate.MemoryMaxBytes, aggregate.MemorySamplesAboveCeiling)
 	}
 }
+
+// Features are an opt-in scenario dimension: absent by default, part of the
+// identity when present, and applied to both endpoint Clients.
+func TestPerfvarFeatureSelection(t *testing.T) {
+	defaults, err := loadPerfvarConfig(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaults.Features) != 0 {
+		t.Fatalf("default features=%v", defaults.Features)
+	}
+	values := map[string]string{
+		"CONNECT_PERFVAR_ROUTE":    "p2p-fast+exchange-h1",
+		"CONNECT_PERFVAR_PROFILE":  mixedDirectLoss300bpName,
+		"CONNECT_PERFVAR_WORKLOAD": "tcp-parallel",
+		"CONNECT_PERFVAR_FEATURE":  "defer-timeout-resend,fast-path-size-aware",
+	}
+	config, err := loadPerfvarConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Features) != 2 || config.Features[0] != perfvarFeatureDeferTimeoutResend ||
+		config.Features[1] != perfvarFeatureFastPathSizeAware {
+		t.Fatalf("features=%v", config.Features)
+	}
+	values["CONNECT_PERFVAR_FEATURE"] = "defer-timeout-resend-typo"
+	if _, err := loadPerfvarConfig(func(name string) string { return values[name] }); err == nil {
+		t.Fatal("unknown feature was accepted")
+	}
+	values["CONNECT_PERFVAR_FEATURE"] = "defer-timeout-resend"
+	config, err = loadPerfvarConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := resolvePerfvarScenarios(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFeature, err := scenarios[0].hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := scenarios[0]
+	plain.Features = nil
+	withoutFeature, err := plain.hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withFeature == withoutFeature {
+		t.Fatal("a feature selection did not change the scenario identity")
+	}
+	// An empty selection keeps the historical identity byte for byte.
+	baseline, err := loadPerfvarConfig(func(name string) string {
+		if name == "CONNECT_PERFVAR_FEATURE" {
+			return ""
+		}
+		return values[name]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineScenarios, err := resolvePerfvarScenarios(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineHash, err := baselineScenarios[0].hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineHash != withoutFeature {
+		t.Fatal("an empty feature selection changed the scenario identity")
+	}
+	// Both settings reach the endpoint Clients, and neither is on by default.
+	off := fullTunClientSettings(fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0)
+	if off.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
+		off.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
+		t.Fatal("an opt-in setting is on by default")
+	}
+	on := fullTunClientSettingsWithFeatures(
+		fullTunRouteP2pFastExchangeH1, nil, nil, nil, 0,
+		[]string{perfvarFeatureDeferTimeoutResend, perfvarFeatureFastPathSizeAware},
+	)
+	if !on.SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress ||
+		!on.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.FastPathSizeAwareAdmission {
+		t.Fatal("a selected feature did not reach the Client settings")
+	}
+}
