@@ -34,6 +34,12 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 			return "[edge-3][taskworker][g2][cid:hot][I][2026-08-31T03:54:50Z][task.go:1938][01a055c8-759e-406e-4061-603f0dc86869]eval active(2875.00s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})\n" +
 				"[edge-3][taskworker][g2][cid:hot][I][2026-08-31T03:54:51Z][task.go:1938][01a055f4-ccee-406e-4061-603f0dc86869]eval active(7.00s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
 		},
+		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
+			}
+			return "", nil
+		},
 	}
 
 	alerts, err := NewWorkerChurnSignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
@@ -54,6 +60,7 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		"fleet_median_alloc_bytes_per_s_1m=3145728",
 		"alloc_ratio_1m=216.7",
 		"active_tasks=UpdateClientScores:2875s,CloseExpiredContracts:7s",
+		"score_alias_schema_ready=false",
 		"target's exported score payload is caller-invariant",
 		"CloseExpiredContracts is active on the same host/block",
 		"delay its Go work between otherwise short PostgreSQL statements",
@@ -70,6 +77,142 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		"01a055c8-759e-406e-4061-603f0dc86869",
 		"01a055f4-ccee-406e-4061-603f0dc86869",
 	)
+}
+
+func runWorkerChurnAliasSynthetic(
+	t *testing.T,
+	taskName string,
+	markerValue string,
+	markerErr error,
+) (Alert, int) {
+	t.Helper()
+	now := time.Date(2026, 9, 12, 14, 30, 0, 0, time.UTC)
+	workers := []workerMetricFixture{
+		{host: "worker-a", block: "g1", instance: "runtime-a", cpuRate: 0.02, allocRate: 1 << 20},
+		{host: "worker-b", block: "g1", instance: "runtime-b", cpuRate: 0.04, allocRate: 2 << 20},
+		{host: "worker-c", block: "g1", instance: "runtime-c", cpuRate: 0.06, allocRate: 4 << 20},
+		{host: "worker-hot", block: "g2", instance: "runtime-hot", cpuRate: 4.001, allocRate: 320 << 20},
+	}
+	redisReads := 0
+	source := &syntheticSource{
+		hostFn: func(_ HostSettings, _ string) (string, error) {
+			return workerRatesFixtureJSON(t, now, workers...), nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "[worker-hot][taskworker][g2][cid:runtime-hot][I][2026-09-12T14:29:55Z][task.go:1938][02b166d9-86af-517f-5172-714a1ed9797a]eval active(90.00s) synthetic/taskworker/work." + taskName + "({})", nil
+		},
+		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
+			redisReads++
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
+			}
+			return markerValue, markerErr
+		},
+	}
+
+	alerts, err := NewWorkerChurnSignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "worker-cpu-allocation-churn")
+	requireAlertOmits(t, alert, "02b166d9-86af-517f-5172-714a1ed9797a")
+	return alert, redisReads
+}
+
+func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
+	tests := []struct {
+		name        string
+		markerValue string
+		markerErr   error
+		want        []string
+		omit        []string
+	}{
+		{
+			name:        "absent",
+			markerValue: "",
+			want: []string{
+				"score_alias_schema_ready=false",
+				"target's exported score payload is caller-invariant",
+				"Deploy the target-oriented UpdateClientScores fanout",
+			},
+			omit: []string{"already active; do not redeploy"},
+		},
+		{
+			name:        "ready",
+			markerValue: redisScoreAliasReadyValue,
+			want: []string{
+				"score_alias_schema_ready=true",
+				"durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass",
+				"residual allocation in the deployed sparse exporter",
+				"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
+				"capture phase-local allocation evidence",
+			},
+			omit: []string{"Deploy the target-oriented UpdateClientScores fanout"},
+		},
+		{
+			name:      "unknown",
+			markerErr: fmt.Errorf("synthetic marker unavailable"),
+			want: []string{
+				"score_alias_schema_ready=unknown",
+				"alias-schema marker lookup failed",
+				"cannot distinguish the former caller-oriented fanout from residual allocation",
+				"score-alias deployment boundary could not be read: synthetic marker unavailable",
+				"Read the client_score_alias_v1_ready marker before changing the deployment",
+			},
+			omit: []string{"score_alias_schema_ready=false", "score_alias_schema_ready=true"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			alert, redisReads := runWorkerChurnAliasSynthetic(
+				t,
+				"UpdateClientScores",
+				test.markerValue,
+				test.markerErr,
+			)
+			if redisReads != 1 {
+				t.Fatalf("score-alias reads = %d, want 1", redisReads)
+			}
+			markdown := alert.Markdown()
+			for _, want := range test.want {
+				if !strings.Contains(markdown, want) {
+					t.Fatalf("worker-churn %s diagnosis missing %q:\n%s", test.name, want, markdown)
+				}
+			}
+			for _, omit := range test.omit {
+				if strings.Contains(markdown, omit) {
+					t.Fatalf("worker-churn %s diagnosis retained %q:\n%s", test.name, omit, markdown)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerChurnSignalSyntheticNonScoreContextSkipsAliasLookup(t *testing.T) {
+	alert, redisReads := runWorkerChurnAliasSynthetic(
+		t,
+		"ProviderEgressProbe",
+		redisScoreAliasReadyValue,
+		nil,
+	)
+	if redisReads != 0 {
+		t.Fatalf("non-score context read score-alias marker %d time(s)", redisReads)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"active_tasks=ProviderEgressProbe:90s",
+		"Co-resident task heartbeats narrow the candidate work",
+		"Profile or inspect the active task families on this exact executor",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("generic worker-churn diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, omit := range []string{"score_alias_schema_ready=", "client_score_alias_v1_ready", "target-oriented fanout"} {
+		if strings.Contains(markdown, omit) {
+			t.Fatalf("generic worker-churn diagnosis retained score-specific %q:\n%s", omit, markdown)
+		}
+	}
 }
 
 func TestWorkerChurnSignalSyntheticRequiresBothRatesAndFreshSkew(t *testing.T) {

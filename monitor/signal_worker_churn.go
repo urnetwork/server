@@ -134,6 +134,9 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	var activeLogErr error
 	activeLogLoaded := false
 	activeLogObservedAt := now
+	aliasesReady := false
+	var aliasesReadyErr error
+	aliasesReadyLoaded := false
 	for _, worker := range pairedWorkers {
 		cpuRatio := safeRatio(worker.cpuRate, cpuMedian)
 		allocRatio := safeRatio(worker.allocRate, allocMedian)
@@ -196,10 +199,35 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		mechanism := "The conjunction of near-quota CPU, high allocation throughput, and fleet-relative skew identifies process-local object churn rather than a large but quiescent heap. Co-resident task heartbeats narrow the candidate work, but do not by themselves attribute every allocation to one task."
 		action := "Profile or inspect the active task families on this exact executor and remove repeated encoding, copying, or unbounded materialization. Keep existing bounded writers and deadlines; do not normalize the signal by raising the CPU limit or restarting the worker merely to clear evidence."
 		verify := "For two consecutive one-minute probes, either CPU falls below 3.8 cores, allocation falls below 256MiB/s, or both rates return within 8x of the fleet median; implicated tasks also complete inside their historical duration band."
+		aliasEvidence := ""
 		if scoreActive {
-			mechanism = "UpdateClientScores is active on the exact hot executor. A target's exported score payload is caller-invariant unless that caller blocks a network present in the target; encoding the unchanged target separately for every caller multiplies gob work by the caller-location count and produces the observed CPU/allocation churn even when streaming keeps live heap bounded."
-			action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and independently encode full overrides only for callers whose blocked networks actually remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not raise the cgroup limit or restart to erase the evidence."
-			verify = "A post-deploy UpdateClientScores run completes inside its historical band while its exact executor remains below the CPU/allocation guards for two consecutive probes; aliases preserve unfiltered selections, excluded callers still use overrides, and the score-byte signal drains after the legacy TTL."
+			if !aliasesReadyLoaded {
+				aliasesReadyLoaded = true
+				redisHost := env.cfg.hostByRole("redis-cluster")
+				if redisHost == nil {
+					aliasesReadyErr = fmt.Errorf("no redis-cluster host in inventory")
+				} else {
+					aliasesReady, aliasesReadyErr = redisScoreAliasesReady(ctx, env, redisHost)
+				}
+			}
+			switch {
+			case aliasesReadyErr != nil:
+				observed += " score_alias_schema_ready=unknown"
+				mechanism = "UpdateClientScores is active on the exact hot executor, but the alias-schema marker lookup failed. Executor correlation still identifies score export as a candidate allocator; without the marker, this probe cannot distinguish the former caller-oriented fanout from residual allocation in the target-oriented sparse exporter."
+				aliasEvidence = " The score-alias deployment boundary could not be read: " + aliasesReadyErr.Error()
+				action = "Read the client_score_alias_v1_ready marker before changing the deployment. If absent, deploy the target-oriented fanout and alias-aware cache; if present, do not redeploy it—let the current task cross its terminal boundary and observe the next collection before profiling the remaining target maps and encoding concurrency. Preserve bounded streaming and do not restart or raise the CPU limit to erase the evidence."
+				verify = "The marker state is known, the corresponding sparse writer path is active, and consecutive score runs finish with the executor returning below the CPU/allocation guards for two consecutive probes without selection loss or Redis capacity pressure."
+			case aliasesReady:
+				observed += " score_alias_schema_ready=true"
+				mechanism = "UpdateClientScores is active on the exact hot executor, and the durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass. This is therefore residual allocation in the deployed sparse exporter, not evidence that the former caller-oriented fix is missing. Executor correlation alone does not identify the exact allocating subphase."
+				action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Let the current score run cross its terminal boundary and observe the next collection. If consecutive sparse passes still cross all CPU/allocation guards, capture phase-local allocation evidence and bound the remaining provider-map or encoding concurrency. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
+				verify = "Consecutive post-marker score runs complete inside their normal band, and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
+			default:
+				observed += " score_alias_schema_ready=false"
+				mechanism = "UpdateClientScores is active on the exact hot executor. A target's exported score payload is caller-invariant unless that caller blocks a network present in the target; encoding the unchanged target separately for every caller multiplies gob work by the caller-location count and produces the observed CPU/allocation churn even when streaming keeps live heap bounded."
+				action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and independently encode full overrides only for callers whose blocked networks actually remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not raise the CPU limit or restart to erase the evidence."
+				verify = "A post-deploy UpdateClientScores run completes inside its historical band while its exact executor remains below the CPU/allocation guards for two consecutive probes; aliases preserve unfiltered selections, excluded callers still use overrides, and the score-byte signal drains after the legacy TTL."
+			}
 			if closeActive {
 				mechanism += " CloseExpiredContracts is active on the same host/block, so this process-local saturation can delay its Go work between otherwise short PostgreSQL statements; close-duration and open-contract age buckets remain the authoritative impact measures."
 				verify += " The co-resident close checkpoint also returns below 120 seconds and its older-than-five/30-minute contract buckets fall on consecutive samples."
@@ -212,6 +240,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		} else if activeSummary == "" {
 			evidence += " No fresh active-task heartbeat was available for this executor, so the rate finding remains valid without task attribution."
 		}
+		evidence += aliasEvidence
 
 		findingContext := "CPU saturation alone can be useful work, and allocation alone can be a short burst. Requiring both absolute guards and both fleet-skew guards avoids treating an ordinary busy worker as pathological churn; this signal complements the live-heap guard in §2.12."
 		if closeActive {

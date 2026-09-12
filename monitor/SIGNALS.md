@@ -3889,6 +3889,11 @@ label_replace(
   ratios. A missing heartbeat prevents task attribution but does not clear the
   process-rate finding. A large quiescent heap belongs to §2.12; this signal
   catches sustained encoding/allocation even after streaming bounds live heap.
+- When the exact executor has an active `UpdateClientScores`, read the durable
+  score-alias ready marker. An absent marker owns the former caller-oriented
+  fanout deployment; a present marker proves that fix completed and changes
+  the boundary to residual allocation in the sparse exporter; an unreadable
+  marker remains explicitly unknown and permits only conditional remediation.
 - ACTION: remove repeated encoding, copying, or materialization in the exact
   active task family. Preserve bounded writers and task deadlines. Do not
   raise the CPU quota or restart the worker merely to make the evidence vanish.
@@ -3972,6 +3977,30 @@ transaction-age probes were clean. Three sequential 14–15-minute close
 checkpoints under one uninterrupted score export strengthen the shared
 process-budget cause. Keep the 25,000 cap and deploy the score fanout fix;
 additional close workers would add contention without removing the allocator.
+
+A later marker-ready boundary on 2026-09-12 separated a recovered short burst
+from that former defect. One sustained warning at 13:42:32Z measured 3.820
+cores and 304.42MiB/s, 29.0× and 22.5× its seven-worker fleet medians. Exact
+15-second history bounded the conjunction to 13:41:30Z–13:42:45Z and was
+healthy from 13:43:00Z onward without a process restart; runtime and desired
+configuration both retained four Go execution threads. A bounded retrospective
+found 20 score runs and 13 absolute CPU/allocation samples in three short
+clusters across two executors. Every hot sample had a same-executor score
+heartbeat within 20 seconds. The warned executor also had at least three
+provider-egress probes, but those probes remained after its rates normalized,
+so their presence alone was not sufficient. The durable alias marker was
+present: the target-oriented fix was active, and the evidence identifies a
+phase-local residual score-export burst without proving its exact allocating
+subphase.
+
+That recovered identity satisfied the normal two-consecutive-probe gate; do
+not redeploy the alias fix, restart the worker, or raise its CPU allocation. A
+single shorter absolute-rate cluster that does not pass both fleet-relative
+guards and sustain is context, not a new incident. If consecutive marker-ready
+score passes cross all four guards, capture phase-local allocation evidence and
+then bound the remaining provider-map or encoding concurrency at the proved
+owner. Do not lower score-export concurrency or change scheduler parallelism
+from heartbeat correlation alone.
 
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
