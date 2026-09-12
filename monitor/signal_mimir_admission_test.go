@@ -443,6 +443,7 @@ func TestMimirAdmissionSignalPagesOnInitialPositiveExactCounter(t *testing.T) {
 		"publisher_starts=11",
 		"readiness_rejects=13",
 		"admission_rejects=17",
+		"allowlisted local/global series-limit fields",
 		"same-window context only",
 		"SIGNALS.md §11.20a",
 	} {

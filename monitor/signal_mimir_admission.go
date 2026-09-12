@@ -952,7 +952,7 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 			assessment.readinessRejects,
 			assessment.admissionRejects,
 		),
-		evidence: "Each host identifies Mimir through its loopback build-info response, reduces the exact process metrics and two allowlisted limit fields locally, and returns only fixed numeric fields. Rendered configuration, metric labels, tenant values, and journal lines never leave the host.",
+		evidence: "Each host identifies Mimir through its loopback build-info response, reduces the exact process metrics and allowlisted local/global series-limit fields locally, and returns only fixed numeric fields. Rendered configuration, metric labels, tenant values, and journal lines never leave the host.",
 		context:  "Publisher starts, readiness rejects, and admission-rejection log matches are aggregate same-window context only. Equality can support a rejected-candidate amplification hypothesis after exact artifact and rollout correlation; inequality cannot name a different cause, and none of the journal counts changes this direct admission classification. A process replacement or counter decrease starts a new baseline and cannot clear this incident.",
 		action:   "Stop treating retries or a limit increase as recovery. Compare exact running Server and Warp artifacts, migration readiness, publisher starts, and exporter cardinality. If rejected candidates publish, deploy the established post-admission metrics fix through the ordinary authorized rollout. Otherwise reduce the first proven unnecessary metric family or correct the genuine cardinality source. Preserve process instance identity and do not restart Mimir merely to reset its head.",
 		verify: fmt.Sprintf(
