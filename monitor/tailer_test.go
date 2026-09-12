@@ -887,54 +887,88 @@ func payoutAttemptLogLines(second string, attempt int) (string, string) {
 	return processorLine, evaluatorLine
 }
 
-// Four canonical task attempts in one source second are the exact live shape
-// that immediately preceded a Circle 429. The Circle-client copy of each error
-// contributes to diagnostic volume but not attempt concurrency, and an exact
-// tail replay must not manufacture a fifth attempt.
-func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) {
+func payoutAdmissionLogLine(second string, admission int) string {
+	admittedAt, err := time.Parse(time.RFC3339, second+"Z")
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(
+		`[worker-a.invalid][taskworker][generation-a][cid:synthetic][I][%s.%06dZ][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
+		second,
+		admission+1,
+		admittedAt.Unix(),
+		admission+1,
+	)
+}
+
+// Response and evaluator timestamps occur after POST and can coalesce even
+// when Redis admitted each request in a different rolling second. They retain
+// the separate liquidity finding and 429 correlation state, but must never
+// drive the admission-ceiling finding.
+func TestPayoutRetryMicroburstIgnoresIndependentResponseCompletions(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	var replay string
 	for attempt := 0; attempt < 4; attempt++ {
 		processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", attempt)
 		tailer.classify(processorLine)
 		tailer.classify(evaluatorLine)
-		if attempt == 0 {
-			replay = evaluatorLine
-		}
 	}
-	tailer.classify(replay)
+	processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", 0)
+	tailer.classify(processorLine)
+	tailer.classify(evaluatorLine)
+
+	findings := tailer.drainWindow()
+	if liquidity := findingByClass(t, findings, "payout-wallet-insufficient"); liquidity.healthy {
+		t.Fatal("wallet response controls lost the liquidity finding")
+	}
+	if burst := findingByClass(t, findings, "payout-retry-microburst"); !burst.healthy {
+		t.Fatalf("response completions manufactured an admission burst: %+v", burst)
+	}
+}
+
+// Four exact admission markers in one normalized source second cannot fit
+// under the three-per-rolling-second gate. A replayed marker must not
+// manufacture a fifth admission.
+func TestPayoutRetryMicroburstCountsPrePostAdmissionsPerSecond(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	lines := make([]string, 0, 4)
+	for admission := 0; admission < 4; admission++ {
+		line := payoutAdmissionLogLine("2026-09-12T19:10:23", admission)
+		lines = append(lines, line)
+		tailer.classify(line)
+	}
+	tailer.classify(lines[0])
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
 	if finding.healthy {
-		t.Fatal("four same-second payout attempts did not create a microburst finding")
+		t.Fatal("four same-second admissions did not create a microburst finding")
 	}
 	for _, want := range []string{
-		"peak_task_attempts_per_second=4",
+		"peak_admitted_submissions_per_second=4",
 		"threshold=4/s",
-		"task_attempts=4",
-		"diagnostic_lines=9",
-		"exact-replay-deduplicated task evaluator lines",
-		"separate from the operational liquidity alert",
-		"Proportional 30–90-minute jitter",
-		"independent random choices still cannot impose a fleet-wide per-second ceiling",
-		"five wallet rejections completed and a sixth transfer request received 429",
-		"four of those five rejections came from blocks whose exact executable already contained proportional jitter",
-		"commit 14928f69",
-		"commit 66525afc",
-		"atomic Redis-time rolling gate of three transfer submits/second",
-		"complete §2.14 admission metrics",
-		"peak_task_attempts_per_second stays below 4",
-		"[<id>]eval error",
+		"admitted_submissions=4",
+		"diagnostic_lines=5",
+		"exact-replay-deduplicated pre-POST admission markers",
+		"authoritative Redis TIME second from the atomic admission decision and is emitted before the processor POST",
+		"cannot fit under a three-admission rolling-second ceiling",
+		"mixed rollout or telemetry loss",
+		"absent markers are unknown rather than zero",
+		"Payout-wallet-insufficient remains a separate finance/operations condition",
+		"complete §2.14 admission-observable coverage",
+		"An uninstrumented Circle caller is instead a 429-source investigation",
+		"peak_admitted_submissions_per_second stays below 4",
+		"[circlec][transfer-admission] admitted observable=v1 redis_second=1789240223 sequence=4 deferrals=0 wait_ms=0",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
 			t.Fatalf("microburst finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(finding.context, "eb7e79b6") {
-		t.Fatalf("microburst finding retained former non-ancestor deployment guidance: %+v", finding)
+	for _, forbidden := range []string{"worker-a.invalid", "cid:synthetic"} {
+		if strings.Contains(finding.evidence, forbidden) {
+			t.Fatalf("microburst evidence leaked %q: %q", forbidden, finding.evidence)
+		}
 	}
 	if logIDRe.MatchString(finding.evidence) {
-		t.Fatalf("microburst evidence leaked a payment id: %q", finding.evidence)
+		t.Fatalf("microburst evidence retained an identifier: %q", finding.evidence)
 	}
 }
 
@@ -944,64 +978,68 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 // 16:31:47 but previously rendered a 16:31:33 sample).
 func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	_, first := payoutAttemptLogLines("2026-08-31T16:31:33", 1)
+	first := payoutAdmissionLogLine("2026-09-12T19:11:33", 1)
 	tailer.classify(first)
-	for attempt := 10; attempt < 15; attempt++ {
-		_, peak := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
+	for admission := 10; admission < 15; admission++ {
+		peak := payoutAdmissionLogLine("2026-09-12T19:11:47", admission)
 		tailer.classify(peak)
 	}
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
 	for _, want := range []string{
-		"peak_task_attempts_per_second=5",
-		"peak_source_second=2026-08-31T16:31:47Z",
-		"peak source second: 2026-08-31T16:31:47Z",
-		"sample from peak second: [edge-3][taskworker][g2][cid:test][I][2026-08-31T16:31:47",
+		"peak_admitted_submissions_per_second=5",
+		"peak_source_second=2026-09-12T19:11:47Z",
+		"peak source second: 2026-09-12T19:11:47Z",
+		"sample from peak second: [circlec][transfer-admission] admitted observable=v1 redis_second=1789240307 sequence=15",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
 			t.Fatalf("peak finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(finding.evidence, "2026-08-31T16:31:33") {
+	if strings.Contains(finding.evidence, "2026-09-12T19:11:33") {
 		t.Fatalf("peak evidence retained the first sparse second: %q", finding.evidence)
 	}
 }
 
-// Production taskworker envelopes use the host's explicit local offset. The
-// burst instant must render in UTC, with a zone, so an operator can join it to
-// Circle, PostgreSQL, and kernel evidence without silently shifting five
-// hours or treating an offset-free wall clock as UTC.
-func TestPayoutRetryMicroburstNormalizesPeakSourceSecondToUTC(t *testing.T) {
+// Host clocks, logger scheduling, and delivery order cannot own the invariant.
+// Four markers with deliberately skewed, out-of-order envelopes must group on
+// the authoritative Redis TIME second returned by the atomic admission script.
+func TestPayoutRetryMicroburstUsesRedisSecondDespiteSkewedOutOfOrderHostTimestamps(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	for attempt := 0; attempt < 4; attempt++ {
-		id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
-		timestamp := fmt.Sprintf("2026-08-31T18:31:16.%06dZ", attempt)
-		if attempt >= 2 {
-			timestamp = fmt.Sprintf("2026-08-31T13:31:16.%06d-05:00", attempt)
-		}
+	redisSecond := time.Date(2026, 9, 12, 19, 12, 16, 0, time.UTC).Unix()
+	timestamps := []string{
+		"2031-01-02T03:04:59.000001Z",
+		"2024-02-03T04:05:01.000002Z",
+		"2029-04-05T01:06:42.000003-05:00",
+		"2025-06-07T08:09:03.000004Z",
+	}
+	for admission, timestamp := range timestamps {
 		line := fmt.Sprintf(
-			`[edge-1][taskworker][g2][cid:test][I][%s][task.go:1930][%s]eval error = asset amount owned by the wallet is insufficient`,
+			`[worker-b.invalid][taskworker][generation-b][cid:synthetic][I][%s][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
 			timestamp,
-			id,
+			redisSecond,
+			admission+1,
 		)
 		tailer.classify(line)
 	}
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
-	combined := finding.observed + "\n" + finding.evidence
+	combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism
 	for _, want := range []string{
-		"peak_source_second=2026-08-31T18:31:16Z",
-		"peak source second: 2026-08-31T18:31:16Z",
-		"normalized UTC",
-		"sample from peak second: [edge-1][taskworker][g2][cid:test][I][2026-08-31T13:31:16",
+		"peak_source_second=2026-09-12T19:12:16Z",
+		"peak source second: 2026-09-12T19:12:16Z",
+		"authoritative Redis TIME second",
+		"rather than an inference from host clocks",
+		"sample from peak second: [circlec][transfer-admission] admitted observable=v1",
 	} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("UTC-normalized peak finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(combined, "peak_source_second=2026-08-31T13:31:16 ") ||
-		strings.Contains(combined, "peak source second: 2026-08-31T13:31:16 (") {
-		t.Fatalf("peak finding retained an offset-free local wall clock: %+v", finding)
+	for _, timestamp := range timestamps {
+		if strings.Contains(combined, timestamp) {
+			t.Fatalf("peak finding retained skewed host time %q: %+v", timestamp, finding)
+		}
 	}
 }
 
@@ -1121,7 +1159,7 @@ func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 
 // A connected Loki tail can miss a record ingested behind its source-time
 // cursor. The bounded overlap must add only the absent records, including the
-// canonical 429 and the two missing members of a same-second payout burst;
+// canonical 429 and the two missing members of a same-second admission burst;
 // replaying the same overlap on the next cadence must add nothing.
 func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
@@ -1131,25 +1169,32 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	tailer.lastLineTime = tailer.startedAt
 
 	walletLines := make([]string, 0, 4)
+	admissionLines := make([]string, 0, 4)
 	for attempt := 0; attempt < 4; attempt++ {
 		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T18:53:30", attempt)
 		walletLines = append(walletLines, evaluatorLine)
+		admissionLines = append(admissionLines, payoutAdmissionLogLine("2026-08-31T18:53:30", attempt))
 	}
 	rateLimitLine := `[edge-0][taskworker][g1][cid:test][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
 
-	// The stable stream delivered newer traffic but omitted attempts one and
-	// three plus the 429.
+	// The stable stream delivered newer traffic but omitted admissions one and
+	// three plus all response evidence and the 429.
+	tailer.ingestStanding(admissionLines[0], true, true)
+	tailer.ingestStanding(admissionLines[2], true, true)
 	tailer.ingestStanding(walletLines[0], true, true)
 	tailer.ingestStanding(walletLines[2], true, true)
-	reconciled := strings.Join(append(append([]string{}, walletLines...), rateLimitLine), "\n")
+	reconciledLines := append([]string{}, admissionLines...)
+	reconciledLines = append(reconciledLines, walletLines...)
+	reconciledLines = append(reconciledLines, rateLimitLine)
+	reconciled := strings.Join(reconciledLines, "\n")
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return reconciled, nil }
 	tailer.reconcileOnce(context.Background())
 
 	findings := tailer.drainWindow()
 	burst := findingByClass(t, findings, "payout-retry-microburst")
 	for _, want := range []string{
-		"peak_task_attempts_per_second=4",
-		"task_attempts=4",
+		"peak_admitted_submissions_per_second=4",
+		"admitted_submissions=4",
 		"diagnostic_lines=4",
 	} {
 		if !strings.Contains(burst.observed, want) {
@@ -1442,8 +1487,8 @@ func TestStandingTailAttributesDirectDroppedEntriesToAffectedService(t *testing.
 	}
 }
 
-// Minute volume is the liquidity/retry-amplification signal, but it is not a
-// synchronized microburst when canonical attempts occupy different seconds.
+// Minute volume is the liquidity/retry-amplification signal, but admissions
+// spread across distinct seconds do not violate the short-window invariant.
 // The subsequent empty window must also resolve a prior burst identity.
 func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
@@ -1452,6 +1497,7 @@ func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 		processorLine, evaluatorLine := payoutAttemptLogLines(second, attempt)
 		tailer.classify(processorLine)
 		tailer.classify(evaluatorLine)
+		tailer.classify(payoutAdmissionLogLine(second, attempt))
 	}
 	findings := tailer.drainWindow()
 	if payout := findingByClass(t, findings, "payout-wallet-insufficient"); payout.healthy {
@@ -1471,10 +1517,10 @@ func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 func TestPayoutRetryMicroburstDeduplicatesReplayAcrossDrainBoundary(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
 	lines := make([]string, 0, 4)
-	for attempt := 0; attempt < 4; attempt++ {
-		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:33", attempt)
-		lines = append(lines, evaluatorLine)
-		tailer.classify(evaluatorLine)
+	for admission := 0; admission < 4; admission++ {
+		line := payoutAdmissionLogLine("2026-08-31T15:46:33", admission)
+		lines = append(lines, line)
+		tailer.classify(line)
 	}
 	if first := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); first.healthy {
 		t.Fatal("initial same-second burst was not detected")

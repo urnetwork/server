@@ -23,26 +23,32 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// logBurst derives a short-window software-amplification finding from one
-// existing log class. eventRe selects exactly one canonical line per logical
-// attempt; exact-line fingerprints prevent a tail-stream replay from inflating
-// the peak.
+// logBurst derives a short-window finding from one fixed log class. eventRe
+// selects exactly one bounded event line; exact-line fingerprints prevent a
+// tail-stream replay from inflating the peak. correlationOnly bursts retain
+// bounded source-second state for another class without emitting a finding.
 type logBurst struct {
-	name      string
-	eventRe   *regexp.Regexp
-	threshold int
-	tier      string
-	meaning   string
-	mechanism string
-	context   string
-	action    string
-	verify    string
-	playbook  string
+	name            string
+	eventRe         *regexp.Regexp
+	eventSecond     func(string) string
+	threshold       int
+	tier            string
+	metricName      string
+	eventLabel      string
+	sourceLabel     string
+	correlationOnly bool
+	meaning         string
+	mechanism       string
+	context         string
+	action          string
+	verify          string
+	playbook        string
 }
 
 // logCanonical counts one canonical line per logical provider event while the
@@ -110,9 +116,9 @@ type logClass struct {
 	// lossless counter rather than the sampled log volume.
 	metricOnly bool
 	// burst is an independently actionable per-second finding derived from
-	// this class's canonical event lines. It stays separate from the parent
-	// alert so an operational cause (for example absent wallet liquidity) does
-	// not conceal or inherit a deployable retry-amplification defect.
+	// this class's bounded event lines, or correlation-only state used by
+	// another class. It stays separate from the parent alert so an operational
+	// cause does not conceal or inherit an admission defect.
 	burst *logBurst
 	// canonical optionally exposes a de-duplicated logical event count next to
 	// the raw class line rate. The line-rate threshold remains fail-safe when a
@@ -153,6 +159,32 @@ var (
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
 )
+
+var circleTransferAdmissionObservedRe = regexp.MustCompile(
+	`\[circlec\]\[transfer-admission\] admitted observable=v1 redis_second=([0-9]{1,19}) sequence=[0-9]{1,20} deferrals=[0-9]{1,20} wait_ms=[0-9]{1,20}[[:space:]]*$`,
+)
+
+// Retain only the fixed, identifier-free admission suffix. The surrounding
+// Warp identity can contain host, generation, and correlation labels that are
+// irrelevant to the fleet ceiling and must not enter an alert artifact.
+func circleTransferAdmissionObservedSample(line string) string {
+	if sample := circleTransferAdmissionObservedRe.FindString(line); sample != "" {
+		return truncateLine(strings.TrimSpace(sample))
+	}
+	return "[circlec][transfer-admission] admitted (malformed fields omitted)"
+}
+
+func circleTransferAdmissionObservedSecond(line string) string {
+	match := circleTransferAdmissionObservedRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return ""
+	}
+	second, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil || second <= 0 {
+		return ""
+	}
+	return time.Unix(second, 0).UTC().Format(time.RFC3339)
+}
 
 var (
 	signalSendLegacyRe = regexp.MustCompile(
@@ -515,6 +547,29 @@ var logClasses = []logClass{
 		rateThreshold: 500, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning:    "companion contract creation cannot find its origin contract — a spike = companion-path regression (origin closed early or client sequence bug)",
 		metricOnly: true},
+	{name: "circle-transfer-admitted", re: circleTransferAdmissionObservedRe,
+		sample: circleTransferAdmissionObservedSample,
+		// This fixed info marker exists only to drive the independently
+		// actionable per-second invariant. Its minute rate is neither an error
+		// nor a provider quota, so keep the ordinary class below any practical
+		// alert threshold.
+		rateThreshold: 1 << 30, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §2.14", redactIDs: true,
+		burst: &logBurst{
+			name:        "payout-retry-microburst",
+			eventRe:     circleTransferAdmissionObservedRe,
+			eventSecond: circleTransferAdmissionObservedSecond,
+			threshold:   4,
+			tier:        tierWarn,
+			metricName:  "admitted_submissions",
+			eventLabel:  "admitted submissions",
+			sourceLabel: "pre-POST admission markers",
+			meaning:     "four or more transfer submissions were admitted by the shared Redis gate in one normalized source second",
+			mechanism:   "Each exact marker carries the authoritative Redis TIME second from the atomic admission decision and is emitted before the processor POST begins. Four markers in one Redis second cannot fit under a three-admission rolling-second ceiling, so this is direct admission-boundary evidence rather than an inference from host clocks, logger scheduling, independent response completion, or task-evaluator timestamps.",
+			context:     "Interpret a quiet marker window only when §2.14 proves the admission-observable capability on every newest Taskworker and the standing-tail visibility checks are healthy. During mixed rollout or telemetry loss, absent markers are unknown rather than zero. Payout-wallet-insufficient remains a separate finance/operations condition, and payment-processor-rate-limit remains the provider response signal.",
+			action:      "First require complete §2.14 admission-observable coverage. If coverage is complete, preserve payment idempotency keys and the three-per-rolling-second ceiling while inspecting the Redis gate's atomic decision path and the active Taskworker artifacts that emitted the impossible markers. An uninstrumented Circle caller is instead a 429-source investigation because it cannot create this marker. Do not accelerate or manually replay payouts.",
+			verify:      "Every newest Taskworker exposes the §2.14 admission-observable capability and all five activity families; for a full 90-minute retry window, peak_admitted_submissions_per_second stays below 4, admission errors and processor 429s remain zero, and payment idempotency keys remain stable.",
+			playbook:    "SIGNALS.md §1.2, §2.14, and §5.7",
+		}},
 	{name: "circle-transfer-admission-failed", re: regexp.MustCompile(`\[circlec\]\[transfer-admission\] failed closed`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §2.14", redactIDs: true,
 		meaning:   "the Taskworker could not obtain the shared Circle transfer admission and deliberately returned before the financial POST",
@@ -531,23 +586,17 @@ var logClasses = []logClass{
 		mechanism: "The payment processor rejected a submit because the configured source wallet lacks enough token balance. Each affected AdvancePayment row remains pending and retries on the task system's consecutive-error backoff with a one-hour nominal cap. Current task code disperses saturated retries across 30–90 minutes with a one-hour mean; older code used only two seconds of jitter and preserved outage-created waves. N parked rows still produce roughly N canonical task attempts per hour on average, but one attempt normally emits both a Circle-client diagnostic and a task-evaluator line.",
 		context:   "This is primarily an operational liquidity boundary, not an API or PostgreSQL defect. The displayed line rate measures diagnostic amplification; wallet_insufficient_events is the exact-replay-deduplicated logical-attempt count and still is not the number of unique payouts. Proportional capped jitter contains synchronized processor bursts but cannot create wallet liquidity; accelerating retries only increases noise and load. A software release cannot fund the custodial wallet, and deleting task rows would discard owed payouts.",
 		action:    "Finance/ops must fund the exact network/token payout wallet identified in protected source logs, or pause payouts using the supported operational control until it is funded. Do not delete or manually replay pending_task rows, rotate payment idempotency keys, or loosen the retry cap.",
-		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main server commit 66525afc includes proportional retry jitter, the shared Circle transfer gate, and complete fail-closed telemetry; deploy it only to blocks that lack the runtime capabilities. Then use §2.14 to prove complete admission metrics, zero fail-closed errors, fewer than four canonical attempts/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
+		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main server commit 66525afc includes proportional retry jitter, the shared Circle transfer gate, and complete fail-closed telemetry; deploy it only to blocks that lack the runtime capabilities. Then use §2.14 to prove complete admission-observable and activity metrics, zero fail-closed errors, fewer than four exact pre-POST admission markers/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
 		redactIDs: true,
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
 			name:    "wallet_insufficient_events",
 		},
 		burst: &logBurst{
-			name:      "payout-retry-microburst",
-			eventRe:   regexp.MustCompile(`\[task\.go:[0-9]+\]`),
-			threshold: 4,
-			tier:      tierWarn,
-			meaning:   "four or more distinct AdvancePayment wallet-rejection attempts landed in one second, the exact short-window shape that preceded live Circle 429s",
-			mechanism: "The old capped task backoff added only 0–2 seconds of jitter, so outage-created rows retained second-scale cohorts across hourly retries. Proportional 30–90-minute jitter removes that deterministic wave but independent random choices still cannot impose a fleet-wide per-second ceiling. The standing tailer counts only task evaluator lines (one canonical line per attempt), groups their embedded timestamps by second, and de-duplicates exact replayed lines before computing the peak.",
-			context:   "This is a deployable software-amplification alert, separate from the operational liquidity alert. Circle documents a default five POST requests/second for Wallets API endpoints. At 07:12:48Z on 2026-09-01, five wallet rejections completed and a sixth transfer request received 429; four of those five rejections came from blocks whose exact executable already contained proportional jitter. Three more rejections and another 429 followed at 07:12:49Z. That post-deployment control proves random dispersion alone lacks a hard ceiling. Current-main server commit 14928f69 adds an atomic Redis-time rolling gate of three transfer submits/second, leaving two requests/second of headroom. The four-attempt threshold remains the pre-gate incident discriminator and the post-gate invariant.",
-			action:    "Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main server commit 66525afc only to blocks that lack its runtime capabilities. Preserve normal backoff and payment idempotency keys; do not accelerate, manually replay, or delete tasks. If every block already contains the gate, use §2.14 admission errors/waits and all Circle request sources before changing its ceiling.",
-			verify:    "Every newest Taskworker exports the complete §2.14 admission metrics from an artifact containing current-main server commit 66525afc; for one full 90-minute retry window, admission errors and payment-processor-rate-limit events remain zero, peak_task_attempts_per_second stays below 4, and payment idempotency keys do not change. Ordinary deferrals prove the gate is working. Funding or pausing the wallet remains a separate operational verification.",
-			playbook:  "SIGNALS.md §1.2 and §5.7",
+			name:            "payout-wallet-completion-correlation",
+			eventRe:         regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			threshold:       4,
+			correlationOnly: true,
 		}},
 	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
@@ -576,7 +625,7 @@ var logClasses = []logClass{
 		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. Historical pre-jitter cohorts repeatedly placed five or six distinct wallet-insufficient attempts in one second with a 429. The decisive post-jitter recurrence at 07:12:48Z placed five wallet rejections and a sixth 429 in one source second; four of those five rejections were on exact executables already proven to contain proportional jitter. Independent random retry times reduce average synchronization but cannot enforce the processor's hard boundary.",
 		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. Circle documents a default five POST requests/second for Wallets API endpoints, matching the observed sixth-request boundary without proving a private account override. The monitor joins exact-replay-deduplicated evaluator records by normalized source second and retains wallet cohort counts across its bounded reconciliation/drain boundary. This is not a general Circle outage diagnosis. The durable cause breakdown stores only each row's latest error, so its rate-limit count can fall while a different row receives a new 429.",
 		action:    "Do not manually retry, delete, or pull payment tasks forward. Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main server commit 66525afc only to blocks that lack its fleet-wide Redis-time transfer gate and fail-closed telemetry. If every block contains it, inspect §2.14 fail-closed errors and admission pressure plus all other Circle request sources before changing the conservative three-per-second ceiling.",
-		verify:    "Every newest Taskworker contains current-main server commit 66525afc and exports all §2.14 admission metrics; admission errors and processor-rate-limit events stay zero, canonical payout attempts stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
+		verify:    "Every newest Taskworker contains current-main server commit 66525afc and exports the §2.14 admission-observable capability plus all five activity families; admission errors and processor-rate-limit events stay zero, exact pre-POST admission markers stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
 		redactIDs: true},
 	// A durable transfer balance can intentionally span decades, but its Redis
 	// escrow counter is a derived, reconciled mirror. The old creation path
@@ -1671,7 +1720,11 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 				}
 			}
 			if c.burst != nil && c.burst.eventRe.MatchString(line) {
-				if second := logTimestampSecond(line); second != "" {
+				second := logTimestampSecond(line)
+				if c.burst.eventSecond != nil {
+					second = c.burst.eventSecond(line)
+				}
+				if second != "" {
 					fingerprint := sha256.Sum256([]byte(key + "\x00" + line))
 					_, replayedCurrent := self.burstSeen[fingerprint]
 					_, replayedPrevious := self.burstSeenPrevious[fingerprint]
@@ -1916,7 +1969,7 @@ func (self *logTailer) drainWindow() []finding {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}
 
-		if c.burst != nil {
+		if c.burst != nil && !c.burst.correlationOnly {
 			burstBroken := false
 			for _, key := range keys {
 				peak := self.burstPeaks[key]
@@ -1925,11 +1978,25 @@ func (self *logTailer) drainWindow() []finding {
 				}
 				burstBroken = true
 				attribution := self.classTargets[key]
+				metricName := c.burst.metricName
+				if metricName == "" {
+					metricName = "task_attempts"
+				}
+				eventLabel := c.burst.eventLabel
+				if eventLabel == "" {
+					eventLabel = "task evaluator attempts"
+				}
+				sourceLabel := c.burst.sourceLabel
+				if sourceLabel == "" {
+					sourceLabel = "task evaluator lines"
+				}
 				observed := fmt.Sprintf(
-					"peak_task_attempts_per_second=%d peak_source_second=%s threshold=%d/s task_attempts=%d diagnostic_lines=%d",
+					"peak_%s_per_second=%d peak_source_second=%s threshold=%d/s %s=%d diagnostic_lines=%d",
+					metricName,
 					peak,
 					self.burstPeakSeconds[key],
 					c.burst.threshold,
+					metricName,
 					self.burstEventTotals[key],
 					self.classCounts[key],
 				)
@@ -1940,16 +2007,17 @@ func (self *logTailer) drainWindow() []finding {
 					probeId: "logs/" + c.burst.name, tier: c.burst.tier,
 					class: c.burst.name, target: self.service, frame: attribution, sustain: 1,
 					symptom: fmt.Sprintf(
-						"service %s: %s peaked at %d distinct task attempts/s (threshold %d/s)",
+						"service %s: %s peaked at %d distinct %s/s (threshold %d/s)",
 						self.service,
 						c.burst.name,
 						peak,
+						eventLabel,
 						c.burst.threshold,
 					),
-					baseline:  fmt.Sprintf("peak distinct task evaluator attempts < %d/s; minute volume alone does not prove a synchronized retry wave", c.burst.threshold),
+					baseline:  fmt.Sprintf("peak distinct %s < %d/s; minute volume alone does not prove a synchronized burst", eventLabel, c.burst.threshold),
 					observed:  observed,
 					mechanism: c.burst.mechanism,
-					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (normalized UTC; exact-replay-deduplicated task evaluator lines grouped by embedded source second)\nsample from peak second: " + self.burstSamples[key],
+					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (authoritative Redis TIME second rendered in UTC; exact-replay-deduplicated " + sourceLabel + " grouped by the marker's admission bucket)\nsample from peak second: " + self.burstSamples[key],
 					context:   c.burst.context,
 					action:    c.burst.action,
 					verify:    c.burst.verify,

@@ -20,6 +20,7 @@ type circleAdmissionFixture struct {
 	errors       float64
 	waitCount    float64
 	waitSum      float64
+	observable   float64
 	omit         map[string]bool
 	rangeSamples map[string]float64
 	omitDelta    map[string]bool
@@ -70,6 +71,11 @@ func circleAdmissionFixtureJSON(
 		addRange("urnetwork_circle_transfer_admission_errors_total", process.errors)
 		addRange("urnetwork_circle_transfer_admission_wait_seconds_count", process.waitCount)
 		addRange("urnetwork_circle_transfer_admission_wait_seconds_sum", process.waitSum)
+		observable := process.observable
+		if observable == 0 {
+			observable = 1
+		}
+		add(circleAdmissionObservableMetricName, observable)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"status": "success",
@@ -91,6 +97,7 @@ func runCircleAdmissionFixture(t testing.TB, now time.Time, payload string) Aler
 			"urnetwork_circle_transfer_admission_errors_total",
 			"urnetwork_circle_transfer_admission_wait_seconds_count",
 			"urnetwork_circle_transfer_admission_wait_seconds_sum",
+			circleAdmissionObservableMetricName,
 			"increase%28",
 			"count_over_time%28",
 			"%5B5m%5D",
@@ -121,7 +128,7 @@ func TestCircleAdmissionSignalSeparatesCollectorPresenceFromRangeCoverage(t *tes
 	now := time.Date(2026, 9, 12, 5, 19, 33, 0, time.UTC)
 	oneSample := map[string]float64{}
 	omitDelta := map[string]bool{}
-	for _, metric := range circleAdmissionMetricNames {
+	for _, metric := range circleAdmissionDeltaMetricNames {
 		oneSample[metric] = 1
 		omitDelta[metric] = true
 	}
@@ -163,6 +170,41 @@ func TestCircleAdmissionQueryRequiresFreshCurrentSamples(t *testing.T) {
 		if !strings.Contains(query, want) {
 			t.Fatalf("Circle admission query does not require a fresh %s sample:\n%s", metric, query)
 		}
+	}
+	if strings.Contains(query, "increase("+circleAdmissionObservableMetricName) ||
+		strings.Contains(query, "count_over_time("+circleAdmissionObservableMetricName) {
+		t.Fatalf("Circle admission query treated the fixed capability as an activity counter:\n%s", query)
+	}
+}
+
+func TestCircleAdmissionSignalTreatsMixedObservableRolloutAsUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 12, 5, 20, 0, 0, time.UTC)
+	current := circleAdmissionFixture{
+		host: "worker-a.invalid", block: "generation-a", instance: "current-a", start: now.Add(-time.Hour),
+	}
+	missing := circleAdmissionFixture{
+		host: "worker-b.invalid", block: "generation-b", instance: "current-b", start: now.Add(-time.Hour),
+		omit: map[string]bool{circleAdmissionObservableMetricName: true},
+	}
+
+	alert := requireAlertClass(
+		t,
+		runCircleAdmissionFixture(t, now, circleAdmissionFixtureJSON(t, now, current, missing)),
+		"circle-transfer-admission-unobservable",
+	)
+	for _, want := range []string{
+		"worker-b.invalid/generation-b#current-b[admission-observable]",
+		"mixed rollout",
+		"absence is unknown",
+		"must never be rendered as zero admitted submissions",
+		"same executable that emits one identifier-free marker",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("mixed-rollout alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Markdown(), "admissions=0") {
+		t.Fatalf("mixed-rollout alert treated missing telemetry as zero:\n%s", alert.Markdown())
 	}
 }
 
@@ -286,5 +328,23 @@ func TestCircleAdmissionSignalSyntheticRejectsInvalidMetric(t *testing.T) {
 	if _, err := NewCircleAdmissionSignal().Run(context.Background(), settings); err == nil ||
 		!strings.Contains(err.Error(), "invalid urnetwork_circle_transfer_admissions_total value -1") {
 		t.Fatalf("invalid metric error = %v", err)
+	}
+}
+
+func TestCircleAdmissionSignalRejectsInvalidObservableCapability(t *testing.T) {
+	now := time.Date(2026, 9, 12, 5, 21, 0, 0, time.UTC)
+	process := circleAdmissionFixture{
+		host: "worker-c.invalid", block: "generation-c", instance: "invalid-observable",
+		start: now.Add(-time.Hour), observable: 2,
+	}
+	payload := circleAdmissionFixtureJSON(t, now, process)
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) { return payload, nil }}
+	settings := syntheticSettings(source)
+	settings.Environment = "synthetic"
+	settings.Now = func() time.Time { return now }
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+	if _, err := NewCircleAdmissionSignal().Run(context.Background(), settings); err == nil ||
+		!strings.Contains(err.Error(), "invalid urnetwork_circle_transfer_admission_observable_info value 2, want 1") {
+		t.Fatalf("invalid observable error = %v", err)
 	}
 }

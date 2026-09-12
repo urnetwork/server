@@ -828,7 +828,7 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"verify current-main server commit 66525afc in every active taskworker artifact",
 		"shared Redis-time Circle transfer admission",
 		"keep the transfer-admission gate fail closed",
-		"canonical payout attempts stay below four per second for a full 90-minute retry window",
+		"exact pre-POST admission markers stay below four per second for a full 90-minute retry window",
 		"Do not delete or manually replay the mixed family",
 	} {
 		if !strings.Contains(markdown, want) {

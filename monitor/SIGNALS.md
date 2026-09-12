@@ -451,24 +451,46 @@ WHERE function_name LIKE '%UpdateClient%'
   divided by two. This matters during the live stale-build drain, where a
   4/min line rate represented two logical 429 events and the durable current
   row class advanced independently.
-- The standing tail derives a separate `payout-retry-microburst` finding from
-  that wallet class. It counts only the canonical `[task.go:<line>]` evaluator
-  record (one per logical attempt), groups the embedded source timestamp by
-  second, and de-duplicates exact records across the current and immediately
-  previous drain window. Circle-client plus evaluator diagnostic pairs
-  therefore count as one attempt, and a `warpctl logs --since=1s` reconnect at
-  a minute boundary cannot manufacture a second burst. WARN at a peak of four
-  attempts in one source second: four was the smallest live cohort immediately
-  followed by a 429 on 2026-08-31. This is an empirical incident discriminator,
-  not a claim about Circle's account-specific quota. Keep its remediation
-  class distinct:
-  `payout-retry-microburst` is a **software deployment** alert closed by
-  converging stale taskworkers to `70b0d269` or later and observing a complete
-  90-minute drain window below four attempts/second; `payout-wallet-insufficient`
-  is an **operations/finance** alert that no software release can close. A
-  remaining 429 after every block is current requires measurement across all
-  Circle clients against the account's authoritative quota, not another blind
-  redeploy.
+- The standing tail derives `payout-retry-microburst` only from the fixed
+  `[circlec][transfer-admission] admitted observable=v1 ...` marker emitted
+  synchronously after the shared Redis gate admits and before the processor
+  POST. A stable-member command replay returns the original Redis TIME
+  admission second only while that reservation remains in the active rolling
+  window. A replay after cutoff obtains one fresh current slot/bucket before
+  the caller can return and POST. The tailer groups that returned field rather
+  than the host/logger timestamp and de-duplicates exact records across the
+  current and immediately previous drain window. A peak of four markers is
+  a direct violation of the three-admission rolling-second ceiling: all four
+  events within one Redis second also fit inside the one-second window ending
+  at the latest event. The process-local sequence
+  makes distinct admissions distinguishable without carrying a payment,
+  wallet, account, network, destination, token, request, or provider response.
+  The retained alert sample strips the Warp host/generation/correlation prefix.
+
+  Response and task-evaluator timestamps are deliberately excluded from this
+  invariant. They occur after POST and independent submissions admitted in
+  different seconds can complete together. Wallet evaluator records remain a
+  bounded correlation input for an actual processor 429, and
+  `payout-wallet-insufficient` remains the separate **operations/finance**
+  alert. A quiet admission-marker window is interpretable only while §2.14
+  proves the marker capability on every newest Taskworker and standing-tail
+  visibility/reconciliation is healthy; mixed rollout or missing telemetry is
+  unobservable, never zero. Close the software branch only after complete
+  capability coverage and a 90-minute window below four markers/second with
+  zero gate errors and zero processor 429s.
+
+  On 2026-09-12, the legacy evaluator-derived rule warned on four independent
+  wallet-rejection completions in one source second. The same bounded window
+  had 66 admitted transfers across five minutes, all eight newest Taskworkers
+  exposed the existing gate metrics, and admission deferrals, admission
+  errors, and processor 429s were all zero. That proves the sample was a real
+  response-completion cohort but does not prove an admission burst. The
+  admission marker and capability gauge correct that counting boundary without
+  changing payment semantics, retry timing, idempotency, or the limiter.
+
+  The older incident chronology below remains useful as response-cohort and
+  429 correlation evidence. Its evaluator-derived “microburst” observations
+  predate the direct marker and must not be read as admission-time measurements.
 
   The standing implementation then caught the next recurrence live at
   16:30–16:38Z. A bounded independent pull found 164 canonical
@@ -630,13 +652,18 @@ WHERE function_name LIKE '%UpdateClient%'
   transfer POST, every process contends on one Redis-time rolling sorted set;
   an atomic Lua decision admits at most three submits in any rolling second,
   leaving two requests/second of documented headroom. A unique member makes a
-  lost-response command replay idempotent. Redis or context failure is fail
-  closed before HTTP, and the durable payment idempotency key remains unchanged.
-  A deterministic synthetic test launches eight concurrent fleet callers at
-  one timestamp, requires exactly three admissions/five deferrals, replays an
-  admitted member without consuming a slot, and reopens capacity only after the
-  rolling second expires. §2.14 owns deployment and runtime verification; the
-  existing source-second log join remains the provider-outcome control.
+  lost-response command replay idempotent while its reservation remains in the
+  active rolling window. After cutoff, that reservation no longer accounts for
+  the current ceiling, so the same member atomically obtains one fresh slot and
+  bucket before the caller returns. Redis or context failure is fail closed
+  before HTTP, and the durable payment idempotency key remains unchanged. A
+  deterministic synthetic launches eight concurrent fleet callers at one
+  timestamp, requires exactly three admissions/five deferrals, and proves a
+  within-window replay preserves the original bucket without consuming a slot.
+  A second lost-response synthetic proves a same-member post-cutoff retry gets
+  exactly one fresh current slot/bucket and one synchronous observation before
+  caller return. §2.14 owns deployment and runtime verification; the existing
+  source-second log join remains the provider-outcome control.
   Follow-up current-main commit `66525afc` converts the server Redis wrapper's
   connection panic path into that same measured fail-closed error, so it is the
   minimum deployable source for complete §2.14 telemetry.
@@ -4138,9 +4165,12 @@ commit `eb7e79b6`) puts one fail-closed, fleet-wide gate immediately
 before the transfer POST. Redis server time eliminates host-clock skew. One
 atomic sorted-set script admits no more than three unique transfer calls in a
 rolling second, leaving two requests/second of headroom for other callers. A
-stable per-call member makes Redis command replay idempotent. A waiter retains
-the payment's durable Circle idempotency key, and a Redis/context error returns
-before HTTP rather than guessing that an ambiguous financial submit is safe.
+stable per-call member makes Redis command replay idempotent only while its
+reservation remains in that active rolling window. A replay after cutoff
+atomically acquires one fresh current slot and bucket before the caller can
+return. A waiter retains the payment's durable Circle idempotency key, and a
+Redis/context error returns before HTTP rather than guessing that an ambiguous
+financial submit is safe.
 Current-main descendant `66525afc` also converts the Redis wrapper's
 pre-command connection panic into the same error/counter/log path; use that
 descendant as the minimum observable deployment baseline. Stable patch IDs
@@ -4154,25 +4184,49 @@ The Taskworker exports these process metrics:
 - `urnetwork_circle_transfer_admission_errors_total`
 - `urnetwork_circle_transfer_admission_wait_seconds_count`
 - `urnetwork_circle_transfer_admission_wait_seconds_sum`
+- `urnetwork_circle_transfer_admission_observable_info` (fixed at one when the
+  process emits the bounded pre-POST marker)
+
+For every successful gate decision, the same executable emits exactly one
+fixed-shape marker before returning to the caller:
+
+`[circlec][transfer-admission] admitted observable=v1 redis_second=<unix-second> sequence=<count> deferrals=<count> wait_ms=<milliseconds>`
+
+`redis_second` is the authoritative bucket returned by the atomic gate. A
+stable-member replay returns the original sorted-set score rather than a later
+command time only while that score remains inside the active rolling window.
+After cutoff, the old score is removed and the replay obtains a fresh current
+slot and bucket before the single synchronous caller return. `sequence` is a
+process-local monotonic observation counter, not a payment or customer
+identifier. It lets the tailer distinguish simultaneous admissions while exact
+replay of one log record remains idempotent. The tailer retains only this
+suffix; malformed suffixes and arbitrary appended text cannot enter the count
+or alert evidence. The added return field is private to each binary's embedded
+Lua invocation and parser; old and new script SHAs can coexist during rollout
+because both retain the identical sorted-set key, members, scores, expiry,
+ceiling, and wait decisions.
 
 The probe selects the newest actual-scrape-fresh process for each host/block,
 so an old draining generation cannot supply a replacement's missing sample.
-It establishes accepted sample presence independently with fresh five-minute
-sample counts, then evaluates five-minute counter increases per exact process.
+It requires a fresh capability sample directly, establishes accepted activity
+sample presence independently with fresh five-minute sample counts, then
+evaluates five-minute counter increases per exact process.
 This distinction matters because PromQL `increase()` returns no vector when Mimir
 accepted only one sample; that is incomplete telemetry coverage, not evidence
 that the process lacks the registered gate collector.
 
-- HEALTHY: every newest Taskworker exposes all five families; admission errors
-  are zero; fleet and per-process mean completed wait are at most five seconds.
-  Deferrals may be non-zero—they prove the gate prevented an unsafe burst.
+- HEALTHY: every newest Taskworker exposes the capability and all five activity
+  families; admission errors are zero; fleet and per-process mean completed
+  wait are at most five seconds. Deferrals may be non-zero—they prove the gate
+  prevented an unsafe burst.
 - WARN `circle-transfer-admission-unobservable`: a newest process either has no
-  accepted sample for a family or has fewer than two accepted samples for a
-  five-minute increase. No accepted sample does not by itself distinguish an
-  absent collector from Taskworker delivery or Mimir admission loss. Deploy a
-  clean Taskworker artifact containing `66525afc` only for a genuinely absent
-  collector proven by §8.12 source/digest provenance; otherwise restore stats
-  delivery/Mimir admission and do not prescribe an application deployment.
+  fresh capability/activity sample or has fewer than two accepted activity
+  samples for a five-minute increase. A missing capability can mean mixed
+  rollout, missing collection, or telemetry loss; admission-marker absence is
+  therefore unknown and must never be rendered as zero. Deploy a clean current
+  Taskworker only for a genuinely absent capability proven by §8.12
+  source/digest provenance; otherwise restore stats delivery/Mimir admission
+  and do not prescribe an application deployment.
 - WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
   exact window with taskworker drain state, Redis liveness/latency, and the
   privacy-safe admission failure line. Never bypass the gate or manually replay
@@ -4183,10 +4237,11 @@ that the process lacks the registered gate collector.
   **operations/finance** boundary: fund or pause that wallet because software
   cannot create liquidity. For legitimate sustained payout growth, obtain the
   account's authoritative Circle quota before changing code or thresholds.
-- VERIFY: §8.12 proves every newest Taskworker contains `66525afc`; all metric
-  families are present for two scrapes; admission errors and Circle 429s stay
-  zero; canonical wallet attempts stay below four/second; and payment
-  idempotency keys remain stable for one full 90-minute retry window.
+- VERIFY: §8.12 proves every newest Taskworker runs the marker-capable artifact;
+  the capability and all five activity families are present, counter families
+  have two scrapes, admission errors and Circle 429s stay zero, exact pre-POST
+  markers stay below four/second, and payment idempotency keys remain stable for
+  one full 90-minute retry window.
 
 The 2026-09-02 post-deployment control closed the software branch. All eight
 newest fresh Taskworker processes ran version
@@ -4194,22 +4249,30 @@ newest fresh Taskworker processes ran version
 `fe3fa8eea625a3935ec7fe6569ee83b8a2578143` and immutable image digest. Git
 ancestry proves that revision contains typed-reset `b8af229f`, proportional
 jitter `70b0d269`, and the complete `66525afc` admission baseline. The
-dedicated probe found all five collectors healthy. Across the full 90-minute
-control, 1,244 exact task-evaluator wallet-insufficient attempts occupied
-1,037 source seconds, peaked at exactly three attempts in one second, and
-produced zero admission-failed lines and zero Circle 429s. That is positive
-evidence that the fleet ceiling works under the live backlog. Continued
-wallet-insufficient or invalid-destination rows after this boundary are the
-separate finance and account-configuration actions in §1.2; do not prescribe
-another Taskworker deployment for them.
+dedicated probe found all five activity collectors healthy. Across the full
+90-minute control, 1,244 exact task-evaluator wallet-insufficient responses
+occupied 1,037 source seconds, peaked at exactly three attempts in one second,
+and produced zero admission-failed lines and zero Circle 429s. That is positive
+provider-response and error-path evidence consistent with a working fleet
+ceiling, but those post-POST timestamps are not direct admission evidence.
+Continued wallet-insufficient or invalid-destination rows after this boundary
+are the separate finance and account-configuration actions in §1.2; do not
+prescribe another Taskworker deployment for them.
 
 Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
 `signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
-tests cover a healthy newest generation, an ambiguous replacement with no
-accepted samples for two metric families, a present collector with only one
-accepted range sample, fail-closed errors, excessive per-process wait hidden by
-a lower fleet mean, and invalid counter data. The product-level Redis synthetic
-covers the eight-caller atomic ceiling and replay semantics.
+tests cover a healthy newest generation, mixed marker-capability rollout, an
+ambiguous replacement with no accepted samples for two activity families, a
+present collector with only one accepted range sample, fail-closed errors,
+excessive per-process wait hidden by a lower fleet mean, and invalid counter
+data. Product-level synthetics cover the marker-before-POST boundary, bounded
+marker shape, the eight-caller Redis ceiling, original-bucket replay within the
+active window, and fresh-slot/bucket admission for a same-member lost-response
+retry after cutoff before one synchronous caller return. Tailer synthetics
+prove response completions cannot trigger the admission alert, four markers do
+trigger it, exact log replay is idempotent, skewed and out-of-order host
+timestamps cannot replace the Redis bucket, and retained Markdown contains no
+Warp or payment identity.
 
 ### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
 Probe: `reliability-drift`
@@ -6847,7 +6910,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `66525afc` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
-| `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. The post-jitter 2026-09-01 control proved independent random delays still reached five responses plus a sixth 429; four/second is therefore both the empirical precursor and the invariant below the new three/rolling-second gate. | **Software deployment action:** use §8.12 and §2.14 to deploy a clean Taskworker containing `66525afc` only where absent. Preserve backoff and idempotency keys. Verify all admission collectors, zero gate errors, a full 90-minute window below four attempts/second, and no new processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
+| `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |

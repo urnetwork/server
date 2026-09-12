@@ -1063,8 +1063,8 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 		"Do not delete or manually replay pending_task rows",
 		"First use §8.12 to verify every taskworker block's source/digest identity",
 		"intentional local checkout containing current-main server commit 66525afc",
-		"§2.14 to prove complete admission metrics",
-		"fewer than four canonical attempts/second",
+		"§2.14 to prove complete admission-observable and activity metrics",
+		"fewer than four exact pre-POST admission markers/second",
 		"allow the same window plus ingestion delay",
 		"duplicate Circle transfers",
 		"<id>",
@@ -1082,6 +1082,51 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") ||
 		strings.Contains(markdown, "Follow SIGNALS.md §4") {
 		t.Fatalf("payout-wallet alert retained generic guidance:\n%s", markdown)
+	}
+}
+
+func TestLogErrorsSignalRendersOnlyBoundedAdmissionBurstEvidence(t *testing.T) {
+	lines := []string{}
+	for admission := 0; admission < 4; admission++ {
+		lines = append(lines, payoutAdmissionLogLine("2026-09-12T19:13:00", admission))
+	}
+	// This resembles the fixed prefix but appends provider-controlled text.
+	// The strict grammar must neither count it nor retain it in evidence.
+	lines = append(lines,
+		payoutAdmissionLogLine("2026-09-12T19:13:00", 4)+" arbitrary_private_field=synthetic-value",
+	)
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return strings.Join(lines, "\n") + "\n", nil
+	}}
+
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "payout-retry-microburst").Markdown()
+	for _, want := range []string{
+		"peak_admitted_submissions_per_second=4",
+		"admitted_submissions=4",
+		"exact-replay-deduplicated pre-POST admission markers",
+		"absent markers are unknown rather than zero",
+		"§2.14 admission-observable capability",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("admission-burst Markdown lacks %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{
+		"worker-a.invalid",
+		"cid:synthetic",
+		"arbitrary_private_field",
+		"synthetic-value",
+	} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("admission-burst Markdown retained %q:\n%s", forbidden, markdown)
+		}
 	}
 }
 
@@ -1125,7 +1170,8 @@ func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 		"commit 66525afc",
 		"fleet-wide Redis-time transfer gate",
 		"conservative three-per-second ceiling",
-		"all §2.14 admission metrics",
+		"§2.14 admission-observable capability plus all five activity families",
+		"exact pre-POST admission markers stay below four/second",
 		"full 90-minute retry window",
 		"account's authoritative quota",
 		"processor-rate-limit events stay zero",
