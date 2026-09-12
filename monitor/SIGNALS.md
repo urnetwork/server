@@ -368,6 +368,46 @@ WHERE function_name LIKE '%UpdateClient%'
   to every row. Keep invalid-destination separate from generic processor 400s
   because only that typed, definitive pre-chain result is safe to unpin
   (§5.7).
+- The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
+  non-payment control for `processor-bad-request`. At `13:59:32Z`, one
+  first-error row had a fresh claim, was due immediately, and was explicitly
+  not parked beyond five minutes. The failure came from contact creation
+  before list membership. A bounded direct PostgreSQL read then found that the
+  same durable task retained the prior HTTP 400 and completed successfully
+  from `13:59:33Z` through `13:59:35Z`; the family had no pending row and did
+  not recur in later watcher samples. The current auth row had none of the
+  bounded obvious shape defects (display syntax, surrounding whitespace,
+  control characters, excess length, multiple/missing `@`, or non-ASCII), but
+  that later shape check is not proof of provider-specific validity at the
+  failed instant.
+
+  The emitted error retained only `400 Bad Request`: although the client had
+  parsed the provider response code and message, it discarded both for every
+  non-duplicate rejection. The evidence therefore cannot distinguish a
+  provider-specific input rejection from a transient provider response, a
+  concurrent user-state change, or a mixed-executor boundary. This was a real
+  task failure that normal first-error backoff recovered, not a monitor false
+  positive, malformed-input proof, configuration proof, or reason to replay
+  the task manually.
+
+  Product-updates contact and list operations now share a privacy-safe error
+  contract: locally canonical HTTP status, one exact allowlisted provider-code
+  token (otherwise `unclassified`), and one finite failure class. They never
+  carry the response message, contact/email, raw body, request URL, credential,
+  remote status text, or an underlying transport/decoder error into the
+  durable task row or taskworker log. Existing duplicate-contact,
+  missing-contact, and already-in/already-out-of-list responses retain their
+  idempotent success semantics. This does not change retry timing or classify
+  an `unclassified` 400 as malformed input.
+
+  After Taskworker artifact convergence, the next product-updates rejection
+  must render the stable bounded fields with either an allowlisted code or
+  `unclassified`, while deterministic hostile-code, malformed-code, sensitive-
+  message, transport-URL, success, and duplicate controls remain redacted and
+  passing. Diagnose any persistent row from that bounded code plus the exact
+  operation and retry lifecycle; do not copy the provider message, contact, or
+  request into evidence. A self-healed first error closes after the same task
+  finishes and stays absent for the five-minute parked boundary.
 - GOTCHA — wallet insufficiency is an operational liquidity boundary, but its
   retry shape can still contain a software amplification. Consecutive task
   errors have a one-hour nominal cap. The old scheduler added only 0–2 seconds

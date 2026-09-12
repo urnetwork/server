@@ -3,9 +3,11 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -178,6 +180,87 @@ type BrevoContactResult struct {
 	Message string `json:"message"`
 }
 
+type brevoProductUpdatesOperation string
+
+const (
+	brevoOperationAddContact     brevoProductUpdatesOperation = "add-contact"
+	brevoOperationRemoveContact  brevoProductUpdatesOperation = "remove-contact"
+	brevoOperationAddToList      brevoProductUpdatesOperation = "add-to-list"
+	brevoOperationRemoveFromList brevoProductUpdatesOperation = "remove-from-list"
+
+	brevoProviderCodeUnclassified = "unclassified"
+)
+
+type brevoProductUpdatesFailureClass string
+
+const (
+	brevoFailureProviderRejection brevoProductUpdatesFailureClass = "provider-rejection"
+	brevoFailureResponseContract  brevoProductUpdatesFailureClass = "response-contract"
+	brevoFailureResponseDecode    brevoProductUpdatesFailureClass = "response-decode"
+	brevoFailureRequestCanceled   brevoProductUpdatesFailureClass = "request-canceled"
+	brevoFailureRequestDeadline   brevoProductUpdatesFailureClass = "request-deadline"
+	brevoFailureTransport         brevoProductUpdatesFailureClass = "transport"
+	brevoFailureProtocol          brevoProductUpdatesFailureClass = "protocol"
+)
+
+// brevoSafeProviderCode returns only codes whose exact spelling is part of
+// this client's reviewed protocol contract. Provider-controlled code and
+// message fields must never become durable task errors through normalization
+// or truncation: an unknown value is represented by one fixed token instead.
+func brevoSafeProviderCode(code string) string {
+	switch code {
+	case "document_not_found", "duplicate_parameter", "invalid_json", "invalid_parameter", "not_found":
+		return code
+	default:
+		return brevoProviderCodeUnclassified
+	}
+}
+
+// brevoProductUpdatesError renders only local finite labels, the numeric HTTP
+// status, and net/http's canonical status text. server.Status.Status is the
+// remote status line and is deliberately not used.
+func brevoProductUpdatesError(
+	operation brevoProductUpdatesOperation,
+	status *server.Status,
+	providerCode string,
+	failureClass brevoProductUpdatesFailureClass,
+) error {
+	statusLabel := "unavailable"
+	if status != nil {
+		statusLabel = strconv.Itoa(status.Code)
+		if statusText := http.StatusText(status.Code); statusText != "" {
+			statusLabel += " " + statusText
+		}
+	}
+	return fmt.Errorf(
+		"Brevo %s failed (status=%s; provider_code=%s; failure_class=%s)",
+		operation,
+		statusLabel,
+		brevoSafeProviderCode(providerCode),
+		failureClass,
+	)
+}
+
+// brevoProductUpdatesRequestError intentionally does not wrap the underlying
+// error. Transport errors can contain the request URL, while decoder errors
+// can contain provider-controlled response fragments.
+func brevoProductUpdatesRequestError(
+	operation brevoProductUpdatesOperation,
+	status *server.Status,
+	err error,
+) error {
+	failureClass := brevoFailureTransport
+	switch {
+	case errors.Is(err, context.Canceled):
+		failureClass = brevoFailureRequestCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		failureClass = brevoFailureRequestDeadline
+	case status != nil:
+		failureClass = brevoFailureResponseDecode
+	}
+	return brevoProductUpdatesError(operation, status, "", failureClass)
+}
+
 // brevoResponseJsonObject accepts the empty success body used by delete
 // endpoints while still surfacing malformed non-empty JSON.
 func brevoResponseJsonObject[R any](response *http.Response, responseBodyBytes []byte) (R, error) {
@@ -207,10 +290,10 @@ func BrevoAddContact(ctx context.Context, userEmail string) error {
 		brevoResponseJsonObject[BrevoContactResult],
 	)
 	if err != nil {
-		return err
+		return brevoProductUpdatesRequestError(brevoOperationAddContact, status, err)
 	}
 	if status == nil {
-		return fmt.Errorf("Could not add contact (missing response status)")
+		return brevoProductUpdatesError(brevoOperationAddContact, nil, "", brevoFailureProtocol)
 	}
 	if 200 <= status.Code && status.Code < 300 {
 		return nil
@@ -219,7 +302,7 @@ func BrevoAddContact(ctx context.Context, userEmail string) error {
 		// "Unable to create contact, email is already associated with another Contact"
 		return nil
 	}
-	return fmt.Errorf("Could not add contact (%s)", status.Status)
+	return brevoProductUpdatesError(brevoOperationAddContact, status, r.Code, brevoFailureProviderRejection)
 }
 
 func BrevoRemoveContact(ctx context.Context, userEmail string) error {
@@ -232,10 +315,10 @@ func BrevoRemoveContact(ctx context.Context, userEmail string) error {
 		brevoResponseJsonObject[BrevoContactResult],
 	)
 	if err != nil {
-		return err
+		return brevoProductUpdatesRequestError(brevoOperationRemoveContact, status, err)
 	}
 	if status == nil {
-		return fmt.Errorf("Could not remove contact (missing response status)")
+		return brevoProductUpdatesError(brevoOperationRemoveContact, nil, "", brevoFailureProtocol)
 	}
 	if 200 <= status.Code && status.Code < 300 {
 		return nil
@@ -244,7 +327,7 @@ func BrevoRemoveContact(ctx context.Context, userEmail string) error {
 		// contact already gone
 		return nil
 	}
-	return fmt.Errorf("Could not remove contact (%s)", status.Status)
+	return brevoProductUpdatesError(brevoOperationRemoveContact, status, r.Code, brevoFailureProviderRejection)
 }
 
 func BrevoAddToList(ctx context.Context, userEmail string, listId int) error {
@@ -266,26 +349,26 @@ func BrevoAddToList(ctx context.Context, userEmail string, listId int) error {
 		brevoResponseJsonObject[BrevoListResult],
 	)
 	if err != nil {
-		return err
+		return brevoProductUpdatesRequestError(brevoOperationAddToList, status, err)
 	}
 	if status == nil {
-		return fmt.Errorf("Could not add contact to list (missing response status)")
+		return brevoProductUpdatesError(brevoOperationAddToList, nil, "", brevoFailureProtocol)
 	}
 	if 200 <= status.Code && status.Code < 300 {
 		if r.Contacts == nil {
-			return fmt.Errorf("Success response did not contain contacts.")
+			return brevoProductUpdatesError(brevoOperationAddToList, status, "", brevoFailureResponseContract)
 		}
 		if slices.Contains(r.Contacts.Success, userEmail) {
 			return nil
 		}
-		return fmt.Errorf("Success list did not contain user email.")
+		return brevoProductUpdatesError(brevoOperationAddToList, status, "", brevoFailureResponseContract)
 	}
 	if r.Code == "invalid_parameter" {
 		// "Contact already in list and/or does not exist"
 		// given the contact is already created, it must be already in the list
 		return nil
 	}
-	return fmt.Errorf("Could not add contact to list (%s)", status.Status)
+	return brevoProductUpdatesError(brevoOperationAddToList, status, r.Code, brevoFailureProviderRejection)
 }
 
 func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) error {
@@ -302,26 +385,26 @@ func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) erro
 		brevoResponseJsonObject[BrevoListResult],
 	)
 	if err != nil {
-		return err
+		return brevoProductUpdatesRequestError(brevoOperationRemoveFromList, status, err)
 	}
 	if status == nil {
-		return fmt.Errorf("Could not remove contact from list (missing response status)")
+		return brevoProductUpdatesError(brevoOperationRemoveFromList, nil, "", brevoFailureProtocol)
 	}
 	if 200 <= status.Code && status.Code < 300 {
 		if r.Contacts == nil {
-			return fmt.Errorf("Success response did not contain contacts.")
+			return brevoProductUpdatesError(brevoOperationRemoveFromList, status, "", brevoFailureResponseContract)
 		}
 		if slices.Contains(r.Contacts.Success, userEmail) {
 			return nil
 		}
-		return fmt.Errorf("Success list did not contain user email.")
+		return brevoProductUpdatesError(brevoOperationRemoveFromList, status, "", brevoFailureResponseContract)
 	}
 	if r.Code == "invalid_parameter" {
 		// "Contact already removed from list and/or does not exist"
 		// either the contact doesn't exist or doesn't exist in the list is success
 		return nil
 	}
-	return fmt.Errorf("Could not remove contact from list (%s)", status.Status)
+	return brevoProductUpdatesError(brevoOperationRemoveFromList, status, r.Code, brevoFailureProviderRejection)
 }
 
 // these set the initial product updates for new networks and users
