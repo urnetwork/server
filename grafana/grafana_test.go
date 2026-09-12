@@ -1603,15 +1603,27 @@ func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
 func TestInactiveDestinationDetailsHaveActionableDashboardQuery(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
 	wantTitle := "\u00a74 contract failures + origin/destination details / min (lossless)"
-	var targets []testTarget
-	for _, panel := range dashboard.Panels {
-		if panel.Title == wantTitle {
-			targets = panel.Targets
+	var detailsPanel *testPanel
+	for panelIndex := range dashboard.Panels {
+		if dashboard.Panels[panelIndex].Title == wantTitle {
+			detailsPanel = &dashboard.Panels[panelIndex]
 			break
 		}
 	}
-	if targets == nil {
+	if detailsPanel == nil {
 		t.Fatalf("signals dashboard lacks panel %q", wantTitle)
+	}
+	targets := detailsPanel.Targets
+	for _, want := range []string{
+		"source_owner=egress_prober|other|unknown",
+		"authenticated source network",
+		"durable prober network",
+		"not accepted from the request",
+		"missing source_owner during rollout is unattributed",
+	} {
+		if !strings.Contains(detailsPanel.Description, want) {
+			t.Errorf("inactive-destination panel description omits %q: %s", want, detailsPanel.Description)
+		}
 	}
 	tests := []struct {
 		metric string
@@ -1625,8 +1637,8 @@ func TestInactiveDestinationDetailsHaveActionableDashboardQuery(t *testing.T) {
 		},
 		{
 			metric: "urnetwork_connect_inactive_destination_details_total",
-			query:  `sum by (request_companion, sender_role, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
-			legend: "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}",
+			query:  `sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+			legend: "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} source_owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}",
 		},
 	}
 	for _, test := range tests {

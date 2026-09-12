@@ -39,7 +39,7 @@ func (staleDestinationProbe) cadence() time.Duration { return time.Minute }
 
 func staleDestinationQuery(environment string) string {
 	return fmt.Sprintf(
-		`label_replace((sum by (companion) (rate(urnetwork_connect_contract_failures_total{env=%s,cause="inactive_destination"}[%s])) * 60),"monitor_metric","%s","__name__",".*") or label_replace((sum by (request_companion,sender_role,resolution,relationship,source_lifecycle,destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env=%s}[%s])) * 60),"monitor_metric","%s","__name__",".*")`,
+		`label_replace((sum by (companion) (rate(urnetwork_connect_contract_failures_total{env=%s,cause="inactive_destination"}[%s])) * 60),"monitor_metric","%s","__name__",".*") or label_replace((sum by (request_companion,sender_role,source_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env=%s}[%s])) * 60),"monitor_metric","%s","__name__",".*")`,
 		strconv.Quote(environment),
 		staleDestinationRange,
 		staleDestinationAggregateMetric,
@@ -52,6 +52,7 @@ func staleDestinationQuery(environment string) string {
 type staleDestinationDetailKey struct {
 	requestCompanion     string
 	senderRole           string
+	sourceOwner          string
 	resolution           string
 	relationship         string
 	sourceLifecycle      string
@@ -66,6 +67,7 @@ type staleDestinationDetailSummary struct {
 	dominant     staleDestinationDetailKey
 	dominantRate float64
 	roleRates    map[string]float64
+	ownerRates   map[string]float64
 }
 
 func (staleDestinationProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -186,10 +188,10 @@ func (staleDestinationProbe) check(ctx context.Context, env *probeEnv) ([]findin
 			metricHost.name,
 			detailObserved,
 		),
-		evidence: "The API owns both counter families at the rejection boundary and initializes the two aggregate companion labels to zero. " + detailEvidence + " No customer, client, network, device, contract, destination, artifact version, or API-process identifier enters the metric cohorts.",
+		evidence: "The API owns both counter families at the rejection boundary and initializes the two aggregate companion labels to zero. " + detailEvidence + " The source-owner label is derived from the authenticated source network and durable prober network in the same PostgreSQL snapshot as lifecycle; it is not accepted from the request. No customer, client, network, device, contract, destination, artifact version, or API-process identifier enters the metric cohorts.",
 		context:  "These are prevented stale contracts, not successful routes and not a hardware-capacity signal. The API guard protects correctness immediately, but a sender can keep retrying the same dead exit. " + detailContext + " A Connect-bearing client that understands ContractError_Reliability retires only the emitting window channel and refills through the existing selection path.",
-		action:   "First require every API artifact to contain server commit c8dfe570 and every affected Connect-bearing client artifact to contain Connect commit 5b33c91. For selected/discovery-window requesters, require Connect commit ec34ce1 so a Reliability result excludes the failed destination before the single resize/refill transition. For provider-return source owners, require Connect commit 55daddb so the exact source gate becomes terminal before later return work is admitted. To attribute a persistent rate, require an API artifact containing the inactive-destination detail consumer and require every Connect-bearing requester to contain Connect commit f8b1b60, which adds the optional sender-role producer. Use only a complete reconciled detail family: a concrete client/server value identifies the sender's sequence lane, but it does not prove either retirement fix, an application, or an artifact version; absent or unknown remains unattributed and never proves an old artifact. Only start the maximum deployed client-window observation after independently proving affected artifact and adoption convergence: a still-installed older client can reconnect and create another legacy window indefinitely. If the rate remains above the boundary after two complete five-minute windows and that post-convergence lifetime, check §2.8, §2.9, §2.15, and §2.16 and use the joint sender-role, resolution, relationship, and lifecycle cohort to locate the stale request lane. Do not delete Redis provide keys, weaken lifecycle checks, lengthen contract timeouts, or restart clients to manufacture recovery.",
-		verify:   "Every API instance exports both initialized aggregate partitions; affected Connect-bearing artifacts independently prove Connect commit ec34ce1 for selected/discovery windows and Connect commit 55daddb for provider-return sources as applicable, never inferred from sender_role; successful contracts to already-inactive destinations remain zero; detail is either explicitly unavailable or fully reconciled rather than partially attributed; the aggregate rejection rate stays at or below 50/min for two complete five-minute windows after the post-convergence client-window lifetime; and a Reliability result removes only its emitting exit before the window refills.",
+		action:   "First require every API artifact to contain server commit c8dfe570 and every affected Connect-bearing client artifact to contain Connect commit 5b33c91. For selected/discovery-window requesters, require Connect commit ec34ce1 so a Reliability result excludes the failed destination before the single resize/refill transition. For provider-return source owners, require Connect commit 55daddb so the exact source gate becomes terminal before later return work is admitted. To attribute a persistent rate, require an API artifact containing both the inactive-destination detail consumer and the server-derived source_owner partition, plus Connect commit f8b1b60 in every affected requester for its independent sender-role lane. A concrete sender role does not prove either retirement fix, and no source_owner value proves client artifact adoption. Use only a complete reconciled detail family. If source_owner=egress_prober dominates, correlate the bounded ProviderEgressProbe pool, retry ceiling, and Taskworker window outcomes; if source_owner=other dominates, continue through selected/discovery and provider-return adoption evidence without treating other as an application identity. unattributed is mixed API rollout or ingestion and never a measured zero. Only start the maximum deployed client-window observation after independently proving affected artifact and adoption convergence: a still-installed older client can reconnect and create another legacy window indefinitely. Do not delete Redis provide keys, weaken lifecycle checks, lengthen contract timeouts, or restart clients to manufacture recovery.",
+		verify:   "Every API instance exports both initialized aggregate partitions and the server-derived source_owner detail; affected Connect-bearing artifacts independently prove Connect commit ec34ce1 for selected/discovery windows and Connect commit 55daddb for provider-return sources as applicable, never inferred from sender_role or source_owner; successful contracts to already-inactive destinations remain zero; detail is fully reconciled, owner-unattributed rate is zero after one complete rollout window, the aggregate rejection rate stays at or below 50/min for two complete five-minute windows after the post-convergence client-window lifetime, and a Reliability result removes only its emitting exit before the window refills.",
 		playbook: "SIGNALS.md §2.18 and §5.9",
 	}}, nil
 }
@@ -201,8 +203,9 @@ func inspectStaleDestinationDetails(
 	now time.Time,
 ) staleDestinationDetailSummary {
 	summary := staleDestinationDetailSummary{
-		status:    "absent",
-		roleRates: map[string]float64{},
+		status:     "absent",
+		roleRates:  map[string]float64{},
+		ownerRates: map[string]float64{},
 	}
 	seen := map[staleDestinationDetailKey]bool{}
 	dominantKey := ""
@@ -215,12 +218,25 @@ func inspectStaleDestinationDetails(
 			return staleDestinationDetailSummary{status: "ambiguous", reason: "unexpected_metric_class"}
 		}
 		summary.series++
-		if len(series.Metric) != 7 {
+		hasSourceOwner, validLabelSet := staleDestinationDetailLabelSet(series.Metric)
+		if !validLabelSet {
 			return staleDestinationDetailSummary{status: "ambiguous", reason: "unexpected_detail_label_set", series: summary.series}
+		}
+		sourceOwner := series.Metric["source_owner"]
+		if !hasSourceOwner {
+			// A missing label is a rolling-deployment capability boundary. Keep
+			// its rate explicit instead of folding it into the server-derived
+			// `other` owner or treating it as a healthy zero.
+			sourceOwner = "unattributed"
+		} else if sourceOwner == "unattributed" {
+			// unattributed is reserved for the monitor's synthesis of a missing
+			// rollout-era label. A producer must emit a server-derived class.
+			return staleDestinationDetailSummary{status: "ambiguous", reason: "invalid_detail_labels", series: summary.series}
 		}
 		key := staleDestinationDetailKey{
 			requestCompanion:     series.Metric["request_companion"],
 			senderRole:           series.Metric["sender_role"],
+			sourceOwner:          sourceOwner,
 			resolution:           series.Metric["resolution"],
 			relationship:         series.Metric["relationship"],
 			sourceLifecycle:      series.Metric["source_lifecycle"],
@@ -250,6 +266,7 @@ func inspectStaleDestinationDetails(
 		}
 		summary.totalRate += detailRate
 		summary.roleRates[key.senderRole] += detailRate
+		summary.ownerRates[key.sourceOwner] += detailRate
 		keyText := staleDestinationDetailKeyText(key)
 		if summary.dominantRate < detailRate ||
 			(summary.dominantRate == detailRate && (dominantKey == "" || keyText < dominantKey)) {
@@ -281,9 +298,42 @@ func inspectStaleDestinationDetails(
 	return summary
 }
 
+func staleDestinationDetailLabelSet(metric map[string]string) (hasSourceOwner bool, valid bool) {
+	required := map[string]bool{
+		"monitor_metric":        false,
+		"request_companion":     false,
+		"sender_role":           false,
+		"resolution":            false,
+		"relationship":          false,
+		"source_lifecycle":      false,
+		"destination_lifecycle": false,
+	}
+	for label := range metric {
+		if label == "source_owner" {
+			hasSourceOwner = true
+			continue
+		}
+		if _, ok := required[label]; !ok {
+			return false, false
+		}
+		required[label] = true
+	}
+	for _, present := range required {
+		if !present {
+			return false, false
+		}
+	}
+	wantLabels := len(required)
+	if hasSourceOwner {
+		wantLabels++
+	}
+	return hasSourceOwner, len(metric) == wantLabels
+}
+
 func validStaleDestinationDetailKey(key staleDestinationDetailKey) bool {
 	return staleDestinationValueAllowed(key.requestCompanion, "false", "true") &&
 		staleDestinationValueAllowed(key.senderRole, "client", "server", "absent", "unknown") &&
+		staleDestinationValueAllowed(key.sourceOwner, "egress_prober", "other", "unattributed", "unknown") &&
 		staleDestinationValueAllowed(key.resolution,
 			"requested_companion", "stream_fallback", "network_normalized", "relationship", "rejected", "unknown") &&
 		staleDestinationValueAllowed(key.relationship, "network", "friends_family", "public", "unknown") &&
@@ -306,6 +356,7 @@ func staleDestinationDetailKeyText(key staleDestinationDetailKey) string {
 	return strings.Join([]string{
 		key.requestCompanion,
 		key.senderRole,
+		key.sourceOwner,
 		key.resolution,
 		key.relationship,
 		key.sourceLifecycle,
@@ -325,15 +376,20 @@ func staleDestinationDetailNarrative(summary staleDestinationDetailSummary) (str
 			share = 100 * summary.dominantRate / summary.totalRate
 		}
 		return fmt.Sprintf(
-				"detail_status=complete detail_series=%d detail_rate_per_minute=%.3f sender_client_rate_per_minute=%.3f sender_server_rate_per_minute=%.3f sender_absent_rate_per_minute=%.3f sender_unknown_rate_per_minute=%.3f dominant_request_companion=%s dominant_sender_role=%s dominant_resolution=%s dominant_relationship=%s dominant_source_lifecycle=%s dominant_destination_lifecycle=%s dominant_rate_per_minute=%.3f dominant_share_percent=%.1f",
+				"detail_status=complete detail_series=%d detail_rate_per_minute=%.3f sender_client_rate_per_minute=%.3f sender_server_rate_per_minute=%.3f sender_absent_rate_per_minute=%.3f sender_unknown_rate_per_minute=%.3f source_owner_egress_prober_rate_per_minute=%.3f source_owner_other_rate_per_minute=%.3f source_owner_unattributed_rate_per_minute=%.3f source_owner_unknown_rate_per_minute=%.3f dominant_request_companion=%s dominant_sender_role=%s dominant_source_owner=%s dominant_resolution=%s dominant_relationship=%s dominant_source_lifecycle=%s dominant_destination_lifecycle=%s dominant_rate_per_minute=%.3f dominant_share_percent=%.1f",
 				summary.series,
 				summary.totalRate,
 				summary.roleRates["client"],
 				summary.roleRates["server"],
 				summary.roleRates["absent"],
 				summary.roleRates["unknown"],
+				summary.ownerRates["egress_prober"],
+				summary.ownerRates["other"],
+				summary.ownerRates["unattributed"],
+				summary.ownerRates["unknown"],
 				summary.dominant.requestCompanion,
 				summary.dominant.senderRole,
+				summary.dominant.sourceOwner,
 				summary.dominant.resolution,
 				summary.dominant.relationship,
 				summary.dominant.sourceLifecycle,
@@ -341,8 +397,8 @@ func staleDestinationDetailNarrative(summary staleDestinationDetailSummary) (str
 				summary.dominantRate,
 				share,
 			),
-			"Every detail label belongs to a fixed producer vocabulary, sample times match the aggregate, no cohort is duplicated, and the summed detail rate reconciles with the aggregate inside the scrape-boundary tolerance.",
-			"A concrete sender role proves only the reported ContractKey sequence lane and presence of the additive capability. Interpret it jointly with request companion, resolution, relationship, and lifecycle; absent is unavailable capability, unknown is an explicit malformed or future value, and neither identifies an old client or product artifact."
+			"Every detail label belongs to a fixed producer vocabulary, sample times match the aggregate, no cohort is duplicated, and the summed detail rate reconciles with the aggregate inside the scrape-boundary tolerance. source_owner is resolved by the API from the authenticated source network and durable prober network; it is not accepted from the request.",
+			"A concrete sender role proves only the reported ContractKey sequence lane and presence of the additive capability; it does not prove either retirement fix. source_owner=egress_prober is a server-authoritative internal-owner partition; other excludes that singleton but does not identify an application or artifact. unattributed is an API generation without the owner label, not a healthy zero. Interpret the owner jointly with request companion, resolution, relationship, and lifecycle."
 	case "partial":
 		return fmt.Sprintf(
 				"detail_status=partial detail_series=%d detail_rate_per_minute=%.3f detail_error=%s",

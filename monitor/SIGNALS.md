@@ -4519,7 +4519,7 @@ label_replace((sum by (companion) (rate(
   }[5m])) * 60),"monitor_metric","aggregate","__name__",".*")
 or
 label_replace((sum by (
-  request_companion,sender_role,resolution,relationship,
+  request_companion,sender_role,source_owner,resolution,relationship,
   source_lifecycle,destination_lifecycle
 ) (rate(urnetwork_connect_inactive_destination_details_total{
   env="main"
@@ -4552,24 +4552,40 @@ or time-skewed partition is UNKNOWN and must not be converted to zero.
   remote-write acceptance, and label retention. Never convert the missing rate
   to zero.
 
-The detail labels are finite: Boolean `request_companion`;
-`sender_role=client|server|absent|unknown`; the existing bounded resolution and
-relationship classes; and the existing source/destination lifecycle classes.
-The Connect producer in `f8b1b60` stamps the optional role from the requesting
-ContractKey, and the API consumer records it at the exact inactive-destination
-failure boundary. `client` or `server` proves only that reported sequence lane
-and capability presence. It is not an application, device, provider, or
-artifact identity. `absent` means the wire field was absent and must not be
-called an old client; `unknown` means an explicitly unknown/future value.
-Absent, partial, or ambiguous detail stays unattributed while the independent
-aggregate alert remains live. No customer or route identifier enters either
-family.
+The detail labels are finite:
+`request_companion,sender_role,source_owner,resolution,
+relationship,source_lifecycle,destination_lifecycle`. `request_companion` is
+Boolean; `sender_role=client|server|absent|unknown`; resolution, relationship,
+and lifecycle use their existing bounded classes; and
+`source_owner=egress_prober|other|unknown`. The Connect producer in `f8b1b60`
+stamps the optional role from the requesting ContractKey, and the API consumer
+records it at the exact inactive-destination failure boundary. `client` or `server`
+proves only that reported sequence lane and capability presence. It is not an
+application, device, provider, or artifact identity. `absent` means the wire
+field was absent and must not be called an old client; `unknown` means an
+explicitly unknown/future value.
+
+`source_owner` is different: the API compares the authenticated source's
+`network_id` with the durable `prober_identity.network_id` in the same
+PostgreSQL snapshot as lifecycle. This remains stable across prober credential
+rotation and arbitrarily nested derived clients, and it is never accepted from
+the request. An egress-prober value therefore attributes only the server-owned
+probe network; `other` excludes that network but still does not identify an
+application, customer, or artifact. `unknown` preserves a missing source or
+incomplete singleton rather than silently classifying it as other. During a
+rolling API deployment, a missing owner label is rendered as `unattributed`,
+retained as a real rate partition, and never folded into `other` or interpreted
+as zero. An explicit producer value of `unattributed` is invalid because that
+class is monitor-synthesized only. Partial or ambiguous detail stays
+unattributed while the independent aggregate alert remains live. No customer
+or route identifier enters either family.
 
 The internal signals dashboard keeps this detail next to the lossless
 contract-failure aggregate and the separate missing-origin breakdown. Rate
-each process counter before summing across all six finite dimensions; retain
+each process counter before summing across all seven finite dimensions; retain
 the selected environment and nonempty instance scope. Its legend must keep
-`sender_role` as a reported lane, not turn it into provider or app identity.
+`sender_role` as a reported lane and `source_owner` as the server-derived
+prober partition, not turn either into provider or app identity.
 Detail rates are partitions of their aggregate, not additional failures to
 add to it. The dashboard coverage and exact-query regressions must fail if
 this target is missing or drops one of those dimensions. A Grafana deployment
@@ -4590,12 +4606,15 @@ transition. Provider-return source owners also require Connect commit
 is admitted. An old client remains wire-compatible but can keep retrying its
 stale exit, so an API rollout alone protects contract correctness without
 necessarily removing the retry load. Causal use of the new joint cohorts
-additionally requires an API artifact containing the detail consumer and every
-relevant Connect-bearing requester to contain `f8b1b60`; otherwise the family
-must remain absent or its `sender_role=absent` cohort remains explicitly
+additionally requires an API artifact containing the detail consumer and
+server-derived owner partition, plus `f8b1b60` in every relevant
+Connect-bearing requester; otherwise the family must retain
+`source_owner=unattributed` or its `sender_role=absent` cohort as explicitly
 unattributed. Even a concrete `sender_role` proves only the sequence lane and
 capability; it does not prove `ec34ce1`, `55daddb`, an application, or an
-artifact version.
+artifact version. `source_owner=egress_prober` proves only the durable
+server-owned prober network. `source_owner=other` excludes that network but
+does not select among ordinary apps, service clients, or other internal owners.
 
 The 2026-09-02 main API, Connect, Proxy, and Taskworker artifacts were built at
 14:56–15:12Z from modified base `2d6f27c`, while the two repair commits were
@@ -4686,6 +4705,28 @@ then the complete detail rate remains at or below 50/min for two five-minute
 windows after the maximum old-client/window lifetime. An API-only redeploy
 cannot force already-installed clients to adopt this recovery behavior.
 
+The 2026-09-12 bounded discriminator found a much larger current population:
+23,457.650 inactive-destination rejections/min, of which 16,672.745/min (71.1%)
+were one complete
+`request_companion=false/sender_role=client/resolution=rejected/public/
+active_derived/inactive_top` cohort. Full and blackhole egress probes cannot be
+its dominant generator. At the original rate step, completed blackhole probes
+fell to zero and full attempts remained single-digit/min; the then-current 16
+tunnel slots and five bounded contract attempts per unresolved evaluation could
+not produce a sustained 19,568–59,704 requests/min. Under the current 128-slot
+configuration, 110 natural evaluation expiries/min bound that exact fixed-probe
+path to at most 550 retries/min, still far below 16,673/min. No mature prober
+residue retained a live platform connection. This rejects a tempting probe-load
+root cause without selecting the remaining producer.
+
+The old metric cannot distinguish ordinary selected/discovery traffic from a
+different derived-client fixed owner: `sender_role=client` is sequence-lane
+evidence, not requester identity. Do not patch retry or retirement behavior from
+that ambiguity. The server-derived `source_owner` partition is the next safe
+discriminator. If `egress_prober` remains small, diagnose `other` only through
+artifact/adoption and lifecycle evidence; the label must never grow into a
+customer, product, network, device, or arbitrary caller dimension.
+
 This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
 signal. More Proxy hosts raise the active-client ceiling but do not make an
 inactive destination contractible.
@@ -4695,7 +4736,8 @@ Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
 unknown partitions, stale/invalid/skewed samples, query scoping, absent and
 partially rolled detail, every fixed-label vocabulary, duplicate/stale/skewed
-detail, reconciliation tolerance, nil-versus-future sender roles, and detailed
+detail, reconciliation tolerance, nil-versus-future sender roles, server-owned
+prober network versus other networks, legacy missing-owner rollout, and detailed
 identifier-free Markdown. Partial or ambiguous detail never renders a dominant
 cohort.
 

@@ -49,8 +49,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 		networkB := server.NewId()
 		activeTop := server.NewId()
 		activeDerived := server.NewId()
+		activeGrandchild := server.NewId()
 		inactiveTop := server.NewId()
 		inactiveDerived := server.NewId()
+		missingSource := server.NewId()
+		rotatedProberClient := server.NewId()
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
@@ -62,7 +65,8 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					($1, $2, true, NULL),
 					($3, $2, true, $1),
 					($4, $5, false, NULL),
-					($6, $5, false, $1)
+					($6, $5, false, $4),
+					($7, $2, true, $3)
 				`,
 				activeTop,
 				networkA,
@@ -70,6 +74,27 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				inactiveTop,
 				networkB,
 				inactiveDerived,
+				activeGrandchild,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO prober_identity (singleton, network_id, client_id)
+				VALUES (true, $1, $2)
+				ON CONFLICT (singleton) DO UPDATE
+				SET
+					network_id = excluded.network_id,
+					client_id = excluded.client_id
+				`,
+				networkA,
+				activeTop,
+			))
+			// Credential rotation changes the singleton's current client without
+			// changing ownership of existing or nested clients in its network.
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE prober_identity SET client_id = $1 WHERE singleton`,
+				rotatedProberClient,
 			))
 		})
 
@@ -87,6 +112,7 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
 					DestinationLifecycle: NetworkClientLifecycleActiveDerived,
+					SourceOwner:          NetworkClientSourceOwnerEgressProber,
 				},
 			},
 			{
@@ -97,6 +123,7 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
 					DestinationLifecycle: NetworkClientLifecycleInactiveDerived,
+					SourceOwner:          NetworkClientSourceOwnerEgressProber,
 				},
 			},
 			{
@@ -107,6 +134,7 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleInactiveDerived,
 					DestinationLifecycle: NetworkClientLifecycleInactiveTop,
+					SourceOwner:          NetworkClientSourceOwnerOther,
 				},
 			},
 			{
@@ -117,6 +145,7 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
 					DestinationLifecycle: NetworkClientLifecycleMissing,
+					SourceOwner:          NetworkClientSourceOwnerEgressProber,
 				},
 			},
 			{
@@ -127,6 +156,40 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
 					DestinationLifecycle: NetworkClientLifecycleActiveTop,
+					SourceOwner:          NetworkClientSourceOwnerEgressProber,
+				},
+			},
+			{
+				name:        "ordinary source",
+				source:      inactiveTop,
+				destination: activeTop,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModePublic,
+					SourceLifecycle:      NetworkClientLifecycleInactiveTop,
+					DestinationLifecycle: NetworkClientLifecycleActiveTop,
+					SourceOwner:          NetworkClientSourceOwnerOther,
+				},
+			},
+			{
+				name:        "nested prober descendant after root rotation",
+				source:      activeGrandchild,
+				destination: inactiveTop,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModePublic,
+					SourceLifecycle:      NetworkClientLifecycleActiveDerived,
+					DestinationLifecycle: NetworkClientLifecycleInactiveTop,
+					SourceOwner:          NetworkClientSourceOwnerEgressProber,
+				},
+			},
+			{
+				name:        "missing source remains unknown",
+				source:      missingSource,
+				destination: activeTop,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModePublic,
+					SourceLifecycle:      NetworkClientLifecycleMissing,
+					DestinationLifecycle: NetworkClientLifecycleActiveTop,
+					SourceOwner:          NetworkClientSourceOwnerUnknown,
 				},
 			},
 		} {
@@ -136,6 +199,20 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 			if got := GetProvideRelationship(ctx, test.source, test.destination); got != test.want.Mode {
 				t.Fatalf("%s: GetProvideRelationship() = %d, want %d", test.name, got, test.want.Mode)
 			}
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_identity SET network_id = NULL WHERE singleton`))
+		})
+		if got := GetProvideRelationshipDetails(ctx, activeTop, inactiveTop); got.SourceOwner != NetworkClientSourceOwnerUnknown {
+			t.Fatalf("NULL prober network source owner = %q, want %q", got.SourceOwner, NetworkClientSourceOwnerUnknown)
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM prober_identity WHERE singleton`))
+		})
+		if got := GetProvideRelationshipDetails(ctx, activeTop, inactiveTop); got.SourceOwner != NetworkClientSourceOwnerUnknown {
+			t.Fatalf("missing prober singleton source owner = %q, want %q", got.SourceOwner, NetworkClientSourceOwnerUnknown)
 		}
 	})
 }
