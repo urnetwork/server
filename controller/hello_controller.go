@@ -7,6 +7,12 @@ import (
 
 type HelloResult struct {
 	ClientAddress string `json:"client_address,omitempty"`
+	// the extender root keys whose signatures this network space accepts
+	// (connect/EXTENDER.md B4, C7). It arrives over the platform's pinned tls,
+	// so it is trustworthy even when the request itself travelled through an
+	// untrusted extender, and it replaces whatever list the client stored.
+	// Empty when the operator has configured no extender network.
+	ExtenderRootPublicKeys []string `json:"extender_root_public_keys,omitempty"`
 }
 
 func Hello(
@@ -14,6 +20,11 @@ func Hello(
 ) (*HelloResult, error) {
 	result := &HelloResult{
 		ClientAddress: session.ClientAddress,
+	}
+	// an unconfigured extender network is not a hello failure; the client
+	// simply trusts no extender record
+	if config, err := EnvExtenderConfig(); err == nil {
+		result.ExtenderRootPublicKeys = config.RootPublicKeys()
 	}
 	return result, nil
 }

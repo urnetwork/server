@@ -7718,4 +7718,60 @@ var migrations = []any{
 		ALTER TABLE network_client_location_reliability
 		ADD COLUMN ipv6_proven bool NOT NULL DEFAULT false
 	`),
+
+	// Extender directory (connect/EXTENDER.md C1). One row per activated
+	// extender identity key, one address row per family it was probed on, and
+	// one publish row per signed record or revocation waiting for the gossip
+	// service to drain it.
+	newSqlMigration(`
+		CREATE TABLE network_extender (
+			extender_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			public_key bytea NOT NULL UNIQUE,
+			create_time timestamp NOT NULL,
+			tcp_port int NOT NULL DEFAULT 443,
+			udp_port int NOT NULL DEFAULT 443,
+			dns_port int NOT NULL DEFAULT 53,
+			dns_tld varchar NOT NULL DEFAULT 'ur.xyz.',
+			country_code varchar NOT NULL DEFAULT '',
+			active bool NOT NULL DEFAULT false,
+			revoke_time timestamp NULL,
+			record_issue_time timestamp NULL,
+
+			PRIMARY KEY (extender_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_extender_address (
+			extender_id uuid NOT NULL,
+			ip_version smallint NOT NULL,
+			ip inet NOT NULL,
+			carriers varchar NOT NULL,
+			activate_time timestamp NOT NULL,
+			last_probe_time timestamp NULL,
+			last_probe_success_time timestamp NULL,
+			consecutive_probe_failures int NOT NULL DEFAULT 0,
+			active bool NOT NULL DEFAULT true,
+			last_publish_time timestamp NULL,
+
+			PRIMARY KEY (extender_id, ip_version)
+		);
+		CREATE INDEX network_extender_address_active_last_publish_time
+		ON network_extender_address (active, last_publish_time)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_extender_publish (
+			publish_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			kind smallint NOT NULL,
+			message bytea NOT NULL,
+			create_time timestamp NOT NULL,
+			published_time timestamp NULL,
+
+			PRIMARY KEY (publish_id)
+		);
+		CREATE INDEX network_extender_publish_published_time_create_time
+		ON network_extender_publish (published_time, create_time)
+	`),
 }
