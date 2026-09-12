@@ -40,6 +40,7 @@ type testPanel struct {
 	Description string `json:"description"`
 	FieldConfig struct {
 		Defaults struct {
+			Unit       string `json:"unit"`
 			Thresholds struct {
 				Steps []struct {
 					Color string   `json:"color"`
@@ -1559,6 +1560,57 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 	for _, metric := range metrics {
 		if !strings.Contains(queries, metric) {
 			t.Errorf("custom application metric %s is absent from the internal dashboards", metric)
+		}
+	}
+}
+
+// Each phase belongs to one worker process. Gauges stay instantaneous, counters
+// use reset-aware rates, and the panels explain overlapping spans and work units.
+func TestTaskworkerScorePhaseDashboardPreservesWorkerAndPhaseSemantics(t *testing.T) {
+	dashboard := readTestDashboard(t, "taskworker.json")
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("worker phase diagnostics must remain authenticated")
+	}
+	const selector = `{env="$env",service="taskworker",block=~"$block",host=~"$host",instance!=""}`
+	for _, c := range []struct {
+		suffix           string
+		rate             bool
+		unit             string
+		descriptionParts []string
+	}{
+		{suffix: "active", unit: "short", descriptionParts: []string{"parent", "target_map", "gob_encode", "cache_write"}},
+		{suffix: "duration_seconds_total", rate: true, unit: "short", descriptionParts: []string{"completed", "wall", "child", "CPU"}},
+		{suffix: "exits_total", rate: true, unit: "short", descriptionParts: []string{"error", "panic", "success"}},
+		{suffix: "work_items_total", rate: true, unit: "short", descriptionParts: []string{"source_load", "target_export", "target_map", "gob_encode", "cache_write", "attempt"}},
+		{suffix: "work_bytes_total", rate: true, unit: "Bps", descriptionParts: []string{"key", "value", "attempt", "heap"}},
+	} {
+		metric := "urnetwork_update_client_scores_phase_" + c.suffix
+		wantExpression := metric + selector
+		if c.rate {
+			wantExpression = "rate(" + wantExpression + "[$__rate_interval])"
+		}
+		found := false
+		for _, panel := range dashboard.Panels {
+			for _, target := range panel.Targets {
+				if !strings.Contains(target.Expr, metric) {
+					continue
+				}
+				found = true
+				if target.Expr != wantExpression || target.LegendFormat != "{{host}} {{block}} {{instance}} {{phase}}" {
+					t.Errorf("phase metric %s loses scoped worker/phase identity or counter semantics: %+v", metric, target)
+				}
+				if panel.Type != "timeseries" || len(panel.Targets) != 1 || panel.FieldConfig.Defaults.Unit != c.unit || target.Instant || target.Range != nil && !*target.Range {
+					t.Errorf("phase metric %s needs a dedicated %s time series", metric, c.unit)
+				}
+				for _, part := range c.descriptionParts {
+					if !strings.Contains(panel.Description, part) {
+						t.Errorf("phase metric %s does not explain %q", metric, part)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("taskworker dashboard is missing phase metric %s", metric)
 		}
 	}
 }
