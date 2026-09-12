@@ -63,6 +63,8 @@ func feedAuthNetworkClientVerifyEgress(
 	)
 }
 
+// ConnectNetworkClient records a legacy, family-agnostic connection (intent
+// 0). Family-pinned transports use ConnectNetworkClientWithIpFamily.
 func ConnectNetworkClient(
 	ctx context.Context,
 	clientId server.Id,
@@ -70,8 +72,22 @@ func ConnectNetworkClient(
 	handlerId server.Id,
 	retryLocationTimeout time.Duration,
 ) (connectionId server.Id, clientAddressHash [32]byte, err error) {
+	return ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, retryLocationTimeout, 0)
+}
+
+// ConnectNetworkClientWithIpFamily is ConnectNetworkClient with the address
+// family the transport declared it intends to prove (0, 4 or 6; see
+// model.ConnectionProvenIpFamily).
+func ConnectNetworkClientWithIpFamily(
+	ctx context.Context,
+	clientId server.Id,
+	clientAddress string,
+	handlerId server.Id,
+	retryLocationTimeout time.Duration,
+	ipFamilyIntent int,
+) (connectionId server.Id, clientAddressHash [32]byte, err error) {
 	var clientIp string
-	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, ipFamilyIntent)
 	if err != nil {
 		return
 	}

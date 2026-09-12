@@ -2336,14 +2336,129 @@ type cityRegionCountry struct {
 type clientLocationReliability struct {
 	networkId server.Id
 	connected bool
-	locations map[cityRegionCountry]int
-
-	clientAddressHashes map[[32]byte]int
+	// locations is bucketed by what each connection proved (connect/IPV6.md
+	// A8): the location row is taken from the v4-proven and legacy
+	// connections when any exist, else from the rest (v6-proven or
+	// unproven). v6 geolocation is coarser than v4, so a dual-stack
+	// provider's two connections often geolocate to different rows; without
+	// the preference every dual-stack provider would carry two locations and
+	// read as invalid.
+	locations      map[cityRegionCountry]int
+	otherLocations map[cityRegionCountry]int
+	// clientAddressHashes is bucketed by the observed family: the hash is
+	// family-lossy and a dual-stack provider legitimately holds one address
+	// per family, so validity requires at most one hash within each family
+	// rather than one overall. Rows written before the family column existed
+	// sit in bucket 0 and are judged as before.
+	clientAddressHashes map[int]map[[32]byte]int
+	// the per-client OR of ConnectionProvenIpFamily over the rows
+	ipv4Proven bool
+	ipv6Proven bool
 
 	netTypeScores            map[int]int
 	netTypeScoreSpeeds       map[int]int
 	allBytesPerSecond        map[ByteCount]int
 	allRelativeLatencyMillis map[int]int
+}
+
+func newClientLocationReliability(networkId server.Id, connected bool) *clientLocationReliability {
+	return &clientLocationReliability{
+		networkId:                networkId,
+		connected:                connected,
+		locations:                map[cityRegionCountry]int{},
+		otherLocations:           map[cityRegionCountry]int{},
+		clientAddressHashes:      map[int]map[[32]byte]int{},
+		netTypeScores:            map[int]int{},
+		netTypeScoreSpeeds:       map[int]int{},
+		allBytesPerSecond:        map[ByteCount]int{},
+		allRelativeLatencyMillis: map[int]int{},
+	}
+}
+
+// clientLocationReliabilityRow is one connection row as both aggregation
+// queries below select it, in column order.
+type clientLocationReliabilityRow struct {
+	clientId              server.Id
+	networkId             server.Id
+	clientAddressHash     [32]byte
+	ipVersion             int
+	ipFamilyIntent        int
+	location              cityRegionCountry
+	netTypeScore          int
+	netTypeScoreSpeed     int
+	bytesPerSecond        ByteCount
+	relativeLatencyMillis int
+	hasSpeedTest          bool
+	hasLatencyTest        bool
+}
+
+func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocationReliabilityRow) {
+	var clientAddressHashSlice []byte
+	server.Raise(result.Scan(
+		&row.clientId,
+		&row.networkId,
+		&clientAddressHashSlice,
+		&row.ipVersion,
+		&row.ipFamilyIntent,
+		&row.location.cityLocationId,
+		&row.location.regionLocationId,
+		&row.location.countryLocationId,
+		&row.netTypeScore,
+		&row.netTypeScoreSpeed,
+		&row.bytesPerSecond,
+		&row.relativeLatencyMillis,
+		&row.hasSpeedTest,
+		&row.hasLatencyTest,
+	))
+	// scanning assigns a fresh slice, so copy into the fixed-size key
+	copy(row.clientAddressHash[:], clientAddressHashSlice)
+	return
+}
+
+// add folds one connection row into the client's summary.
+func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
+	switch ConnectionProvenIpFamily(row.ipVersion, row.ipFamilyIntent) {
+	case 4:
+		self.ipv4Proven = true
+		self.locations[row.location] += 1
+	case 6:
+		self.ipv6Proven = true
+		self.otherLocations[row.location] += 1
+	default:
+		self.otherLocations[row.location] += 1
+	}
+	hashes, ok := self.clientAddressHashes[row.ipVersion]
+	if !ok {
+		hashes = map[[32]byte]int{}
+		self.clientAddressHashes[row.ipVersion] = hashes
+	}
+	hashes[row.clientAddressHash] += 1
+	self.netTypeScores[row.netTypeScore] += 1
+	self.netTypeScoreSpeeds[row.netTypeScoreSpeed] += 1
+	if row.hasSpeedTest {
+		self.allBytesPerSecond[row.bytesPerSecond] += 1
+	}
+	if row.hasLatencyTest {
+		self.allRelativeLatencyMillis[row.relativeLatencyMillis] += 1
+	}
+}
+
+// effectiveLocations is the preferred bucket when it has rows, else the other.
+func (self *clientLocationReliability) effectiveLocations() map[cityRegionCountry]int {
+	if 0 < len(self.locations) {
+		return self.locations
+	}
+	return self.otherLocations
+}
+
+// maxClientAddressHashCount is the largest number of distinct hashes within
+// one observed family. One per family is the dual-stack steady state.
+func (self *clientLocationReliability) maxClientAddressHashCount() int {
+	maxCount := 0
+	for _, hashes := range self.clientAddressHashes {
+		maxCount = max(maxCount, len(hashes))
+	}
+	return maxCount
 }
 
 // server.ComplexValue
@@ -2361,21 +2476,24 @@ func (self *clientLocationReliability) Values() []any {
 	// [10] has_speed_test
 	// [11] has_latency_test
 	// [12] connected
+	// [13] ipv4_proven
+	// [14] ipv6_proven
 
-	values := make([]any, 13)
+	values := make([]any, 15)
 
 	values[0] = self.networkId
 
-	if 1 == len(self.locations) {
-		location := slices.Collect(maps.Keys(self.locations))[0]
+	locations := self.effectiveLocations()
+	if 1 == len(locations) {
+		location := slices.Collect(maps.Keys(locations))[0]
 		values[1] = &location.cityLocationId
 		values[2] = &location.regionLocationId
 		values[3] = &location.countryLocationId
 	}
 	// else leave locations nil
 
-	values[4] = len(self.clientAddressHashes)
-	values[5] = len(self.locations)
+	values[4] = self.maxClientAddressHashCount()
+	values[5] = len(locations)
 	// values[5] = self.connected
 
 	maxNetTypeScore := 0
@@ -2401,6 +2519,8 @@ func (self *clientLocationReliability) Values() []any {
 	values[10] = 0 < len(self.allBytesPerSecond)
 	values[11] = 0 < len(self.allRelativeLatencyMillis)
 	values[12] = self.connected
+	values[13] = self.ipv4Proven
+	values[14] = self.ipv6Proven
 
 	return values
 }
@@ -2461,7 +2581,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
-			network_client_connection.client_address_hash,	
+			network_client_connection.client_address_hash,
+			network_client_connection.ip_version,
+			network_client_connection.ip_family_intent,
 			network_client_location.city_location_id,
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
@@ -2497,63 +2619,14 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var clientId server.Id
-			var networkId server.Id
-			var clientAddressHash [32]byte
-			var cityLocationId server.Id
-			var regionLocationId server.Id
-			var countryLocationId server.Id
-			var netTypeScore int
-			var netTypeScoreSpeed int
-			var bytesPerSecond ByteCount
-			var relativeLatencyMillis int
-			var hasSpeedTest bool
-			var hasLatencyTest bool
-			var clientAddressHashSlice []byte
-			server.Raise(result.Scan(
-				&clientId,
-				&networkId,
-				&clientAddressHashSlice,
-				&cityLocationId,
-				&regionLocationId,
-				&countryLocationId,
-				&netTypeScore,
-				&netTypeScoreSpeed,
-				&bytesPerSecond,
-				&relativeLatencyMillis,
-				&hasSpeedTest,
-				&hasLatencyTest,
-			))
-			// scanning assigns a fresh slice, so copy into the fixed-size key
-			copy(clientAddressHash[:], clientAddressHashSlice)
-			r, ok := clientLocationReliabilities[clientId]
+			row := scanClientLocationReliabilityRow(result)
+			r, ok := clientLocationReliabilities[row.clientId]
 			if !ok {
-				r = &clientLocationReliability{
-					connected:                true,
-					locations:                map[cityRegionCountry]int{},
-					clientAddressHashes:      map[[32]byte]int{},
-					netTypeScores:            map[int]int{},
-					netTypeScoreSpeeds:       map[int]int{},
-					allBytesPerSecond:        map[ByteCount]int{},
-					allRelativeLatencyMillis: map[int]int{},
-				}
-				clientLocationReliabilities[clientId] = r
+				r = newClientLocationReliability(row.networkId, true)
+				clientLocationReliabilities[row.clientId] = r
 			}
-			r.networkId = networkId
-			r.locations[cityRegionCountry{
-				cityLocationId:    cityLocationId,
-				regionLocationId:  regionLocationId,
-				countryLocationId: countryLocationId,
-			}] += 1
-			r.clientAddressHashes[clientAddressHash] += 1
-			r.netTypeScores[netTypeScore] += 1
-			r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
-			if hasSpeedTest {
-				r.allBytesPerSecond[bytesPerSecond] += 1
-			}
-			if hasLatencyTest {
-				r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
-			}
+			r.networkId = row.networkId
+			r.add(row)
 		}
 	})
 
@@ -2564,7 +2637,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		SELECT
 			network_client.client_id,
 			network_client.network_id,
-			network_client_connection.client_address_hash,	
+			network_client_connection.client_address_hash,
+			network_client_connection.ip_version,
+			network_client_connection.ip_family_intent,
 			network_client_location.city_location_id,
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
@@ -2606,63 +2681,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var clientId server.Id
-			var networkId server.Id
-			var clientAddressHash [32]byte
-			var cityLocationId server.Id
-			var regionLocationId server.Id
-			var countryLocationId server.Id
-			var netTypeScore int
-			var netTypeScoreSpeed int
-			var bytesPerSecond ByteCount
-			var relativeLatencyMillis int
-			var hasSpeedTest bool
-			var hasLatencyTest bool
-			var clientAddressHashSlice []byte
-			server.Raise(result.Scan(
-				&clientId,
-				&networkId,
-				&clientAddressHashSlice,
-				&cityLocationId,
-				&regionLocationId,
-				&countryLocationId,
-				&netTypeScore,
-				&netTypeScoreSpeed,
-				&bytesPerSecond,
-				&relativeLatencyMillis,
-				&hasSpeedTest,
-				&hasLatencyTest,
-			))
-			// scanning assigns a fresh slice, so copy into the fixed-size key
-			copy(clientAddressHash[:], clientAddressHashSlice)
-			r, ok := clientLocationReliabilities[clientId]
-			if !ok {
-				r = &clientLocationReliability{
-					networkId:                networkId,
-					connected:                false,
-					locations:                map[cityRegionCountry]int{},
-					clientAddressHashes:      map[[32]byte]int{},
-					netTypeScores:            map[int]int{},
-					netTypeScoreSpeeds:       map[int]int{},
-					allBytesPerSecond:        map[ByteCount]int{},
-					allRelativeLatencyMillis: map[int]int{},
-				}
-				clientLocationReliabilities[clientId] = r
-
-				r.locations[cityRegionCountry{
-					cityLocationId:    cityLocationId,
-					regionLocationId:  regionLocationId,
-					countryLocationId: countryLocationId,
-				}] += 1
-				r.clientAddressHashes[clientAddressHash] += 1
-				r.netTypeScores[netTypeScore] += 1
-				r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
-				if hasSpeedTest {
-					r.allBytesPerSecond[bytesPerSecond] += 1
-				}
-				if hasLatencyTest {
-					r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
-				}
+			row := scanClientLocationReliabilityRow(result)
+			if _, ok := clientLocationReliabilities[row.clientId]; !ok {
+				// the most recent disconnected connection only
+				r := newClientLocationReliability(row.networkId, false)
+				clientLocationReliabilities[row.clientId] = r
+				r.add(row)
 			}
 			// else there is already an entry, don't update
 		}
@@ -2686,7 +2710,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	            min_relative_latency_ms integer,
 			    has_speed_test bool,
 			    has_latency_test bool,
-			    connected bool
+			    connected bool,
+			    ipv4_proven bool,
+			    ipv6_proven bool
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -2710,7 +2736,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_bytes_per_second,
 	        min_relative_latency_ms,
 	        has_speed_test,
-	        has_latency_test
+	        has_latency_test,
+	        ipv4_proven,
+	        ipv6_proven
 	    )
 	    SELECT
 	    	client_id,
@@ -2727,7 +2755,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_bytes_per_second,
 	        min_relative_latency_ms,
 	        has_speed_test,
-	        has_latency_test
+	        has_latency_test,
+	        ipv4_proven,
+	        ipv6_proven
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -2745,7 +2775,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_bytes_per_second = EXCLUDED.max_bytes_per_second,
 	        min_relative_latency_ms = EXCLUDED.min_relative_latency_ms,
 	        has_speed_test = EXCLUDED.has_speed_test,
-	        has_latency_test = EXCLUDED.has_latency_test
+	        has_latency_test = EXCLUDED.has_latency_test,
+	        ipv4_proven = EXCLUDED.ipv4_proven,
+	        ipv6_proven = EXCLUDED.ipv6_proven
 	    `,
 		updateBlockNumber,
 	))

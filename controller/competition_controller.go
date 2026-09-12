@@ -6312,7 +6312,7 @@ func NewApexAdapter(
 		return nil, errors.New("Apex adapter token, durable store, and fee collector are required")
 	}
 	if options.HttpClient == nil {
-		options.HttpClient = &http.Client{Timeout: 30 * time.Second}
+		options.HttpClient = server.NewHttpClient(30 * time.Second)
 	}
 	httpClient := *options.HttpClient
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {

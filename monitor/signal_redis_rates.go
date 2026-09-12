@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 // definitions so an undersized rate range cannot masquerade as missing Redis
 // telemetry.
 func NewRedisRatesSignal() Signal {
-	return newRedisRatesSignal(&http.Client{Timeout: 10 * time.Second}, "")
+	return newRedisRatesSignal(server.NewHttpClient(10*time.Second), "")
 }
 
 func newRedisRatesSignal(client grafanaDatasourceHTTPClient, endpoint string) Signal {
@@ -166,7 +168,7 @@ func (p redisRatesProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	}
 	client := p.client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = server.NewHttpClient(10 * time.Second)
 	}
 	endpoint := strings.TrimRight(p.endpoint, "/")
 	if endpoint == "" {

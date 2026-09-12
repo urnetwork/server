@@ -18,6 +18,8 @@ import (
 
 	"golang.org/x/oauth2"
 	oauthjwt "golang.org/x/oauth2/jwt"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -234,7 +236,7 @@ func validateGooglePlayReportingSettings(settings GooglePlayReportingSettings) e
 }
 
 func newGooglePlayReportingClient(ctx context.Context, settings GooglePlayReportingSettings) (*providerHTTP, error) {
-	base := &http.Client{Timeout: 30 * time.Second, CheckRedirect: providerSameOriginRedirect}
+	base := &http.Client{Transport: server.NewHttpTransport(), Timeout: 30 * time.Second, CheckRedirect: providerSameOriginRedirect}
 	authContext := context.WithValue(ctx, oauth2.HTTPClient, base)
 	config := &oauthjwt.Config{
 		Email:        settings.ClientEmail,

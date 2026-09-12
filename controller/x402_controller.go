@@ -386,7 +386,7 @@ func x402FacilitatorPost(ctx context.Context, path string, request any, response
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Facilitator.ApiKey))
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := server.NewHttpClient(30 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
 		return err

@@ -27,7 +27,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"runtime/debug"
 	"slices"
@@ -247,9 +246,7 @@ func StartStatsPusher(ctx context.Context) (flush func()) {
 	instance := hex.EncodeToString(instanceBytes)
 
 	pusher := newStatsPusher(fmt.Sprintf("http://127.0.0.1:%d", localPort), service, username, password).
-		Client(&http.Client{
-			Timeout: 10 * time.Second,
-		}).
+		Client(NewHttpClient(10*time.Second)).
 		Grouping("env", env).
 		Grouping("service", service).
 		Grouping("block", block).

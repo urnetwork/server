@@ -23,12 +23,13 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -456,7 +457,7 @@ func (self *runner) tcpExchange(ctx context.Context, network, address string, pa
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	connection, err := (&net.Dialer{Timeout: timeout}).DialContext(commandCtx, network, address)
+	connection, err := server.NewDialer(timeout).DialContext(commandCtx, network, address)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +493,7 @@ func (self *runner) tlsCertificates(ctx context.Context, network, address, serve
 	defer cancel()
 
 	connection, err := (&tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: timeout},
+		NetDialer: server.NewDialer(timeout),
 		Config: &tls.Config{
 			ServerName:         serverName,
 			MinVersion:         tls.VersionTLS12,

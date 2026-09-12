@@ -146,19 +146,28 @@ func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
 				return fmt.Sprintf("sample/%s/%d", callerId, sampleIndex)
 			},
 			alias: func(callerId server.Id) string { return "alias/" + callerId.String() },
+			facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
+				return fmt.Sprintf("counts/%s/%s", callerId, facet)
+			},
+			facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
+				return fmt.Sprintf("sample/%s/%s/%d", callerId, facet, sampleIndex)
+			},
 		},
-		func(scores map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
+		func(scores map[server.Id]*ClientScore) clientScoreExportPayload {
 			size := len(scores)
 			encodeSizes = append(encodeSizes, size)
-			return []byte(fmt.Sprintf("counts=%d", size)),
+			return unfacetedExportPayloadForTest(
+				[]byte(fmt.Sprintf("counts=%d", size)),
 				[]byte(fmt.Sprintf("filter=%d", size)),
 				[]int{size},
 				func(int) []byte {
 					sampleEncodeSizes = append(sampleEncodeSizes, size)
 					return []byte(fmt.Sprintf("sample=%d", size))
-				}
+				},
+			)
 		},
 		false,
+		true,
 		func(set clientScoreRedisSet) error {
 			valuesByKey[set.key] = string(set.value)
 			return nil
@@ -190,8 +199,8 @@ func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
 	if got := valuesByKey["alias/"+callerFiltered.String()]; got != clientScoreAliasCallerValue {
 		t.Fatalf("filtered caller alias = %q, want caller-specific alias", got)
 	}
-	if got, want := len(valuesByKey), 9; got != want {
-		t.Fatalf("emitted key count = %d, want %d (two payloads plus three aliases)", got, want)
+	if got, want := len(valuesByKey), 15; got != want {
+		t.Fatalf("emitted key count = %d, want %d (two payloads of counts, filter, sample and three empty facet counts, plus three aliases)", got, want)
 	}
 }
 
@@ -219,14 +228,21 @@ func TestClientScoreTargetFanoutCompatibilityPassKeepsLegacyPayloads(t *testing.
 				return fmt.Sprintf("sample/%s/%d", callerId, sampleIndex)
 			},
 			alias: func(callerId server.Id) string { return "alias/" + callerId.String() },
+			facetCounts: func(callerId server.Id, facet ipFamilyFacet) string {
+				return fmt.Sprintf("counts/%s/%s", callerId, facet)
+			},
+			facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
+				return fmt.Sprintf("sample/%s/%s/%d", callerId, facet, sampleIndex)
+			},
 		},
-		func(map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
+		func(map[server.Id]*ClientScore) clientScoreExportPayload {
 			encodeCalls++
-			return []byte("counts"), []byte("filter"), []int{1}, func(int) []byte {
+			return unfacetedExportPayloadForTest([]byte("counts"), []byte("filter"), []int{1}, func(int) []byte {
 				sampleEncodeCalls++
 				return []byte("sample")
-			}
+			})
 		},
+		true,
 		true,
 		func(set clientScoreRedisSet) error {
 			valuesByKey[set.key] = string(set.value)
@@ -249,9 +265,35 @@ func TestClientScoreTargetFanoutCompatibilityPassKeepsLegacyPayloads(t *testing.
 			t.Fatalf("compatibility alias for caller %s = %q, want baseline", callerId, got)
 		}
 	}
-	if got, want := len(valuesByKey), 11; got != want {
-		t.Fatalf("compatibility key count=%d, want %d", got, want)
+	if got, want := len(valuesByKey), 20; got != want {
+		t.Fatalf("compatibility key count=%d, want %d (three callers of counts, filter, sample and three empty facet counts, plus two aliases)", got, want)
 	}
+}
+
+// unfacetedExportPayloadForTest wraps the pre-facet encoder shape: the
+// un-faceted payload plus one empty facet per family, so the alias and
+// compatibility behaviors above are tested without any facet samples.
+func unfacetedExportPayloadForTest(
+	countsBytes []byte,
+	filterBytes []byte,
+	counts []int,
+	encodeSample func(int) []byte,
+) clientScoreExportPayload {
+	payload := clientScoreExportPayload{
+		countsBytes:  countsBytes,
+		filterBytes:  filterBytes,
+		counts:       counts,
+		encodeSample: encodeSample,
+		facets:       map[ipFamilyFacet]clientScoreFacetPayload{},
+	}
+	for _, facet := range ipFamilyFacets {
+		payload.facets[facet] = clientScoreFacetPayload{
+			countsBytes:  []byte("counts=0"),
+			counts:       []int{},
+			encodeSample: func(int) []byte { return nil },
+		}
+	}
+	return payload
 }
 
 func TestSelectClientScorePayloadPreservesLegacyAndOverrides(t *testing.T) {

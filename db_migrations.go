@@ -7692,4 +7692,30 @@ var migrations = []any{
 		CREATE INDEX provider_egress_health_measured_at_client_id
 		ON provider_egress_health (measured_at, client_id)
 	`),
+	// IPv6 dual-stack (connect/IPV6.md A3, A8). ip_version is the family the
+	// connection was observed to arrive on (4 or 6; 0 on rows written before
+	// this migration). ip_family_intent is the family a family-pinned platform
+	// transport declared it intends to prove (4 or 6; 0 is a legacy,
+	// family-agnostic transport, which the reliability aggregation counts as
+	// v4). A declared intent proves its family only when the observed family
+	// agrees; the row keeps both so the rule is applied at aggregation time.
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN ip_version smallint NOT NULL DEFAULT 0
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN ip_family_intent smallint NOT NULL DEFAULT 0
+	`),
+	// The per-client aggregate of the rule above: which families this client
+	// has proven with a currently connected connection. Both false on rows
+	// written before this migration, which the score export reads as v4-only.
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN ipv4_proven bool NOT NULL DEFAULT false
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN ipv6_proven bool NOT NULL DEFAULT false
+	`),
 }

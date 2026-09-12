@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const grafanaDatasourceResponseLimit = 64 * 1024
@@ -18,7 +20,7 @@ const grafanaDatasourceResponseLimit = 64 * 1024
 // bounded query through Grafana's own /api/ds/query boundary for each required
 // datasource.
 func NewGrafanaDatasourcesSignal() Signal {
-	return newGrafanaDatasourcesSignal(&http.Client{Timeout: 10 * time.Second}, "")
+	return newGrafanaDatasourcesSignal(server.NewHttpClient(10*time.Second), "")
 }
 
 type grafanaDatasourceHTTPClient interface {
@@ -73,7 +75,7 @@ func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 	client := p.client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = server.NewHttpClient(10 * time.Second)
 	}
 	hostname := environment + "-grafana." + domain
 	endpoint := p.endpoint
