@@ -1338,6 +1338,12 @@ type perfvarSendRecoveryCounters struct {
 	// TimeoutResendDeferCount exists only on revisions that carry the
 	// deferred retransmit; it is read by name so every arm builds.
 	TimeoutResendDeferCount uint64 `json:"timeout_resend_defer_count"`
+	// The relay-stall exports: the longest interval a sequence went without
+	// its cumulative acknowledgement advancing, and the round trip the resend
+	// timer actually read. Read by name; zero on revisions without them.
+	CumulativeAckGapMaxDuration time.Duration `json:"cumulative_ack_gap_max_nanoseconds"`
+	ResendTimerRttMaxDuration   time.Duration `json:"resend_timer_rtt_max_nanoseconds"`
+	ResendTimerRttMinDuration   time.Duration `json:"resend_timer_rtt_min_nanoseconds"`
 }
 
 type perfvarSendRecoveryObservation struct {
@@ -1771,7 +1777,24 @@ func perfvarSendRecoveryCountersFor(
 		TimeoutResendWithRecentCumulativeProgress:   snapshot.TimeoutResendWithRecentCumulativeProgress,
 		UnreliableCarrierLastAckAge:                 snapshot.UnreliableCarrierLastAckAge,
 		TimeoutResendDeferCount:                     perfvarUint64Field(&snapshot, "TimeoutResendDeferCount"),
+		CumulativeAckGapMaxDuration:                 time.Duration(perfvarInt64Field(&snapshot, "CumulativeAckGapMaxDuration")),
+		ResendTimerRttMaxDuration:                   time.Duration(perfvarInt64Field(&snapshot, "ResendTimerRttMaxDuration")),
+		ResendTimerRttMinDuration:                   time.Duration(perfvarInt64Field(&snapshot, "ResendTimerRttMinDuration")),
 	}
+}
+
+// perfvarInt64Field reads one named int64 field (a Duration counts), or zero
+// when this Connect revision has no such field.
+func perfvarInt64Field(target any, name string) int64 {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return 0
+	}
+	field := value.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Int64 {
+		return 0
+	}
+	return field.Int()
 }
 
 // perfvarUint64Field reads one named uint64 field, or zero when this Connect
