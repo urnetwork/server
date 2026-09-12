@@ -97,6 +97,17 @@ func (self *armSdkFlag) Set(value string) error {
 	return nil
 }
 
+// runArgFlag appends arguments to every test-binary invocation, for example
+// glog's -v=1 when a reproduction needs transport logging.
+type runArgFlag []string
+
+func (self *runArgFlag) String() string { return strings.Join(*self, " ") }
+
+func (self *runArgFlag) Set(value string) error {
+	*self = append(*self, value)
+	return nil
+}
+
 type armFlag []arm
 
 func (self *armFlag) String() string { return fmt.Sprint(*self) }
@@ -121,6 +132,7 @@ type campaignManifest struct {
 	ServerRev string            `json:"server_revision"`
 	Arms      []manifestArm     `json:"arms"`
 	Filters   map[string]string `json:"filters"`
+	RunArgs   []string          `json:"run_args,omitempty"`
 	BaseSeed  int64             `json:"base_seed"`
 	SeedStep  int64             `json:"seed_step"`
 	RunCount  int               `json:"run_count"`
@@ -157,6 +169,8 @@ func runCampaign(args []string) error {
 	flags.Var(&arms, "arm", "name=/path/to/connect (first arm is the control)")
 	var armSdks armSdkFlag
 	flags.Var(&armSdks, "arm-sdk", "name=/path/to/sdk (optional per-arm SDK tree)")
+	var runArgs runArgFlag
+	flags.Var(&runArgs, "run-arg", "extra argument for every test-binary run (repeatable)")
 	runs := flags.Int("runs", 5, "repetitions per arm")
 	seed := flags.Int64("seed", 20260910, "base seed")
 	seedStep := flags.Int64("seed-step", 1, "seed increment per repetition; 0 repeats one seed")
@@ -196,6 +210,7 @@ func runCampaign(args []string) error {
 		Server:    serverAbsolute,
 		ServerRev: gitRevision(serverAbsolute),
 		Filters:   map[string]string{},
+		RunArgs:   runArgs,
 		BaseSeed:  *seed,
 		SeedStep:  *seedStep,
 		RunCount:  *runs,
@@ -256,7 +271,7 @@ func runCampaign(args []string) error {
 			}
 			fmt.Printf("run %d arm %s seed %d -> %s\n", run, arm.Name, runSeed, logPath)
 			start := time.Now()
-			exitCode, err := executeRun(packageDir, arm.Binary, logPath, runSeed, envFilters)
+			exitCode, err := executeRun(packageDir, arm.Binary, logPath, runSeed, envFilters, runArgs)
 			manifest.Runs = append(manifest.Runs, manifestRun{
 				Arm:      arm.Name,
 				Run:      run,
@@ -319,13 +334,16 @@ func executeRun(
 	logPath string,
 	seed int64,
 	envFilters map[string]string,
+	runArgs []string,
 ) (int, error) {
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return -1, err
 	}
 	defer logFile.Close()
-	command := exec.Command(binary, "-test.run", "^TestPerformanceVariations$", "-test.v", "-test.timeout", "0", "-test.count", "1")
+	args := []string{"-test.run", "^TestPerformanceVariations$", "-test.v", "-test.timeout", "0", "-test.count", "1"}
+	args = append(args, runArgs...)
+	command := exec.Command(binary, args...)
 	command.Dir = packageDir
 	env := os.Environ()
 	env = append(env,
