@@ -4305,12 +4305,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	//
 	// The asymmetry that leaves is intended. A stale *good* record keeps a
 	// provider visible; a stale *bad* record keeps it hidden until it is probed
-	// again. That is only safe because the probe due-queue
-	// (GetProviderEgressLocationDue) is deliberately not gated on any of this --
-	// it reads the live provider population directly, so an excluded provider is
-	// still handed to the prober and still graduates the moment it measures
-	// healthy. If that queue ever starts consulting these scores, an excluded
-	// provider can never be re-measured and is stuck out permanently.
+	// again. The full-probe queue therefore remains independent of health and TLS
+	// scores. Its only negative-evidence exception is a current blackhole failure:
+	// that independently proves the fixed tunnel cannot carry any destination,
+	// and the cheaper blackhole queue retries it without full-probe backoff. A
+	// passing recheck immediately restores full-probe eligibility, while a stale
+	// or missing check fails open after ProviderBlackholeCheckMaxAge. Gating the
+	// full queue on any other score could prevent an excluded provider from ever
+	// being re-measured.
 	// Shared with UpdateClientLocations so the gated membership and the
 	// advertised count can never disagree about what "healthy" means.
 	// UpdateClientScores uses health but not observed country: its candidate

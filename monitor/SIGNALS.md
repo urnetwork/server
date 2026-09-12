@@ -4766,9 +4766,10 @@ due APIs:
 For each shard, aggregate without exporting identifiers:
 
 - mutually exclusive full-due categories, all with no probe attempt in six
-  hours: no egress location; or, for a provider with a location, the eligible
-  location, existing-health, or missing-health lane with the earliest absolute
-  deadline. Location becomes due after 84 hours and expires at seven days;
+  hours and no current explicit failing blackhole verdict: no egress location;
+  or, for a provider with a location, the eligible location, existing-health,
+  or missing-health lane with the earliest absolute deadline. Location becomes
+  due after 84 hours and expires at seven days;
   existing health becomes due after 12 hours and expires at 24 hours. Missing
   health is an urgent lane whose 24-hour deadline is anchored at the accepted
   location timestamp; this prioritizes restoring evidence and does not claim
@@ -4776,14 +4777,20 @@ For each shard, aggregate without exporting identifiers:
   location stays exclusively in the no-location lane. An exact location/health
   deadline tie is assigned to location, matching the scheduler's stable merge;
 - blackhole due: no check, or a check older than 90 minutes;
-- newest full activity: the newest location, attempt, or health timestamp in
-  that same shard;
+- deferred current-dark full due: the number that otherwise meets a full-due
+  lane but whose latest blackhole check is a failure inside three hours;
+- newest full activity: the newest location, attempt, or health timestamp from
+  a provider without a current dark verdict in that same shard. Excluding old-
+  deployment activity against rows now dark prevents it from masking a stalled
+  corrected candidate queue;
 - newest blackhole activity: the newest blackhole check in that shard; and
 - current coverage: locations inside seven days and blackhole checks inside
   three hours, plus the number of unique latest full attempts and blackhole
   checks written in the last hour. The full-attempt count is success-inclusive:
   a successful probe may leave its former due category, so classifying attempts
-  by the provider's current category would manufacture zero progress.
+  by the provider's current category would manufacture zero progress. This
+  gross last-hour attempt rate deliberately remains unfiltered by current-dark
+  state for rollout comparability.
 
 The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
@@ -4794,6 +4801,16 @@ floor while a large first sweep is catching up. Instead, when `due > 0`,
 require the corresponding shard-local newest timestamp to be no older than its
 durable `max_time + idle_delay` plus one five-minute monitor cadence. Old
 evidence is healthy when the exact due count is zero.
+
+Only a current explicit `ok=false` blackhole verdict defers the expensive full
+queue. A missing check, a check at least three hours old, or a current passing
+check remains admitted. Recovery does not depend on the full queue: the cheap
+blackhole queue has no attempt backoff, offers the failing provider again after
+90 minutes, restores full eligibility immediately on a passing upsert, and
+fails open when an unreplaced failure reaches three hours. The primary-key
+lookup on `provider_blackhole_check(client_id)` keeps the new exclusion local
+to each candidate reached by the pre-existing head plan; it adds no migration,
+scan, sort, policy weight, concurrency, or timeout.
 
 Shard activity is necessary but not sufficient. Sum the eligible, current, and
 last-hour blackhole counts across the complete geometry. When current coverage
@@ -4837,6 +4854,13 @@ When full coverage is incomplete and the measured rate is nonzero,
 `projected_drain` must fit inside the seven-day location lifetime. This is an
 execution-capacity bound, not proof of a particular failure mechanism and not a
 policy for sharing the unlocated lane between first attempts and retries.
+`deferred_current_dark_due` is desired scheduler-state accounting. It becomes
+evidence of actual queue suppression only after the corrected API artifact has
+converged everywhere; before that boundary it is a candidate suppression
+opportunity, not proof of deployed queue behavior. During convergence the due
+projection uses the desired non-dark candidate set while the gross last-hour
+attempt rate may still include old-deployment dark attempts. Preserve that
+rate for comparison, and do not use the mixed first hour as steady-state proof.
 
 The category-local fairness check is narrower. For stale-location,
 stale-health, and missing-health separately, export due count, count past the
@@ -4858,7 +4882,9 @@ delay or a first-attempt-versus-retry allocation inside the unlocated lane.
   mixed-generation durable geometry. Let the normal bootstrap/post path
   converge it; never clone, delete, or rewrite pending rows by hand.
 - `egress-full-stalled` (PAGE after two samples): a shard has full-probe due
-  candidates but no location/attempt/health progress inside the derived bound.
+  non-dark candidates but no location/attempt/health progress inside the
+  derived bound. The newest-activity clock excludes current-dark candidates so
+  earlier attempts against them cannot keep a corrected queue falsely fresh.
 - `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
   due candidates but no check progress inside the same derived bound.
 - `egress-blackhole-capacity` (PAGE after two samples): shard activity is
@@ -4873,11 +4899,13 @@ delay or a first-attempt-versus-retry allocation inside the unlocated lane.
   is a separate correctness/availability decision; never hide the fault by
   merely lengthening the maximum age or deleting rows.
 - `egress-full-capacity` (PAGE after two samples): gross full attempts are
-  advancing, but the complete due population projects beyond the seven-day
-  location lifetime. First converge the deadline scheduler and independent
-  blackhole drain; then capacity-test any remaining deficit against PostgreSQL,
-  PgBouncer, API, Taskworker, and Proxy headroom. Do not infer weights or raise
-  concurrency from this aggregate alone.
+  advancing, but the non-dark due population projects beyond the seven-day
+  location lifetime. First prove corrected API artifact convergence, then
+  converge the deadline scheduler and independent blackhole drain and let the
+  gross one-hour rate clear its mixed-deployment window. Capacity-test any
+  remaining deficit against PostgreSQL, PgBouncer, API, Taskworker, and Proxy
+  headroom. Do not infer weights or raise concurrency from this aggregate
+  alone.
 - `egress-full-fairness` (PAGE after two samples, one shard/category frame):
   stale-location, stale-health, or missing-health work is already past its
   absolute deadline, or the success-inclusive all-capacity lower bound still
@@ -5025,13 +5053,71 @@ non-fatal result submission fails; Server publication independently fails
 closed when the health row is absent. The bounded current Main aggregate was a
 healthy dormant control: all four shards had zero fresh-location/missing-health
 rows (0 of 688 fresh-location rows), so this was not attributed to the current
-capacity page. The correction nevertheless adds a bounded location-indexed
-anti-health head, applies the same six-hour attempt backoff, assigns the
-location timestamp plus the existing 24-hour health lifetime as its ordering
-deadline, and deduplicates it with location work. No new weight or concurrency
-is introduced. After deployment, require missing-health to remain zero or to
-advance after backoff while the stale-location and stale-health deadline gates
-remain healthy; the first-attempt-versus-retry SLA remains unresolved.
+capacity page. The correction nevertheless adds an output-bounded anti-health
+head, applies the same six-hour attempt backoff, assigns the location timestamp
+plus the existing 24-hour health lifetime as its ordering deadline, and
+deduplicates it with location work. Unlike stale location, missing health is
+absence in another table and has no `observed_at` range predicate. The existing
+`(observed_at, client_id)` index remains available, but PostgreSQL may correctly
+choose a small-table sequential scan, hash anti-join, and sort when missing rows
+are rare; `LIMIT` bounds output, not necessarily scanned location rows. A
+2026-09-12 pre-commit production EXPLAIN observed that pre-existing plan while
+the other three heads retained their ordered indexes and the added current-dark
+predicate remained a primary-key anti lookup. The HEAD comparison estimated
+the location Seq Scan at cost 171.96 for 18 rows and the Limit at 204.47 for one
+row; the candidate retained those nodes and estimates, added only a cost-2.64
+primary-key lookup, and moved the Limit to 209.33. Do not introduce a migration
+or change due semantics from that plan shape alone. Revisit it separately only
+if bounded query latency or location-table growth becomes material. No new
+weight or concurrency is introduced. After deployment, require missing-health
+to remain zero or to advance after backoff while the stale-location and stale-
+health deadline gates remain healthy; the first-attempt-versus-retry SLA remains
+unresolved.
+
+The 2026-09-12 Main full-capacity diagnosis isolated a different omission in
+the corrected API scheduler. A current snapshot had 82,280 eligible providers,
+78,479 due, and only 298 gross attempts/hour versus 468/hour required; the
+projected drain was 263h21m, beyond seven days. The corresponding 30-minute
+aggregate showed all eight full slots saturated, a 494.6-second p95 batch,
+307.379 attempts/hour, 74.891 submissions/hour, and 232.488 failures/hour
+(75.64%). The three location sources independently agreed on the dominant
+`timeout/connect_formation` shape, while the blackhole-only drain remained
+materially faster than full probing.
+
+A bounded 07:50Z latest-row join across the exact four current tasks
+(`max_time=1800s`) supplied the causal overlap without exporting provider
+identities. Of 250 last-hour `no_consensus` failures, 198 already had a current
+dark verdict in the conservative pre-existing bracket, 33 were in the near-
+concurrent bracket, 13 acquired a failing verdict afterward, six had a current
+passing verdict, and none had absent or stale blackhole evidence. All three
+`not_confident` failures were also pre-existing current-dark. Latest-row
+replacement makes the pre-existing count a lower bound; neither the near nor
+post-attempt bracket proves selection-time state. The lower bound is still
+material: a full failure occupies roughly one 60-second location timeout plus
+the subsequent 60-second health stage, so 232.488 failures/hour consume about
+7.75 of the eight configured full worker-hours. Four such waves also explain
+the observed batch p95 without a concurrency, timeout, or weighting change.
+
+The adjacent 07:34Z compatibility control explained why the dark set was
+large: all 13,838 checked legacy-HMAC providers were dark with zero passes,
+while 5,880 of 10,396 checked compatible providers passed (4,516 dark); 57,833
+eligible providers were not assigned to either proven compatibility cohort.
+The prober singleton, observable credential/bootstrap state, scheduled
+bootstrap, and PostgreSQL balance-threshold Boolean were current/healthy. JWT
+expiry was not decoded and runtime Redis escrow deduction was not observed, so
+those controls rule out only the observable common gates, not every credential
+or balance failure. The compatible passing cohort remains the direct healthy
+control against a shared prober, platform, API, or tunnel-readiness outage.
+
+The owning correction excludes only an explicit failing blackhole verdict
+younger than three hours from all four full-due heads. It does not treat absent
+or stale checks as failures. The independent 90-minute cheap retry supplies the
+recovery path, a pass re-admits immediately, and an unreplaced failure ages out
+fail-open. Monitor due/deadline/latest-activity accounting mirrors that desired
+candidate set while keeping the last-hour attempt rate gross. Therefore treat
+`deferred_current_dark_due` as suppression opportunity until exact corrected
+API artifact convergence, then require the mixed one-hour rate window to clear
+before using the new projection as steady-state closure evidence.
 
 Connect commit `66aaad4` (the patch-identical rebased successor of historical
 commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a
