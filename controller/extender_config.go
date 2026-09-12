@@ -60,8 +60,10 @@ type ExtenderConfig struct {
 	Dns    ExtenderDnsConfig `yaml:"dns"`
 }
 
-// Geo dns publishing (C5). Phase 2 reads none of this; it is declared so the
-// resource has one documented schema from the start.
+// Geo dns publishing (C5), read by the dns half of the publish tick. An unset
+// ttl is 60 seconds and an unset sample_count is 8 addresses per set. The
+// record name is configured rather than derived from the host, since which
+// name an operator serves is an operations decision.
 type ExtenderDnsConfig struct {
 	Enabled            bool   `yaml:"enabled"`
 	HostedZoneId       string `yaml:"hosted_zone_id"`

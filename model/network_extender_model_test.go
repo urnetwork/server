@@ -768,3 +768,61 @@ func TestCountActiveNetworkExtenders(t *testing.T) {
 		connect.AssertEqual(t, CountActiveNetworkExtenders(ctx), 26)
 	})
 }
+
+// The geo dns reader sees one row per active address of an active extender,
+// carrying the country that decides which continent set it belongs in (C5).
+// An extender that was revoked, and a family that ran out of probe attempts,
+// are published nowhere -- a dns set is the one place a dead address costs a
+// client a connection attempt with no fallback.
+func TestGetActiveNetworkExtenderDnsAddressesExcludesTheInactive(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		connect.AssertEqual(t, len(GetActiveNetworkExtenderDnsAddresses(ctx)), 0)
+
+		create := func(index int, countryCode string, active bool, addresses ...*NetworkExtenderAddress) {
+			Testing_CreateNetworkExtender(
+				ctx,
+				&NetworkExtender{
+					ExtenderId:  server.NewId(),
+					NetworkId:   server.NewId(),
+					ClientId:    server.NewId(),
+					PublicKey:   []byte(fmt.Sprintf("extender-public-key-dnsread-%03d", index)),
+					CreateTime:  server.NowUtc(),
+					TcpPort:     443,
+					UdpPort:     443,
+					DnsPort:     53,
+					DnsTld:      connect.DefaultExtenderDnsTld,
+					CountryCode: countryCode,
+					Active:      active,
+				},
+				addresses,
+			)
+		}
+		address := func(ipVersion int, ip string, active bool) *NetworkExtenderAddress {
+			return &NetworkExtenderAddress{
+				IpVersion:    ipVersion,
+				Ip:           netip.MustParseAddr(ip),
+				Carriers:     []string{connect.ExtenderCarrierTcp},
+				ActivateTime: server.NowUtc(),
+				Active:       active,
+			}
+		}
+
+		create(1, "de", true, address(4, "198.51.100.1", true), address(6, "2001:db8:2::1", true))
+		// one family lost its attempts, the other still answers
+		create(2, "jp", true, address(4, "198.51.100.2", false), address(6, "2001:db8:2::2", true))
+		// revoked, so neither family is published
+		create(3, "fr", false, address(4, "198.51.100.3", true))
+
+		addresses := GetActiveNetworkExtenderDnsAddresses(ctx)
+		connect.AssertEqual(t, len(addresses), 3)
+		countryIps := map[string][]string{}
+		for _, address := range addresses {
+			countryIps[address.CountryCode] = append(countryIps[address.CountryCode], address.Ip.String())
+		}
+		connect.AssertEqual(t, countryIps, map[string][]string{
+			"de": {"198.51.100.1", "2001:db8:2::1"},
+			"jp": {"2001:db8:2::2"},
+		})
+	})
+}

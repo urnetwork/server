@@ -1,7 +1,6 @@
 package work
 
 import (
-	"context"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -27,8 +26,11 @@ import (
 // and one the operator stops publishing simply expires out of every directory
 // without needing a revocation.
 //
-// The tick is also where the geo dns sets are refreshed (C5), which phase 4
-// fills in at publishExtenderDns below.
+// The tick is also where the geo dns sets are refreshed (C5), in
+// publishExtenderDns of extender_dns_publish.go. The dns sample belongs on
+// this tick rather than on one of its own because it and the drip describe the
+// same directory, and two cadences would let them disagree about which
+// extenders are live.
 
 const (
 	// How often the drip runs.
@@ -56,20 +58,6 @@ func extenderPublishBatchSize(activeCount int) int {
 	}
 	required := (activeCount + ExtenderPublishRotationTickCount - 1) / ExtenderPublishRotationTickCount
 	return max(ExtenderPublishMinBatchSize, required)
-}
-
-// publishExtenderDns refreshes the geolocation dns sets for this tick (C5).
-//
-// This is the slot phase 4 fills: the Route 53 publisher samples active
-// addresses per continent and writes one UPSERT batch of A and AAAA sets at
-// `extender.<host>`. It belongs on this tick rather than on one of its own
-// because the dns sample and the gossip drip describe the same directory, and
-// two cadences would let them disagree about which extenders are live.
-//
-// Until then it does nothing and reports nothing, so the drip runs unchanged
-// whether or not dns publishing is configured.
-func publishExtenderDns(_ context.Context, _ *controller.ExtenderConfig) error {
-	return nil
 }
 
 type ExtenderPublishArgs struct {

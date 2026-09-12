@@ -236,12 +236,3 @@ func TestExtenderPublishPostRearmsTheChain(t *testing.T) {
 		}
 	})
 }
-
-// The dns half of the tick is not wired yet (C5, phase 4). Its slot must stay
-// a no-op that cannot fail the drip: the record drip and the dns sets are
-// independent publishers of the same directory.
-func TestExtenderPublishDnsSlotIsInert(t *testing.T) {
-	if err := publishExtenderDns(context.Background(), nil); err != nil {
-		t.Fatalf("the dns slot must not fail before phase 4 fills it: %v", err)
-	}
-}

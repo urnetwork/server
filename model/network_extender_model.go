@@ -99,6 +99,16 @@ type NetworkExtenderProbeTarget struct {
 	Carriers   []string
 }
 
+// One address the geo dns sets are sampled from (C5), flattened the same way
+// as a probe target: the family decides which record type an address can
+// appear in, and the country decides which continent set it is local to.
+type NetworkExtenderDnsAddress struct {
+	ExtenderId  server.Id
+	IpVersion   int
+	Ip          netip.Addr
+	CountryCode string
+}
+
 // Builds the serialized gossip message of a record. issueTime is the time the
 // row set was written, which the body must carry so a record is never newer
 // than the state it describes.
@@ -697,6 +707,50 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 	})
 
 	return targets
+}
+
+// GetActiveNetworkExtenderDnsAddresses reads every address the geo dns sets
+// may hold (C5): one row per active address of an active extender, with the
+// country the extender activated from.
+//
+// The order is stable rather than random. The sampler does its own shuffling
+// from a seeded source, so a random order here would only make one tick's
+// sets impossible to reproduce for the same reason the sampler is seeded.
+func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtenderDnsAddress {
+	addresses := []*NetworkExtenderDnsAddress{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_extender.extender_id,
+				network_extender.country_code,
+				network_extender_address.ip_version,
+				network_extender_address.ip
+			FROM network_extender
+			INNER JOIN network_extender_address ON
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.active
+			WHERE network_extender.active
+			ORDER BY network_extender.extender_id, network_extender_address.ip_version
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				address := &NetworkExtenderDnsAddress{}
+				server.Raise(result.Scan(
+					&address.ExtenderId,
+					&address.CountryCode,
+					&address.IpVersion,
+					&address.Ip,
+				))
+				addresses = append(addresses, address)
+			}
+		})
+	})
+
+	return addresses
 }
 
 // CountActiveNetworkExtenders counts extenders with at least one active

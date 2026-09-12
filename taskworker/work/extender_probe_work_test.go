@@ -35,8 +35,9 @@ import (
 const testExtenderWorkNetworkHost = "ur.example"
 
 // Installs an `extender.yml` with a fresh root key and returns the public key
-// that verifies what the tasks sign.
-func installTestExtenderWorkConfig(t testing.TB) ed25519.PublicKey {
+// that verifies what the tasks sign. Extra yaml lines are appended as given,
+// which is how the dns tests add the block of C5.
+func installTestExtenderWorkConfig(t testing.TB, extraYamlLines ...string) ed25519.PublicKey {
 	t.Helper()
 	rootKeySeed, err := connect.NewExtenderKeySeed()
 	if err != nil {
@@ -46,13 +47,14 @@ func installTestExtenderWorkConfig(t testing.TB) ed25519.PublicKey {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installTestExtenderWorkConfigYaml(t, strings.Join([]string{
+	yamlLines := []string{
 		"root_private_key_hex: " + connect.ExtenderKeySeedHex(rootKeySeed),
 		"root_public_keys_hex:",
 		"  - " + hex.EncodeToString(rootPublicKey),
 		"network_host: " + testExtenderWorkNetworkHost,
 		"api_url: https://api." + testExtenderWorkNetworkHost,
-	}, "\n"))
+	}
+	installTestExtenderWorkConfigYaml(t, strings.Join(append(yamlLines, extraYamlLines...), "\n"))
 	return rootPublicKey
 }
 
