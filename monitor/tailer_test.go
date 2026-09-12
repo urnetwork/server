@@ -1933,11 +1933,14 @@ func TestWindowEvaluationBudgetUsesStructuredClass(t *testing.T) {
 	).Markdown()
 	for _, want := range []string{
 		"event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0",
-		"natural evaluation-budget boundary",
+		"pre-fix artifact signature",
+		"acquisition phase clipped",
+		"b11d722 or later",
 		"not why the receiver stayed silent",
 		"Lifecycle cancellation",
 		"do not lengthen either timeout as an HMAC remedy",
-		"no-late-admission cleanup",
+		"no-overlap/no-late-admission cleanup",
+		"full acquisition-plus-ping safety expiry",
 		"exactly one terminal owner",
 	} {
 		if !strings.Contains(markdown, want) {
