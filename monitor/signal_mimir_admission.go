@@ -34,7 +34,7 @@ const (
 // active until a complete, comparable two-hour quiet window has elapsed.
 func NewMimirAdmissionSignal() Signal {
 	return &signalAdapter{
-		number: "11.20a", key: "mimir-admission", name: "Mimir series admission headroom",
+		number: "11.20a", key: "mimir-admission", name: "Mimir series and sample-rate admission",
 		probe: &mimirAdmissionProbe{},
 	}
 }

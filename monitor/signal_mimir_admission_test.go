@@ -418,9 +418,10 @@ func mimirAdmissionCounterHostResponses(
 func TestMimirAdmissionSignalPagesOnInitialPositiveExactCounter(t *testing.T) {
 	signal := NewMimirAdmissionSignal()
 	if signal.Number() != "11.20a" || signal.Key() != "mimir-admission" ||
+		signal.Name() != "Mimir series and sample-rate admission" ||
 		signal.ID() != "observability/mimir-admission" || signal.Cadence() != time.Minute {
-		t.Fatalf("wrong Mimir admission signal metadata: number=%s key=%s id=%s cadence=%s",
-			signal.Number(), signal.Key(), signal.ID(), signal.Cadence())
+		t.Fatalf("wrong Mimir admission signal metadata: number=%s key=%s name=%s id=%s cadence=%s",
+			signal.Number(), signal.Key(), signal.Name(), signal.ID(), signal.Cadence())
 	}
 	now := time.Date(2032, 1, 2, 3, 4, 0, 0, time.UTC)
 	alerts := runMimirAdmissionSynthetic(
