@@ -593,9 +593,11 @@ func parseRecord(text string) (runRecord, bool) {
 			record.counters[name] = math.Min(device, provider) / float64(time.Millisecond)
 		}
 	}
-	maxOf("ack_gap_max_ms", "send_recovery", "cumulative_ack_gap_max_nanoseconds")
-	maxOf("timer_rtt_max_ms", "send_recovery", "resend_timer_rtt_max_nanoseconds")
-	minOf("timer_rtt_min_ms", "send_recovery", "resend_timer_rtt_min_nanoseconds")
+	// These three are lifetime maxima on the Client, so they are reported in
+	// the lifetime block rather than as an interval delta.
+	maxOf("ack_gap_max_ms", "send_recovery", "end_lifetime", "cumulative_ack_gap_max_nanoseconds")
+	maxOf("timer_rtt_max_ms", "send_recovery", "end_lifetime", "resend_timer_rtt_max_nanoseconds")
+	minOf("timer_rtt_min_ms", "send_recovery", "end_lifetime", "resend_timer_rtt_min_nanoseconds")
 	both("selective_gap_writes", "send_recovery", "selective_gap_write_count")
 	both("ack_writes_p2p", "receive_handoff", "ack_route_write_count_by_transport", "p2p")
 	// The exchange lane of a mixed route was labelled "unknown" by campaigns
