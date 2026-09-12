@@ -62,6 +62,8 @@ func stTransactionReconcileBlock(block uint64) map[string]any {
 	return result
 }
 
+// Handles single reconciliation reads and batched fee preparation. Reversing
+// batch replies exercises response-id matching, including per-method errors.
 func (self *stTransactionReconcileRPC) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	self.t.Helper()
 	defer request.Body.Close()
@@ -70,78 +72,104 @@ func (self *stTransactionReconcileRPC) ServeHTTP(writer http.ResponseWriter, req
 		self.t.Errorf("read transaction RPC request: %v", err)
 		return
 	}
-	var call stEpochRPCRequest
-	if err := json.Unmarshal(body, &call); err != nil {
-		self.t.Errorf("decode transaction RPC request: %v", err)
-		return
-	}
-	var result any
-	switch call.Method {
-	case "eth_chainId":
-		result = "0x3b1"
-	case "eth_getBlockByNumber":
-		var selector string
-		if len(call.Params) == 0 || json.Unmarshal(call.Params[0], &selector) != nil {
-			self.t.Errorf("invalid block selector: %s", body)
+	var calls []stEpochRPCRequest
+	batch := strings.HasPrefix(strings.TrimSpace(string(body)), "[")
+	if batch {
+		if err := json.Unmarshal(body, &calls); err != nil || len(calls) == 0 {
+			self.t.Errorf("decode transaction RPC batch: %v", err)
 			return
 		}
-		block := self.finalizedBlock
-		if selector != "latest" && selector != "finalized" {
-			block, err = hexutil.DecodeUint64(selector)
-			if err != nil {
-				self.t.Errorf("decode block selector %q: %v", selector, err)
+	} else {
+		var call stEpochRPCRequest
+		if err := json.Unmarshal(body, &call); err != nil {
+			self.t.Errorf("decode transaction RPC request: %v", err)
+			return
+		}
+		calls = append(calls, call)
+	}
+	responses := make([]map[string]any, len(calls))
+	for index, call := range calls {
+		response := map[string]any{"jsonrpc": "2.0", "id": call.ID}
+		var result any
+		switch call.Method {
+		case "eth_chainId":
+			result = "0x3b1"
+		case "eth_getBlockByNumber":
+			var selector string
+			if len(call.Params) == 0 || json.Unmarshal(call.Params[0], &selector) != nil {
+				self.t.Errorf("invalid block selector: %s", body)
 				return
 			}
-		}
-		result = stTransactionReconcileBlock(block)
-	case "eth_getTransactionCount":
-		result = hexutil.EncodeUint64(self.finalizedNonce)
-	case "eth_gasPrice":
-		result = "0x64"
-	case "eth_estimateGas":
-		result = "0xc350"
-	case "eth_sendRawTransaction":
-		var rawHex string
-		if len(call.Params) != 1 || json.Unmarshal(call.Params[0], &rawHex) != nil {
-			self.t.Errorf("invalid raw transaction request: %s", body)
+			block := self.finalizedBlock
+			if selector != "latest" && selector != "finalized" {
+				block, err = hexutil.DecodeUint64(selector)
+				if err != nil {
+					self.t.Errorf("decode block selector %q: %v", selector, err)
+					return
+				}
+			}
+			result = stTransactionReconcileBlock(block)
+		case "eth_getTransactionCount":
+			result = hexutil.EncodeUint64(self.finalizedNonce)
+		case "eth_gasPrice":
+			result = "0x64"
+		case "eth_maxPriorityFeePerGas":
+			// The fixture has pre-London headers. Unsupported tip quoting is a
+			// normal RPC error; production must then request the real gas price.
+			response["error"] = map[string]any{"code": -32601, "message": "method not found"}
+		case "eth_estimateGas":
+			result = "0xc350"
+		case "eth_sendRawTransaction":
+			var rawHex string
+			if len(call.Params) != 1 || json.Unmarshal(call.Params[0], &rawHex) != nil {
+				self.t.Errorf("invalid raw transaction request: %s", body)
+				return
+			}
+			raw, decodeErr := hexutil.Decode(rawHex)
+			if decodeErr != nil {
+				self.t.Errorf("decode raw transaction: %v", decodeErr)
+				return
+			}
+			var transaction types.Transaction
+			if decodeErr := transaction.UnmarshalBinary(raw); decodeErr != nil {
+				self.t.Errorf("decode signed transaction: %v", decodeErr)
+				return
+			}
+			hash := strings.ToLower(transaction.Hash().Hex())
+			self.stateLock.Lock()
+			self.sent = append(self.sent, &transaction)
+			self.receipts[hash] = &types.Receipt{
+				Type: transaction.Type(), TxHash: transaction.Hash(), BlockHash: stTransactionReconcileBlockHash(self.finalizedBlock - 1),
+				BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), TransactionIndex: 0,
+				Status: types.ReceiptStatusSuccessful, CumulativeGasUsed: transaction.Gas(), GasUsed: transaction.Gas(),
+				EffectiveGasPrice: transaction.GasPrice(), Logs: []*types.Log{},
+			}
+			self.stateLock.Unlock()
+			result = hash
+		case "eth_getTransactionReceipt":
+			var hash string
+			if len(call.Params) != 1 || json.Unmarshal(call.Params[0], &hash) != nil {
+				self.t.Errorf("invalid receipt request: %s", body)
+				return
+			}
+			self.stateLock.Lock()
+			result = self.receipts[strings.ToLower(hash)]
+			self.stateLock.Unlock()
+		default:
+			self.t.Errorf("unexpected transaction RPC method %s", call.Method)
 			return
 		}
-		raw, decodeErr := hexutil.Decode(rawHex)
-		if decodeErr != nil {
-			self.t.Errorf("decode raw transaction: %v", decodeErr)
-			return
+		if _, hasError := response["error"]; !hasError {
+			response["result"] = result
 		}
-		var transaction types.Transaction
-		if decodeErr := transaction.UnmarshalBinary(raw); decodeErr != nil {
-			self.t.Errorf("decode signed transaction: %v", decodeErr)
-			return
-		}
-		hash := strings.ToLower(transaction.Hash().Hex())
-		self.stateLock.Lock()
-		self.sent = append(self.sent, &transaction)
-		self.receipts[hash] = &types.Receipt{
-			Type: transaction.Type(), TxHash: transaction.Hash(), BlockHash: stTransactionReconcileBlockHash(self.finalizedBlock - 1),
-			BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), TransactionIndex: 0,
-			Status: types.ReceiptStatusSuccessful, CumulativeGasUsed: transaction.Gas(), GasUsed: transaction.Gas(),
-			EffectiveGasPrice: transaction.GasPrice(), Logs: []*types.Log{},
-		}
-		self.stateLock.Unlock()
-		result = hash
-	case "eth_getTransactionReceipt":
-		var hash string
-		if len(call.Params) != 1 || json.Unmarshal(call.Params[0], &hash) != nil {
-			self.t.Errorf("invalid receipt request: %s", body)
-			return
-		}
-		self.stateLock.Lock()
-		result = self.receipts[strings.ToLower(hash)]
-		self.stateLock.Unlock()
-	default:
-		self.t.Errorf("unexpected transaction RPC method %s", call.Method)
-		return
+		responses[len(calls)-1-index] = response
+	}
+	var response any = responses
+	if !batch {
+		response = responses[0]
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(writer).Encode(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": result}); err != nil {
+	if err := json.NewEncoder(writer).Encode(response); err != nil {
 		self.t.Errorf("encode transaction RPC response: %v", err)
 	}
 }
