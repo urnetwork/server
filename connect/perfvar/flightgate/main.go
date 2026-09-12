@@ -434,6 +434,9 @@ var counterNames = []string{
 	"timeout_resend_writes",
 	"timeout_resend_with_recent_progress",
 	"timeout_resend_deferred",
+	"ack_gap_max_ms",
+	"timer_rtt_max_ms",
+	"timer_rtt_min_ms",
 	"selective_gap_writes",
 	"ack_writes_p2p",
 	"ack_writes_relay",
@@ -571,6 +574,28 @@ func parseRecord(text string) (runRecord, bool) {
 	both("timeout_resend_writes", "send_recovery", "timeout_resend_write_count")
 	both("timeout_resend_with_recent_progress", "send_recovery", "timeout_resend_with_recent_cumulative_progress")
 	both("timeout_resend_deferred", "send_recovery", "timeout_resend_defer_count")
+	// The relay-stall exports are maxima, not counters: take the larger of the
+	// two ends rather than their sum, and the smaller for the minimum.
+	maxOf := func(name string, path ...string) {
+		device := num(raw, append([]string{"carrier", "device_" + path[0]}, path[1:]...)...)
+		provider := num(raw, append([]string{"carrier", "provider_" + path[0]}, path[1:]...)...)
+		record.counters[name] = math.Max(device, provider) / float64(time.Millisecond)
+	}
+	minOf := func(name string, path ...string) {
+		device := num(raw, append([]string{"carrier", "device_" + path[0]}, path[1:]...)...)
+		provider := num(raw, append([]string{"carrier", "provider_" + path[0]}, path[1:]...)...)
+		switch {
+		case device == 0:
+			record.counters[name] = provider / float64(time.Millisecond)
+		case provider == 0:
+			record.counters[name] = device / float64(time.Millisecond)
+		default:
+			record.counters[name] = math.Min(device, provider) / float64(time.Millisecond)
+		}
+	}
+	maxOf("ack_gap_max_ms", "send_recovery", "cumulative_ack_gap_max_nanoseconds")
+	maxOf("timer_rtt_max_ms", "send_recovery", "resend_timer_rtt_max_nanoseconds")
+	minOf("timer_rtt_min_ms", "send_recovery", "resend_timer_rtt_min_nanoseconds")
 	both("selective_gap_writes", "send_recovery", "selective_gap_write_count")
 	both("ack_writes_p2p", "receive_handoff", "ack_route_write_count_by_transport", "p2p")
 	// The exchange lane of a mixed route was labelled "unknown" by campaigns
