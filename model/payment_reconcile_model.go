@@ -551,6 +551,53 @@ func EndReconciledEntitlementForPurchaseToken(
 	return
 }
 
+// EndReconciledEntitlementForNetworkPurchaseToken is the scheduled-poll form
+// of the Play end operation. Both pieces of durable task ownership must match:
+// a token copied onto another network's task can never end that network, and a
+// network with more than one Play purchase loses only the terminal purchase.
+// The active-row predicates make redelivery idempotent. The pro cache is
+// refreshed only after the transaction commits an end.
+func EndReconciledEntitlementForNetworkPurchaseToken(
+	ctx context.Context,
+	networkId server.Id,
+	market SubscriptionMarket,
+	purchaseToken string,
+	now time.Time,
+) (ended bool, err error) {
+	if purchaseToken == "" {
+		// an empty scope must never mean "every purchase on the network"
+		return false, nil
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Tx may retry after a transient serialization error; never retain an
+		// aborted attempt's outcome in the named return values.
+		ended = false
+		err = nil
+		if err = LockPlaySubscriptionPurchaseInTx(
+			tx,
+			ctx,
+			networkId,
+			purchaseToken,
+		); err != nil {
+			return
+		}
+		ended = 0 < len(endReconciledEntitlementInTx(
+			tx,
+			ctx,
+			&networkId,
+			market,
+			nil,
+			purchaseToken,
+			now,
+		))
+	}, server.TxReadCommitted)
+
+	if ended {
+		UpdateProNetwork(ctx, networkId)
+	}
+	return
+}
+
 // endReconciledEntitlementInTx is the shared core: it ends -- AT now, never
 // retroactively -- the market's active supporter renewals matching the scope
 // (networkId nil-able; transactionIds nil = no transaction filter;
@@ -630,10 +677,12 @@ func endReconciledEntitlementInTx(
 			  AND pro
 			  AND end_time = ANY($3::timestamp[])
 			  AND end_time > $2
+			  AND ($4::varchar = '' OR purchase_token = $4)
 			`,
 			endedNetworkId,
 			now,
 			endTimes,
+			purchaseToken,
 		))
 		endedNetworkIds = append(endedNetworkIds, endedNetworkId)
 	}

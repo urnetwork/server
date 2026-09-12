@@ -5549,6 +5549,27 @@ task, persistence, idempotency, or monitor-cardinality failure. Closure
 requires zero new Solana repairs across two natural hourly passes; the warning
 remains visible until the historical rows leave the 24-hour window.
 
+The 2026-09-12 Main audit recovered one Google `ended` repair whose ordinary
+scheduled renewal poll had completed about two seconds after provider expiry.
+The provider already reported `SUBSCRIPTION_STATE_EXPIRED`, but the task
+returned `canceled=true`, recorded no error, scheduled no successor, and left
+the matching local renewal and Pro balance active; reconciliation ended both
+about 49 minutes later while preserving an unrelated active Pro balance. This
+proved an ordinary-path terminal-state defect, not a credential, provider,
+Taskworker availability, or reconciliation-idempotency failure. The correction
+makes `EXPIRED`, `PENDING_PURCHASE_CANCELED`, expired `CANCELED`, and HTTP 410
+end only the task network's exact Google purchase-token entitlement in one
+idempotent transaction serialized against credit for the same network/token,
+and returns an end failure to the task. A `CANCELED`
+subscription with future paid time keeps its entitlement and one poll at the
+maximum line-item expiry. Converge the corrected artifact across API and
+Taskworker: Taskworker owns the scheduled terminal end, while API webhook and
+verification calls share the serialized credit path. Then verify a natural
+terminal poll reports the bounded terminal/end booleans, leaves unrelated
+purchases and networks active, cannot be reversed by an already-expired
+in-flight `ACTIVE` response, and produces no matching reconciliation repair
+through two complete hourly runs.
+
 Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
 to `signal_payment_reconciliation.go` and
 `signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy

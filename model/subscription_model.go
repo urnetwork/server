@@ -4277,6 +4277,30 @@ func LockPaymentNetworkInTx(
 	return err
 }
 
+// LockPlaySubscriptionPurchaseInTx serializes a Play purchase's credit and end
+// paths. Both take the network lifecycle lock first and this token advisory
+// lock second, so a terminal poll that follows an in-flight ACTIVE response
+// sees and ends the committed credit rather than racing past it.
+func LockPlaySubscriptionPurchaseInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	purchaseToken string,
+) error {
+	if purchaseToken == "" {
+		return errors.New("Play purchase token is empty")
+	}
+	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		purchaseToken,
+	)
+	return err
+}
+
 func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *SubscriptionRenewal) (returnErr error) {
 	if err := LockPaymentNetworkInTx(tx, ctx, renewal.NetworkId); err != nil {
 		return err
