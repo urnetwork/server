@@ -2,11 +2,54 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+func workerScorePhaseFixtureJSON(t *testing.T, now time.Time, host, block, instance string, complete bool) string {
+	t.Helper()
+	result := []any{}
+	for phaseIndex, phase := range workerScorePhaseNames {
+		metrics := map[string]float64{
+			"active":   0,
+			"duration": float64(phaseIndex+1) / 10,
+			"exits":    float64(phaseIndex + 1),
+			"items":    float64((phaseIndex + 1) * 10),
+			"bytes":    float64((phaseIndex + 1) << 20),
+		}
+		if phase == "gob_encode" {
+			metrics["active"] = 12
+		}
+		for metricName, value := range metrics {
+			if !complete && phase == "cache_write" && metricName == "bytes" {
+				continue
+			}
+			result = append(result, map[string]any{
+				"metric": map[string]string{
+					"monitor_score_phase_metric": metricName,
+					"phase":                      phase,
+					"env":                        "synthetic",
+					"job":                        "taskworker",
+					"host":                       host,
+					"block":                      block,
+					"instance":                   instance,
+				},
+				"value": []any{float64(now.Unix()), fmt.Sprintf("%.6f", value)},
+			})
+		}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"status": "success",
+		"data":   map[string]any{"resultType": "vector", "result": result},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
 
 func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 	now := time.Date(2026, 8, 31, 3, 55, 0, 0, time.UTC)
@@ -84,8 +127,13 @@ func runWorkerChurnAliasSynthetic(
 	taskName string,
 	markerValue string,
 	markerErr error,
+	phaseCompleteOption ...bool,
 ) (Alert, int) {
 	t.Helper()
+	phaseComplete := true
+	if 0 < len(phaseCompleteOption) {
+		phaseComplete = phaseCompleteOption[0]
+	}
 	now := time.Date(2026, 9, 12, 14, 30, 0, 0, time.UTC)
 	workers := []workerMetricFixture{
 		{host: "worker-a", block: "g1", instance: "runtime-a", cpuRate: 0.02, allocRate: 1 << 20},
@@ -95,7 +143,13 @@ func runWorkerChurnAliasSynthetic(
 	}
 	redisReads := 0
 	source := &syntheticSource{
-		hostFn: func(_ HostSettings, _ string) (string, error) {
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, "monitor_score_phase_metric") {
+				if markerValue != redisScoreAliasReadyValue || markerErr != nil {
+					return "", fmt.Errorf("unexpected phase query")
+				}
+				return workerScorePhaseFixtureJSON(t, now, "worker-hot", "g2", "runtime-hot", phaseComplete), nil
+			}
 			return workerRatesFixtureJSON(t, now, workers...), nil
 		},
 		localFn: func(string, ...string) (string, error) {
@@ -117,6 +171,33 @@ func runWorkerChurnAliasSynthetic(
 	alert := requireAlertClass(t, alerts, "worker-cpu-allocation-churn")
 	requireAlertOmits(t, alert, "02b166d9-86af-517f-5172-714a1ed9797a")
 	return alert, redisReads
+}
+
+func TestWorkerChurnSignalTreatsMixedPhaseRolloutAsUnobservable(t *testing.T) {
+	alert, _ := runWorkerChurnAliasSynthetic(
+		t,
+		"UpdateClientScores",
+		redisScoreAliasReadyValue,
+		nil,
+		false,
+	)
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"score_phase_observability=unavailable",
+		"mixed rollout or before two metric scrapes",
+		"explicitly unobservable, not healthy",
+		"partial data was not interpreted as health",
+		"Converge the taskworker phase-telemetry build",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("mixed phase rollout diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, omit := range []string{"score_phase_observability=ready", "active gob_encode spans"} {
+		if strings.Contains(markdown, omit) {
+			t.Fatalf("mixed phase rollout was classified with complete telemetry %q:\n%s", omit, markdown)
+		}
+	}
 }
 
 func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
@@ -144,8 +225,13 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 				"score_alias_schema_ready=true",
 				"durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass",
 				"residual allocation in the deployed sparse exporter",
+				"score_phase_observability=ready",
+				"score_phase_active=source_load:0,target_export:0,target_map:0,gob_encode:12,cache_write:0",
+				"score_phase_mib_per_s_1m=source_load:1.00,target_export:2.00,target_map:3.00,gob_encode:4.00,cache_write:5.00",
+				"the scrape found 12 active gob_encode spans",
+				"work bytes are not mislabeled as process heap allocations",
 				"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
-				"capture phase-local allocation evidence",
+				"profile the observed source-load, target-map, gob-encode, or cache-write phase",
 			},
 			omit: []string{"Deploy the target-oriented UpdateClientScores fanout"},
 		},

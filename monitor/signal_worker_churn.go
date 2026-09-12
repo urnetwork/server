@@ -21,6 +21,8 @@ const (
 // Signal worker-churn implements SIGNALS.md §2.12a. It detects a taskworker
 // that is simultaneously CPU-saturated and allocating at an exceptional rate,
 // even when its bounded live heap no longer trips the §2.12 memory-skew guard.
+// A marker-ready score task is attributed further only when its complete fixed
+// phase family is fresh; partial rollout data stays explicitly unobservable.
 func NewWorkerChurnSignal() Signal {
 	return &signalAdapter{
 		number: "2.12a", key: "worker-churn", name: "Taskworker CPU/allocation churn",
@@ -137,6 +139,9 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	aliasesReady := false
 	var aliasesReadyErr error
 	aliasesReadyLoaded := false
+	phaseObservations := map[string]workerScorePhaseObservation{}
+	var phaseObservationsErr error
+	phaseObservationsLoaded := false
 	for _, worker := range pairedWorkers {
 		cpuRatio := safeRatio(worker.cpuRate, cpuMedian)
 		allocRatio := safeRatio(worker.allocRate, allocMedian)
@@ -219,9 +224,28 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				verify = "The marker state is known, the corresponding sparse writer path is active, and consecutive score runs finish with the executor returning below the CPU/allocation guards for two consecutive probes without selection loss or Redis capacity pressure."
 			case aliasesReady:
 				observed += " score_alias_schema_ready=true"
-				mechanism = "UpdateClientScores is active on the exact hot executor, and the durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass. This is therefore residual allocation in the deployed sparse exporter, not evidence that the former caller-oriented fix is missing. Executor correlation alone does not identify the exact allocating subphase."
-				action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Let the current score run cross its terminal boundary and observe the next collection. If consecutive sparse passes still cross all CPU/allocation guards, capture phase-local allocation evidence and bound the remaining provider-map or encoding concurrency. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
-				verify = "Consecutive post-marker score runs complete inside their normal band, and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
+				mechanism = "UpdateClientScores is active on the exact hot executor, and the durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass. This is therefore residual allocation in the deployed sparse exporter, not evidence that the former caller-oriented fix is missing."
+				if !phaseObservationsLoaded {
+					phaseObservationsLoaded = true
+					phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
+				}
+				phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
+				if phaseObservationsErr != nil || !phaseReady {
+					observed += " score_phase_observability=unavailable"
+					mechanism += " The fixed phase series are unavailable or incomplete for this exact runtime, which is expected during a mixed rollout or before two metric scrapes. The residual source-load, target-map, gob-encode, and cache-write owner is therefore explicitly unobservable, not healthy."
+					action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Converge the taskworker phase-telemetry build and retain the current process until every fixed series has two scrapes. On the next guarded recurrence, use phase occupancy and exact work-byte rates to select the profiling boundary. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
+					verify = "Every active taskworker exposes the complete fixed phase set, then consecutive post-marker score runs complete inside their normal band and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
+					if phaseObservationsErr != nil {
+						aliasEvidence += " The phase-metric query was unavailable: " + phaseObservationsErr.Error()
+					} else {
+						aliasEvidence += " The phase metric query returned no complete fixed phase set for this exact runtime; partial data was not interpreted as health."
+					}
+				} else {
+					observed += " " + phaseObservation.summary()
+					mechanism += " Fixed phase telemetry is complete for this runtime: " + phaseObservation.discriminator() + ". The phase seconds and deterministic work bytes localize the next profile boundary, but work bytes are not mislabeled as process heap allocations."
+					action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Preserve this process through the terminal boundary and profile the observed source-load, target-map, gob-encode, or cache-write phase if the all-guard recurrence sustains. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
+					verify = "The complete fixed phase set remains fresh, consecutive post-marker score runs complete inside their normal band, and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
+				}
 			default:
 				observed += " score_alias_schema_ready=false"
 				mechanism = "UpdateClientScores is active on the exact hot executor. A target's exported score payload is caller-invariant unless that caller blocks a network present in the target; encoding the unchanged target separately for every caller multiplies gob work by the caller-location count and produces the observed CPU/allocation churn even when streaming keeps live heap bounded."

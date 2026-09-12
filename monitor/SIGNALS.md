@@ -3934,6 +3934,32 @@ label_replace(
   fanout deployment; a present marker proves that fix completed and changes
   the boundary to residual allocation in the sparse exporter; an unreadable
   marker remains explicitly unknown and permits only conditional remediation.
+- For a marker-ready executor, join the fixed-cardinality phase families on
+  exact host, block, and runtime instance:
+
+  ```promql
+  urnetwork_update_client_scores_phase_active
+  rate(urnetwork_update_client_scores_phase_duration_seconds_total[1m])
+  rate(urnetwork_update_client_scores_phase_exits_total[1m])
+  rate(urnetwork_update_client_scores_phase_work_items_total[1m])
+  rate(urnetwork_update_client_scores_phase_work_bytes_total[1m])
+  ```
+
+  The only phase labels are `source_load`, `target_export`, `target_map`,
+  `gob_encode`, and `cache_write`; `target_export` is the parent of the three
+  target subphases. Active concurrency and summed completed-span seconds
+  distinguish source materialization, map/filter preparation, gob encoding,
+  and Redis execution. Work items and bytes are exact source rows, target
+  passes, inspected map/filter inputs, encoded values/bytes, and attempted SET
+  commands/key-plus-value bytes. They are deterministic workload measures,
+  not Go heap-allocation deltas. Continue to use the process-wide allocation
+  and heap families for that boundary: 48 concurrent workers and other tasks
+  make `runtime.MemStats` deltas inside an individual span non-attributable.
+- Require all five metric families for all five phases from the exact runtime,
+  including two samples for each rate. A partial set during a mixed rollout or
+  immediately after process start is `score_phase_observability=unavailable`,
+  not evidence that an unobserved phase is healthy. Preserve the process-rate
+  warning while visibility converges.
 - ACTION: remove repeated encoding, copying, or materialization in the exact
   active task family. Preserve bounded writers and task deadlines. Do not
   raise the CPU quota or restart the worker merely to make the evidence vanish.
@@ -3970,7 +3996,12 @@ The synthetic source regression supplies four fresh workers, makes one consume
 executor and active score task with both fleet ratios. Negative cases prove a
 CPU-only worker, an allocation-only worker, and a stale former generation do
 not alert. The model regression independently proves equivalent callers share
-one encoding while a genuinely affected caller gets a filtered encoding.
+one encoding while a genuinely affected caller gets a filtered encoding. A
+2026-09-12 instrumentation regression additionally proves the phase label set
+cannot grow from runtime data, 48 concurrent gob spans preserve byte-for-byte
+output, and active gauges plus exit counters clean up on normal, error, and
+panic paths. Monitor regressions prove a complete phase set is rendered as
+bounded Markdown while one missing series remains explicitly unobservable.
 
 The first live probe run also exposed a chronology failure in degraded task
 attribution. Loki's 502 path delayed `warpctl logs` for more than a minute
@@ -4036,11 +4067,14 @@ subphase.
 That recovered identity satisfied the normal two-consecutive-probe gate; do
 not redeploy the alias fix, restart the worker, or raise its CPU allocation. A
 single shorter absolute-rate cluster that does not pass both fleet-relative
-guards and sustain is context, not a new incident. If consecutive marker-ready
-score passes cross all four guards, capture phase-local allocation evidence and
-then bound the remaining provider-map or encoding concurrency at the proved
-owner. Do not lower score-export concurrency or change scheduler parallelism
-from heartbeat correlation alone.
+guards and sustain is context, not a new incident. The 2026-09-12 phase
+instrumentation is an observability correction, not an algorithm or scheduling
+change: it preserves the 48-way target export and reports fixed phase occupancy
+plus deterministic work rates. If consecutive marker-ready score passes cross
+all four guards after a complete-metric rollout, profile the phase selected by
+that evidence and only then bound the proved source-map, target-map, encoding,
+or cache-write owner. Do not lower score-export concurrency or change scheduler
+parallelism from heartbeat correlation alone.
 
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
@@ -8448,7 +8482,7 @@ Tier-1 (warn):
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by the transactional-email layout through the public website URL and pinned to each enabled edge under the same Host | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
-| worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
+| worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; marker-ready score attribution additionally requires the complete fixed phase family | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
 | missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled `missing_origin_details_total` causal cohorts | > 500/min for 5 min; `companion=true` is not covered and missing detail never means zero |

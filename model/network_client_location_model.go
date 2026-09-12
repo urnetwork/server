@@ -162,6 +162,18 @@ func filterClientScoresByNetwork(
 	return activeClientScores
 }
 
+func filterClientScoresByNetworkWithMetrics(
+	clientScores map[server.Id]*ClientScore,
+	excludedNetworkIds map[server.Id]bool,
+	metrics *updateClientScoresPhaseMetricSet,
+) map[server.Id]*ClientScore {
+	span := metrics.start(updateClientScoresPhaseTargetMap)
+	defer span.finish()
+	activeClientScores := filterClientScoresByNetwork(clientScores, excludedNetworkIds)
+	metrics.addWork(updateClientScoresPhaseTargetMap, len(clientScores), 0)
+	return activeClientScores
+}
+
 // emitClientScoreTargetFanout stores one complete zero-caller baseline for a
 // target. Callers whose blocked-network set leaves the target unchanged get a
 // one-byte baseline alias; callers that really remove a provider get a complete
@@ -187,6 +199,36 @@ func emitClientScoreTargetFanout(
 	writeUnfacetedPayload bool,
 	emit func(clientScoreRedisSet) error,
 ) error {
+	return emitClientScoreTargetFanoutWithMetrics(
+		clientLocationIds,
+		clientScores,
+		excludeLocationNetworkIds,
+		keys,
+		encode,
+		writeLegacyUnchanged,
+		writeUnfacetedPayload,
+		emit,
+		updateClientScoresPhaseMetrics,
+	)
+}
+
+func emitClientScoreTargetFanoutWithMetrics(
+	clientLocationIds []server.Id,
+	clientScores map[server.Id]*ClientScore,
+	excludeLocationNetworkIds map[server.Id]map[server.Id]bool,
+	keys clientScoreTargetKeys,
+	encode clientScoreTargetEncode,
+	writeLegacyUnchanged bool,
+	writeUnfacetedPayload bool,
+	emit func(clientScoreRedisSet) error,
+	metrics *updateClientScoresPhaseMetricSet,
+) error {
+	targetSpan := metrics.start(updateClientScoresPhaseTargetExport)
+	defer targetSpan.finish()
+	metrics.addWork(updateClientScoresPhaseTargetExport, 1, 0)
+
+	mapSpan := metrics.start(updateClientScoresPhaseTargetMap)
+	defer mapSpan.finish()
 	targetNetworkIds := clientScoreNetworkIds(clientScores)
 	unchangedClientLocationIds := make([]server.Id, 0, len(clientLocationIds))
 	changedClientLocationIds := make([]server.Id, 0)
@@ -200,6 +242,8 @@ func emitClientScoreTargetFanout(
 			unchangedClientLocationIds = append(unchangedClientLocationIds, clientLocationId)
 		}
 	}
+	metrics.addWork(updateClientScoresPhaseTargetMap, len(clientScores)+len(clientLocationIds), 0)
+	mapSpan.finish()
 
 	emitPayload := func(
 		callerIds []server.Id,
@@ -276,9 +320,10 @@ func emitClientScoreTargetFanout(
 		}
 	}
 	for _, clientLocationId := range changedClientLocationIds {
-		activeClientScores := filterClientScoresByNetwork(
+		activeClientScores := filterClientScoresByNetworkWithMetrics(
 			clientScores,
 			excludeLocationNetworkIds[clientLocationId],
+			metrics,
 		)
 		if err := emitPayload([]server.Id{clientLocationId}, encode(activeClientScores)); err != nil {
 			return err
@@ -464,10 +509,15 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 		clientScoreExportMaxAttempts,
 		produce,
 		func(batch []clientScoreRedisSet) error {
+			span := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseCacheWrite)
+			defer span.finish()
 			pipe := r.Pipeline()
+			batchBytes := 0
 			for _, set := range batch {
+				batchBytes += len(set.key) + len(set.value)
 				pipe.Set(ctx, set.key, set.value, ttl)
 			}
+			updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseCacheWrite, len(batch), batchBytes)
 			_, err := pipe.Exec(ctx)
 			return err
 		},
@@ -3863,6 +3913,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return fmt.Errorf("read client score ip family migration state: %w", err)
 	}
 	writeUnfacetedPayload := !ipFamilyReady
+	sourceLoadSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseSourceLoad)
+	defer sourceLoadSpan.finish()
+	sourceRows := 0
 
 	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
 		clientScore, ok := m[lookbackClientScore.ClientId]
@@ -4121,6 +4174,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				sourceRows++
 				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId, reputationFailedNames := loadClientScore(result)
 
 				// top-level only; the lookback copies stay nil (see `ClientScore`)
@@ -4230,6 +4284,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				sourceRows++
 				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId, reputationFailedNames := loadClientScore(result)
 
 				// once per distinct group id. The three location columns can
@@ -4385,7 +4440,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			migrateClientScore(clientScore)
 		}
 	}
-
 	// splitClientScoreSamples shuffles and buckets one list of scores into
 	// ClientScoreSampleCount-sized samples. Encode on demand so 48 parallel
 	// caller-location exporters retain at most one sample each, rather than
@@ -4412,20 +4466,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		encodeSample = func(i int) []byte {
 			i0 := i * clientsPerSample
 			i1 := min((i+1)*clientsPerSample, len(clientScores))
-			b := bytes.NewBuffer(nil)
-			e := gob.NewEncoder(b)
-			e.Encode(clientScores[i0:i1])
-			return b.Bytes()
+			return encodeClientScoreGobValue(updateClientScoresPhaseMetrics, clientScores[i0:i1])
 		}
 
-		b := bytes.NewBuffer(nil)
-		e := gob.NewEncoder(b)
-		e.Encode(counts)
-		countsBytes = b.Bytes()
+		countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
 		return
 	}
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) clientScoreExportPayload {
+		mapSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseTargetMap)
+		defer mapSpan.finish()
 		clientScores := []*ClientScore{}
 		facetClientScores := map[ipFamilyFacet][]*ClientScore{}
 		publicCount := 0
@@ -4458,6 +4508,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		payload := clientScoreExportPayload{
 			facets: map[ipFamilyFacet]clientScoreFacetPayload{},
 		}
+		updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
+		mapSpan.finish()
 		payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
 		// every facet, an empty one included: see the key layout comment
 		for _, facet := range ipFamilyFacets {
@@ -4466,10 +4518,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			payload.facets[facet] = facetPayload
 		}
 
-		b := bytes.NewBuffer(nil)
-		e := gob.NewEncoder(b)
-		e.Encode(filter)
-		payload.filterBytes = b.Bytes()
+		payload.filterBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)
 
 		return payload
 	}
@@ -4488,6 +4537,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				sourceRows++
 				var networkId server.Id
 				var clientLocationId server.Id
 				server.Raise(result.Scan(
@@ -4526,6 +4576,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			clientScores:  clientScores,
 		})
 	}
+	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseSourceLoad, sourceRows, 0)
+	sourceLoadSpan.finish()
 
 	var wg sync.WaitGroup
 	var exportCount atomic.Uint32
