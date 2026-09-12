@@ -187,10 +187,10 @@ func TestCircleAdmissionSignalSyntheticHealthyCurrentFleet(t *testing.T) {
 	}
 }
 
-func TestCircleAdmissionSignalSyntheticMissingCollector(t *testing.T) {
+func TestCircleAdmissionSignalTreatsMissingSamplesAsAmbiguous(t *testing.T) {
 	now := time.Date(2026, 9, 1, 8, 1, 0, 0, time.UTC)
 	process := circleAdmissionFixture{
-		host: "edge-3", block: "g2", instance: "missing", start: now.Add(-time.Hour),
+		host: "worker-c.invalid", block: "generation-b", instance: "no-samples", start: now.Add(-time.Hour),
 		omit: map[string]bool{
 			"urnetwork_circle_transfer_deferrals_total":              true,
 			"urnetwork_circle_transfer_admission_wait_seconds_sum":   true,
@@ -210,7 +210,9 @@ func TestCircleAdmissionSignalSyntheticMissingCollector(t *testing.T) {
 		t.Fatalf("wrong Circle admission signal identity: %+v", alert)
 	}
 	for _, want := range []string{
-		"edge-3/g2#missing[deferrals,wait-sum]",
+		"no_range_samples=worker-c.invalid/generation-b#no-samples[deferrals,wait-sum]",
+		"cannot distinguish an absent collector from stats delivery or admission loss",
+		"Only §8.12 source and immutable artifact evidence can prove",
 		"at most three transfer submits",
 		"commit 14928f69",
 		"commit 66525afc",
@@ -218,11 +220,14 @@ func TestCircleAdmissionSignalSyntheticMissingCollector(t *testing.T) {
 		"SIGNALS.md §2.14",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("missing-collector alert lacks %q:\n%s", want, alert.Markdown())
+			t.Fatalf("missing-sample alert lacks %q:\n%s", want, alert.Markdown())
 		}
 	}
+	if strings.Contains(alert.Markdown(), "genuinely lacks") {
+		t.Fatalf("missing-sample alert overclaimed collector absence:\n%s", alert.Markdown())
+	}
 	if strings.Contains(alert.Markdown(), "b8718420") || strings.Contains(alert.Markdown(), "eb7e79b6") {
-		t.Fatalf("missing-collector alert retained former non-ancestor deployment guidance:\n%s", alert.Markdown())
+		t.Fatalf("missing-sample alert retained former non-ancestor deployment guidance:\n%s", alert.Markdown())
 	}
 }
 

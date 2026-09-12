@@ -68,7 +68,7 @@ type circleAdmissionMetrics struct {
 	errors       float64
 	waitCount    float64
 	waitSum      float64
-	presentMask  uint8
+	sampleMask   uint8
 	deltaMask    uint8
 	rangeSamples map[string]float64
 }
@@ -178,14 +178,14 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			if mask == 0 {
 				continue
 			}
-			process.presentMask |= mask
+			process.sampleMask |= mask
 			process.rangeSamples[baseMetric] = value
 			continue
 		}
 		switch metricName {
 		case "process_start_time_seconds":
 			process.start = value
-			process.presentMask |= circleAdmissionMetricStart
+			process.sampleMask |= circleAdmissionMetricStart
 		case "urnetwork_circle_transfer_admissions_total":
 			process.admissions = value
 			process.deltaMask |= circleAdmissionMetricAdmissions
@@ -212,7 +212,7 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return circleAdmissionProcessLabel(current[i]) < circleAdmissionProcessLabel(current[j])
 	})
 
-	missing := []string{}
+	noSamples := []string{}
 	rangeGaps := []string{}
 	rows := []string{}
 	var totalAdmissions float64
@@ -223,11 +223,11 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	var maxMeanWait float64
 	var maxMeanWaitProcess string
 	for _, process := range current {
-		if process.presentMask&circleAdmissionMetricAll != circleAdmissionMetricAll {
-			missing = append(missing, fmt.Sprintf(
+		if process.sampleMask&circleAdmissionMetricAll != circleAdmissionMetricAll {
+			noSamples = append(noSamples, fmt.Sprintf(
 				"%s[%s]",
 				circleAdmissionProcessLabel(process),
-				strings.Join(circleAdmissionMissingMetrics(process.presentMask), ","),
+				strings.Join(circleAdmissionMissingSamples(process.sampleMask), ","),
 			))
 			continue
 		}
@@ -256,27 +256,30 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	findings := []finding{}
-	if len(missing) > 0 || len(rangeGaps) > 0 {
+	if len(noSamples) > 0 || len(rangeGaps) > 0 {
 		observations := []string{}
-		if len(missing) > 0 {
-			observations = append(observations, "missing_collectors="+strings.Join(missing, "; "))
+		if len(noSamples) > 0 {
+			observations = append(observations, "no_range_samples="+strings.Join(noSamples, "; "))
 		}
 		if len(rangeGaps) > 0 {
 			observations = append(observations, "insufficient_range="+strings.Join(rangeGaps, "; "))
 		}
-		mechanism := "A newest process genuinely lacks one or more registered Circle admission collectors."
-		evidence := "Collector presence is established independently with fresh count_over_time samples; five-minute increase availability is not used as a proxy for registration."
-		action := "Prove the missing block's source and immutable image digest with §8.12. Only if the artifact predates current-main commit 66525afc, deploy a Taskworker artifact from an intentional local server checkout containing that baseline; record any participating diff. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys."
-		if len(rangeGaps) > 0 {
+		mechanism := "No accepted sample for one or more Circle metric families is queryable in the five-minute range. Mimir cannot distinguish an absent collector from stats delivery or admission loss from this observation alone."
+		evidence := "Fresh count_over_time establishes accepted sample presence independently from five-minute increase availability. Only §8.12 source and immutable artifact evidence can prove whether the running process registered the collector."
+		action := "Prove the affected block's source and immutable image digest with §8.12. If the artifact contains current-main commit 66525afc, restore Taskworker stats delivery and Mimir admission; only an artifact proven to predate that baseline justifies a Taskworker deployment. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys."
+		if len(rangeGaps) > 0 && len(noSamples) == 0 {
 			mechanism = "The Circle collectors are registered, but at least one newest process has fewer than two accepted samples in the five-minute range, so PromQL cannot calculate its increase. A new generation can cause this briefly; on an established generation, correlated gaps across all five families point to telemetry admission or delivery loss, not missing gate code."
-			action = "Restore enough Taskworker stats delivery and Mimir admission for two consecutive accepted samples on every current process, then rerun the five-minute delta. Do not deploy the Taskworker merely because increase() had insufficient range samples, and do not weaken or bypass the Circle gate. If missing_collectors is also present, prove that block's artifact separately with §8.12."
+			action = "Restore enough Taskworker stats delivery and Mimir admission for two consecutive accepted samples on every current process, then rerun the five-minute delta. Do not deploy the Taskworker merely because increase() had insufficient range samples, and do not weaken or bypass the Circle gate."
+		} else if len(rangeGaps) > 0 {
+			mechanism += " Other families have one accepted sample but not the two required to calculate an increase."
+			action += " Restore two consecutive accepted samples for the independently visible families before evaluating their deltas."
 		}
 		findings = append(findings, finding{
 			probeId: "task/circle-transfer-admission", tier: tierWarn,
 			class: "circle-transfer-admission-unobservable", target: "taskworker-fleet", sustain: 1,
 			symptom: fmt.Sprintf(
-				"%d of %d newest fresh taskworker identities lack a collector or enough accepted range samples for Circle admission deltas",
-				len(missing)+len(rangeGaps), len(current),
+				"%d of %d newest fresh taskworker identities lack an accepted sample or enough accepted range samples for Circle admission deltas",
+				len(noSamples)+len(rangeGaps), len(current),
 			),
 			mechanism: mechanism,
 			baseline:  "Every newest fresh taskworker exports admissions, deferrals, fail-closed errors, and admission-wait count/sum for two consecutive scrapes.",
@@ -343,7 +346,7 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 func newestCircleAdmissionProcesses(processes map[string]*circleAdmissionMetrics) []*circleAdmissionMetrics {
 	newest := map[string]*circleAdmissionMetrics{}
 	for _, process := range processes {
-		if process.presentMask&circleAdmissionMetricStart == 0 {
+		if process.sampleMask&circleAdmissionMetricStart == 0 {
 			continue
 		}
 		key := process.host + "\x00" + process.block
@@ -388,7 +391,7 @@ func circleAdmissionProcessLabel(process *circleAdmissionMetrics) string {
 	return label
 }
 
-func circleAdmissionMissingMetrics(mask uint8) []string {
+func circleAdmissionMissingSamples(mask uint8) []string {
 	missing := []string{}
 	for _, metric := range []struct {
 		mask uint8

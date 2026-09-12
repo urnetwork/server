@@ -4036,21 +4036,22 @@ The Taskworker exports these process metrics:
 - `urnetwork_circle_transfer_admission_wait_seconds_sum`
 
 The probe selects the newest actual-scrape-fresh process for each host/block,
-so an old draining generation cannot supply a replacement's missing collector.
-It establishes collector presence independently with fresh five-minute sample
-counts, then evaluates five-minute counter increases per exact process. This
-distinction matters because PromQL `increase()` returns no vector when Mimir
+so an old draining generation cannot supply a replacement's missing sample.
+It establishes accepted sample presence independently with fresh five-minute
+sample counts, then evaluates five-minute counter increases per exact process.
+This distinction matters because PromQL `increase()` returns no vector when Mimir
 accepted only one sample; that is incomplete telemetry coverage, not evidence
 that the process lacks the registered gate collector.
 
 - HEALTHY: every newest Taskworker exposes all five families; admission errors
   are zero; fleet and per-process mean completed wait are at most five seconds.
   Deferrals may be non-zero—they prove the gate prevented an unsafe burst.
-- WARN `circle-transfer-admission-unobservable`: a newest process either lacks
-  a family or has fewer than two accepted samples for a five-minute increase.
-  Deploy a clean Taskworker artifact containing `66525afc` only for a genuinely
-  absent collector proven by §8.12 source/digest provenance. When the collector
-  is present but range coverage is insufficient, restore Taskworker stats
+- WARN `circle-transfer-admission-unobservable`: a newest process either has no
+  accepted sample for a family or has fewer than two accepted samples for a
+  five-minute increase. No accepted sample does not by itself distinguish an
+  absent collector from Taskworker delivery or Mimir admission loss. Deploy a
+  clean Taskworker artifact containing `66525afc` only for a genuinely absent
+  collector proven by §8.12 source/digest provenance; otherwise restore stats
   delivery/Mimir admission and do not prescribe an application deployment.
 - WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
   exact window with taskworker drain state, Redis liveness/latency, and the
@@ -4084,11 +4085,11 @@ another Taskworker deployment for them.
 
 Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
 `signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
-tests cover a healthy newest generation, a replacement missing two metric
-families, a present collector with only one accepted range sample, fail-closed
-errors, excessive per-process wait hidden by a lower fleet mean, and invalid
-counter data. The product-level Redis synthetic covers the eight-caller atomic
-ceiling and replay semantics.
+tests cover a healthy newest generation, an ambiguous replacement with no
+accepted samples for two metric families, a present collector with only one
+accepted range sample, fail-closed errors, excessive per-process wait hidden by
+a lower fleet mean, and invalid counter data. The product-level Redis synthetic
+covers the eight-caller atomic ceiling and replay semantics.
 
 ### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
 Probe: `reliability-drift`
