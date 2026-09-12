@@ -1002,6 +1002,42 @@ func TestMimirAdmissionSignalJournalContextDoesNotChangeRootCause(t *testing.T) 
 	}
 }
 
+func TestMimirAdmissionCatalogRequiresCardinalityAndCompactionClosure(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "The 2026-09-11 series-limit incident")
+	end := strings.Index(catalog, "### 11.20a Mimir series-admission counters")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("SIGNALS.md lacks the bounded 2026-09-11 series-limit diagnosis")
+	}
+	section := catalog[start:end]
+	for _, required := range []string{
+		"stable Redis series changed by four",
+		"readiness-rejection aggregates stayed zero",
+		"sum/count-only summaries",
+		"Source availability is not deployment",
+		"pause further service rollouts",
+		"restart Mimir: a restart is not controlled series removal",
+		"raise the local or global",
+		"removed-series counter",
+		"complete next-generation overlap",
+		"shard skew",
+		"complete comparable two-hour window",
+		"urnetwork_http_request_duration_seconds",
+		"urnetwork_taskworker_execution_duration_seconds",
+		"urnetwork_proxy_session_duration_seconds",
+		"urnetwork_mcp_call_duration_seconds",
+		"urnetwork_mcp_fetch_wait_duration_seconds",
+	} {
+		if !strings.Contains(section, required) {
+			t.Errorf("series-limit closure guidance omits %q", required)
+		}
+	}
+}
+
 // Duplicate, incomplete, invalid, and trailing fields all fail closed.
 func TestParseMimirAdmissionHostSampleRejectsAdversarialFrames(t *testing.T) {
 	processStart := time.Date(2032, 7, 8, 9, 10, 0, 0, time.UTC).Unix()

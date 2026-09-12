@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/urnetwork/server"
@@ -36,6 +37,35 @@ func TestTaskMetricLabelsAndOutcomesAreBounded(t *testing.T) {
 	}
 	if got := taskMetricAttribution(&Task{}); got != "system" {
 		t.Fatalf("system attribution = %q, want system", got)
+	}
+}
+
+func TestTaskExecutionDurationSummaryExportsExactSumCountWithoutBuckets(t *testing.T) {
+	registry := prometheus.NewPedanticRegistry()
+	duration := newTaskExecutionSeconds()
+	registry.MustRegister(duration)
+	duration.WithLabelValues("controller.Registered", "system").Observe(2.25)
+	duration.WithLabelValues("controller.Registered", "system").Observe(1)
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(families) != 1 || families[0].GetName() != "urnetwork_taskworker_execution_duration_seconds" ||
+		families[0].GetType() != dto.MetricType_SUMMARY || len(families[0].Metric) != 1 {
+		t.Fatalf("task duration families = %+v, want one summary", families)
+	}
+	summary := families[0].Metric[0].GetSummary()
+	if summary.GetSampleCount() != 2 || summary.GetSampleSum() != 3.25 || len(summary.Quantile) != 0 {
+		t.Fatalf("task duration summary = %+v, want count=2 sum=3.25 and no quantiles", summary)
+	}
+	want := strings.NewReader(`# HELP urnetwork_taskworker_execution_duration_seconds Task function execution duration by finite registered task and caller attribution.
+# TYPE urnetwork_taskworker_execution_duration_seconds summary
+urnetwork_taskworker_execution_duration_seconds_sum{attribution="system",task="controller.Registered"} 3.25
+urnetwork_taskworker_execution_duration_seconds_count{attribution="system",task="controller.Registered"} 2
+`)
+	if err := testutil.GatherAndCompare(registry, want, "urnetwork_taskworker_execution_duration_seconds"); err != nil {
+		t.Fatalf("task duration exposition contains more than exact sum/count: %v", err)
 	}
 }
 

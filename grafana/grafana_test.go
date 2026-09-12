@@ -874,6 +874,93 @@ func TestMcpDashboardCoversBoundedCallsFetchAndCapacity(t *testing.T) {
 	}
 }
 
+func TestServiceDurationDashboardsUseSumCountAndFreshMaximumWithoutBuckets(t *testing.T) {
+	tests := []struct {
+		file            string
+		durationMetrics []string
+		maximumMetrics  []string
+	}{
+		{
+			file:            "api.json",
+			durationMetrics: []string{"urnetwork_http_request_duration_seconds"},
+			maximumMetrics:  []string{"urnetwork_http_request_interval_max_timestamp_seconds"},
+		},
+		{
+			file:            "taskworker.json",
+			durationMetrics: []string{"urnetwork_taskworker_execution_duration_seconds"},
+			maximumMetrics:  []string{"urnetwork_taskworker_execution_interval_max_timestamp_seconds"},
+		},
+		{
+			file: "proxy.json",
+			durationMetrics: []string{
+				"urnetwork_proxy_session_duration_seconds",
+				"urnetwork_http_request_duration_seconds",
+			},
+			maximumMetrics: []string{
+				"urnetwork_proxy_session_interval_max_timestamp_seconds",
+				"urnetwork_http_request_interval_max_timestamp_seconds",
+			},
+		},
+		{
+			file: "mcp.json",
+			durationMetrics: []string{
+				"urnetwork_http_request_duration_seconds",
+				"urnetwork_mcp_call_duration_seconds",
+				"urnetwork_mcp_fetch_wait_duration_seconds",
+			},
+			maximumMetrics: []string{
+				"urnetwork_http_request_interval_max_timestamp_seconds",
+				"urnetwork_mcp_call_interval_max_timestamp_seconds",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			dashboard := readTestDashboard(t, test.file)
+			documentBytes, err := dashboardsFs.ReadFile("dashboards/" + test.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document := string(documentBytes)
+			for _, metric := range test.durationMetrics {
+				for _, suffix := range []string{"_sum", "_count"} {
+					if !strings.Contains(document, metric+suffix) {
+						t.Errorf("%s omits %s%s", test.file, metric, suffix)
+					}
+				}
+				if strings.Contains(document, metric+"_bucket") {
+					t.Errorf("%s still queries cardinality-multiplying buckets for %s", test.file, metric)
+				}
+			}
+			for _, timestampMetric := range test.maximumMetrics {
+				found := false
+				for _, expression := range dashboardExpressions(dashboard) {
+					if !strings.Contains(expression, timestampMetric) {
+						continue
+					}
+					found = true
+					for _, required := range []string{"and on (", "time() - 120", "time() + 30"} {
+						if !strings.Contains(expression, required) {
+							t.Errorf("%s maximum %s omits %q: %s", test.file, timestampMetric, required, expression)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("%s omits maximum timestamp %s", test.file, timestampMetric)
+				}
+			}
+		})
+	}
+
+	proxyBytes, err := dashboardsFs.ReadFile("dashboards/proxy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(proxyBytes), "urnetwork_proxy_wireguard_return_backpressure_seconds_bucket") {
+		t.Fatal("targeted duration reduction removed the low-cardinality WireGuard histogram control")
+	}
+}
+
 func TestWebAnalyticsDashboardPrivacyContract(t *testing.T) {
 	dashboard := readTestDashboard(t, "web-analytics.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {

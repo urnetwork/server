@@ -27,13 +27,19 @@ var taskExecutionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help:      "Task function executions by finite registered task, caller attribution, and bounded terminal outcome.",
 }, []string{"task", "attribution", "outcome"})
 
-var taskExecutionSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "urnetwork",
-	Subsystem: "taskworker",
-	Name:      "execution_duration_seconds",
-	Help:      "Task function execution duration by finite registered task and caller attribution.",
-	Buckets:   []float64{0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 900, 3600},
-}, []string{"task", "attribution"})
+var taskExecutionSeconds = newTaskExecutionSeconds()
+
+// newTaskExecutionSeconds retains exact sum/count observations without a
+// bucket multiplier for every registered task and attribution pair.
+func newTaskExecutionSeconds() *prometheus.SummaryVec {
+	return prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace:  "urnetwork",
+		Subsystem:  "taskworker",
+		Name:       "execution_duration_seconds",
+		Help:       "Task function execution duration by finite registered task and caller attribution.",
+		Objectives: nil,
+	}, []string{"task", "attribution"})
+}
 
 var taskExecutionInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",

@@ -6483,7 +6483,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
-| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters; correlate rejected-candidate pusher starts and steady exporter cardinality as context only. Verify the Warp retry/status-return and Server readiness-gated metrics fixes plus the candidate's migration prerequisite. Xops `30d14ce` removes unused node collectors; measure its effect before deciding capacity. Preserve distinct instance labels. Require no new discards and restored measured headroom through a complete two-hour window; historical gaps stay under §11.20. |
+| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Split rejected-candidate churn from a steady cardinality increase with process-generation changes, readiness/publisher aggregates, and bounded metric-family counts; no one context field selects the cause. Pause further service rollouts, preserve distinct instance labels, and do not restart Mimir or raise its limit to manufacture headroom. After removing the proven source of avoidable series, require observed series removal, enough per-ingester headroom for the complete next-generation overlap, zero new discards, and fresh source metrics through the complete two-hour quiet window. Historical gaps stay under §11.20. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
@@ -11020,6 +11020,49 @@ application metrics on two direct reads, and series removal restoring
 measured headroom for the next rollout. A confirmed exporter reduction is a
 separate source/config boundary. Historical gaps and restart durability remain
 open under their own verification windows.
+
+The 2026-09-11 series-limit incident demonstrated the steady-cardinality
+branch. A broad service rollout increased query-visible global series from
+82,693 to 113,698 while stable Redis series changed by four. API, Taskworker,
+Proxy, Connect, and MCP cohorts grew together. Five
+route/task/protocol/tool/stage duration families used classic histogram
+buckets: `urnetwork_http_request_duration_seconds`,
+`urnetwork_taskworker_execution_duration_seconds`,
+`urnetwork_proxy_session_duration_seconds`,
+`urnetwork_mcp_call_duration_seconds`, and
+`urnetwork_mcp_fetch_wait_duration_seconds`. The first three alone accounted
+for 16,072 query-visible bucket series; the two lazy MCP families could create
+more with traffic. Five of six Mimir children reported increasing exact
+per-user-series discard counters, all available local headroom fell to at most
+659 series, and the removed-series counters stayed flat. Mimir generations did
+not change, readiness-rejection aggregates stayed zero, and host memory had
+ample independent headroom. That combination proves avoidable exporter
+cardinality plus rollout overlap, not rejected-candidate amplification, Redis
+growth, a counter reset, or host-memory exhaustion.
+
+For those five families, retain the bounded dimensions and exact observations
+as sum/count-only summaries, with no client-side quantiles. The existing
+one-minute maximum and its paired timestamp remain the exact, freshness-gated
+tail signal for HTTP routes, task executions, proxy sessions, and MCP calls.
+Keep unrelated low-cardinality histograms when their buckets have an
+independent operational consumer. Source availability is not deployment
+evidence: identify the running artifacts and verify the five `_bucket`
+families stop receiving samples while `_sum`, `_count`, and the paired maximum
+families remain fresh.
+
+During an active rejection incident, pause further service rollouts. Do not
+restart Mimir: a restart is not controlled series removal and introduces a new
+generation/reset and continuity boundary. Do not raise the local or global
+limit before removing the measured multiplier and proving cgroup capacity.
+Wait for ordinary head compaction to produce an increase in each applicable
+removed-series counter and a measured fall in every child's memory-series
+count. Before the corrective rollout, require every child to have more
+headroom than the bounded projected complete next-generation overlap plus an
+explicit reserve; fleet-average headroom is insufficient because shard skew
+is real. Roll services in bounded stages and stop on any new discard. Closure
+still requires a complete comparable two-hour window with zero discard
+increments, fresh independent application reads, and enough measured local
+and global headroom for another complete generation overlap.
 
 Pair every branch with §11.21. Do not zero `query_store_after` or
 `ignore_blocks_within` merely to fill the graph: Mimir 3.1.1 warns that querying

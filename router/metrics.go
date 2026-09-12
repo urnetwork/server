@@ -22,7 +22,7 @@ type httpMetrics struct {
 	requests      *prometheus.CounterVec
 	requestBytes  *prometheus.CounterVec
 	responseBytes *prometheus.CounterVec
-	duration      *prometheus.HistogramVec
+	duration      *prometheus.SummaryVec
 	inflight      *prometheus.GaugeVec
 
 	intervalMaxDesc      *prometheus.Desc
@@ -61,12 +61,12 @@ func newHttpMetrics(registerer prometheus.Registerer) *httpMetrics {
 			Name:      "response_bytes_total",
 			Help:      "HTTP response-body bytes successfully written, by configured route.",
 		}, []string{"route"}),
-		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: "urnetwork",
-			Subsystem: "http",
-			Name:      "request_duration_seconds",
-			Help:      "HTTP handler duration by configured route.",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		duration: prometheus.NewSummaryVec(prometheus.SummaryOpts{
+			Namespace:  "urnetwork",
+			Subsystem:  "http",
+			Name:       "request_duration_seconds",
+			Help:       "HTTP handler duration by configured route.",
+			Objectives: nil,
 		}, []string{"route"}),
 		inflight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
