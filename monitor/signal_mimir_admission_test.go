@@ -1403,6 +1403,9 @@ func TestMimirAdmissionCatalogRequiresIndependentRateAdmissionClosure(t *testing
 			t.Errorf("rate-admission closure guidance omits %q", required)
 		}
 	}
+	if !strings.Contains(catalog, "| mimir-ingestion-rate-limit | exact child Mimir metrics |") {
+		t.Error("SIGNALS.md alert-emission table omits mimir-ingestion-rate-limit")
+	}
 }
 
 // Duplicate, incomplete, invalid, and trailing fields all fail closed.

@@ -640,6 +640,9 @@ func TestStandingTailPreCursorReductionIsDocumented(t *testing.T) {
 			t.Errorf("pre-cursor catalog guidance omits %q", required)
 		}
 	}
+	if !strings.Contains(catalog, "| loki-tail-pre-cursor-entries | logs |") {
+		t.Error("SIGNALS.md alert-emission table omits loki-tail-pre-cursor-entries")
+	}
 }
 
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
