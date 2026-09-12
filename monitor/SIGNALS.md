@@ -6102,18 +6102,20 @@ cover a production-shaped severe leak, exact warning/page thresholds, a
 connected control, missing singleton authority, missing deactivation time,
 contradictory aggregates, bounded private SQL, and detailed Markdown.
 
-### 2.26 Device-backed share of new networks (automated sign-up waves)
+### 2.26 Device-backed share of new networks (source-neutral quality guard)
 Probe: `signup-quality`
 
 WHAT: of the networks created on one complete UTC day, the share that
-registered a device client within 48 hours. A seed-phrase account is created
-through the API with no device, so an automated wave of account creation
-raises the raw network count while the device-backed count stays flat. Those
-networks can neither see an onboarding offer screen nor be mailed; the
-campaign's enrollment gate (server `e4c34a21`: a network enters with an email
-login, or on its first device within 30 days, never with neither) keeps them
-out of the cohort, but every sizing, dashboard and store estimate that reads
-the raw sign-up count is misled while the wave runs.
+registered a device client within 48 hours. A low share is a source-neutral
+population-quality symptom, not an automation detector. A seed-phrase account
+can be created through the API before any device is registered, but the same
+aggregate can also describe legitimate device-less creation, verification
+friction, or a client-registration failure. Those networks can neither see an
+onboarding offer screen nor be mailed; the campaign's enrollment gate (a
+network enters with an email login, or on its first device within 30 days,
+never with neither) keeps them out of the campaign cohort, but every sizing,
+dashboard and store estimate that reads the raw sign-up count is misleading
+while the share is below its quality floor.
 
 HOW: read-only, direct psql, bounded to one day. A materialized PostgreSQL
 clock converts `statement_timestamp()` to UTC before deriving both naive
@@ -6129,29 +6131,76 @@ twice, while the existence probe answered in seconds. Only the day and two
 counts leave the database.
 
 - HEALTHY: at least 50% device-backed on a day with at least 100 new
-  networks. The quiet week of 21–27 August 2026 ran at about 80% (265
-  networks a day, 234 with a device); the growth days of 13–20 August at
-  95%.
-- BROKEN (WARN, `automated-signup-wave`, sustain 1 at the hourly cadence):
-  under 50%. Observed 31 August to 9 September 2026: 8,000–14,500 networks
-  a day with 13–16% device-backed (about 1,600–2,300 real devices a day
-  under a flat wave of 10,000–12,000 API-created accounts).
+  networks. Representative quiet controls were 234 / 282 (83.0%) on 24
+  August and 212 / 252 (84.1%) on 27 August 2026; the growth days of 13–20
+  August ran at about 95%.
+- BROKEN (WARN, legacy identity frame `automated-signup-wave`, sustain 1 at
+  the hourly cadence): under 50%. The frame is retained strictly as the stable
+  downstream ticket identity and does not attribute the population to
+  automation. Representative survivor-cohort controls were 13,145 networks /
+  2,113 device-backed on 31 August, 14,521 / 1,961 on 3 September, 13,234 /
+  1,596 on 7 September, and 8,781 / 1,005 on 8 September 2026. The cohort
+  tapered to 3,069 / 1,213 on 9 September but remained below the quality
+  floor.
 - Under 100 networks the share is noise and the probe stays healthy.
-- ACTION: confirm the source (API sign-up rate by auth type, the abuse
-  controls on network create) and rate-limit or gate it at network create;
-  do not size or judge an onboarding experiment on the raw sign-up count
-  while the share is under the floor (mmm/onboarding/RUN-MAIN.md sizes on
-  the device-backed count). No cohort repair is needed: the campaign row is
-  only created for networks with an email login or a device.
+- ACTION: classify the bounded cohort by fixed auth type, verification state,
+  and first-device timing; compare durable creation/deletion counts and the
+  network-create limiter and route-status controls. Product and Security own
+  any stronger abuse proof or account gate. Do not infer automation or change
+  a limiter from the share alone, and do not size or judge an onboarding
+  experiment on the raw sign-up count while the share is under the floor
+  (mmm/onboarding/RUN-MAIN.md sizes on the device-backed count). No cohort
+  repair is needed: the campaign row is only created for networks with an
+  email login or a device.
 
 A wave that also registers devices (emulated clients) passes this check; the
 §2.7 new-connection rate and the onboarding `exposure-integrity` readout are
 the next discriminators.
 
+The 2026-09-12 investigation pinned the distinction. For the matured
+2026-09-09 UTC cohort, the live table contained 3,069 networks and the durable
+audit contained 3,074 accepted creations with only five later deletions, so
+survivor bias did not explain the 39.5% share. Fixed in-database categories
+found 2,870 seed-phrase creations; among the 2,867 survivors, 1,039 registered
+a device within 48 hours and 1,828 still had none. No survivor's first device
+arrived after 48 hours. The healthy 2026-08-24 control had 282 networks, 234
+device-backed, and only 15 seed-phrase networks, all device-backed; the
+2026-09-03 high-volume control had 14,521 networks, including 14,348
+seed-phrase networks and 12,525 seed-phrase networks without a device. The
+durable address reduction found no source bucket above the configured five
+seed-phrase creations per rolling day, so it supports limiter operation but
+does not classify thousands of independent sources as people or automation.
+
+Historical route/status metrics cannot close that attribution: the bounded
+HTTP route family was added after this cohort. Current runtime provenance is
+fleet-converged but reports a modified source identity, which cannot prove the
+historical executable or substitute for its unpreserved diff. Therefore the
+incident proves a large, predominantly seed-phrase, device-less accepted
+population and rules out deletion and delayed first-device timing, but does
+not prove caller intent. The network-create limiter is scoped to one source
+subnet and the observed population did not violate that contract; a
+distributed-source gate is a Product/Security policy decision, not a
+correctness patch inferred from this monitor. Verify the next two matured UTC
+cohorts at the hourly cadence. Close
+when both are at or above the floor, or when Product/Security explicitly
+accepts a source-classified device-less flow and revises the floor; otherwise
+retain the warning and obtain a purpose-built, privacy-reviewed admission
+observable before changing account policy.
+
+Identity-transition convention: `Alert.Identity` includes the frame, so the
+historical `automated-signup-wave` frame remains a compatibility token even
+though the alert mechanism and action are source-neutral. Renaming it to a
+descriptive symptom such as `low-device-backed-share` would open a new
+identity and could leave the old downstream incident unresolved until a
+healthy cadence. Do not interpret the token as causal evidence or rename it
+without an explicit downstream identity migration/resolution path.
+
 Implementation convention: SIGNALS.md §2.26 (`signup-quality`) maps to
 `signal_signup_quality.go` and `signal_signup_quality_test.go`. Synthetic
-tests cover the Main-shaped wave, a healthy quiet day, a day at the exact
-floor, a low-volume day that cannot decide, malformed and contradictory rows,
+tests cover the Main-shaped low-share cohort without causal attribution, the
+legacy identity across a wording transition, a healthy quiet day, a day at the
+exact floor, a low-volume day that cannot decide, malformed and contradictory
+rows,
 the session-timezone-independent UTC query shape, strict exact-row/date/int64
 parsing (including nonnumeric and overflow controls), the per-network probe
 shape of the query, and identifier-free Markdown. Malformed evidence fails the
