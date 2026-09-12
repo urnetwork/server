@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/gossip"
 
 	"github.com/urnetwork/server"
 )
@@ -20,7 +21,7 @@ import (
 // A5).
 //
 // Everything an operator needs to sign and publish extender records lives in
-// one vault resource, `extender.yml`:
+// one vault resource, `extender.yml`, whose complete key set is:
 //
 //	root_private_key_hex: <ed25519 seed>
 //	root_public_keys_hex:
@@ -30,15 +31,27 @@ import (
 //	  - ur.example
 //	  - migration.example
 //	api_url: https://api.ur.example
+//	gossip_identity_key_hex: <ed25519 seed>
 //	dns:
 //	  enabled: false
+//	  hosted_zone_id: <zone>
+//	  record_name: extender.ur.example
+//	  ttl: 60
+//	  sample_count: 8
+//	  aws_region: <region>
+//	  aws_access_key_id: <key id>
+//	  aws_secret_access_key: <secret>
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
 // network_host names the space a record belongs to and network_hosts is every
 // host the api and connect answer on, which is what an extender is allowed to
-// forward to. The dns block is read by the Route 53 publisher of phase 4 and
-// is carried here so operations configure one resource rather than two.
+// forward to. api_url is the url a forward probe reaches through an extender.
+// gossip_identity_key_hex is the mesh identity of the operator's gossip node
+// (C6): the service runs under it and hello publishes the peer id derived from
+// it, so it must outlive a redeploy or every member loses the operator it was
+// told to dial. The dns block is read by the Route 53 publisher (C5) and is
+// carried here so operations configure one resource rather than two.
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -56,8 +69,10 @@ type ExtenderConfig struct {
 	// a migration host
 	NetworkHosts []string `yaml:"network_hosts"`
 	// the public api url a forward probe reaches through an extender
-	ApiUrl string            `yaml:"api_url"`
-	Dns    ExtenderDnsConfig `yaml:"dns"`
+	ApiUrl string `yaml:"api_url"`
+	// the ed25519 seed of the operator's gossip node identity (C6, C7)
+	GossipIdentityKeyHex string            `yaml:"gossip_identity_key_hex"`
+	Dns                  ExtenderDnsConfig `yaml:"dns"`
 }
 
 // Geo dns publishing (C5), read by the dns half of the publish tick. An unset
@@ -146,6 +161,45 @@ func (self *ExtenderConfig) RootPublicKeys() []string {
 		rootPublicKeyHexes = append(rootPublicKeyHexes, rootPublicKeyHex)
 	}
 	return rootPublicKeyHexes
+}
+
+// GossipIdentityKeySeed is the ed25519 seed the operator's gossip node runs
+// its mesh identity under (C6). It is stored as a seed rather than as a key so
+// that one hex form serves every ed25519 identity in the design (B1).
+//
+// An absent or unreadable key is an error naming the key, since the gossip
+// service cannot pick one for itself: a generated identity would change on
+// every redeploy and every member would be left dialing a peer id that no
+// longer answers.
+func (self *ExtenderConfig) GossipIdentityKeySeed() ([]byte, error) {
+	if strings.TrimSpace(self.GossipIdentityKeyHex) == "" {
+		return nil, fmt.Errorf("the extender network has no gossip_identity_key_hex")
+	}
+	seed, err := connect.ParseExtenderKeySeedHex(self.GossipIdentityKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("the extender gossip_identity_key_hex is not readable: %w", err)
+	}
+	return seed, nil
+}
+
+// GossipPeerId is the mesh identity hello serves (C7), which is what lets a
+// member demand the operator it meant to reach at the other end of its dial
+// (D3). A member with no peer id makes no operator dial at all, so an operator
+// with no gossip key answers with none rather than with something unverifiable.
+func (self *ExtenderConfig) GossipPeerId() (string, error) {
+	seed, err := self.GossipIdentityKeySeed()
+	if err != nil {
+		return "", err
+	}
+	publicKey, err := connect.ExtenderPublicKeyFromSeed(seed)
+	if err != nil {
+		return "", err
+	}
+	peerId, err := gossip.PeerIdForExtenderPublicKey(publicKey)
+	if err != nil {
+		return "", err
+	}
+	return peerId.String(), nil
 }
 
 // AllowedHosts is the operator half of an extender's whitelist (A5): for every

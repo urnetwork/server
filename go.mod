@@ -24,6 +24,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/mr-tron/base58 v1.3.0
+	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/nyaruka/phonenumbers v1.6.5
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1
 	github.com/pion/logging v0.2.4
@@ -124,7 +125,6 @@ require (
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
-	github.com/multiformats/go-multiaddr v0.16.1 // indirect
 	github.com/multiformats/go-multiaddr-dns v0.6.0 // indirect
 	github.com/multiformats/go-multiaddr-fmt v0.1.0 // indirect
 	github.com/multiformats/go-multibase v0.3.0 // indirect

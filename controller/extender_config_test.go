@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/gossip"
 
 	"github.com/urnetwork/server/session"
 )
@@ -139,6 +140,72 @@ func TestExtenderConfigApiHost(t *testing.T) {
 	}
 }
 
+// The gossip identity is a seed like every other ed25519 identity, and
+// anything that is not one is an error rather than a key the service would
+// silently run under (C6).
+func TestExtenderConfigGossipIdentityKeySeed(t *testing.T) {
+	seed, err := connect.NewExtenderKeySeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	malformed := []string{
+		"",
+		"   ",
+		"zz",
+		// a full seed's worth of hex characters, one nibble short
+		strings.Repeat("a", 2*ed25519.SeedSize-1),
+		// a key rather than a seed is still the wrong length here
+		hex.EncodeToString(make([]byte, 16)),
+	}
+	for _, gossipIdentityKeyHex := range malformed {
+		config := &ExtenderConfig{GossipIdentityKeyHex: gossipIdentityKeyHex}
+		if _, err := config.GossipIdentityKeySeed(); err == nil {
+			t.Errorf("gossip identity %q must be an error", gossipIdentityKeyHex)
+		}
+		if _, err := config.GossipPeerId(); err == nil {
+			t.Errorf("gossip peer id of %q must be an error", gossipIdentityKeyHex)
+		}
+	}
+
+	// whitespace is trimmed, which is what a yaml value with a stray space is
+	config := &ExtenderConfig{GossipIdentityKeyHex: " " + connect.ExtenderKeySeedHex(seed) + " "}
+	gossipIdentityKeySeed, err := config.GossipIdentityKeySeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(gossipIdentityKeySeed, seed) {
+		t.Fatal("the parsed seed does not match the configured one")
+	}
+}
+
+// The peer id hello serves must be exactly the one the mesh derives from the
+// same key, since a member demands that id at the other end of its operator
+// dial (C7, D3).
+func TestExtenderConfigGossipPeerIdMatchesTheMeshDerivation(t *testing.T) {
+	seed, err := connect.NewExtenderKeySeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := connect.ExtenderPublicKeyFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectPeerId, err := gossip.PeerIdForExtenderPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := &ExtenderConfig{GossipIdentityKeyHex: connect.ExtenderKeySeedHex(seed)}
+	gossipPeerId, err := config.GossipPeerId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gossipPeerId != expectPeerId.String() {
+		t.Fatalf("gossip peer id = %q, want %q", gossipPeerId, expectPeerId)
+	}
+}
+
 // With the bundled spoof list empty, a probe fronts the extender with a random
 // label under the operator's own host. Every probe must get a different one:
 // a constant name would let an extender recognize the operator's probe and
@@ -193,6 +260,43 @@ func TestHelloServesTheConfiguredExtenderRootKeys(t *testing.T) {
 	if !slices.Equal(result.ExtenderRootPublicKeys, []string{firstKeyHex, secondKeyHex}) {
 		t.Fatalf("hello keys = %v", result.ExtenderRootPublicKeys)
 	}
+	// this operator runs no gossip service, so there is no peer id to dial
+	if result.GossipPeerId != "" {
+		t.Fatalf("hello gossip peer id = %q, want none", result.GossipPeerId)
+	}
+}
+
+// Hello serves the operator's mesh identity, which is what a member needs
+// before it can make the one dial that gets it into the mesh (C7, D3).
+func TestHelloServesTheConfiguredGossipPeerId(t *testing.T) {
+	seed, err := connect.NewExtenderKeySeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := connect.ExtenderPublicKeyFromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectPeerId, err := gossip.PeerIdForExtenderPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	installTestExtenderConfigYaml(t, strings.Join([]string{
+		"root_public_keys_hex:",
+		"  - " + hex.EncodeToString(publicKey),
+		"network_host: ur.example",
+		"gossip_identity_key_hex: " + connect.ExtenderKeySeedHex(seed),
+	}, "\n"))
+
+	clientSession := session.Testing_CreateClientSession(context.Background(), nil)
+	result, err := Hello(clientSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.GossipPeerId != expectPeerId.String() {
+		t.Fatalf("hello gossip peer id = %q, want %q", result.GossipPeerId, expectPeerId)
+	}
 }
 
 // An operator with no extender network answers hello without the field at all,
@@ -212,6 +316,9 @@ func TestHelloServesNoExtenderKeysWhenUnconfigured(t *testing.T) {
 	}
 	if len(result.ExtenderRootPublicKeys) != 0 {
 		t.Fatalf("hello keys = %v, want none", result.ExtenderRootPublicKeys)
+	}
+	if result.GossipPeerId != "" {
+		t.Fatalf("hello gossip peer id = %q, want none", result.GossipPeerId)
 	}
 	if result.ClientAddress == "" {
 		t.Fatal("hello must still answer with the client address")
