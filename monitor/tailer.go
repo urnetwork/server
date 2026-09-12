@@ -1070,6 +1070,12 @@ type logTailer struct {
 	// alert-relevant records long enough to make the two transports and
 	// successive overlap queries idempotent without retaining ordinary logs.
 	standingSeen map[[sha256.Size]byte]time.Time
+	// A standing WebSocket can deliver a newly arrived record whose source
+	// timestamp is already behind its cursor. Such a record proves an
+	// observation-path delay, but it is not a current product failure. Retain
+	// only a bounded count and the oldest source time for the next drain.
+	staleArrivalCount  int
+	staleArrivalOldest time.Time
 	// normalized novel shape -> count/sample. The sample must come from the
 	// selected top shape; retaining one global first sample can pair unrelated
 	// evidence with that shape when several novel classes share a minute.
@@ -1596,6 +1602,18 @@ func (self *logTailer) ingestStanding(line string, updateLiveness bool, count bo
 	if updateLiveness {
 		self.lastLineTime = now
 	}
+	if updateLiveness && count {
+		if observedAt, ok := parseLogTimestamp(line); ok && observedAt.Before(now.Add(-logReconcileLookback)) {
+			if self.standingReplayLocked(line, now) {
+				return
+			}
+			self.staleArrivalCount += 1
+			if self.staleArrivalOldest.IsZero() || observedAt.Before(self.staleArrivalOldest) {
+				self.staleArrivalOldest = observedAt
+			}
+			return
+		}
+	}
 	self.classifyLocked(line, true, count, now)
 }
 
@@ -1971,6 +1989,28 @@ func (self *logTailer) drainWindow() []finding {
 		findings = append(findings, healthyFinding("logs/novel", tierWarn, "novel", self.service))
 	}
 
+	if self.staleArrivalCount > 0 {
+		oldestAge := self.clock().Sub(self.staleArrivalOldest).Round(time.Second)
+		findings = append(findings, finding{
+			probeId: "monitor/visibility", tier: tierWarn,
+			class: "tailer-stale-arrival", target: "logs/" + self.service, sustain: 1,
+			symptom: fmt.Sprintf(
+				"standing log tail for %s delivered %d record(s) whose source time was older than the live overlap",
+				self.service,
+				self.staleArrivalCount,
+			),
+			baseline:  fmt.Sprintf("standing live-tail arrivals are no more than %s old; older records are recovered by the bounded range reconciliation", logReconcileLookback),
+			observed:  fmt.Sprintf("stale_arrivals=%d oldest_source_age=%s", self.staleArrivalCount, oldestAge),
+			mechanism: "The standing WebSocket returned a record whose source timestamp was already behind the current live overlap. Counting it in the arrival minute would turn historical evidence into a current product alert, so the tailer discarded it from product classes and retained only this visibility aggregate.",
+			context:   "This does not distinguish delayed producer ingestion, a Loki tail cursor replay, or an upstream response replay. It also does not prove the historical record was never evaluated in its original source window.",
+			action:    "Inspect the standing Warpctl/Loki cursor and bounded source-time reconciliation for the affected selector. Diagnose the delayed observation path; do not assign the historical line to current service behavior or restart the emitting product service.",
+			verify:    "No stale live-tail arrival recurs for ten minutes, two consecutive bounded reconciliations complete, and current source-time controls remain visible.",
+			playbook:  "SIGNALS.md §1.5 and §4",
+		})
+	} else {
+		findings = append(findings, healthyFinding("monitor/visibility", tierWarn, "tailer-stale-arrival", "logs/"+self.service))
+	}
+
 	// reset the window
 	self.classCounts = map[string]int{}
 	self.classSamples = map[string]string{}
@@ -1988,6 +2028,8 @@ func (self *logTailer) drainWindow() []finding {
 	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSamples = map[string]string{}
+	self.staleArrivalCount = 0
+	self.staleArrivalOldest = time.Time{}
 	now := self.clock()
 	self.pruneStandingSeenLocked(now)
 	for secondKey, seenAt := range self.burstRecentSecondSeen {

@@ -521,6 +521,68 @@ func TestMimirSeriesLimitStandingWindowHasStablePrivateFrameAndHealthyControl(t 
 	}
 }
 
+func TestStandingTailAttributesStaleSourceTimeWithoutReplayingProductFailure(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 11, 22, 30, 0, 0, time.UTC)
+	tailer := newLogTailer("grafana", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+
+	stale := `[fixture.example][grafana][g1][cid:synthetic][2026-09-11T21:30:00Z] Stats push rejected (400): per-user series limit exceeded instance="sensitive-fixture"`
+	tailer.ingestStanding(stale, true, true)
+	tailer.ingestStanding(stale, true, true)
+	tailer.ingestStanding(`[fixture.example][grafana][g1][cid:synthetic][2026-09-11T21:45:00Z] ordinary delayed fixture record`, true, true)
+	findings := tailer.drainWindow()
+	if product := findingByClass(t, findings, "mimir-series-limit"); !product.healthy {
+		t.Fatalf("stale source record became a current product failure: %+v", product)
+	}
+	visibility := findingByClass(t, findings, "tailer-stale-arrival")
+	if visibility.healthy || visibility.sustain != 1 {
+		t.Fatalf("stale source record was not attributed to observation visibility: %+v", visibility)
+	}
+	for _, want := range []string{"stale_arrivals=2", "oldest_source_age=1h0m0s"} {
+		if !strings.Contains(visibility.observed, want) {
+			t.Fatalf("stale observation lacks %q: %+v", want, visibility)
+		}
+	}
+	rendered := visibility.symptom + visibility.baseline + visibility.observed +
+		visibility.mechanism + visibility.evidence + visibility.context +
+		visibility.action + visibility.verify
+	if strings.Contains(rendered, "sensitive-fixture") {
+		t.Fatalf("stale observation retained source contents: %+v", visibility)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("stale ordinary record became a novel product failure: %+v", novel)
+	}
+
+	current := `[fixture.example][grafana][g1][cid:synthetic][2026-09-11T22:28:30Z] Stats push rejected (400): per-user series limit exceeded instance="sensitive-fixture"`
+	tailer.ingestStanding(current, true, true)
+	findings = tailer.drainWindow()
+	if product := findingByClass(t, findings, "mimir-series-limit"); product.healthy {
+		t.Fatalf("current source record was discarded: %+v", product)
+	}
+	if next := findingByClass(t, findings, "tailer-stale-arrival"); !next.healthy {
+		t.Fatalf("quiet stale-arrival window did not resolve: %+v", next)
+	}
+}
+
+func TestStandingTailStaleGateRequiresAnAuthoritativePastTimestamp(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 11, 22, 30, 0, 0, time.UTC)
+	for _, line := range []string{
+		`[fixture.example][grafana][g1][cid:synthetic][timestamp-unavailable] Stats push rejected (400): per-user series limit exceeded`,
+		`[fixture.example][grafana][g1][cid:synthetic][2026-09-11T22:31:00Z] Stats push rejected (400): per-user series limit exceeded`,
+	} {
+		tailer := newLogTailer("grafana", nil)
+		tailer.clock = func() time.Time { return fixedNow }
+		tailer.ingestStanding(line, true, true)
+		findings := tailer.drainWindow()
+		if product := findingByClass(t, findings, "mimir-series-limit"); product.healthy {
+			t.Fatalf("non-stale source record was hidden: %q", line)
+		}
+		if visibility := findingByClass(t, findings, "tailer-stale-arrival"); !visibility.healthy {
+			t.Fatalf("unproven source staleness raised stale-arrival: %+v", visibility)
+		}
+	}
+}
+
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
 	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`

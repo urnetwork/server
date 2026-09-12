@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,23 +37,55 @@ properties=$(systemctl show fluent-bit.service \
 read_property() {
   printf '%s\n' "$properties" | awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=")+1); found=1} END {exit !found}'
 }
+restarts=$(read_property NRestarts)
+fluent_bit_version=unknown
+if command -v dpkg-query >/dev/null 2>&1; then
+  candidate_version=$(dpkg-query --show '--showformat=${Version}' fluent-bit 2>/dev/null || true)
+  case "$candidate_version" in
+    ''|*[!0-9A-Za-z.+:~_-]*) ;;
+    *) fluent_bit_version=$candidate_version ;;
+  esac
+fi
+restart_reason=none
+if [ "$restarts" -gt 0 ]; then
+  restart_reason=other-or-unobservable
+  coredump=$(journalctl -b -n 400 --no-pager --quiet -o cat \
+    COREDUMP_COMM=fluent-bit COREDUMP_SIGNAL=11 2>/dev/null || true)
+  if printf '%s\n' "$coredump" | grep -Fq 'add_metric_histogram' && \
+     printf '%s\n' "$coredump" | grep -Fq 'finish_duplicate_histogram_summary_sum_count' && \
+     printf '%s\n' "$coredump" | grep -Fq 'parse_histogram_summary_name'; then
+    restart_reason=prometheus-histogram-decoder-crash
+  fi
+fi
 printf '%s\n' \
-  'observation_schema=1' \
+  'observation_schema=2' \
   "active_state=$(read_property ActiveState)" \
   "sub_state=$(read_property SubState)" \
   "result=$(read_property Result)" \
-  "restarts=$(read_property NRestarts)" \
+  "restarts=$restarts" \
   "nofile_hard=$(read_property LimitNOFILE)" \
-  "nofile_soft=$(read_property LimitNOFILESoft)"
+  "nofile_soft=$(read_property LimitNOFILESoft)" \
+  "fluent_bit_version=$fluent_bit_version" \
+  "restart_reason=$restart_reason"
 `
 
+const (
+	logShipperRestartNone             = "none"
+	logShipperRestartOther            = "other-or-unobservable"
+	logShipperRestartHistogramDecoder = "prometheus-histogram-decoder-crash"
+)
+
+var logShipperVersionRe = regexp.MustCompile(`^(?:unknown|[0-9A-Za-z.+:~_-]{1,64})$`)
+
 type logShipperSample struct {
-	activeState string
-	subState    string
-	result      string
-	restarts    int
-	nofileHard  uint64
-	nofileSoft  uint64
+	activeState   string
+	subState      string
+	result        string
+	restarts      int
+	nofileHard    uint64
+	nofileSoft    uint64
+	version       string
+	restartReason string
 }
 
 type logShipperResult struct {
@@ -120,7 +153,7 @@ func (logShipperProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			findings = append(findings, cannotObserveFinding(target+"/log-shipper", result.err))
 			continue
 		}
-		findings = append(findings, evaluateLogShipper(target, result.sample)...)
+		findings = append(findings, evaluateLogShipper(target, result.sample, result.host.hasRole("redis-cluster"))...)
 	}
 	return findings, nil
 }
@@ -128,7 +161,7 @@ func (logShipperProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 func parseLogShipperSample(raw string) (logShipperSample, error) {
 	required := []string{
 		"observation_schema", "active_state", "sub_state", "result", "restarts",
-		"nofile_hard", "nofile_soft",
+		"nofile_hard", "nofile_soft", "fluent_bit_version", "restart_reason",
 	}
 	allowed := map[string]bool{}
 	for _, key := range required {
@@ -154,7 +187,7 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 			return logShipperSample{}, fmt.Errorf("log shipper: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "1" {
+	if values["observation_schema"] != "2" {
 		return logShipperSample{}, fmt.Errorf("log shipper: unsupported observation schema")
 	}
 	restarts, err := strconv.Atoi(values["restarts"])
@@ -172,17 +205,30 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 	if soft > hard {
 		return logShipperSample{}, fmt.Errorf("log shipper: soft fd limit exceeds hard limit")
 	}
+	if !logShipperVersionRe.MatchString(values["fluent_bit_version"]) {
+		return logShipperSample{}, fmt.Errorf("log shipper: invalid fluent_bit_version")
+	}
+	restartReason := values["restart_reason"]
+	if restartReason != logShipperRestartNone &&
+		restartReason != logShipperRestartOther &&
+		restartReason != logShipperRestartHistogramDecoder {
+		return logShipperSample{}, fmt.Errorf("log shipper: invalid restart_reason")
+	}
+	if (restarts == 0) != (restartReason == logShipperRestartNone) {
+		return logShipperSample{}, fmt.Errorf("log shipper: restart reason does not match restart count")
+	}
 	return logShipperSample{
 		activeState: values["active_state"], subState: values["sub_state"],
 		result: values["result"], restarts: restarts, nofileHard: hard, nofileSoft: soft,
+		version: values["fluent_bit_version"], restartReason: restartReason,
 	}, nil
 }
 
-func evaluateLogShipper(target string, sample logShipperSample) []finding {
+func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost bool) []finding {
 	observed := fmt.Sprintf(
-		"active_state=%s sub_state=%s result=%s restarts=%d nofile_soft=%d nofile_hard=%d",
+		"active_state=%s sub_state=%s result=%s restarts=%d nofile_soft=%d nofile_hard=%d fluent_bit_version=%s restart_reason=%s",
 		sample.activeState, sample.subState, sample.result, sample.restarts,
-		sample.nofileSoft, sample.nofileHard,
+		sample.nofileSoft, sample.nofileHard, sample.version, sample.restartReason,
 	)
 	findings := []finding{}
 	running := sample.activeState == "active" && sample.subState == "running"
@@ -220,7 +266,34 @@ func evaluateLogShipper(target string, sample logShipperSample) []finding {
 		findings = append(findings, healthyFinding("observability/log-shipper", tierWarn, "log-shipper-fd-budget", target))
 	}
 
-	if running && sample.restarts > 0 {
+	if sample.restartReason == logShipperRestartHistogramDecoder {
+		mechanism := "The current-boot core record contains the exact Fluent Bit/cmetrics duplicate-histogram parsing stack. The stack proves a Prometheus histogram decoder crash but does not name the offending scrape source, metric family, or target."
+		contextText := "This is an exact shipper crash cause, not proof that the scraped service, Mimir, or an application failed. A recovered unit can be active while the restart counter and bounded core metadata preserve the event."
+		action := "Inventory the bounded Prometheus scrape inputs on this host and reproduce the schema of candidate histogram families. Exclude or correct only the proven producer-side family; do not raise Mimir limits or force a Fluent Bit major upgrade as the first correction."
+		verify := "After the authorized producer-side correction, require the offending histogram absent or schema-compatible, required source metrics fresh, a stable Fluent Bit process, and fresh host data in both Mimir and Loki for ten minutes."
+		if redisClusterHost {
+			mechanism += " On a Redis-cluster host, the optional command latency histogram is the strongest bounded candidate because its command-dependent bucket layouts exercise this path; ordinary commandstats counters do not require it."
+			contextText += " The stack alone is not metric-family attribution; confirm the Redis exporter unit and family before applying that host-specific fix."
+			action = "Confirm the Redis exporter still exposes the optional command latency histogram, then deploy the unit that excludes only that family while retaining commandstats rate/duration counters. Do not raise Mimir limits or force a Fluent Bit major upgrade as the first correction."
+			verify = "After the authorized Redis exporter rollout, require the optional latency histogram family absent, required commandstats metrics fresh, a stable Fluent Bit process, and fresh Redis data in both Mimir and Loki for ten minutes."
+		}
+		findings = append(findings, finding{
+			probeId: "observability/log-shipper", tier: tierWarn,
+			class: "log-shipper-prometheus-histogram-decoder-crash", target: target, sustain: 1,
+			symptom:   fmt.Sprintf("%s Fluent Bit crashed while decoding a Prometheus histogram", target),
+			mechanism: mechanism,
+			baseline:  "No current-boot Fluent Bit restart has the Prometheus histogram decoder crash stack.", observed: observed,
+			evidence: fmt.Sprintf("restarts=%d fluent_bit_version=%s restart_reason=%s", sample.restarts, sample.version, sample.restartReason),
+			context:  contextText,
+			action:   action,
+			verify:   verify,
+			playbook: "SIGNALS.md §11.14",
+		})
+	} else {
+		findings = append(findings, healthyFinding("observability/log-shipper", tierWarn, "log-shipper-prometheus-histogram-decoder-crash", target))
+	}
+
+	if running && sample.restarts > 0 && sample.restartReason != logShipperRestartHistogramDecoder {
 		findings = append(findings, finding{
 			probeId: "observability/log-shipper", tier: tierWarn,
 			class: "log-shipper-churn", target: target, sustain: 2,

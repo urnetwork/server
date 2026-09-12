@@ -1056,6 +1056,20 @@ Corroborate with bounded, remotely reduced Mimir admission-discard and
 in-memory-series counters as described in §11.20; do not infer a producer or
 rollout cause from this text alone.
 
+The standing WebSocket is an arrival stream, so arrival time cannot be used as
+the product-error window. Warpctl's bracketed RFC3339 source timestamp is the
+authoritative boundary. A live-tail record more than the two-minute
+reconciliation overlap old is excluded from all current product classes and
+reported immediately as privacy-reduced `tailer-stale-arrival`, with only a
+deduplicated count and oldest source age. Exact replays share the existing
+four-minute overlap fingerprint; ordinary stale records are treated the same
+as error-shaped records and no source contents are retained. Missing,
+malformed, or future timestamps are not called stale because that fact is not
+proved; the Warpctl wrapper contract and a healthy current-source control must
+be checked separately. Close this visibility warning only after two bounded
+reconciliations and ten minutes without another stale arrival. Never use a
+53-minute-old line delivered now to page the emitting service now.
+
 The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
 takes precedence over generic `panic`. It requires the final
 `*errors.errorString=tx is closed` together with both deployed `txWithPool`
@@ -6499,7 +6513,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125` in its `warp-main-*` unit) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. A replaced executable or Docker version drift is only transition evidence: compatible releases can keep creating containers normally. | The monitor reads bounded daemon-identifier and Warp-supervisor suffixes; its startup-version context is optional after the one-hour buffer ages out. PAGE on an observed containerd split, native TTRPC rejection, or concrete `Start container failed`. Use Xops' privileged maintenance probe for definitive client/server comparison during package transitions and recovery. Recover only with explicit one-host-at-a-time authorization and require a replacement container at `Up`; never reboot merely because a package changed. See §8.5a. |
 | `invalid mount config for type "bind": bind source path does not exist` with `configVersion=<valid-semver>.tmp` and exit 125 (`container-runtime-staging-bind-source`) | The complete bounded host window has a nonzero exact three-way count equality: Warp start exit-125, `.tmp` config deploy-failure, and Docker bind-source-missing aggregates reconcile. That production signature came from config-updater copying into its reserved `.tmp` directory while pre-`f1503d6` Warpctl admitted the suffix as semver build metadata and ranked staging above the completed version. The aggregate records are not per-event joins, so any mixed counts retain generic `container-runtime-incompatible`. | Stop further config publication to affected units and deploy a Warpctl artifact containing `f1503d6`, which excludes only the exact `<valid-semver>.tmp` staging namespace before ordinary semver ranking. Do not recreate the vanished path, restart Docker, or reboot for this defect. Exercise a later publication and require the completed version selected, terminal deploy success on every enabled host, and zero `.tmp` exit-125 selections or bind-source-missing failures for ten minutes. See §8.5a. |
 | `journal-buffer-config`, `journal-buffer-short`, or `journal-buffer-unavailable` | The effective edge journal policy drifted from the one-hour/100 GiB/1024-file contract, measured history no longer reaches the near-hour boundary, or journald is down. This affects local recovery evidence and may interrupt Fluent Bit input, but it does not prove Loki data loss. | Apply the reviewed journald drop-in without rebooting, measure bounded producer volume if the boundary stays short, and correlate §11.14. Require two boundary observations plus fresh Loki data. See §8.5b. |
-| `log-shipper-down`, `log-shipper-fd-budget`, or `log-shipper-churn` | The host Fluent Bit unit is stopped, its soft/hard fd budget regressed below 65,536, or systemd has restarted it. Warp workload health does not cover this independent host unit. | Repair the first bounded Fluent Bit startup/output error and restart only the shipper. Require active/running state, both fd limits, fresh per-host Mimir metrics, and a fresh labeled Loki record. See §11.14. |
+| `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, or `log-shipper-prometheus-histogram-decoder-crash` | The host Fluent Bit unit is stopped, its soft/hard fd budget regressed below 65,536, systemd has restarted it for an unclassified reason, or its current-boot core metadata contains the exact cmetrics duplicate-histogram decoder stack. The stack does not name an offending scrape source. On a Redis-cluster host the optional command latency histogram is the strongest bounded candidate, not an identity proved by the stack. | Repair the first bounded cause and restart only the shipper after authorization. For the exact Redis-host candidate, exclude only the optional latency histogram at redis_exporter and retain commandstats; do not force a major Fluent Bit upgrade or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh required metrics and logs, and ten minutes without another restart. See §11.14. |
+| `tailer-stale-arrival` | The standing Loki WebSocket delivered one or more exact-replay-deduplicated records whose valid source timestamp was older than the monitor's two-minute live overlap. Those records are observation-path history, not current product errors, and their contents are not retained. A missing/malformed or future wrapper timestamp is not assigned this class because staleness is unproved. | Inspect Warpctl/Loki cursor behavior and the bounded source-time reconciliation for that selector. Do not act on the historical product line as if it occurred in the arrival minute. Require two complete reconciliations, current-source controls, and zero stale arrivals for ten minutes. See §1.5. |
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
@@ -10426,16 +10441,44 @@ grep -cE '^ *name +prometheus_scrape' /etc/fluent-bit/fluent-bit.conf
   `xops/main/ansible/tests/test_fluent_bit_shipper.py` asserts the limit leads
   `redis_count`, so the next time that number grows the test fails first.
 
+A separate 2026-09-11 restart was an exact SIGSEGV in Fluent Bit 4.2.1's
+cmetrics Prometheus decoder:
+`add_metric_histogram -> finish_duplicate_histogram_summary_sum_count ->
+parse_histogram_summary_name`. The core stack proves the decoder crash, but
+does **not** name the scraped target or metric family. On the Redis-cluster
+host, the strongest bounded candidate was
+`redis_commands_latencies_usec`: redis_exporter exposes command-specific,
+variable bucket sets (hundreds of buckets per node), while no Server dashboard
+or monitor consumes that optional family. The same exporter obtains the
+required `redis_commands_duration_seconds_total` and
+`redis_commands_processed_total` from INFO commandstats independently.
+
+The smallest source fix is therefore in Xops' Redis exporter unit:
+`--exclude-latency-histogram-metrics`. It removes only LATENCY HISTOGRAM at
+the source and leaves commandstats and exporter-health metrics present. The
+Redis playbook must not force an otherwise-unreviewed Fluent Bit 5.x repository
+or `state: latest` upgrade as a substitute for removing this unused poison
+input. After an authorized rollout, verify the optional family is absent, both
+required commandstats counters and `redis_up` are fresh, Fluent Bit remains on
+one stable process, and both Mimir and Loki retain fresh Redis-host data for ten
+minutes. A decoder crash on any non-Redis role remains source-unclassified
+until its configured scrape inputs and bucket schemas identify the producer.
+
 The `log-shipper` probe reads the host unit directly on services, PostgreSQL,
 Redis/MinIO, backup, and Subtensor hosts. `log-shipper-down` PAGEs when the
 unit is not active/running; `log-shipper-fd-budget` WARNs when either the soft
-or hard limit is below 65,536; and `log-shipper-churn` WARNs when systemd has
-automatically restarted the current activation. A VPN-only host is outside
-this signal. These are process and startup-capacity signals, not an
-end-to-end delivery claim: closure additionally requires fresh per-host host
-metrics through Mimir and a fresh labeled Warp record through Loki. Never
-clear a restart counter or reboot merely to hide evidence; repair the first
-bounded Fluent Bit error and restart only the shipper.
+or hard limit is below 65,536; `log-shipper-churn` WARNs when systemd has
+automatically restarted the current activation for another or unobservable
+reason; and `log-shipper-prometheus-histogram-decoder-crash` WARNs immediately
+when a current-boot signal-11 core contains all three exact decoder frames.
+The host-side reducer returns only schema version, unit state, restart count,
+fd limits, a sanitized package version, and a bounded restart-reason enum; raw
+journal or core text never leaves the host. A VPN-only host is outside this
+signal. These are process and startup-capacity signals, not an end-to-end
+delivery claim: closure additionally requires fresh per-host host metrics
+through Mimir and a fresh labeled Warp record through Loki. Never clear a
+restart counter or reboot merely to hide evidence; repair the first bounded
+Fluent Bit error and restart only the shipper.
 
 ### 11.15 Grafana 13 datasource rows without native plugins (2026-08-29, 2026-09-01, 2026-09-02, 2026-09-03)
 
