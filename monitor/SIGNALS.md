@@ -17210,6 +17210,22 @@ trigger rebuilds, with an hourly fallback. Independently enumerate the bounded
 memory. Never render that key, contract address, network identity, or any
 ranked network identifier into an alert.
 
+For Main, obtain that configuration fact from a narrow typed desired-state
+view of the unprefixed `enabled`, `chain_id`, and `coordinator_address` fields
+in `st.yml`. `explicit-disabled` means the source flag is exactly false;
+`enabled-invalid` means it is true but `chain_id` is not the Main protocol
+value 964 or the chain/coordinator namespace is otherwise missing or invalid;
+`enabled` means the namespace can be derived. A missing,
+non-Boolean, or malformed `enabled` value is `unavailable`, never disabled.
+Only the safe status is rendered. The derived namespace remains in memory for
+the exact census comparison, and enabled intent arms the subnet credential
+requirements even when its namespace is invalid. Do not use the controller's
+fail-soft `StEnabled()` result for this distinction: it intentionally reduces
+missing and invalid runtime configuration to false. The Main monitor launcher
+sets `WARP_ENV` only; deployed host settings own `URNETWORK_ST_PROFILE`, so its
+absence from the watcher is not evidence of a deployed profile defect and the
+monitor must neither require nor synthesize it.
+
 Availability is not encoded by `latest_epoch != 0`: epoch zero is a legitimate
 finalized epoch. Before the enabled exact active deployment has any finalized
 row, the persisted bit must be false. Stored numeric measure/rank columns are
@@ -17243,8 +17259,10 @@ and PAGE.
   latest snapshot is future-dated or older than two hours.
 - `points-epoch-metrics-unavailable` warns immediately when ranked total points
   exist but the ST subsystem/deployment/finalized-epoch source is unavailable
-  and the snapshot bit is correctly false. This is not evidence that every
-  network measured zero Blocks or Streak.
+  and the snapshot bit is correctly false. Its safe ST configuration status
+  distinguishes explicit disable, enabled-invalid namespace, and unavailable
+  source observation. This is not evidence that every network measured zero
+  Blocks or Streak.
 - `points-epoch-rebuild-pending` warns immediately when the active finalized
   source is newer than the immutable snapshot within the two-hour rebuild
   budget, or nullable/future/bounded-skew evidence cannot prove ordering. Let
@@ -17291,6 +17309,18 @@ direct monitor census simultaneously found ST disabled and unconfigured with
 `finalized_epochs=0`. That joins the public behavior to the persisted contract:
 the software availability correction is deployed, and the current correctly
 false state has only the reviewed ST/finalized-epoch operational closure.
+
+A 2026-09-12 source audit corrected the configuration attribution in that
+control. Main's `st.yml` was valid and explicitly set `enabled: false`, while
+the authoritative watcher intentionally had no `URNETWORK_ST_PROFILE`. The
+old monitor called the controller loader, whose required-profile failure was
+recovered as nil, and therefore happened to render false/empty without proving
+the explicit source disable. The direct Main desired-state inspection above
+now reports `explicit-disabled` independently of the watcher environment;
+synthetic controls retain enabled-invalid visibility and subnet credential
+requirements, and prove that an absent local profile cannot erase a valid
+enabled namespace. The public false-bit conclusion remains valid, but the old
+controller-derived configuration evidence must not be reused as source proof.
 
 On 2026-09-08 the public API and direct database snapshot agreed: the latest
 snapshot contained 25,708 ranked networks with populated positive total points,

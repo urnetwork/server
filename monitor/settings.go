@@ -284,11 +284,16 @@ type SignalSettings struct {
 	// tailer then repeats the same absolute window per block, preserving late
 	// ingestion coverage without raising the backend-wide query limit.
 	LogServiceBlocks map[string][]string
-	// VerificationEnabled is the canonical st-subsystem feature state. It lets
-	// task probes distinguish a legitimately slow enabled verification job
-	// from a stale recurring chain that must not exist while the subsystem is
-	// disabled.
+	// VerificationEnabled is the canonical st-subsystem feature intent. It lets
+	// task probes distinguish a legitimately slow or misconfigured enabled
+	// verification job from a stale recurring chain that must not exist while
+	// the subsystem is explicitly disabled.
 	VerificationEnabled bool
+	// STConfigStatus is Main's privacy-safe desired-state classification.
+	// It distinguishes an explicit disable from an enabled configuration whose
+	// deployment namespace is invalid, without rendering that namespace or
+	// treating the monitor process's environment as deployed-runtime evidence.
+	STConfigStatus STConfigurationStatus
 	// STDeploymentKey is the exact active chain/coordinator namespace used by
 	// the ST mirror. It is compared in memory and must never be rendered into
 	// alerts; an empty value keeps missing or disabled configuration distinct
@@ -398,6 +403,9 @@ func (s SignalSettings) validate() error {
 	if s.AddressMode != AddressModeLAN && s.AddressMode != AddressModeOverlay {
 		return fmt.Errorf("monitor: unsupported address mode %q", s.AddressMode)
 	}
+	if err := s.STConfigStatus.validate(s.VerificationEnabled, s.STDeploymentKey); err != nil {
+		return err
+	}
 	seenLogServices := map[string]struct{}{}
 	for _, service := range s.LogServices {
 		if service == "" || strings.TrimSpace(service) != service {
@@ -467,6 +475,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		logServices:          append([]string(nil), settings.LogServices...),
 		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
 		verificationEnabled:  settings.VerificationEnabled,
+		stConfigStatus:       settings.STConfigStatus.normalized(),
 		stDeploymentKey:      settings.STDeploymentKey,
 		sshUser:              settings.SSHUser,
 		sshDevUser:           settings.SSHDevUser,

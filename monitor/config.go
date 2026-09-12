@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
 
@@ -226,13 +225,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		home = "."
 	}
-	stEnabled := controller.StEnabled()
-	stDeploymentKey := ""
-	if stEnabled {
-		if key, ok := controller.StDeploymentKey(); ok {
-			stDeploymentKey = string(key)
-		}
-	}
+	stConfiguration := loadSTConfigurationObservation(env)
 	settings := SignalSettings{
 		Environment:         env,
 		PublicDomain:        strings.TrimSpace(services.Domain),
@@ -240,8 +233,9 @@ func LoadSignalSettings() (SignalSettings, error) {
 		ManagerHostname:     activeManagerHostnameFromServices(services),
 		LogServices:         logServices,
 		LogServiceBlocks:    logServiceBlocks,
-		VerificationEnabled: stEnabled,
-		STDeploymentKey:     stDeploymentKey,
+		VerificationEnabled: stConfiguration.configuredEnabled,
+		STConfigStatus:      stConfiguration.status,
+		STDeploymentKey:     stConfiguration.deploymentKey,
 		SSHUser:             y.Ssh.User,
 		SSHDevUser:          y.Ssh.DevUser,
 		SSHKeyPaths:         append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
@@ -267,7 +261,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 		},
 		GooglePlay:     loadGooglePlayReportingSettings(),
 		AppleReporting: loadAppleReportingSettings(),
-		Credentials:    loadCredentialRequirements(env, stEnabled, logServices),
+		Credentials:    loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -353,7 +347,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 // payment integration, so a missing resource or field is a release defect.
 // Crash-report resources remain optional by contract: absence is a no-op, but
 // a present partial credential is still observable.
-func loadCredentialRequirements(environment string, stEnabled bool, services []string) []CredentialRequirement {
+func loadCredentialRequirements(environment string, stConfiguredEnabled bool, services []string) []CredentialRequirement {
 	required := environment == "main"
 	serviceEnabled := func(wanted string) bool {
 		for _, service := range services {
@@ -576,7 +570,7 @@ func loadCredentialRequirements(environment string, stEnabled bool, services []s
 			fields: []credentialFieldSpec{field("anthropic.api_key", "anthropic", "api_key")},
 		})
 	}
-	if stEnabled {
+	if stConfiguredEnabled {
 		specs = append(specs,
 			credentialRequirementSpec{
 				key: "subnet", resource: "st.yml", purpose: "Enabled subnet signing, artifact, and settlement identities", required: true,
