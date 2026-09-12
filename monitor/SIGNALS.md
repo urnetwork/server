@@ -14799,6 +14799,38 @@ callbacks with exactly one terminal owner. Rebuild every Connect-bearing
 artifact to remove the clipped shape; mixed generations can continue emitting
 it until convergence.
 
+The material `21:43:59Z` Main control on 2026-09-12 contained two unique
+authoritative `window_failed` records 34 milliseconds apart on one Taskworker
+generation. The failed latch permits at most one such record per
+`multiClientWindow`, so these were two distinct quality windows, not tail
+replay. ProviderEgressProbe is the only Taskworker constructor of this tunnel,
+and two durable probe attempts overlapped the records; the identity-free lines
+cannot be joined one-to-one to those tasks and do not identify customer
+sessions. In the surrounding three minutes two observed Taskworker generations
+emitted 905 unique clipped-budget events (`effective_min=12972..14963` versus
+`ping_timeout=30000`) and 861 nonterminal stalls, all
+`providers-unresponsive`; the terminal emitter accounted for 542 and 518 of
+those events, respectively. Its two matching probe summaries attempted and
+failed 16/16 full measurements, while 1,442/1,500 cheap checks were dark and
+zero failed tunnel construction; a contemporaneous compatible-HMAC cohort
+still had passing peers. This proves that the old acquisition-budget behavior
+contaminated provider-failure attribution while a severe independent dark
+cohort also existed. It does not prove which mechanism was counterfactually
+sufficient for either terminal window, a customer outage, or the running
+binary's exact Connect ancestry.
+
+No further terminal record appeared for ten minutes despite 2,933 more budget
+events and 2,771 more nonterminal stalls, so the event/replay recovery gate
+closed; active clipping and provider darkness did not. The Main Taskworker
+owner must still converge every generation on a build whose proved Connect
+input contains `b11d722` or later, without changing the two timeouts, while
+the separate §2.24 owner repairs the legacy-HMAC/dark cohort. After convergence,
+require zero `effective_min < ping_timeout` records and zero terminal
+recurrence for ten minutes under comparable fixed-probe traffic, full owned
+ping budgets for unanswered candidates, and independent peer recovery or
+provider addition. A full-budget recurrence remains a fresh remote/provider
+diagnosis rather than evidence that the acquisition fix failed.
+
 **Signaling-send result boundary:** a September 11 Taskworker observation had
 37 unmatched error-shaped lines/minute, led by 20/min of legacy
 `transport_p2p_webrtc.go` `[signal]send failed -><destination>` records. The
