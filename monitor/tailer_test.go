@@ -583,6 +583,65 @@ func TestStandingTailStaleGateRequiresAnAuthoritativePastTimestamp(t *testing.T)
 	}
 }
 
+func TestStandingTailClassifiesWarpctlPreCursorReductionWithoutRawHistory(t *testing.T) {
+	tailer := newLogTailer("fixture-service", nil)
+	tailer.ingestStanding(
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=17`,
+		true,
+		true,
+	)
+
+	finding := findingByClass(t, tailer.drainWindow(), "loki-tail-pre-cursor-entries")
+	if finding.healthy || finding.sustain != 1 {
+		t.Fatalf("pre-cursor reduction was not an immediate visibility warning: %+v", finding)
+	}
+	for _, want := range []string{"fixture-service", "count=17", "monotonic live-tail cursor"} {
+		rendered := finding.symptom + finding.observed + finding.evidence + finding.mechanism
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("pre-cursor finding lacks %q: %+v", want, finding)
+		}
+	}
+	rendered := finding.symptom + finding.baseline + finding.observed +
+		finding.mechanism + finding.evidence + finding.context +
+		finding.action + finding.verify
+	if strings.Contains(rendered, "private-stale-fixture") {
+		t.Fatalf("pre-cursor finding retained suppressed contents: %s", rendered)
+	}
+}
+
+func TestStandingTailRejectsMalformedPreCursorReduction(t *testing.T) {
+	for _, line := range []string{
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=0`,
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=1 private-stale-fixture`,
+	} {
+		tailer := newLogTailer("fixture-service", nil)
+		tailer.ingestStanding(line, true, true)
+		finding := findingByClass(t, tailer.drainWindow(), "loki-tail-pre-cursor-entries")
+		if !finding.healthy {
+			t.Fatalf("malformed pre-cursor reduction was trusted: %q %+v", line, finding)
+		}
+	}
+}
+
+func TestStandingTailPreCursorReductionIsDocumented(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	for _, required := range []string{
+		"[warpctl][loki-tail-pre-cursor-entries] service=<service> count=<n>",
+		"observation-path evidence rather than a current product failure",
+		"Distinct records at the cursor timestamp",
+		"remain visible",
+		"never replay suppressed contents",
+	} {
+		if !strings.Contains(catalog, required) {
+			t.Errorf("pre-cursor catalog guidance omits %q", required)
+		}
+	}
+}
+
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
 	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`

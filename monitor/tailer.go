@@ -351,6 +351,17 @@ var logClasses = []logClass{
 		action:    "Verify the running Grafana artifact contains Warp 35453fd and the Warpctl artifact contains 26089b2 or later, retain bounded overlap reconciliation for the named service, and remove any residual producer burst or genuinely blocked consumer. Do not print dropped labels or timestamps, disable reconciliation, or raise any Loki response or ingester queue.",
 		verify:    "The named service tail stays connected, two consecutive overlap reconciliations complete, and no service-attributed loki-tail-dropped-entries summary, ingester reset, or backend EOF appears for 10 minutes through the workload that triggered the loss.",
 	},
+	// Loki's live API can deliver a record after ingestion even when its source
+	// timestamp is behind the WebSocket cursor. Warpctl drops that record before
+	// it can become a current product line and emits only this bounded summary.
+	{name: "loki-tail-pre-cursor-entries", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-pre-cursor-entries\]\s+service=[A-Za-z0-9._-]+\s+count=[1-9][0-9]*\s*$`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "Loki delivered late or replayed records behind Warpctl's monotonic live-tail cursor; Warpctl suppressed their contents and retained only this service/count summary",
+		mechanism: "Loki's standing tail is driven by ingestion arrival, so a newly ingested record can carry a source timestamp older than the requested cursor. Printing it would assign historical product evidence to the current monitor window while leaving the reconnect cursor unchanged. Warpctl now compares every returned timestamp with its monotonic cursor, suppresses pre-cursor contents, and emits this privacy-safe aggregate instead.",
+		context:   "This proves a source-time versus arrival-time observation boundary, not a current failure in the emitting product service. It does not distinguish late producer delivery, Loki ingestion delay, or a backend replay, and it does not prove that the historical record was evaluated in its original source window.",
+		action:    "Correlate the service with bounded source-time reconciliation, Loki ingestion latency, and tail reconnects. Preserve the Warpctl cursor guard and the monitor's independent source-time guard; do not replay the suppressed contents into the current product window or restart the emitting service.",
+		verify:    "The standing tail stays connected, two consecutive overlap reconciliations complete, current-source controls remain visible, and no pre-cursor summary or monitor-side stale-arrival warning recurs for ten minutes.",
+	},
 	// Mimir 3.1 logs any store-gateway bucket-index version behind the
 	// querier's requested version as a warning. The live fleet's independent
 	// jittered 15-minute loops produced an exact, harmless -873-second

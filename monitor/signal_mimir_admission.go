@@ -18,7 +18,8 @@ import (
 const (
 	mimirAdmissionMarker                   = "monitor-signal-11.20a-mimir-admission"
 	mimirAdmissionQuietWindow              = 2 * time.Hour
-	mimirAdmissionStateVersion             = 1
+	mimirAdmissionLegacyStateVersion       = 1
+	mimirAdmissionStateVersion             = 2
 	mimirAdmissionHistoryLimit             = 1024
 	mimirAdmissionLazyFamilyVersion        = "3.1.1"
 	mimirAdmissionLazyFamilySourceRevision = "a3d6c90f25"
@@ -49,6 +50,8 @@ type mimirAdmissionProbe struct {
 	histories         map[mimirAdmissionIdentity]mimirAdmissionHistory
 	incident          bool
 	quietSince        time.Time
+	rateIncident      bool
+	rateQuietSince    time.Time
 	lockProviderState func(context.Context, string, string) (*providerStateLock, error)
 	loadProviderState func(string, string, int, any) (bool, error)
 	saveProviderState func(string, string, int, any) error
@@ -73,9 +76,10 @@ type mimirAdmissionIdentity struct {
 
 // Only monotonic counters need a prior value; gauges are current-page context.
 type mimirAdmissionHistory struct {
-	discardTotal int64
-	createdTotal int64
-	removedTotal int64
+	discardTotal     int64
+	rateDiscardTotal int64
+	createdTotal     int64
+	removedTotal     int64
 }
 
 // One strict frame represents either a complete child or an explicitly
@@ -91,11 +95,15 @@ type mimirAdmissionInstance struct {
 	removedTotal         int64
 	localLimit           int64
 	globalLimit          int64
+	ingestionRateLimit   float64
+	ingestionBurstLimit  int64
 	discardDescriptor    bool
 	discardFamilyAbsent  bool
 	discardAbsenceSource bool
 	discardPresent       bool
 	discardTotal         int64
+	rateDiscardPresent   bool
+	rateDiscardTotal     int64
 	seen                 map[string]bool
 }
 
@@ -124,37 +132,46 @@ type mimirAdmissionHostResult struct {
 
 // The assessment is a privacy-safe fleet reduction used by the page renderer.
 type mimirAdmissionAssessment struct {
-	configuredHosts     int
-	observableHosts     int
-	instanceCount       int
-	descriptorInstances int
-	sourceZeroInstances int
-	journalHosts        int
-	publisherStarts     int64
-	readinessRejects    int64
-	admissionRejects    int64
-	affectedInstances   int
-	initialPositive     int
-	discardIncrease     int64
-	createdIncrease     int64
-	removedIncrease     int64
-	memoryMinimum       int64
-	memoryMaximum       int64
-	activeMinimum       int64
-	activeMaximum       int64
-	localLimitMinimum   int64
-	localLimitMaximum   int64
-	globalLimitMinimum  int64
-	globalLimitMaximum  int64
-	headroomMinimum     int64
-	headroomMaximum     int64
-	generationChanges   int
-	counterResets       int
-	directComplete      bool
-	comparable          bool
-	incidentActive      bool
-	quietFor            time.Duration
-	visibilityFailures  []mimirAdmissionVisibilityFailure
+	configuredHosts       int
+	observableHosts       int
+	instanceCount         int
+	descriptorInstances   int
+	sourceZeroInstances   int
+	journalHosts          int
+	publisherStarts       int64
+	readinessRejects      int64
+	admissionRejects      int64
+	affectedInstances     int
+	initialPositive       int
+	discardIncrease       int64
+	rateAffectedInstances int
+	rateInitialPositive   int
+	rateDiscardIncrease   int64
+	createdIncrease       int64
+	removedIncrease       int64
+	memoryMinimum         int64
+	memoryMaximum         int64
+	activeMinimum         int64
+	activeMaximum         int64
+	localLimitMinimum     int64
+	localLimitMaximum     int64
+	globalLimitMinimum    int64
+	globalLimitMaximum    int64
+	ingestionRateMinimum  float64
+	ingestionRateMaximum  float64
+	ingestionBurstMinimum int64
+	ingestionBurstMaximum int64
+	headroomMinimum       int64
+	headroomMaximum       int64
+	generationChanges     int
+	counterResets         int
+	directComplete        bool
+	comparable            bool
+	incidentActive        bool
+	quietFor              time.Duration
+	rateIncidentActive    bool
+	rateQuietFor          time.Duration
+	visibilityFailures    []mimirAdmissionVisibilityFailure
 }
 
 // Visibility failures use fixed messages so remote output cannot enter an
@@ -167,13 +184,35 @@ type mimirAdmissionVisibilityFailure struct {
 // The versioned state contains only the bounded counter identity and values
 // needed to survive a watcher replacement without persisting metric labels.
 type mimirAdmissionPersistedState struct {
-	Incident       bool                             `json:"incident"`
-	QuietSinceUnix int64                            `json:"quiet_since_unix"`
-	Histories      []mimirAdmissionPersistedHistory `json:"histories"`
+	Incident           bool                             `json:"incident"`
+	QuietSinceUnix     int64                            `json:"quiet_since_unix"`
+	RateIncident       bool                             `json:"rate_incident"`
+	RateQuietSinceUnix int64                            `json:"rate_quiet_since_unix"`
+	Histories          []mimirAdmissionPersistedHistory `json:"histories"`
 }
 
 // One persisted history entry reconstructs a host/process counter baseline.
 type mimirAdmissionPersistedHistory struct {
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	ProcessStart     string `json:"process_start"`
+	DiscardTotal     int64  `json:"discard_total"`
+	RateDiscardTotal int64  `json:"rate_discard_total"`
+	CreatedTotal     int64  `json:"created_total"`
+	RemovedTotal     int64  `json:"removed_total"`
+}
+
+// Version one carried only the series-limit incident. Loading it is an
+// additive migration: its exact series history remains authoritative while
+// rate-limit state starts unarmed. Saving version two prevents an overlapping
+// old watcher from silently discarding the new incident fields.
+type mimirAdmissionPersistedStateV1 struct {
+	Incident       bool                               `json:"incident"`
+	QuietSinceUnix int64                              `json:"quiet_since_unix"`
+	Histories      []mimirAdmissionPersistedHistoryV1 `json:"histories"`
+}
+
+type mimirAdmissionPersistedHistoryV1 struct {
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
 	ProcessStart string `json:"process_start"`
@@ -183,9 +222,11 @@ type mimirAdmissionPersistedHistory struct {
 }
 
 type mimirAdmissionRuntimeState struct {
-	histories  map[mimirAdmissionIdentity]mimirAdmissionHistory
-	incident   bool
-	quietSince time.Time
+	histories      map[mimirAdmissionIdentity]mimirAdmissionHistory
+	incident       bool
+	quietSince     time.Time
+	rateIncident   bool
+	rateQuietSince time.Time
 }
 
 var mimirAdmissionProcessStartPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
@@ -226,7 +267,18 @@ func (self *mimirAdmissionProbe) loadState(stateDir string) error {
 	}
 	loaded, err := loader(stateDir, "mimir-admission", mimirAdmissionStateVersion, &state)
 	if err != nil {
-		return err
+		legacy := mimirAdmissionPersistedStateV1{}
+		legacyLoaded, legacyErr := loader(
+			stateDir,
+			"mimir-admission",
+			mimirAdmissionLegacyStateVersion,
+			&legacy,
+		)
+		if legacyErr != nil || !legacyLoaded {
+			return err
+		}
+		state = migrateMimirAdmissionPersistedStateV1(legacy)
+		loaded = true
 	}
 	histories := map[mimirAdmissionIdentity]mimirAdmissionHistory{}
 	if loaded {
@@ -240,9 +292,10 @@ func (self *mimirAdmissionProbe) loadState(stateDir string) error {
 				processStart: persisted.ProcessStart,
 			}
 			histories[identity] = mimirAdmissionHistory{
-				discardTotal: persisted.DiscardTotal,
-				createdTotal: persisted.CreatedTotal,
-				removedTotal: persisted.RemovedTotal,
+				discardTotal:     persisted.DiscardTotal,
+				rateDiscardTotal: persisted.RateDiscardTotal,
+				createdTotal:     persisted.CreatedTotal,
+				removedTotal:     persisted.RemovedTotal,
 			}
 		}
 	}
@@ -250,11 +303,35 @@ func (self *mimirAdmissionProbe) loadState(stateDir string) error {
 	self.stateDir = stateDir
 	self.histories = histories
 	self.incident = loaded && state.Incident
+	self.rateIncident = loaded && state.RateIncident
 	self.quietSince = time.Time{}
+	self.rateQuietSince = time.Time{}
 	if self.quietResetDone && state.QuietSinceUnix > 0 {
 		self.quietSince = time.Unix(state.QuietSinceUnix, 0).UTC()
 	}
+	if self.quietResetDone && state.RateQuietSinceUnix > 0 {
+		self.rateQuietSince = time.Unix(state.RateQuietSinceUnix, 0).UTC()
+	}
 	return nil
+}
+
+func migrateMimirAdmissionPersistedStateV1(legacy mimirAdmissionPersistedStateV1) mimirAdmissionPersistedState {
+	state := mimirAdmissionPersistedState{
+		Incident:       legacy.Incident,
+		QuietSinceUnix: legacy.QuietSinceUnix,
+		Histories:      make([]mimirAdmissionPersistedHistory, 0, len(legacy.Histories)),
+	}
+	for _, history := range legacy.Histories {
+		state.Histories = append(state.Histories, mimirAdmissionPersistedHistory{
+			Host:         history.Host,
+			Port:         history.Port,
+			ProcessStart: history.ProcessStart,
+			DiscardTotal: history.DiscardTotal,
+			CreatedTotal: history.CreatedTotal,
+			RemovedTotal: history.RemovedTotal,
+		})
+	}
+	return state
 }
 
 // Atomic versioned persistence happens after every observation. The caller
@@ -264,12 +341,13 @@ func (self *mimirAdmissionProbe) saveState(stateDir string) error {
 	histories := make([]mimirAdmissionPersistedHistory, 0, len(self.histories))
 	for identity, history := range self.histories {
 		histories = append(histories, mimirAdmissionPersistedHistory{
-			Host:         identity.host,
-			Port:         identity.port,
-			ProcessStart: identity.processStart,
-			DiscardTotal: history.discardTotal,
-			CreatedTotal: history.createdTotal,
-			RemovedTotal: history.removedTotal,
+			Host:             identity.host,
+			Port:             identity.port,
+			ProcessStart:     identity.processStart,
+			DiscardTotal:     history.discardTotal,
+			RateDiscardTotal: history.rateDiscardTotal,
+			CreatedTotal:     history.createdTotal,
+			RemovedTotal:     history.removedTotal,
 		})
 	}
 	sort.Slice(histories, func(i int, j int) bool {
@@ -282,13 +360,19 @@ func (self *mimirAdmissionProbe) saveState(stateDir string) error {
 		return histories[i].ProcessStart < histories[j].ProcessStart
 	})
 	quietSinceUnix := int64(0)
+	rateQuietSinceUnix := int64(0)
 	if !self.quietSince.IsZero() {
 		quietSinceUnix = self.quietSince.Unix()
 	}
+	if !self.rateQuietSince.IsZero() {
+		rateQuietSinceUnix = self.rateQuietSince.Unix()
+	}
 	state := mimirAdmissionPersistedState{
-		Incident:       self.incident,
-		QuietSinceUnix: quietSinceUnix,
-		Histories:      histories,
+		Incident:           self.incident,
+		QuietSinceUnix:     quietSinceUnix,
+		RateIncident:       self.rateIncident,
+		RateQuietSinceUnix: rateQuietSinceUnix,
+		Histories:          histories,
 	}
 	self.stateLock.Unlock()
 	if err := validateMimirAdmissionPersistedState(state); err != nil {
@@ -305,9 +389,11 @@ func (self *mimirAdmissionProbe) snapshotState() mimirAdmissionRuntimeState {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return mimirAdmissionRuntimeState{
-		histories:  cloneMimirAdmissionHistories(self.histories),
-		incident:   self.incident,
-		quietSince: self.quietSince,
+		histories:      cloneMimirAdmissionHistories(self.histories),
+		incident:       self.incident,
+		quietSince:     self.quietSince,
+		rateIncident:   self.rateIncident,
+		rateQuietSince: self.rateQuietSince,
 	}
 }
 
@@ -317,6 +403,8 @@ func (self *mimirAdmissionProbe) restoreState(state mimirAdmissionRuntimeState) 
 	self.histories = cloneMimirAdmissionHistories(state.histories)
 	self.incident = state.incident
 	self.quietSince = state.quietSince
+	self.rateIncident = state.rateIncident
+	self.rateQuietSince = state.rateQuietSince
 }
 
 func cloneMimirAdmissionHistories(
@@ -335,7 +423,8 @@ func validateMimirAdmissionPersistedState(state mimirAdmissionPersistedState) er
 	if len(state.Histories) > mimirAdmissionHistoryLimit {
 		return fmt.Errorf("Mimir admission state has too many histories")
 	}
-	if state.QuietSinceUnix < 0 || (!state.Incident && state.QuietSinceUnix != 0) {
+	if state.QuietSinceUnix < 0 || (!state.Incident && state.QuietSinceUnix != 0) ||
+		state.RateQuietSinceUnix < 0 || (!state.RateIncident && state.RateQuietSinceUnix != 0) {
 		return fmt.Errorf("Mimir admission state has an invalid quiet boundary")
 	}
 	seenIdentities := map[mimirAdmissionIdentity]bool{}
@@ -348,7 +437,8 @@ func validateMimirAdmissionPersistedState(state mimirAdmissionPersistedState) er
 		processStart, ok := new(big.Rat).SetString(persisted.ProcessStart)
 		if strings.TrimSpace(persisted.Host) == "" || persisted.Port < 1 || persisted.Port > 65535 ||
 			!ok || processStart.Sign() <= 0 || processStart.RatString() != persisted.ProcessStart ||
-			persisted.DiscardTotal < 0 || persisted.CreatedTotal < 0 || persisted.RemovedTotal < 0 {
+			persisted.DiscardTotal < 0 || persisted.RateDiscardTotal < 0 ||
+			persisted.CreatedTotal < 0 || persisted.RemovedTotal < 0 {
 			return fmt.Errorf("Mimir admission state has an invalid history")
 		}
 		if seenIdentities[identity] {
@@ -442,6 +532,10 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 				assessment.incidentActive = true
 				assessment.quietFor = mimirAdmissionQuietDuration(now, priorState.quietSince)
 			}
+			if priorState.rateIncident {
+				assessment.rateIncidentActive = true
+				assessment.rateQuietFor = mimirAdmissionQuietDuration(now, priorState.rateQuietSince)
+			}
 		} else {
 			self.stateLock.Lock()
 			self.quietResetDone = true
@@ -449,7 +543,7 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			stateSaved = true
 		}
 	}
-	findings := make([]finding, 0, len(assessment.visibilityFailures)+2)
+	findings := make([]finding, 0, len(assessment.visibilityFailures)+3)
 	seenVisibilityTargets := map[string]bool{}
 	for _, failure := range assessment.visibilityFailures {
 		if seenVisibilityTargets[failure.target] {
@@ -471,6 +565,13 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			"observability/mimir-admission", tierPage, "mimir-series-limit", "mimir-fleet",
 		))
 	}
+	if assessment.rateIncidentActive {
+		findings = append(findings, mimirAdmissionRateLimitFinding(assessment))
+	} else if stateSaved && assessment.directComplete && assessment.comparable {
+		findings = append(findings, healthyFinding(
+			"observability/mimir-admission", tierPage, "mimir-ingestion-rate-limit", "mimir-fleet",
+		))
+	}
 	return findings, nil
 }
 
@@ -488,6 +589,10 @@ func (self *mimirAdmissionProbe) stateFailureFindings(
 	if state.incident {
 		assessment := mimirAdmissionRetainedAssessment(now, configuredHosts, state)
 		findings = append(findings, mimirAdmissionLimitFinding(assessment))
+	}
+	if state.rateIncident {
+		assessment := mimirAdmissionRetainedAssessment(now, configuredHosts, state)
+		findings = append(findings, mimirAdmissionRateLimitFinding(assessment))
 	}
 	return findings
 }
@@ -534,11 +639,13 @@ func mimirAdmissionRetainedAssessment(
 	state mimirAdmissionRuntimeState,
 ) mimirAdmissionAssessment {
 	return mimirAdmissionAssessment{
-		configuredHosts: configuredHosts,
-		directComplete:  false,
-		comparable:      false,
-		incidentActive:  state.incident,
-		quietFor:        mimirAdmissionQuietDuration(now, state.quietSince),
+		configuredHosts:    configuredHosts,
+		directComplete:     false,
+		comparable:         false,
+		incidentActive:     state.incident,
+		quietFor:           mimirAdmissionQuietDuration(now, state.quietSince),
+		rateIncidentActive: state.rateIncident,
+		rateQuietFor:       mimirAdmissionQuietDuration(now, state.rateQuietSince),
 	}
 }
 
@@ -565,7 +672,8 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 		comparable:      true,
 	}
 	nextHistories := map[mimirAdmissionIdentity]mimirAdmissionHistory{}
-	positive := false
+	seriesPositive := false
+	ratePositive := false
 	metricRangeInitialized := false
 
 	for _, result := range results {
@@ -649,6 +757,10 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 				assessment.localLimitMaximum = instance.localLimit
 				assessment.globalLimitMinimum = instance.globalLimit
 				assessment.globalLimitMaximum = instance.globalLimit
+				assessment.ingestionRateMinimum = instance.ingestionRateLimit
+				assessment.ingestionRateMaximum = instance.ingestionRateLimit
+				assessment.ingestionBurstMinimum = instance.ingestionBurstLimit
+				assessment.ingestionBurstMaximum = instance.ingestionBurstLimit
 				assessment.headroomMinimum = headroom
 				assessment.headroomMaximum = headroom
 				metricRangeInitialized = true
@@ -661,6 +773,10 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 				assessment.localLimitMaximum = max(assessment.localLimitMaximum, instance.localLimit)
 				assessment.globalLimitMinimum = min(assessment.globalLimitMinimum, instance.globalLimit)
 				assessment.globalLimitMaximum = max(assessment.globalLimitMaximum, instance.globalLimit)
+				assessment.ingestionRateMinimum = min(assessment.ingestionRateMinimum, instance.ingestionRateLimit)
+				assessment.ingestionRateMaximum = max(assessment.ingestionRateMaximum, instance.ingestionRateLimit)
+				assessment.ingestionBurstMinimum = min(assessment.ingestionBurstMinimum, instance.ingestionBurstLimit)
+				assessment.ingestionBurstMaximum = max(assessment.ingestionBurstMaximum, instance.ingestionBurstLimit)
 				assessment.headroomMinimum = min(assessment.headroomMinimum, headroom)
 				assessment.headroomMaximum = max(assessment.headroomMaximum, headroom)
 			}
@@ -671,9 +787,10 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 				processStart: instance.processStart,
 			}
 			current := mimirAdmissionHistory{
-				discardTotal: instance.discardTotal,
-				createdTotal: instance.createdTotal,
-				removedTotal: instance.removedTotal,
+				discardTotal:     instance.discardTotal,
+				rateDiscardTotal: instance.rateDiscardTotal,
+				createdTotal:     instance.createdTotal,
+				removedTotal:     instance.removedTotal,
 			}
 			previous, observedBefore := self.histories[identity]
 			if !observedBefore {
@@ -685,30 +802,47 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 					}
 				}
 				if instance.discardTotal > 0 {
-					positive = true
+					seriesPositive = true
 					assessment.affectedInstances++
 					assessment.initialPositive++
 					assessment.discardIncrease += instance.discardTotal
 				}
-			} else if instance.discardTotal < previous.discardTotal ||
-				instance.createdTotal < previous.createdTotal ||
-				instance.removedTotal < previous.removedTotal {
-				assessment.directComplete = false
-				assessment.comparable = false
-				assessment.counterResets++
-				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-					target: hostName + "/mimir-admission",
-					err:    fmt.Errorf("a monotonic counter decreased within one process generation"),
-				})
+				if instance.rateDiscardTotal > 0 {
+					ratePositive = true
+					assessment.rateAffectedInstances++
+					assessment.rateInitialPositive++
+					assessment.rateDiscardIncrease += instance.rateDiscardTotal
+				}
 			} else {
-				discardDelta := instance.discardTotal - previous.discardTotal
-				if discardDelta > 0 {
-					positive = true
+				counterReset := instance.discardTotal < previous.discardTotal ||
+					instance.rateDiscardTotal < previous.rateDiscardTotal ||
+					instance.createdTotal < previous.createdTotal ||
+					instance.removedTotal < previous.removedTotal
+				if counterReset {
+					assessment.directComplete = false
+					assessment.comparable = false
+					assessment.counterResets++
+					assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
+						target: hostName + "/mimir-admission",
+						err:    fmt.Errorf("a monotonic counter decreased within one process generation"),
+					})
+				}
+				if discardDelta := instance.discardTotal - previous.discardTotal; discardDelta > 0 {
+					seriesPositive = true
 					assessment.affectedInstances++
 					assessment.discardIncrease += discardDelta
 				}
-				assessment.createdIncrease += instance.createdTotal - previous.createdTotal
-				assessment.removedIncrease += instance.removedTotal - previous.removedTotal
+				if rateDelta := instance.rateDiscardTotal - previous.rateDiscardTotal; rateDelta > 0 {
+					ratePositive = true
+					assessment.rateAffectedInstances++
+					assessment.rateDiscardIncrease += rateDelta
+				}
+				if createdDelta := instance.createdTotal - previous.createdTotal; createdDelta > 0 {
+					assessment.createdIncrease += createdDelta
+				}
+				if removedDelta := instance.removedTotal - previous.removedTotal; removedDelta > 0 {
+					assessment.removedIncrease += removedDelta
+				}
 			}
 			nextHistories[identity] = current
 		}
@@ -720,27 +854,53 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 	}
 
 	self.histories = nextHistories
+	assessment.incidentActive, assessment.quietFor = advanceMimirAdmissionIncident(
+		now,
+		assessment.directComplete,
+		assessment.comparable,
+		seriesPositive,
+		&self.incident,
+		&self.quietSince,
+	)
+	assessment.rateIncidentActive, assessment.rateQuietFor = advanceMimirAdmissionIncident(
+		now,
+		assessment.directComplete,
+		assessment.comparable,
+		ratePositive,
+		&self.rateIncident,
+		&self.rateQuietSince,
+	)
+	return assessment
+}
+
+func advanceMimirAdmissionIncident(
+	now time.Time,
+	directComplete bool,
+	comparable bool,
+	positive bool,
+	incident *bool,
+	quietSince *time.Time,
+) (bool, time.Duration) {
 	if positive {
-		self.incident = true
-		self.quietSince = time.Time{}
-	} else if self.incident {
-		if assessment.directComplete && assessment.comparable {
-			if self.quietSince.IsZero() {
-				self.quietSince = now
+		*incident = true
+		*quietSince = time.Time{}
+	} else if *incident {
+		if directComplete && comparable {
+			if quietSince.IsZero() {
+				*quietSince = now
 			}
-			if now.Sub(self.quietSince) >= mimirAdmissionQuietWindow {
-				self.incident = false
-				self.quietSince = time.Time{}
+			if now.Sub(*quietSince) >= mimirAdmissionQuietWindow {
+				*incident = false
+				*quietSince = time.Time{}
 			}
 		} else {
-			self.quietSince = time.Time{}
+			*quietSince = time.Time{}
 		}
 	}
-	assessment.incidentActive = self.incident
-	if self.incident && !self.quietSince.IsZero() && now.After(self.quietSince) {
-		assessment.quietFor = now.Sub(self.quietSince)
+	if *incident && !quietSince.IsZero() && now.After(*quietSince) {
+		return true, now.Sub(*quietSince)
 	}
-	return assessment
+	return *incident, 0
 }
 
 // The fixed finding keeps replicated child increments distinct from unique
@@ -800,6 +960,63 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 			mimirAdmissionQuietWindow,
 		),
 		playbook: "SIGNALS.md §11.20a, §11.20, §8.11, and §8.12",
+	}
+}
+
+// Rate admission is independent from series cardinality: one token-bucket
+// counter can increase while the per-user series counter and headroom remain
+// flat. Runtime limits are context, never producer attribution.
+func mimirAdmissionRateLimitFinding(assessment mimirAdmissionAssessment) finding {
+	state := "new direct counter increase"
+	if assessment.rateDiscardIncrease == 0 {
+		state = "two-hour complete quiet hold in progress"
+	}
+	return finding{
+		probeId: "observability/mimir-admission", tier: tierPage,
+		class: "mimir-ingestion-rate-limit", target: "mimir-fleet", frame: "rate-limited", sustain: 1,
+		symptom:   "Mimir ingestion-rate admission rejected samples or remains inside its required quiet hold",
+		mechanism: "An exact Mimir child counter for reason=rate_limited increased. The distributor's per-tenant sample token bucket rejected ingestion independently of the per-user in-memory series limit; the child-counter delta proves lost samples but does not identify the producer whose remote-write request crossed the shared budget.",
+		baseline: fmt.Sprintf(
+			"Every enabled services host has a complete exact-child observation, no rate-limited discard counter increases, and the fleet remains complete and comparable for %s after the last increase.",
+			mimirAdmissionQuietWindow,
+		),
+		observed: fmt.Sprintf(
+			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d rate_discard_counter_increase=%d ingestion_rate_limit=%g..%g/s ingestion_burst_limit=%d..%d series_discard_counter_increase=%d memory_series=%d..%d active_series=%d..%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%d readiness_rejects=%d",
+			state,
+			assessment.configuredHosts,
+			assessment.observableHosts,
+			assessment.instanceCount,
+			assessment.descriptorInstances,
+			assessment.sourceZeroInstances,
+			assessment.rateAffectedInstances,
+			assessment.rateInitialPositive,
+			assessment.rateDiscardIncrease,
+			assessment.ingestionRateMinimum,
+			assessment.ingestionRateMaximum,
+			assessment.ingestionBurstMinimum,
+			assessment.ingestionBurstMaximum,
+			assessment.discardIncrease,
+			assessment.memoryMinimum,
+			assessment.memoryMaximum,
+			assessment.activeMinimum,
+			assessment.activeMaximum,
+			assessment.generationChanges,
+			assessment.counterResets,
+			assessment.directComplete,
+			assessment.comparable,
+			assessment.rateQuietFor.Round(time.Second),
+			assessment.journalHosts,
+			assessment.publisherStarts,
+			assessment.readinessRejects,
+		),
+		evidence: "Each host identifies Mimir through its loopback build-info response and reduces the exact process counter plus ingestion-rate and burst settings locally. Only fixed numeric fields leave the host; rendered configuration, tenant values, metric labels, and request bodies do not.",
+		context:  "The configured rate and burst explain the admission policy but do not attribute load. Publisher/readiness aggregates likewise cannot identify the rejected writer. The Redis command-latency histogram is one proven unnecessary high-volume input and a candidate load reduction, not proof that Redis is the only producer or that excluding it closes this counter.",
+		action:   "Pause additional metrics-publisher rollouts, preserve the exact child generations, and compare bounded per-service and metric-family series/cadence aggregates with the shared gateway push path. Remove or reduce only a proven unnecessary sample source; justify any capacity change from measured steady and rollout load. Do not retry rejected payloads blindly, restart Mimir to erase counters, or raise the ingestion limit before attribution and resource checks.",
+		verify: fmt.Sprintf(
+			"Require complete exact-child observations with stable generations and limits, zero new rate-limited discard increments, fresh required application metrics, and the independent per-user-series counter remaining observable through the complete %s quiet window.",
+			mimirAdmissionQuietWindow,
+		),
+		playbook: "SIGNALS.md §11.20a and §11.20",
 	}
 }
 
@@ -875,7 +1092,21 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 			}
 			instance.seen[key] = true
 			instance.processStart = value
-		case "memory_series", "active_series", "created_total", "removed_total", "local_limit", "global_limit", "discard_total":
+		case "ingestion_rate_limit":
+			if len(fields) != 2 || current < 0 {
+				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
+			}
+			instance := &sample.instances[current]
+			if instance.seen[key] {
+				return sample, fmt.Errorf("mimir admission line %d: duplicate %s", lineNumber+1, key)
+			}
+			value, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil || value <= 0 || math.IsInf(value, 0) || math.IsNaN(value) {
+				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
+			}
+			instance.seen[key] = true
+			instance.ingestionRateLimit = value
+		case "memory_series", "active_series", "created_total", "removed_total", "local_limit", "global_limit", "ingestion_burst_limit", "discard_total", "rate_discard_total":
 			if len(fields) != 2 || current < 0 {
 				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
 			}
@@ -884,7 +1115,7 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				return sample, fmt.Errorf("mimir admission line %d: duplicate %s", lineNumber+1, key)
 			}
 			value, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil || value < 0 || ((key == "local_limit" || key == "global_limit") && value == 0) {
+			if err != nil || value < 0 || ((key == "local_limit" || key == "global_limit" || key == "ingestion_burst_limit") && value == 0) {
 				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
 			}
 			instance.seen[key] = true
@@ -901,10 +1132,14 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				instance.localLimit = value
 			case "global_limit":
 				instance.globalLimit = value
+			case "ingestion_burst_limit":
+				instance.ingestionBurstLimit = value
 			case "discard_total":
 				instance.discardTotal = value
+			case "rate_discard_total":
+				instance.rateDiscardTotal = value
 			}
-		case "discard_descriptor", "discard_family_absent", "discard_absence_source", "discard_present":
+		case "discard_descriptor", "discard_family_absent", "discard_absence_source", "discard_present", "rate_discard_present":
 			if len(fields) != 2 || current < 0 {
 				return sample, fmt.Errorf("mimir admission line %d: invalid %s", lineNumber+1, key)
 			}
@@ -923,8 +1158,10 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				instance.discardFamilyAbsent = value
 			} else if key == "discard_absence_source" {
 				instance.discardAbsenceSource = value
-			} else {
+			} else if key == "discard_present" {
 				instance.discardPresent = value
+			} else {
+				instance.rateDiscardPresent = value
 			}
 		case "instance_end":
 			if len(fields) != 1 || current < 0 {
@@ -937,8 +1174,9 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 			if instance.observable {
 				for _, required := range []string{
 					"process_start", "memory_series", "active_series", "created_total", "removed_total",
-					"local_limit", "global_limit", "discard_descriptor", "discard_family_absent",
-					"discard_absence_source", "discard_present", "discard_total",
+					"local_limit", "global_limit", "ingestion_rate_limit", "ingestion_burst_limit",
+					"discard_descriptor", "discard_family_absent", "discard_absence_source",
+					"discard_present", "discard_total", "rate_discard_present", "rate_discard_total",
 				} {
 					if !instance.seen[required] {
 						return sample, fmt.Errorf("mimir admission line %d: instance omitted %s", lineNumber+1, required)
@@ -947,11 +1185,17 @@ func parseMimirAdmissionHostSample(output string) (mimirAdmissionHostSample, err
 				if !instance.discardPresent && instance.discardTotal != 0 {
 					return sample, fmt.Errorf("mimir admission line %d: absent discard row has a nonzero total", lineNumber+1)
 				}
+				if !instance.rateDiscardPresent && instance.rateDiscardTotal != 0 {
+					return sample, fmt.Errorf("mimir admission line %d: absent rate discard row has a nonzero total", lineNumber+1)
+				}
 				if instance.discardDescriptor && instance.discardFamilyAbsent {
 					return sample, fmt.Errorf("mimir admission line %d: present descriptor contradicts absent family", lineNumber+1)
 				}
 				if instance.discardFamilyAbsent && instance.discardPresent {
 					return sample, fmt.Errorf("mimir admission line %d: absent family contains an exact counter row", lineNumber+1)
+				}
+				if instance.discardFamilyAbsent && instance.rateDiscardPresent {
+					return sample, fmt.Errorf("mimir admission line %d: absent family contains an exact rate counter row", lineNumber+1)
 				}
 			} else if len(instance.seen) != 0 {
 				return sample, fmt.Errorf("mimir admission line %d: unobservable instance contains metric fields", lineNumber+1)
@@ -1082,7 +1326,7 @@ for port in $ports; do
 
   mimir_count=$((mimir_count+1))
   printf 'instance_begin %s\n' "$port"
-  global_limit=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null | awk '
+  config_values=$(curl -fsS --max-time 10 "http://${loopback_address}:${port}/config" 2>/dev/null | awk '
     function yaml_key(value) {sub(/:$/, "", value); return value}
     function clear_path() {
       for (level in path_key) delete path_key[level]
@@ -1104,17 +1348,28 @@ for port in $ports; do
       leave_to_parent(indent)
       if ($1 !~ /:$/) next
       key = yaml_key($1)
-      if (path_depth == 1 && path_key[1] == "limits" && key == "max_global_series_per_user") {
-        count++
-        value = $2
+      if (path_depth == 1 && path_key[1] == "limits") {
+        if (key == "max_global_series_per_user") {
+          global_count++
+          global_value = $2
+        } else if (key == "ingestion_rate") {
+          rate_count++
+          rate_value = $2
+        } else if (key == "ingestion_burst_size") {
+          burst_count++
+          burst_value = $2
+        }
       }
       path_depth++
       path_indent[path_depth] = indent
       path_key[path_depth] = key
     }
     END {
-      if (count == 1 && value ~ /^[0-9]+$/ && value > 0) print value
-      else exit 41
+      if (global_count == 1 && global_value ~ /^[0-9]+$/ && global_value > 0 &&
+          rate_count == 1 && rate_value ~ /^[0-9]+([.][0-9]+)?$/ && rate_value > 0 &&
+          burst_count == 1 && burst_value ~ /^[0-9]+$/ && burst_value > 0) {
+        printf "%s %s %s\n", global_value, rate_value, burst_value
+      } else exit 41
     }
   ')
   config_status=$?
@@ -1124,6 +1379,14 @@ for port in $ports; do
     printf 'observable 0\ninstance_end\n'
     continue
   fi
+  set -- $config_values
+  if [ "$#" -ne 3 ]; then
+    printf 'observable 0\ninstance_end\n'
+    continue
+  fi
+  global_limit=$1
+  ingestion_rate_limit=$2
+  ingestion_burst_limit=$3
   reduced=$(printf '%s\n' "$metrics" | awk '
     function numeric(value) {return value ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/}
     /^# HELP cortex_discarded_samples_total / {descriptor_help++}
@@ -1152,11 +1415,21 @@ for port in $ports; do
       discard_count++
       discard_total+=$NF
     }
+    /^cortex_discarded_samples_total[{]/ && index($0, "reason=\"rate_limited\"") > 0 {
+      rate_discard_seen++
+      if ($0 !~ /(^|[{,])reason="rate_limited"([,}])/ || !numeric($NF)) {
+        rate_discard_invalid++
+        next
+      }
+      rate_discard_count++
+      rate_discard_total+=$NF
+    }
     END {
       if (process_count != 1 || process_start_value <= 0 || memory_count != 1 ||
           active_count < 1 || created_count < 1 || removed_count < 1 ||
           local_count < 1 || local_minimum <= 0 || local_minimum != local_maximum ||
-          discard_invalid > 0 || discard_seen != discard_count) exit 42
+          discard_invalid > 0 || discard_seen != discard_count ||
+          rate_discard_invalid > 0 || rate_discard_seen != rate_discard_count) exit 42
       descriptor=(descriptor_help == 1 && descriptor_type == 1)
 	  family_absent=(descriptor_help == 0 && descriptor_type == 0 && discard_family_rows == 0)
       printf "process_start %s\n", process_start_text
@@ -1169,6 +1442,8 @@ for port in $ports; do
 	  printf "discard_family_absent %d\n", family_absent
       printf "discard_present %d\n", (discard_count > 0)
       printf "discard_total %.0f\n", discard_total
+      printf "rate_discard_present %d\n", (rate_discard_count > 0)
+      printf "rate_discard_total %.0f\n", rate_discard_total
     }
   ')
   reduced_status=$?
@@ -1176,8 +1451,8 @@ for port in $ports; do
     printf 'observable 0\ninstance_end\n'
     continue
   fi
-  printf 'observable 1\n%s\nglobal_limit %s\ndiscard_absence_source %s\ninstance_end\n' \
-    "$reduced" "$global_limit" "$discard_absence_source"
+  printf 'observable 1\n%s\nglobal_limit %s\ningestion_rate_limit %s\ningestion_burst_limit %s\ndiscard_absence_source %s\ninstance_end\n' \
+    "$reduced" "$global_limit" "$ingestion_rate_limit" "$ingestion_burst_limit" "$discard_absence_source"
 done
 printf 'mimir_count %s\n' "$mimir_count"
 
