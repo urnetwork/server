@@ -158,6 +158,8 @@ const (
 	perfvarFeatureNoDeferTimeoutResend = "no-defer-timeout-resend"
 	perfvarFeatureFastPathSizeAware    = "fast-path-size-aware"
 	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
+	perfvarFeatureLaneRule             = "reliable-lane-proven-recovery"
+	perfvarFeatureNoLaneRule           = "no-reliable-lane-proven-recovery"
 )
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -634,6 +636,8 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 			perfvarFeatureNoDeferTimeoutResend,
 			perfvarFeatureFastPathSizeAware,
 			perfvarFeatureNoFastPathSizeAware,
+			perfvarFeatureLaneRule,
+			perfvarFeatureNoLaneRule,
 		},
 		[]string{},
 	)

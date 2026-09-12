@@ -3415,6 +3415,9 @@ func fullTunClientSettingsWithFeatures(
 		case perfvarFeatureFastPathSizeAware, perfvarFeatureNoFastPathSizeAware:
 			target, field = p2pSettings, "FastPathSizeAwareAdmission"
 			value = feature == perfvarFeatureFastPathSizeAware
+		case perfvarFeatureLaneRule, perfvarFeatureNoLaneRule:
+			target, field = settings.SendBufferSettings, "ReliableLaneProvenRecovery"
+			value = feature == perfvarFeatureLaneRule
 		default:
 			panic(fmt.Sprintf("unknown PERFVAR feature %q", feature))
 		}
