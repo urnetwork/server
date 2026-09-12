@@ -146,7 +146,7 @@ func TestHostpowerSignalMalformedOutputIsPrivacyReducedVisibility(t *testing.T) 
 	}
 }
 
-func TestHostpowerCommandReducesCurrentBootHistoryAndHardware(t *testing.T) {
+func TestHostpowerCommandReducesReverseChronologicalCurrentBootHistoryAndHardware(t *testing.T) {
 	binDir := t.TempDir()
 	commands := map[string]string{
 		"systemd-analyze": `#!/bin/sh
@@ -162,8 +162,8 @@ case " $* " in
   *' -n 0 '*) exit 0 ;;
 esac
 printf '%s\n' \
-  '1789128000.000000 host.fixture.example kernel: PM: suspend entry (s2idle)' \
-  '1789131600.000000 host.fixture.example kernel: PM: suspend exit'
+  '1789131600.000000 host.fixture.example kernel: PM: suspend exit' \
+  '1789128000.000000 host.fixture.example kernel: PM: suspend entry (s2idle)'
 `,
 		"sudo": `#!/bin/sh
 printf '%s\n' topology_state=shared-removable media_health=unobservable
@@ -189,7 +189,7 @@ printf '%s\n' topology_state=shared-removable media_health=unobservable
 		sample.topologyState != "shared-removable" || sample.mediaHealth != "unobservable" {
 		t.Fatalf("reduced sample=%+v", sample)
 	}
-	for _, want := range []string{"-k -b 0", "--grep 'PM: suspend (entry|exit)'", "-n 128", "systemd-analyze cat-config", "DCONF_PROFILE=user", "hostpower-hardware.sh"} {
+	for _, want := range []string{"-k -b 0", "--grep 'PM: suspend (entry|exit)'", "-n 128", "LC_ALL=C sort -n -k1,1", "systemd-analyze cat-config", "DCONF_PROFILE=user", "hostpower-hardware.sh"} {
 		if !strings.Contains(hostpowerCommand, want) {
 			t.Errorf("hostpower command lacks %q", want)
 		}

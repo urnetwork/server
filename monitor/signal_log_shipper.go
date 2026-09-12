@@ -33,7 +33,8 @@ const logShipperCommand = `# ` + logShipperMarker + `
 set -u
 properties=$(systemctl show fluent-bit.service \
   -p ActiveState -p SubState -p Result -p NRestarts \
-  -p LimitNOFILE -p LimitNOFILESoft --no-pager 2>/dev/null) || exit 41
+  -p LimitNOFILE -p LimitNOFILESoft -p ExecMainStartTimestamp \
+  --no-pager 2>/dev/null) || exit 41
 read_property() {
   printf '%s\n' "$properties" | awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=")+1); found=1} END {exit !found}'
 }
@@ -49,11 +50,23 @@ fi
 restart_reason=none
 if [ "$restarts" -gt 0 ]; then
   restart_reason=other-or-unobservable
-  coredump=$(journalctl -b -n 400 --no-pager --quiet -o cat \
-    COREDUMP_COMM=fluent-bit COREDUMP_SIGNAL=11 2>/dev/null || true)
-  if printf '%s\n' "$coredump" | grep -Fq 'add_metric_histogram' && \
-     printf '%s\n' "$coredump" | grep -Fq 'finish_duplicate_histogram_summary_sum_count' && \
-     printf '%s\n' "$coredump" | grep -Fq 'parse_histogram_summary_name'; then
+  restart_evidence=''
+  process_start=$(read_property ExecMainStartTimestamp)
+  if [ -n "$process_start" ] && process_start_epoch=$(date --date="$process_start" +%s 2>/dev/null); then
+    restart_since="@$((process_start_epoch - 300))"
+    restart_until="@$((process_start_epoch + 1))"
+    coredump=$(journalctl -b -n 400 \
+      --since "$restart_since" --until "$restart_until" \
+      --no-pager --quiet -o cat COREDUMP_COMM=fluent-bit COREDUMP_SIGNAL=11 \
+      2>/dev/null || true)
+    restart_window=$(journalctl -b -u fluent-bit.service -n 400 \
+      --since "$restart_since" --until "$restart_until" \
+      --no-pager --quiet -o cat 2>/dev/null || true)
+    restart_evidence=$(printf '%s\n%s\n' "$coredump" "$restart_window")
+  fi
+  if printf '%s\n' "$restart_evidence" | grep -Fq 'add_metric_histogram' && \
+     printf '%s\n' "$restart_evidence" | grep -Fq 'finish_duplicate_histogram_summary_sum_count' && \
+     printf '%s\n' "$restart_evidence" | grep -Fq 'parse_histogram_summary_name'; then
     restart_reason=prometheus-histogram-decoder-crash
   fi
 fi
@@ -237,12 +250,12 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			probeId: "observability/log-shipper", tier: tierPage,
 			class: "log-shipper-down", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s is not shipping host logs and metrics", target),
-			mechanism: "The host-managed fluent-bit unit is not active/running. Warp containers can remain healthy while this independent unit permanently stops, removing that host from Loki and Mimir.",
+			mechanism: "The host-managed fluent-bit unit is not active/running. Warp containers can remain healthy while this independent unit permanently stops, removing that host's Mimir telemetry and any configured Warp log stream from Loki.",
 			baseline:  "fluent-bit.service is active/running on every managed Warp, database, Redis, backup, and Subtensor host.", observed: observed,
 			evidence: fmt.Sprintf("service=%s/%s result=%s", sample.activeState, sample.subState, sample.result),
 			context:  "This is affirmative shipper-process loss. It does not identify whether the original trigger was configuration, fd exhaustion, credentials, or an output failure.",
 			action:   "Inspect the bounded fluent-bit journal and effective unit limits, fix the first startup/output failure, then restart only fluent-bit. Do not reboot the host or infer workload failure from missing telemetry.",
-			verify:   "Require active/running state, the expected fd budget, fresh per-host Mimir metrics, and a fresh labeled Warp record in Loki.",
+			verify:   "Require active/running state, the expected fd budget, and fresh per-host Mimir metrics. Require a fresh labeled Loki record only where a managed Warp log source exists.",
 			playbook: "SIGNALS.md §11.14",
 		})
 	} else {
@@ -259,7 +272,7 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			evidence: fmt.Sprintf("nofile_soft=%d nofile_hard=%d", sample.nofileSoft, sample.nofileHard),
 			context:  "A currently running unit can still fail on its next configuration-driven restart if the startup descriptor budget is too small.",
 			action:   "Apply the shared Fluent Bit systemd override and restart only the shipper after validating its rendered inputs.",
-			verify:   "Read both effective limits, require at least 65536, and confirm fresh Mimir and Loki data after one controlled shipper restart.",
+			verify:   "Read both effective limits, require at least 65536, and confirm fresh data in each configured output after one controlled shipper restart. Require a fresh labeled Loki record only where a managed Warp log source exists.",
 			playbook: "SIGNALS.md §11.14",
 		})
 	} else {
@@ -267,15 +280,15 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 	}
 
 	if sample.restartReason == logShipperRestartHistogramDecoder {
-		mechanism := "The current-boot core record contains the exact Fluent Bit/cmetrics duplicate-histogram parsing stack. The stack proves a Prometheus histogram decoder crash but does not name the offending scrape source, metric family, or target."
-		contextText := "This is an exact shipper crash cause, not proof that the scraped service, Mimir, or an application failed. A recovered unit can be active while the restart counter and bounded core metadata preserve the event."
+		mechanism := "The bounded restart window contains the exact Fluent Bit/cmetrics duplicate-histogram parsing stack. The stack proves a Prometheus histogram decoder crash but does not name the offending scrape source, metric family, or target."
+		contextText := "This is an exact shipper crash cause, not proof that the scraped service, Mimir, or an application failed. A recovered unit can be active while the restart counter and bounded restart evidence preserve the event."
 		action := "Inventory the bounded Prometheus scrape inputs on this host and reproduce the schema of candidate histogram families. Exclude or correct only the proven producer-side family; do not raise Mimir limits or force a Fluent Bit major upgrade as the first correction."
-		verify := "After the authorized producer-side correction, require the offending histogram absent or schema-compatible, required source metrics fresh, a stable Fluent Bit process, and fresh host data in both Mimir and Loki for ten minutes."
+		verify := "After the authorized producer-side correction, require the offending histogram absent or schema-compatible, required source metrics fresh, a stable Fluent Bit process, and fresh data in each configured output for ten minutes. Require a fresh labeled Loki record only where a managed Warp log source exists."
 		if redisClusterHost {
 			mechanism += " On a Redis-cluster host, the optional command latency histogram is the strongest bounded candidate because its command-dependent bucket layouts exercise this path; ordinary commandstats counters do not require it."
 			contextText += " The stack alone is not metric-family attribution; confirm the Redis exporter unit and family before applying that host-specific fix."
 			action = "Confirm the Redis exporter still exposes the optional command latency histogram, then deploy the unit that excludes only that family while retaining commandstats rate/duration counters. Do not raise Mimir limits or force a Fluent Bit major upgrade as the first correction."
-			verify = "After the authorized Redis exporter rollout, require the optional latency histogram family absent, required commandstats metrics fresh, a stable Fluent Bit process, and fresh Redis data in both Mimir and Loki for ten minutes."
+			verify = "After the authorized Redis exporter rollout, require the optional latency histogram family absent, required commandstats metrics fresh in Mimir, a stable Fluent Bit process, and fresh data in each configured output for ten minutes. Require a fresh labeled Loki record only where a managed Warp log source exists."
 		}
 		findings = append(findings, finding{
 			probeId: "observability/log-shipper", tier: tierWarn,
@@ -301,9 +314,9 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			mechanism: "systemd recorded one or more automatic restarts. The retry policy avoids permanent failure, but repeated starts can create telemetry gaps and usually preserve an actionable first error in the unit journal.",
 			baseline:  "NRestarts remains zero during steady state.", observed: observed,
 			evidence: fmt.Sprintf("restarts=%d result=%s", sample.restarts, sample.result),
-			context:  "This is process churn, not proof of missing downstream data; verify Mimir and Loki freshness independently.",
+			context:  "This is process churn, not proof of missing downstream data; verify freshness in each configured output independently.",
 			action:   "Inspect the first bounded error before the restart and repair that cause. Do not clear the counter or reboot merely to hide the evidence.",
-			verify:   "Require a stable process and fresh per-host data in both outputs for ten minutes.",
+			verify:   "Require a stable process and fresh data in each configured output for ten minutes. Require a fresh labeled Loki record only where a managed Warp log source exists.",
 			playbook: "SIGNALS.md §11.14",
 		})
 	} else {

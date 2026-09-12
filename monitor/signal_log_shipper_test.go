@@ -127,6 +127,7 @@ func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T)
 	for _, want := range []string{
 		"systemctl show fluent-bit.service", "LimitNOFILE", "LimitNOFILESoft", "NRestarts",
 		"journalctl -b -n 400", "COREDUMP_COMM=fluent-bit", "COREDUMP_SIGNAL=11",
+		"ExecMainStartTimestamp", "-u fluent-bit.service", "--since", "--until",
 		"add_metric_histogram", "finish_duplicate_histogram_summary_sum_count",
 		"parse_histogram_summary_name", "dpkg-query",
 	} {
@@ -139,9 +140,13 @@ func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T)
 			t.Errorf("command contains unrelated boundary %q", forbidden)
 		}
 	}
+	window := `--since "$restart_since" --until "$restart_until"`
+	if count := strings.Count(logShipperCommand, window); count != 2 {
+		t.Errorf("generation window uses=%d, want one per journal selector", count)
+	}
 }
 
-func TestLogShipperCommandReducesExactDecoderStackAndOtherCause(t *testing.T) {
+func TestLogShipperCommandUsesOnlyGenerationBoundedDecoderStack(t *testing.T) {
 	binDir := t.TempDir()
 	writeCommand := func(name string, body string) {
 		t.Helper()
@@ -156,14 +161,20 @@ func TestLogShipperCommandReducesExactDecoderStackAndOtherCause(t *testing.T) {
 'Result=success' \
 'NRestarts=1' \
 'LimitNOFILE=65536' \
-'LimitNOFILESoft=65536'
+'LimitNOFILESoft=65536' \
+'ExecMainStartTimestamp=Mon 2024-01-01 00:00:00 UTC'
 `)
 	writeCommand("dpkg-query", "printf '%s' '4.2.1-fixture'\n")
-	writeCommand("journalctl", `printf '%s\n' \
+	writeCommand("date", "printf '%s\\n' '1704067200'\n")
+	writeCommand("journalctl", `case "$*" in
+*"--since @1704066900"*"--until @1704067201"*"COREDUMP_COMM=fluent-bit COREDUMP_SIGNAL=11"*) exit 0 ;;
+*"-u fluent-bit.service"*"--since @1704066900"*"--until @1704067201"*) printf '%s\n' \
 'add_metric_histogram' \
 'finish_duplicate_histogram_summary_sum_count' \
 'parse_histogram_summary_name' \
-'sensitive-fixture-detail'
+'sensitive-fixture-detail' ;;
+*) exit 91 ;;
+esac
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	run := func() string {
@@ -188,13 +199,32 @@ func TestLogShipperCommandReducesExactDecoderStackAndOtherCause(t *testing.T) {
 		t.Fatalf("raw core detail escaped reducer: %q", exact)
 	}
 
-	writeCommand("journalctl", "printf '%s\\n' 'different synthetic crash frame'\n")
+	writeCommand("journalctl", `case "$*" in
+*"--since @1704066900"*"--until @1704067201"*"COREDUMP_COMM=fluent-bit COREDUMP_SIGNAL=11"*) exit 0 ;;
+*"-u fluent-bit.service"*"--since @1704066900"*"--until @1704067201"*) printf '%s\n' 'different synthetic crash frame' ;;
+*) printf '%s\n' 'add_metric_histogram' 'finish_duplicate_histogram_summary_sum_count' 'parse_histogram_summary_name' ;;
+esac
+`)
 	other, err := parseLogShipperSample(run())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if other.restartReason != logShipperRestartOther {
 		t.Fatalf("restart reason=%q, want other-or-unobservable", other.restartReason)
+	}
+
+	writeCommand("date", "exit 1\n")
+	writeCommand("journalctl", `printf '%s\n' \
+'add_metric_histogram' \
+'finish_duplicate_histogram_summary_sum_count' \
+'parse_histogram_summary_name'
+`)
+	unobservable, err := parseLogShipperSample(run())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unobservable.restartReason != logShipperRestartOther {
+		t.Fatalf("unavailable generation timestamp reason=%q, want other-or-unobservable", unobservable.restartReason)
 	}
 }
 
