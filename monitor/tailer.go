@@ -163,6 +163,10 @@ var (
 		`\[transport_p2p_webrtc\.go:[0-9]+\](\[signal\]send failed mode=(sender|receive-reply) ` +
 			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other))[[:space:]]*$`,
 	)
+	onboardingPostPrimaryCanceledRe = regexp.MustCompile(
+		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
+			`failed for (?:network|client) [^:\r\n]+: Done[[:space:]]*$`,
+	)
 )
 
 func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
@@ -193,6 +197,34 @@ func signalSendLogMode(line string) string {
 		return "unknown"
 	}
 	return match[2]
+}
+
+func onboardingPostPrimaryCanceledStage(line string) string {
+	match := onboardingPostPrimaryCanceledRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return "unknown"
+	}
+	switch match[1] {
+	case "app open attribution":
+		return "app-open"
+	case "campaign enrollment":
+		return "campaign-enrollment"
+	case "client context":
+		return "client-context"
+	case "connect.day write":
+		return "connect-day"
+	default:
+		return "unknown"
+	}
+}
+
+func onboardingPostPrimaryCanceledLogGroup(line string) string {
+	return "stage=" + onboardingPostPrimaryCanceledStage(line)
+}
+
+func onboardingPostPrimaryCanceledLogSample(line string) string {
+	return "[onboarding]post-primary persistence returned Done stage=" +
+		onboardingPostPrimaryCanceledStage(line) + " (identifier omitted)"
 }
 
 func windowStallLogSample(line string) string {
@@ -365,6 +397,15 @@ var logClasses = []logClass{
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	{name: "onboarding-post-primary-canceled", re: onboardingPostPrimaryCanceledRe,
+		sample: onboardingPostPrimaryCanceledLogSample, groupBy: onboardingPostPrimaryCanceledLogGroup,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning:   "primary account verification, API client creation, or Connect session persistence succeeded, but its separate optional onboarding write returned the database Done sentinel before recording app-open, campaign-enrollment, client-context, or connect-day state",
+		mechanism: "The optional writers originally reused the request or connection session context after the primary transaction committed. Cancellation can therefore reach Acquire, Ping, BeginTx, or Exec first; dbWithPool maps that boundary to Done, and the detached commit path is never entered because no optional transaction was established. Corrected source drops only parent cancellation after primary success and gives the optional work the same finite ten-second budget as an existing post-commit projection.",
+		context:   "The bounded stage frame distinguishes API app-open, campaign-enrollment, and client-context loss from Connect connect-day loss while the fixed sample omits the network or client identifier. In a one-hour 2026-09-11 Main control, the three observed exact Done shapes were distributed across active generations rather than concentrated at process starts. On corrected source, the same line instead means the private ten-second post-primary budget itself expired, so inspect PostgreSQL acquisition and statement latency rather than attributing it to caller teardown.",
+		action:    "Prove the emitting artifact. For pre-fix API, deploy the bounded post-primary account/client onboarding session; for pre-fix Connect, deploy the bounded post-connection connect-day writer. Preserve request cancellation for primary account verification, auth-client, and connect work, and do not retry or fabricate historical analytics rows. On a corrected artifact, diagnose the bounded database stall at the framed stage instead of lengthening or removing the deadline.",
+		verify:    "Deterministic PostgreSQL tests start with an already-canceled parent, persist each optional logical row exactly once, and prove the detached context remains finite; every API and Connect block runs corrected source; and this class remains absent for ten minutes after ingestion delay while auth-client and connection activity continues.",
+	},
 	{name: "onboarding-app-open-attribution", re: regexp.MustCompile(`\[onboarding\]app open attribution failed for network [^:\r\n]+: ERROR: inconsistent types deduced for parameter \$4 \(SQLSTATE 42P08\)`),
 		sample: func(string) string {
 			return "[onboarding]app open attribution failed: PostgreSQL parameter type conflict (SQLSTATE 42P08; network identifier omitted)"

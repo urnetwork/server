@@ -46,6 +46,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
+		{"onboarding post-primary canceled", "[onboarding]campaign enrollment failed for network synthetic-network: Done", "onboarding-post-primary-canceled"},
 		{"onboarding app-open attribution", "[onboarding]app open attribution failed for network synthetic-private-network: ERROR: inconsistent types deduced for parameter $4 (SQLSTATE 42P08)", "onboarding-app-open-attribution"},
 		{"onboarding connect-day write", "[onboarding]connect.day write failed for client private-client.fixture.example: ERROR: inconsistent types deduced for parameter $3 (SQLSTATE 42P08)", "onboarding-connect-day-write"},
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
@@ -239,6 +240,76 @@ func TestLogErrorsSignalRedactsOnboardingAppOpenAttribution(t *testing.T) {
 		if other.Class == "novel" {
 			t.Fatalf("known onboarding attribution failure remained novel: %+v", other)
 		}
+	}
+}
+
+func TestLogErrorsSignalClassifiesOnboardingPostPrimaryCancellationByStage(t *testing.T) {
+	tests := []struct {
+		name       string
+		line       string
+		stage      string
+		identifier string
+	}{
+		{
+			name:       "app open",
+			line:       "[onboarding]app open attribution failed for network synthetic-network-token: Done",
+			stage:      "app-open",
+			identifier: "synthetic-network-token",
+		},
+		{
+			name:       "campaign enrollment",
+			line:       "[onboarding]campaign enrollment failed for network synthetic-enrollment-token: Done",
+			stage:      "campaign-enrollment",
+			identifier: "synthetic-enrollment-token",
+		},
+		{
+			name:       "client context",
+			line:       "[onboarding]client context failed for network synthetic-context-token: Done",
+			stage:      "client-context",
+			identifier: "synthetic-context-token",
+		},
+		{
+			name:       "connect day",
+			line:       "[onboarding]connect.day write failed for client synthetic-client-token: Done",
+			stage:      "connect-day",
+			identifier: "synthetic-client-token",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+				if len(args) > 1 && args[0] == "ls" {
+					return "repo names synthetic-service", nil
+				}
+				return test.line, nil
+			}}
+			alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			alert := requireAlertClass(t, alerts, "onboarding-post-primary-canceled")
+			markdown := alert.Markdown()
+			for _, want := range []string{
+				"frame=stage=" + test.stage,
+				"stage=" + test.stage,
+				"identifier omitted",
+				"primary",
+				"ten-second",
+				"API and Connect",
+			} {
+				if !strings.Contains(markdown, want) {
+					t.Errorf("post-primary cancellation alert lacks %q: %s", want, markdown)
+				}
+			}
+			if strings.Contains(markdown, test.identifier) {
+				t.Fatalf("post-primary cancellation alert retained identifier: %s", markdown)
+			}
+			for _, other := range alerts {
+				if other.Class == "novel" {
+					t.Fatalf("known post-primary cancellation remained novel: %+v", other)
+				}
+			}
+		})
 	}
 }
 
