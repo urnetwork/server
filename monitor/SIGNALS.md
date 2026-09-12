@@ -132,6 +132,12 @@ source contract to distinguish a clean whole-family lazy zero from descriptor
 loss, treats descriptor-backed uninstantiated exact-reason children as zero,
 keeps the two incident holds independent, and requires a complete two-hour
 quiet window before resolving either direct admission page.
+The balance follow-up adds §11.20b (`mimir-balance`): it compares exact
+per-child attempted/accepted/request counter deltas with the active distributor
+count and global rate, while reducing front socket peers to local/remote counts
+on-host. It distinguishes aggregate capacity from persistent connection skew,
+which can exhaust one child's divided token bucket while the fleet remains
+comfortably below its global budget.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -4031,15 +4037,21 @@ The Taskworker exports these process metrics:
 
 The probe selects the newest actual-scrape-fresh process for each host/block,
 so an old draining generation cannot supply a replacement's missing collector.
-It evaluates five-minute counter increases per exact process.
+It establishes collector presence independently with fresh five-minute sample
+counts, then evaluates five-minute counter increases per exact process. This
+distinction matters because PromQL `increase()` returns no vector when Mimir
+accepted only one sample; that is incomplete telemetry coverage, not evidence
+that the process lacks the registered gate collector.
 
 - HEALTHY: every newest Taskworker exposes all five families; admission errors
   are zero; fleet and per-process mean completed wait are at most five seconds.
   Deferrals may be non-zero—they prove the gate prevented an unsafe burst.
-- WARN `circle-transfer-admission-unobservable`: a newest process lacks any
-  family. Deploy a clean Taskworker artifact containing `66525afc` only to the
-  missing blocks, using §8.12 source/digest provenance rather than a mutable
-  config version.
+- WARN `circle-transfer-admission-unobservable`: a newest process either lacks
+  a family or has fewer than two accepted samples for a five-minute increase.
+  Deploy a clean Taskworker artifact containing `66525afc` only for a genuinely
+  absent collector proven by §8.12 source/digest provenance. When the collector
+  is present but range coverage is insufficient, restore Taskworker stats
+  delivery/Mimir admission and do not prescribe an application deployment.
 - WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
   exact window with taskworker drain state, Redis liveness/latency, and the
   privacy-safe admission failure line. Never bypass the gate or manually replay
@@ -4073,9 +4085,10 @@ another Taskworker deployment for them.
 Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
 `signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
 tests cover a healthy newest generation, a replacement missing two metric
-families, fail-closed errors, excessive per-process wait hidden by a lower
-fleet mean, and invalid counter data. The product-level Redis synthetic covers
-the eight-caller atomic ceiling and replay semantics.
+families, a present collector with only one accepted range sample, fail-closed
+errors, excessive per-process wait hidden by a lower fleet mean, and invalid
+counter data. The product-level Redis synthetic covers the eight-caller atomic
+ceiling and replay semantics.
 
 ### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
 Probe: `reliability-drift`
@@ -6511,6 +6524,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 |---|---|---|
 | `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Split rejected-candidate churn from a steady cardinality increase with process-generation changes, readiness/publisher aggregates, and bounded metric-family counts; no one context field selects the cause. Pause further service rollouts, preserve distinct instance labels, and do not restart Mimir or raise its limit to manufacture headroom. After removing the proven source of avoidable series, require observed series removal, enough per-ingester headroom for the complete next-generation overlap, zero new discards, and fresh source metrics through the complete two-hour quiet window. Historical gaps stay under §11.20. |
 | `cortex_discarded_samples_total{reason="rate_limited"}` (`mimir-ingestion-rate-limit`) | Mimir's per-tenant sample token bucket rejected ingestion. The exact child-counter increase proves lost samples independently of series-cardinality headroom, but replicated child counters are not unique request counts and do not identify the producer. | Run `mimir-admission` (§11.20a), preserve exact child generations, and attribute load with bounded per-service/family cadence and series counts before changing capacity. Remove or reduce only a proven unnecessary sample source. A rate/burst increase may require an operational capacity decision and resource validation; do not raise it, restart Mimir, or blindly retry rejected payloads as an automatic software fix. Require zero new rate-limited increments and fresh required metrics for the complete two-hour quiet window. |
+| `mimir-distributor-skew` | The fleet attempted rate is below the tenant's global budget, but one or more distributors exceed the independently enforced local share (`global rate / healthy distributors`). Persistent remote-write connections selected one address from a multi-address hosts entry and concentrated load; spare capacity on sibling token buckets cannot be borrowed. | Run `mimir-balance` (§11.20b). Give each remote publisher a distinct preferred enabled front while retaining all enabled fronts as failover, and remove only measured unnecessary families. This is a software/configuration routing fault while aggregate load remains below budget; do not add hardware or raise the global limit to mask it. Verify balanced child rates and connections for two samples, then zero exact rate-limit increments and fresh required metrics for the full §11.20a quiet window. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
@@ -11267,6 +11281,77 @@ exact-absence, partial-descriptor, and positive-row controls. Do not raise a lim
 labels, retry rejected payloads, or restart Mimir merely to reset a visible
 counter. Historical availability and replacement durability remain independent
 under §11.20 and §11.21.
+
+### 11.20b Mimir distributor ingestion balance
+
+Probe: `mimir-balance`
+
+Run this WARN-tier probe every minute on every enabled `services` host. It
+identifies each loopback Mimir child through build info, then reduces the exact
+`cortex_distributor_samples_in_total`,
+`cortex_distributor_received_samples_total`, and
+`cortex_distributor_requests_in_total` counters, the configured tenant
+ingestion rate, the active distributor-ring count, and the process start. The
+same host command reduces established connections accepted by the stable
+Grafana publisher port to loopback and non-loopback counts. Metric labels,
+tenant identities, socket peers, build bodies, and rendered configuration do
+not leave the host. Missing descriptors, malformed values, partial children,
+an inconsistent ring/rate view, a counter reset, or any host loss fails closed.
+
+Counter baselines are keyed by host, listener port, and canonical
+full-precision process start, bounded to 1,024 histories, and stored atomically
+under the shared versioned state lock. A child replacement starts a new
+baseline; a comparison older than three minutes is not used as a live rate.
+This makes watcher overlap safe without averaging an observation outage into a
+healthy balance. The first complete observation arms the baseline and emits no
+alert. A healthy comparison requires every configured host and every ring
+member to be present under one consistent global-rate and active-member view.
+
+Compute each child's attempted, accepted, and request rates from monotonic
+counter deltas over the exact elapsed interval. For Mimir 3.1.1's global
+strategy, the effective local refill rate is the configured global ingestion
+rate divided by the healthy distributor count. Emit
+`mimir-distributor-skew` after two consecutive complete one-minute comparisons
+only when at least one child exceeds that local share while the sum of all
+attempted child rates remains below the global budget. If fleet attempted load
+itself reaches the global limit, do not call the incident balance-only: §11.20a
+owns affirmative loss, and optimization plus hardware or an explicit capacity
+decision may be required. Attempted minus accepted is an upper bound on loss,
+not a substitute for the exact `reason="rate_limited"` counter, because
+deduplication and other rejection paths can also separate those counters.
+
+On 2026-09-12, the exact two-snapshot fleet control measured approximately
+6,691 attempted samples/s against a 10,000 samples/s tenant budget across six
+healthy distributors. Five children accepted their complete attempted load;
+one received approximately 2,199 samples/s against its 1,667 samples/s local
+share and discarded approximately 500 samples/s. Comparable application
+process counts ruled out an overlapping generation on that child. The
+overloaded front alone held roughly twenty non-loopback publisher connections,
+while most siblings held none: the DB and Redis/MinIO publishers had selected
+the first address in a shared multi-address hosts entry and kept persistent
+connections there. The fleet had about 3,841 samples/s of unused sibling
+capacity, proving distributor routing skew rather than aggregate tenant
+exhaustion.
+
+One bounded scrape of every staggered Redis target measured approximately 646
+samples/s total. The optional command-latency histograms accounted for about
+346 samples/s and the already prepared exporter exclusion reduces that source
+to about 300 samples/s. Even under the impossible best case where every removed
+sample had landed on the overloaded child, its projected rate remained about
+1,854 samples/s, still above the local share. That exclusion remains the
+smallest decoder-safety and load-reduction fix, but cannot by itself close the
+admission incident.
+
+The software/configuration correction is deterministic publisher placement:
+each remote telemetry host receives a different preferred enabled Grafana LAN
+front first in its `main-grafana.local` block, with every other enabled front
+retained afterward for resolver-level failover. Do not include a disabled host
+as a failover target. Reconnect publishers only through their approved Xops
+playbooks; do not restart Mimir or raise its limit to erase the symptom. Verify
+two consecutive complete `mimir-balance` samples with every child below its
+effective share and without connection concentration. Closure then requires
+the separate §11.20a exact rate-limit counter to remain flat, all required
+application metrics to remain fresh, and the complete two-hour quiet window.
 
 ### 11.21 Mimir shutdown durability configuration
 

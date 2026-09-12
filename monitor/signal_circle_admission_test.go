@@ -10,17 +10,19 @@ import (
 )
 
 type circleAdmissionFixture struct {
-	host       string
-	block      string
-	instance   string
-	start      time.Time
-	age        time.Duration
-	admissions float64
-	deferrals  float64
-	errors     float64
-	waitCount  float64
-	waitSum    float64
-	omit       map[string]bool
+	host         string
+	block        string
+	instance     string
+	start        time.Time
+	age          time.Duration
+	admissions   float64
+	deferrals    float64
+	errors       float64
+	waitCount    float64
+	waitSum      float64
+	omit         map[string]bool
+	rangeSamples map[string]float64
+	omitDelta    map[string]bool
 }
 
 func circleAdmissionFixtureJSON(
@@ -50,11 +52,24 @@ func circleAdmissionFixtureJSON(
 			})
 		}
 		add("process_start_time_seconds", float64(process.start.Unix()))
-		add("urnetwork_circle_transfer_admissions_total", process.admissions)
-		add("urnetwork_circle_transfer_deferrals_total", process.deferrals)
-		add("urnetwork_circle_transfer_admission_errors_total", process.errors)
-		add("urnetwork_circle_transfer_admission_wait_seconds_count", process.waitCount)
-		add("urnetwork_circle_transfer_admission_wait_seconds_sum", process.waitSum)
+		addRange := func(metric string, value float64) {
+			if process.omit[metric] {
+				return
+			}
+			if !process.omitDelta[metric] {
+				add(metric, value)
+			}
+			samples := process.rangeSamples[metric]
+			if samples == 0 {
+				samples = 2
+			}
+			add(metric+circleAdmissionSamplesSuffix, samples)
+		}
+		addRange("urnetwork_circle_transfer_admissions_total", process.admissions)
+		addRange("urnetwork_circle_transfer_deferrals_total", process.deferrals)
+		addRange("urnetwork_circle_transfer_admission_errors_total", process.errors)
+		addRange("urnetwork_circle_transfer_admission_wait_seconds_count", process.waitCount)
+		addRange("urnetwork_circle_transfer_admission_wait_seconds_sum", process.waitSum)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"status": "success",
@@ -77,6 +92,7 @@ func runCircleAdmissionFixture(t testing.TB, now time.Time, payload string) Aler
 			"urnetwork_circle_transfer_admission_wait_seconds_count",
 			"urnetwork_circle_transfer_admission_wait_seconds_sum",
 			"increase%28",
+			"count_over_time%28",
 			"%5B5m%5D",
 			"timestamp%28",
 			"monitor_metric",
@@ -99,6 +115,39 @@ func runCircleAdmissionFixture(t testing.TB, now time.Time, payload string) Aler
 		t.Fatal(err)
 	}
 	return alerts
+}
+
+func TestCircleAdmissionSignalSeparatesCollectorPresenceFromRangeCoverage(t *testing.T) {
+	now := time.Date(2026, 9, 12, 5, 19, 33, 0, time.UTC)
+	oneSample := map[string]float64{}
+	omitDelta := map[string]bool{}
+	for _, metric := range circleAdmissionMetricNames {
+		oneSample[metric] = 1
+		omitDelta[metric] = true
+	}
+	process := circleAdmissionFixture{
+		host: "worker-a.invalid", block: "generation-a", instance: "generated-instance", start: now.Add(-time.Hour),
+		rangeSamples: oneSample, omitDelta: omitDelta,
+	}
+
+	alert := requireAlertClass(
+		t,
+		runCircleAdmissionFixture(t, now, circleAdmissionFixtureJSON(t, now, process)),
+		"circle-transfer-admission-unobservable",
+	)
+	for _, want := range []string{
+		"insufficient_range=worker-a.invalid/generation-a#generated-instance[admissions=1,deferrals=1,admission-errors=1,wait-count=1,wait-sum=1]",
+		"collectors are registered",
+		"telemetry admission or delivery loss",
+		"Do not deploy the Taskworker merely because increase() had insufficient range samples",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("range-coverage alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Markdown(), "Deploy a Taskworker artifact") {
+		t.Fatalf("range-coverage alert prescribed an unproved Taskworker deploy:\n%s", alert.Markdown())
+	}
 }
 
 func TestCircleAdmissionQueryRequiresFreshCurrentSamples(t *testing.T) {

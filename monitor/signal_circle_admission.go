@@ -15,6 +15,7 @@ import (
 const (
 	circleAdmissionFreshness       = 90 * time.Second
 	circleAdmissionRange           = "5m"
+	circleAdmissionSamplesSuffix   = ":range-samples"
 	circleAdmissionMeanWaitSeconds = 5.0
 )
 
@@ -58,16 +59,18 @@ var circleAdmissionMetricNames = []string{
 }
 
 type circleAdmissionMetrics struct {
-	host          string
-	block         string
-	instance      string
-	start         float64
-	admissions    float64
-	deferrals     float64
-	errors        float64
-	waitCount     float64
-	waitSum       float64
-	availableMask uint8
+	host         string
+	block        string
+	instance     string
+	start        float64
+	admissions   float64
+	deferrals    float64
+	errors       float64
+	waitCount    float64
+	waitSum      float64
+	presentMask  uint8
+	deltaMask    uint8
+	rangeSamples map[string]float64
 }
 
 func circleAdmissionQuery(environment string) string {
@@ -91,6 +94,14 @@ func circleAdmissionQuery(environment string) string {
 			metric,
 			int64(circleAdmissionFreshness/time.Second),
 			strconv.Quote(metricName),
+		))
+		parts = append(parts, fmt.Sprintf(
+			`label_replace((count_over_time(%s[%s]) and on(env,host,block,instance) (timestamp(%s) >= time() - %d)),"monitor_metric",%s,"job",".*")`,
+			metric,
+			circleAdmissionRange,
+			metric,
+			int64(circleAdmissionFreshness/time.Second),
+			strconv.Quote(metricName+circleAdmissionSamplesSuffix),
 		))
 	}
 	return strings.Join(parts, " or ")
@@ -155,28 +166,41 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		key := host + "\x00" + block + "\x00" + instance
 		process := processes[key]
 		if process == nil {
-			process = &circleAdmissionMetrics{host: host, block: block, instance: instance}
+			process = &circleAdmissionMetrics{
+				host: host, block: block, instance: instance,
+				rangeSamples: map[string]float64{},
+			}
 			processes[key] = process
+		}
+		if strings.HasSuffix(metricName, circleAdmissionSamplesSuffix) {
+			baseMetric := strings.TrimSuffix(metricName, circleAdmissionSamplesSuffix)
+			mask := circleAdmissionMetricMask(baseMetric)
+			if mask == 0 {
+				continue
+			}
+			process.presentMask |= mask
+			process.rangeSamples[baseMetric] = value
+			continue
 		}
 		switch metricName {
 		case "process_start_time_seconds":
 			process.start = value
-			process.availableMask |= circleAdmissionMetricStart
+			process.presentMask |= circleAdmissionMetricStart
 		case "urnetwork_circle_transfer_admissions_total":
 			process.admissions = value
-			process.availableMask |= circleAdmissionMetricAdmissions
+			process.deltaMask |= circleAdmissionMetricAdmissions
 		case "urnetwork_circle_transfer_deferrals_total":
 			process.deferrals = value
-			process.availableMask |= circleAdmissionMetricDeferrals
+			process.deltaMask |= circleAdmissionMetricDeferrals
 		case "urnetwork_circle_transfer_admission_errors_total":
 			process.errors = value
-			process.availableMask |= circleAdmissionMetricErrors
+			process.deltaMask |= circleAdmissionMetricErrors
 		case "urnetwork_circle_transfer_admission_wait_seconds_count":
 			process.waitCount = value
-			process.availableMask |= circleAdmissionMetricWaitCount
+			process.deltaMask |= circleAdmissionMetricWaitCount
 		case "urnetwork_circle_transfer_admission_wait_seconds_sum":
 			process.waitSum = value
-			process.availableMask |= circleAdmissionMetricWaitSum
+			process.deltaMask |= circleAdmissionMetricWaitSum
 		}
 	}
 
@@ -189,6 +213,7 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	})
 
 	missing := []string{}
+	rangeGaps := []string{}
 	rows := []string{}
 	var totalAdmissions float64
 	var totalDeferrals float64
@@ -198,11 +223,19 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	var maxMeanWait float64
 	var maxMeanWaitProcess string
 	for _, process := range current {
-		if process.availableMask&circleAdmissionMetricAll != circleAdmissionMetricAll {
+		if process.presentMask&circleAdmissionMetricAll != circleAdmissionMetricAll {
 			missing = append(missing, fmt.Sprintf(
 				"%s[%s]",
 				circleAdmissionProcessLabel(process),
-				strings.Join(circleAdmissionMissingMetrics(process.availableMask), ","),
+				strings.Join(circleAdmissionMissingMetrics(process.presentMask), ","),
+			))
+			continue
+		}
+		if process.deltaMask&circleAdmissionMetricAll != circleAdmissionMetricAll {
+			rangeGaps = append(rangeGaps, fmt.Sprintf(
+				"%s[%s]",
+				circleAdmissionProcessLabel(process),
+				strings.Join(circleAdmissionRangeGaps(process), ","),
 			))
 			continue
 		}
@@ -223,20 +256,34 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	findings := []finding{}
-	if len(missing) > 0 {
+	if len(missing) > 0 || len(rangeGaps) > 0 {
+		observations := []string{}
+		if len(missing) > 0 {
+			observations = append(observations, "missing_collectors="+strings.Join(missing, "; "))
+		}
+		if len(rangeGaps) > 0 {
+			observations = append(observations, "insufficient_range="+strings.Join(rangeGaps, "; "))
+		}
+		mechanism := "A newest process genuinely lacks one or more registered Circle admission collectors."
+		evidence := "Collector presence is established independently with fresh count_over_time samples; five-minute increase availability is not used as a proxy for registration."
+		action := "Prove the missing block's source and immutable image digest with §8.12. Only if the artifact predates current-main commit 66525afc, deploy a Taskworker artifact from an intentional local server checkout containing that baseline; record any participating diff. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys."
+		if len(rangeGaps) > 0 {
+			mechanism = "The Circle collectors are registered, but at least one newest process has fewer than two accepted samples in the five-minute range, so PromQL cannot calculate its increase. A new generation can cause this briefly; on an established generation, correlated gaps across all five families point to telemetry admission or delivery loss, not missing gate code."
+			action = "Restore enough Taskworker stats delivery and Mimir admission for two consecutive accepted samples on every current process, then rerun the five-minute delta. Do not deploy the Taskworker merely because increase() had insufficient range samples, and do not weaken or bypass the Circle gate. If missing_collectors is also present, prove that block's artifact separately with §8.12."
+		}
 		findings = append(findings, finding{
 			probeId: "task/circle-transfer-admission", tier: tierWarn,
 			class: "circle-transfer-admission-unobservable", target: "taskworker-fleet", sustain: 1,
 			symptom: fmt.Sprintf(
-				"%d of %d newest fresh taskworker identities do not expose the complete Circle transfer admission metric set",
-				len(missing), len(current),
+				"%d of %d newest fresh taskworker identities lack a collector or enough accepted range samples for Circle admission deltas",
+				len(missing)+len(rangeGaps), len(current),
 			),
-			mechanism: "The process predates the fleet-wide transfer gate or its collector is incomplete. Retry jitter changes the average schedule but cannot impose a hard cross-process request ceiling, so an unobservable block can still race the visible blocks and receive a processor 429.",
+			mechanism: mechanism,
 			baseline:  "Every newest fresh taskworker exports admissions, deferrals, fail-closed errors, and admission-wait count/sum for two consecutive scrapes.",
-			observed:  strings.Join(missing, "; "),
-			evidence:  "Newest process identity is selected by fresh process_start_time_seconds for each host/block; draining generations cannot satisfy a replacement's collector contract.",
+			observed:  strings.Join(observations, " "),
+			evidence:  evidence,
 			context:   "Circle documents a default five POST requests/second for Wallets API endpoints. Current-main server commit 14928f69 atomically admits at most three transfer submits in a Redis-time rolling second; descendant 66525afc also converts the Redis wrapper's panic path into the measured fail-closed error. This leaves two requests/second of headroom and preserves the existing payment idempotency key.",
-			action:    "Deploy a Taskworker artifact from an intentional local server checkout containing current-main commit 66525afc to only the missing blocks, and record any participating diff. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys.",
+			action:    action,
 			verify:    "§8.12 proves source/digest identity convergence and every newest Taskworker exposes all five admission metric families for two scrapes; then the remaining §1.5 payout cohort stays below four canonical attempts/second and produces no processor 429 for a full 90-minute retry window.",
 			playbook:  "SIGNALS.md §2.14, §1.2, §5.7, and §8.12",
 		})
@@ -296,7 +343,7 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 func newestCircleAdmissionProcesses(processes map[string]*circleAdmissionMetrics) []*circleAdmissionMetrics {
 	newest := map[string]*circleAdmissionMetrics{}
 	for _, process := range processes {
-		if process.availableMask&circleAdmissionMetricStart == 0 {
+		if process.presentMask&circleAdmissionMetricStart == 0 {
 			continue
 		}
 		key := process.host + "\x00" + process.block
@@ -311,6 +358,23 @@ func newestCircleAdmissionProcesses(processes map[string]*circleAdmissionMetrics
 		current = append(current, process)
 	}
 	return current
+}
+
+func circleAdmissionMetricMask(metricName string) uint8 {
+	switch metricName {
+	case "urnetwork_circle_transfer_admissions_total":
+		return circleAdmissionMetricAdmissions
+	case "urnetwork_circle_transfer_deferrals_total":
+		return circleAdmissionMetricDeferrals
+	case "urnetwork_circle_transfer_admission_errors_total":
+		return circleAdmissionMetricErrors
+	case "urnetwork_circle_transfer_admission_wait_seconds_count":
+		return circleAdmissionMetricWaitCount
+	case "urnetwork_circle_transfer_admission_wait_seconds_sum":
+		return circleAdmissionMetricWaitSum
+	default:
+		return 0
+	}
 }
 
 func circleAdmissionProcessLabel(process *circleAdmissionMetrics) string {
@@ -341,6 +405,26 @@ func circleAdmissionMissingMetrics(mask uint8) []string {
 		}
 	}
 	return missing
+}
+
+func circleAdmissionRangeGaps(process *circleAdmissionMetrics) []string {
+	gaps := []string{}
+	for _, metric := range []struct {
+		mask uint8
+		name string
+		key  string
+	}{
+		{circleAdmissionMetricAdmissions, "admissions", "urnetwork_circle_transfer_admissions_total"},
+		{circleAdmissionMetricDeferrals, "deferrals", "urnetwork_circle_transfer_deferrals_total"},
+		{circleAdmissionMetricErrors, "admission-errors", "urnetwork_circle_transfer_admission_errors_total"},
+		{circleAdmissionMetricWaitCount, "wait-count", "urnetwork_circle_transfer_admission_wait_seconds_count"},
+		{circleAdmissionMetricWaitSum, "wait-sum", "urnetwork_circle_transfer_admission_wait_seconds_sum"},
+	} {
+		if process.deltaMask&metric.mask == 0 {
+			gaps = append(gaps, fmt.Sprintf("%s=%.0f", metric.name, process.rangeSamples[metric.key]))
+		}
+	}
+	return gaps
 }
 
 func circleAdmissionObservation(process *circleAdmissionMetrics) string {
