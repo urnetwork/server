@@ -72,7 +72,8 @@ private_regular_file() {
     local path=$1
     [[ -f $path && ! -L $path && -s $path ]] || return 1
     local mode
-    mode=$(stat -c '%a' "$path")
+    mode=$(stat -c '%a' -- "$path" 2>/dev/null || stat -f '%Lp' -- "$path") || return 1
+    [[ $mode =~ ^[0-7]+$ ]] || return 1
     (( (8#$mode & 0077) == 0 ))
 }
 
@@ -475,7 +476,6 @@ status_command() {
 
 require_command curl
 require_command date
-require_command flock
 require_command git
 require_command go
 require_command hostname
@@ -483,12 +483,31 @@ require_command jq
 require_command make
 require_command sudo
 require_command stat
+require_command uname
+case $(uname -s) in
+    Darwin)
+        require_command /usr/bin/lockf
+        state_lock_command=(/usr/bin/lockf -s -t 0 8)
+        ;;
+    Linux)
+        require_command flock
+        state_lock_command=(flock -n 8)
+        ;;
+    *)
+        fail "this platform has no supported state lock primitive"
+        ;;
+esac
 [[ -f $source_config ]] || fail "source config is absent: $source_config"
+umask 077
 mkdir -p "$state_dir"
 chmod 0700 "$state_dir"
-exec 9>"$state_dir/RUN-MAIN.lock"
-flock -n 9 || fail "another RUN-MAIN process holds $state_dir/RUN-MAIN.lock"
-umask 077
+state_lock_path=$state_dir/RUN-MAIN.lock
+[[ ! -L $state_lock_path && ( ! -e $state_lock_path || -f $state_lock_path ) ]] ||
+    fail "state lock path must be a regular file: $state_lock_path"
+# The enclosing suite gate reserves fd9. Keep this narrower lock on fd8 for
+# the shell and inheriting children; never unlink or truncate its stable inode.
+exec 8>>"$state_lock_path"
+"${state_lock_command[@]}" || fail "another RUN-MAIN process holds $state_lock_path"
 main_environment
 
 command=${1:-}
