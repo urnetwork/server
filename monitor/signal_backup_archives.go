@@ -14,13 +14,17 @@ import (
 )
 
 const (
-	backupArchiveMetricFreshness = 90 * time.Second
-	backupArchiveHeartbeatAge    = 90 * time.Second
-	backupArchiveMaximumAge      = 5 * 24 * time.Hour
-	backupArchiveFutureTolerance = 5 * time.Minute
-	backupArchiveStorageLookback = 30 * 24 * time.Hour
-	backupArchiveTimerImminent   = 5 * time.Minute
+	backupArchiveMetricFreshness       = 90 * time.Second
+	backupArchiveHeartbeatAge          = 90 * time.Second
+	backupArchiveMaximumAge            = 5 * 24 * time.Hour
+	backupArchiveIntegrityMaximumAge   = 48 * time.Hour
+	backupArchiveFutureTolerance       = 5 * time.Minute
+	backupArchiveStorageLookback       = 30 * 24 * time.Hour
+	backupArchiveTimerImminent         = 5 * time.Minute
+	backupArchiveGenerationMaximumSize = 200
 )
+
+var backupArchiveGenerationPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
 github_unit_state=$(systemctl show github-backup-archive.service -p ActiveState --value 2>/dev/null || true)
@@ -294,7 +298,7 @@ var backupArchiveNames = []string{
 // or Grafana frontend cannot hide missing or stale completed backup archives.
 func NewBackupArchivesSignal() Signal {
 	return &signalAdapter{
-		number: "11.22", key: "backup-archives", name: "Planetoid backup archive freshness",
+		number: "11.22", key: "backup-archives", name: "Planetoid backup archive freshness and integrity",
 		probe: backupArchivesProbe{},
 	}
 }
@@ -310,16 +314,26 @@ type backupArchiveLatestSample struct {
 	createdAt  time.Time
 }
 
+type backupArchiveIntegritySample struct {
+	format     string
+	result     string
+	generation string
+	checkedAt  time.Time
+}
+
 type backupArchiveObservation struct {
-	host             string
-	archive          string
-	latest           []backupArchiveLatestSample
-	progress         []float64
-	heartbeats       []time.Time
-	invalidLatest    []string
-	invalidProgress  []string
-	invalidHeartbeat []string
-	staleScrapes     int
+	host                  string
+	archive               string
+	latest                []backupArchiveLatestSample
+	progress              []float64
+	heartbeats            []time.Time
+	integrity             []backupArchiveIntegritySample
+	invalidLatest         []string
+	invalidProgress       []string
+	invalidHeartbeat      []string
+	invalidIntegrity      []string
+	staleScrapes          int
+	staleIntegrityScrapes int
 }
 
 type backupArchiveWriterObservation struct {
@@ -380,6 +394,57 @@ type backupArchiveStorageEvent struct {
 	occurredAt time.Time
 	kind       string
 	device     string
+}
+
+func parseBackupArchiveIntegritySample(
+	archive string,
+	labels map[string]string,
+	value float64,
+	now time.Time,
+) (backupArchiveIntegritySample, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return backupArchiveIntegritySample{}, fmt.Errorf("check timestamp is not finite and positive")
+	}
+	checkedAt := unixFloatTime(value)
+	if checkedAt.After(now.Add(backupArchiveFutureTolerance)) {
+		return backupArchiveIntegritySample{}, fmt.Errorf("check timestamp is in the future")
+	}
+
+	format := labels["format"]
+	result := labels["result"]
+	generation := labels["generation"]
+	validContract := false
+	switch archive {
+	case "pg":
+		validContract =
+			(format == "pg-gpg-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "pg-gpg-md5-legacy" && result == "legacy-unverified")
+	case "redis":
+		validContract =
+			(format == "redis-bundle-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "redis-pairs-md5-legacy" && result == "legacy-unverified")
+	case "github-urnetwork", "github-urfoundation":
+		validContract =
+			(format == "github-tar-xz-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "github-tar-xz-legacy" && result == "legacy-unverified")
+	}
+	if format == "none" && result == "missing" && generation == "none" {
+		validContract = true
+	}
+	if !validContract {
+		return backupArchiveIntegritySample{}, fmt.Errorf("labels are outside the bounded archive integrity contract")
+	}
+	if result != "missing" && (generation == "none" || len(generation) > backupArchiveGenerationMaximumSize ||
+		!backupArchiveGenerationPattern.MatchString(generation)) {
+		return backupArchiveIntegritySample{}, fmt.Errorf("generation is outside the bounded archive integrity contract")
+	}
+
+	return backupArchiveIntegritySample{
+		format:     format,
+		result:     result,
+		generation: generation,
+		checkedAt:  checkedAt,
+	}, nil
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -460,23 +525,39 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				series.Metric["__name__"], hostName, archive, err,
 			)
 		}
+		metricName := series.Metric["__name__"]
 		scrapeAge := now.Sub(observedAt)
 		if scrapeAge > backupArchiveMetricFreshness {
 			observation.staleScrapes++
+			if metricName == "urnetwork_backup_archive_integrity_checked_timestamp_seconds" {
+				observation.staleIntegrityScrapes++
+			}
 			continue
 		}
 		if scrapeAge < -30*time.Second {
-			observation.invalidLatest = append(
-				observation.invalidLatest,
-				fmt.Sprintf("future_scrape=%s", observedAt.Format(time.RFC3339)),
-			)
+			if metricName == "urnetwork_backup_archive_integrity_checked_timestamp_seconds" {
+				observation.invalidIntegrity = append(observation.invalidIntegrity, "future-scrape")
+			} else {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					fmt.Sprintf("future_scrape=%s", observedAt.Format(time.RFC3339)),
+				)
+			}
 			continue
 		}
 
-		switch series.Metric["__name__"] {
+		switch metricName {
 		case "urnetwork_backup_archive_latest_timestamp_seconds":
 			generation := strings.TrimSpace(series.Metric["generation"])
-			if generation == "" || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+			if generation == "" || len(generation) > backupArchiveGenerationMaximumSize ||
+				!backupArchiveGenerationPattern.MatchString(generation) {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					"generation-outside-bounded-contract",
+				)
+				continue
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
 				observation.invalidLatest = append(
 					observation.invalidLatest,
 					fmt.Sprintf("generation=%q value=%v", generation, value),
@@ -521,6 +602,13 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				continue
 			}
 			observation.heartbeats = append(observation.heartbeats, heartbeatAt)
+		case "urnetwork_backup_archive_integrity_checked_timestamp_seconds":
+			sample, err := parseBackupArchiveIntegritySample(archive, series.Metric, value, now)
+			if err != nil {
+				observation.invalidIntegrity = append(observation.invalidIntegrity, err.Error())
+				continue
+			}
+			observation.integrity = append(observation.integrity, sample)
 		}
 	}
 
@@ -532,6 +620,11 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	findings := make([]finding, 0, len(keys)*2)
 	for _, key := range keys {
 		observation := observations[key]
+		findings = append(findings, evaluateBackupArchiveIntegrity(
+			now,
+			observation,
+			metricHost.name,
+		)...)
 		findings = append(findings, evaluateBackupArchive(
 			now,
 			observation,
@@ -1876,7 +1969,7 @@ func backupArchivesQuery(environment string, hosts []*host) string {
 	sort.Strings(hostNames)
 	return fmt.Sprintf(
 		`{__name__=~%s,env=%s,host=~%s}`,
-		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress|heartbeat_timestamp_seconds)`),
+		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress|heartbeat_timestamp_seconds|integrity_checked_timestamp_seconds)`),
 		strconv.Quote(environment),
 		strconv.Quote(strings.Join(hostNames, "|")),
 	)
@@ -1945,6 +2038,243 @@ func backupArchiveProgress(observation *backupArchiveObservation) (float64, bool
 	return observation.progress[0], true
 }
 
+func newestBackupArchiveLatest(observation *backupArchiveObservation) (backupArchiveLatestSample, bool) {
+	if observation == nil || len(observation.latest) == 0 {
+		return backupArchiveLatestSample{}, false
+	}
+	latest := observation.latest[0]
+	for _, candidate := range observation.latest[1:] {
+		if candidate.createdAt.After(latest.createdAt) {
+			latest = candidate
+		}
+	}
+	return latest, true
+}
+
+func currentBackupArchiveIntegrity(
+	observation *backupArchiveObservation,
+) (backupArchiveIntegritySample, bool, string) {
+	if observation == nil {
+		return backupArchiveIntegritySample{}, false, "observation-missing"
+	}
+	if len(observation.invalidIntegrity) != 0 {
+		return backupArchiveIntegritySample{}, false, fmt.Sprintf(
+			"invalid_samples=%d first_reason=%s",
+			len(observation.invalidIntegrity),
+			observation.invalidIntegrity[0],
+		)
+	}
+	if len(observation.integrity) == 0 {
+		return backupArchiveIntegritySample{}, false, "fresh_samples=0"
+	}
+	current := observation.integrity[0]
+	currentCount := 1
+	for _, candidate := range observation.integrity[1:] {
+		switch {
+		case candidate.checkedAt.After(current.checkedAt):
+			current = candidate
+			currentCount = 1
+		case candidate.checkedAt.Equal(current.checkedAt):
+			currentCount++
+		}
+	}
+	if currentCount != 1 {
+		return backupArchiveIntegritySample{}, false, fmt.Sprintf(
+			"ambiguous_current_samples=%d",
+			currentCount,
+		)
+	}
+	return current, true, ""
+}
+
+func evaluateBackupArchiveIntegrity(
+	now time.Time,
+	observation *backupArchiveObservation,
+	gateway string,
+) []finding {
+	const (
+		invalidClass      = "backup-archive-integrity-invalid"
+		missingClass      = "backup-archive-integrity-missing"
+		unobservableClass = "backup-archive-integrity-unobservable"
+		staleClass        = "backup-archive-integrity-stale"
+		mismatchClass     = "backup-archive-integrity-generation-mismatch"
+		legacyClass       = "backup-archive-integrity-legacy-unverified"
+	)
+	target := observation.host + "/" + observation.archive
+	current, currentOK, selectionReason := currentBackupArchiveIntegrity(observation)
+	checkAge := time.Duration(0)
+	if currentOK {
+		checkAge = now.Sub(current.checkedAt)
+	}
+	staleScrapeOnly := !currentOK && len(observation.integrity) == 0 && len(observation.invalidIntegrity) == 0 &&
+		observation.staleIntegrityScrapes > 0
+	unobservable := !currentOK && !staleScrapeOnly
+	stale := staleScrapeOnly || (currentOK && checkAge > backupArchiveIntegrityMaximumAge)
+
+	findings := make([]finding, 0, 6)
+	if currentOK && current.result == "invalid" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: invalidClass, target: target, frame: "format-validation", sustain: 1,
+			symptom:   fmt.Sprintf("%s latest format-specific archive integrity check failed", target),
+			mechanism: "The destination read the selected archive bytes and the bounded format validator rejected them. PostgreSQL and Redis validate the encrypted artifact against its adjacent SHA-256 record; GitHub validates that checksum plus the xz and tar streams. A failed newly transferred candidate is not eligible for staging or retention promotion.",
+			baseline:  "The latest integrity report is fresh, names the same generation as the structural latest-timestamp row, and has result=verified.",
+			observed: fmt.Sprintf(
+				"format=%s result=invalid generation=%s checked_at=%s check_age=%s metrics_gateway=%s",
+				current.format, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "The result is producer-owned and comes from a full byte read of the immutable destination artifact; neither a fresh scrape nor a young artifact timestamp overrides it.",
+			context:  "This proves a checksum or bounded container-format failure, not a failed decryption, database restore, Redis load, or Git repository restore drill. Planetoid does not receive the database decryption secret.",
+			action:   "Preserve the failed candidate and its bounded writer evidence. Identify transfer truncation, storage I/O, checksum publication, or container-stream failure before one authorized replacement transfer; do not promote, rename, hand-edit, or mark the candidate verified.",
+			verify:   "A later atomic writer run validates a newly transferred candidate before promotion, and two direct Mimir reads show a fresh verified report joined to the same structural generation. Schedule a separately authorized restore drill for decrypt/restore readiness.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, invalidClass, target,
+		))
+	}
+
+	if currentOK && current.result == "missing" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: missingClass, target: target, frame: "format-validation", sustain: 2,
+			symptom:   fmt.Sprintf("%s integrity validator found no archive candidate", target),
+			mechanism: "The format-specific validator completed and atomically reported result=missing, so it could not select even a legacy recovery-point candidate on the mounted archive at check time.",
+			baseline:  "Each archive has one fresh integrity report for a concrete generation; new-format artifacts are verified and historical artifacts remain explicitly legacy-unverified.",
+			observed: fmt.Sprintf(
+				"format=none result=missing generation=none checked_at=%s check_age=%s metrics_gateway=%s",
+				current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "This is an explicit validator result, distinct from losing the integrity metric or receiving an old check through fresh textfile scrapes.",
+			context:  "The report describes candidate visibility at its check time. It does not prove why media is absent and cannot distinguish removal from an unavailable or wrong archive volume without the independent mount/root controls.",
+			action:   "Resolve simultaneous volume, root, and structural-latest findings first. Inspect the exact mounted tier through the authorized recovery workflow; do not manufacture a generation label or rerun a writer against an unverified destination.",
+			verify:   "A format-specific check completes against the intended mounted volume and reports either verified or legacy-unverified for the same generation exposed by the structural latest metric on two probes.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, missingClass, target,
+		))
+	}
+
+	if unobservable {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: unobservableClass, target: target, frame: "integrity-telemetry", sustain: 2,
+			symptom:   fmt.Sprintf("%s current archive integrity state is unobservable", target),
+			mechanism: "No single fresh integrity report satisfies the bounded archive/format/result/generation contract. The Xops writer, separate atomic integrity textfile, collector, remote-write path, or Mimir series may be absent or ambiguous.",
+			baseline:  "Exactly one newest fresh integrity report can be selected for every archive, with a finite check timestamp and a bounded format/result/generation tuple.",
+			observed: fmt.Sprintf(
+				"reason=%s fresh_integrity_samples=%d invalid_integrity_samples=%d stale_integrity_scrape_samples=%d metrics_gateway=%s",
+				selectionReason, len(observation.integrity), len(observation.invalidIntegrity), observation.staleIntegrityScrapes, gateway,
+			),
+			evidence: "Invalid label values are reduced to a bounded reason and count; raw labels, paths, checksums, credentials, and archive contents are not emitted.",
+			context:  "UNKNOWN integrity is neither verified nor invalid media. A fresh structural latest timestamp or ordinary in-progress metric cannot substitute for the separate full-byte check.",
+			action:   "Inspect only the owning writer's atomic integrity .prom file and an isolated textfile collection. Deploy the producer before this monitor; use the explicit bounded revalidation mode only when a full archive read is intended, never an ordinary metrics refresh.",
+			verify:   "Two direct Mimir reads select one fresh bounded integrity row for this archive and its check timestamp remains independently within 48 hours.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, unobservableClass, target,
+		))
+	}
+
+	if stale {
+		frame := "check-time"
+		observed := fmt.Sprintf(
+			"format=%s result=%s generation=%s checked_at=%s check_age=%s maximum_age=48h metrics_gateway=%s",
+			current.format, current.result, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+		)
+		if staleScrapeOnly {
+			frame = "scrape-time"
+			observed = fmt.Sprintf(
+				"fresh_integrity_samples=0 stale_integrity_scrape_samples=%d maximum_scrape_age=%s metrics_gateway=%s",
+				observation.staleIntegrityScrapes, backupArchiveMetricFreshness, gateway,
+			)
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: staleClass, target: target, frame: frame, sustain: 2,
+			symptom:   fmt.Sprintf("%s archive integrity evidence is stale", target),
+			mechanism: "Either the integrity series itself stopped arriving or its producer-owned check timestamp has not advanced within two daily schedules. Cheap metrics refreshes deliberately preserve the last check time and therefore cannot turn an old full-byte validation into current evidence.",
+			baseline:  "The integrity series scrape is no more than 90 seconds old and its independent check timestamp is no more than 48 hours old.",
+			observed:  observed,
+			evidence:  "Scrape time, integrity check time, and structural artifact time are evaluated independently.",
+			context:   "Stale integrity is UNKNOWN current byte/format state, not proof of corruption. It does not establish decrypt or restore readiness even when the retained result was verified.",
+			action:    "Inspect the owning writer and its last atomic integrity report. Repair a failed scheduled validation or observation path; invoke explicit full-media revalidation only with operator authority and a healthy archive-volume boundary. Do not rewrite the check timestamp through metrics refresh.",
+			verify:    "Two probes receive a scrape-fresh report whose producer-owned check time is within 48 hours and whose generation matches structural latest.",
+			playbook:  "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, staleClass, target,
+		))
+	}
+
+	mismatch := false
+	latest, latestOK := newestBackupArchiveLatest(observation)
+	if currentOK && !stale && len(observation.invalidLatest) == 0 {
+		if current.result == "missing" {
+			mismatch = latestOK
+		} else {
+			mismatch = !latestOK || current.generation != latest.generation
+		}
+	}
+	if mismatch {
+		latestGeneration := "none"
+		if latestOK {
+			latestGeneration = latest.generation
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: mismatchClass, target: target, frame: "generation-join", sustain: 2,
+			symptom:   fmt.Sprintf("%s integrity report and structural latest metric name different generations", target),
+			mechanism: "The two independently atomic textfiles do not currently agree on the selected generation. A short publication/scrape overlap is tolerated by the two-probe sustain, but persistent disagreement can otherwise let an old verified result appear to bless different current bytes.",
+			baseline:  "The fresh integrity generation exactly equals the newest structural latest-timestamp generation; an explicit missing report is paired only with no structural candidate.",
+			observed: fmt.Sprintf(
+				"integrity_generation=%s integrity_result=%s latest_generation=%s checked_at=%s metrics_gateway=%s",
+				current.generation, current.result, latestGeneration, current.checkedAt.Format(time.RFC3339), gateway,
+			),
+			evidence: "The join uses bounded generation labels after independently selecting the newest artifact time and newest integrity check time.",
+			context:  "No integrity result counts as current health across a generation mismatch. This is an exposition/publication join failure, not itself proof that either artifact is corrupt.",
+			action:   "Inspect the two producer-owned atomic textfiles and the writer publication boundary. Preserve both generations; do not relabel or copy a verified result between them. Let one in-flight atomic publication settle before repairing a persistent mismatch.",
+			verify:   "Two consecutive direct reads return a fresh integrity report and structural latest row with the exact same generation; result=verified is then byte/format evidence only.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, mismatchClass, target,
+		))
+	}
+
+	if currentOK && current.result == "legacy-unverified" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: legacyClass, target: target, frame: "legacy-format", sustain: 1,
+			symptom:   fmt.Sprintf("%s newest archive uses a legacy format without destination verification", target),
+			mechanism: "The validator recognized a structurally complete historical format but no destination-verifiable checksum contract exists for it. Legacy PostgreSQL retains only the decrypted-xz restore MD5; legacy Redis uses encrypted instance/MD5 pairs; legacy GitHub has a tar.xz without its adjacent SHA-256 record.",
+			baseline:  "New candidates publish an adjacent destination-verifiable SHA-256 record and the destination reports result=verified after its format-specific full read.",
+			observed: fmt.Sprintf(
+				"format=%s result=legacy-unverified generation=%s checked_at=%s check_age=%s metrics_gateway=%s",
+				current.format, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "Legacy is an explicit bounded validator result. It is not inferred from a missing metric and is not silently converted to verified.",
+			context:  "Legacy-unverified does not mean corrupt, and a new-format byte/format verification still would not be a decrypt or restore drill.",
+			action:   "Retain the historical recovery point. Allow the next normal atomic writer generation to replace it with a verified format; do not fabricate a checksum for bytes whose producer-side publication contract cannot be proven retroactively.",
+			verify:   "The next scheduled generation validates before promotion and two direct Mimir reads show result=verified joined to the same structural generation. Restore readiness remains a separate drill.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, legacyClass, target,
+		))
+	}
+
+	return findings
+}
+
 func evaluateBackupArchive(
 	now time.Time,
 	observation *backupArchiveObservation,
@@ -1970,7 +2300,7 @@ func evaluateBackupArchive(
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-metrics-invalid", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s publishes an invalid or ambiguous backup archive metric", target),
-			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one completed archive, one active-state gauge, and at most one producer heartbeat. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
+			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one structural archive candidate, one active-state gauge, and at most one producer heartbeat. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
 			baseline:  "Each expected archive has exactly one fresh in-progress gauge in {0,1}; every completed-archive and producer-heartbeat value is finite, positive, and no more than five minutes in the future.",
 			observed: fmt.Sprintf(
 				"invalid=%s fresh_latest_samples=%d fresh_progress_samples=%d fresh_heartbeat_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
@@ -1979,7 +2309,7 @@ func evaluateBackupArchive(
 			evidence: "Raw Mimir samples were source-timestamp filtered before their archive timestamp and Boolean value were validated.",
 			context:  "This is a producer or collector contract failure, not proof that the archive media itself is corrupt.",
 			action:   "Inspect the exact Planetoid .prom file and the writer that owns this archive. Restore atomic single-writer exposition and the host clock; do not coerce an invalid value in Grafana or add a second textfile producer.",
-			verify:   "Two consecutive direct Mimir reads return one fresh in-progress series in {0,1}, one unambiguous newest completed generation when present, and no future or malformed value.",
+			verify:   "Two consecutive direct Mimir reads return one fresh in-progress series in {0,1}, one unambiguous newest structural generation when present, and no future or malformed value.",
 			playbook: "SIGNALS.md §11.22",
 		})
 	} else {
@@ -2020,16 +2350,16 @@ func evaluateBackupArchive(
 			findings = append(findings, finding{
 				probeId: "observability/backup-archives", tier: tierPage,
 				class: "backup-archive-missing", target: target, sustain: 2,
-				symptom:   fmt.Sprintf("%s has no observable completed archive generation", target),
+				symptom:   fmt.Sprintf("%s has no observable structurally complete archive generation", target),
 				mechanism: "No fresh latest-timestamp series exists for this archive. This can mean no completed artifact exists, or that a pre-fix writer refreshed its off-volume metric while the archive mount was unavailable and erased the last-known completion row. Metric absence alone cannot distinguish those states.",
-				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation exposes one latest-timestamp row for a complete generation; a writer preserves that last-known row while its archive volume is unavailable.",
+				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation exposes one latest-timestamp row for a structurally complete candidate; a writer preserves that last-known row while its archive volume is unavailable.",
 				observed: fmt.Sprintf(
 					"completed_generations=0 in_progress=%s stale_scrape_samples=%d metrics_gateway=%s",
 					progress, observation.staleScrapes, gateway,
 				),
 				evidence: "The raw Mimir query contains no fresh latest-timestamp row. Temporary and partial files never produce one, but this observation does not inspect the root-owned archive contents directly.",
 				context:  "This is UNKNOWN completion state until the mounted media is inspected. An active first run is operationally pending, while a missing last-known metric is a producer defect; neither state can be repaired by inventing a timestamp. Software cannot create archive capacity or attach unavailable physical media.",
-				action:   "First resolve any simultaneous archive-volume alert. Inspect the exact mounted latest tier and manifests through an authorized root-owned path. If a complete generation exists, deploy the writer that preserves last-known completion rows during volume loss and invoke only its bounded metrics refresh; do not hand-edit the .prom file. If none exists, restore the first failed prerequisite and authorize one single-writer catch-up run; never rename a partial artifact.",
+				action:   "First resolve any simultaneous archive-volume alert. Inspect the exact mounted latest tier and integrity report through an authorized root-owned path. If a structural candidate exists, deploy the writer that preserves last-known completion rows during volume loss and invoke only its bounded metrics refresh; do not hand-edit either .prom file. If none exists, restore the first failed prerequisite and authorize one single-writer catch-up run; never rename a partial artifact.",
 				verify:   "A non-empty completed artifact and its manifest are present, and two fresh Mimir samples expose that real generation timestamp. Then induce the synthetic unavailable-volume boundary and prove a phase reset preserves the same completion row rather than turning it into apparent absence.",
 				playbook: "SIGNALS.md §11.22",
 			})
@@ -2037,12 +2367,7 @@ func evaluateBackupArchive(
 		return findings
 	}
 
-	latest := observation.latest[0]
-	for _, candidate := range observation.latest[1:] {
-		if candidate.createdAt.After(latest.createdAt) {
-			latest = candidate
-		}
-	}
+	latest, _ := newestBackupArchiveLatest(observation)
 	age := now.Sub(latest.createdAt)
 	ageText := backupArchiveAge(age)
 	if age > backupArchiveMaximumAge {
@@ -2099,16 +2424,16 @@ func evaluateBackupArchive(
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-stale", target: target, frame: frame, sustain: 1,
 			symptom: fmt.Sprintf(
-				"%s newest completed generation is %s old",
+				"%s newest structurally complete generation is %s old",
 				target, ageText,
 			),
 			mechanism: mechanism,
-			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
+			baseline:  "Every structural archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale. Integrity health is evaluated independently.",
 			observed: fmt.Sprintf(
 				"generation=%s completed_at=%s age=%s in_progress=%s archive_volume_state=%s fresh_latest_samples=%d metrics_gateway=%s%s",
 				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, volumeState, len(observation.latest), gateway, queueObserved,
 			),
-			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
+			evidence: "Archive age comes from the producer's structural artifact timestamp carried as the metric value, not from the fresh Mimir scrape or integrity-check timestamp.",
 			context:  context,
 			action:   action,
 			verify:   verify,

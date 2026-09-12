@@ -11371,19 +11371,23 @@ Probe: `backup-archives`
 
 Planetoid is the offsite recovery boundary for four independently completed
 archives: `pg`, `redis`, `github-urnetwork`, and `github-urfoundation`. Their
-writers atomically replace final artifacts and publish two Prometheus textfile
-families: `urnetwork_backup_archive_latest_timestamp_seconds` carries the
-completed file timestamp plus generation, while
-`urnetwork_backup_archive_in_progress` carries one Boolean per archive. Fluent
-Bit reads those files and remote-writes them with `env`, `host`, and `job`
-labels. Grafana is only a renderer; a blank panel is not enough to distinguish
-no completed backup from a missing collector.
+writers atomically replace final artifacts and publish Prometheus textfile
+telemetry. `urnetwork_backup_archive_latest_timestamp_seconds` carries the
+newest structurally complete candidate's file timestamp plus generation,
+`urnetwork_backup_archive_in_progress` carries one Boolean per archive, and
+`urnetwork_backup_archive_integrity_checked_timestamp_seconds` carries the
+producer-owned time of the last format-specific validation plus bounded
+`format`, `generation`, and `result` labels. Fluent Bit reads those separate
+atomic reports and remote-writes them with `env`, `host`, and `job` labels.
+Grafana is only a renderer; a blank panel is not enough to distinguish no
+archive candidate from a missing collector, and a young structural timestamp
+is not byte-integrity evidence.
 
 Code recovery points use the same sortable UTC naming convention as database
 recovery points: `main-code-urnetwork-YYYY-MM-DD-HH-MM-SS.tar.xz` and
 `main-code-urfoundation-YYYY-MM-DD-HH-MM-SS.tar.xz`. PostgreSQL, Redis, and
 each code organization follow the same retention contract: four newest
-complete generations under `latest/<type>`, the newest promotion candidate
+structurally complete generations under `latest/<type>`, the newest promotion candidate
 under `staging/<type>`, four generations under `week/<type>` selected after a
 seven-day window, and four under `month/<type>` selected after a 30-day window.
 Retention copies are hard links so the same recovery point consumes space once.
@@ -11397,6 +11401,33 @@ Redis's exported `generation` is intentionally the recovery-point identifier
 generation is a pair named `<generation>.tar.gpg` and
 `<generation>.tar.gpg.sha256`; omitting `.tar.gpg` from the Grafana label does
 not mean the encrypted archive is an unpacked directory.
+
+New PostgreSQL generations add `<generation>.gpg.sha256` beside the encrypted
+artifact and the existing restore MD5. Planetoid validates the SHA-256 against
+the ciphertext it stores; a historical PostgreSQL gpg/MD5 pair is
+`pg-gpg-md5-legacy` / `legacy-unverified` because its MD5 covers the decrypted
+xz stream and Planetoid does not hold the decrypt secret. New Redis tar bundles
+use their existing ciphertext SHA-256 as `redis-bundle-sha256`; exact legacy
+encrypted instance/MD5 sets remain `redis-pairs-md5-legacy` /
+`legacy-unverified`. New GitHub archives publish an adjacent SHA-256 first and
+the discoverable tar.xz last, then validate the digest plus both xz and tar
+streams as `github-tar-xz-sha256`. Historical tarballs without that producer
+contract are `github-tar-xz-legacy` / `legacy-unverified`; no checksum is
+fabricated retroactively. Checksum-only newer publications are explicit
+`invalid` candidates rather than being hidden by an older valid generation.
+The validators never decrypt a database artifact, start PostgreSQL or Redis,
+or prove Git checkout/restore behavior. Byte and bounded container-format
+verification is not a restore drill.
+
+The integrity report lives off the removable archive and is replaced
+atomically. An ordinary `--refresh-metrics` only parses and republishes the
+last bounded report, preserving its original check time; it never rereads a
+large artifact. Each newly transferred candidate is fully validated before
+staging or retention promotion. `--revalidate-integrity` is the separate,
+explicit full-media-read mode. Scrape time, integrity check time, and artifact
+file time therefore remain independent evidence. A check older than 48 hours
+is stale even if Fluent Bit keeps scraping the report and the structural
+artifact remains inside its five-day recovery-point objective.
 
 Planetoid also publishes physical allocation telemetry for the mounted archive
 volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
@@ -11448,18 +11479,29 @@ names remain mutable across detach and re-enumeration, so a lineage match is
 strong evidence rather than a physical serial: stable LUKS UUID and device
 identity remain mandatory operator discriminators. The probe also queries the producer-owned
 `urnetwork_backup_archive_heartbeat_timestamp_seconds` values alongside the
-progress gauges. It expects exactly the four archive names above.
+progress gauges and the producer-owned integrity reports. It expects exactly
+the four archive names above.
 Samples older than 90 seconds are observation loss even when their archive
 timestamp value is old. The newest valid generation is selected during the
-short Mimir staleness overlap after a label change. Metric values must be
-finite, generations must be non-empty, archive and heartbeat timestamps may
-not be more than five minutes in the future, and each in-progress gauge must be
-uniquely present and equal to zero or one. The query and direct discriminator
-carry no credentials, repository names, private key paths, or backup contents.
+short Mimir staleness overlap after a label change; the newest integrity report
+is selected independently by its check time. Equal-time integrity reports are
+ambiguous. Metric values must be finite, generations must be non-empty and use
+the bounded filename-safe alphabet, archive, heartbeat, and check timestamps
+may not be more than five minutes in the future, and each in-progress gauge
+must be uniquely present and equal to zero or one. Format/result combinations
+are archive-specific and closed. Invalid integrity labels are reduced to a
+bounded reason and count rather than emitted. The query and direct
+discriminator carry no credentials, repository names, checksums, private key
+paths, or backup contents.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
-at least one complete generation; and each newest completion is no more than
-five days old. While the GitHub unit is active, its MainPID is nonzero, both
+at least one structurally complete candidate; each newest candidate is no more
+than five days old; and every archive has one scrape-fresh integrity report
+whose producer-owned check time is no more than 48 hours old, whose generation
+matches structural latest exactly, and whose result is `verified`. An explicit
+`invalid`, `missing`, stale, unobservable, generation-mismatched, or
+`legacy-unverified` integrity state never satisfies that health contract. While
+the GitHub unit is active, its MainPID is nonzero, both
 producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
 Outside an execution transition, the GitHub writer is either running or
@@ -11505,7 +11547,43 @@ BROKEN:
 - `backup-archive-metrics-invalid` is immediate for an ambiguous progress
   series, a value outside `{0,1}`, an empty generation, or an impossible
   timestamp. Do not coerce these values in Grafana.
-- `backup-archive-missing` after two probes means no atomic completed
+- `backup-archive-integrity-invalid` is immediate when the newest selected
+  format-specific report has `result=invalid`. PostgreSQL and Redis reject a
+  ciphertext/SHA-256 mismatch; GitHub rejects that mismatch or an invalid xz or
+  tar stream. The newly transferred candidate must not be staged or promoted.
+  Preserve it for bounded diagnosis and replace it only through one authorized
+  atomic writer run. This result does not say that decryption or a restore was
+  attempted.
+- `backup-archive-integrity-missing` pages after two probes when a current
+  validator explicitly reports `format=none,generation=none,result=missing`.
+  This is different from absent telemetry: the validator completed but found
+  no candidate at its check time. Join it to the independent volume, root, and
+  structural-latest states before inferring removal or choosing a recovery
+  action.
+- `backup-archive-integrity-unobservable` warns after two probes when no single
+  scrape-fresh report satisfies the closed archive/format/result/generation
+  contract. Missing telemetry, invalid labels, and equal-check-time ambiguity
+  remain UNKNOWN, not healthy and not proof of corrupt media. Raw invalid
+  labels, paths, digests, credentials, and contents never enter the alert.
+- `backup-archive-integrity-stale` warns after two probes when the integrity
+  series scrape is older than 90 seconds or the producer-owned check time is
+  older than 48 hours. A deployment/service `--refresh-metrics` rereads only
+  the small last report and deliberately preserves that check time; it cannot
+  certify old bytes. `--revalidate-integrity` is an explicit full-media read,
+  not a routine metrics refresh and still not a decrypt/restore drill.
+- `backup-archive-integrity-generation-mismatch` pages after two probes when a
+  fresh integrity report and structural latest metric select different
+  generations, or when only one says a generation exists. This sustain absorbs
+  a short cross-textfile publication overlap. Persistent mismatch means an old
+  verified result could otherwise appear to bless different current bytes, so
+  no result counts as current health until the exact labels join.
+- `backup-archive-integrity-legacy-unverified` warns immediately when the
+  validator recognizes a historical structurally complete format without a
+  destination-verifiable producer checksum contract. Retain it; legacy does
+  not mean corrupt. Let the next normal generation replace it with a verified
+  format, and never fabricate a retroactive checksum. New-format verification
+  remains byte/container evidence rather than restore readiness.
+- `backup-archive-missing` after two probes means no structurally complete
   generation is observable through the latest-timestamp metric. It can mean no
   artifact exists, or that a pre-fix writer overwrote its off-volume metric
   while the archive was unavailable and discarded the last-known row. Resolve
@@ -11513,9 +11591,10 @@ BROKEN:
   between those states. `in_progress=1` makes a first run operationally
   pending; it does not create a recovery point. Never infer physical absence
   from metric absence or manufacture a timestamp.
-- `backup-archive-stale` is immediate once the newest real completion is more
-  than five days old. A current scrape of an old value proves the telemetry
-  path while reporting an expired recovery-point objective. When
+- `backup-archive-stale` is immediate once the newest structural candidate is
+  more than five days old. A current scrape of an old value proves the
+  telemetry path while reporting an expired recovery-point objective; the
+  separate integrity join decides whether those bytes are validated. When
   `in_progress=1`, preserve the single active writer and compare increasing
   receive bytes plus source backlog with sustained direct-transfer throughput.
   A transfer is not stalled merely because its atomic final timestamp has not moved. When
