@@ -17714,10 +17714,29 @@ hop. A later 2026-09-04 tail error arrived 27 seconds after the corresponding
 lifetime expiry, disproving the former fixed 15-second lookback. The collector
 now reads a bounded ten-minute state history before the transport timestamp
 and correlates only a lifetime-zero plus IPv6-absent interval with no IPv6
-restoration before the first tail error. It retains 15 seconds after the tail
-event for timestamp precision and a near-simultaneous restoration. This
-captures a still-active loss without attaching an already-restored historical
+restoration more than two seconds before the first tail error. It retains 15
+seconds after the tail event for timestamp precision and a near-simultaneous
+restoration. This captures a still-active loss or a transport error delivered
+immediately after recovery without attaching an already-restored historical
 event to a later edge failure.
+
+The 2026-09-12 `16:36Z` recurrence established that bounded delivery grace.
+The monitor's stored-router lifetime reached zero, its IPv6 network state
+disappeared 29 milliseconds later, and IPv6 returned after 6.8 seconds. A
+single Warpctl tail reported `no route to host` 933 milliseconds after that
+restoration. The prior matcher rejected any restoration before the
+whole-second tail timestamp and therefore retained generic edge/upstream
+wording despite affirmative local evidence. Four minutes later, another
+default-router loss produced eight diagnostics across all eight standing
+service tails and two configured edge identities; the existing matcher
+correctly attached the still-active local loss to that recurrence. All tail
+children survived, the initially affected service and config generations were
+uniform, and the enabled-edge battery found the configured identities healthy
+after recovery. The matcher now permits only a two-second
+restoration-to-diagnostic delivery interval while preserving the ten-minute
+expiry lookback and requiring both the lifetime-zero and IPv6-absent records.
+A restoration more than two seconds before the tail diagnostic remains
+ineligible, so an old local flap cannot hide a later independent edge failure.
 
 The software signal now queries only that narrow recent local record after a
 tail route event and attaches the affirmative discriminator without copying

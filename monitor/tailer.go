@@ -2201,9 +2201,10 @@ type tailTransportMonitorRouteEvidenceCollector func(
 ) tailTransportMonitorRouteEvidence
 
 const (
-	monitorIPv6LogTimeLayout          = "2006-01-02 15:04:05.000"
-	monitorIPv6RouteCorrelationWindow = 15 * time.Second
-	monitorIPv6RouteStateLookback     = 10 * time.Minute
+	monitorIPv6LogTimeLayout                    = "2006-01-02 15:04:05.000"
+	monitorIPv6RouteCorrelationWindow           = 15 * time.Second
+	monitorIPv6RouteStateLookback               = 10 * time.Minute
+	monitorIPv6RestorationDiagnosticGracePeriod = 2 * time.Second
 )
 
 var (
@@ -2349,13 +2350,27 @@ func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggr
 	if !ok {
 		return false
 	}
-	if !e.ipv6RestoredAt.IsZero() && !first.Before(e.ipv6RestoredAt) {
+	if restorationDelay, ok := e.restorationBeforeDiagnostic(event); ok &&
+		restorationDelay > monitorIPv6RestorationDiagnosticGracePeriod {
 		return false
 	}
 	return !e.routerLifetimeExpiredAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeExpiredAt) &&
 		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.ipv6AbsentAt)
+}
+
+func (e tailTransportMonitorRouteEvidence) restorationBeforeDiagnostic(
+	event *tailTransportRouteAggregate,
+) (time.Duration, bool) {
+	if e.ipv6RestoredAt.IsZero() || event == nil {
+		return 0, false
+	}
+	first, _, ok := tailTransportRouteEventBounds(map[string]*tailTransportRouteAggregate{"event": event})
+	if !ok || first.Before(e.ipv6RestoredAt) {
+		return 0, false
+	}
+	return first.Sub(e.ipv6RestoredAt), true
 }
 
 type tailTransportRouteTarget struct {
@@ -2469,6 +2484,15 @@ func tailTransportRouteFindings(
 				absentAt,
 				monitorEvidence.autoconfDetachCount,
 			)
+			if restorationDelay, ok := monitorEvidence.restorationBeforeDiagnostic(event); ok {
+				mechanism += fmt.Sprintf(
+					" The transport diagnostic followed IPv6 restoration by %s, within the bounded %s delivery grace; larger restored gaps remain ineligible for local attribution.",
+					restorationDelay,
+					monitorIPv6RestorationDiagnosticGracePeriod,
+				)
+				observed += fmt.Sprintf(" monitor_restoration_before_diagnostic=%s", restorationDelay)
+				evidence += " The route-loss and restoration timestamps are reduced independently; raw configd records are not retained in the alert."
+			}
 			contextText = "This event is a monitor-side first-hop Router Advertisement/default-router expiration, not evidence that the named production edge, its interface, LB, or LAN neighbor failed. A later edge HTTP 200 is expected after the monitor's IPv6 route returns. The first-hop router, its RA/failover owner, or the local path carrying its advertisements is operational infrastructure and cannot be repaired by deploying an edge service."
 			action = "Inspect the monitor's local first-hop IPv6 Router Advertisement path: correlate router and RA-daemon uptime, WAN/failover state, and local-link health at the recorded time, then capture timestamped ICMPv6 type 134 traffic on the monitor interface during recurrence. Use the capture to distinguish an explicit zero-lifetime withdrawal from missed or late refresh advertisements, and repair the identified RA source or delivery path. Do not change the named production edge, its Vault address, LB, firewall, or neighbor state for this locally proven event."
 			verify = "For at least 30 minutes, the monitor's stored default-router lifetime is refreshed before expiry, an unrelated-provider IPv6 control and configured edges remain reachable in the same seconds, and every standing tail remains free of route-loss diagnostics."

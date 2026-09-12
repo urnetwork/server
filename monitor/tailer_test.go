@@ -329,10 +329,17 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	if !activeInterval.matches(event) {
 		t.Fatal("active 27-second IPv6-loss interval did not match the later tail error")
 	}
-	restoredBeforeTail := activeInterval
-	restoredBeforeTail.ipv6RestoredAt = expiredAt.Add(-time.Second)
-	if restoredBeforeTail.matches(event) {
-		t.Fatal("IPv6 loss restored before the tail error was treated as causal")
+	restoredWithinDeliveryGrace := activeInterval
+	restoredWithinDeliveryGrace.ipv6RestoredAt = expiredAt.Add(-time.Second)
+	if !restoredWithinDeliveryGrace.matches(event) {
+		t.Fatal("sub-second restoration-to-diagnostic propagation was not treated as causal")
+	}
+	restoredOutsideDeliveryGrace := activeInterval
+	restoredOutsideDeliveryGrace.ipv6RestoredAt = expiredAt.Add(
+		-monitorIPv6RestorationDiagnosticGracePeriod - 251*time.Millisecond,
+	)
+	if restoredOutsideDeliveryGrace.matches(event) {
+		t.Fatal("route loss restored outside the bounded delivery grace was treated as causal")
 	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
@@ -344,6 +351,72 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	distant.ipv6AbsentAt = distant.routerLifetimeExpiredAt.Add(time.Second)
 	if distant.matches(event) {
 		t.Fatal("distant router expiry was correlated to this transport event")
+	}
+}
+
+func TestTailTransportRouteLossUsesBoundedPostRestoreDiagnosticGrace(t *testing.T) {
+	const diagnostic = "2026/09/12 11:36:27 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting."
+	tailer := newLogTailer("synthetic-service", nil)
+	tailer.recordTransportDiagnostic(diagnostic)
+
+	parseTime := func(value string) time.Time {
+		t.Helper()
+		parsed, err := time.ParseInLocation(monitorIPv6LogTimeLayout, value, time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	probe := &logTailProbe{
+		tailers: []*logTailer{tailer},
+		monitorRouteEvidence: func(context.Context, *probeEnv, map[string]*tailTransportRouteAggregate) tailTransportMonitorRouteEvidence {
+			return tailTransportMonitorRouteEvidence{
+				interfaceName:           "en0",
+				routerLifetimeExpiredAt: parseTime("2026-09-12 11:36:19.284"),
+				ipv6AbsentAt:            parseTime("2026-09-12 11:36:19.313"),
+				ipv6RestoredAt:          parseTime("2026-09-12 11:36:26.067"),
+			}
+		},
+	}
+	env := &probeEnv{cfg: &monitorConfig{hosts: []*host{{
+		name: "synthetic-edge",
+		edgeIPv6: []EdgeIPv6InterfaceSettings{{
+			Interface: "public0",
+			Address:   "2001:db8:2::44",
+		}},
+	}}}}
+
+	findings, err := probe.check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+	if routeLoss.healthy {
+		t.Fatalf("bounded post-restoration diagnostic was not attributed locally: %+v", routeLoss)
+	}
+	alert := alertFromFinding(
+		syntheticSettings(nil),
+		"1.5",
+		"log-errors",
+		"Log error-class rates",
+		routeLoss,
+	)
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"monitor_restoration_before_diagnostic=933ms",
+		"bounded 2s delivery grace",
+		"larger restored gaps remain ineligible",
+		"monitor-side first-hop",
+		"Do not change the named production edge",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("bounded restoration alert Markdown missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, rawLogFragment := range []string{"configd[", "network changed:"} {
+		if strings.Contains(markdown, rawLogFragment) {
+			t.Fatalf("bounded restoration alert retained raw local log fragment %q:\n%s", rawLogFragment, markdown)
+		}
 	}
 }
 
