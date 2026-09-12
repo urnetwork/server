@@ -9,14 +9,12 @@ Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
 
-Use Terra (`gpt-5.6-terra`) with reasoning effort `max` for all test execution,
-including preflight, submission validation, post-promotion smoke tests, and
-reruns. Preserve the exact output of every test failure or suspected flake and
-hand it to Astra (`gpt-6-astra`) with reasoning effort `max` to diagnose the root
+Use Terra with max reasoning for all test execution, including preflight,
+submission validation, post-promotion smoke tests, and reruns. A test failure or
+suspected flake must be handed to Sol with max reasoning to diagnose the root
 cause, implement the correction, and add a deterministic regression test. Terra
-max then reruns the affected test and required suite; test execution stays with
-Terra while Astra owns debugging and fixes. These assignments must survive
-agent handoffs.
+max then reruns the affected test and required suite; do not accept a Sol-run
+test as the independent completion result.
 
 Sol with max reasoning owns each winning-submission honesty and safety code
 review, the approve/reject decision, every winner promotion, and all source or
