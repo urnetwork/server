@@ -737,9 +737,14 @@ Probe: `pg-capacity`
 
 Read this through direct port 5432, never through the nginx/PgBouncer frontend.
 The probe derives the ordinary-role ceiling from the deployed server settings,
-counts every `client backend`, and exports only the ten largest groups by
-application, role, client address, state, and wait event. It does not export
-query text or customer identifiers.
+counts every `client backend`, and renders only the ten largest groups after
+privacy-safe owner aggregation by application, role, configured host alias,
+state, and wait event. The read-only collector uses `client_addr` transiently
+to match a unique LAN or overlay inventory address, but exact addresses and
+CIDRs never reach logs, alerts, or persisted monitor state. Null/local and
+loopback clients use fixed local classes; a client with no unique inventory
+match becomes `unmapped-service-client` or `ambiguous-service-client`. It does
+not export query text or customer identifiers.
 
 ```sql
 SELECT name, setting, unit
@@ -752,9 +757,17 @@ SELECT application_name, usename, client_addr, state, count(*)
 FROM pg_stat_activity
 WHERE backend_type = 'client backend'
 GROUP BY application_name, usename, client_addr, state
-ORDER BY count(*) DESC
-LIMIT 10;
+ORDER BY count(*) DESC;
 ```
+
+The raw SQL groups are bounded by the live client-backend ceiling. The monitor
+maps them in memory, combines all LAN/overlay addresses that belong to the same
+configured host, then ranks and emits ten groups. Ranking raw address groups
+first would let a multi-address host consume several slots and could hide the
+actual owner, especially when `application_name` is unset. Unknown clients are
+deliberately combined only after retaining application, role, state, and wait
+dimensions; resolving one unknown endpoint requires an authorized private
+socket census rather than disclosing its address in monitor output.
 
 - `normal_role_ceiling = max_connections -
   superuser_reserved_connections - reserved_connections`. Every existing
@@ -826,7 +839,8 @@ Probe: `pool-retention`
 This is the reserve-shape companion to §1.3a. Read it through direct 5432 and
 count loopback client backends by state; do not assume that every loopback
 backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
-proves the owner.
+proves the owner. This probe exports only aggregate loopback counts and ages;
+the exact loopback address/CIDR predicate never appears in logs or alerts.
 
 ```sql
 SELECT count(*) FILTER (WHERE client_addr <<= inet '127.0.0.0/8'
@@ -1831,9 +1845,12 @@ waiter older than a minute. The alert now carries the sample query, both
 thresholds, and `DataFileRead`-specific attribution guidance. The query also
 selects the PID, query ID, application, client address, and sample from the
 same oldest waiter, retaining an attribution snapshot when a transient command
-finishes before the follow-up query. A one-shot aged singleton remains
-evidence to validate, while the standing monitor's
-two-observation gate distinguishes recurrence before opening a ticket.
+finishes before the follow-up query. The client address is used only for an
+in-memory unique inventory match; the alert renders the configured host alias
+or a fixed local/unmapped/ambiguous class and never the address or CIDR. A
+one-shot aged singleton remains evidence to validate, while the standing
+monitor's two-observation gate distinguishes recurrence before opening a
+ticket.
 
 At 06:05Z the next one-shot found a different singleton,
 `Client:ClientWrite` at 96s. It too completed before the immediate PID query,

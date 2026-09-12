@@ -10,8 +10,9 @@ import (
 func syntheticPgCapacityRows(total string, active string, idle string, idleInTx string) []Row {
 	return []Row{
 		{"summary", "1024", "3", "0", "1021", total, active, idle, idleInTx, "239674kB", "256GB"},
-		{"owner", "connect", "bringyour", "10.0.0.31", "idle", "300", "Client:ClientRead", "540", "3550", "", ""},
-		{"owner", "taskworker", "bringyour", "10.0.0.32", "active", "80", "IO:DataFileRead", "3", "1200", "", ""},
+		{"owner", "connect", "bringyour", "192.0.2.31", "idle", "180", "Client:ClientRead", "540", "3500", "", ""},
+		{"owner", "connect", "bringyour", "2001:db8:31::/64", "idle", "120", "IO:DataFileRead", "600", "3550", "", ""},
+		{"owner", "taskworker", "bringyour", "198.51.100.32", "active", "80", "IO:DataFileRead", "3", "1200", "", ""},
 	}
 }
 
@@ -22,11 +23,15 @@ func TestPgCapacitySignalHealthyWithHeadroom(t *testing.T) {
 			"superuser_reserved_connections",
 			"reserved_connections",
 			"backend_type = 'client backend'",
-			"LIMIT 10",
+			"client_addr::text",
+			"GROUP BY application_name, role_name, client_address, connection_state",
 		} {
 			if !strings.Contains(query, want) {
 				t.Fatalf("pg-capacity query missing %q:\n%s", want, query)
 			}
+		}
+		if strings.Contains(query, "LIMIT 10") {
+			t.Fatalf("pg-capacity query ranks raw addresses before privacy-safe aggregation:\n%s", query)
 		}
 		return syntheticPgCapacityRows("400", "31", "340", "7"), nil
 	}}
@@ -43,7 +48,14 @@ func TestPgCapacitySignalWarnsWithBoundedOwnerEvidence(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return syntheticPgCapacityRows("800", "230", "540", "7"), nil
 	}}
-	alerts, err := NewPgCapacitySignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts = append(settings.Hosts, HostSettings{
+		Name:           "edge-synthetic",
+		LANAddress:     "192.0.2.31",
+		OverlayAddress: "2001:db8:31::",
+		Roles:          []string{"services"},
+	})
+	alerts, err := NewPgCapacitySignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +69,8 @@ func TestPgCapacitySignalWarnsWithBoundedOwnerEvidence(t *testing.T) {
 		"normal_role_slots_remaining=221",
 		"work_mem=239674kB",
 		"shared_buffers=256GB",
-		"application=connect role=bringyour address=10.0.0.31 state=idle clients=300 waits=Client:ClientRead oldest_state_s=540 oldest_backend_s=3550",
-		"bounded to ten; no query text",
+		"application=connect role=bringyour client_owner=edge-synthetic state=idle clients=300 waits=Client:ClientRead,IO:DataFileRead oldest_state_s=600 oldest_backend_s=3550",
+		"bounded to ten after privacy-safe host aggregation; no client addresses or query text",
 		"Independent PgBouncer processes",
 		"SHOW POOLS where administrative access exists",
 		"60-66-second COMMIT latency",
@@ -71,6 +83,60 @@ func TestPgCapacitySignalWarnsWithBoundedOwnerEvidence(t *testing.T) {
 		if markdown := alert.Markdown(); !strings.Contains(markdown, want) {
 			t.Fatalf("capacity warning missing %q:\n%s", want, markdown)
 		}
+	}
+	for _, forbidden := range []string{"192.0.2.31", "2001:db8:31::/64", "198.51.100.32"} {
+		if markdown := alert.Markdown(); strings.Contains(markdown, forbidden) {
+			t.Fatalf("capacity warning leaked client address %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
+func TestPgCapacityOwnerEvidenceReducesUnexpectedRawAddresses(t *testing.T) {
+	rows := []pgRow{
+		{"summary", "1024", "3", "0", "1021", "800", "230", "540", "7", "239674kB", "256GB"},
+		{"owner", "connect", "bringyour", "203.0.113.41/32", "idle", "4", "Client:ClientRead", "10", "20", "", ""},
+	}
+	_, owners, err := parsePgCapacityRows(rows, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := pgCapacityEvidence(owners)
+	if !strings.Contains(evidence, "client_owner=unmapped-service-client") {
+		t.Fatalf("capacity owner evidence omitted privacy-safe fallback: %s", evidence)
+	}
+	for _, forbidden := range []string{"203.0.113.41", "203.0.113.41/32"} {
+		if strings.Contains(evidence, forbidden) {
+			t.Fatalf("capacity owner diagnostic leaked client address %q: %s", forbidden, evidence)
+		}
+	}
+}
+
+func TestPgCapacityMalformedRowsDoNotEchoAddresses(t *testing.T) {
+	tests := []struct {
+		name string
+		row  pgRow
+	}{
+		{
+			name: "address in numeric column",
+			row:  pgRow{"owner", "connect", "bringyour", "192.0.2.51", "idle", "198.51.100.51", "-:-", "10", "20", "", ""},
+		},
+		{
+			name: "address as row kind",
+			row:  pgRow{"203.0.113.51", "", "", "", "", "", "", "", "", "", ""},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := parsePgCapacityRows([]pgRow{test.row}, nil)
+			if err == nil {
+				t.Fatal("malformed capacity row was accepted")
+			}
+			for _, forbidden := range []string{"192.0.2.51", "198.51.100.51", "203.0.113.51"} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("capacity parser error leaked address %q: %v", forbidden, err)
+				}
+			}
+		})
 	}
 }
 
@@ -131,7 +197,7 @@ func TestPgCapacitySignalPreservesUnrelatedQueryFailure(t *testing.T) {
 
 func TestPgCapacitySignalRejectsMalformedSummary(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"owner", "connect", "bringyour", "10.0.0.31", "idle", "4", "Client:ClientRead", "10", "20", "", ""}}, nil
+		return []Row{{"owner", "connect", "bringyour", "198.51.100.31", "idle", "4", "Client:ClientRead", "10", "20", "", ""}}, nil
 	}}
 	if _, err := NewPgCapacitySignal().Run(context.Background(), syntheticSettings(source)); err == nil ||
 		!strings.Contains(err.Error(), "no summary row") {
