@@ -192,11 +192,7 @@ func TestRouterAbortHandlerNormalCanceledResponseRemainsUntouched(t *testing.T) 
 // HTTP/2 has a stream reset instead of HTTP/1's incomplete chunked EOF. The
 // exact prefix must arrive before the abort, and no generic tail may complete it.
 func TestRouterAbortHandlerTerminatesFlushedHTTP2Response(t *testing.T) {
-	deadline, ok := t.Deadline()
-	if !ok {
-		t.Fatal("HTTP/2 abort control requires the original test deadline")
-	}
-	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	ctx, cancel := routerAbortTestContext(t)
 	defer cancel()
 	const prefix = "authenticated-http2-prefix\n"
 	abort, flushed, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
