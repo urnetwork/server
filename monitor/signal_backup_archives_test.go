@@ -42,6 +42,10 @@ type backupArchiveWriterFixture struct {
 	timerLast                     int64
 	githubGitTransferAttempts     int64
 	githubGitTransferRetrySeconds int64
+	githubFailureStatus           string
+	githubFirstFailureBoundary    string
+	githubFailureJournalLines     int64
+	githubFailureBoundaryLines    map[string]int64
 	archiveRootObservation        string
 	githubArchivePathState        string
 	remoteArchivePathState        string
@@ -353,12 +357,22 @@ func TestBackupArchivesSignalSyntheticDetectsFailedGitHubWriterBeforeFreshnessBr
 		})
 	}
 	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
-		unitState:    "failed",
-		unitSubstate: "failed",
-		result:       "exit-code",
-		exitStatus:   1,
-		invocationID: "present",
-		execStart:    123456,
+		unitState:                  "failed",
+		unitSubstate:               "failed",
+		result:                     "exit-code",
+		exitStatus:                 1,
+		invocationID:               "present",
+		execStart:                  123456,
+		githubFailureStatus:        "complete",
+		githubFirstFailureBoundary: "storage-eio",
+		githubFailureJournalLines:  11,
+		githubFailureBoundaryLines: map[string]int64{
+			"storage-eio":  10,
+			"unclassified": 1,
+		},
+		clearanceState:    "valid",
+		remoteMount:       "/synthetic/archive",
+		remoteMountSource: "/dev/mapper/synthetic-archive",
 	}, fixtures...)
 	alert := requireBackupArchiveAlert(
 		t,
@@ -375,6 +389,15 @@ func TestBackupArchivesSignalSyntheticDetectsFailedGitHubWriterBeforeFreshnessBr
 		"result=exit-code",
 		"exit_status=1",
 		"invocation_id_present=true",
+		"failure_journal_status=complete",
+		"first_failure_boundary=storage-eio",
+		"failure_journal_lines=11",
+		"storage_eio_lines=10",
+		"unclassified_lines=1",
+		"current_mount_state=read-write",
+		"current_clearance_state=valid",
+		"later, independent observations",
+		"never leave the host",
 		"still-young previous tarball",
 		"single-writer boundary",
 		"operator authorization",
@@ -390,6 +413,39 @@ func TestBackupArchivesSignalSyntheticDetectsFailedGitHubWriterBeforeFreshnessBr
 		"backup-1/github-urnetwork",
 	); unexpected != nil {
 		t.Fatalf("fresh archive was misclassified as stale: %+v", *unexpected)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticKeepsClippedGitHubFailureBoundaryAmbiguous(t *testing.T) {
+	now := time.Date(2026, 9, 8, 17, 30, 30, 0, time.UTC)
+	fixtures := healthyBackupArchiveFixtures(now)
+	alert := requireBackupArchiveAlert(t, runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState:                  "failed",
+		unitSubstate:               "failed",
+		result:                     "exit-code",
+		exitStatus:                 1,
+		invocationID:               "present",
+		execStart:                  654321,
+		githubFailureStatus:        "ambiguous",
+		githubFirstFailureBoundary: "unclassified",
+		githubFailureJournalLines:  backupArchiveGitHubJournalMaxLines + 1,
+		githubFailureBoundaryLines: map[string]int64{
+			"unclassified": backupArchiveGitHubJournalMaxLines + 1,
+		},
+		remoteMount:       "/synthetic/archive",
+		remoteMountSource: "/dev/mapper/synthetic-archive",
+	}, fixtures...), "backup-archive-writer-failed", "backup-1/github")
+	for _, want := range []string{
+		"failure_journal_status=ambiguous",
+		"first_failure_boundary=unclassified",
+		"failure_journal_lines=513",
+		"exceeded the 512-line classification bound",
+		"cannot prove the invocation's first failed boundary",
+		"do not infer a first boundary from the clipped tail",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("ambiguous GitHub writer alert missing %q:\n%s", want, alert.Markdown())
+		}
 	}
 }
 
@@ -1156,6 +1212,11 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 		"ExecMainStartTimestamp",
 		"UnitFileState",
 		"github_result",
+		"github_failure_journal_status",
+		"github_failure_first_boundary",
+		"_SYSTEMD_INVOCATION_ID=",
+		"_SYSTEMD_UNIT=github-backup-archive.service",
+		"-n 513",
 		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
@@ -1218,10 +1279,291 @@ func TestBackupArchivesWriterCommandReducesInvocationIdentifiersToPresence(t *te
 	}
 	for _, want := range []string{
 		"github_invocation_id=present\n",
+		"github_failure_journal_status=unobservable\n",
 		"remote_invocation_id=present\n",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("writer observation missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandTriesDirectFailureJournalBeforeSudo(t *testing.T) {
+	directProbe := strings.Index(
+		backupArchiveWriterCommand,
+		"if command journalctl --quiet --no-pager -n 1 -o cat",
+	)
+	sudoFallback := strings.Index(
+		backupArchiveWriterCommand,
+		"elif sudo -n journalctl --quiet --no-pager -n 1 -o cat",
+	)
+	if directProbe < 0 || sudoFallback < 0 || directProbe >= sudoFallback {
+		t.Fatalf("failure journal access order direct=%d sudo=%d, want direct before sudo fallback", directProbe, sudoFallback)
+	}
+}
+
+func runSyntheticBackupArchiveWriterCommand(
+	t testing.TB,
+	unitState string,
+	result string,
+	exitStatus int64,
+	journal string,
+) string {
+	t.Helper()
+	binDir := t.TempDir()
+	systemctl := `#!/bin/sh
+case "$2:$4" in
+  github-backup-archive.service:ActiveState) printf '%s\n' "${SYNTHETIC_UNIT_STATE}" ;;
+  github-backup-archive.service:SubState) printf '%s\n' "${SYNTHETIC_UNIT_STATE}" ;;
+  github-backup-archive.service:Result) printf '%s\n' "${SYNTHETIC_UNIT_RESULT}" ;;
+  github-backup-archive.service:ExecMainStatus) printf '%s\n' "${SYNTHETIC_UNIT_EXIT_STATUS}" ;;
+  github-backup-archive.service:InvocationID) printf '%s\n' '0123456789abcdef0123456789abcdef' ;;
+esac
+`
+	sudo := `#!/bin/sh
+case " $* " in
+  *" _SYSTEMD_INVOCATION_ID="*)
+    if [ -n "${SYNTHETIC_JOURNAL-}" ]; then
+      printf '%s\n' "${SYNTHETIC_JOURNAL}"
+    else
+      exit 1
+    fi
+    ;;
+  *" archive-write-clearance.sh --root-status ")
+    printf '%s\n' \
+      'github_archive_path_state=directory' \
+      'remote_archive_path_state=directory' \
+      'archive_paths_match=true' \
+      'archive_mounts_match=true' \
+      'archive_paths_on_mount=true' \
+      'archive_path_permissions_secure=true'
+    ;;
+  *" archive-write-clearance.sh --status ") printf '%s\n' valid ;;
+  *) exit 1 ;;
+esac
+`
+	journalctl := `#!/bin/sh
+case " $* " in
+  *" _SYSTEMD_INVOCATION_ID="*)
+    if [ -n "${SYNTHETIC_JOURNAL-}" ]; then
+      printf '%s\n' "${SYNTHETIC_JOURNAL}"
+    else
+      exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+`
+	for _, commandFixture := range []struct {
+		name string
+		body string
+	}{
+		{name: "systemctl", body: systemctl},
+		{name: "sudo", body: sudo},
+		{name: "date", body: "#!/bin/sh\nexit 1\n"},
+		{name: "mountpoint", body: "#!/bin/sh\nexit 1\n"},
+		{name: "journalctl", body: journalctl},
+	} {
+		path := filepath.Join(binDir, commandFixture.name)
+		if err := os.WriteFile(path, []byte(commandFixture.body), 0o700); err != nil {
+			t.Fatalf("write synthetic %s: %v", commandFixture.name, err)
+		}
+	}
+	command := exec.Command("sh", "-c", backupArchiveWriterCommand)
+	command.Env = append(
+		os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"SYNTHETIC_UNIT_STATE="+unitState,
+		"SYNTHETIC_UNIT_RESULT="+result,
+		fmt.Sprintf("SYNTHETIC_UNIT_EXIT_STATUS=%d", exitStatus),
+		"SYNTHETIC_JOURNAL="+journal,
+	)
+	outputBytes, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run synthetic writer observation command: %v\n%s", err, outputBytes)
+	}
+	return string(outputBytes)
+}
+
+func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		journal  string
+		boundary string
+	}{
+		{name: "storage EIO", journal: "synthetic writer: Input/output error", boundary: "storage-eio"},
+		{name: "storage read only", journal: "synthetic writer: Read-only file system", boundary: "storage-read-only"},
+		{name: "clearance mount", journal: "archive write clearance denied: synthetic fixture", boundary: "clearance-mount"},
+		{name: "storage metrics clearance", journal: "archive mount identity is not cleared and read-write: mount=/synthetic/mount path=/synthetic/archive", boundary: "clearance-mount"},
+		{name: "authentication", journal: "Permission denied (publickey).", boundary: "auth"},
+		{name: "missing SSH key", journal: "missing GitHub backup ssh key: /synthetic/fixture-key", boundary: "auth"},
+		{name: "missing API token", journal: "missing synthetic-org GitHub API token file: /synthetic/fixture-api-token", boundary: "auth"},
+		{name: "malformed API token", journal: "synthetic-org GitHub API token file must contain exactly one line: /synthetic/fixture-api-token", boundary: "auth"},
+		{name: "empty API tokens", journal: "GitHub API token files must not be empty", boundary: "auth"},
+		{name: "HTTP 401", journal: "curl: (22) The requested URL returned error: 401", boundary: "auth"},
+		{name: "API rate", journal: "curl: (22) The requested URL returned error: 429", boundary: "api-rate"},
+		{name: "Git transfer", journal: "synthetic transport: Connection reset by peer", boundary: "git-transfer"},
+		{name: "Git update wrapper", journal: "failed to update synthetic-org/synthetic-repository; preserving the previous synthetic-org code archive", boundary: "git-transfer"},
+		{name: "invalid mirror cache", journal: "cached repository is not a bare mirror: /synthetic/repository.git", boundary: "git-transfer"},
+		{name: "capacity", journal: "synthetic writer: No space left on device", boundary: "capacity"},
+		{name: "capacity observation", journal: "could not read archive volume capacity for /synthetic/archive", boundary: "capacity"},
+		{name: "compression integrity", journal: "new code archive failed its xz/tar integrity check: synthetic.tar.xz", boundary: "compression-integrity"},
+		{name: "atomic publication", journal: "mv: cannot move synthetic-input to main-code-synthetic.tar.xz", boundary: "atomic-publication"},
+		{name: "storage metrics helper", journal: "archive storage metrics helper is missing or not executable: /synthetic/archive-storage-metrics", boundary: "atomic-publication"},
+		{name: "storage metrics initialization", journal: "failed to initialize archive storage metrics", boundary: "atomic-publication"},
+		{name: "storage metrics update", journal: "failed to update archive storage metrics", boundary: "atomic-publication"},
+		{name: "storage metrics directory", journal: "backup storage metrics directory does not exist: /synthetic/metrics", boundary: "atomic-publication"},
+		{name: "progress metrics refresh", journal: "failed to refresh GitHub backup in-progress metrics", boundary: "atomic-publication"},
+		{name: "retention source", journal: "no complete synthetic-org code archive in /synthetic/archive", boundary: "atomic-publication"},
+		{name: "storage precedence", journal: "tar: synthetic output: Input/output error", boundary: "storage-eio"},
+	} {
+		output := runSyntheticBackupArchiveWriterCommand(t, "failed", "exit-code", 1, testCase.journal)
+		for _, want := range []string{
+			"github_failure_journal_status=complete\n",
+			"github_failure_first_boundary=" + testCase.boundary + "\n",
+			"github_failure_journal_lines=1\n",
+			"github_failure_" + strings.ReplaceAll(testCase.boundary, "-", "_") + "_lines=1\n",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("%s: writer observation missing %q:\n%s", testCase.name, want, output)
+			}
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandDoesNotTreatMountWaitAsFailedBoundary(t *testing.T) {
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		"waiting up to 30s for archive mount /synthetic/mount and /synthetic/archive\n"+
+			"synthetic archive write: Input/output error",
+	)
+	for _, want := range []string{
+		"github_failure_journal_status=complete\n",
+		"github_failure_first_boundary=storage-eio\n",
+		"github_failure_journal_lines=2\n",
+		"github_failure_storage_eio_lines=1\n",
+		"github_failure_clearance_mount_lines=0\n",
+		"github_failure_unclassified_lines=1\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("mount-wait writer observation missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandKeepsUnsupportedStorageMetricTypeUnclassified(t *testing.T) {
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		"unsupported archive type: synthetic",
+	)
+	for _, want := range []string{
+		"github_failure_journal_status=complete\n",
+		"github_failure_first_boundary=unclassified\n",
+		"github_failure_journal_lines=1\n",
+		"github_failure_unclassified_lines=1\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("unsupported storage-metric type observation missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandReducesExactEioInvocationWithoutRawText(t *testing.T) {
+	const redactionMarker = "redaction-marker.example/synthetic-repository"
+	journalLines := []string{redactionMarker}
+	for index := 0; index < 10; index++ {
+		journalLines = append(journalLines, "synthetic archive write: Input/output error")
+	}
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		strings.Join(journalLines, "\n"),
+	)
+	for _, want := range []string{
+		"github_failure_journal_status=complete\n",
+		"github_failure_first_boundary=storage-eio\n",
+		"github_failure_journal_lines=11\n",
+		"github_failure_storage_eio_lines=10\n",
+		"github_failure_unclassified_lines=1\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("EIO writer observation missing %q:\n%s", want, output)
+		}
+	}
+	for _, forbidden := range []string{
+		redactionMarker,
+		"synthetic archive write",
+		"0123456789abcdef0123456789abcdef",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("writer observation leaked raw invocation value %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestBackupArchivesWriterCommandSkipsJournalForHealthyGitHubWriter(t *testing.T) {
+	const redactionMarker = "healthy-redaction-marker.example/synthetic-repository"
+	output := runSyntheticBackupArchiveWriterCommand(t, "inactive", "success", 0, redactionMarker)
+	for _, want := range []string{
+		"github_failure_journal_status=not-applicable\n",
+		"github_failure_first_boundary=none\n",
+		"github_failure_journal_lines=0\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("healthy writer observation missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, redactionMarker) {
+		t.Fatalf("healthy writer observation read or leaked journal text:\n%s", output)
+	}
+}
+
+func TestBackupArchivesWriterCommandFailsClosedAndRedactsAmbiguousJournal(t *testing.T) {
+	const redactionMarker = "ambiguous-redaction-marker.example/synthetic-repository"
+	journalLines := make([]string, 0, backupArchiveGitHubJournalMaxLines+2)
+	for index := int64(0); index <= backupArchiveGitHubJournalMaxLines+1; index++ {
+		journalLines = append(journalLines, fmt.Sprintf("%s-%d", redactionMarker, index))
+	}
+	output := runSyntheticBackupArchiveWriterCommand(t, "failed", "exit-code", 1, strings.Join(journalLines, "\n"))
+	for _, want := range []string{
+		"github_failure_journal_status=ambiguous\n",
+		"github_failure_first_boundary=unclassified\n",
+		"github_failure_journal_lines=513\n",
+		"github_failure_unclassified_lines=513\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("ambiguous writer observation missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, redactionMarker) {
+		t.Fatalf("ambiguous writer observation leaked raw journal text:\n%s", output)
+	}
+}
+
+func TestBackupArchivesWriterCommandFailsClosedOnOverlappingFirstBoundary(t *testing.T) {
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		"curl: synthetic connection reset",
+	)
+	for _, want := range []string{
+		"github_failure_journal_status=ambiguous\n",
+		"github_failure_first_boundary=unclassified\n",
+		"github_failure_journal_lines=1\n",
+		"github_failure_unclassified_lines=1\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("overlapping writer observation missing %q:\n%s", want, output)
 		}
 	}
 }
@@ -1343,12 +1685,19 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 48 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 61 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
 		{name: "github exit", output: strings.Replace(valid, "github_exit_status=0", "github_exit_status=nope", 1), want: "invalid GitHub exit status"},
 		{name: "github invocation", output: strings.Replace(valid, "github_invocation_id=present", "github_invocation_id=not-a-state", 1), want: "invalid github_invocation_id"},
+		{name: "failure journal status", output: strings.Replace(valid, "github_failure_journal_status=not-applicable", "github_failure_journal_status=invalid.example", 1), want: "invalid GitHub failure journal status"},
+		{name: "first failure boundary", output: strings.Replace(valid, "github_failure_first_boundary=none", "github_failure_first_boundary=invalid.example", 1), want: "invalid GitHub first failure boundary"},
+		{name: "failure journal lines", output: strings.Replace(valid, "github_failure_journal_lines=0", "github_failure_journal_lines=many", 1), want: "invalid GitHub failure journal line count"},
+		{name: "failure count", output: strings.Replace(valid, "github_failure_storage_eio_lines=0", "github_failure_storage_eio_lines=many", 1), want: "invalid GitHub failure boundary count for storage-eio"},
+		{name: "failure count coverage", output: strings.Replace(valid, "github_failure_unclassified_lines=0", "github_failure_unclassified_lines=1", 1), want: "boundary counts do not cover"},
+		{name: "complete empty journal", output: strings.Replace(valid, "github_failure_journal_status=not-applicable", "github_failure_journal_status=complete", 1), want: "complete GitHub failure journal has invalid cardinality"},
+		{name: "healthy journal applicability", output: strings.Replace(valid, "github_failure_journal_status=not-applicable", "github_failure_journal_status=unobservable", 1), want: "applicability disagrees"},
 		{name: "github start epoch", output: strings.Replace(valid, "github_exec_start_epoch=0", "github_exec_start_epoch=earlier", 1), want: "invalid github_exec_start_epoch"},
 		{name: "github timer epoch", output: strings.Replace(valid, "github_timer_next_epoch=2000000000", "github_timer_next_epoch=tomorrow", 1), want: "invalid github_timer_next_epoch"},
 		{name: "root observation", output: strings.Replace(valid, "archive_root_observation=observable", "archive_root_observation=maybe", 1), want: "invalid archive_root_observation"},
@@ -1372,6 +1721,14 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		if err == nil || !strings.Contains(err.Error(), testCase.want) {
 			t.Fatalf("%s: parse error=%v, want substring %q", testCase.name, err, testCase.want)
 		}
+	}
+	const redactionMarker = "parser-redaction-marker.example/synthetic-repository"
+	_, err := parseBackupArchiveWriterObservation(
+		"backup-1",
+		strings.Replace(valid, "github_failure_journal_status=not-applicable", "github_failure_journal_status="+redactionMarker, 1),
+	)
+	if err == nil || strings.Contains(err.Error(), redactionMarker) {
+		t.Fatalf("malformed GitHub failure summary was not safely redacted: %v", err)
 	}
 }
 
@@ -1751,6 +2108,19 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.githubGitTransferRetrySeconds == 0 {
 		fixture.githubGitTransferRetrySeconds = 30
 	}
+	if fixture.githubFailureStatus == "" {
+		if backupArchiveGitHubWriterFailed(fixture.unitState, fixture.result, fixture.exitStatus) {
+			fixture.githubFailureStatus = "unobservable"
+		} else {
+			fixture.githubFailureStatus = "not-applicable"
+		}
+	}
+	if fixture.githubFirstFailureBoundary == "" {
+		fixture.githubFirstFailureBoundary = "none"
+	}
+	if fixture.githubFailureBoundaryLines == nil {
+		fixture.githubFailureBoundaryLines = map[string]int64{}
+	}
 	if fixture.archiveRootObservation == "" {
 		fixture.archiveRootObservation = "observable"
 	}
@@ -1960,6 +2330,21 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.clearanceState,
 		*fixture.storageReadable,
 	)
+	output += fmt.Sprintf(
+		"github_failure_journal_status=%s\n"+
+			"github_failure_first_boundary=%s\n"+
+			"github_failure_journal_lines=%d\n",
+		fixture.githubFailureStatus,
+		fixture.githubFirstFailureBoundary,
+		fixture.githubFailureJournalLines,
+	)
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		output += fmt.Sprintf(
+			"%s=%d\n",
+			boundaryField.field,
+			fixture.githubFailureBoundaryLines[boundaryField.boundary],
+		)
+	}
 	for _, event := range fixture.storageEvents {
 		output += fmt.Sprintf("remote_storage_event=%d,%s,%s\n", event.epoch, event.kind, event.device)
 	}

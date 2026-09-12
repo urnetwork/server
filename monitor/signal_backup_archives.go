@@ -22,9 +22,26 @@ const (
 	backupArchiveStorageLookback       = 30 * 24 * time.Hour
 	backupArchiveTimerImminent         = 5 * time.Minute
 	backupArchiveGenerationMaximumSize = 200
+	backupArchiveGitHubJournalMaxLines = int64(512)
 )
 
 var backupArchiveGenerationPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+var backupArchiveGitHubFailureBoundaryFields = []struct {
+	boundary string
+	field    string
+}{
+	{boundary: "storage-eio", field: "github_failure_storage_eio_lines"},
+	{boundary: "storage-read-only", field: "github_failure_storage_read_only_lines"},
+	{boundary: "clearance-mount", field: "github_failure_clearance_mount_lines"},
+	{boundary: "auth", field: "github_failure_auth_lines"},
+	{boundary: "api-rate", field: "github_failure_api_rate_lines"},
+	{boundary: "git-transfer", field: "github_failure_git_transfer_lines"},
+	{boundary: "capacity", field: "github_failure_capacity_lines"},
+	{boundary: "compression-integrity", field: "github_failure_compression_integrity_lines"},
+	{boundary: "atomic-publication", field: "github_failure_atomic_publication_lines"},
+	{boundary: "unclassified", field: "github_failure_unclassified_lines"},
+}
 
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
 github_unit_state=$(systemctl show github-backup-archive.service -p ActiveState --value 2>/dev/null || true)
@@ -45,6 +62,127 @@ github_timer_last_epoch=$(date -d "${github_timer_last}" +%s 2>/dev/null || true
 github_environment=$(systemctl show github-backup-archive.service -p Environment --value 2>/dev/null || true)
 github_git_transfer_attempts=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_ATTEMPTS=//p' | tail -n 1)
 github_git_transfer_retry_seconds=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_RETRY_SECONDS=//p' | tail -n 1)
+emit_github_failure_summary() {
+	printf 'github_failure_journal_status=%s\n' "$1"
+	printf 'github_failure_first_boundary=none\n'
+	printf 'github_failure_journal_lines=0\n'
+	printf 'github_failure_storage_eio_lines=0\n'
+	printf 'github_failure_storage_read_only_lines=0\n'
+	printf 'github_failure_clearance_mount_lines=0\n'
+	printf 'github_failure_auth_lines=0\n'
+	printf 'github_failure_api_rate_lines=0\n'
+	printf 'github_failure_git_transfer_lines=0\n'
+	printf 'github_failure_capacity_lines=0\n'
+	printf 'github_failure_compression_integrity_lines=0\n'
+	printf 'github_failure_atomic_publication_lines=0\n'
+	printf 'github_failure_unclassified_lines=0\n'
+}
+reduce_github_failure_journal() {
+	awk '
+	function classify(message, class_count, class) {
+		message=tolower(message)
+		# A specific operating-system storage result takes precedence over the
+		# command (tar, xz, mv, or git) that happened to encounter it.
+		if (message ~ /input\/output error|i\/o error|(^|[^[:alnum:]_])eio([^[:alnum:]_]|$)/) return "storage-eio"
+		if (message ~ /read-only file system|filesystem[^[:alnum:]]+read-only|(^|[^[:alnum:]_])erofs([^[:alnum:]_]|$)/) return "storage-read-only"
+		if (message ~ /no space left on device|disk quota exceeded|file too large|could not read archive volume capacity/) return "capacity"
+		# Explicit credential and HTTP 401 evidence takes precedence over the
+		# generic GitHub API/curl context carried by those same messages.
+		if (message ~ /authentication failed|permission denied \(publickey\)|publickey authentication|bad credentials|missing github backup ssh key|missing .* github api token file|github api token file.*(must|empty)|returned error: 401|http[^0-9]*401/) return "auth"
+
+		class_count=0
+		class=""
+		if (message ~ /archive write clearance|archive write-clearance|archive mount is not present and read-write|archive mount wait values must|refusing to use \/ as the archive mount|archive mount did not become present and read-write|archive mount identity is not cleared and read-write|archive path is outside|mirror work path must be on the archive drive|configured archive mount|clearance marker|clearance probation|stable archive .*identity|mounted archive does not match/) {class="clearance-mount"; class_count++}
+		if (message ~ /api rate limit|secondary rate limit|github api|returned error: (403|429)|http[^0-9]*(403|429)|curl:|failed to discover every .* repository|github returned no repositories|github organization repositories response|unsafe github repository|unexpected github repository/) {class="api-rate"; class_count++}
+		if (message ~ /connection reset|broken pipe|unexpected disconnect|early eof|remote end hung up|could not read from remote repository|unable to access|ssh: connect|connection timed out|network is unreachable|no route to host|connection refused|could not resolve hostname|repository not found|failed to (update|mirror) .*; preserving the previous .* code archive|failed to fetch git lfs objects .*; preserving the previous .* code archive|git (mirror update|mirror clone|lfs fetch).*failed|refusing unexpected (clone attempt|repository cache) path|cached repository is not a bare mirror|failed to install cached mirror/) {class="git-transfer"; class_count++}
+		if (message ~ /new code archive failed its xz\/tar integrity check|failed to create .*\.tar\.xz|(^|[^[:alnum:]_])xz:|(^|[^[:alnum:]_])tar:|sha256sum:/) {class="compression-integrity"; class_count++}
+		if (message ~ /failed to (initialize|update|refresh).*backup.*metrics|failed to (initialize|update) archive storage metrics|archive storage metrics helper is missing or not executable|backup (integrity |storage )?metrics directory does not exist|refusing conflicting code archive migration target|no (staged|complete) .* code archive|mv:.*\.tar\.xz|ln:.*main-code-|cp:.*main-code-|chmod:.*\.tar\.xz/) {class="atomic-publication"; class_count++}
+		if (class_count != 1) {
+			if (class_count > 1 && first_boundary == "") ambiguous_before_first=1
+			return "unclassified"
+		}
+		return class
+	}
+	{
+		if (journal_lines >= 513) {
+			overflow=1
+			next
+		}
+		journal_lines++
+		class=classify($0)
+		counts[class]++
+		if (first_boundary == "" && class != "unclassified") first_boundary=class
+	}
+	END {
+		status="complete"
+		if (journal_lines == 0) {
+			status="unobservable"
+			first_boundary="none"
+		} else if (overflow || journal_lines > 512 || ambiguous_before_first) {
+			status="ambiguous"
+			first_boundary="unclassified"
+		} else if (first_boundary == "") {
+			first_boundary="unclassified"
+		}
+		printf "github_failure_journal_status=%s\n", status
+		printf "github_failure_first_boundary=%s\n", first_boundary
+		printf "github_failure_journal_lines=%d\n", journal_lines
+		printf "github_failure_storage_eio_lines=%d\n", counts["storage-eio"]
+		printf "github_failure_storage_read_only_lines=%d\n", counts["storage-read-only"]
+		printf "github_failure_clearance_mount_lines=%d\n", counts["clearance-mount"]
+		printf "github_failure_auth_lines=%d\n", counts["auth"]
+		printf "github_failure_api_rate_lines=%d\n", counts["api-rate"]
+		printf "github_failure_git_transfer_lines=%d\n", counts["git-transfer"]
+		printf "github_failure_capacity_lines=%d\n", counts["capacity"]
+		printf "github_failure_compression_integrity_lines=%d\n", counts["compression-integrity"]
+		printf "github_failure_atomic_publication_lines=%d\n", counts["atomic-publication"]
+		printf "github_failure_unclassified_lines=%d\n", counts["unclassified"]
+	}'
+}
+github_failure_exit_status=${github_exit_status}
+case "${github_failure_exit_status}" in ''|*[!0-9]*) github_failure_exit_status=0 ;; esac
+github_writer_failed=1
+case "${github_unit_state}" in
+	active|activating|reloading|deactivating) github_writer_failed=0 ;;
+	inactive)
+		if test "${github_result}" = success && test "${github_failure_exit_status}" = 0; then
+			github_writer_failed=0
+		fi
+		;;
+esac
+github_failure_summary=$(emit_github_failure_summary not-applicable)
+if test "${github_writer_failed}" = 1; then
+	github_failure_summary=$(emit_github_failure_summary unobservable)
+	if printf '%s\n' "${github_invocation_id}" |
+		awk 'NR == 1 && length($0) == 32 && $0 ~ /^[[:xdigit:]]+$/ {valid=1} END {exit !(NR == 1 && valid)}'; then
+		github_failure_journal_source=unavailable
+		if command journalctl --quiet --no-pager -n 1 -o cat \
+			"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+			_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+			awk 'END {exit(NR == 0)}'; then
+			github_failure_journal_source=direct
+		elif sudo -n journalctl --quiet --no-pager -n 1 -o cat \
+			"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+			_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+			awk 'END {exit(NR == 0)}'; then
+			github_failure_journal_source=sudo
+		fi
+		case "${github_failure_journal_source}" in
+			sudo)
+				github_failure_summary=$(sudo -n journalctl --quiet --no-pager -n 513 -o cat \
+					"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+					_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+					reduce_github_failure_journal)
+				;;
+			direct)
+				github_failure_summary=$(command journalctl --quiet --no-pager -n 513 -o cat \
+					"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+					_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+					reduce_github_failure_journal)
+				;;
+		esac
+	fi
+fi
 remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
 remote_unit_substate=$(systemctl show remote-backup-archive.service -p SubState --value 2>/dev/null || true)
 remote_main_pid=$(systemctl show remote-backup-archive.service -p MainPID --value 2>/dev/null || true)
@@ -189,6 +327,7 @@ printf 'github_timer_next_epoch=%s\n' "${github_timer_next_epoch}"
 printf 'github_timer_last_epoch=%s\n' "${github_timer_last_epoch}"
 printf 'github_git_transfer_attempts=%s\n' "${github_git_transfer_attempts}"
 printf 'github_git_transfer_retry_seconds=%s\n' "${github_git_transfer_retry_seconds}"
+printf '%s\n' "${github_failure_summary}"
 printf 'archive_root_observation=%s\n' "${archive_root_observation}"
 printf 'github_archive_path_state=%s\n' "${github_archive_path_state}"
 printf 'remote_archive_path_state=%s\n' "${remote_archive_path_state}"
@@ -352,6 +491,7 @@ type backupArchiveWriterObservation struct {
 	timerLast                     time.Time
 	githubGitTransferAttempts     int64
 	githubGitTransferRetrySeconds int64
+	githubFailure                 backupArchiveGitHubFailureObservation
 	archiveRootObservation        string
 	githubArchivePathState        string
 	remoteArchivePathState        string
@@ -388,6 +528,13 @@ type backupArchiveWriterObservation struct {
 	clearanceState                string
 	storageReadable               bool
 	storageEvents                 []backupArchiveStorageEvent
+}
+
+type backupArchiveGitHubFailureObservation struct {
+	journalStatus string
+	firstBoundary string
+	journalLines  int64
+	boundaryLines map[string]int64
 }
 
 type backupArchiveStorageEvent struct {
@@ -787,6 +934,19 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_timer_last_epoch",
 		"github_git_transfer_attempts",
 		"github_git_transfer_retry_seconds",
+		"github_failure_journal_status",
+		"github_failure_first_boundary",
+		"github_failure_journal_lines",
+		"github_failure_storage_eio_lines",
+		"github_failure_storage_read_only_lines",
+		"github_failure_clearance_mount_lines",
+		"github_failure_auth_lines",
+		"github_failure_api_rate_lines",
+		"github_failure_git_transfer_lines",
+		"github_failure_capacity_lines",
+		"github_failure_compression_integrity_lines",
+		"github_failure_atomic_publication_lines",
+		"github_failure_unclassified_lines",
 		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
@@ -948,6 +1108,18 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
+	githubFailure, err := parseBackupArchiveGitHubFailureObservation(values)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	githubWriterFailed := backupArchiveGitHubWriterFailed(
+		values["github_unit_state"],
+		values["github_result"],
+		githubExitStatus,
+	)
+	if githubWriterFailed == (githubFailure.journalStatus == "not-applicable") {
+		return backupArchiveWriterObservation{}, fmt.Errorf("GitHub failure journal applicability disagrees with terminal unit state")
+	}
 	archivePathBools := map[string]bool{}
 	for _, key := range []string{
 		"archive_paths_match",
@@ -1030,6 +1202,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		timerLast:                     unixIntegerTime(githubTimerLastEpoch),
 		githubGitTransferAttempts:     githubGitTransferAttempts,
 		githubGitTransferRetrySeconds: githubGitTransferRetrySeconds,
+		githubFailure:                 githubFailure,
 		archiveRootObservation:        values["archive_root_observation"],
 		githubArchivePathState:        values["github_archive_path_state"],
 		remoteArchivePathState:        values["remote_archive_path_state"],
@@ -1070,6 +1243,79 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		clearanceState:     values["remote_clearance_state"],
 		storageReadable:    storageReadable,
 		storageEvents:      storageEvents,
+	}, nil
+}
+
+func parseBackupArchiveGitHubFailureObservation(
+	values map[string]string,
+) (backupArchiveGitHubFailureObservation, error) {
+	status := values["github_failure_journal_status"]
+	switch status {
+	case "not-applicable", "complete", "ambiguous", "unobservable":
+	default:
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub failure journal status")
+	}
+	firstBoundary := values["github_failure_first_boundary"]
+	validFirstBoundary := firstBoundary == "none"
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		if firstBoundary == boundaryField.boundary {
+			validFirstBoundary = true
+			break
+		}
+	}
+	if !validFirstBoundary {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub first failure boundary")
+	}
+
+	journalLines, err := strconv.ParseInt(values["github_failure_journal_lines"], 10, 64)
+	if err != nil || journalLines < 0 || journalLines > backupArchiveGitHubJournalMaxLines+1 {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub failure journal line count")
+	}
+	boundaryLines := make(map[string]int64, len(backupArchiveGitHubFailureBoundaryFields))
+	var classifiedLines int64
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		count, err := strconv.ParseInt(values[boundaryField.field], 10, 64)
+		if err != nil || count < 0 || count > backupArchiveGitHubJournalMaxLines+1 {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf(
+				"invalid GitHub failure boundary count for %s",
+				boundaryField.boundary,
+			)
+		}
+		boundaryLines[boundaryField.boundary] = count
+		classifiedLines += count
+	}
+	if classifiedLines != journalLines {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("GitHub failure boundary counts do not cover the bounded journal")
+	}
+
+	switch status {
+	case "not-applicable", "unobservable":
+		if journalLines != 0 || firstBoundary != "none" {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("unobserved GitHub failure journal contains classification state")
+		}
+	case "ambiguous":
+		if journalLines == 0 || journalLines > backupArchiveGitHubJournalMaxLines+1 || firstBoundary != "unclassified" {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("ambiguous GitHub failure journal is not fail-closed")
+		}
+	case "complete":
+		if journalLines == 0 || journalLines > backupArchiveGitHubJournalMaxLines {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("complete GitHub failure journal has invalid cardinality")
+		}
+		recognizedLines := journalLines - boundaryLines["unclassified"]
+		if recognizedLines == 0 {
+			if firstBoundary != "unclassified" {
+				return backupArchiveGitHubFailureObservation{}, fmt.Errorf("unclassified GitHub failure journal claims a boundary")
+			}
+		} else if firstBoundary == "none" || firstBoundary == "unclassified" || boundaryLines[firstBoundary] == 0 {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("GitHub first failure boundary is not represented in the journal counts")
+		}
+	}
+
+	return backupArchiveGitHubFailureObservation{
+		journalStatus: status,
+		firstBoundary: firstBoundary,
+		journalLines:  journalLines,
+		boundaryLines: boundaryLines,
 	}, nil
 }
 
@@ -1637,16 +1883,87 @@ func evaluateBackupArchiveRetry(observation backupArchiveWriterObservation) find
 // Reports an unsuccessful GitHub archive invocation independently of archive
 // age. A failed oneshot otherwise remains invisible while its last completed
 // generation is still inside the five-day freshness objective.
+func backupArchiveGitHubWriterFailed(unitState, result string, exitStatus int64) bool {
+	switch unitState {
+	case "active", "activating", "reloading", "deactivating":
+		return false
+	case "inactive":
+		return result != "success" || exitStatus != 0
+	default:
+		return true
+	}
+}
+
+func backupArchiveGitHubFailureText(observation backupArchiveGitHubFailureObservation) string {
+	parts := []string{
+		fmt.Sprintf("failure_journal_status=%s", observation.journalStatus),
+		fmt.Sprintf("first_failure_boundary=%s", observation.firstBoundary),
+		fmt.Sprintf("failure_journal_lines=%d", observation.journalLines),
+	}
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		parts = append(parts, fmt.Sprintf(
+			"%s_lines=%d",
+			strings.ReplaceAll(boundaryField.boundary, "-", "_"),
+			observation.boundaryLines[boundaryField.boundary],
+		))
+	}
+	return strings.Join(parts, " ")
+}
+
 func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) finding {
 	const class = "backup-archive-writer-failed"
 	target := writer.host + "/github"
-	switch writer.unitState {
-	case "active", "activating", "reloading", "deactivating":
+	if !backupArchiveGitHubWriterFailed(writer.unitState, writer.result, writer.exitStatus) {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
-	case "inactive":
-		if writer.result == "success" && writer.exitStatus == 0 {
-			return healthyFinding("observability/backup-archives", tierPage, class, target)
+	}
+
+	mechanism := "The GitHub archive oneshot is not executing and its effective systemd state does not record a successful exit. Fresh scrape timestamps and a still-young previous tarball can therefore hide a failed writer until the five-day archive-age objective is breached."
+	action := "Keep the single-writer boundary. Preserve completed archives and failed-invocation state, repair only the first proven boundary, and obtain operator authorization before one catch-up invocation."
+	switch writer.githubFailure.journalStatus {
+	case "complete":
+		switch writer.githubFailure.firstBoundary {
+		case "storage-eio":
+			mechanism += " The exact failed invocation's first recognized boundary is an operating-system storage EIO. A currently read-write mount and currently valid clearance are later, independent observations; neither proves that the writer's storage path was usable during this invocation."
+			action += " Reconcile the invocation boundary with exact-lineage filesystem and device evidence, and require the stable-identity clearance interlock to remain valid after that boundary before any retry. Do not relabel the failure as provider, API, or Git transport merely because the volume is read-write now."
+		case "storage-read-only":
+			mechanism += " The exact failed invocation's first recognized boundary is a read-only filesystem result. Present mount options are later state and cannot clear the historical writer failure."
+			action += " Resolve the archive filesystem and stable-device clearance boundary without a live read-write remount of an aborted filesystem, then revalidate the exact archive root before any retry."
+		case "clearance-mount":
+			mechanism += " The exact failed invocation first crossed the archive clearance, mount, stable-identity, or root-placement interlock."
+			action += " Repair the privacy-reduced clearance/mount contract and prove the expected root is on that mounted filesystem; never create a lookalike directory beneath a missing mount."
+		case "auth":
+			mechanism += " The exact failed invocation first exposed a GitHub SSH or API authentication boundary."
+			action += " Validate the installed backup identity and token-file contract through bounded provider checks without copying credential values into logs or alerts."
+		case "api-rate":
+			mechanism += " The exact failed invocation first exposed GitHub API access, response-contract, or rate-limit evidence."
+			action += " Inspect the bounded provider response class and rate-limit window, preserving the prior archive; do not rotate credentials unless authentication is independently proven bad."
+		case "git-transfer":
+			mechanism += " The exact failed invocation first exposed a repository mirror, clone, LFS, SSH, or network-transfer boundary."
+			action += " Preserve the mirror cache and correlate the invocation with bounded client, provider, and path evidence; allow only the configured finite idempotent transfer retry."
+		case "capacity":
+			mechanism += " The exact failed invocation first exposed filesystem capacity, quota, or file-size exhaustion."
+			action += " Prove byte and inode headroom on the exact archive filesystem before retrying; do not prune a last recovery point merely to silence the alert."
+		case "compression-integrity":
+			mechanism += " The exact failed invocation first exposed archive compression, checksum, or tar/xz integrity evidence."
+			action += " Preserve the previous atomic archive, diagnose the bounded compression/integrity stage, and require a full writer-owned validation before publication."
+		case "atomic-publication":
+			mechanism += " The exact failed invocation first exposed metrics, retention, or final atomic-publication evidence."
+			action += " Preserve the previous discoverable archive and repair the exact same-filesystem publication/retention contract before retrying."
+		case "unclassified":
+			mechanism += " The complete bounded invocation journal contains no uniquely recognized failure boundary, so the cause remains unclassified rather than being guessed from present state."
+			action += " Inspect that exact invocation under operator access and extend the closed reducer only from a stable, privacy-safe error class; do not copy raw journal text into the alert."
 		}
+	case "ambiguous":
+		if writer.githubFailure.journalLines > backupArchiveGitHubJournalMaxLines {
+			mechanism += fmt.Sprintf(" The exact invocation exceeded the %d-line classification bound, so the retained tail cannot prove the invocation's first failed boundary.", backupArchiveGitHubJournalMaxLines)
+			action += " Inspect the exact invocation under bounded operator access; do not infer a first boundary from the clipped tail or broaden the monitor to emit raw journal text."
+		} else {
+			mechanism += " Before any unique boundary was established, one exact-invocation message matched multiple closed failure classes. The first failed boundary is therefore ambiguous rather than whichever classifier happened to run first."
+			action += " Inspect the exact invocation under bounded operator access and refine only stable non-overlapping patterns; do not select a boundary by classifier order or emit the raw message."
+		}
+	case "unobservable":
+		mechanism += " The exact failed-invocation journal could not be selected and reduced because its identifier was absent or invalid, access failed, or it contained no observable records. The cause remains unknown."
+		action += " Restore read-only access to the exact InvocationID journal and rerun the reducer; do not substitute another unit generation or an unbounded unit journal."
 	}
 
 	return finding{
@@ -1657,10 +1974,10 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			"%s code archive writer has an unsuccessful terminal unit state",
 			target,
 		),
-		mechanism: "The GitHub archive oneshot is not executing and its effective systemd state does not record a successful exit. Fresh scrape timestamps and a still-young previous tarball can therefore hide a failed writer until the five-day archive-age objective is breached.",
-		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0.",
+		mechanism: mechanism,
+		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0. For an unsuccessful terminal invocation, at most 512 exact InvocationID journal lines are reduced on-host to one closed first-boundary class plus line counts.",
 		observed: fmt.Sprintf(
-			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d invocation_id_present=%t exec_start_monotonic=%d",
+			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d invocation_id_present=%t exec_start_monotonic=%d %s current_mount_state=%s current_clearance_state=%s current_root_observation=%s",
 			writer.unitState,
 			writer.unitSubstate,
 			writer.mainPID,
@@ -1668,10 +1985,14 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			writer.exitStatus,
 			writer.invocationID != "none" && writer.invocationID != "unknown",
 			writer.execStart,
+			backupArchiveGitHubFailureText(writer.githubFailure),
+			writer.remoteMountState,
+			writer.clearanceState,
+			writer.archiveRootObservation,
 		),
-		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, InvocationID presence, and monotonic start time are read directly from the effective GitHub archive unit. The invocation identifier itself, command arguments, credentials, and journal text are not emitted.",
-		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. The archive volume's hardware/filesystem clearance remains a separate prerequisite; clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
-		action:   "Keep the single-writer boundary. Read the bounded unit journal and classify the first failed dependency among archive clearance/mount state, GitHub authentication/API access, local capacity, repository transfer, compression, and atomic publication. Do not delete partial state, clear the failure as a substitute for repair, or manually start a writer while another archive job is active. After the cause and storage prerequisites are proven, obtain operator authorization before enabling a missed trigger or starting one catch-up invocation.",
+		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, InvocationID presence, and monotonic start time are read directly from the effective GitHub archive unit. On that host only, a validated raw InvocationID and unit filter select at most 513 journal messages, where the final record is an overflow sentinel; the reducer returns only a completeness state, first closed boundary, and per-class counts. The invocation identifier, raw messages, repository and path names, endpoints, command arguments, and credentials never leave the host.",
+		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. Current archive mount, clearance, and root results are separate point-in-time controls and cannot erase a historical exact-invocation result. Clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
+		action:   action,
 		verify:   "A subsequent authorized invocation has a new nonzero InvocationID and post-repair start boundary, runs as the sole writer, exits with Result=success and ExecMainStatus=0, validates both code tarballs and manifests, and publishes both new generations on two direct Mimir reads. The timer must independently pass its future-schedule gate.",
 		playbook: "SIGNALS.md §11.22",
 	}

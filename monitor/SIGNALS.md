@@ -11787,7 +11787,25 @@ role. It also reads each archive writer directly on that backup host. For
 `github-backup-archive.service` it reads active state, substate, MainPID,
 result, exit status, current InvocationID presence, and monotonic start time;
 from that unit's effective environment it reduces only the numeric Git transfer
-attempt and retry-delay policy;
+attempt and retry-delay policy. When that unit has an unsuccessful terminal
+state, the same host command validates the raw InvocationID locally and selects
+only that exact invocation and unit from the journal. At most 513 message lines
+enter an on-host closed classifier: 512 are the diagnostic bound and the 513th
+is an overflow sentinel. Ordinary journal read access is tried before the sudo
+fallback, so a working direct path does not generate a denied privileged-access
+record on every failed-writer probe. The command returns only `complete`,
+`ambiguous`, or `unobservable`, the first uniquely recognized boundary, total
+line count, and per-class counts for storage EIO, storage read-only,
+clearance/mount, authentication, API/rate, Git transfer, capacity,
+compression/integrity, atomic publication, and unclassified text. A healthy or
+executing unit returns
+`not-applicable` without reading its invocation journal. The raw InvocationID,
+journal messages, repository and path names, endpoints, and credentials never
+leave the backup host. Explicit missing, malformed, or empty GitHub credential
+files and HTTP 401 are authentication even though their messages also name the
+API or `curl`; stable storage-metrics helper, directory, and writer-wrapper
+failures are atomic-publication boundaries. A nonfatal mount-wait message is
+unclassified and cannot outrank the later terminal boundary;
 for `github-backup-archive.timer` it reads active state, durable unit-file
 state, and its next realtime trigger. The effective
 `remote-backup-archive.service` contributes the equivalent execution identity,
@@ -12030,11 +12048,23 @@ BROKEN:
   an execution transition and its terminal ActiveState, Result, or
   ExecMainStatus is unsuccessful. It is independent of the five-day age gate:
   a valid prior tarball can remain fresh while every future code recovery point
-  is already broken. Preserve invocation-ID privacy, inspect only the bounded
-  unit journal, and classify archive clearance/mount, provider authentication,
-  API/transfer, capacity, compression, and atomic-publication boundaries before
-  retrying. Clearing systemd's failed marker is not repair. Keep the
-  single-writer rule and obtain operator authorization before one catch-up run.
+  is already broken. The alert joins the terminal state to the privacy-reduced
+  exact-invocation journal result above. `complete` identifies the first closed
+  class even when earlier informational or otherwise unclassified lines exist;
+  its per-class counts preserve that distinction without exposing text.
+  `ambiguous` means the invocation crossed the 512-line bound, so the retained
+  tail cannot prove the first boundary, or that the earliest classifiable line
+  matched multiple closed classes. Classifier order never chooses between
+  overlapping evidence. `unobservable` means the InvocationID was absent or
+  invalid, journal access failed, or no exact records were readable. Neither
+  state may be coerced to `unclassified`, and a complete
+  all-unclassified journal must not be guessed from current mount or provider
+  state. Current archive mount, clearance, and root results remain separately
+  labeled point-in-time controls; a later read-write mount or valid clearance
+  cannot erase a storage EIO or read-only result from the failed invocation.
+  Clearing systemd's failed marker is not repair. Preserve the single-writer
+  rule, repair the first proven boundary, and obtain operator authorization
+  before one catch-up run.
 - `backup-archive-git-transfer-retry-disabled` is immediate when the effective
   GitHub writer does not configure exactly four transfer attempts with a
   30-second delay. Every repository must succeed before its organization's
@@ -12580,6 +12610,27 @@ health; after 30 days even that historical value becomes no-data. Never apply
 `last_over_time`, `max_over_time`, or an absent-to-zero fallback to the current
 health panels, because doing so would turn an offline exporter into a healthy
 archive claim.
+
+A later bounded 2026-09-11 direct writer snapshot exposed the exact gap in the
+generic writer-failed page. `github-backup-archive.service` was terminally
+failed with exit status one. Its exact invocation began and ended at
+`2026-09-11T15:41:35Z`; the bounded journal contained 11 message lines, with
+one line outside the closed classifier followed by ten `storage-eio` lines.
+The privacy-retained raw-journal SHA-256 was
+`e8b62ee1a410070a613e0eb34b14f9aa09c71aa6407bd2a6508684f63b8c0b35`.
+No authentication, API/rate, Git-transfer, capacity,
+compression/integrity, or atomic-publication class was present. Independently,
+the point-in-time archive checks reported a read-write volume and valid
+clearance, while the timer was active, enabled, and scheduled for
+`2026-09-12T13:00:00Z`. Those later controls rule out neither historical EIO
+nor a writer-visible path fault at the invocation boundary; they also do not
+authorize a retry. The previous signal reported only the unsuccessful unit and
+asked an operator to inspect raw journal text, so it could not identify this
+first classifiable boundary while preserving privacy. The exact-invocation
+on-host reducer closes that visibility gap: the alert can report
+`failure_journal_status=complete`, `first_failure_boundary=storage-eio`,
+`failure_journal_lines=11`, `storage_eio_lines=10`, and
+`unclassified_lines=1`, with every raw message and identity withheld.
 
 ---
 
