@@ -122,6 +122,7 @@ type campaignManifest struct {
 	Arms      []manifestArm     `json:"arms"`
 	Filters   map[string]string `json:"filters"`
 	BaseSeed  int64             `json:"base_seed"`
+	SeedStep  int64             `json:"seed_step"`
 	RunCount  int               `json:"run_count"`
 	Runs      []manifestRun     `json:"runs"`
 	Host      string            `json:"host"`
@@ -158,6 +159,7 @@ func runCampaign(args []string) error {
 	flags.Var(&armSdks, "arm-sdk", "name=/path/to/sdk (optional per-arm SDK tree)")
 	runs := flags.Int("runs", 5, "repetitions per arm")
 	seed := flags.Int64("seed", 20260910, "base seed")
+	seedStep := flags.Int64("seed-step", 1, "seed increment per repetition; 0 repeats one seed")
 	filters := map[string]*string{}
 	for _, name := range []string{"route", "profile", "workload", "direction", "topology", "resource", "byte-count", "lanes", "feature"} {
 		filters[name] = flags.String(name, "", "CONNECT_PERFVAR_"+strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
@@ -195,6 +197,7 @@ func runCampaign(args []string) error {
 		ServerRev: gitRevision(serverAbsolute),
 		Filters:   map[string]string{},
 		BaseSeed:  *seed,
+		SeedStep:  *seedStep,
 		RunCount:  *runs,
 		GoVersion: commandOutput("go", "version"),
 	}
@@ -246,7 +249,7 @@ func runCampaign(args []string) error {
 		rotation := (run - 1) % len(manifest.Arms)
 		order := append(slices.Clone(manifest.Arms[rotation:]), manifest.Arms[:rotation]...)
 		for _, arm := range order {
-			runSeed := *seed + int64(run-1)
+			runSeed := *seed + *seedStep*int64(run-1)
 			logPath := filepath.Join(outAbsolute, arm.Name, fmt.Sprintf("run-%02d.log", run))
 			if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 				return err
