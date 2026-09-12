@@ -574,7 +574,10 @@ func (self pgbouncerProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 // pgVacuumProbe is SIGNALS.md 2.4: dead-tuple accumulation on hot tables.
 type pgVacuumProbe struct{}
 
-const vacuumDeadTupleAlertFloor int64 = 10_000_000
+const (
+	vacuumDeadTupleAlertFloor  int64 = 10_000_000
+	vacuumOldHorizonAgeSeconds       = 60
+)
 
 const pgVacuumHealthSQL = `
 	WITH oldest_horizon AS MATERIALIZED (
@@ -658,6 +661,30 @@ func isPaymentPlannerVacuumHorizon(query string) bool {
 		strings.Contains(lowerQuery, "< end_time")
 }
 
+func isPureCascadeVacuumRelation(relation string) bool {
+	switch relation {
+	case "contract_close", "transfer_escrow", "transfer_escrow_sweep":
+		return true
+	default:
+		return false
+	}
+}
+
+func vacuumHasReportedWork(r pgRow) bool {
+	return r.str(4) != "" &&
+		(0 < atoiRow(r, 7) || 0 < atoiRow(r, 8) || 0 < atoiRow(r, 9) || 0 < atoiRow(r, 10))
+}
+
+// vacuumHasOldHorizon applies the same one-minute boundary used to reject a
+// fresh read-only attribution below. The xid distance is deliberately absent:
+// a new snapshot can inherit a large backend_xmin age from cluster state, but
+// it has not itself held that horizon long enough to make cleanup overdue.
+func vacuumHasOldHorizon(r pgRow) bool {
+	return r.str(12) != "" &&
+		r.str(12) != "0" &&
+		vacuumOldHorizonAgeSeconds <= atoiRow(r, 16)
+}
+
 func (self pgVacuumProbe) id() string             { return "pg/dead-tuples" }
 func (self pgVacuumProbe) tier() string           { return tierWarn }
 func (self pgVacuumProbe) cadence() time.Duration { return 5 * time.Minute }
@@ -726,11 +753,16 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			context += " The task-canary signal is authoritative for the Payout row. In the affected deployment, the outer plan transaction can later sit idle while a deliberately separate reliability-maintenance transaction runs; PostgreSQL's global five-minute idle-in-transaction timeout then closes that outer connection."
 			action = "Let the bounded payout attempt reach its task outcome, and roll out the payment-plan SET LOCAL idle_in_transaction_session_timeout override together with bounded plan slices. Do not cancel this bounded reader solely from its sampled age, disable the database-wide timeout, or blame it for the retention write fan-out."
 			verify = "A Payout slice commits and clears its task error, an unrelated PostgreSQL session retains the global five-minute idle-in-transaction timeout, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
-		} else if lowerQuery := strings.TrimSpace(strings.ToLower(r.str(20))); atoiRow(r, 16) < 60 && strings.HasPrefix(lowerQuery, "select ") {
+		} else if lowerQuery := strings.TrimSpace(strings.ToLower(r.str(20))); atoiRow(r, 16) < vacuumOldHorizonAgeSeconds && strings.HasPrefix(lowerQuery, "select ") {
 			mechanism += " The selected candidate is a fresh read-only snapshot, not a persistent horizon holder. Its large backend_xmin age is inherited from cluster transaction state; a seconds-old SELECT does not become the owner merely because it was sampled after the real old transaction released."
 			context += " Treat this row as negative attribution evidence. Continuing dead-row growth with per-index progress points to writer churn and cleanup debt; use the retention, close-backlog, and active-query signals to name those writers."
 			action = "Do not cancel or tune around the fresh SELECT. Let the progressing vacuum continue and address only a separately proven high-row writer or genuinely old transaction."
 			verify = "The sampled read disappears normally, index progress continues, known high-row writers are bounded, and " + recoveryTarget + " on consecutive five-minute samples."
+		} else if isPureCascadeVacuumRelation(r.str(0)) && vacuumHasReportedWork(r) && !vacuumHasOldHorizon(r) {
+			mechanism = "This intentionally high-threshold pure-cascade table has an active paced autovacuum that has already reported heap or index work. A bounded trigger overshoot while ordinary writes continue is consistent with normal trigger-to-completion cleanup; this single sample does not prove that cleanup is stalled or that a writer is defective. The warning remains useful because debt can continue rising until the pass completes."
+			context = "The fixed threshold and paced vacuum trade bounded dead space for buffer-cache safety on a giant cascade victim. Compare heap, index, and phase counters across five-minute samples; only unchanged progress, an old horizon or lock, or failure to recover after completion establishes an overdue cleanup boundary."
+			action = "Preserve the active autovacuum and compare its heap and index counters at the next five-minute sample. Escalate only a separately identified writer or blocker if progress stops or the completed pass does not recover; do not run a manual vacuum, cancel the worker, or retune the table from one trigger overshoot."
+			verify = "Vacuum counters continue advancing, the pass completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		}
 		findings = append(findings, finding{
 			probeId: "pg/dead-tuples", tier: tierWarn,

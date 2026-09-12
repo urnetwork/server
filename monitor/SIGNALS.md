@@ -2514,6 +2514,24 @@ generic 10M comparison emitted a false warning; the probe now reads each
 table's reloptions and keeps the 10M floor for tables without a larger fixed
 threshold.
 
+The 2026-09-12 trigger supplied the complementary above-threshold control.
+`transfer_escrow` crossed its deliberate 25M floor by only 0.09M, then peaked
+0.71M above it while the paced autovacuum advanced from heap scan through each
+of three indexes and into heap vacuum. It completed about 12 seconds after the
+last warning and reduced the estimate to 2.12M. Every alert's oldest sampled
+transaction was only 1–10 seconds old; the follow-up found no blocker or
+replication slot. A fixed-threshold pure-cascade table with reported heap or
+index work must therefore retain its capacity warning but use recovery
+guidance: compare counters across five-minute samples and let the pass finish.
+Do not call an ordinary writer defective from one trigger overshoot. Only
+unchanged progress, a separately proved old horizon or lock, or failure to
+return below the configured floor after completion establishes an overdue or
+stalled cleanup boundary. For this branch, an old generic horizon means the
+selected backend_xid/backend_xmin candidate has held its transaction or query
+for at least 60 seconds, matching the existing sub-minute fresh-read boundary.
+A large xid distance alone does not qualify: a new snapshot can inherit the
+cluster's oldest in-progress xid without itself being the cleanup owner.
+
 2026-08-30 cross-signal example: `transfer_contract` reached 11.74M dead
 tuples while the legacy §2.10 retention statement continued updating about
 2.16M rows/call. The sampled oldest MVCC horizon candidates had transactions
