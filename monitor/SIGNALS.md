@@ -8551,6 +8551,43 @@ no new large-drift or negative-counter evidence; reopen underlying-cause work
 only on a correlated recurrence, rather than inferring it from the timeout
 class alone.
 
+A separate contained recurrence on 2026-09-13 comprised ten distinct
+settlement releases on five balances in two bursts of four and six. All ten
+reported `clamped_to=0`; API, Proxy, and Connect emitted none, and no checked
+mirror-write failure accompanied them. The next scheduled reconciliations
+completed in roughly 48 and 57 seconds with single-digit-GiB aggregate
+corrections, rather than the long, TiB-scale signature of the retired absolute
+writer. Ten distinct payloads and source timestamps rule out exact log replay,
+while six later natural runs remained below both the 120-second duration and
+256GiB aggregate gates with no further negative line for more than one natural
+close/reconcile interval.
+
+That aggregate control rules out legacy fleet clobber, a stuck reconciler, a
+missing atomic clamp, and a cross-service burst; it does not identify which of
+the two remaining current races shortened these five mirrors. A settlement may
+have committed before its delayed Redis release while reconciliation corrected
+the still-reserved mirror downward, or a preceding page snapshot may have
+corrected toward stale PostgreSQL state after a live mirror write. Both bursts
+preceded the immediately following reconcile starts; aggregate cadence and
+drift direction therefore cannot assign them to those later runs. On a
+recurrence, retain the affected pairs only inside a bounded private correlation
+and order the balance's PostgreSQL snapshot, live reservation or settlement
+commit, Redis GET/correction, and mirror post. A settlement commit before the
+page snapshot/correction followed by its delayed release selects the first
+race; a reservation commit/post after the page snapshot but before its later
+Redis correction, followed by settlement, selects the second. If those
+per-balance boundaries were not captured, do not infer a cause from aggregate
+reversal; preserve the ambiguity.
+
+Close this occurrence after the natural short-pass and quiet-interval gate
+above; do not describe that as closure of the systemic cross-store boundary.
+Systemic closure still requires a durable per-balance mutation sequence,
+outbox, or equivalent fence followed by a full natural expiry/close interval
+without recurrence. Such a change alters the PostgreSQL/Redis protocol and may
+require schema and rollout coordination, so it needs explicit architecture and
+data-owner authorization before implementation; it is not authorized by a
+monitor alert, incident diagnosis, or catalog amendment.
+
 ## 6. How we decided what was REAL (methodology)
 
 1. **One discriminating measurement before any action.** Every hypothesis got
