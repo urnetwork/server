@@ -7774,4 +7774,34 @@ var migrations = []any{
 		CREATE INDEX network_extender_publish_published_time_create_time
 		ON network_extender_publish (published_time, create_time)
 	`),
+
+	// Contract parties (connect/EXTENDER.md J1, J2). extender_id is the active
+	// extender whose address the connection arrived from, or null when the
+	// caller address matched none, which is the common case. The index is the
+	// per-endpoint read the contract insert does: the distinct extenders of a
+	// client's currently connected connections.
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN extender_id uuid NULL
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_connection_client_id_connected_extender_id
+		ON network_client_connection (client_id, connected, extender_id)
+	`),
+
+	// The extender parties of one contract, zero to many per side. client_id
+	// and network_id are the extender's provider client and network, copied so
+	// settlement pays the participant set without joining the directory. The
+	// rows are deleted with the contract.
+	newSqlMigration(`
+		CREATE TABLE contract_extender (
+			contract_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			party varchar(16) NOT NULL,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+
+			PRIMARY KEY (contract_id, extender_id, party)
+		)
+	`),
 }

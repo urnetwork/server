@@ -2369,8 +2369,14 @@ func ConnectNetworkClientWithIpFamily(
 
 	// ClientIpHash parsed the ip above, so this is always 4 or 6 here
 	ipVersion := 0
+	// the extender this connection arrived through, null when the caller
+	// address is not an active extender address (connect/EXTENDER.md J1)
+	var extenderId *server.Id
 	if addr, parseErr := netip.ParseAddr(clientIp); parseErr == nil {
 		ipVersion = server.IpVersionForAddr(addr)
+		if activeExtenderId, found := ActiveExtenderIdForAddress(addr); found {
+			extenderId = &activeExtenderId
+		}
 	}
 	ipFamilyIntent = normalizeIpFamilyIntent(ipFamilyIntent)
 
@@ -2409,9 +2415,10 @@ func ConnectNetworkClientWithIpFamily(
 					handler_id,
 					expected_latency_ms,
 					ip_version,
-					ip_family_intent
+					ip_family_intent,
+					extender_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			`,
 			clientId,
 			connectionId,
@@ -2425,6 +2432,7 @@ func ConnectNetworkClientWithIpFamily(
 			expectedLatencyMillis,
 			ipVersion,
 			ipFamilyIntent,
+			extenderId,
 		))
 
 		// refresh auth_time as a durable last-seen marker. connection rows are
