@@ -10,11 +10,16 @@ package gossip
 
 import (
 	"context"
+	"encoding/hex"
 	"slices"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	connectgossip "github.com/urnetwork/connect/gossip"
+	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -255,6 +260,136 @@ func TestGossipConcurrentDrainsNeverPublishARowTwice(t *testing.T) {
 			if publish.PublishedTime == nil {
 				t.Fatalf("row %s is still unstamped", publish.PublishId)
 			}
+		}
+	})
+}
+
+// A publisher that stops the drain from inside it, so the mid-batch break is
+// forced rather than raced. The first row is published normally, so the stamp
+// of a completed row is never attempted under a canceled context.
+type testCancelingPublisher struct {
+	cancel       context.CancelFunc
+	publishCount int
+}
+
+func (self *testCancelingPublisher) Publish(
+	ctx context.Context,
+	message *protocol.ExtenderGossipMessage,
+) error {
+	self.publishCount += 1
+	if self.publishCount == 1 {
+		return nil
+	}
+	self.cancel()
+	return errTestPublish
+}
+
+// A drain that is asked to stop stops claiming work. Everything it has not
+// delivered is left unstamped for the next drain, which is the same rule a
+// failed publish follows: losing a record is the one outcome the queue must
+// never produce.
+func TestGossipDrainStopsWhenTheContextIsCanceled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		// the drain has its own context, so the queue can still be read back
+		// after the drain was stopped
+		drainCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		config := newTestConfig(t)
+
+		for index := range 3 {
+			extender := newTestExtender(t, ctx, index, 4)
+			extender.queueRecord(t, ctx, config)
+		}
+
+		publisher := &testCancelingPublisher{cancel: cancel}
+		outcome := drainPublishes(drainCtx, publisher, publishBatchSize)
+		if outcome.Claimed != 3 || outcome.Published != 1 || outcome.Failed != 1 {
+			t.Fatalf("canceled drain = %+v, want 3 claimed, 1 published and 1 failed", outcome)
+		}
+		// the third row was never even offered to the topic
+		if publisher.publishCount != 2 {
+			t.Fatalf("the drain published %d rows after the cancel", publisher.publishCount)
+		}
+
+		stamped := 0
+		for _, publish := range testPublishes(ctx) {
+			if publish.PublishedTime != nil {
+				stamped += 1
+			}
+		}
+		if stamped != 1 {
+			t.Fatalf("stamped %d rows, want only the one that was delivered", stamped)
+		}
+	})
+}
+
+// A publisher that signals every message it takes, so a test can barrier on a
+// drain having happened rather than wait out a cadence.
+type testSignalingPublisher struct {
+	published chan string
+}
+
+func (self *testSignalingPublisher) Publish(
+	ctx context.Context,
+	message *protocol.ExtenderGossipMessage,
+) error {
+	body := &protocol.ExtenderRecordBody{}
+	if err := proto.Unmarshal(message.GetRecord().GetBody(), body); err != nil {
+		return err
+	}
+	self.published <- hex.EncodeToString(body.GetPublicKey())
+	return nil
+}
+
+// The service drains on a cadence for the life of its context, so a row queued
+// after one drain is delivered by the next without anything waking the service,
+// and the loop ends when the context does.
+func TestGossipRunPublishDrainsEveryRoundAndEndsWithTheContext(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		drainCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		config := newTestConfig(t)
+
+		publisher := &testSignalingPublisher{published: make(chan string)}
+		done := make(chan struct{})
+		// the same shape the service runs it in, so a claim that loses the race
+		// with the cancel is absorbed here exactly as it is in production
+		go server.HandleError(func() {
+			defer close(done)
+			runPublish(drainCtx, publisher, 5*time.Millisecond, publishBatchSize)
+		}, cancel)
+
+		nextPublished := func(what string) string {
+			select {
+			case keyHex := <-publisher.published:
+				return keyHex
+			case <-time.After(testMeshTimeout):
+				t.Fatalf("the drain never published %s", what)
+				return ""
+			}
+		}
+
+		first := newTestExtender(t, ctx, 0, 4)
+		first.queueRecord(t, ctx, config)
+		if keyHex := nextPublished("the first record"); keyHex != hexKey(first) {
+			t.Fatalf("first drain published %s, want %s", keyHex, hexKey(first))
+		}
+
+		// queued only after the first drain, so delivering it proves the loop
+		// came back round on its own
+		second := newTestExtender(t, ctx, 1, 6)
+		second.queueRecord(t, ctx, config)
+		if keyHex := nextPublished("the second record"); keyHex != hexKey(second) {
+			t.Fatalf("second drain published %s, want %s", keyHex, hexKey(second))
+		}
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(testMeshTimeout):
+			t.Fatal("the drain loop did not end with its context")
 		}
 	})
 }

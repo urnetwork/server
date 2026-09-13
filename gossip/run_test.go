@@ -8,10 +8,16 @@ package gossip
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/urnetwork/connect"
 	connectgossip "github.com/urnetwork/connect/gossip"
+
+	"github.com/urnetwork/server/controller"
 )
 
 // A readiness gate that must never be reached, because the configuration is
@@ -154,4 +160,83 @@ func TestGossipMemberReconnectsToARestartedOperator(t *testing.T) {
 	waitForNodeStatus(t, member.node, "the operator connected again", func(status connectgossip.NodeStatus) bool {
 		return status.OperatorConnected
 	})
+}
+
+// The hosts a record may name are the primary host first and then every
+// migration host, deduplicated and with blanks dropped, exactly as the
+// extender's own allowed host list is built (A5). The primary is always
+// accepted, whether or not network_hosts repeats it, or a record signed for the
+// operator's own space would be rejected by its own node.
+func TestGossipOperatorConfigNetworkHosts(t *testing.T) {
+	const keySeedHex = "0000000000000000000000000000000000000000000000000000000000000000"
+	rootPublicKey, err := connect.ExtenderPublicKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name         string
+		networkHost  string
+		networkHosts []string
+		want         []string
+	}{
+		{
+			name:        "the primary host alone",
+			networkHost: testNetworkHost,
+			want:        []string{testNetworkHost},
+		},
+		{
+			name:         "a migration host as well",
+			networkHost:  testNetworkHost,
+			networkHosts: []string{"old.example"},
+			want:         []string{testNetworkHost, "old.example"},
+		},
+		{
+			name:         "the primary host repeated",
+			networkHost:  testNetworkHost,
+			networkHosts: []string{testNetworkHost, "old.example", testNetworkHost},
+			want:         []string{testNetworkHost, "old.example"},
+		},
+		{
+			name:         "blanks are not hosts",
+			networkHost:  "  " + testNetworkHost + "  ",
+			networkHosts: []string{"", "   ", " old.example "},
+			want:         []string{testNetworkHost, "old.example"},
+		},
+	}
+	for _, c := range cases {
+		config, err := newOperatorConfig(&controller.ExtenderConfig{
+			RootPublicKeysHex:    []string{hex.EncodeToString(rootPublicKey)},
+			GossipIdentityKeyHex: keySeedHex,
+			NetworkHost:          c.networkHost,
+			NetworkHosts:         c.networkHosts,
+		})
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !slices.Equal(config.networkHosts, c.want) {
+			t.Errorf("%s: network hosts = %v, want %v", c.name, config.networkHosts, c.want)
+		}
+		if config.networkHost != strings.TrimSpace(c.networkHost) {
+			t.Errorf("%s: network host = %q", c.name, config.networkHost)
+		}
+	}
+}
+
+// The service refuses a nil context before it touches the environment, so a
+// caller that wired the process up wrong gets an error rather than a node it
+// can never stop.
+func TestGossipRunRefusesANilContext(t *testing.T) {
+	if err := Run(nil, RunOptions{Port: 80}); err == nil {
+		t.Fatal("a nil context was accepted")
+	}
+	if err := runWithDependencies(
+		nil,
+		RunOptions{Port: 80},
+		refuseReadiness(t),
+		refuseStatsPusher(t),
+	); err == nil {
+		t.Fatal("a nil context was accepted")
+	}
 }

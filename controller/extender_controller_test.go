@@ -467,6 +467,24 @@ func TestExtenderActivateValidatesArguments(t *testing.T) {
 			wantError: "tcp_port",
 		},
 		{
+			name: "udp port out of range",
+			args: &ExtenderActivateArgs{
+				PublicKeyHex: publicKeyHex,
+				Carriers:     []string{"tcp"},
+				UdpPort:      -1,
+			},
+			wantError: "udp_port",
+		},
+		{
+			name: "dns port out of range",
+			args: &ExtenderActivateArgs{
+				PublicKeyHex: publicKeyHex,
+				Carriers:     []string{"tcp"},
+				DnsPort:      65536,
+			},
+			wantError: "dns_port",
+		},
+		{
 			name: "dns tld too long",
 			args: &ExtenderActivateArgs{
 				PublicKeyHex: publicKeyHex,
@@ -492,4 +510,180 @@ func TestExtenderActivateValidatesArguments(t *testing.T) {
 			t.Errorf("%s: error = %q, want it to mention %q", c.name, result.Error, c.wantError)
 		}
 	}
+}
+
+// Zero ports and an empty tld take the C1 defaults, which is what a provider
+// that configured nothing sends. The record is what every client dials from, so
+// a default that was dropped rather than filled in would publish an extender on
+// port zero.
+//
+// The tcp port cannot be defaulted in a test, since 443 is not bindable here;
+// the three ports share one defaulting and one range check, and the udp and dns
+// ports prove both.
+func TestExtenderActivateDefaultsThePortsAndTld(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		args.UdpPort = 0
+		args.DnsPort = 0
+		args.DnsTld = ""
+		// only the carrier whose port is given, so the defaulted ports are
+		// stored without being dialed
+		args.Carriers = []string{connect.ExtenderCarrierTcp}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, int(body.TcpPort), fixture.tcpPort)
+		connect.AssertEqual(t, int(body.UdpPort), 443)
+		connect.AssertEqual(t, int(body.DnsPort), 53)
+		connect.AssertEqual(t, body.DnsTld, connect.DefaultExtenderDnsTld)
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		connect.AssertEqual(t, stored.Extender.UdpPort, 443)
+		connect.AssertEqual(t, stored.Extender.DnsPort, 53)
+		connect.AssertEqual(t, stored.Extender.DnsTld, connect.DefaultExtenderDnsTld)
+	})
+}
+
+// The carrier list is normalized before anything is probed or stored: case and
+// surrounding space are the caller's, the order is the caller's, and one
+// carrier is dialed once however many times it was named. A duplicate that
+// survived would spend the shared probe budget twice on the same dial.
+func TestExtenderActivateNormalizesTheCarrierList(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		args.Carriers = []string{" QUIC ", "quic", "", "  ", "Tcp", "TCP"}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+		if !slices.Equal(result.Carriers, []string{"quic", "tcp"}) {
+			t.Fatalf("carriers = %v, want the caller's order, deduplicated", result.Carriers)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, len(body.Addresses), 1)
+		if !slices.Equal(body.Addresses[0].Carriers, []string{"quic", "tcp"}) {
+			t.Fatalf("record carriers = %v", body.Addresses[0].Carriers)
+		}
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		if !slices.Equal(stored.Addresses[0].Carriers, []string{"quic", "tcp"}) {
+			t.Fatalf("stored carriers = %v", stored.Addresses[0].Carriers)
+		}
+	})
+}
+
+// An activation is attributed to a network and a client and is probed back at
+// the caller's own address, so a session without either is refused before any
+// configuration is read, any budget is spent and any dial is made.
+func TestExtenderActivateRefusesACallerItCannotAttribute(t *testing.T) {
+	publicKeyHex := hex.EncodeToString(make([]byte, ed25519.PublicKeySize))
+	validArgs := func() *ExtenderActivateArgs {
+		return &ExtenderActivateArgs{
+			PublicKeyHex: publicKeyHex,
+			Carriers:     []string{connect.ExtenderCarrierTcp},
+		}
+	}
+	cases := []struct {
+		name          string
+		byJwt         *jwt.ByJwt
+		clientAddress string
+		wantError     string
+	}{
+		{
+			name:          "no client jwt at all",
+			byJwt:         nil,
+			clientAddress: "127.0.0.1:54321",
+			wantError:     "requires a client",
+		},
+		{
+			name:          "a jwt with no client",
+			byJwt:         &jwt.ByJwt{},
+			clientAddress: "127.0.0.1:54321",
+			wantError:     "requires a client",
+		},
+		{
+			name:          "an address that is not an address",
+			byJwt:         &jwt.ByJwt{ClientId: &server.Id{}},
+			clientAddress: "not-an-address.example:54321",
+			wantError:     "not readable",
+		},
+		{
+			name:          "no address at all",
+			byJwt:         &jwt.ByJwt{ClientId: &server.Id{}},
+			clientAddress: "",
+			wantError:     "not readable",
+		},
+	}
+	for _, c := range cases {
+		clientSession := session.Testing_CreateClientSession(context.Background(), c.byJwt)
+		clientSession.ClientAddress = c.clientAddress
+		result, err := ExtenderActivate(validArgs(), clientSession)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if result.Activated {
+			t.Errorf("%s: the activation was accepted", c.name)
+			continue
+		}
+		if !strings.Contains(result.Error, c.wantError) {
+			t.Errorf("%s: error = %q, want it to mention %q", c.name, result.Error, c.wantError)
+		}
+	}
+}
+
+// The country of an activation is the geolocation of the caller's address, and
+// a lookup that finds nothing leaves it empty rather than refusing a reachable
+// extender. A loopback caller has no geolocation, so this is exactly that case:
+// what it must not do is cost an operator its extender over a lookup.
+func TestExtenderActivateSurvivesAGeolocationThatFindsNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		args.Carriers = []string{connect.ExtenderCarrierTcp}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		connect.AssertEqual(t, stored.Extender.CountryCode, "")
+		// and the record carries the same country the row does, since both come
+		// out of the one signing transaction
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, body.CountryCode, stored.Extender.CountryCode)
+	})
 }
