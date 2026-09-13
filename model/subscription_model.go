@@ -1298,7 +1298,8 @@ type TransferEscrowBalance struct {
 // ContractParticipant is one service client whose hop carries a contract's
 // traffic. The payer/origin endpoint is not a participant; the opposite
 // endpoint (egress) is, along with every intermediary attached to the
-// contract's stream.
+// contract's stream and the provider client of every extender party. Every hop
+// has equal weight, so one client appears at most once whatever its roles.
 type ContractParticipant struct {
 	ClientId  server.Id
 	NetworkId server.Id
@@ -1410,6 +1411,57 @@ func SetContractStream(
 
 	return
 }
+
+// Writes the extender parties of a new contract (connect/EXTENDER.md J2): the
+// distinct active extenders tagged on the currently connected connections of
+// the source client, as party source, and those of the destination client, as
+// party destination. The extender's own
+// provider client and network are copied in, so settlement never joins the
+// directory. Zero rows is the normal case, and a contract need not have
+// carried its data over the extender -- every active extender of an endpoint
+// counts, which is fuzzy per contract but averages to the right allocation.
+//
+// The two branches carry different party values so they cannot collide, and
+// each is distinct in itself, so several connections of one client through one
+// extender are one row.
+//
+// $1 contract, $2 source client, $3 destination client, $4 source party,
+// $5 destination party.
+const contractExtenderInsertSql = `
+	INSERT INTO contract_extender (
+		contract_id,
+		extender_id,
+		party,
+		client_id,
+		network_id
+	)
+	SELECT
+		$1,
+		endpoint.extender_id,
+		endpoint.party,
+		network_extender.client_id,
+		network_extender.network_id
+	FROM (
+		SELECT DISTINCT extender_id, $4::varchar AS party
+		FROM network_client_connection
+		WHERE
+			client_id = $2 AND
+			connected AND
+			extender_id IS NOT NULL
+
+		UNION ALL
+
+		SELECT DISTINCT extender_id, $5::varchar AS party
+		FROM network_client_connection
+		WHERE
+			client_id = $3 AND
+			connected AND
+			extender_id IS NOT NULL
+	) AS endpoint
+	INNER JOIN network_extender ON
+		network_extender.extender_id = endpoint.extender_id AND
+		network_extender.active
+`
 
 func createTransferEscrowInTx(
 	ctx context.Context,
@@ -1623,6 +1675,15 @@ func createTransferEscrowInTx(
 			companionContractId,
 			payerNetworkId,
 			priority,
+		)
+
+		batch.Queue(
+			contractExtenderInsertSql,
+			contractId,
+			sourceId,
+			destinationId,
+			ContractPartySource,
+			ContractPartyDestination,
 		)
 	})
 
@@ -2189,6 +2250,15 @@ func createContractNoEscrowInTx(
 		destinationId,
 		contractTransferByteCount,
 	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		contractExtenderInsertSql,
+		contractId,
+		sourceId,
+		destinationId,
+		ContractPartySource,
+		ContractPartyDestination,
+	))
 	return
 }
 
@@ -2476,10 +2546,11 @@ func claimContractOutcomeInTx(
 }
 
 // contractParticipantsInTx returns the service side of a contract: the
-// non-payer endpoint (the egress hop) plus the intermediary clients persisted
-// for its stream. The participant set deliberately still contains clients on
-// the origin network; settlement uses the full set as the even-split
-// denominator, then suppresses those ineligible shares.
+// non-payer endpoint (the egress hop), the intermediary clients persisted for
+// its stream, and the extenders the endpoints were connected through. The
+// participant set deliberately still contains clients on the origin network;
+// settlement uses the full set as the even-split denominator, then suppresses
+// those ineligible shares.
 func contractParticipantsInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2596,6 +2667,32 @@ func contractParticipantsInTx(
 			}
 		})
 	}
+
+	// The extender parties of the contract are hops like any other
+	// (connect/EXTENDER.md J3), so they join the same map before the split:
+	// keying by client id counts an extender whose provider client is already
+	// a participant once, and an extender on the payer network keeps its even
+	// share out of the payout through the same eligibility rule.
+	result, err = tx.Query(
+		ctx,
+		`
+			SELECT
+				client_id,
+				network_id
+			FROM contract_extender
+			WHERE contract_id = $1
+		`,
+		contractId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var participant ContractParticipant
+			server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
+			if _, exists := participantsByClientId[participant.ClientId]; participant.ClientId != originId && !exists {
+				participantsByClientId[participant.ClientId] = participant
+			}
+		}
+	})
 
 	for _, participant := range participantsByClientId {
 		participants = append(participants, participant)
@@ -4930,6 +5027,10 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					DELETE FROM transfer_escrow_sweep
 					USING candidate
 					WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
+				), deleted_extender AS (
+					DELETE FROM contract_extender
+					USING candidate
+					WHERE contract_extender.contract_id = candidate.contract_id
 				), deleted_contract AS (
 					DELETE FROM transfer_contract
 					USING candidate
@@ -5060,9 +5161,9 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 }
 
 // SweepOrphanContractData removes contract_close/transfer_escrow/
-// transfer_escrow_sweep rows whose transfer_contract no longer exists, plus
-// contract_participant rows whose stream is no longer referenced by any
-// retained contract.
+// transfer_escrow_sweep/contract_extender rows whose transfer_contract no
+// longer exists, plus contract_participant rows whose stream is no longer
+// referenced by any retained contract.
 // RemoveCompletedContracts cascades the per-contract rows atomically with the
 // contract delete. Stream participants are shared by all contracts on a stream,
 // so this sweep removes them after the last reference disappears. Each table is
@@ -5245,6 +5346,48 @@ func sweepOrphanContractSteps() []sweepOrphanStep {
 			(SELECT count(*) FROM slice),
 			(SELECT count(*) FROM del),
 			bound.stream_id, bound.client_id
+		FROM bound
+		`,
+		},
+
+		// contract_extender, keyed by (contract_id, extender_id, party).
+		// Appended, not grouped with the other contract-keyed tables, so that
+		// a cursor persisted before this step existed still names the table it
+		// was paging.
+		{
+			table: "contract_extender",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(server.Id), new(string)}
+			},
+			sql: `
+		WITH slice AS (
+			SELECT contract_id, extender_id, party
+			FROM contract_extender
+			WHERE ($1 OR (contract_id, extender_id, party) > ($2, $3, $4))
+			ORDER BY contract_id, extender_id, party
+			LIMIT $5
+		), del AS (
+			DELETE FROM contract_extender
+			USING slice
+			WHERE
+				contract_extender.contract_id = slice.contract_id AND
+				contract_extender.extender_id = slice.extender_id AND
+				contract_extender.party = slice.party AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.contract_id = contract_extender.contract_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT contract_id, extender_id, party
+			FROM slice
+			ORDER BY contract_id DESC, extender_id DESC, party DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.contract_id, bound.extender_id, bound.party
 		FROM bound
 		`,
 		},

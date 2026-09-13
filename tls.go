@@ -135,6 +135,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 		glog.Infof("[tls]creating self-signed cert for %s\n", hostName)
 
 		organizationName := hostName
+		// back-dated against clock skew, and valid for the same period ahead
 		validFrom := 180 * 24 * time.Hour
 		validFor := 180 * 24 * time.Hour
 		certPemBytes, keyPemBytes, err := selfSign(
@@ -260,8 +261,13 @@ func selfSign(
 		keyUsage |= x509.KeyUsageKeyEncipherment
 	}
 
+	// validFrom back-dates the start against clock skew and validFor is how
+	// long the certificate stays valid from now. Measuring validFor from
+	// notBefore instead would let the back-dating consume the whole window:
+	// equal values produced a certificate that had already expired when it
+	// was created.
 	notBefore := time.Now().Add(-validFrom)
-	notAfter := notBefore.Add(validFor)
+	notAfter := time.Now().Add(validFor)
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)

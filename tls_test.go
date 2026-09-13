@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/pem"
 	"os"
 	"path/filepath"
@@ -243,5 +244,31 @@ func TestTransportTlsSelfSign(t *testing.T) {
 		tlsConfig, err := transportTls.GetTlsConfig(hostName)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertNotEqual(t, tlsConfig, nil)
+	}
+}
+
+// A self-signed identity must be valid when it is created. Measuring the
+// validity window from the back-dated start let the back-dating consume the
+// whole window, so every generated certificate had already expired and any
+// client that verified it failed the handshake.
+func TestTransportTlsSelfSignIsValidWhenItIsCreated(t *testing.T) {
+	transportTls := NewTransportTls(map[string]bool{}, &TransportTlsSettings{
+		EnableSelfSign: true,
+	})
+	tlsConfig, err := transportTls.GetTlsConfig("fixture.example")
+	connect.AssertEqual(t, err, nil)
+
+	certificate, err := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+	connect.AssertEqual(t, err, nil)
+	now := time.Now()
+	if now.Before(certificate.NotBefore) {
+		t.Fatalf("self-signed certificate is not yet valid: %s is before %s", now, certificate.NotBefore)
+	}
+	if certificate.NotAfter.Before(now) {
+		t.Fatalf("self-signed certificate has expired: %s is after %s", now, certificate.NotAfter)
+	}
+	// the whole configured window remains, less the time it took to create
+	if certificate.NotAfter.Before(now.Add(179 * 24 * time.Hour)) {
+		t.Fatalf("self-signed certificate expires at %s, less than the configured window from %s", certificate.NotAfter, now)
 	}
 }

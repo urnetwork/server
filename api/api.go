@@ -86,6 +86,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
+		// a provider offering itself as an extender; the handler probes the
+		// caller address back before anything is stored (connect/EXTENDER.md C2)
+		router.NewRoute("POST", "/network/extender-activate", handlers.ExtenderActivate),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),

@@ -57,6 +57,17 @@ func newConnectRouterFromExchange(
 	)
 }
 
+// NewConnectRouterFromExchangeE is the checked construction used by process
+// startup outside this package, where a TLS or handler initialization failure
+// must be reported rather than crash the process.
+func NewConnectRouterFromExchangeE(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	exchange *Exchange,
+) (*ConnectRouter, error) {
+	return newConnectRouterFromExchange(ctx, cancel, exchange)
+}
+
 func NewConnectRouter(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -125,6 +136,13 @@ func newConnectRouter(
 
 func (self *ConnectRouter) Connect(w http.ResponseWriter, r *http.Request) {
 	self.connectHandler.Connect(w, r)
+}
+
+// The handler behind this router's routes. The alt front dispatches accepted
+// QUIC connections into the same handler instead of mounting the H1 route, so
+// both fronts share one handler id, heartbeat and drain.
+func (self *ConnectRouter) ConnectHandler() *ConnectHandler {
+	return self.connectHandler
 }
 
 // Status prevents Warp from activating a replacement until every QUIC
