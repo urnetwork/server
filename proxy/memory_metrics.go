@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/sdk"
@@ -75,6 +77,33 @@ var proxyPlatformTransportPendingH1BytesGauge = prometheus.NewGauge(
 		Subsystem: "proxy",
 		Name:      "platform_transports_pending_h1_bytes",
 		Help:      "H1 carrier bytes waiting for private DeviceLocal admission",
+	},
+)
+
+var proxyPlatformTransportSlotFullPendingH1DevicesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "platform_transport_slot_full_pending_h1_devices",
+		Help:      "DeviceLocals with H1 admission pending while their private carrier-count cap is full",
+	},
+)
+
+var proxyPlatformTransportH3PreemptionsCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "platform_transport_h3_preemptions_total",
+		Help:      "H3 carrier leases preempted for H1 admission across hosted DeviceLocals",
+	},
+)
+
+var proxyPlatformTransportSlotFullH3PreemptionsCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "platform_transport_slot_full_pending_h1_h3_preemptions_total",
+		Help:      "H3 preemption deltas sampled from DeviceLocals whose H1 waits at a full carrier-count cap",
 	},
 )
 
@@ -154,15 +183,68 @@ var proxyWireGuardReturnBackpressureDuration = prometheus.NewHistogram(
 // proxyDeviceMemoryUsage is one instance-wide sample without per-customer
 // labels. It preserves operational visibility without exporting proxy ids.
 type proxyDeviceMemoryUsage struct {
-	DeviceCount                int
-	TargetByteCount            sdk.ByteCount
-	UsedByteCount              sdk.ByteCount
-	PlatformBudgetByteCount    sdk.ByteCount
-	PlatformUsedByteCount      sdk.ByteCount
-	PlatformMaxTransportCount  int
-	PlatformUsedTransportCount int
-	PlatformPendingH1Count     int
-	PlatformPendingH1ByteCount sdk.ByteCount
+	DeviceCount                          int
+	TargetByteCount                      sdk.ByteCount
+	UsedByteCount                        sdk.ByteCount
+	PlatformBudgetByteCount              sdk.ByteCount
+	PlatformUsedByteCount                sdk.ByteCount
+	PlatformMaxTransportCount            int
+	PlatformUsedTransportCount           int
+	PlatformPendingH1Count               int
+	PlatformPendingH1ByteCount           sdk.ByteCount
+	PlatformSlotFullPendingH1DeviceCount int
+	PlatformH3PreemptionDelta            int64
+	PlatformSlotFullH3PreemptionDelta    int64
+}
+
+type proxyPlatformPreemptionSample struct {
+	count             int64
+	slotFullPendingH1 bool
+}
+
+// proxyPlatformPreemptionTracker converts the independently monotonic
+// DeviceLocal counters into one process-monotonic Prometheus counter. Removed
+// DeviceLocals are forgotten only after their final observed increments have
+// been retained in the process counter.
+type proxyPlatformPreemptionTracker struct {
+	stateLock sync.Mutex
+	observed  map[*sdk.DeviceLocal]int64
+}
+
+func (t *proxyPlatformPreemptionTracker) observe(
+	current map[*sdk.DeviceLocal]proxyPlatformPreemptionSample,
+) (delta int64, slotFullDelta int64) {
+	t.stateLock.Lock()
+	defer t.stateLock.Unlock()
+
+	if t.observed == nil {
+		t.observed = map[*sdk.DeviceLocal]int64{}
+	}
+	for deviceLocal, sample := range current {
+		count := sample.count
+		previous, ok := t.observed[deviceLocal]
+		var deviceDelta int64
+		joinedToCurrentEpoch := ok && previous <= count
+		if !ok || count < previous {
+			// A newly observed DeviceLocal contributes its complete process-lifetime
+			// count. A same-object decrease is defensive reset handling: preserve
+			// monotonic exporter semantics and start the new epoch at count.
+			deviceDelta = count
+		} else {
+			deviceDelta = count - previous
+		}
+		delta += deviceDelta
+		if joinedToCurrentEpoch && sample.slotFullPendingH1 {
+			slotFullDelta += deviceDelta
+		}
+		t.observed[deviceLocal] = count
+	}
+	for deviceLocal := range t.observed {
+		if _, ok := current[deviceLocal]; !ok {
+			delete(t.observed, deviceLocal)
+		}
+	}
+	return delta, slotFullDelta
 }
 
 func init() {
@@ -174,6 +256,9 @@ func init() {
 	prometheus.MustRegister(proxyPlatformTransportUsedGauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1Gauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1BytesGauge)
+	prometheus.MustRegister(proxyPlatformTransportSlotFullPendingH1DevicesGauge)
+	prometheus.MustRegister(proxyPlatformTransportH3PreemptionsCounter)
+	prometheus.MustRegister(proxyPlatformTransportSlotFullH3PreemptionsCounter)
 	prometheus.MustRegister(proxyLockCacheEntriesGauge)
 	prometheus.MustRegister(proxyLockCacheCapacityGauge)
 	prometheus.MustRegister(proxyLockCacheHitsCounter)
@@ -204,6 +289,11 @@ func aggregateProxyDeviceMemoryUsage(
 		aggregate.PlatformUsedTransportCount += usage.PlatformTransportUsedCount
 		aggregate.PlatformPendingH1Count += usage.PlatformTransportPendingH1Count
 		aggregate.PlatformPendingH1ByteCount += usage.PlatformTransportPendingH1Bytes
+		if 0 < usage.PlatformTransportPendingH1Count &&
+			0 < usage.PlatformTransportMaxCount &&
+			usage.PlatformTransportMaxCount <= usage.PlatformTransportUsedCount {
+			aggregate.PlatformSlotFullPendingH1DeviceCount++
+		}
 	}
 	return aggregate
 }
@@ -227,14 +317,26 @@ func (self *ProxyDeviceManager) DeviceMemoryUsage() proxyDeviceMemoryUsage {
 	}()
 
 	deviceUsages := make([]*sdk.DeviceLocalMemoryUsage, 0, len(deviceLocals))
+	preemptions := make(map[*sdk.DeviceLocal]proxyPlatformPreemptionSample, len(deviceLocals))
 	for _, deviceLocal := range deviceLocals {
-		deviceUsages = append(deviceUsages, deviceLocal.MemoryUsed())
+		usage := deviceLocal.MemoryUsed()
+		deviceUsages = append(deviceUsages, usage)
+		preemptions[deviceLocal] = proxyPlatformPreemptionSample{
+			count: usage.PlatformTransportPreemptedH3Count,
+			slotFullPendingH1: 0 < usage.PlatformTransportPendingH1Count &&
+				0 < usage.PlatformTransportMaxCount &&
+				usage.PlatformTransportMaxCount <= usage.PlatformTransportUsedCount,
+		}
 	}
-	return aggregateProxyDeviceMemoryUsage(deviceUsages)
+	usage := aggregateProxyDeviceMemoryUsage(deviceUsages)
+	usage.PlatformH3PreemptionDelta, usage.PlatformSlotFullH3PreemptionDelta =
+		self.platformPreemptions.observe(preemptions)
+	return usage
 }
 
 // updateProxyDeviceMemoryGauges publishes one identity-free aggregate sample.
 func updateProxyDeviceMemoryGauges(usage proxyDeviceMemoryUsage) {
+	devicesLiveGauge.Set(float64(usage.DeviceCount))
 	proxyDeviceMemoryTargetBytesGauge.Set(float64(usage.TargetByteCount))
 	proxyDeviceMemoryUsedBytesGauge.Set(float64(usage.UsedByteCount))
 	proxyPlatformTransportBudgetBytesGauge.Set(float64(usage.PlatformBudgetByteCount))
@@ -243,4 +345,7 @@ func updateProxyDeviceMemoryGauges(usage proxyDeviceMemoryUsage) {
 	proxyPlatformTransportUsedGauge.Set(float64(usage.PlatformUsedTransportCount))
 	proxyPlatformTransportPendingH1Gauge.Set(float64(usage.PlatformPendingH1Count))
 	proxyPlatformTransportPendingH1BytesGauge.Set(float64(usage.PlatformPendingH1ByteCount))
+	proxyPlatformTransportSlotFullPendingH1DevicesGauge.Set(float64(usage.PlatformSlotFullPendingH1DeviceCount))
+	proxyPlatformTransportH3PreemptionsCounter.Add(float64(usage.PlatformH3PreemptionDelta))
+	proxyPlatformTransportSlotFullH3PreemptionsCounter.Add(float64(usage.PlatformSlotFullH3PreemptionDelta))
 }

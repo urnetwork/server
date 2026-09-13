@@ -2829,7 +2829,7 @@
     {
       "type": "timeseries",
       "title": "proxy platform-carrier admission",
-      "description": "Fleet carrier slots: private per-device limits, acquired carriers, and H1 reservations waiting for admission. The limit should scale with live hosted devices; a flat limit while device count grows indicates a stale shared-budget build. Sustained pending H1 at the limit is the direct carrier-starvation signature.",
+      "description": "Fleet carrier slots: private per-device limits, acquired carriers, H1 reservations waiting for admission, slot-full private budgets, and same-device H3 preemption churn. The limit should scale with live hosted devices; sustained slot-full pending plus the joined preemption rate identifies the connect#211 CPU-loop shape.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2896,6 +2896,24 @@
           "expr": "sum(urnetwork_proxy_platform_transports_pending_h1{env=\"$env\"})",
           "refId": "C",
           "legendFormat": "pending H1"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transport_slot_full_pending_h1_devices{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "slot-full pending devices"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "E",
+          "legendFormat": "H3 preemptions/s"
         }
       ]
     },
