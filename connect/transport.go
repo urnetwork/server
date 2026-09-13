@@ -1685,19 +1685,55 @@ func (self *ConnectHandler) listenQuic(
 
 		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
 		if !self.startHandle(func() {
-			defer conn.CloseWithError(0, "")
-
-			err := self.connectQuic(conn)
-			if err != nil {
-				glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
-			} else {
-				glog.Infof("[c]h3 connection exited %s\n", listenAddress)
-			}
+			self.serveQuicConn(conn, listenAddress)
 		}) {
 			conn.CloseWithError(0, "")
 			return handleCtx.Err()
 		}
 	}
+}
+
+// Serves one accepted QUIC connection on the caller's goroutine and closes it
+// on return. Admission is the caller's: the handler's own listener holds a
+// started worker for it, and HandleQuicConn takes one for an external
+// dispatch.
+func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string) {
+	defer conn.CloseWithError(0, "")
+
+	err := self.connectQuic(conn)
+	if err != nil {
+		glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
+	} else {
+		glog.Infof("[c]h3 connection exited %s\n", listenAddress)
+	}
+}
+
+// HandleQuicConn serves one connection accepted by an external listener and
+// returns when it is finished, reporting false when the handler is closing.
+// The alt front terminates QUIC on its own sockets and dispatches by sni, so
+// this is the same admission and teardown the handler's own listener applies,
+// without its accept loop.
+func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn) bool {
+	if !self.beginHandle() {
+		conn.CloseWithError(0, "")
+		return false
+	}
+	defer self.endHandle()
+	self.serveQuicConn(conn, conn.LocalAddr().String())
+	return true
+}
+
+// The certificate source this handler loaded. An external listener that
+// terminates TLS for the same connections shares it, so one certificate cache
+// and one allowed-host policy stand behind every front.
+func (self *ConnectHandler) TransportTls() *server.TransportTls {
+	return self.transportTls
+}
+
+// NewQuicConfig returns the server half of the H3 configuration. An external
+// listener for the same handler must not build a second, drifting one.
+func NewQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
+	return newConnectQuicConfig(settings)
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to
@@ -1786,13 +1822,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return err
 	}
 
-	// FIXME
-	/*
-		if self.apiHostNames[earlyConn.ConnectionState.TLS.ServerName] {
-			// pass off the stream to the internal api server
-			return self.apiServer.OfferAccept(stream)
-		}
-	*/
+	// an api name never reaches this handler: the alt front dispatches by sni
+	// before the connection is offered here, and behind the lb this listener
+	// only ever carries connect
 
 	framer := connect.NewFramer(self.settings.FramerSettings)
 

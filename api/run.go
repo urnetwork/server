@@ -160,19 +160,21 @@ func runWithDependencies(
 	// This bounded cache is separate from mutable JWT account authentication.
 	// It owns its real refresh loop before the route is exposed; HTTP drain
 	// completes before the deferred close joins leases and closes RPC clients.
-	var reservedUpload *controller.StReservedAttemptUpload
+	var apiRouter *router.Router
+	closeApiRouter := func() {}
 	var err error
 	if admitted {
-		reservedUpload, err = controller.NewStReservedAttemptUpload(ctx)
+		apiRouter, closeApiRouter, err = NewRouter(processCtx, ctx)
 		if err != nil {
-			return fmt.Errorf("reserved validator staging startup: %w", err)
+			return err
 		}
+	} else {
+		apiRouter = router.NewRouter(processCtx, routesWithReservedAttemptUpload(nil))
 	}
-	defer reservedUpload.Close()
+	defer closeApiRouter()
 
 	glog.Infof("[api]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
-	apiRouter := router.NewRouter(processCtx, routesWithReservedAttemptUpload(reservedUpload))
 	err = listenAndServe(
 		serveCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
@@ -194,4 +196,22 @@ func runWithDependencies(
 	flushStats()
 	glog.Infof("[api]close\n")
 	return nil
+}
+
+// NewRouter builds the complete api route table together with the close that
+// joins the request-time caches it owns. The alt service mounts the same
+// router on http3, so route construction and cache ownership cannot diverge
+// between the two fronts.
+//
+// routeCtx owns the router and its stats. uploadCtx owns the reserved
+// validator staging cache, whose refresh loop stops when a drain begins while
+// the routes stay served until the close joins its leases.
+func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+	reservedUpload, err := controller.NewStReservedAttemptUpload(uploadCtx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reserved validator staging startup: %w", err)
+	}
+	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload)),
+		reservedUpload.Close,
+		nil
 }

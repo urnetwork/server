@@ -45,6 +45,7 @@ require (
 	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
+	github.com/urnetwork/warp v0.0.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
 	golang.org/x/oauth2 v0.36.0
@@ -210,3 +211,5 @@ replace github.com/urnetwork/goidenticons => ../goidenticons
 replace github.com/urnetwork/userwireguard => ../userwireguard
 
 replace github.com/urfoundation/sn => ../sn
+
+replace github.com/urnetwork/warp => ../warp

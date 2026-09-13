@@ -206,18 +206,45 @@ func TestExtenderConfigGossipPeerIdMatchesTheMeshDerivation(t *testing.T) {
 	}
 }
 
-// With the bundled spoof list empty, a probe fronts the extender with a random
-// label under the operator's own host. Every probe must get a different one:
-// a constant name would let an extender recognize the operator's probe and
-// behave differently for it.
+// A probe fronts the extender with a name it cannot recognize as the
+// operator's, so the extender cannot behave differently for a probe. The
+// bundled spoof list decides the shape: with a list, the name is one of its
+// domains and needs no network host; with an empty list, it is a random label
+// under the operator's own host and every probe gets a different one, since a
+// constant name would be just as recognizable. Neither shape is ever the
+// operator's own host.
 func TestExtenderConfigProbeServerNameIsRandomUnderTheNetworkHost(t *testing.T) {
 	config := &ExtenderConfig{NetworkHost: "ur.example"}
+	spoofDomains := connect.SpoofDomains()
+
+	if 0 < len(spoofDomains) {
+		for range 8 {
+			serverName, err := config.ProbeServerName()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(spoofDomains, serverName) {
+				t.Fatalf("probe name %q is not a bundled spoof domain", serverName)
+			}
+			if serverName == config.NetworkHost || strings.HasSuffix(serverName, "."+config.NetworkHost) {
+				t.Fatalf("probe name %q is the operator's own host", serverName)
+			}
+		}
+		// a spoof name is independent of the network, so it needs no host
+		if _, err := (&ExtenderConfig{}).ProbeServerName(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 
 	seen := map[string]bool{}
 	for range 8 {
 		serverName, err := config.ProbeServerName()
 		if err != nil {
 			t.Fatal(err)
+		}
+		if serverName == config.NetworkHost {
+			t.Fatalf("probe name %q is the operator's own host", serverName)
 		}
 		if !strings.HasSuffix(serverName, ".ur.example") {
 			t.Fatalf("probe name %q is not under the network host", serverName)
