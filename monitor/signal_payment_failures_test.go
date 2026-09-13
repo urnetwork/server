@@ -93,6 +93,7 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	).Markdown()
 	for _, want := range []string{
 		"2 deleted account(s)",
+		"retain in-window local stripe renewal history",
 		"distinct deleted owners rather than renewal rows",
 		"deleted_owner_count=2",
 		"oldest_renewal_start_age_seconds=5400",
@@ -109,6 +110,9 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("orphan renewal alert missing %q:\n%s", want, rendered)
 		}
+	}
+	if strings.Contains(rendered, "retain an active stripe renewal") {
+		t.Fatalf("orphan renewal alert overclaims provider state:\n%s", rendered)
 	}
 }
 

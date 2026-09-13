@@ -5828,6 +5828,35 @@ capabilities before two clean reconciliation/deletion windows can verify the
 software boundary. Deployment and provider-side disposition remain explicit
 operator actions.
 
+The 2026-09-12 Main recheck separated the local window from provider state.
+The same five deleted owners remained across 194 watcher samples; they owned
+six local rows, all due to expire within two whole days. Four owners' earliest
+renewal starts were more than 180 days old and one was less than 30 days old,
+but none retained a deletion audit row, so the aggregate cannot date deletion
+or select one historical write/delete interleaving. Only two local rows had a
+usable provider invoice reference. One resolved to a canceled subscription;
+the other remained provider-active only for paid-through time, with both
+cancel-at-period-end and its scheduled cancellation time set. The sole retained customer
+and metadata inventory added only terminal incomplete-expired history. Three
+owners had no invoice, customer, or exact-metadata discovery path, so their
+provider disposition is unknown rather than active or canceled.
+
+This is real retained local history, but `active` was an overclaim for the
+aggregate and the alert now calls it `in-window local renewal history`. The
+canceled and paid-through controls prove that local `end_time > now()` is not
+provider-billing evidence; natural expiry can clear the row census without
+proving lifecycle repair. Runtime schema retained the intended primary key and
+no network foreign key: adding cascade would erase the financial/idempotency
+evidence without canceling anything at Stripe. The ordinary reconciler also
+correctly inner-joins an existing network, so it cannot recreate or grant a
+deleted owner and is not the cleanup owner. Current source contains the
+deletion/credit fence and complete Stripe discovery, but all current API and
+Taskworker identities reported one modified, locally unavailable base with no
+preserved diff; their deployed capabilities remain unknown. Provider/Support
+owns the three unresolved dispositions. Release owns attributable API and
+Taskworker artifacts, followed by two clean reconciliation/deletion windows;
+do not treat the stable count or its imminent expiry as deployment proof.
+
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
