@@ -417,14 +417,10 @@ func TestExtenderDnsSampleRotatesBetweenTicks(t *testing.T) {
 // The Route 53 calls, delivered one record per page so the pager's early stop
 // is observable.
 //
-// A zone with an entry in zoneRecordSets is listed with its own sets and every
-// other zone with the flat existingRecordSets, so a single-zone test says
-// nothing about zones and a multi-zone one says everything. Used from the test
-// goroutine only, as every tick here is synchronous.
+// Used from the test goroutine only, as every tick here is synchronous.
 type testRoute53Api struct {
 	hostedZones        []*route53.HostedZone
 	hostedZonesErr     error
-	zoneRecordSets     map[string][]*route53.ResourceRecordSet
 	existingRecordSets []*route53.ResourceRecordSet
 	deliveredPageCount int
 	hostedZoneInputs   []*route53.ListHostedZonesByNameInput
@@ -464,13 +460,9 @@ func (self *testRoute53Api) ListResourceRecordSetsPagesWithContext(
 	_ ...request.Option,
 ) error {
 	self.listInputs = append(self.listInputs, input)
-	recordSets, ok := self.zoneRecordSets[aws.StringValue(input.HostedZoneId)]
-	if !ok {
-		recordSets = self.existingRecordSets
-	}
-	for i, recordSet := range recordSets {
+	for i, recordSet := range self.existingRecordSets {
 		self.deliveredPageCount += 1
-		lastPage := i == len(recordSets)-1
+		lastPage := i == len(self.existingRecordSets)-1
 		output := &route53.ListResourceRecordSetsOutput{
 			ResourceRecordSets: []*route53.ResourceRecordSet{recordSet},
 		}

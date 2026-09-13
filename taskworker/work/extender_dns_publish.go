@@ -47,9 +47,8 @@ import (
 // record drip and the dns sets are independent publishers of the same
 // directory and one being unreachable must not cost the other its turn.
 //
-// The zone the batch goes to is configured by name as well as by id, and the
-// name is resolved to an id once per process here (resolveExtenderDnsHostedZoneId),
-// shared with the gossip record setup task of extender_gossip_dns_work.go.
+// The zone the batch goes to is configured by name as well as by id, and a
+// name is resolved to an id once per process (resolveExtenderDnsHostedZoneId).
 
 const (
 	// Addresses per set when the configuration does not say.
@@ -310,8 +309,8 @@ func extenderDnsFqdn(recordName string) string {
 	return recordName
 }
 
-// The Route 53 calls the extender tasks make, which is the seam a test drives
-// the real batch builders through.
+// The Route 53 calls the publisher makes, which is the seam a test drives the
+// real batch builder through.
 type route53Api interface {
 	ListHostedZonesByNameWithContext(
 		ctx aws.Context,
@@ -331,8 +330,7 @@ type route53Api interface {
 	) (*route53.ChangeResourceRecordSetsOutput, error)
 }
 
-// newExtenderRoute53Api builds an aws session for one of the extender dns
-// blocks.
+// newExtenderRoute53Api builds the aws session of the dns block.
 //
 // Static credentials are used only when both halves are configured; anything
 // else falls back to the default chain, which is what an instance role or the
@@ -368,8 +366,8 @@ func newExtenderRoute53Api(
 	return route53.New(awsSession), nil
 }
 
-// The zone ids already resolved from a name, shared by every extender task in
-// the process and guarded by extenderDnsHostedZoneIdsStateLock.
+// The zone ids already resolved from a name, remembered for the process and
+// guarded by extenderDnsHostedZoneIdsStateLock.
 //
 // One resolution per name per process is the point: the zone of a name does not
 // change while the process runs, and a lookup on every tick would spend an api
