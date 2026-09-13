@@ -44,10 +44,110 @@ service stats pushers (`grafana.go`; series are per process, keyed by
     `prev_block_*` — MinerClaimed events in the st_event mirror windowed by
     chain block like deposits and emissions (`model.SumStMinerClaimedInBlockRange`).
 
+### The extender network (2026-09-13, connect/EXTENDER.md M)
+
+Four more public gauges on the same 5-minute db tick, and an `extender
+network` row on the public dashboard between the provider network and growth:
+
+- `online_extenders` and
+  `online_extenders_by_country{country_code,country}` — extenders that are
+  active with at least one active probed address
+  (`model.CountExtendersByCountry`, one scan). An extender is a host that
+  relays client traffic to the operator and to providers on paths that would
+  otherwise be blocked; the directory already gives its address away, so its
+  per-country count publishes nothing new. The country label is the name of
+  the country location the activation resolved
+  (`network_extender.country_location_id`, stored by the activation handler
+  through `model.CreateLocation`), or the upper-case code for a row not yet
+  filled by an activation. The vec replaces its whole label set like the
+  provider one, so an emptied country goes stale rather than pushing forever.
+  An extender whose activation resolved no country at all counts in the total
+  and has no series.
+- `online_providers_by_ip_family{ip_family}` and
+  `online_extenders_by_ip_family{ip_family}`, with `ip_family` one of `ipv4`,
+  `ipv6`, `dualstack` — **always all three series**, so a family with no
+  members is a zero and never an absence. A provider's family comes from
+  `network_client_location_reliability.ipv4_proven`/`ipv6_proven`: both is
+  dualstack, v6 alone is ipv6, everything else is ipv4 (a row written before
+  those columns reads as v4-only everywhere else in this schema). An
+  extender's family is the families it has active address rows on. The family
+  counts of either population sum to its total, and the provider split comes
+  out of the existing per-country scan rather than a second pass.
+
+`/stats/providers-map` gains `extender_count` on every region entry, always
+present: `GetProvidersMap` runs a second aggregate of the online extenders by
+`network_extender.region_location_id` and merges it with the provider
+aggregate, so a region with extenders and no providers is exported with
+`provider_count` 0. An extender located only to its country is placed under
+the country location's own name at the country centroid; one with no location
+at all is counted in the gauges only.
+
 Derived numbers are plain PromQL: new networks in range/per day
 (`total_networks` minus its `offset`), staked and block amounts in USD
 (× `alpha_usd`), price change (`offset 24h`/`7d`), block progress and
 countdown (`time()`), provider share (`topk(6)` plus the remainder).
+
+## Internal measurements: the contract gauges
+
+Six gauges from the same collector tick are deliberately **not** public
+(connect/EXTENDER.md M3, M4). They are listed in `grafana_test.go` as
+`internalMeasurementMetrics`, which requires them on `providers.json` and
+keeps them out of `publicSafeMetrics`:
+
+    urnetwork_stats_open_contracts                transfer contracts open now
+    urnetwork_stats_contracts_24h                 contracts created in the trailing 24h
+    urnetwork_stats_open_contracts_with_extender  of the open ones, those with an extender party
+    urnetwork_stats_contracts_with_extender_24h   the same over the trailing 24h
+    urnetwork_stats_open_disputes                 disputes raised and not yet decided
+    urnetwork_stats_disputes_24h                  contracts created in the trailing 24h that are disputed
+
+A gauge is a point in time, so each number comes in two forms. The open counts
+read the partial indexes on `transfer_contract` (`open`, and `dispute AND
+outcome IS NULL`) plus an existence probe of `contract_extender` over the open
+set, which is cheap because the open set is small.
+
+### The hour bucket cache
+
+The 24 hour counts are bucketized in one hour blocks of `create_time`
+(`model/contract_stats_model.go`). A complete bucket never changes, so it is
+computed once — by whichever taskworker needs it first — and cached in redis
+under `stats.contract_hour.<unix bucket start>` as json with a 26 hour ttl. A
+cold cache is filled with **one grouped query per table** over the whole
+missing range (`date_trunc('hour', create_time)`), not one query per bucket.
+A bucket counts as complete only once its hour has been over for a minute, so
+an insert still in flight when the hour turned can never freeze a short count
+into the cache; until then that bucket is counted live, as the current partial
+one always is. The 24 hour value is the 23 closed buckets before the current
+one plus the current partial one, so the window is at most 24 hours long and
+no contract is counted twice.
+
+A bucket's contract and dispute counts are one range scan of
+`transfer_contract_create_time` with `count(*) FILTER (WHERE dispute)`; its
+extender count is a range scan of `contract_extender` by the
+`(create_time, contract_id)` index the extender work added, so it is never a
+probe per contract. Every party row of one contract is written in the
+contract's own transaction, so a contract never straddles two buckets.
+
+The clock is a parameter (`model.CountContracts(ctx, now)`), so the window is
+placed by the caller and the tests never sleep.
+`model.Testing_ContractHourCacheStats` reports what the last window did —
+buckets from redis, buckets filled, fill queries, buckets counted live — which
+is how the tests tell a consulted cache from a rescanned range.
+
+## The providers dashboard
+
+`grafana/dashboards/providers.json`, uid `urnetwork-providers`, title
+`urnetwork / providers`, internal (no `public` tag). It has one template
+variable, `env`, from
+`label_values(urnetwork_stats_online_providers, env)`, and no block or host
+variable: every gauge here is replicated by every taskworker and read with
+`max(<metric>{env="$env"})`, so a fleet breakout would only split one
+measurement. Rows: population (providers and extenders with their family
+splits), contracts (each of the six gauges as a stat and a time series),
+ratios (the share of open contracts with an extender party, the 24 hour
+dispute rate), and the top 10 provider and extender countries.
+`TestProvidersDashboardPinsInternalMeasurements` pins all of that and fails if
+a contract gauge ever reaches a public dashboard.
 
 ## What is deliberately NOT public
 
@@ -115,7 +215,8 @@ only when they age out of its range.
 
 ## Files
 
-- `grafana/dashboards/public-traffic.json` — the dashboard (55 panels)
+- `grafana/dashboards/public-traffic.json` — the dashboard (68 panels)
+- `grafana/dashboards/providers.json` — the internal providers dashboard
 - `grafana/dashboards/signals.json` — internal panels for the new gauges
 - `grafana/dashboards/connect.json` — receive-queue drop counters on the
   dropped-messages panel (in-flight connect work; coverage test)
@@ -123,6 +224,14 @@ only when they age out of its range.
   public allowlist + fleet-label guard, provider-map structure test
 - `controller/stats_collector.go` (+ `_test.go`) — new gauges, block clock,
   labeled gauge vec with stale-series deletion
-- `model/network_stats_model.go` — `CountProvidersByCountry`;
-  `CountProviderCountries` derived from it (`providers_map_model_test.go`)
+- `model/network_stats_model.go` — `CountProvidersByCountry` with its ip
+  family split; `CountProviderCountries` derived from it
+  (`providers_map_model_test.go`)
+- `model/network_extender_stats_model.go` (+ `_test.go`) —
+  `CountExtendersByCountry`
+- `model/contract_stats_model.go` (+ `_test.go`) — the open contract counts
+  and the hour bucket cache
+- `model/providers_map_model.go` (+ `_test.go`) — `extender_count` on the map
+- `model/network_extender_model.go` — the four location ids on an activation
+  (`controller/extender_controller.go` resolves and creates the location)
 - `model/st_model.go` (+ `st_model_db_test.go`) — `SumStMinerClaimedInBlockRange`
