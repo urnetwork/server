@@ -294,12 +294,16 @@ func TestReleaseBuilderDocumentationRetainsLocalLauncherContract(t *testing.T) {
 		"`builder_message` overwrote `$?`",
 		"release-runner failure, not slow convergence or a missing artifact",
 		"`build/all/deploy-rollout.zsh`",
-		"omits `--only-older` only for config-updater, LB, and Proxy",
+		"omits `--only-older` for config-updater, LB, transparent Proxy, statusless Gossip, and unexposed Alt",
+		"Gossip, Alt, and Proxy run once at 100%",
 		"DynamoDB intent plus exact running-version convergence before acceptance",
 		"`TestRolloutUsesOnlyOlderOnlyForSampleableServicesAcrossEveryWave`",
 		"`TestRolloutDeployFailureStopsImmediately`",
 		"`TestRolloutStatusSampleFailureStopsBeforeNextWave`",
 		"`TestRunUsesCanonicalRolloutContract`",
+		"`TestRunBuildsAltAndGossipContainersBeforeRollout`",
+		"`TestAltContainerBuildContract`",
+		"`TestGossipContainerBuildContract`",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("release-builder runbook missing %q", required)

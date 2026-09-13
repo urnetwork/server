@@ -270,9 +270,9 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "expr": "sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "G",
-          "legendFormat": "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+          "legendFormat": "missing origin request_companion={{request_companion}} sender={{sender_role}} owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
         },
         {
           "datasource": {

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -43,11 +44,49 @@ func TestHMACCutoverSignalSyntheticIncompatibleCohort(t *testing.T) {
 		"compatible-version cohort remains a healthy control",
 		"Raw descriptions plus provider and network identifiers never leave",
 		"explicit security/availability decision",
-		"must converge both API and Connect signer paths",
+		"expires and fails open",
+		"not durable quarantine",
+		"self-reported description alone must never become a permanent exclusion",
+		"uniformly build every API and Connect signer from one reviewed shared Connect policy source",
+		"rebuild and safely promote the monitor from that same policy source",
+		"bounded period with a named sunset",
+		"not final protocol closure",
+		"whole refresh inside the three-hour verdict lifetime",
+		"passing its availability gate is not final closure",
 		"not a Proxy RAM or active-client hardware ceiling",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("incompatibility alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestHMACCutoverCatalogPreservesDecisionAndClosureBoundaries(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 2.24 Stored-contract HMAC cutover compatibility")
+	end := strings.Index(catalog, "### 2.25 Egress-prober derived-client retirement")
+	if start < 0 || end <= start {
+		t.Fatal("SIGNALS.md §2.24 section boundaries are missing")
+	}
+	section := strings.Join(strings.Fields(catalog[start:end]), " ")
+	for _, want := range []string{
+		"three-hour lifetime expires",
+		"deliberately fails open",
+		"not a durable quarantine",
+		"Never permanently exclude a provider from its self-reported description alone",
+		"uniformly build every API and Connect signer from one reviewed shared Connect policy source",
+		"Rebuild and safely promote the monitor from that same policy source",
+		"time-bounded risk acceptance with a named sunset, not final closure",
+		"API-only or Connect-only rollout is inconsistent",
+		"temporary compatibility availability gate does not close the protocol boundary",
+		"upgrade-and-sunset obligation",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("SIGNALS.md §2.24 omits %q", want)
 		}
 	}
 }

@@ -68,20 +68,21 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		return err
 	}
 
-	settings, err := loadSettings()
+	loadEffectiveSettings := func() (servermonitor.SignalSettings, error) {
+		settings, err := loadSettings()
+		if err != nil {
+			return servermonitor.SignalSettings{}, err
+		}
+		return applyMonitorSettingsOptions(settings, opts)
+	}
+	settings, err := loadEffectiveSettings()
 	if err != nil {
 		return err
 	}
-	if opts.mode != "" {
-		settings.AddressMode = servermonitor.AddressMode(opts.mode)
-	}
-	if len(opts.keys) > 0 {
-		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
-	}
-	settings, err = servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
-	if err != nil {
-		return err
-	}
+	// LoadSignalSettings arms the library default. Replace it here so every
+	// current-generation comparison reapplies this process's immutable CLI
+	// mode, repeated key override, and exact host exclusions before comparing.
+	settings.SettingsGenerationCheck = servermonitor.NewSettingsGenerationCheck(loadEffectiveSettings)
 	if err := settings.Validate(); err != nil {
 		return err
 	}
@@ -102,6 +103,16 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		return writeAlerts(stdout, opts.format, alerts)
 	})
+}
+
+func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
+	if opts.mode != "" {
+		settings.AddressMode = servermonitor.AddressMode(opts.mode)
+	}
+	if len(opts.keys) > 0 {
+		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
+	}
+	return servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
 }
 
 func parseMonitorOptions(args []string) (monitorOptions, error) {

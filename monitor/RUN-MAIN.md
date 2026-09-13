@@ -313,8 +313,11 @@ exact public IPv6 paths.
 
 ## Safe watcher promotion
 
-Any monitor code, catalog, inventory-loading, tailer, or alert-rendering change
-requires a newly built watcher. Promote it as a controlled handoff:
+Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or
+effective Config/Vault settings-generation change requires a newly built
+watcher. A `settings-freshness` finding means this boundary has already been
+crossed; validate the current generation with a fresh one-shot before
+promotion. Promote it as a controlled handoff:
 
 1. run focused tests, `go test ./monitor`, `go test -race ./monitor`, and
    `go vet ./monitor`;

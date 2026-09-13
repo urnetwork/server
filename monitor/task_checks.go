@@ -587,7 +587,7 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
 	add("processor-rate-limit",
-		"do not accelerate processor-rate-limit rows; verify current-main server commit 66525afc in every active taskworker artifact and deploy its shared Redis-time Circle transfer admission only to blocks that lack it; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
+		"do not accelerate processor-rate-limit rows; verify current-main marker-capable server commit "+circleAdmissionMarkerBaselineCommit+" in every active taskworker artifact and deploy it only to blocks that lack it; "+circleAdmissionFailClosedBaselineCommit+" alone proves fail-closed activity/error telemetry but not the capability gauge or exact pre-POST marker; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
 		"every active taskworker exposes the §2.14 admission-observable capability and all five activity families, admission errors and processor-rate-limit remain zero, and exact pre-POST admission markers stay below four per second for a full 90-minute retry window")
 	add("deadline-timeout",
 		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",

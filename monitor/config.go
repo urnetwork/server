@@ -177,6 +177,19 @@ type credentialRequirementSpec struct {
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
+	settings, err := loadSignalSettingsSnapshot()
+	if err != nil {
+		return SignalSettings{}, err
+	}
+	settings.SettingsGenerationCheck = NewSettingsGenerationCheck(loadSignalSettingsSnapshot)
+	return settings, nil
+}
+
+// loadSignalSettingsSnapshot deliberately omits the generation checker so a
+// checker can reload current effective settings without recursively wrapping
+// another checker. The returned values are otherwise identical to
+// LoadSignalSettings.
+func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	env, err := server.Env()
 	if err != nil {
 		return SignalSettings{}, err

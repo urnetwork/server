@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,7 +24,8 @@ const (
 // signal_missing_origin_test.go. It measures the lossless API counter for
 // originally non-companion requests that entered companion settlement without
 // a usable reverse origin, then consumes only reconciled fixed-vocabulary
-// resolution/relationship/lifecycle detail. No customer identity leaves Mimir.
+// sender/source-owner/resolution/relationship/lifecycle detail. No customer
+// identity leaves Mimir.
 func NewMissingOriginSignal() Signal {
 	return &signalAdapter{
 		number: "2.17", key: "missing-origin", name: "Missing-origin return-path rate",
@@ -39,7 +41,7 @@ func (missingOriginProbe) cadence() time.Duration { return time.Minute }
 
 func missingOriginQuery(environment string) string {
 	return fmt.Sprintf(
-		`label_replace((sum(rate(urnetwork_connect_contract_failures_total{env=%s,cause="missing_companion_origin",companion="false"}[%s])) * 60),"monitor_metric","%s","__name__",".*") or label_replace((sum by (resolution,relationship,source_lifecycle,destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=%s,request_companion="false"}[%s])) * 60),"monitor_metric","%s","__name__",".*")`,
+		`label_replace((sum(rate(urnetwork_connect_contract_failures_total{env=%s,cause="missing_companion_origin",companion="false"}[%s])) * 60),"monitor_metric","%s","__name__",".*") or label_replace((sum by (sender_role,source_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=%s,request_companion="false"}[%s])) * 60),"monitor_metric","%s","__name__",".*")`,
 		strconv.Quote(environment),
 		missingOriginRange,
 		missingOriginAggregateMetric,
@@ -50,6 +52,8 @@ func missingOriginQuery(environment string) string {
 }
 
 type missingOriginDetailKey struct {
+	senderRole           string
+	sourceOwner          string
 	resolution           string
 	relationship         string
 	sourceLifecycle      string
@@ -63,6 +67,8 @@ type missingOriginDetailSummary struct {
 	totalRate    float64
 	dominant     missingOriginDetailKey
 	dominantRate float64
+	roleRates    map[string]float64
+	ownerRates   map[string]float64
 }
 
 func (missingOriginProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -153,8 +159,8 @@ func (missingOriginProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		),
 		evidence: "Mimir evaluates the five-minute rate of the bounded API counter across the fleet for companion=false and exports one aggregate rate. " + detailEvidence + " No customer, client, network, device, contract, destination, or API-process identifier enters the metric cohorts; the standard bounded metrics-gateway name remains operational context.",
 		context:  "companion=false records the original wire bit, not the role of the request or the branch ultimately taken. resolveNonCompanionProvideMode can convert that request to companion fallback. Provider discovery is one producer, but provider return paths and same-network peers also create contracts. " + detailContext + " A 2026-09-02 identifier-free production cohort found the live pre-guard fault entirely in same-network returns from active top-level sources to already-inactive derived destinations; that dated result is a discriminator, not a permanent assumption about future incidents. Genuine companion=true traffic has a separate, substantially higher workload-dependent background and is context until its own healthy band is established.",
-		action:   "First require §2.8, §2.9, §2.15, and §2.16 to be healthy and verify bounded score-cache samples contain only contractable active top-level providers, then run §2.20 and §2.18. If successful stale contracts remain nonzero or §2.18 is unobservable because API artifacts predate server commit c8dfe570, satisfy the selected artifact's migration prerequisite and deploy the lifecycle guard; do not wait out a legacy client cohort while the server still authorizes dead routes. After API convergence, use the bounded rejection and lifecycle/relationship dimensions to locate any stale producer. Before treating elapsed time as rollout evidence, independently prove affected Connect-bearing artifacts contain Connect commit ec34ce1 for selected/discovery windows and Connect commit 55daddb for provider-return source owners, or both while the path remains unattributed. Lifecycle/relationship cohorts and companion=false do not identify a product or artifact, and a still-installed older client can reconnect and create another legacy window indefinitely. Only after that adoption boundary, let affected clients age through their maximum client-window lifetime; do not infer endpoint roles from companion=false, print identifiers, edit Redis blobs, relax provider gates, or restart clients to manufacture recovery.",
-		verify:   "§2.20 reports zero successful contracts to already-inactive destinations for two complete five-minute windows, §2.18 exposes both initialized partitions, affected Connect-bearing artifacts independently prove Connect commit ec34ce1 for selected/discovery paths and Connect commit 55daddb for provider-return paths (or both while unattributed), the companion=false missing-origin rate remains below 500/min for the same windows after one post-convergence client-window lifetime, selection controls remain healthy, and an end-to-end provider route succeeds without manual state changes.",
+		action:   "First require §2.8, §2.9, §2.15, and §2.16 to be healthy and verify bounded score-cache samples contain only contractable active top-level providers, then run §2.20 and §2.18. If successful stale contracts remain nonzero or §2.18 is unobservable because API artifacts predate server commit c8dfe570, satisfy the selected artifact's migration prerequisite and deploy the lifecycle guard; do not wait out a legacy client cohort while the server still authorizes dead routes. Before assigning a current high-rate cohort, require every API artifact to export the seven-label missing-origin detail family and wait one complete five-minute range: source_owner=egress_prober selects the bounded ProviderEgressProbe path for direct correlation, source_owner=other excludes that singleton but does not identify an application, and unattributed is legacy API telemetry rather than a cause. After API convergence, use the bounded sender/source-owner/rejection/lifecycle/relationship dimensions to locate a producer. Before treating elapsed time as rollout evidence, independently prove affected Connect-bearing artifacts contain Connect commit ec34ce1 for selected/discovery windows and Connect commit 55daddb for provider-return source owners, or both while the path remains unattributed. No metric label proves client artifact adoption, and a still-installed older client can reconnect and create another legacy window indefinitely. Only after that adoption boundary, let affected clients age through their maximum client-window lifetime; do not infer endpoint roles from companion=false, print identifiers, edit Redis blobs, relax provider gates, or restart clients to manufacture recovery.",
+		verify:   "Every API instance exports sender_role and server-derived source_owner on missing-origin details, owner-unattributed rate is zero after one complete five-minute rollout range, §2.20 reports zero successful contracts to already-inactive destinations for two complete five-minute windows, §2.18 exposes both initialized partitions, affected Connect-bearing artifacts independently prove Connect commit ec34ce1 for selected/discovery paths and Connect commit 55daddb for provider-return paths (or both while unattributed), the companion=false missing-origin rate remains below 500/min for the same windows after one post-convergence client-window lifetime, selection controls remain healthy, and an end-to-end provider route succeeds without manual state changes.",
 		playbook: "SIGNALS.md §2.17 and §5.9",
 	}}, nil
 }
@@ -165,7 +171,11 @@ func inspectMissingOriginDetails(
 	aggregateRate float64,
 	now time.Time,
 ) missingOriginDetailSummary {
-	summary := missingOriginDetailSummary{status: "absent"}
+	summary := missingOriginDetailSummary{
+		status:     "absent",
+		roleRates:  map[string]float64{},
+		ownerRates: map[string]float64{},
+	}
 	seen := map[missingOriginDetailKey]bool{}
 	dominantKey := ""
 	for _, series := range response.Data.Result {
@@ -177,10 +187,26 @@ func inspectMissingOriginDetails(
 			return missingOriginDetailSummary{status: "ambiguous", reason: "unexpected_metric_class"}
 		}
 		summary.series++
-		if len(series.Metric) != 5 {
+		hasAttribution, validLabelSet := missingOriginDetailLabelSet(series.Metric)
+		if !validLabelSet {
 			return missingOriginDetailSummary{status: "ambiguous", reason: "unexpected_detail_label_set", series: summary.series}
 		}
+		senderRole := series.Metric["sender_role"]
+		sourceOwner := series.Metric["source_owner"]
+		if !hasAttribution {
+			// Both labels were added atomically. A cohort without them belongs to
+			// an older API schema in a rolling range; preserve its rate but never
+			// infer the sender lane or owner from the request shape.
+			senderRole = "unattributed"
+			sourceOwner = "unattributed"
+		} else if senderRole == "unattributed" || sourceOwner == "unattributed" {
+			// unattributed is monitor-synthesized rollout state, not a producer
+			// vocabulary value.
+			return missingOriginDetailSummary{status: "ambiguous", reason: "invalid_detail_labels", series: summary.series}
+		}
 		key := missingOriginDetailKey{
+			senderRole:           senderRole,
+			sourceOwner:          sourceOwner,
 			resolution:           series.Metric["resolution"],
 			relationship:         series.Metric["relationship"],
 			sourceLifecycle:      series.Metric["source_lifecycle"],
@@ -209,6 +235,8 @@ func inspectMissingOriginDetails(
 			return missingOriginDetailSummary{status: "ambiguous", reason: "invalid_detail_rate", series: summary.series}
 		}
 		summary.totalRate += detailRate
+		summary.roleRates[key.senderRole] += detailRate
+		summary.ownerRates[key.sourceOwner] += detailRate
 		keyText := missingOriginDetailKeyText(key)
 		if summary.dominantRate < detailRate ||
 			(summary.dominantRate == detailRate && (dominantKey == "" || keyText < dominantKey)) {
@@ -241,9 +269,49 @@ func inspectMissingOriginDetails(
 	return summary
 }
 
+func missingOriginDetailLabelSet(metric map[string]string) (hasAttribution bool, valid bool) {
+	required := map[string]bool{
+		"monitor_metric":        false,
+		"resolution":            false,
+		"relationship":          false,
+		"source_lifecycle":      false,
+		"destination_lifecycle": false,
+	}
+	hasSenderRole := false
+	hasSourceOwner := false
+	for label := range metric {
+		switch label {
+		case "sender_role":
+			hasSenderRole = true
+		case "source_owner":
+			hasSourceOwner = true
+		default:
+			if _, ok := required[label]; !ok {
+				return false, false
+			}
+			required[label] = true
+		}
+	}
+	for _, present := range required {
+		if !present {
+			return false, false
+		}
+	}
+	if hasSenderRole != hasSourceOwner {
+		return false, false
+	}
+	wantLabels := len(required)
+	if hasSenderRole {
+		wantLabels += 2
+	}
+	return hasSenderRole, len(metric) == wantLabels
+}
+
 func validMissingOriginDetailKey(key missingOriginDetailKey) bool {
-	return missingOriginValueAllowed(key.resolution,
-		"requested_companion", "stream_fallback", "network_normalized", "relationship", "rejected", "unknown") &&
+	return missingOriginValueAllowed(key.senderRole, "client", "server", "absent", "unattributed", "unknown") &&
+		missingOriginValueAllowed(key.sourceOwner, "egress_prober", "other", "unattributed", "unknown") &&
+		missingOriginValueAllowed(key.resolution,
+			"requested_companion", "stream_fallback", "network_normalized", "relationship", "rejected", "unknown") &&
 		missingOriginValueAllowed(key.relationship, "network", "friends_family", "public", "unknown") &&
 		missingOriginValueAllowed(key.sourceLifecycle,
 			"missing", "active_top", "inactive_top", "active_derived", "inactive_derived", "control", "unknown") &&
@@ -261,14 +329,21 @@ func missingOriginValueAllowed(value string, allowed ...string) bool {
 }
 
 func missingOriginDetailKeyText(key missingOriginDetailKey) string {
-	return key.resolution + "/" + key.relationship + "/" + key.sourceLifecycle + "/" + key.destinationLifecycle
+	return strings.Join([]string{
+		key.senderRole,
+		key.sourceOwner,
+		key.resolution,
+		key.relationship,
+		key.sourceLifecycle,
+		key.destinationLifecycle,
+	}, "/")
 }
 
 func missingOriginDetailNarrative(summary missingOriginDetailSummary) (string, string, string) {
 	switch summary.status {
 	case "absent":
 		return "detail_status=absent detail_series=0 detail_rate_per_minute=unknown",
-			"The bounded resolution/relationship/lifecycle query returned no cohort series while the aggregate failure rate was nonzero, so missing detail is unavailable instrumentation rather than a measured zero.",
+			"The bounded sender/source-owner/resolution/relationship/lifecycle query returned no cohort series while the aggregate failure rate was nonzero, so missing detail is unavailable instrumentation rather than a measured zero.",
 			"Absent detail is consistent with an API generation predating c8dfe570, a mixed rollout, or detail-series ingestion loss. Use the initialized §2.18 partitions and exact API artifacts to choose that boundary; do not attribute the aggregate to a route class until detail is complete."
 	case "complete":
 		share := 0.0
@@ -276,9 +351,20 @@ func missingOriginDetailNarrative(summary missingOriginDetailSummary) (string, s
 			share = 100 * summary.dominantRate / summary.totalRate
 		}
 		return fmt.Sprintf(
-				"detail_status=complete detail_series=%d detail_rate_per_minute=%.3f dominant_resolution=%s dominant_relationship=%s dominant_source_lifecycle=%s dominant_destination_lifecycle=%s dominant_rate_per_minute=%.3f dominant_share_percent=%.1f",
+				"detail_status=complete detail_series=%d detail_rate_per_minute=%.3f sender_client_rate_per_minute=%.3f sender_server_rate_per_minute=%.3f sender_absent_rate_per_minute=%.3f sender_unattributed_rate_per_minute=%.3f sender_unknown_rate_per_minute=%.3f source_owner_egress_prober_rate_per_minute=%.3f source_owner_other_rate_per_minute=%.3f source_owner_unattributed_rate_per_minute=%.3f source_owner_unknown_rate_per_minute=%.3f dominant_sender_role=%s dominant_source_owner=%s dominant_resolution=%s dominant_relationship=%s dominant_source_lifecycle=%s dominant_destination_lifecycle=%s dominant_rate_per_minute=%.3f dominant_share_percent=%.1f",
 				summary.series,
 				summary.totalRate,
+				summary.roleRates["client"],
+				summary.roleRates["server"],
+				summary.roleRates["absent"],
+				summary.roleRates["unattributed"],
+				summary.roleRates["unknown"],
+				summary.ownerRates["egress_prober"],
+				summary.ownerRates["other"],
+				summary.ownerRates["unattributed"],
+				summary.ownerRates["unknown"],
+				summary.dominant.senderRole,
+				summary.dominant.sourceOwner,
 				summary.dominant.resolution,
 				summary.dominant.relationship,
 				summary.dominant.sourceLifecycle,
@@ -286,8 +372,8 @@ func missingOriginDetailNarrative(summary missingOriginDetailSummary) (string, s
 				summary.dominantRate,
 				share,
 			),
-			"Every returned detail label belongs to the producer's fixed vocabulary, cohort sample times match the aggregate, no cohort is duplicated, and the summed detail rate reconciles with the aggregate inside the documented scrape-boundary tolerance.",
-			"The dominant detail cohort is safe causal context from the request-time database snapshot, not an endpoint identity. Use its joint resolution, relationship, and lifecycle shape to distinguish fallback/return traffic from other paths without inferring a customer or device."
+			"Every returned detail label belongs to the producer's fixed vocabulary or is an explicitly unattributed legacy-schema cohort, cohort sample times match the aggregate, no cohort is duplicated, and the summed detail rate reconciles with the aggregate inside the documented scrape-boundary tolerance. source_owner is resolved by the API from the authenticated source network and durable prober network; it is not accepted from the request.",
+			"The dominant detail cohort is safe causal context from the request-time database snapshot, not an endpoint identity. sender_role is the reported sequence lane, not an application. source_owner=egress_prober identifies only the server-owned singleton, other excludes it without naming a product, and unattributed is an older API schema rather than a cause. Interpret these jointly with resolution, relationship, and lifecycle."
 	case "partial":
 		return fmt.Sprintf(
 				"detail_status=partial detail_series=%d detail_rate_per_minute=%.3f detail_error=%s",

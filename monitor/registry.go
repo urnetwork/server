@@ -49,6 +49,7 @@ func NewSignals() []Signal {
 		NewRedisClusterSignal(),
 		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),
+		NewSettingsFreshnessSignal(),
 		NewActiveQueriesSignal(),
 		NewWaitEventsSignal(),
 		NewReindexDebrisSignal(),

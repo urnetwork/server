@@ -1678,11 +1678,11 @@ func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
 		t.Fatalf("signals dashboard panel %q lacks the missing-origin detail query", wantTitle)
 	}
 
-	wantQuery := `sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`
+	wantQuery := `sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`
 	if detailsTarget.Expr != wantQuery {
 		t.Errorf("missing-origin detail query = %q, want %q", detailsTarget.Expr, wantQuery)
 	}
-	wantLegend := "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+	wantLegend := "missing origin request_companion={{request_companion}} sender={{sender_role}} owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
 	if detailsTarget.LegendFormat != wantLegend {
 		t.Errorf("missing-origin detail legend = %q, want %q", detailsTarget.LegendFormat, wantLegend)
 	}

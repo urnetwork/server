@@ -309,6 +309,18 @@ type DNSAliasSignalSource interface {
 	DNSRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
 }
 
+// SettingsGenerationCheck compares the immutable settings already owned by a
+// monitor with the effective settings available now. The implementation keeps
+// the fresh values only for the duration of the comparison: Alerts expose only
+// whether the generation still matches, never resource contents or
+// fingerprints.
+type SettingsGenerationCheck func(ctx context.Context, startup SignalSettings) (current bool, err error)
+
+// SignalSettingsLoader returns one complete effective settings snapshot.
+// Command wrappers use it to reapply their immutable CLI overrides before a
+// generation comparison.
+type SignalSettingsLoader func() (SignalSettings, error)
+
 // StreamingSignalSource optionally provides long-running local streams. It is
 // used by the standing SIGNALS.md §1.5 log collector.
 type StreamingSignalSource interface {
@@ -375,6 +387,10 @@ type SignalSettings struct {
 	SourceAttribution SourceAttributionSettings
 	DNSAliases        DNSAliasSettings
 	StateDir          string
+	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
+	// assemble SignalSettings directly may omit it; synthetic tests inject it
+	// without touching Config or Vault.
+	SettingsGenerationCheck SettingsGenerationCheck
 
 	SSHConnectTimeout time.Duration
 	CommandTimeout    time.Duration
