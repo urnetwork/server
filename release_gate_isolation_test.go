@@ -50,6 +50,15 @@ case "$1" in
     [[ -f "$FAKE_STATE/$id.meta" ]] || exit 1
     read -r name owner service restart binding < "$FAKE_STATE/$id.meta"
     if [[ "$*" == *NetworkSettings.Ports* ]]; then printf '%s\n' "$binding"
+    elif [[ "$*" == *State.Running* ]]; then
+      if [[ "${FAKE_STOPPED_SERVICE:-}" == "$service" ]]; then
+        printf 'exited false 1\n'
+        if [[ "${FAKE_CHANGE_OWNER_ON_STATE:-}" == 1 ]]; then
+          printf '%s %s %s %s %s\n' "$name" 00000000000000000000000000000000 "$service" "$restart" "$binding" > "$FAKE_STATE/$id.meta"
+        fi
+      else printf 'running true 0\n'; fi
+    elif [[ "$*" == *'json .State'* ]]; then
+      printf '{"Status":"exited","Running":false,"ExitCode":1}\n'
     else printf '%s /%s %s %s %s\n' "$id" "$name" "$owner" "$service" "$restart"; fi ;;
   container)
     [[ "$2" == ls ]]
@@ -63,7 +72,14 @@ case "$1" in
   start) [[ -f "$FAKE_STATE/$2.meta" ]] ;;
   exec)
     read -r name owner service restart binding < "$FAKE_STATE/$2.meta"
+    printf 'exec\n' >> "$FAKE_STATE/$2.execs"
     if [[ "$service" == postgres ]]; then printf '512:256MB:en_US.UTF-8:t\n'; else printf 'PONG\n'; fi ;;
+  logs)
+    id="${!#}"
+    [[ -f "$FAKE_STATE/$id.meta" ]]
+    printf '%s\n' "$id" >> "$FAKE_STATE/$id.logs-read"
+    printf 'fixture startup failure: permission denied\n'
+    if [[ "${FAKE_LARGE_LOG:-}" == 1 ]]; then head -c 2097152 /dev/zero | tr '\000' x; fi ;;
   rm)
     id="${!#}"; [[ "$id" =~ ^[0-9a-f]{64}$ ]]
     [[ -f "$FAKE_STATE/$id.meta" ]]
@@ -174,6 +190,7 @@ release_gate_service_fixture() { shift 2; "$FIXTURE_GENERATOR" "$@"; }
 		"GATE_ROOT":         self.root, "FIXTURE_WORKSPACE": self.workspace, "FIXTURE_LOCK": self.lock,
 		"FAKE_PG_PORT": "35431", "FAKE_REDIS_PORT": "36371",
 		"APEX_CONTAINER_EVALUATION": "", "FAKE_FAIL_CREATE": "",
+		"FAKE_STOPPED_SERVICE": "", "FAKE_CHANGE_OWNER_ON_STATE": "", "FAKE_LARGE_LOG": "",
 		"PRIVATE_PROBE": self.probe, "WARP_ENV": "local",
 	})
 	return command.CombinedOutput()
@@ -239,6 +256,54 @@ done
 	}
 	if files, err := filepath.Glob(filepath.Join(self.state, "*.meta")); err != nil || len(files) != 0 {
 		t.Fatalf("owned resources survived cleanup: %v %v", files, err)
+	}
+}
+
+func TestReleaseGateServicesStoppedOwnerRetainsBoundedDiagnostics(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+export FAKE_STOPPED_SERVICE=postgres FAKE_LARGE_LOG=1
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+id="$(< "$release_gate_service_root/postgres.cid")"
+[[ ! -e "$release_gate_service_root/redis.cid" && ! -e "$release_gate_service_root/environment.sh" ]]
+[[ ! -e "$FAKE_STATE/$id.execs" ]]
+[[ "$(< "$FAKE_STATE/$id.logs-read")" == "$id" ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *"container_id=$id"* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *'stage=stopped'* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *'observation=exited false 1'* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure-state.txt")" == '{"Status":"exited","Running":false,"ExitCode":1}' ]]
+[[ "$(stat -c '%s' "$release_gate_service_root/postgres.failure-log.txt")" == 1048576 ]]
+for suffix in failure.txt failure-state.txt failure-log.txt readiness.stderr; do
+  [[ "$(stat -c '%a' "$release_gate_service_root/postgres.$suffix")" == 600 ]]
+done
+release_gate_services_cleanup
+[[ "$(< "$FAKE_STATE/removed")" == "$id" && ! -e "$FAKE_STATE/$id.meta" ]]
+`)
+	if err != nil {
+		t.Fatalf("stopped owned service diagnostics: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "is not running: exited false 1") {
+		t.Fatalf("stopped owned service lost its concrete refusal: %s", output)
+	}
+}
+
+func TestReleaseGateServicesStoppedOwnerDoesNotReadForeignDiagnostics(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+export FAKE_STOPPED_SERVICE=postgres FAKE_CHANGE_OWNER_ON_STATE=1
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+id="$(< "$release_gate_service_root/postgres.cid")"
+[[ ! -e "$FAKE_STATE/$id.execs" && ! -e "$FAKE_STATE/$id.logs-read" ]]
+[[ ! -e "$release_gate_service_root/postgres.failure.txt" && ! -e "$release_gate_service_root/postgres.failure-log.txt" ]]
+[[ ! -e "$release_gate_service_root/redis.cid" && ! -e "$release_gate_service_root/environment.sh" ]]
+if release_gate_services_cleanup; then exit 91; fi
+[[ -f "$FAKE_STATE/$id.meta" && ! -e "$FAKE_STATE/removed" ]]
+`)
+	if err != nil {
+		t.Fatalf("changed owner diagnostic refusal: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "refusing changed postgres container ownership") {
+		t.Fatalf("changed owner diagnostic refusal was not retained: %s", output)
 	}
 }
 
