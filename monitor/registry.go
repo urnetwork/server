@@ -112,6 +112,7 @@ func NewSignals() []Signal {
 		NewPointsReadinessSignal(),
 		NewEdgeIPv6Signal(),
 		NewTLSExpirySignal(),
+		NewDNSAliasesSignal(),
 		NewGrafanaDatasourcesSignal(),
 		NewGrafanaIngressSignal(),
 		NewGrafanaNodeSignal(),

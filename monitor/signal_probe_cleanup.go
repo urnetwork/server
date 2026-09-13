@@ -90,6 +90,22 @@ WITH clock AS MATERIALIZED (
               AND NOT connected
         )), 0)::bigint AS oldest_active_disconnected_age_seconds
     FROM recent
+), residual_connection_history AS MATERIALIZED (
+    SELECT
+        EXISTS (
+            SELECT 1
+            FROM network_client_connection ncc
+            WHERE ncc.client_id = r.client_id
+        ) AS ever_connected
+    FROM recent r
+    WHERE r.create_time < r.now_utc - interval '10 minutes'
+      AND r.active
+      AND NOT r.connected
+), residual_aggregate AS (
+    SELECT
+        count(*) FILTER (WHERE NOT ever_connected)::bigint AS mature_active_disconnected_never_connected,
+        count(*) FILTER (WHERE ever_connected)::bigint AS mature_active_disconnected_ever_connected
+    FROM residual_connection_history
 )
 SELECT
     (SELECT count(*) FROM prober)::text AS authority_rows,
@@ -100,8 +116,11 @@ SELECT
     mature_active_disconnected::text,
     fresh_active::text,
     inactive_without_deactivate_time::text,
-    oldest_active_disconnected_age_seconds::text
-FROM aggregate;
+    oldest_active_disconnected_age_seconds::text,
+    mature_active_disconnected_never_connected::text,
+    mature_active_disconnected_ever_connected::text
+FROM aggregate
+CROSS JOIN residual_aggregate;
 `
 }
 
@@ -115,13 +134,15 @@ type probeCleanupSnapshot struct {
 	freshActive                        int64
 	inactiveWithoutDeactivateTime      int64
 	oldestActiveDisconnectedAgeSeconds int64
+	matureDisconnectedNeverConnected   int64
+	matureDisconnectedEverConnected    int64
 }
 
 func parseProbeCleanupSnapshot(rows []pgRow) (probeCleanupSnapshot, error) {
-	if len(rows) != 1 || len(rows[0]) != 9 {
+	if len(rows) != 1 || len(rows[0]) != 11 {
 		return probeCleanupSnapshot{}, fmt.Errorf("provider probe cleanup returned an invalid aggregate shape")
 	}
-	values := make([]int64, 9)
+	values := make([]int64, 11)
 	for index := range values {
 		value, err := parseStrictInt64(rows[0].str(index))
 		if err != nil || value < 0 {
@@ -134,12 +155,14 @@ func parseProbeCleanupSnapshot(rows []pgRow) (probeCleanupSnapshot, error) {
 		matureInactive: values[3], matureActiveConnected: values[4],
 		matureActiveDisconnected: values[5], freshActive: values[6],
 		inactiveWithoutDeactivateTime: values[7], oldestActiveDisconnectedAgeSeconds: values[8],
+		matureDisconnectedNeverConnected: values[9], matureDisconnectedEverConnected: values[10],
 	}
 	if snapshot.authorityRows > 1 ||
 		snapshot.matureCreated != snapshot.matureInactive+snapshot.matureActiveConnected+snapshot.matureActiveDisconnected ||
 		snapshot.matureCreated > snapshot.created6h ||
 		snapshot.freshActive > snapshot.created6h-snapshot.matureCreated ||
 		snapshot.inactiveWithoutDeactivateTime > snapshot.created6h ||
+		snapshot.matureActiveDisconnected != snapshot.matureDisconnectedNeverConnected+snapshot.matureDisconnectedEverConnected ||
 		(snapshot.matureActiveDisconnected == 0 && snapshot.oldestActiveDisconnectedAgeSeconds != 0) ||
 		(snapshot.authorityRows == 0 && probeCleanupValuesHaveNonzero(values[1:])) {
 		return probeCleanupSnapshot{}, fmt.Errorf("provider probe cleanup returned contradictory aggregate values")
@@ -168,26 +191,39 @@ func (probeCleanupProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	target := "provider-egress-prober"
 	findings := []finding{
 		healthyFinding("pg/probe-cleanup", tierPage, "probe-child-retirement", target),
+		healthyFinding("pg/probe-cleanup", tierPage, "probe-unused-args-retirement", target),
 		healthyFinding("pg/probe-cleanup", tierWarn, "probe-child-retirement-identity", target),
 		healthyFinding("pg/probe-cleanup", tierWarn, "probe-child-retirement-integrity", target),
 	}
 	if snapshot.authorityRows != 1 {
-		findings[1] = probeCleanupIdentityFinding(snapshot)
+		findings[2] = probeCleanupIdentityFinding(snapshot)
 		return findings, nil
 	}
 	if snapshot.inactiveWithoutDeactivateTime != 0 {
-		findings[2] = probeCleanupIntegrityFinding(snapshot)
+		findings[3] = probeCleanupIntegrityFinding(snapshot)
 	}
-	if snapshot.matureActiveDisconnected != 0 {
-		severity := tierWarn
-		if snapshot.matureCreated >= 20 &&
-			snapshot.matureActiveDisconnected >= 20 &&
-			snapshot.matureActiveDisconnected*100 >= snapshot.matureCreated*probeCleanupPagePercent {
-			severity = tierPage
-		}
-		findings[0] = probeCleanupLeakFinding(snapshot, severity)
+	if snapshot.matureDisconnectedEverConnected != 0 {
+		findings[0] = probeCleanupLeakFinding(
+			snapshot,
+			probeCleanupSeverity(snapshot, snapshot.matureDisconnectedEverConnected),
+			snapshot.matureDisconnectedEverConnected,
+		)
+	}
+	if snapshot.matureDisconnectedNeverConnected != 0 {
+		findings[1] = probeUnusedArgsRetirementFinding(
+			snapshot,
+			probeCleanupSeverity(snapshot, snapshot.matureDisconnectedNeverConnected),
+		)
 	}
 	return findings, nil
+}
+
+func probeCleanupSeverity(snapshot probeCleanupSnapshot, residual int64) string {
+	if snapshot.matureCreated >= 20 && residual >= 20 &&
+		residual*100 >= snapshot.matureCreated*probeCleanupPagePercent {
+		return tierPage
+	}
+	return tierWarn
 }
 
 func probeCleanupObserved(snapshot probeCleanupSnapshot) string {
@@ -196,30 +232,50 @@ func probeCleanupObserved(snapshot probeCleanupSnapshot) string {
 		unretiredPercent = 100 * float64(snapshot.matureActiveDisconnected) / float64(snapshot.matureCreated)
 	}
 	return fmt.Sprintf(
-		"authority_rows=%d created_6h=%d mature_grace_seconds=600 mature_created=%d mature_inactive=%d mature_active_connected=%d mature_active_disconnected=%d mature_active_disconnected_percent=%.1f fresh_active=%d inactive_without_deactivate_time=%d oldest_active_disconnected_age_seconds=%d",
+		"authority_rows=%d created_6h=%d mature_grace_seconds=600 mature_created=%d mature_inactive=%d mature_active_connected=%d mature_active_disconnected=%d mature_active_disconnected_percent=%.1f mature_active_disconnected_never_connected=%d mature_active_disconnected_ever_connected=%d fresh_active=%d inactive_without_deactivate_time=%d oldest_active_disconnected_age_seconds=%d",
 		snapshot.authorityRows, snapshot.created6h, snapshot.matureCreated, snapshot.matureInactive,
 		snapshot.matureActiveConnected, snapshot.matureActiveDisconnected, unretiredPercent,
+		snapshot.matureDisconnectedNeverConnected, snapshot.matureDisconnectedEverConnected,
 		snapshot.freshActive, snapshot.inactiveWithoutDeactivateTime,
 		snapshot.oldestActiveDisconnectedAgeSeconds,
 	)
 }
 
-func probeCleanupLeakFinding(snapshot probeCleanupSnapshot, severity string) finding {
+func probeCleanupLeakFinding(snapshot probeCleanupSnapshot, severity string, residual int64) finding {
 	return finding{
 		probeId: "pg/probe-cleanup", tier: severity,
 		class: "probe-child-retirement", target: "provider-egress-prober", frame: "derived-client-lifecycle", sustain: 2,
 		symptom: fmt.Sprintf(
-			"%d of %d mature egress-prober child clients remain active without a live connection",
-			snapshot.matureActiveDisconnected, snapshot.matureCreated,
+			"%d of %d mature egress-prober children that previously opened a connection remain active after it closed",
+			residual, snapshot.matureCreated,
 		),
-		mechanism: "Each bounded provider tunnel derives a short-lived API client from the durable prober identity. The client must be deactivated only after its contract and out-of-band cleanup completes. A legacy close path canceled the generator control plane before the joined final remove-client request, so completed probes left active child rows until the much later idle reaper.",
+		mechanism: "A lifetime connection row proves this child reached the generated-client channel path. Once that connection is no longer live, channel retirement must keep the generator control plane available until its admitted remove-client request completes. Cancellation or unjoined teardown can otherwise leave the child active until the much later idle reaper.",
 		baseline:  "After a ten-minute close grace, no prober-derived client remains active without a connected session; active connected children are the in-flight healthy control and stay bounded by current probe work.",
 		observed:  probeCleanupObserved(snapshot),
-		evidence:  "The query restricts six hours of children by both the singleton prober network and parent client, then exports only aggregate lifecycle counts. Client, network, connection, and credential identifiers never leave PostgreSQL.",
-		context:   "This is a software-owned teardown leak, not proof of a Proxy active-client hardware ceiling and not the cause of the independent legacy stored-contract HMAC rejection. The pre-rollout stock remains a separate database-retention and operational-cleanup concern even after new leakage stops.",
-		action:    "Build and deploy Taskworker from immutable sibling inputs containing current Connect 66aaad4 and Operator Proxy 35b0bc7, and prove those exact trees in the image manifest; the outer Server VCS stamp is insufficient when local module replacements are used. The former Connect d3b49d9 was rebased to the patch-identical current commit and is historical evidence, not a required ancestor. Do not delete or deactivate production rows merely to clear this signal, and do not call a small or empty cohort recovery while §2.19 probe activity is insufficient.",
-		verify:    "After every Taskworker process converges, run an explicit cohort beginning after the rollout boundary and require creation/deactivation balance plus zero, or an explicitly budgeted tiny transient, mature active-disconnected rows. The rolling six-hour signal becomes independently clean only after rollout end plus six hours and the ten-minute grace; active connected children remain bounded by in-flight work.",
+		evidence:  "The query restricts six hours of children by both the singleton prober network and parent client, classifies only mature disconnected residuals by lifetime connection existence, and exports aggregate counts. Client, network, connection, and credential identifiers never leave PostgreSQL.",
+		context:   "This is the reached-channel teardown branch. Never-connected client arguments are independently reported as probe-unused-args-retirement. Neither branch proves a Proxy active-client hardware ceiling or explains the independent legacy stored-contract HMAC rejection. Historical stock remains a separate database-retention and operational-cleanup concern after new leakage stops.",
+		action:    "Trace generated-client channel close through the exact deployed Connect and Operator Proxy inputs. Preserve ordered tunnel close, generation-safe removal, and joined cleanup before control-plane cancellation. Add a deterministic blocked-remove regression for any newly found gap. Do not delete or deactivate production rows merely to clear this signal, and do not call a small or empty cohort recovery while §2.19 probe activity is insufficient.",
+		verify:    "After every affected process converges on the correction, run an explicit cohort beginning after the rollout boundary and require zero mature ever-connected residuals while §2.19 proves continuing probe work. The rolling six-hour signal becomes independently clean only after rollout end plus six hours and the ten-minute grace.",
 		playbook:  "SIGNALS.md §2.25, §2.19, §2.23, §2.24, and §8.12",
+	}
+}
+
+func probeUnusedArgsRetirementFinding(snapshot probeCleanupSnapshot, severity string) finding {
+	return finding{
+		probeId: "pg/probe-cleanup", tier: severity,
+		class: "probe-unused-args-retirement", target: "provider-egress-prober", frame: "derived-client-lifecycle", sustain: 2,
+		symptom: fmt.Sprintf(
+			"%d of %d mature egress-prober children never opened a connection and remain active",
+			snapshot.matureDisconnectedNeverConnected, snapshot.matureCreated,
+		),
+		mechanism: "A child with no lifetime connection row was discarded before it entered the generated-client channel path, such as an unused, late, expired, or failed client argument. Those direct RemoveClientArgs calls must be admitted to the generator retirement lifecycle and joined by shutdown; otherwise API cancellation can strand their asynchronous remove request.",
+		baseline:  "After a ten-minute close grace, every never-connected prober-derived client has been retired; fresh active children remain outside the mature cohort.",
+		observed:  probeCleanupObserved(snapshot),
+		evidence:  "The bounded query evaluates lifetime connection existence only for mature active-disconnected residuals and exports aggregate branch counts. Client, network, connection, and credential identifiers never leave PostgreSQL.",
+		context:   "This is the pre-channel/direct-argument cleanup branch. Children that previously opened a connection are independently reported as probe-child-retirement. It is a software lifecycle fault, not proof of provider capacity pressure and not authority for historical row deletion.",
+		action:    "Make live direct client-argument removal retirement-admitted and ensure generator CloseAndWait joins it before canceling the API. Retain generation-safe RemoveIfCurrent behavior, store preservation during shutdown, and bounded late-after-close best effort. Prove the ordering with a deterministic blocked remove-client response. Do not bulk-deactivate production rows.",
+		verify:    "After every affected process converges, start a post-rollout cohort and require zero mature never-connected residuals while §2.19 proves continuing probe work. Then require the complete rolling six-hour window plus the ten-minute grace to clear.",
+		playbook:  "SIGNALS.md §2.25, §2.19, §2.23, and §8.12",
 	}
 }
 

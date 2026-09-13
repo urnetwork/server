@@ -6178,25 +6178,35 @@ population/age bounds, privacy, and detailed Markdown.
 Probe: `probe-cleanup`
 
 Every provider-egress attempt derives a short-lived API client from the durable
-`prober_identity` singleton. Closing the bounded tunnel must retire that child;
-otherwise active rows accumulate until the much later idle reaper and inflate
-the database's apparent active-client population. This probe identifies the
-cohort by both the singleton network and parent client, limits reads to six
-hours, applies a ten-minute close grace, and exports only aggregate lifecycle
-counts. IDs, credentials, endpoints, and descriptions remain in PostgreSQL.
+`prober_identity` singleton. Closing or discarding the bounded tunnel attempt
+must retire that child; otherwise active rows accumulate until the much later
+idle reaper and inflate the database's apparent active-client population. This
+probe identifies the cohort by both the singleton network and parent client,
+limits reads to six hours, applies a ten-minute close grace, and splits mature
+active-disconnected residuals by whether any lifetime connection row exists.
+It exports only aggregate lifecycle counts. IDs, credentials, endpoints, and
+descriptions remain in PostgreSQL.
 
 - `probe-child-retirement` (WARN for any residual; PAGE after two samples when
-  at least 20 residuals are at least 10% of 20 or more mature children): mature
-  children remain active without a connected session. Active connected rows
-  are retained as the in-flight control; §2.19 and §2.23 must independently
-  bound probe execution and advancement rather than treating this signal as a
-  generic stuck-task detector.
+  at least 20 residuals are at least 10% of 20 or more mature children):
+  previously connected children remain active after their connection closes.
+  This is the reached-channel teardown branch.
+- `probe-unused-args-retirement` (same WARN/PAGE thresholds): children that
+  never produced a connection row remain active. This is the direct
+  client-argument cleanup branch for unused, late, expired, or failed
+  arguments, before generated-channel ownership begins.
 - `probe-child-retirement-identity` (WARN after two samples): the singleton
   authority is absent or incomplete. Repair §2.23 bootstrap; never infer the
   parent from descriptive text.
 - `probe-child-retirement-integrity` (WARN after two samples): a recent child
   is inactive without `deactivate_time`. The active flag and timestamp must be
   written together. Find the exact writer before any historical backfill.
+
+Active connected rows are retained as the in-flight control. §2.19 and §2.23
+must independently bound probe execution and advancement rather than treating
+either retirement class as a generic stuck-task detector. The two retirement
+branches can alert independently and must not be recombined when choosing a
+code path or declaring recovery.
 
 A privacy-bounded 2026-09-10 Main sample found 64,556 children created in six
 hours. Of 63,174 past the grace, 5,872 were inactive, 14 remained connected,
@@ -6209,7 +6219,9 @@ successor of historical `d3b49d9`) and Operator Proxy `35b0bc7` correct new
 teardown, but an immutable Taskworker artifact must prove both exact sibling
 inputs because Server's local module replacements make its outer VCS stamp
 insufficient evidence. Do not require the superseded Connect hash to be an
-ancestor of a post-rebase build.
+ancestor of a post-rebase build. That sample predates the lifetime-connection
+split and therefore records only the historical combined residual; it must not
+be assigned retroactively to either current branch.
 
 A later 2026-09-10 running-artifact discriminator found all eight fresh
 Taskworker slots on one generation with no fresh predecessor overlap. The exact
@@ -6224,21 +6236,48 @@ past the ten-minute grace, and finally a complete six-hour window plus grace.
 This paragraph records historical evidence and does not make that artifact's
 version standing deployment guidance.
 
-Do not bulk-delete or deactivate production children to clear this alert. The
-software fix prevents new leakage; historical active stock needs a separately
+A bounded 2026-09-13 post-rollout discriminator then found all eight current
+Taskworker slots on one artifact whose extracted executable contained both
+previous corrections. Connected-client teardown was clean. Across five
+post-rollout age buckets from ten minutes through six hours, every mature
+active-disconnected residual had zero lifetime connection rows; the
+`probe-child-retirement` branch was therefore zero and the remaining fault was
+exclusively `probe-unused-args-retirement`. Source review found the matching
+ordering gap: live direct `RemoveClientArgs` cleanup was launched
+asynchronously without admission to the generator retirement lifecycle, so
+`ApiMultiClientGenerator.CloseAndWait` could cancel and close the API before
+that remove completed. A separate bounded API-route control observed canceled
+remove-client requests while successful controls continued. Together these
+controls distinguish the current pre-channel lifecycle fault from the already
+corrected channel teardown, legacy stock, provider capacity, and ordinary
+probe inactivity.
+
+The correction is to admit live direct argument removal to the same bounded
+retirement lifecycle and make `CloseAndWait` join it before API cancellation.
+It must preserve generation-safe `RemoveIfCurrent`, intentional identity-store
+preservation during shutdown, and bounded best effort for calls that arrive
+after close.
+A deterministic regression blocks the remove-client response, starts
+`CloseAndWait`, proves shutdown remains joined until release, and requires one
+successful removal. Adjacent stale-generation and shutdown-store controls must
+remain green.
+
+Do not bulk-delete or deactivate production children to clear either alert.
+Software fixes prevent new leakage; historical active stock needs a separately
 reviewed, bounded reaper or operational cleanup. Begin an explicit post-rollout
-cohort only after every Taskworker contains both fixes, wait through the
-ten-minute grace, and require creation/deactivation balance. The rolling signal
-cannot become independently clean until rollout end plus six hours and the
-grace. This is a **software lifecycle/data-integrity** class, not a Proxy
-hardware-capacity remedy and not an explanation for the independent §2.24 HMAC
-failure.
+cohort only after every affected Taskworker contains the applicable fix, wait
+through the ten-minute grace, and require creation/deactivation balance for
+each branch. The rolling signal cannot become independently clean until
+rollout end plus six hours and the grace. These are **software
+lifecycle/data-integrity** classes, not a Proxy hardware-capacity remedy and
+not an explanation for the independent §2.24 HMAC failure.
 
 Implementation convention: SIGNALS.md §2.25 (`probe-cleanup`) maps to
 `signal_probe_cleanup.go` and `signal_probe_cleanup_test.go`. Synthetic tests
 cover a production-shaped severe leak, exact warning/page thresholds, a
-connected control, missing singleton authority, missing deactivation time,
-contradictory aggregates, bounded private SQL, and detailed Markdown.
+connected control, independent never-connected and ever-connected branches,
+missing singleton authority, missing deactivation time, contradictory totals
+and branch partitions, bounded private SQL, and detailed Markdown.
 
 ### 2.26 Device-backed share of new networks (source-neutral quality guard)
 Probe: `signup-quality`
@@ -8810,6 +8849,9 @@ Tier-0 (page):
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
+| probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
+| dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
+| hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
 
 Tier-1 (warn):
 | id | source | check | threshold |
@@ -8842,6 +8884,7 @@ Tier-1 (warn):
 | stats-landmine | pg | fewer than three valid/ready exact isolated pair/payer structural index shapes, or `transfer_contract.open` statistics target is not the bounded value 300; legacy n_distinct/reltuples remain evidence while the structural repair is incomplete | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
+| probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature active-disconnected egress-prober children with or without lifetime connection history | any residual in either independent branch for 2 probes |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs + Grafana `/api/ds/query` | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | grafana-datasource-query | Grafana `/api/ds/query` | 11.15 authenticated `warp-mimir` or `warp-loki` control does not return a successful result after plugin loading | 2 consecutive probes |
@@ -8871,6 +8914,8 @@ Tier-1 (warn):
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
+| dns-authoritative-unobservable / dns-recursive-unobservable / dns-recursive-answer-family | native DNS | §18.3 complete authority visibility plus exact recursive A/AAAA sets and NOERROR/NODATA absences | observation failure for 2 probes; recursive drift for 2 probes, page after 3 |
+| hostpower-policy-not-loaded / hostpower-policy-runtime-unobservable | host | §21.2 installed policy compared with fixed-enum live login1 actions and CanSuspend | effective deny-all config with divergent non-destructive live actions and non-affirmative CanSuspend for 2 probes; required runtime state unknown for 2 probes |
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every source-known durable identity and published schema artifact | page when any identity differs or any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
@@ -14128,6 +14173,22 @@ Use a layered regression and recovery contract:
   pauses, and path restoration. Measure end-to-end progress, not just a resize
   timer: abandoning a contextless generator call does not cancel that work.
   Later DNS/TCP qualification is distinct from initial `ProviderStateAdded`.
+  Treat an already-owned resolver as part of the transport contract. The plain
+  `http://` and `ws://` dialers must enter `ConnectSettings.DialContext` even
+  when no explicit `DialContextSettings` callback is installed; otherwise the
+  standard HTTP transport or Gorilla falls back to its process-default resolver
+  and bypasses the configured resolver, address-family policy, proxy, and
+  address race. The `https://` and `wss://` paths already enter the same
+  settings boundary through their TLS dialers. An explicit dial callback
+  remains authoritative over the resolver. This source defect can surface as
+  an existing `window-stall` or terminal window failure when the process DNS
+  path cannot resolve a provider carrier, but those identity-free logs do not
+  prove resolver bypass by themselves. Preserve deterministic IPv4/IPv6
+  `http://`, `https://`, `ws://`, and `wss://` controls using a synthetic
+  resolver, plus plain HTTP and WS controls proving that an explicitly
+  injected dial callback wins without a resolver call. The canonical
+  platform-transport standby test must exercise this same owned-resolver
+  boundary rather than a public hostname.
 - **Routing and visibility:** a VPN-active indicator is not forwarding proof.
   Validate both DNS protocols and ordinary traffic with the UI closed, and
   ensure every advertised resolver has an owner in the effective mode. Record
@@ -18402,6 +18463,70 @@ before declaring recovery. Do not bypass client verification, change DNS,
 restart unrelated services, or turn certificate validation into a new
 build-admission architecture.
 
+### 18.3 Authoritative DNS aliases and recursive address families
+
+Probe: `dns-aliases`
+
+This probe is armed only by an explicit optional `dns_aliases` block in
+`monitor.yml`. The block contains `managed_domains`, `expected_a`, and
+`expected_aaaa`; those values are the operator-owned desired state and must
+never be inferred from current DNS or from public LB topology. An absent block
+gracefully noops. A present but incomplete, malformed, duplicate, or
+wrong-family value emits PAGE `dns-alias-config-invalid` on the first cadence
+so a broken observation contract cannot look green.
+
+For each configured domain and the active environment name, check these exact
+aliases:
+
+- `alt` and `<env>-alt` require the configured A and AAAA sets;
+- `alt-v4` and `<env>-alt-v4` require the configured A set and an empty AAAA
+  set; and
+- `alt-v6` and `<env>-alt-v6` require an empty A set and the configured AAAA
+  set.
+
+Discover every authoritative nameserver for each managed domain, then send a
+bounded native DNS wire query directly to every authority with recursion
+disabled. Healthy requires an authoritative `NOERROR` response and an exact
+direct RRset on every authority. A CNAME never satisfies the direct A/AAAA
+contract. An intentionally absent family must be `NOERROR` with no answer;
+`NXDOMAIN` is not equivalent. Any concrete disagreement emits PAGE
+`dns-authoritative-rrset` immediately. Evidence contains only record type and
+aggregate expected, missing, unexpected, CNAME, response-code, and authority
+counts; it never renders answer addresses, nameserver identities, or raw
+resolver errors.
+
+Nameserver discovery failure, complete transport failure, malformed DNS, or a
+partial authority sample emits WARN `dns-authoritative-unobservable` after two
+five-minute cadences and keeps exact RRset health unknown. The platform
+recursive resolver is checked independently for the exact configured A/AAAA
+sets and forbidden-family behavior. An observation failure emits WARN
+`dns-recursive-unobservable` after two cadences. When all authorities are exact
+but the recursive view returns a stale same-family value, omits a required
+value or family, returns a forbidden family, or returns `NXDOMAIN` rather than
+`NOERROR`/NODATA, emit WARN
+`dns-recursive-answer-family` after two cadences and promote it to PAGE after
+three. Suppress this downstream drift class while authoritative state is
+broken or unknown; do not duplicate the upstream cause or close a prior
+recursive ticket from an unknown sample.
+
+The 2026-09-13 defining incident exposed both halves of this blind spot: an
+authoritative alias RRset had diverged from operator intent while a recursive
+view could retain a stale address in the correct family. Existing exact-edge
+and TLS probes pin configured interfaces and therefore did not enumerate the
+alias DNS contract; a presence-only recursive check would also have accepted
+the stale same-family answer. The correction is this explicit desired-state
+probe and exact recursive comparison. It does not itself change Route 53 or
+turn an observed answer into desired state.
+
+Repair only the proven hostname/family in the authoritative DNS source, or the
+proven recursive cache/policy path when every authority is already exact.
+Preserve the intentional single-stack aliases and do not change unrelated
+records, LB addresses, services, or certificates. Recovery requires every
+authority and recursive answer to agree exactly for three
+consecutive five-minute samples, including `NOERROR`/NODATA for each forbidden
+family. DNS record repair is an operator/authoritative-provider action; a
+server deployment alone cannot correct an incorrect RRset.
+
 ## 19. Web platform association metadata
 
 ### 19.1 Android App Links and Apple association files
@@ -18890,18 +19015,28 @@ control, and dependent host probes rather than from one successful ping.
 Probe: `hostpower`
 
 Scope every enabled host with role `backup` or `stationary`. Every five minutes,
-the probe reads the effective layered `systemd/sleep.conf` and
-`systemd/logind.conf`, the locked GNOME power values, and at most 128 matching
-kernel suspend entry/exit records from the current boot and last 30 days. It
-also calls one root-owned Xops helper whose only output is a bounded topology
-class and media-health class. Raw journal text, interface/block names, sysfs
-paths, MACs, serials, stable disk identifiers, SMART output, and addresses never
-leave the host.
+the probe reads the layered `systemd/sleep.conf` and `systemd/logind.conf`, the
+locked GNOME power values, fixed-enum live login1 idle/lid actions and
+`CanSuspend`, and at most 128 matching kernel suspend entry/exit records from
+the current boot and last 30 days. A systemd release without the optional
+external-power-specific lid property is classified explicitly as
+`unsupported`. A supported property with an empty action is classified as
+`fallback`; both states delegate to the required base lid action. Missing or
+malformed required runtime state is UNKNOWN. It also calls one root-owned Xops
+helper whose only output is a bounded topology class and media-health class.
+Raw D-Bus and journal text, users, sessions, process identifiers,
+interface/block names, sysfs paths, MACs, serials, stable disk identifiers,
+SMART output, and addresses never leave the host.
 
-HEALTHY requires all systemd suspend/hibernate paths denied, logind idle/lid
-actions ignored, locked GNOME AC/battery idle and lid actions set to `nothing`,
-and no current-boot kernel suspend entry. On a backup host, the archive device
-and active management uplink must resolve to a concrete ancestry class. A
+HEALTHY requires all configured systemd suspend/hibernate paths denied,
+configured and live logind idle/lid actions ignored, locked GNOME AC/battery
+idle and lid actions set to `nothing`, the unprivileged login1 `CanSuspend`
+caller result non-affirmative (`no` or not-applicable), and no current-boot
+kernel suspend entry. A non-affirmative caller result is only a same-sample
+consistency control: the effective deny-all `sleep.conf`, which systemd
+reparses when testing and executing a sleep operation, is the actual global
+blocking layer. On a backup host, the archive device and active management
+uplink must resolve to a concrete ancestry class. A
 `shared-removable` result is a warning even when both devices currently work:
 one Thunderbolt/USB dock, cable, bus, or power failure can remove the recovery
 path and archive storage together. This is an operational/hardware class, not a
@@ -18910,6 +19045,25 @@ tested independently powered management path.
 
 `hostpower-suspend-policy-unsafe` pages immediately because a stationary
 server must stay observable on its battery/UPS during an AC or dock failure.
+Safe installed configuration with divergent non-destructive live lid/idle
+actions and a non-affirmative `CanSuspend` caller result emits sustained WARN
+`hostpower-policy-not-loaded`: the effective deny-all sleep policy is active,
+but the
+independent running login-manager defense has not converged. An available live
+suspend capability remains PAGE even when another property is unknown or the
+files look safe. A temporarily inhibited capability is still available when
+the inhibitor is removed and therefore remains PAGE. A live `poweroff`,
+`reboot`, `soft-reboot`, `halt`, `kexec`, or `factory-reset` action also
+remains PAGE when `CanSuspend` is non-affirmative because that caller result
+does not govern those destructive actions. Missing, malformed, or unreadable
+required live state emits sustained WARN
+`hostpower-policy-runtime-unobservable`; configuration files alone must never
+turn that state green. Do not restart logind ad hoc or trigger suspend as a
+test. Reconcile the running generation through an authorized maintenance
+procedure using the reviewed Xops conditional logind reload, then require two
+safe live samples. The Xops change must be deployed separately; monitor source
+alone does not reconcile a running host.
+
 `hostpower-suspend-observed` warns on a short paired current-boot transition and
 pages when an entry is unmatched or a paired suspend lasts at least five
 minutes. The history remains evidence until reboot; fixing policy does not
@@ -18946,6 +19100,16 @@ reported zero pairs and one pending entry. The reducer now sorts only the at
 most 128 already bounded records by their numeric timestamp on-host before
 pairing; it reports the one 18h56m59s interval without exporting journal text
 or adding a production query. Record arrival order is not suspend chronology.
+
+A bounded 2026-09-13 follow-up proved why configuration and runtime must remain
+separate observations. The no-suspend files had landed after the retained
+incident, but the still-running login manager predated them and exposed a stale
+lid action while the effective deny-all sleep policy already rejected systemd
+sleep operations. The unprivileged `CanSuspend` result was non-affirmative but
+does not independently prove that block. That state is not a new suspend and
+is not fully healthy: it is the bounded `hostpower-policy-not-loaded`
+convergence class above. The retained suspend finding remains independent and
+continues until the boot journal changes.
 
 ---
 

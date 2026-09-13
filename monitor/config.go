@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // monitorYaml mirrors vault/<env>/monitor.yml.
@@ -83,6 +84,16 @@ type monitorYaml struct {
 		ExpectedIPv4 string `yaml:"expected_ipv4"`
 		ExpectedIPv6 string `yaml:"expected_ipv6"`
 	} `yaml:"source_attribution"`
+	// Keep the raw node so an omitted block remains distinguishable from an
+	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
+	// the former to noop and the latter to fail closed as invalid desired state.
+	DNSAliases yaml.Node `yaml:"dns_aliases"`
+}
+
+type dnsAliasesYaml struct {
+	ManagedDomains []string `yaml:"managed_domains"`
+	ExpectedA      []string `yaml:"expected_a"`
+	ExpectedAAAA   []string `yaml:"expected_aaaa"`
 }
 
 // servicesYaml is the narrow active-LB view needed by edge-ipv6. The first
@@ -268,6 +279,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 			ExpectedIPv4: y.SourceAttribution.ExpectedIPv4,
 			ExpectedIPv6: y.SourceAttribution.ExpectedIPv6,
 		},
+		DNSAliases:     dnsAliasSettingsFromMonitorYaml(y),
 		GooglePlay:     loadGooglePlayReportingSettings(),
 		AppleReporting: loadAppleReportingSettings(),
 		Credentials:    loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
@@ -356,6 +368,22 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+func dnsAliasSettingsFromMonitorYaml(y monitorYaml) DNSAliasSettings {
+	if y.DNSAliases.Kind == 0 {
+		return DNSAliasSettings{}
+	}
+	configured := dnsAliasesYaml{}
+	if y.DNSAliases.Kind != yaml.MappingNode || y.DNSAliases.Decode(&configured) != nil {
+		return DNSAliasSettings{Enabled: true}
+	}
+	return DNSAliasSettings{
+		Enabled:        true,
+		ManagedDomains: append([]string(nil), configured.ManagedDomains...),
+		ExpectedA:      append([]string(nil), configured.ExpectedA...),
+		ExpectedAAAA:   append([]string(nil), configured.ExpectedAAAA...),
+	}
 }
 
 // activeProxyPathsFromServices derives SIGNALS.md §14.5's stable probe
