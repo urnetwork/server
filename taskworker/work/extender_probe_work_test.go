@@ -131,11 +131,12 @@ func stubExtenderProbe(t testing.TB, answer func() error) func() []testExtenderP
 		serverName string,
 		destinationHost string,
 	) error {
-		// the task must front every probe with a name under the operator host
-		// and ask for the api as its destination, exactly as an activation
-		// does; a stub that ignored them would hide a regression there
-		if !strings.HasSuffix(serverName, "."+testExtenderWorkNetworkHost) {
-			t.Errorf("probe server name %q is not under the network host", serverName)
+		// the task must front every probe with a name a client dial would
+		// present and ask for the api as its destination, exactly as an
+		// activation does; a stub that ignored them would hide a regression
+		// there
+		if !isTestExtenderProbeServerName(serverName) {
+			t.Errorf("probe server name %q is neither a spoof name nor under the network host", serverName)
 		}
 		if destinationHost != "api."+testExtenderWorkNetworkHost {
 			t.Errorf("probe destination %q is not the api host", destinationHost)
@@ -158,6 +159,21 @@ func stubExtenderProbe(t testing.TB, answer func() error) func() []testExtenderP
 		defer stateLock.Unlock()
 		return slices.Clone(calls)
 	}
+}
+
+// Reports whether one probe's outer name is what ProbeServerName produces
+// (A10): a bundled spoof name, which is what a client dial presents, or a
+// random label under the operator host while the bundled list is empty. Never
+// the operator's own host, which would tell a watcher exactly what the outer
+// name exists to hide.
+func isTestExtenderProbeServerName(serverName string) bool {
+	if serverName == testExtenderWorkNetworkHost {
+		return false
+	}
+	if strings.HasSuffix(serverName, "."+testExtenderWorkNetworkHost) {
+		return true
+	}
+	return slices.Contains(connect.SpoofDomains(), serverName)
 }
 
 func runTestExtenderProbe(t testing.TB, ctx context.Context) *ExtenderProbeResult {
