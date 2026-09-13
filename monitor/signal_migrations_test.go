@@ -108,8 +108,8 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 
 func TestMigrationsSignalRequiresExactReadyProviderEgressHealthDeadlineIndex(t *testing.T) {
 	head := server.MigrationCount()
-	if head != 657 {
-		t.Fatalf("test pins provider-egress deadline index at migration 657, got head %d", head)
+	if head < 657 {
+		t.Fatalf("test requires the published provider-egress deadline index at migration 657, got head %d", head)
 	}
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
@@ -468,6 +468,30 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	}
 	if byVersion[616][0].removedVersion != 621 || byVersion[618][0].removedVersion != 622 {
 		t.Fatalf("superseded index lifetimes are not pinned: v616=%+v v618=%+v", byVersion[616][0], byVersion[618][0])
+	}
+	// The appended IPv6 artifacts must interrogate their actual relation,
+	// type, nullability and legacy default; catalog labels alone are not proof.
+	head := server.MigrationCount()
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		for _, column := range []struct{ table, name, kind, defaults string }{
+			{table: "network_client_connection", name: "ip_version", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
+			{table: "network_client_connection", name: "ip_family_intent", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
+			{table: "network_client_location_reliability", name: "ipv4_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
+			{table: "network_client_location_reliability", name: "ipv6_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
+		} {
+			want := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '" + column.table + "' AND column_name = '" + column.name + "' AND data_type = '" + column.kind + "' AND is_nullable = 'NO' AND column_default IN " + column.defaults + " )"
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("IPv6 artifact %s.%s lost its actual typed schema check", column.table, column.name)
+			}
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("complete appended artifact catalog is not coherent: %+v, %v", alerts, err)
 	}
 }
 

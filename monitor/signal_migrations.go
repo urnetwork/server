@@ -113,6 +113,10 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "onboarding_email_tracker_daily", requiredVersion: 655, rowColumn: 66},
 	{name: "network_onboarding_email_sent_at", requiredVersion: 656, rowColumn: 67},
 	{name: "provider_egress_health measured_at/client_id deadline index", requiredVersion: 657, rowColumn: 68},
+	{name: "network_client_connection.ip_version", requiredVersion: 658, rowColumn: 69},
+	{name: "network_client_connection.ip_family_intent", requiredVersion: 659, rowColumn: 70},
+	{name: "network_client_location_reliability.ipv4_proven", requiredVersion: 660, rowColumn: 71},
+	{name: "network_client_location_reliability.ipv6_proven", requiredVersion: 661, rowColumn: 72},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -752,6 +756,34 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND definition = '`+providerEgressHealthDeadlineIndexDefinition+`'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'ip_version'
+		             AND data_type = 'smallint' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'ip_family_intent'
+		             AND data_type = 'smallint' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'ipv4_proven'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'ipv6_proven'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
 		       )
 		FROM version;
 	`)
