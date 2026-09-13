@@ -282,6 +282,9 @@ func TestLocalTestDirectoryDiscoveryPreservesPackageBoundaries(t *testing.T) {
 	if slices.Contains(directories, "./monitor/testdata") {
 		t.Error("local test discovery included the inert external PromQL engine fixture")
 	}
+	if slices.Contains(directories, "./temp") {
+		t.Error("local test discovery included ignored scratch source")
+	}
 	for _, requiredDirectory := range []string{
 		".",
 		"./connect/perfvar",
@@ -292,6 +295,44 @@ func TestLocalTestDirectoryDiscoveryPreservesPackageBoundaries(t *testing.T) {
 		if !slices.Contains(directories, requiredDirectory) {
 			t.Errorf("local test discovery omitted %q", requiredDirectory)
 		}
+	}
+}
+
+// Ignored artifact trees may contain incomplete copies of tests. Discover only
+// source packages, while retaining legitimate names that resemble exclusions.
+func TestLocalTestDirectoryDiscoveryExcludesScratchArtifacts(t *testing.T) {
+	fixtureDir := t.TempDir()
+	script, err := os.ReadFile("test-dirs.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(fixtureDir, "test-dirs.sh")
+	if err := os.WriteFile(scriptPath, script, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keptDirectories := []string{".", "./app", "./nested/temp", "./profiled", "./rebuild", "./tempest"}
+	ignoredDirectories := []string{
+		"./temp", "./temp/nested", "./bin", "./build", "./profile",
+		"./app/bin", "./app/build", "./app/profile", "./.git", "./.vscode", "./.direnv",
+	}
+	for _, directory := range append(slices.Clone(keptDirectories), ignoredDirectories...) {
+		path := filepath.Join(fixtureDir, directory)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// This file intentionally cannot compile without its absent companion;
+		// directory discovery must not try to repair or execute copied fixtures.
+		if err := os.WriteFile(filepath.Join(path, "fixture_test.go"), []byte("package fixture\nvar _ = missingFixtureHelper\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := exec.Command(scriptPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("discover fixture packages: %v\n%s", err, output)
+	}
+	directories := strings.Fields(string(output))
+	if !slices.Equal(directories, keptDirectories) {
+		t.Fatalf("artifact discovery crossed package boundaries: got=%v want=%v", directories, keptDirectories)
 	}
 }
 

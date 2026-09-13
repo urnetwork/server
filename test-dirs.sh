@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# List local Go test directories for test.sh. Acceptance-owned source,
-# commands, and artifacts belong to the separate acceptance harness and are
-# pruned before test-file discovery.
+# List local Go test directories for test.sh. Acceptance-owned trees and the
+# scratch/build/profile directories ignored by this repository are artifacts,
+# not source packages; prune them before looking for test files.
 set -o pipefail
 
 for command_name in find dirname sort; do
@@ -22,7 +22,11 @@ server_dir="$(cd -- "$script_dir" >/dev/null 2>&1 && pwd)" || exit $?
 cd "$server_dir" || exit $?
 
 find . \
-    -type d -iname '*acceptance*' -prune -o \
+    -type d \( \
+        -iname '*acceptance*' -o \
+        -path './temp' -o -path './.vscode' -o -path './.direnv' -o \
+        -name '.git' -o -name 'bin' -o -name 'build' -o -name 'profile' \
+    \) -prune -o \
     -path './connect/sim-latency/eval-*' -prune -o \
     -path './connect/sim-latency/baseline' -prune -o \
     -iname '*_test.go' -print | \

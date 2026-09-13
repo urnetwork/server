@@ -1130,28 +1130,19 @@ func testConnectMultiClientPerformance(t testing.TB) {
 		runtime.ReadMemStats(&memStatsEnd)
 
 		// wait for echoes to settle
-		stableCount := 0
-		lastEchoCount := atomic.LoadInt64(&echoCount)
-		for stableCount < 8 {
-			select {
-			case <-time.After(250 * time.Millisecond):
-			}
-			for {
+		if err := waitForPerformanceCountToSettle(ctx, func() int64 {
+			// Snapshot a finite batch so an active producer cannot keep this
+			// observation inside the drain forever, bypassing its deadline.
+			for remaining := len(echoRtts); 0 < remaining; remaining-- {
 				select {
 				case rtt := <-echoRtts:
 					blastRtts = append(blastRtts, rtt)
-					continue
 				default:
 				}
-				break
 			}
-			currentEchoCount := atomic.LoadInt64(&echoCount)
-			if currentEchoCount == lastEchoCount {
-				stableCount += 1
-			} else {
-				stableCount = 0
-				lastEchoCount = currentEchoCount
-			}
+			return atomic.LoadInt64(&echoCount)
+		}); err != nil {
+			panic(fmt.Errorf("udp echo settle: %w", err))
 		}
 
 		delivered := atomic.LoadInt64(&echoCount) - echoCountStart
@@ -1252,19 +1243,10 @@ func testConnectMultiClientPerformance(t testing.TB) {
 		}
 
 		// wait for the blast to settle
-		stableCount := 0
-		lastDownloadCount := atomic.LoadInt64(&downloadCount)
-		for stableCount < 8 {
-			select {
-			case <-time.After(250 * time.Millisecond):
-			}
-			currentDownloadCount := atomic.LoadInt64(&downloadCount)
-			if currentDownloadCount == lastDownloadCount {
-				stableCount += 1
-			} else {
-				stableCount = 0
-				lastDownloadCount = currentDownloadCount
-			}
+		if err := waitForPerformanceCountToSettle(ctx, func() int64 {
+			return atomic.LoadInt64(&downloadCount)
+		}); err != nil {
+			panic(fmt.Errorf("download settle: %w", err))
 		}
 
 		downloadReceived := atomic.LoadInt64(&downloadCount)
