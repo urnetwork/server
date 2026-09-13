@@ -8563,24 +8563,59 @@ while six later natural runs remained below both the 120-second duration and
 close/reconcile interval.
 
 That aggregate control rules out legacy fleet clobber, a stuck reconciler, a
-missing atomic clamp, and a cross-service burst; it does not identify which of
-the two remaining current races shortened these five mirrors. A settlement may
+missing atomic clamp, and a cross-service burst; it could not identify which of
+the two remaining current races shortened those five mirrors. A settlement may
 have committed before its delayed Redis release while reconciliation corrected
 the still-reserved mirror downward, or a preceding page snapshot may have
 corrected toward stale PostgreSQL state after a live mirror write. Both bursts
-preceded the immediately following reconcile starts; aggregate cadence and
-drift direction therefore cannot assign them to those later runs. On a
-recurrence, retain the affected pairs only inside a bounded private correlation
-and order the balance's PostgreSQL snapshot, live reservation or settlement
-commit, Redis GET/correction, and mirror post. A settlement commit before the
-page snapshot/correction followed by its delayed release selects the first
-race; a reservation commit/post after the page snapshot but before its later
-Redis correction, followed by settlement, selects the second. If those
-per-balance boundaries were not captured, do not infer a cause from aggregate
-reversal; preserve the ambiguity.
+preceded the immediately following reconcile starts, and the required
+per-balance operation boundaries were not retained, so that occurrence remains
+ambiguous.
 
-Close this occurrence after the natural short-pass and quiet-interval gate
-above; do not describe that as closure of the systemic cross-store boundary.
+A material recurrence at `02:13:36Z` on 2026-09-13 supplied the missing timing
+discriminator. The bounded cohort comprised 268 distinct settlement releases
+on five balances across two generations and three Taskworker instances; every
+line came from the settlement site and reported `clamped_to=0`. The PAGE cohort
+was 254 distinct settlements on two balances in one source second, releasing
+4,717,187,072 bytes against 4,707,266,560 bytes of absolute negative result;
+the 9,920,512-byte difference was the positive mirror remainder before the
+clamp. All 254 reservations were created from `02:08:28.793Z` through
+`02:08:31.933Z` while the preceding reconciliation ran from `02:08:13.409Z`
+through `02:08:50.839Z`. They settled from `02:13:36.135Z` through
+`02:13:36.496Z`, and the next reconciliation did not start until
+`02:13:52.333Z`. No reconciliation therefore occurred between settlement
+commit and its mirror release. This rules out commit-before-post for the PAGE
+cohort and selects the stale page-snapshot/live-reservation race: the earlier
+reconciliation fixed its PostgreSQL page before the live reservations, then
+corrected the mirror toward that stale page after their mirror writes.
+
+The remaining 14 releases from `02:19:37Z` through `02:19:43Z` were distinct
+events on three balances, not severity-window decay or log replay. Eleven
+reservations were created during the preceding run and three immediately after
+it, while their settlements overlapped the next reconciliation. Without the
+page-local snapshot, correction, and commit timestamps, that smaller WARN
+cohort remains ambiguous between the two races and must not inherit the PAGE
+attribution. Six adjacent natural reconciliations completed in 34.414–46.296
+seconds with aggregate correction below 256GiB, ruling out the earlier failed
+overrun, large-drift, and retired-writer signatures. A later aggregate read
+found every mirror nonnegative and four of five equal to the durable open sum;
+the fifth comparison was not a stable mismatch because 40 of its 45 open
+reservations arrived after the latest completed reconciliation and the
+PostgreSQL and Redis reads were non-atomic. The clamp proves containment, not
+absence of transient entitlement impact; no customer impact was attributed.
+
+On another recurrence, retain the affected pairs only inside a bounded private
+correlation and order the balance's PostgreSQL snapshot, live reservation or
+settlement commit, Redis GET/correction, and mirror post. A settlement commit
+before the page snapshot/correction followed by its delayed release selects the
+first race; a reservation commit/post after the page snapshot but before its
+later Redis correction, followed by settlement, selects the second. If those
+per-balance boundaries were not captured, do not infer a cause from aggregate
+reversal or a non-atomic current-state comparison.
+
+Close an individual occurrence only after its natural short-pass and
+quiet-interval gate; do not describe that as closure of the systemic
+cross-store boundary.
 Systemic closure still requires a durable per-balance mutation sequence,
 outbox, or equivalent fence followed by a full natural expiry/close interval
 without recurrence. Such a change alters the PostgreSQL/Redis protocol and may
