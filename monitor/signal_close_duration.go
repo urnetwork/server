@@ -39,7 +39,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		5000,
 	)
 	active := parseTaskActiveRun(activeLog, "CloseExpiredContracts")
-	terminal := parseTaskTerminalRun(activeLog, "CloseExpiredContracts")
+	terminal := parseTaskTerminalRunAtLeast(activeLog, "CloseExpiredContracts", closeDurationLimit)
 	retryActive := parseTaskActiveRunForID(activeLog, "CloseExpiredContracts", terminal.taskID)
 
 	// These ids come only from taskRunIDRe's fixed hexadecimal shape, so they

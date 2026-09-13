@@ -8522,6 +8522,35 @@ deterministic regression creates a 100-year balance through the real contract
 path and requires its Redis TTL to remain within 90 days. Alert samples retain
 `expireat` and `{escrow_<id>}net` while redacting the balance id.
 
+A 2026-09-12 recurrence exposed a task-lifecycle observation gap rather than a
+newly attributed data-integrity mechanism. Nine consecutive
+`ReconcileNetEscrow` attempts ended with bounded `Timeout` evaluator errors at
+122.76–123.33 seconds after active heartbeats through 120 seconds; six of those
+failures fell between 23:15Z and 23:34Z. The current `netescrow` and task-canary
+one-shots were healthy afterward, and natural scheduled attempts resumed in
+roughly 10–20 seconds. This proves repeated failed freshness overruns followed
+by recovery. After the last failed attempt at 23:33:51Z, the authoritative
+stream contained no `netescrow-negative` or `netescrow-large-drift` alert rows
+through the bounded follow-up. That is a recovery/aftermath negative control,
+not runtime-cause proof. The evidence does not identify which reservation page
+or dependency used the budget. One `netescrow-negative` line occurred during
+the retry sequence, but no large-drift alert accompanied it, so that mutation
+aftermath must not be joined to the timeout cause.
+
+The prior probe read only two minutes of active logs and successful
+`finished_task` rows. Rescheduled evaluator failures never enter that table and
+therefore disappeared as soon as a short retry replaced their active
+heartbeat. The probe now reads the shared bounded 45-minute task lifecycle,
+including its host-journal fallback, retains the latest qualifying
+`eval error`, and selects exact task-id completions even when later fast tasks
+would otherwise displace them. A short or completed retry is rendered as
+recovery context without erasing the failed precursor. Task ids remain inside
+the correlation path and never enter the alert. Close this individual incident
+after the retained failure ages out with scheduled runs below 120 seconds and
+no new large-drift or negative-counter evidence; reopen underlying-cause work
+only on a correlated recurrence, rather than inferring it from the timeout
+class alone.
+
 ## 6. How we decided what was REAL (methodology)
 
 1. **One discriminating measurement before any action.** Every hypothesis got
@@ -8652,7 +8681,7 @@ Tier-1 (warn):
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every source-known durable identity and published schema artifact | page when any identity differs or any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
-| netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
+| netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat, retained evaluator failure, or completed ReconcileNetEscrow duration | >= 120s; retain the latest failed/completed precursor 45 min and correlate exact-id retry recovery |
 | netescrow-reservation-overrun | pg | 5.11 current bounded-lateral reservation page count and oldest query age | any page >= 120s and <= 30m; slow/missing-fence warning, not detached attribution |
 | netescrow-reservation-detached | pg | 5.11 current bounded-lateral reservation page count and oldest query age | any page > 30m task maximum; detached attribution without task/session correlation |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
