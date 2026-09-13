@@ -3,7 +3,6 @@ package monitor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -104,13 +103,13 @@ func TestVisibilityAlertClassifiesSSHAdmissionResetAtTheHostBoundary(t *testing.
 	alert := visibilityAlert(
 		settings,
 		NewMigrationsSignal(),
-		errors.New("by-us-fmt-5-edge-2: exit status 255: kex_exchange_identification: read: Connection reset by peer\nConnection reset by 172.28.208.182 port 22"),
+		errors.New("synthetic-edge-a: exit status 255: kex_exchange_identification: read: Connection reset by peer\nConnection reset by 192.0.2.22 port 22"),
 	)
 	if alert.Class != "ssh-admission-reset" {
 		t.Fatalf("class = %q, want ssh-admission-reset", alert.Class)
 	}
-	if alert.Target != "by-us-fmt-5-edge-2" {
-		t.Fatalf("target = %q, want by-us-fmt-5-edge-2", alert.Target)
+	if alert.Target != "synthetic-edge-a" {
+		t.Fatalf("target = %q, want synthetic-edge-a", alert.Target)
 	}
 	for name, value := range map[string]string{
 		"mechanism": alert.Mechanism,
@@ -127,29 +126,48 @@ func TestVisibilityAlertClassifiesSSHAdmissionResetAtTheHostBoundary(t *testing.
 	if !strings.Contains(alert.Context, "failed_signal=migrations") {
 		t.Fatalf("context does not retain the failed probe: %q", alert.Context)
 	}
+	if !strings.Contains(alert.Observed, "error_class=ssh-admission-reset") {
+		t.Fatalf("observed values do not retain the fixed error class: %q", alert.Observed)
+	}
+	requireAlertOmits(t, alert, "192.0.2.22", "Connection reset by peer")
 }
 
 func TestVisibilityAlertKeepsRemoteCommandFailureGeneric(t *testing.T) {
 	alert := visibilityAlert(
 		syntheticSettings(&syntheticSource{}),
 		NewMigrationsSignal(),
-		errors.New("by-us-fmt-5-edge-2: exit status 1: psql: syntax error"),
+		errors.New("synthetic-edge-a: exit status 1: synthetic command failed"),
 	)
 	if alert.Class != "cannot-observe" {
 		t.Fatalf("class = %q, want cannot-observe", alert.Class)
 	}
+	if !strings.Contains(alert.Markdown(), "error_class=observation-command-failed") {
+		t.Fatalf("generic command failure lost its fixed class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, "synthetic command failed")
 }
 
-func TestVisibilityAlertRedactsTaskIdentifierFromCommandFailure(t *testing.T) {
+func TestVisibilityAlertClassifiesHostileCommandFailureWithoutChangingIdentity(t *testing.T) {
 	taskID := "01a05700-aaaa-bbbb-cccc-dddddddddddd"
+	errorText := "synthetic-edge-a: exit status 1: provider supplied " + taskID +
+		" address=192.0.2.45 pointer=0xdeadbeef goroutine synthetic.Stack"
 	alert := visibilityAlert(
 		syntheticSettings(&syntheticSource{}),
 		NewTaskCanariesSignal(),
-		fmt.Errorf("warpctl logs failed while correlating %s", taskID),
+		errors.New(errorText),
 	)
-	requireAlertOmits(t, alert, taskID)
-	if !strings.Contains(alert.Markdown(), "<task-id>") {
-		t.Fatal("visibility alert did not retain a safe identifier placeholder")
+	if !strings.Contains(alert.Markdown(), "error_class=observation-command-failed") {
+		t.Fatalf("visibility alert did not retain a fixed class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, taskID, "192.0.2.45", "0xdeadbeef", "provider supplied", "synthetic.Stack")
+
+	second := visibilityAlert(
+		syntheticSettings(&syntheticSource{}),
+		NewTaskCanariesSignal(),
+		errors.New("synthetic-edge-b: exit status 1: unrelated hostile provider text"),
+	)
+	if alert.Identity() != second.Identity() {
+		t.Fatalf("raw command text changed visibility identity: %q != %q", alert.Identity(), second.Identity())
 	}
 }
 

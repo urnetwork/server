@@ -432,9 +432,10 @@ func TestSubtensorSignalKeepsOlderHelperAsCannotObserve(t *testing.T) {
 	}
 	visibility := requireAlertClass(t, alerts, "cannot-observe")
 	if visibility.Target != "snow/lightnode/peer-diagnostics" ||
-		!strings.Contains(visibility.Observed, "installed helper predates") {
+		!strings.Contains(visibility.Observed, "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("older helper did not retain an exact visibility boundary: %+v", visibility)
 	}
+	requireAlertOmits(t, visibility, "installed helper predates")
 }
 
 func TestSubtensorSignalLocalizesLitep2pNotificationFailureAgainstArchive(t *testing.T) {

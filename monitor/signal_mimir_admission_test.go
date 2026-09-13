@@ -572,10 +572,11 @@ func TestMimirAdmissionSignalRateGenerationAndResetCannotClearIncident(t *testin
 	resetAlerts := runMimirAdmissionSynthetic(t, signal, start.Add(4*time.Minute), rateFour)
 	visibility := requireAlertClass(t, resetAlerts, "cannot-observe")
 	ratePage := requireAlertClass(t, resetAlerts, "mimir-ingestion-rate-limit")
-	if !strings.Contains(visibility.Markdown(), "monotonic counter decreased within one process generation") ||
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassCounterReset) ||
 		!strings.Contains(ratePage.Markdown(), "quiet_complete=0s") {
 		t.Fatalf("rate reset did not fail closed:\nvisibility=%s\npage=%s", visibility.Markdown(), ratePage.Markdown())
 	}
+	requireAlertOmits(t, visibility, "monotonic counter decreased within one process generation")
 }
 
 func TestMimirAdmissionSignalRateUnavailableAndMalformedRemainVisible(t *testing.T) {
@@ -733,9 +734,10 @@ func TestMimirAdmissionSignalTreatsDescriptorBackedAbsentRowAsLazyZero(t *testin
 	resetAlerts := runMimirAdmissionSyntheticWithStateDir(t, signal, resetAt, stateDir, lazyZeroAfterPositive)
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
 	requireAlertClass(t, resetAlerts, "mimir-series-limit")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("disappearing positive row was not treated as a reset: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	persisted = mimirAdmissionPersistedState{}
 	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &persisted)
 	if err != nil || !loaded || !persisted.Incident || persisted.QuietSinceUnix != 0 ||
@@ -814,9 +816,10 @@ func TestMimirAdmissionSignalTreatsSourceBackedWholeFamilyAbsenceAsLazyZero(t *t
 		sourceBackedZeroAfterPositive,
 	)
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("whole-family disappearance after a positive was not a reset: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	resetPage := requireAlertClass(t, resetAlerts, "mimir-series-limit")
 	if !strings.Contains(resetPage.Markdown(), "descriptor_instances=0 source_zero_instances=1") {
 		t.Fatalf("source-backed zero path was not rendered independently: %s", resetPage.Markdown())
@@ -837,9 +840,10 @@ func TestMimirAdmissionSignalTreatsSourceBackedWholeFamilyAbsenceAsLazyZero(t *t
 		},
 	)
 	unknownVisibility := requireAlertClass(t, unknownAlerts, "cannot-observe")
-	if !strings.Contains(unknownVisibility.Markdown(), "outside the recognized source contract") {
+	if !strings.Contains(unknownVisibility.Markdown(), "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("unknown artifact family absence did not fail closed: %s", unknownVisibility.Markdown())
 	}
+	requireAlertOmits(t, unknownVisibility, "outside the recognized source contract")
 }
 
 // Port plus canonical sub-second process start keeps concurrent children and
@@ -1164,10 +1168,11 @@ func TestMimirAdmissionSignalEarlyStateFailuresRetainMaturePage(t *testing.T) {
 	}
 	visibility := requireAlertClass(t, loadAlerts, "cannot-observe")
 	page := requireAlertClass(t, loadAlerts, "mimir-series-limit")
-	if !strings.Contains(visibility.Markdown(), "durable state is unreadable") ||
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassStateUnavailable) ||
 		!strings.Contains(page.Markdown(), "direct_complete=false") {
 		t.Fatalf("early load failure lost fixed retained boundary:\nvisibility=%s\npage=%s", visibility.Markdown(), page.Markdown())
 	}
+	requireAlertOmits(t, visibility, "durable state is unreadable")
 	if gotState := probe.snapshotState(); !reflect.DeepEqual(gotState, wantState) {
 		t.Fatalf("invalid durable reload changed retained state:\nwant=%+v\ngot=%+v", wantState, gotState)
 	}
@@ -1213,9 +1218,10 @@ func TestMimirAdmissionSignalKeepsDescriptorLossAndMalformedFramesUnknown(t *tes
 	)
 	descriptorVisibility := requireAlertClass(t, descriptorAlerts, "cannot-observe")
 	requireAlertClass(t, descriptorAlerts, "mimir-series-limit")
-	if !strings.Contains(descriptorVisibility.Markdown(), "discard counter descriptor is unavailable") {
+	if !strings.Contains(descriptorVisibility.Markdown(), "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("descriptor absence lost its boundary: %s", descriptorVisibility.Markdown())
 	}
+	requireAlertOmits(t, descriptorVisibility, "discard counter descriptor is unavailable")
 
 	malformed := strings.Replace(
 		mimirAdmissionSingleHostResponses(processStart, 5, 130000, 3000, [3]int64{})["metrics-a.example"].output,
@@ -1273,9 +1279,10 @@ func TestMimirAdmissionSignalGenerationAndCounterResetNeverClearIncident(t *test
 	resetAlerts := runMimirAdmissionSynthetic(t, signal, quietStart.Add(time.Hour), decreased)
 	requireAlertClass(t, resetAlerts, "mimir-series-limit")
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("counter reset lost its boundary: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	requireAlertClass(
 		t,
 		runMimirAdmissionSynthetic(t, signal, quietStart.Add(4*time.Hour), decreased),
@@ -1545,9 +1552,10 @@ func TestMimirAdmissionSignalBoundsCurrentChildIdentities(t *testing.T) {
 		},
 	)
 	visibility := requireAlertClass(t, alerts, "cannot-observe")
-	if !strings.Contains(visibility.Markdown(), "current child identity bound exceeded") {
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassBoundExceeded) {
 		t.Fatalf("over-bound observation lost fixed cause: %s", visibility.Markdown())
 	}
+	requireAlertOmits(t, visibility, "current child identity bound exceeded")
 	after := mimirAdmissionPersistedState{}
 	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &after)
 	if err != nil || !loaded {

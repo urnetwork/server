@@ -328,7 +328,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	durationSeconds := 0
 	ageSeconds := 0
 	identity := warpLogIdentity{}
-	errorText := ""
+	errorClass := ""
 	failedAt := time.Time{}
 	activeAttemptEnded := !activeRun.observedAt.IsZero() &&
 		!terminalRun.observedAt.IsZero() &&
@@ -352,7 +352,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		taskID = terminalRun.taskID
 		durationSeconds = terminalRun.seconds
 		identity = terminalRun.identity
-		errorText = terminalRun.errorText
+		errorClass = terminalRun.errorClass
 		failedAt = terminalRun.observedAt
 	} else if hasCompletedOverrun {
 		phase = "completed"
@@ -485,8 +485,8 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		if failedPrecursorToActive {
 			observed += fmt.Sprintf(" precursor_failed_duration_s=%d precursor_failed_attempt_correlated=true", terminalRun.seconds)
-			if terminalRun.errorText != "" {
-				observed += fmt.Sprintf(" precursor_failed_error=%q", terminalRun.errorText)
+			if terminalRun.errorClass != "" {
+				observed += fmt.Sprintf(" precursor_failed_error_class=%q", terminalRun.errorClass)
 			}
 			observed += " precursor_failed_at=" + terminalRun.observedAt.UTC().Format(time.RFC3339Nano)
 			if terminalRun.identity.host != "" {
@@ -521,8 +521,8 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if taskID != "" {
 			observed += " failed_attempt_correlated=true"
 		}
-		if errorText != "" {
-			observed += fmt.Sprintf(" failed_error=%q", errorText)
+		if errorClass != "" {
+			observed += fmt.Sprintf(" failed_error_class=%q", errorClass)
 		}
 		if !failedAt.IsZero() {
 			observed += " failed_at=" + failedAt.UTC().Format(time.RFC3339Nano)
@@ -576,7 +576,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	verify := "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval."
 	profile, profileErr := self.statementProfile(ctx, env)
 	if profileErr != nil {
-		evidence += " PostgreSQL statement attribution was unavailable: " + profileErr.Error()
+		evidence += " PostgreSQL statement attribution was unavailable; error_class=" + classifyObservationError(profileErr) + "."
 	} else if 0 < profile.reservationCalls {
 		reservationLifetimeMeanMs := profile.reservationTotalMs / float64(profile.reservationCalls)
 		balanceLifetimeMeanMs := 0.0

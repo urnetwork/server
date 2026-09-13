@@ -31,7 +31,7 @@ type taskActiveRun struct {
 
 type taskTerminalRun struct {
 	taskActiveRun
-	errorText string
+	errorClass string
 }
 
 type executorActiveTask struct {
@@ -525,7 +525,7 @@ func parseTaskTerminalRunAtLeast(logOutput, taskName string, minimum time.Durati
 				seconds:  int(seconds),
 				identity: parseWarpLogIdentity(line),
 			},
-			errorText: redactTaskErrorIdentifiers(strings.TrimSpace(match[2])),
+			errorClass: classifyTaskError(taskName, strings.TrimSpace(match[2])),
 		}
 		if idMatch := taskRunIDRe.FindStringSubmatch(line); len(idMatch) == 2 {
 			candidate.taskID = idMatch[1]

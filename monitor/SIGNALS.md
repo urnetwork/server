@@ -353,7 +353,9 @@ WHERE function_name LIKE '%UpdateClient%'
   10`, hiding the independently failed `UpdateClientScores` row and its Redis
   `:6402` write timeout. The probe now groups the complete failing set by task
   function and emits one alert identity per family, carrying family/parked/live
-  counts and one representative error. Never cap raw rows before this grouping.
+  counts and one representative fixed error class. Raw task errors remain
+  private inputs to classification and never enter Alert Markdown. Never cap
+  raw rows before this grouping.
 - GOTCHA — one task family can still contain several causes. On 2026-08-30,
   `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
   connection-cleanup deadlines from §2.10 retention, five
@@ -361,13 +363,13 @@ WHERE function_name LIKE '%UpdateClient%'
   highest-error representative belonged to the wallet class and made a
   single-cause explanation falsely describe the other 16 rows. The probe now
   computes a complete bounded cause breakdown before it selects a
-  representative error. When more than one class exists, the family alert says
-  it is mixed and builds its action and verification from only the classes
-  present in that snapshot; stale guidance for an absent class is itself an
-  alerting defect. A sample is evidence, not permission to apply its diagnosis
-  to every row. Keep invalid-destination separate from generic processor 400s
-  because only that typed, definitive pre-chain result is safe to unpin
-  (§5.7).
+  representative fixed error class. When more than one class exists, the
+  family alert says it is mixed and builds its action and verification from
+  only the classes present in that snapshot; stale guidance for an absent
+  class is itself an alerting defect. A sample is evidence, not permission to
+  apply its diagnosis to every row. Keep invalid-destination separate from
+  generic processor 400s because only that typed, definitive pre-chain result
+  is safe to unpin (§5.7).
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -8550,6 +8552,18 @@ after the retained failure ages out with scheduled runs below 120 seconds and
 no new large-drift or negative-counter evidence; reopen underlying-cause work
 only on a correlated recurrence, rather than inferring it from the timeout
 class alone.
+
+The bounded 2026-09-13 lifecycle recheck exposed a privacy defect in that
+retention path: a failed attempt's complete evaluator error JSON and stack were
+copied into `failed_error` after only task-id replacement. That text can also
+carry dependency-controlled messages, addresses, and opaque identifiers. The
+monitor now classifies task errors in memory into a fixed allowlist (including
+the proved PostgreSQL statement-timeout class) and renders only
+`failed_error_class` or `precursor_failed_error_class`; unknown shapes become
+`unclassified`. Generic observation failures and the task-error battery use the
+same fixed-output boundary. Raw text remains available only transiently for
+existing internal guidance selection. Lifecycle phase, exact-attempt
+correlation, and alert identity are unchanged.
 
 A separate contained recurrence on 2026-09-13 comprised ten distinct
 settlement releases on five balances in two bursts of four and six. All ten
