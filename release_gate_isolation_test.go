@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Fake only the Docker boundary, retaining real setup/ownership/endpoint and
@@ -187,7 +191,7 @@ source "$release_gate_service_root/environment.sh"
 [[ "$(stat -c '%a' "$release_gate_service_root/postgres.cid")" == 600 ]]
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg_maintenance.yml"
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/config/db.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/config/db_maintenance.yml"
-[[ "$(< "$WARP_TEST_ENV_PORTABLE_ROOT/config/settings.yml")" == 'all: {}' ]]
+cat "$WARP_TEST_ENV_PORTABLE_ROOT/config/settings.yml"
 [[ -d "$WARP_SITE_HOME" && ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/local" ]]
 [[ -f "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" && ! -L "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" ]]
 [[ ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/nonservice.yml" ]]
@@ -200,6 +204,38 @@ done
 `)
 	if err != nil {
 		t.Fatalf("private resource setup: %v\n%s", err, output)
+	}
+	// The real private generator owns only these documentation/loopback
+	// locations. Reject extra settings, especially ambient env_vars that
+	// could redirect the isolated database or Redis transports.
+	var settings struct {
+		All struct {
+			IPOverrides []struct {
+				Subnet      string `yaml:"subnet"`
+				CountryCode string `yaml:"country_code"`
+				Country     string `yaml:"country"`
+				Region      string `yaml:"region"`
+				City        string `yaml:"city"`
+			} `yaml:"ip_overrides"`
+		} `yaml:"all"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(output))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&settings); err != nil {
+		t.Fatalf("private settings census: %v", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("private settings have trailing content: %v", err)
+	}
+	expectedSubnets := []string{"192.0.2.0/24", "2001:db8::/32", "127.0.0.0/8", "::1/128"}
+	if len(settings.All.IPOverrides) != len(expectedSubnets) {
+		t.Fatalf("private settings override count=%d, want %d", len(settings.All.IPOverrides), len(expectedSubnets))
+	}
+	for index, subnet := range expectedSubnets {
+		override := settings.All.IPOverrides[index]
+		if override.Subnet != subnet || override.CountryCode != "zz" || override.Country != "Fixture Country" || override.Region != "Fixture Region" || override.City != "Fixture City" {
+			t.Fatalf("private settings override %d differs: %+v", index, override)
+		}
 	}
 	if files, err := filepath.Glob(filepath.Join(self.state, "*.meta")); err != nil || len(files) != 0 {
 		t.Fatalf("owned resources survived cleanup: %v %v", files, err)
