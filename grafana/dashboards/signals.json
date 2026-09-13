@@ -3200,6 +3200,61 @@
     },
     {
       "type": "timeseries",
+      "title": "Circle transfer admission event capability by worker",
+      "description": "SIGNALS.md §2.14: 1 means this taskworker emits one bounded pre-POST event for each admitted Circle transfer. This is a build capability gauge; the admission rate and wait panels describe traffic. Each series keeps its host, block, and process instance. Samples older than 90 seconds and missing telemetry remain no-data; the §2.14 monitor checks coverage of every newest worker.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 167
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "last"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (timestamp(urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"}) >= time() - 90)",
+          "refId": "A",
+          "legendFormat": "{{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "proxy lock-cache occupancy",
       "description": "Caller IP-lock cache entries and hard capacity for each Proxy process. A process pinned at capacity while evictions rise is bounded high-cardinality churn; a flat capacity mismatch identifies a stale build or configuration boundary.",
       "datasource": {
@@ -3210,7 +3265,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 167
+        "y": 175
       },
       "fieldConfig": {
         "defaults": {
@@ -3274,7 +3329,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 167
+        "y": 175
       },
       "fieldConfig": {
         "defaults": {
@@ -3351,7 +3406,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 175
+        "y": 183
       }
     },
     {
@@ -3366,7 +3421,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 176
+        "y": 184
       },
       "fieldConfig": {
         "defaults": {
@@ -3415,7 +3470,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 184
+        "y": 192
       }
     },
     {
@@ -3426,7 +3481,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 185
+        "y": 193
       },
       "options": {
         "mode": "markdown",

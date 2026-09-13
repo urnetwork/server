@@ -1431,6 +1431,41 @@ func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	}
 }
 
+// The capability gauge identifies each freshly observed worker that emits a
+// bounded pre-POST admission event; missing workers must remain no-data.
+func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
+	dashboard := readTestDashboard(t, "signals.json")
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("worker admission capability must remain authenticated")
+	}
+	var capabilityPanel *testPanel
+	for panelIndex := range dashboard.Panels {
+		panel := &dashboard.Panels[panelIndex]
+		if panel.Title == "Circle transfer admission event capability by worker" {
+			capabilityPanel = panel
+			break
+		}
+	}
+	if capabilityPanel == nil || len(capabilityPanel.Targets) != 1 {
+		t.Fatal("signals dashboard is missing a dedicated Circle admission capability panel")
+	}
+	const metric = `urnetwork_circle_transfer_admission_observable_info{env="$env",service="taskworker",instance!=""}`
+	wantQuery := metric + ` and on (env, service, block, host, instance) (timestamp(` + metric + `) >= time() - 90)`
+	target := capabilityPanel.Targets[0]
+	if target.Expr != wantQuery || target.LegendFormat != "{{host}} / {{block}} / {{instance}}" {
+		t.Errorf("Circle admission capability loses fresh per-worker gauge semantics: %+v", target)
+	}
+	if capabilityPanel.Type != "timeseries" || capabilityPanel.FieldConfig.Defaults.Unit != "short" ||
+		target.Instant || target.Range != nil && !*target.Range {
+		t.Error("Circle admission capability must be a unitless gauge time series")
+	}
+	for _, part := range []string{"1", "pre-POST", "90 seconds", "no-data", "§2.14"} {
+		if !strings.Contains(capabilityPanel.Description, part) {
+			t.Errorf("Circle admission capability does not explain %q", part)
+		}
+	}
+}
+
 // registeredApplicationMetrics inventories prometheus option literals in the
 // production Go sources. The stats collector creates its gauges through
 // small wrappers (newStatsGauge, newStatsGaugeVec), so their string-literal
@@ -1450,6 +1485,10 @@ func registeredApplicationMetrics(t *testing.T) []string {
 	}
 
 	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, walkErr error) error {
+		// The local metric inventory shares RUN-ALL's source ownership boundary.
+		if slices.Contains([]string{"../proxy/acceptance", "../proxy/cmd/acceptance-main"}, filepath.ToSlash(path)) {
+			return filepath.SkipDir
+		}
 		if walkErr != nil {
 			if strings.HasPrefix(
 				filepath.ToSlash(path),
