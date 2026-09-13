@@ -22,6 +22,7 @@ func NetworkCreate(
 	if result.Error != nil {
 		return nil, fmt.Errorf("%s", result.Error.Message)
 	}
+	enrollNetworkCreateOnboardingPostPrimary(result, session)
 
 	/**
 	 * we only add transfer balance if the user is not pro (no balance code redeemed)
@@ -95,17 +96,28 @@ func NetworkCreate(
 			)
 		}
 
-		// the onboarding campaign: the account exists and can be mailed now
-		// (a verification-pending sign-up enters from AuthVerify instead)
-		userAuth := ""
-		if result.UserAuth != nil {
-			userAuth = *result.UserAuth
-		}
-		EnrollNetworkOnboarding(session, result.Network.NetworkId, userAuth, false)
-
 	}
 
 	return result, nil
+}
+
+func enrollNetworkCreateOnboardingPostPrimary(
+	result *model.NetworkCreateResult,
+	clientSession *session.ClientSession,
+) {
+	if result == nil || result.Network == nil || result.VerificationRequired != nil {
+		return
+	}
+	// Account creation is already committed. Enroll before optional balance,
+	// referral, preference, event, or welcome-message work so a failure in one
+	// of those projections cannot silently skip the campaign row.
+	userAuth := ""
+	if result.UserAuth != nil {
+		userAuth = *result.UserAuth
+	}
+	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
+		EnrollNetworkOnboarding(postSession, result.Network.NetworkId, userAuth, false)
+	})
 }
 
 type UpdateNetworkNameArgs struct {

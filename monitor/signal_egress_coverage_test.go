@@ -53,6 +53,7 @@ func syntheticEgressCoverageActivity(snapshot egressCoverageSnapshot) Row {
 		fmt.Sprint(snapshot.staleLocationOldestAgeSeconds), fmt.Sprint(snapshot.staleHealthOldestAgeSeconds),
 		fmt.Sprint(snapshot.missingHealthDue), fmt.Sprint(snapshot.missingHealthExpiredDue),
 		fmt.Sprint(snapshot.missingHealthOldestAgeSeconds),
+		fmt.Sprint(snapshot.deferredCurrentDarkDue),
 	}
 }
 
@@ -257,7 +258,8 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 			return []Row{
 				syntheticEgressCoverageActivity(egressCoverageSnapshot{
 					shardIndex: 0, eligible: 22000, noLocationDue: 8, blackholeDue: 250,
-					fullAgeSeconds: 3600, blackholeAgeSeconds: 4200,
+					deferredCurrentDarkDue: 12000,
+					fullAgeSeconds:         3600, blackholeAgeSeconds: 4200,
 					fullCurrent: 400, blackholeCurrent: 18000,
 					fullAttemptsLastHour: 100, blackholeLastHour: 9000,
 					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
@@ -296,6 +298,21 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 			}
 		}
 	}
+	for _, notWant := range []string{"current-dark", "deferred_current_dark_due", "candidate suppression opportunity"} {
+		if strings.Contains(blackhole.Markdown(), notWant) {
+			t.Fatalf("blackhole stall alert contains full-queue wording %q:\n%s", notWant, blackhole.Markdown())
+		}
+	}
+	for _, want := range []string{
+		"deferred_current_dark_due=12000",
+		"old-deployment attempts",
+		"desired scheduler-state accounting",
+		"candidate suppression opportunity",
+	} {
+		if !strings.Contains(full.Markdown(), want) {
+			t.Fatalf("full stall alert missing %q:\n%s", want, full.Markdown())
+		}
+	}
 	for _, want := range []string{
 		"((hashtext(nclr.client_id::text) % 2) + 2) % 2",
 		"interval '84 hours'",
@@ -304,12 +321,17 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 		"interval '90 minutes'",
 		"interval '3 hours'",
 		"interval '1 hour'",
+		"pbc.ok = false",
+		") AS current_dark",
+		"count(c.client_id) FILTER (WHERE c.no_location AND c.attempt_due AND NOT c.current_dark)",
+		"FILTER (WHERE NOT c.current_dark) AS latest_full",
+		"c.current_dark AND c.attempt_due AND c.urgent_lane <> ''",
 		"count(c.client_id) FILTER (WHERE c.attempt_at >= c.now_utc - interval '1 hour')",
 		"pel.observed_at + interval '7 days' <= peh.measured_at + interval '24 hours'",
 		"WHEN peh.client_id IS NULL THEN 'missing-health'",
-		"min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due)",
-		"min(c.measured_at) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due)",
-		"min(c.observed_at) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due)",
+		"min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due AND NOT c.current_dark)",
+		"min(c.measured_at) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due AND NOT c.current_dark)",
+		"min(c.observed_at) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due AND NOT c.current_dark)",
 	} {
 		if !strings.Contains(activityQuery, want) {
 			t.Fatalf("activity query missing %q:\n%s", want, activityQuery)
@@ -547,8 +569,9 @@ func TestEgressCoverageSignalSyntheticFullCapacity(t *testing.T) {
 			return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
 				shardIndex: 0, eligible: 1000,
 				noLocationDue: 900, staleLocationDue: 50, staleHealthDue: 10,
-				fullAgeSeconds:      100,
-				blackholeAgeSeconds: 100, fullCurrent: 40, blackholeCurrent: 1000,
+				deferredCurrentDarkDue: 30,
+				fullAgeSeconds:         100,
+				blackholeAgeSeconds:    100, fullCurrent: 40, blackholeCurrent: 1000,
 				fullAttemptsLastHour:          5,
 				blackholeLastHour:             1,
 				staleLocationOldestAgeSeconds: int64((90 * time.Hour) / time.Second),
@@ -568,9 +591,11 @@ func TestEgressCoverageSignalSyntheticFullCapacity(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "egress-full-capacity")
 	for _, want := range []string{
-		"current_percent=4.0", "due=960", "attempted_last_hour=5",
+		"current_percent=4.0", "due=960", "deferred_current_dark_due=30", "attempted_last_hour=5",
 		"required_per_hour=6", "projected_drain=192h0m0s",
 		"configured_total_full_concurrency=2", "gross full-probe execution capacity",
+		"desired scheduler-state accounting", "candidate suppression opportunity",
+		"one-hour gross-rate rollout window clears",
 		"no product decision for a maximum retry interval", "Do not invent fixed lane weights",
 		"complete seven-day sweep", "identities never leave the database",
 	} {
@@ -656,7 +681,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessIsCategoryLocal(t *testing.T) 
 		for _, want := range []string{
 			"past its absolute deadline",
 			"deadline_missed=true", "expired_due=",
-			"all_shards_unlocated_can_fill_batch=true", "bounded indexed evidence heads",
+			"all_shards_unlocated_can_fill_batch=true", "output-bounded anti-health head",
 			"success-inclusive lower bound", "not itself a post-EDF failure",
 			"First attempts and retries",
 			"No provider or task identifier leaves PostgreSQL",
@@ -899,16 +924,23 @@ func TestParseEgressCoverageActivityRejectsAmbiguousRows(t *testing.T) {
 	missingHealthExpiredExceedsDue[17] = "1"
 	missingHealthOldestAbsent := valid(0)
 	missingHealthOldestAbsent[16] = "1"
+	deferredExceedsEligible := valid(0)
+	deferredExceedsEligible[19] = "2"
+	dueAndDeferredOverlap := valid(0)
+	dueAndDeferredOverlap[2] = "1"
+	dueAndDeferredOverlap[19] = "1"
 	for name, rows := range map[string][]pgRow{
-		"missing shard":                        {valid(0)},
-		"negative count":                       {negative, valid(1)},
-		"duplicate shard":                      {valid(0), valid(0)},
-		"current exceeds":                      {tooCurrent, valid(1)},
-		"last hour exceeds":                    {tooManyBlackhole, valid(1)},
-		"expired exceeds due":                  {expiredExceedsDue, valid(1)},
-		"due has no oldest age":                {missingOldest, valid(1)},
-		"missing health expired exceeds due":   {missingHealthExpiredExceedsDue, valid(1)},
-		"missing health due has no oldest age": {missingHealthOldestAbsent, valid(1)},
+		"missing shard":                          {valid(0)},
+		"negative count":                         {negative, valid(1)},
+		"duplicate shard":                        {valid(0), valid(0)},
+		"current exceeds":                        {tooCurrent, valid(1)},
+		"last hour exceeds":                      {tooManyBlackhole, valid(1)},
+		"expired exceeds due":                    {expiredExceedsDue, valid(1)},
+		"due has no oldest age":                  {missingOldest, valid(1)},
+		"missing health expired exceeds due":     {missingHealthExpiredExceedsDue, valid(1)},
+		"missing health due has no oldest age":   {missingHealthOldestAbsent, valid(1)},
+		"deferred current dark exceeds eligible": {deferredExceedsEligible, valid(1)},
+		"due and deferred overlap":               {dueAndDeferredOverlap, valid(1)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseEgressCoverageActivity(rows, 2); err == nil {

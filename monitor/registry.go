@@ -120,6 +120,7 @@ func NewSignals() []Signal {
 		NewLokiTailersSignal(),
 		NewMimirContinuitySignal(),
 		NewMimirAdmissionSignal(),
+		NewMimirBalanceSignal(),
 		NewMimirShutdownSignal(),
 		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),

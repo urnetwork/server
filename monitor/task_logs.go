@@ -498,6 +498,14 @@ func parseTaskActiveRunForID(logOutput, taskName, taskID string) taskActiveRun {
 // per-item writes may commit, but the task row stays pending and is reclaimed
 // under the same id.
 func parseTaskTerminalRun(logOutput, taskName string) taskTerminalRun {
+	return parseTaskTerminalRunAtLeast(logOutput, taskName, 0)
+}
+
+// parseTaskTerminalRunAtLeast selects the newest qualifying failure rather
+// than selecting the newest failure and applying a duration threshold later.
+// A short later retry error must not erase an older incident still inside the
+// caller's bounded lifecycle window.
+func parseTaskTerminalRunAtLeast(logOutput, taskName string, minimum time.Duration) taskTerminalRun {
 	terminal := taskTerminalRun{}
 	marker := "." + taskName + "("
 	for _, line := range strings.Split(logOutput, "\n") {
@@ -509,7 +517,7 @@ func parseTaskTerminalRun(logOutput, taskName string) taskTerminalRun {
 			continue
 		}
 		seconds, err := strconv.ParseFloat(match[1], 64)
-		if err != nil {
+		if err != nil || seconds < minimum.Seconds() {
 			continue
 		}
 		candidate := taskTerminalRun{

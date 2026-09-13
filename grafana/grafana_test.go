@@ -40,6 +40,7 @@ type testPanel struct {
 	Description string `json:"description"`
 	FieldConfig struct {
 		Defaults struct {
+			Unit       string `json:"unit"`
 			Thresholds struct {
 				Steps []struct {
 					Color string   `json:"color"`
@@ -874,6 +875,93 @@ func TestMcpDashboardCoversBoundedCallsFetchAndCapacity(t *testing.T) {
 	}
 }
 
+func TestServiceDurationDashboardsUseSumCountAndFreshMaximumWithoutBuckets(t *testing.T) {
+	tests := []struct {
+		file            string
+		durationMetrics []string
+		maximumMetrics  []string
+	}{
+		{
+			file:            "api.json",
+			durationMetrics: []string{"urnetwork_http_request_duration_seconds"},
+			maximumMetrics:  []string{"urnetwork_http_request_interval_max_timestamp_seconds"},
+		},
+		{
+			file:            "taskworker.json",
+			durationMetrics: []string{"urnetwork_taskworker_execution_duration_seconds"},
+			maximumMetrics:  []string{"urnetwork_taskworker_execution_interval_max_timestamp_seconds"},
+		},
+		{
+			file: "proxy.json",
+			durationMetrics: []string{
+				"urnetwork_proxy_session_duration_seconds",
+				"urnetwork_http_request_duration_seconds",
+			},
+			maximumMetrics: []string{
+				"urnetwork_proxy_session_interval_max_timestamp_seconds",
+				"urnetwork_http_request_interval_max_timestamp_seconds",
+			},
+		},
+		{
+			file: "mcp.json",
+			durationMetrics: []string{
+				"urnetwork_http_request_duration_seconds",
+				"urnetwork_mcp_call_duration_seconds",
+				"urnetwork_mcp_fetch_wait_duration_seconds",
+			},
+			maximumMetrics: []string{
+				"urnetwork_http_request_interval_max_timestamp_seconds",
+				"urnetwork_mcp_call_interval_max_timestamp_seconds",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.file, func(t *testing.T) {
+			dashboard := readTestDashboard(t, test.file)
+			documentBytes, err := dashboardsFs.ReadFile("dashboards/" + test.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document := string(documentBytes)
+			for _, metric := range test.durationMetrics {
+				for _, suffix := range []string{"_sum", "_count"} {
+					if !strings.Contains(document, metric+suffix) {
+						t.Errorf("%s omits %s%s", test.file, metric, suffix)
+					}
+				}
+				if strings.Contains(document, metric+"_bucket") {
+					t.Errorf("%s still queries cardinality-multiplying buckets for %s", test.file, metric)
+				}
+			}
+			for _, timestampMetric := range test.maximumMetrics {
+				found := false
+				for _, expression := range dashboardExpressions(dashboard) {
+					if !strings.Contains(expression, timestampMetric) {
+						continue
+					}
+					found = true
+					for _, required := range []string{"and on (", "time() - 120", "time() + 30"} {
+						if !strings.Contains(expression, required) {
+							t.Errorf("%s maximum %s omits %q: %s", test.file, timestampMetric, required, expression)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("%s omits maximum timestamp %s", test.file, timestampMetric)
+				}
+			}
+		})
+	}
+
+	proxyBytes, err := dashboardsFs.ReadFile("dashboards/proxy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(proxyBytes), "urnetwork_proxy_wireguard_return_backpressure_seconds_bucket") {
+		t.Fatal("targeted duration reduction removed the low-cardinality WireGuard histogram control")
+	}
+}
+
 func TestWebAnalyticsDashboardPrivacyContract(t *testing.T) {
 	dashboard := readTestDashboard(t, "web-analytics.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {
@@ -1476,6 +1564,57 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 	}
 }
 
+// Each phase belongs to one worker process. Gauges stay instantaneous, counters
+// use reset-aware rates, and the panels explain overlapping spans and work units.
+func TestTaskworkerScorePhaseDashboardPreservesWorkerAndPhaseSemantics(t *testing.T) {
+	dashboard := readTestDashboard(t, "taskworker.json")
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("worker phase diagnostics must remain authenticated")
+	}
+	const selector = `{env="$env",service="taskworker",block=~"$block",host=~"$host",instance!=""}`
+	for _, c := range []struct {
+		suffix           string
+		rate             bool
+		unit             string
+		descriptionParts []string
+	}{
+		{suffix: "active", unit: "short", descriptionParts: []string{"parent", "target_map", "gob_encode", "cache_write"}},
+		{suffix: "duration_seconds_total", rate: true, unit: "short", descriptionParts: []string{"completed", "wall", "child", "CPU"}},
+		{suffix: "exits_total", rate: true, unit: "short", descriptionParts: []string{"error", "panic", "success"}},
+		{suffix: "work_items_total", rate: true, unit: "short", descriptionParts: []string{"source_load", "target_export", "target_map", "gob_encode", "cache_write", "attempt"}},
+		{suffix: "work_bytes_total", rate: true, unit: "Bps", descriptionParts: []string{"key", "value", "attempt", "heap"}},
+	} {
+		metric := "urnetwork_update_client_scores_phase_" + c.suffix
+		wantExpression := metric + selector
+		if c.rate {
+			wantExpression = "rate(" + wantExpression + "[$__rate_interval])"
+		}
+		found := false
+		for _, panel := range dashboard.Panels {
+			for _, target := range panel.Targets {
+				if !strings.Contains(target.Expr, metric) {
+					continue
+				}
+				found = true
+				if target.Expr != wantExpression || target.LegendFormat != "{{host}} {{block}} {{instance}} {{phase}}" {
+					t.Errorf("phase metric %s loses scoped worker/phase identity or counter semantics: %+v", metric, target)
+				}
+				if panel.Type != "timeseries" || len(panel.Targets) != 1 || panel.FieldConfig.Defaults.Unit != c.unit || target.Instant || target.Range != nil && !*target.Range {
+					t.Errorf("phase metric %s needs a dedicated %s time series", metric, c.unit)
+				}
+				for _, part := range c.descriptionParts {
+					if !strings.Contains(panel.Description, part) {
+						t.Errorf("phase metric %s does not explain %q", metric, part)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("taskworker dashboard is missing phase metric %s", metric)
+		}
+	}
+}
+
 // The lossless failure total identifies the alerting cause, while this bounded
 // breakdown distinguishes request shapes without exposing client identifiers.
 func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
@@ -1516,15 +1655,27 @@ func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
 func TestInactiveDestinationDetailsHaveActionableDashboardQuery(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
 	wantTitle := "\u00a74 contract failures + origin/destination details / min (lossless)"
-	var targets []testTarget
-	for _, panel := range dashboard.Panels {
-		if panel.Title == wantTitle {
-			targets = panel.Targets
+	var detailsPanel *testPanel
+	for panelIndex := range dashboard.Panels {
+		if dashboard.Panels[panelIndex].Title == wantTitle {
+			detailsPanel = &dashboard.Panels[panelIndex]
 			break
 		}
 	}
-	if targets == nil {
+	if detailsPanel == nil {
 		t.Fatalf("signals dashboard lacks panel %q", wantTitle)
+	}
+	targets := detailsPanel.Targets
+	for _, want := range []string{
+		"source_owner=egress_prober|other|unknown",
+		"authenticated source network",
+		"durable prober network",
+		"not accepted from the request",
+		"missing source_owner during rollout is unattributed",
+	} {
+		if !strings.Contains(detailsPanel.Description, want) {
+			t.Errorf("inactive-destination panel description omits %q: %s", want, detailsPanel.Description)
+		}
 	}
 	tests := []struct {
 		metric string
@@ -1538,8 +1689,8 @@ func TestInactiveDestinationDetailsHaveActionableDashboardQuery(t *testing.T) {
 		},
 		{
 			metric: "urnetwork_connect_inactive_destination_details_total",
-			query:  `sum by (request_companion, sender_role, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
-			legend: "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}",
+			query:  `sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+			legend: "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} source_owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}",
 		},
 	}
 	for _, test := range tests {

@@ -750,6 +750,23 @@ var playPackageNameFunc = playPackageName
 var playSkusFunc = func() map[string]*Sku { return playSkus() }
 var playAuthHeaderFunc = playAuthHeader
 
+// Replaceable only by the terminal-renewal error-path test. Production always
+// ends through the network-and-purchase-token-scoped model transaction.
+var endPlaySubscriptionEntitlement = func(
+	ctx context.Context,
+	networkId server.Id,
+	purchaseToken string,
+	now time.Time,
+) (bool, error) {
+	return model.EndReconciledEntitlementForNetworkPurchaseToken(
+		ctx,
+		networkId,
+		model.SubscriptionMarketGoogle,
+		purchaseToken,
+		now,
+	)
+}
+
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
 // https://developer.android.com/google/play/billing/rtdn-reference
 func PlayWebhook(
@@ -1038,9 +1055,11 @@ type PlaySubscriptionRenewalArgs struct {
 }
 
 type PlaySubscriptionRenewalResult struct {
-	Canceled   bool      `json:"canceled"`
-	ExpiryTime time.Time `json:"expiry_time"`
-	Renewed    bool      `json:"renewed"`
+	Canceled         bool      `json:"canceled"`
+	EntitlementEnded bool      `json:"entitlement_ended"`
+	ExpiryTime       time.Time `json:"expiry_time"`
+	Renewed          bool      `json:"renewed"`
+	Terminal         bool      `json:"terminal"`
 }
 
 func SchedulePlaySubscriptionRenewal(
@@ -1082,9 +1101,11 @@ func PlaySubscriptionRenewal(
 			switch v.StatusCode {
 			// Gone
 			case 410:
-				return &PlaySubscriptionRenewalResult{
-					Canceled: true,
-				}, nil
+				return endTerminalPlaySubscriptionRenewal(
+					playSubscriptionRenewal,
+					clientSession,
+					time.Time{},
+				)
 			default:
 				return nil, err
 			}
@@ -1116,19 +1137,34 @@ func PlaySubscriptionRenewal(
 		return nil, err
 	}
 
+	now := server.NowUtc()
 	active := false
 	canceled := false
+	terminal := false
 	switch sub.SubscriptionState {
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		active = true
-	case "SUBSCRIPTION_STATE_CANCELED",
-		"SUBSCRIPTION_STATE_EXPIRED":
+	case "SUBSCRIPTION_STATE_CANCELED":
 		canceled = true
+		terminal = !maxExpiryTime.After(now)
+	case "SUBSCRIPTION_STATE_EXPIRED",
+		"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
+		canceled = true
+		terminal = true
+	}
+
+	if terminal {
+		return endTerminalPlaySubscriptionRenewal(
+			playSubscriptionRenewal,
+			clientSession,
+			minExpiryTime,
+		)
 	}
 
 	if canceled {
 		return &PlaySubscriptionRenewalResult{
-			Canceled: true,
+			Canceled:   true,
+			ExpiryTime: maxExpiryTime,
 		}, nil
 	}
 
@@ -1161,19 +1197,23 @@ func PlaySubscriptionRenewal(
 			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 				renewed = false
 				creditErr = nil
-				if err := model.LockPaymentNetworkInTx(
+				if err := model.LockPlaySubscriptionPurchaseInTx(
 					tx,
 					clientSession.Ctx,
 					playSubscriptionRenewal.NetworkId,
+					playSubscriptionRenewal.PurchaseToken,
 				); err != nil {
 					creditErr = err
 					return
 				}
-				server.RaisePgResult(tx.Exec(
-					clientSession.Ctx,
-					`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-					playSubscriptionRenewal.PurchaseToken,
-				))
+				// A provider response can cross a terminal poll while waiting
+				// for this lock. Never let a stale ACTIVE response whose paid
+				// window has now ended recreate the entitlement the terminal
+				// owner just closed. A real renewal has a future max expiry and
+				// still proceeds.
+				if !server.NowUtc().Before(maxExpiryTime) {
+					return
+				}
 
 				if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
 					// a concurrent credit for this expiry already landed
@@ -1268,6 +1308,33 @@ func PlaySubscriptionRenewal(
 	}, nil
 }
 
+// endTerminalPlaySubscriptionRenewal applies the same terminal-state contract
+// as reconciliation, but inside the ordinary scheduled poll: EXPIRED,
+// PENDING_PURCHASE_CANCELED, expired CANCELED, and 410 end only the task's
+// network-and-token entitlement. An end failure is returned so the task is
+// retried instead of recording a successful terminal stop.
+func endTerminalPlaySubscriptionRenewal(
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	clientSession *session.ClientSession,
+	expiryTime time.Time,
+) (*PlaySubscriptionRenewalResult, error) {
+	ended, err := endPlaySubscriptionEntitlement(
+		clientSession.Ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+		server.NowUtc(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("could not end terminal Play entitlement: %w", err)
+	}
+	return &PlaySubscriptionRenewalResult{
+		Canceled:         true,
+		EntitlementEnded: ended,
+		ExpiryTime:       expiryTime,
+		Terminal:         true,
+	}, nil
+}
+
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
@@ -1275,6 +1342,21 @@ func PlaySubscriptionRenewalPost(
 	tx server.PgTx,
 ) error {
 	if playSubscriptionRenewalResult.Canceled {
+		if !playSubscriptionRenewalResult.Terminal &&
+			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
+			// Cancellation before the paid-through expiry preserves access and
+			// retains exactly one poll at that terminal boundary. If Post was
+			// delayed across the boundary, make that poll immediately due.
+			playSubscriptionRenewal.CheckTime = server.MaxTime(
+				playSubscriptionRenewalResult.ExpiryTime,
+				server.NowUtc(),
+			)
+			SchedulePlaySubscriptionRenewal(
+				clientSession,
+				tx,
+				playSubscriptionRenewal,
+			)
+		}
 		return nil
 	}
 

@@ -23,26 +23,32 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// logBurst derives a short-window software-amplification finding from one
-// existing log class. eventRe selects exactly one canonical line per logical
-// attempt; exact-line fingerprints prevent a tail-stream replay from inflating
-// the peak.
+// logBurst derives a short-window finding from one fixed log class. eventRe
+// selects exactly one bounded event line; exact-line fingerprints prevent a
+// tail-stream replay from inflating the peak. correlationOnly bursts retain
+// bounded source-second state for another class without emitting a finding.
 type logBurst struct {
-	name      string
-	eventRe   *regexp.Regexp
-	threshold int
-	tier      string
-	meaning   string
-	mechanism string
-	context   string
-	action    string
-	verify    string
-	playbook  string
+	name            string
+	eventRe         *regexp.Regexp
+	eventSecond     func(string) string
+	threshold       int
+	tier            string
+	metricName      string
+	eventLabel      string
+	sourceLabel     string
+	correlationOnly bool
+	meaning         string
+	mechanism       string
+	context         string
+	action          string
+	verify          string
+	playbook        string
 }
 
 // logCanonical counts one canonical line per logical provider event while the
@@ -110,9 +116,9 @@ type logClass struct {
 	// lossless counter rather than the sampled log volume.
 	metricOnly bool
 	// burst is an independently actionable per-second finding derived from
-	// this class's canonical event lines. It stays separate from the parent
-	// alert so an operational cause (for example absent wallet liquidity) does
-	// not conceal or inherit a deployable retry-amplification defect.
+	// this class's bounded event lines, or correlation-only state used by
+	// another class. It stays separate from the parent alert so an operational
+	// cause does not conceal or inherit an admission defect.
 	burst *logBurst
 	// canonical optionally exposes a de-duplicated logical event count next to
 	// the raw class line rate. The line-rate threshold remains fail-safe when a
@@ -153,6 +159,105 @@ var (
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
 )
+
+var circleTransferAdmissionObservedRe = regexp.MustCompile(
+	`\[circlec\]\[transfer-admission\] admitted observable=v1 redis_second=([0-9]{1,19}) sequence=[0-9]{1,20} deferrals=[0-9]{1,20} wait_ms=[0-9]{1,20}[[:space:]]*$`,
+)
+
+// Retain only the fixed, identifier-free admission suffix. The surrounding
+// Warp identity can contain host, generation, and correlation labels that are
+// irrelevant to the fleet ceiling and must not enter an alert artifact.
+func circleTransferAdmissionObservedSample(line string) string {
+	if sample := circleTransferAdmissionObservedRe.FindString(line); sample != "" {
+		return truncateLine(strings.TrimSpace(sample))
+	}
+	return "[circlec][transfer-admission] admitted (malformed fields omitted)"
+}
+
+func circleTransferAdmissionObservedSecond(line string) string {
+	match := circleTransferAdmissionObservedRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return ""
+	}
+	second, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil || second <= 0 {
+		return ""
+	}
+	return time.Unix(second, 0).UTC().Format(time.RFC3339)
+}
+
+var (
+	signalSendLegacyRe = regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ->` +
+			`[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}[[:space:]]*$`,
+	)
+	signalSendStructuredRe = regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\](\[signal\]send failed mode=(sender|receive-reply) ` +
+			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other))[[:space:]]*$`,
+	)
+	onboardingPostPrimaryCanceledRe = regexp.MustCompile(
+		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
+			`failed for (?:network|client) [^:\r\n]+: Done[[:space:]]*$`,
+	)
+)
+
+func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
+	return regexp.MustCompile(
+		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ` +
+			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) + `[[:space:]]*$`,
+	)
+}
+
+// Omits the destination that made the legacy line private while preserving
+// the only result that old source established.
+func signalSendLegacyLogSample(string) string {
+	return "[signal]send failed (legacy destination omitted; result unavailable)"
+}
+
+// Retains only the fixed mode/reason suffix from current Connect output.
+func signalSendStructuredLogSample(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 4 {
+		return "[signal]send failed (malformed structured result omitted)"
+	}
+	return match[1]
+}
+
+func signalSendLogMode(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 4 {
+		return "unknown"
+	}
+	return match[2]
+}
+
+func onboardingPostPrimaryCanceledStage(line string) string {
+	match := onboardingPostPrimaryCanceledRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return "unknown"
+	}
+	switch match[1] {
+	case "app open attribution":
+		return "app-open"
+	case "campaign enrollment":
+		return "campaign-enrollment"
+	case "client context":
+		return "client-context"
+	case "connect.day write":
+		return "connect-day"
+	default:
+		return "unknown"
+	}
+}
+
+func onboardingPostPrimaryCanceledLogGroup(line string) string {
+	return "stage=" + onboardingPostPrimaryCanceledStage(line)
+}
+
+func onboardingPostPrimaryCanceledLogSample(line string) string {
+	return "[onboarding]post-primary persistence returned Done stage=" +
+		onboardingPostPrimaryCanceledStage(line) + " (identifier omitted)"
+}
 
 func windowStallLogSample(line string) string {
 	return strings.TrimSpace(windowStallEventRe.FindString(line))
@@ -278,6 +383,17 @@ var logClasses = []logClass{
 		action:    "Verify the running Grafana artifact contains Warp 35453fd and the Warpctl artifact contains 26089b2 or later, retain bounded overlap reconciliation for the named service, and remove any residual producer burst or genuinely blocked consumer. Do not print dropped labels or timestamps, disable reconciliation, or raise any Loki response or ingester queue.",
 		verify:    "The named service tail stays connected, two consecutive overlap reconciliations complete, and no service-attributed loki-tail-dropped-entries summary, ingester reset, or backend EOF appears for 10 minutes through the workload that triggered the loss.",
 	},
+	// Loki's live API can deliver a record after ingestion even when its source
+	// timestamp is behind the WebSocket cursor. Warpctl drops that record before
+	// it can become a current product line and emits only this bounded summary.
+	{name: "loki-tail-pre-cursor-entries", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-pre-cursor-entries\]\s+service=[A-Za-z0-9._-]+\s+count=[1-9][0-9]*\s*$`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "Loki delivered late or replayed records behind Warpctl's monotonic live-tail cursor; Warpctl suppressed their contents and retained only this service/count summary",
+		mechanism: "Loki's standing tail is driven by ingestion arrival, so a newly ingested record can carry a source timestamp older than the requested cursor. Printing it would assign historical product evidence to the current monitor window while leaving the reconnect cursor unchanged. Warpctl now compares every returned timestamp with its monotonic cursor, suppresses pre-cursor contents, and emits this privacy-safe aggregate instead.",
+		context:   "This proves a source-time versus arrival-time observation boundary, not a current failure in the emitting product service. It does not distinguish late producer delivery, Loki ingestion delay, or a backend replay, and it does not prove that the historical record was evaluated in its original source window.",
+		action:    "Correlate the service with bounded source-time reconciliation, Loki ingestion latency, and tail reconnects. Preserve the Warpctl cursor guard and the monitor's independent source-time guard; do not replay the suppressed contents into the current product window or restart the emitting service.",
+		verify:    "The standing tail stays connected, two consecutive overlap reconciliations complete, current-source controls remain visible, and no pre-cursor summary or monitor-side stale-arrival warning recurs for ten minutes.",
+	},
 	// Mimir 3.1 logs any store-gateway bucket-index version behind the
 	// querier's requested version as a warning. The live fleet's independent
 	// jittered 15-minute loops produced an exact, harmless -873-second
@@ -324,6 +440,15 @@ var logClasses = []logClass{
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	{name: "onboarding-post-primary-canceled", re: onboardingPostPrimaryCanceledRe,
+		sample: onboardingPostPrimaryCanceledLogSample, groupBy: onboardingPostPrimaryCanceledLogGroup,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning:   "primary account verification, API client creation, or Connect session persistence succeeded, but its separate optional onboarding write returned the database Done sentinel before recording app-open, campaign-enrollment, client-context, or connect-day state",
+		mechanism: "The optional writers originally reused the request or connection session context after the primary transaction committed. Cancellation can therefore reach Acquire, Ping, BeginTx, or Exec first; dbWithPool maps that boundary to Done, and the detached commit path is never entered because no optional transaction was established. Corrected source drops only parent cancellation after primary success and gives the optional work the same finite ten-second budget as an existing post-commit projection.",
+		context:   "The bounded stage frame distinguishes API app-open, campaign-enrollment, and client-context loss from Connect connect-day loss while the fixed sample omits the network or client identifier. In a one-hour 2026-09-11 Main control, the three observed exact Done shapes were distributed across active generations rather than concentrated at process starts. On corrected source, the same line instead means the private ten-second post-primary budget itself expired, so inspect PostgreSQL acquisition and statement latency rather than attributing it to caller teardown.",
+		action:    "Prove the emitting artifact. For pre-fix API, deploy the bounded post-primary account/client onboarding session; for pre-fix Connect, deploy the bounded post-connection connect-day writer. Preserve request cancellation for primary account verification, auth-client, and connect work, and do not retry or fabricate historical analytics rows. On a corrected artifact, diagnose the bounded database stall at the framed stage instead of lengthening or removing the deadline.",
+		verify:    "Deterministic PostgreSQL tests start with an already-canceled parent, persist each optional logical row exactly once, and prove the detached context remains finite; every API and Connect block runs corrected source; and this class remains absent for ten minutes after ingestion delay while auth-client and connection activity continues.",
+	},
 	{name: "onboarding-app-open-attribution", re: regexp.MustCompile(`\[onboarding\]app open attribution failed for network [^:\r\n]+: ERROR: inconsistent types deduced for parameter \$4 \(SQLSTATE 42P08\)`),
 		sample: func(string) string {
 			return "[onboarding]app open attribution failed: PostgreSQL parameter type conflict (SQLSTATE 42P08; network identifier omitted)"
@@ -422,6 +547,29 @@ var logClasses = []logClass{
 		rateThreshold: 500, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning:    "companion contract creation cannot find its origin contract — a spike = companion-path regression (origin closed early or client sequence bug)",
 		metricOnly: true},
+	{name: "circle-transfer-admitted", re: circleTransferAdmissionObservedRe,
+		sample: circleTransferAdmissionObservedSample,
+		// This fixed info marker exists only to drive the independently
+		// actionable per-second invariant. Its minute rate is neither an error
+		// nor a provider quota, so keep the ordinary class below any practical
+		// alert threshold.
+		rateThreshold: 1 << 30, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §2.14", redactIDs: true,
+		burst: &logBurst{
+			name:        "payout-retry-microburst",
+			eventRe:     circleTransferAdmissionObservedRe,
+			eventSecond: circleTransferAdmissionObservedSecond,
+			threshold:   4,
+			tier:        tierWarn,
+			metricName:  "admitted_submissions",
+			eventLabel:  "admitted submissions",
+			sourceLabel: "pre-POST admission markers",
+			meaning:     "four or more transfer submissions were admitted by the shared Redis gate in one normalized source second",
+			mechanism:   "Each exact marker carries the authoritative Redis TIME second from the atomic admission decision and is emitted before the processor POST begins. Four markers in one Redis second cannot fit under a three-admission rolling-second ceiling, so this is direct admission-boundary evidence rather than an inference from host clocks, logger scheduling, independent response completion, or task-evaluator timestamps.",
+			context:     "Interpret a quiet marker window only when §2.14 proves the admission-observable capability on every newest Taskworker and the standing-tail visibility checks are healthy. During mixed rollout or telemetry loss, absent markers are unknown rather than zero. Payout-wallet-insufficient remains a separate finance/operations condition, and payment-processor-rate-limit remains the provider response signal.",
+			action:      "First require complete §2.14 admission-observable coverage. If coverage is complete, preserve payment idempotency keys and the three-per-rolling-second ceiling while inspecting the Redis gate's atomic decision path and the active Taskworker artifacts that emitted the impossible markers. An uninstrumented Circle caller is instead a 429-source investigation because it cannot create this marker. Do not accelerate or manually replay payouts.",
+			verify:      "Every newest Taskworker exposes the §2.14 admission-observable capability and all five activity families; for a full 90-minute retry window, peak_admitted_submissions_per_second stays below 4, admission errors and processor 429s remain zero, and payment idempotency keys remain stable.",
+			playbook:    "SIGNALS.md §1.2, §2.14, and §5.7",
+		}},
 	{name: "circle-transfer-admission-failed", re: regexp.MustCompile(`\[circlec\]\[transfer-admission\] failed closed`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §2.14", redactIDs: true,
 		meaning:   "the Taskworker could not obtain the shared Circle transfer admission and deliberately returned before the financial POST",
@@ -438,23 +586,17 @@ var logClasses = []logClass{
 		mechanism: "The payment processor rejected a submit because the configured source wallet lacks enough token balance. Each affected AdvancePayment row remains pending and retries on the task system's consecutive-error backoff with a one-hour nominal cap. Current task code disperses saturated retries across 30–90 minutes with a one-hour mean; older code used only two seconds of jitter and preserved outage-created waves. N parked rows still produce roughly N canonical task attempts per hour on average, but one attempt normally emits both a Circle-client diagnostic and a task-evaluator line.",
 		context:   "This is primarily an operational liquidity boundary, not an API or PostgreSQL defect. The displayed line rate measures diagnostic amplification; wallet_insufficient_events is the exact-replay-deduplicated logical-attempt count and still is not the number of unique payouts. Proportional capped jitter contains synchronized processor bursts but cannot create wallet liquidity; accelerating retries only increases noise and load. A software release cannot fund the custodial wallet, and deleting task rows would discard owed payouts.",
 		action:    "Finance/ops must fund the exact network/token payout wallet identified in protected source logs, or pause payouts using the supported operational control until it is funded. Do not delete or manually replay pending_task rows, rotate payment idempotency keys, or loosen the retry cap.",
-		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main server commit 66525afc includes proportional retry jitter, the shared Circle transfer gate, and complete fail-closed telemetry; deploy it only to blocks that lack the runtime capabilities. Then use §2.14 to prove complete admission metrics, zero fail-closed errors, fewer than four canonical attempts/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
+		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main server commit 66525afc includes proportional retry jitter, the shared Circle transfer gate, and complete fail-closed telemetry; deploy it only to blocks that lack the runtime capabilities. Then use §2.14 to prove complete admission-observable and activity metrics, zero fail-closed errors, fewer than four exact pre-POST admission markers/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
 		redactIDs: true,
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
 			name:    "wallet_insufficient_events",
 		},
 		burst: &logBurst{
-			name:      "payout-retry-microburst",
-			eventRe:   regexp.MustCompile(`\[task\.go:[0-9]+\]`),
-			threshold: 4,
-			tier:      tierWarn,
-			meaning:   "four or more distinct AdvancePayment wallet-rejection attempts landed in one second, the exact short-window shape that preceded live Circle 429s",
-			mechanism: "The old capped task backoff added only 0–2 seconds of jitter, so outage-created rows retained second-scale cohorts across hourly retries. Proportional 30–90-minute jitter removes that deterministic wave but independent random choices still cannot impose a fleet-wide per-second ceiling. The standing tailer counts only task evaluator lines (one canonical line per attempt), groups their embedded timestamps by second, and de-duplicates exact replayed lines before computing the peak.",
-			context:   "This is a deployable software-amplification alert, separate from the operational liquidity alert. Circle documents a default five POST requests/second for Wallets API endpoints. At 07:12:48Z on 2026-09-01, five wallet rejections completed and a sixth transfer request received 429; four of those five rejections came from blocks whose exact executable already contained proportional jitter. Three more rejections and another 429 followed at 07:12:49Z. That post-deployment control proves random dispersion alone lacks a hard ceiling. Current-main server commit 14928f69 adds an atomic Redis-time rolling gate of three transfer submits/second, leaving two requests/second of headroom. The four-attempt threshold remains the pre-gate incident discriminator and the post-gate invariant.",
-			action:    "Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main server commit 66525afc only to blocks that lack its runtime capabilities. Preserve normal backoff and payment idempotency keys; do not accelerate, manually replay, or delete tasks. If every block already contains the gate, use §2.14 admission errors/waits and all Circle request sources before changing its ceiling.",
-			verify:    "Every newest Taskworker exports the complete §2.14 admission metrics from an artifact containing current-main server commit 66525afc; for one full 90-minute retry window, admission errors and payment-processor-rate-limit events remain zero, peak_task_attempts_per_second stays below 4, and payment idempotency keys do not change. Ordinary deferrals prove the gate is working. Funding or pausing the wallet remains a separate operational verification.",
-			playbook:  "SIGNALS.md §1.2 and §5.7",
+			name:            "payout-wallet-completion-correlation",
+			eventRe:         regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			threshold:       4,
+			correlationOnly: true,
 		}},
 	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
@@ -483,7 +625,7 @@ var logClasses = []logClass{
 		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. Historical pre-jitter cohorts repeatedly placed five or six distinct wallet-insufficient attempts in one second with a 429. The decisive post-jitter recurrence at 07:12:48Z placed five wallet rejections and a sixth 429 in one source second; four of those five rejections were on exact executables already proven to contain proportional jitter. Independent random retry times reduce average synchronization but cannot enforce the processor's hard boundary.",
 		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. Circle documents a default five POST requests/second for Wallets API endpoints, matching the observed sixth-request boundary without proving a private account override. The monitor joins exact-replay-deduplicated evaluator records by normalized source second and retains wallet cohort counts across its bounded reconciliation/drain boundary. This is not a general Circle outage diagnosis. The durable cause breakdown stores only each row's latest error, so its rate-limit count can fall while a different row receives a new 429.",
 		action:    "Do not manually retry, delete, or pull payment tasks forward. Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main server commit 66525afc only to blocks that lack its fleet-wide Redis-time transfer gate and fail-closed telemetry. If every block contains it, inspect §2.14 fail-closed errors and admission pressure plus all other Circle request sources before changing the conservative three-per-second ceiling.",
-		verify:    "Every newest Taskworker contains current-main server commit 66525afc and exports all §2.14 admission metrics; admission errors and processor-rate-limit events stay zero, canonical payout attempts stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
+		verify:    "Every newest Taskworker contains current-main server commit 66525afc and exports the §2.14 admission-observable capability plus all five activity families; admission errors and processor-rate-limit events stay zero, exact pre-POST admission markers stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
 		redactIDs: true},
 	// A durable transfer balance can intentionally span decades, but its Redis
 	// escrow counter is a derived, reconciled mirror. The old creation path
@@ -520,6 +662,60 @@ var logClasses = []logClass{
 		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
 		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
 	},
+	{name: "signal-send-unclassified", re: signalSendLegacyRe,
+		sample:        signalSendLegacyLogSample,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "a legacy Connect signaling send failed at rate, but the boolean-only caller discarded whether admission, encryption readiness, or lifecycle/sequence closure caused it",
+		mechanism: "Legacy ClientSignalSender called SendWithTimeout, which collapses every detailed error into false. A receive-originated reply uses timeout zero and can return false with no error when bounded admission is full; a sender-owned call can instead end with its client, generation, or sequence; and the required-encryption gate has a distinct typed refusal. The retained line cannot choose among those paths.",
+		context:   "The emitting service hosts this Connect code; a Taskworker selector identifies the host process, not the owning package or a failed task. In the bounded September 11 cohort, 5,441 lines spanned all eight Taskworker processes with no process start inside the captured interval, and the alerting burst began before the later fleet drain. That rejects restart as the demonstrated onset but does not prove send capacity healthy. The historical September 10 novel-log record cited by the recurrence manifest was subsequently corrected from Taskworker to Connect and is not ancestry for this event. Do not infer pressure, lifecycle, transport failure, or a Connect revision from this legacy line.",
+		action:    "Use §8.12 to prove the emitting service's embedded Connect build input. If the line is legacy, deploy the identity-free structured sender diagnostic before selecting a behavioral fix. Then branch only on its bounded mode and reason. Do not increase queues, block a receive callback, restart Taskworker, or claim that later transport-pressure commits repair this cohort from the legacy result alone.",
+		verify:    "Every relevant service runs a Connect descendant that emits bounded mode/reason fields, this legacy class stays zero, and the resulting reason-specific class remains below 20/min for ten minutes under comparable signaling traffic. Receive-originated replies retain zero-wait admission and pooled-frame ownership tests.",
+		redactIDs: true,
+	},
+	{name: "signal-send-not-admitted", re: signalSendStructuredReasonRe("not-admitted"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send returned false without an error; mode identifies whether this was the receive-reply zero-wait boundary or the ordinary sender path",
+		mechanism: "A receive-reply send deliberately offers into bounded admission with timeout zero so one peer cannot block the shared receive callback. A full admission boundary therefore refuses that reply and leaves retry machinery to recover it. Sender mode does not use that zero-wait policy and requires a separate send-budget audit.",
+		context:   "This result identifies admission refusal, not CPU, memory, transport, or provider failure. Correlate it with the exact mode, send-admission controls, negotiation retry/recovery, and artifact ancestry. A burst distributed across processes is not by itself proof that their resources are saturated.",
+		action:    "For receive-reply mode, inspect bounded send-admission pressure and retry recovery without changing the nonblocking callback contract. For sender mode, verify its effective wait and owning generation. Prove any proposed queue, lane, or carrier correction with a deterministic admission test; do not block the receive path or enlarge a queue from this log alone.",
+		verify:    "The class stays below 20/min for ten minutes under comparable signaling traffic, refused receive replies recover through ordinary negotiation retry, and deterministic full-admission tests retain zero-wait callback behavior and exact pooled-frame return.",
+		redactIDs: true,
+	},
+	{name: "signal-send-encryption-not-ready", re: signalSendStructuredReasonRe("encryption-not-ready"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the typed required-encryption entry gate refused the signaling frame because the selected session was not established",
+		mechanism: "SendWithTimeoutDetailed preserved ErrEncryptionRequiredNotEstablished instead of collapsing it into the legacy boolean. This identifies the local entry gate; it does not establish why encryption setup was incomplete or make legacy stored-contract HMAC incompatibility the cause.",
+		context:   "Correlate the mode and selected logical lane with encryption-session establishment, TLS/key classes, and exact artifact ancestry. Keep this distinct from transfer admission pressure and lifecycle closure.",
+		action:    "Audit why signaling selected a required-but-unestablished session and preserve fail-closed encryption. Repair only the proven lane/session or handshake boundary; do not bypass encryption, lengthen provider-window timeouts, or infer HMAC incompatibility without §2.24 controls.",
+		verify:    "The class stays below 20/min for ten minutes under comparable encrypted signaling, the selected session establishes before application admission, and deterministic typed-error tests keep the result distinct from admission and closure.",
+		redactIDs: true,
+	},
+	{name: "signal-send-canceled-or-closed", re: signalSendStructuredReasonRe("canceled-or-closed"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send ended at a client, peer-generation, sequence, or capability closure represented by the legacy bounded Done result",
+		mechanism: "The transfer layer does not yet expose a typed owner for every Done path, so the sender deliberately groups them rather than claiming client cancellation, generation replacement, or sequence closure from text alone.",
+		context:   "A bounded burst during a proved service drain or peer-generation replacement can be expected lifecycle. The same rate with stable process generations needs sequence/capability and peer-lifecycle discrimination. The class does not prove transport or resource failure.",
+		action:    "Correlate the exact source seconds with service drain/start and peer-generation transition controls. If no lifecycle boundary exists, inspect sequence/capability withdrawal and preserve the sender's generation-bound cancellation. Do not restart a stable service or convert receive replies into blocking sends.",
+		verify:    "Outside a proved drain or replacement, the class stays below 20/min for ten minutes under comparable signaling; during lifecycle tests, cancellation releases blocked sends without leaking pooled frames or delaying shutdown.",
+		redactIDs: true,
+	},
+	{name: "signal-send-other", re: signalSendStructuredReasonRe("other"),
+		sample:        signalSendStructuredLogSample,
+		groupBy:       signalSendLogMode,
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the detailed Connect signaling send returned an error outside the fixed admission, encryption-readiness, and closure vocabulary",
+		mechanism: "The public log intentionally retains no raw error or identity. This bounded fallback keeps an unexpected result visible without turning arbitrary error text into labels or alert evidence.",
+		context:   "Treat this as an unresolved source-level result, not a transport diagnosis. Reproduce against the proved Connect input or add a typed bounded result at the owning layer before refining the taxonomy.",
+		action:    "Inspect the exact source and deterministic local reproduction for the emitting artifact, then promote only a stable typed outcome into the bounded vocabulary. Do not log raw errors, destination ids, session ids, or payloads to classify it.",
+		verify:    "The class stays below 20/min for ten minutes, the owning typed result has a deterministic privacy-safe regression, and malformed or unknown structured fields remain visible through generic novelty rather than being silently accepted.",
+		redactIDs: true,
+	},
 	{name: "window-generator-canceled", re: windowGeneratorCanceledRe,
 		sample:        windowGeneratorCanceledLogSample,
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
@@ -533,11 +729,11 @@ var logClasses = []logClass{
 	{name: "window-evaluation-budget", re: windowEvaluationBudgetRe,
 		sample:        windowEvaluationBudgetLogSample,
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "initial provider evaluations repeatedly consumed their effective expansion-pass budget without an acknowledgement; candidates is the number owned and canceled by that pass, not a customer or failed-window count",
-		mechanism: "Connect bounds each initial ping by both PingTimeout and the owning expansion-pass deadline. When the pass deadline wins, cleanup prevents late admission and emits one structured aggregate before recording each unresolved candidate exactly once as provider-unresponsive. effective_min is the shortest usable per-candidate budget; observed_max is elapsed wall time, while ping_timeout and expand_timeout expose the configured mismatch.",
-		context:   "This event establishes a natural evaluation-budget boundary, not why the receiver stayed silent. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement are excluded. Correlate the same window and artifact with HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal window state. A displayed rate counts throttled diagnostic lines, not candidates or incidents.",
-		action:    "Investigate the first corroborated stage. For the September 2026 legacy cohort, follow §2.24; do not lengthen either timeout as an HMAC remedy. If compatible providers reproduce it, verify actual effective budget and response latency before changing timing. Preserve pass ownership, no-late-admission cleanup, and exactly-once failure accounting.",
-		verify:    "The class stays below 20 lines/minute for ten minutes under comparable provider-window traffic, affected windows add providers or emit recovery, and deterministic barriers retain pre-boundary admission, reject post-boundary callbacks, suppress lifecycle cancellation, and assign exactly one terminal owner.",
+		meaning:   "one or more initial provider evaluations reached an owning expansion-pass safety boundary without an acknowledgement; candidates is the number owned and canceled by that pass, not a customer or failed-window count",
+		mechanism: "On pre-fix Connect, one WindowExpandTimeout deadline incorrectly bounded both candidate acquisition and already-started pings, so effective_min below ping_timeout proves that the acquisition phase clipped the configured evaluation budget. Connect b11d722 or later ends acquisition at expand_timeout but retains the same pass through each full PingTimeout, bounded by the acquisition-plus-ping envelope; only an unresolved candidate at that later safety boundary emits this event.",
+		context:   "This event identifies the budget owner, not why the receiver stayed silent. Prove the emitting Connect input and branch on effective_min versus ping_timeout: the clipped shape is a pre-fix artifact signature, while a full-budget recurrence on corrected source means the ping timer or callback failed to retire normally. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement remain excluded. HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal window state remain independent controls. A displayed rate counts throttled diagnostic lines, not candidates or incidents.",
+		action:    "For effective_min below ping_timeout, rebuild the emitting Connect-bearing artifact with b11d722 or later; do not lengthen either timeout as an HMAC remedy. On corrected source, diagnose a full acquisition-plus-ping safety expiry at the timer, callback, or scheduler boundary. Preserve pass ownership, no-overlap/no-late-admission cleanup, and exactly-once failure accounting.",
+		verify:    "After complete artifact convergence, no clipped-budget event recurs for ten minutes under comparable provider-window traffic, ordinary unanswered candidates receive their full ping budget and retire through the ping-timeout path, affected windows add providers or emit recovery, and deterministic barriers preserve acquisition-edge admission, reject post-terminal callbacks, suppress lifecycle cancellation, and assign exactly one terminal owner.",
 	},
 	{name: "window-stall-terminal", re: windowTerminalRe,
 		sample:        windowTerminalLogSample,
@@ -934,6 +1130,12 @@ type logTailer struct {
 	// alert-relevant records long enough to make the two transports and
 	// successive overlap queries idempotent without retaining ordinary logs.
 	standingSeen map[[sha256.Size]byte]time.Time
+	// A standing WebSocket can deliver a newly arrived record whose source
+	// timestamp is already behind its cursor. Such a record proves an
+	// observation-path delay, but it is not a current product failure. Retain
+	// only a bounded count and the oldest source time for the next drain.
+	staleArrivalCount  int
+	staleArrivalOldest time.Time
 	// normalized novel shape -> count/sample. The sample must come from the
 	// selected top shape; retaining one global first sample can pair unrelated
 	// evidence with that shape when several novel classes share a minute.
@@ -1460,6 +1662,18 @@ func (self *logTailer) ingestStanding(line string, updateLiveness bool, count bo
 	if updateLiveness {
 		self.lastLineTime = now
 	}
+	if updateLiveness && count {
+		if observedAt, ok := parseLogTimestamp(line); ok && observedAt.Before(now.Add(-logReconcileLookback)) {
+			if self.standingReplayLocked(line, now) {
+				return
+			}
+			self.staleArrivalCount += 1
+			if self.staleArrivalOldest.IsZero() || observedAt.Before(self.staleArrivalOldest) {
+				self.staleArrivalOldest = observedAt
+			}
+			return
+		}
+	}
 	self.classifyLocked(line, true, count, now)
 }
 
@@ -1506,7 +1720,11 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 				}
 			}
 			if c.burst != nil && c.burst.eventRe.MatchString(line) {
-				if second := logTimestampSecond(line); second != "" {
+				second := logTimestampSecond(line)
+				if c.burst.eventSecond != nil {
+					second = c.burst.eventSecond(line)
+				}
+				if second != "" {
 					fingerprint := sha256.Sum256([]byte(key + "\x00" + line))
 					_, replayedCurrent := self.burstSeen[fingerprint]
 					_, replayedPrevious := self.burstSeenPrevious[fingerprint]
@@ -1751,7 +1969,7 @@ func (self *logTailer) drainWindow() []finding {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}
 
-		if c.burst != nil {
+		if c.burst != nil && !c.burst.correlationOnly {
 			burstBroken := false
 			for _, key := range keys {
 				peak := self.burstPeaks[key]
@@ -1760,11 +1978,25 @@ func (self *logTailer) drainWindow() []finding {
 				}
 				burstBroken = true
 				attribution := self.classTargets[key]
+				metricName := c.burst.metricName
+				if metricName == "" {
+					metricName = "task_attempts"
+				}
+				eventLabel := c.burst.eventLabel
+				if eventLabel == "" {
+					eventLabel = "task evaluator attempts"
+				}
+				sourceLabel := c.burst.sourceLabel
+				if sourceLabel == "" {
+					sourceLabel = "task evaluator lines"
+				}
 				observed := fmt.Sprintf(
-					"peak_task_attempts_per_second=%d peak_source_second=%s threshold=%d/s task_attempts=%d diagnostic_lines=%d",
+					"peak_%s_per_second=%d peak_source_second=%s threshold=%d/s %s=%d diagnostic_lines=%d",
+					metricName,
 					peak,
 					self.burstPeakSeconds[key],
 					c.burst.threshold,
+					metricName,
 					self.burstEventTotals[key],
 					self.classCounts[key],
 				)
@@ -1775,16 +2007,17 @@ func (self *logTailer) drainWindow() []finding {
 					probeId: "logs/" + c.burst.name, tier: c.burst.tier,
 					class: c.burst.name, target: self.service, frame: attribution, sustain: 1,
 					symptom: fmt.Sprintf(
-						"service %s: %s peaked at %d distinct task attempts/s (threshold %d/s)",
+						"service %s: %s peaked at %d distinct %s/s (threshold %d/s)",
 						self.service,
 						c.burst.name,
 						peak,
+						eventLabel,
 						c.burst.threshold,
 					),
-					baseline:  fmt.Sprintf("peak distinct task evaluator attempts < %d/s; minute volume alone does not prove a synchronized retry wave", c.burst.threshold),
+					baseline:  fmt.Sprintf("peak distinct %s < %d/s; minute volume alone does not prove a synchronized burst", eventLabel, c.burst.threshold),
 					observed:  observed,
 					mechanism: c.burst.mechanism,
-					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (normalized UTC; exact-replay-deduplicated task evaluator lines grouped by embedded source second)\nsample from peak second: " + self.burstSamples[key],
+					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (authoritative Redis TIME second rendered in UTC; exact-replay-deduplicated " + sourceLabel + " grouped by the marker's admission bucket)\nsample from peak second: " + self.burstSamples[key],
 					context:   c.burst.context,
 					action:    c.burst.action,
 					verify:    c.burst.verify,
@@ -1835,6 +2068,28 @@ func (self *logTailer) drainWindow() []finding {
 		findings = append(findings, healthyFinding("logs/novel", tierWarn, "novel", self.service))
 	}
 
+	if self.staleArrivalCount > 0 {
+		oldestAge := self.clock().Sub(self.staleArrivalOldest).Round(time.Second)
+		findings = append(findings, finding{
+			probeId: "monitor/visibility", tier: tierWarn,
+			class: "tailer-stale-arrival", target: "logs/" + self.service, sustain: 1,
+			symptom: fmt.Sprintf(
+				"standing log tail for %s delivered %d record(s) whose source time was older than the live overlap",
+				self.service,
+				self.staleArrivalCount,
+			),
+			baseline:  fmt.Sprintf("standing live-tail arrivals are no more than %s old; older records are recovered by the bounded range reconciliation", logReconcileLookback),
+			observed:  fmt.Sprintf("stale_arrivals=%d oldest_source_age=%s", self.staleArrivalCount, oldestAge),
+			mechanism: "The standing WebSocket returned a record whose source timestamp was already behind the current live overlap. Counting it in the arrival minute would turn historical evidence into a current product alert, so the tailer discarded it from product classes and retained only this visibility aggregate.",
+			context:   "This does not distinguish delayed producer ingestion, a Loki tail cursor replay, or an upstream response replay. It also does not prove the historical record was never evaluated in its original source window.",
+			action:    "Inspect the standing Warpctl/Loki cursor and bounded source-time reconciliation for the affected selector. Diagnose the delayed observation path; do not assign the historical line to current service behavior or restart the emitting product service.",
+			verify:    "No stale live-tail arrival recurs for ten minutes, two consecutive bounded reconciliations complete, and current source-time controls remain visible.",
+			playbook:  "SIGNALS.md §1.5 and §4",
+		})
+	} else {
+		findings = append(findings, healthyFinding("monitor/visibility", tierWarn, "tailer-stale-arrival", "logs/"+self.service))
+	}
+
 	// reset the window
 	self.classCounts = map[string]int{}
 	self.classSamples = map[string]string{}
@@ -1852,6 +2107,8 @@ func (self *logTailer) drainWindow() []finding {
 	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSamples = map[string]string{}
+	self.staleArrivalCount = 0
+	self.staleArrivalOldest = time.Time{}
 	now := self.clock()
 	self.pruneStandingSeenLocked(now)
 	for secondKey, seenAt := range self.burstRecentSecondSeen {
@@ -2012,9 +2269,10 @@ type tailTransportMonitorRouteEvidenceCollector func(
 ) tailTransportMonitorRouteEvidence
 
 const (
-	monitorIPv6LogTimeLayout          = "2006-01-02 15:04:05.000"
-	monitorIPv6RouteCorrelationWindow = 15 * time.Second
-	monitorIPv6RouteStateLookback     = 10 * time.Minute
+	monitorIPv6LogTimeLayout                    = "2006-01-02 15:04:05.000"
+	monitorIPv6RouteCorrelationWindow           = 15 * time.Second
+	monitorIPv6RouteStateLookback               = 10 * time.Minute
+	monitorIPv6RestorationDiagnosticGracePeriod = 2 * time.Second
 )
 
 var (
@@ -2160,13 +2418,27 @@ func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggr
 	if !ok {
 		return false
 	}
-	if !e.ipv6RestoredAt.IsZero() && !first.Before(e.ipv6RestoredAt) {
+	if restorationDelay, ok := e.restorationBeforeDiagnostic(event); ok &&
+		restorationDelay > monitorIPv6RestorationDiagnosticGracePeriod {
 		return false
 	}
 	return !e.routerLifetimeExpiredAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeExpiredAt) &&
 		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteStateLookback)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.ipv6AbsentAt)
+}
+
+func (e tailTransportMonitorRouteEvidence) restorationBeforeDiagnostic(
+	event *tailTransportRouteAggregate,
+) (time.Duration, bool) {
+	if e.ipv6RestoredAt.IsZero() || event == nil {
+		return 0, false
+	}
+	first, _, ok := tailTransportRouteEventBounds(map[string]*tailTransportRouteAggregate{"event": event})
+	if !ok || first.Before(e.ipv6RestoredAt) {
+		return 0, false
+	}
+	return first.Sub(e.ipv6RestoredAt), true
 }
 
 type tailTransportRouteTarget struct {
@@ -2280,6 +2552,15 @@ func tailTransportRouteFindings(
 				absentAt,
 				monitorEvidence.autoconfDetachCount,
 			)
+			if restorationDelay, ok := monitorEvidence.restorationBeforeDiagnostic(event); ok {
+				mechanism += fmt.Sprintf(
+					" The transport diagnostic followed IPv6 restoration by %s, within the bounded %s delivery grace; larger restored gaps remain ineligible for local attribution.",
+					restorationDelay,
+					monitorIPv6RestorationDiagnosticGracePeriod,
+				)
+				observed += fmt.Sprintf(" monitor_restoration_before_diagnostic=%s", restorationDelay)
+				evidence += " The route-loss and restoration timestamps are reduced independently; raw configd records are not retained in the alert."
+			}
 			contextText = "This event is a monitor-side first-hop Router Advertisement/default-router expiration, not evidence that the named production edge, its interface, LB, or LAN neighbor failed. A later edge HTTP 200 is expected after the monitor's IPv6 route returns. The first-hop router, its RA/failover owner, or the local path carrying its advertisements is operational infrastructure and cannot be repaired by deploying an edge service."
 			action = "Inspect the monitor's local first-hop IPv6 Router Advertisement path: correlate router and RA-daemon uptime, WAN/failover state, and local-link health at the recorded time, then capture timestamped ICMPv6 type 134 traffic on the monitor interface during recurrence. Use the capture to distinguish an explicit zero-lifetime withdrawal from missed or late refresh advertisements, and repair the identified RA source or delivery path. Do not change the named production edge, its Vault address, LB, firewall, or neighbor state for this locally proven event."
 			verify = "For at least 30 minutes, the monitor's stored default-router lifetime is refreshed before expiry, an unrelated-provider IPv6 control and configured edges remain reachable in the same seconds, and every standing tail remains free of route-loss diagnostics."

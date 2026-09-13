@@ -1264,20 +1264,14 @@ func waitForTestConnectPlatformTransport(
 	transports []*connect.PlatformTransport,
 	timeout time.Duration,
 ) error {
-	waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
-	defer waitCancel()
-	for {
+	return TestingWaitForConnectCondition(ctx, timeout, 10*time.Millisecond, func(context.Context) (bool, string) {
 		for _, transport := range transports {
 			if transport.IsConnected() {
-				return nil
+				return true, "platform transport connected"
 			}
 		}
-		select {
-		case <-waitCtx.Done():
-			return waitCtx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+		return false, "no platform transport connected"
+	})
 }
 
 // Give each logical client the production carrier capacity of the separate
@@ -2478,7 +2472,7 @@ func testConnect(
 						}
 						return count
 					}
-					for {
+					err := TestingWaitForConnectCondition(ctx, progressTimeout, 10*time.Second, func(context.Context) (bool, string) {
 						_, _, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
 						_, _, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
 						_, _, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
@@ -2488,13 +2482,14 @@ func testConnect(
 						count += controlMessageCount(resendMessageTypesB)
 						count += controlMessageCount(receiveMessageTypesA)
 						count += controlMessageCount(receiveMessageTypesB)
-						if count == 0 {
-							break
-						}
-						fmt.Printf("Waiting for %d control messages to settle\n", count)
-						select {
-						case <-time.After(10 * time.Second):
-						}
+						return count == 0, fmt.Sprintf(
+							"pending controls=%d sequence_a=%s resend_a=%v receive_b=%v sequence_b=%s resend_b=%v receive_a=%v",
+							count, sequenceIdA, resendMessageTypesA, receiveMessageTypesB,
+							sequenceIdB, resendMessageTypesB, receiveMessageTypesA,
+						)
+					})
+					if err != nil {
+						t.Fatalf("control messages did not settle: %v", err)
 					}
 				}
 
@@ -2561,8 +2556,7 @@ func testConnect(
 	// the deadline.
 	var contractIdPartialClosePartiesAToB map[server.Id]model.ContractParty
 	var contractIdPartialClosePartiesBToA map[server.Id]model.ContractParty
-	partialCloseDeadline := time.Now().Add(30 * time.Second)
-	for {
+	partialCloseErr := TestingWaitForConnectCondition(ctx, 30*time.Second, 500*time.Millisecond, func(ctx context.Context) (bool, string) {
 		contractIdPartialClosePartiesAToB = model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
 		contractIdPartialClosePartiesBToA = model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
 
@@ -2584,15 +2578,11 @@ func testConnect(
 			}
 		}
 
-		if len(contractIdPartialClosePartiesAToB) == 0 && len(contractIdPartialClosePartiesBToA) == 0 {
-			break
-		}
-		if partialCloseDeadline.Before(time.Now()) {
-			break
-		}
-		select {
-		case <-time.After(500 * time.Millisecond):
-		}
+		return len(contractIdPartialClosePartiesAToB) == 0 && len(contractIdPartialClosePartiesBToA) == 0,
+			fmt.Sprintf("partial closes A->B=%v B->A=%v", contractIdPartialClosePartiesAToB, contractIdPartialClosePartiesBToA)
+	})
+	if partialCloseErr != nil {
+		t.Fatalf("contracts did not settle: %v", partialCloseErr)
 	}
 
 	connect.AssertEqual(t, len(contractIdPartialClosePartiesAToB), 0)

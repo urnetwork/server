@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -1736,6 +1737,76 @@ func TestForceCloseRequiresPositiveParallelism(t *testing.T) {
 	_, err := ForceCloseOpenContractIds(context.Background(), time.Now(), 10, 0, 0, 0)
 	connect.AssertNotEqual(t, nil, err)
 	connect.AssertEqual(t, true, strings.Contains(err.Error(), "parallelism must be positive"))
+}
+
+// A live close can settle a contract after the expiry sweep selected its open
+// snapshot. The exact settled duplicate is successful only after terminal
+// verification and stream cleanup; malformed closes and cleanup failures must
+// remain visible.
+func TestForceCloseConcurrentSettlementErrorBoundary(t *testing.T) {
+	concurrentSettlement := fmt.Errorf("%w: synthetic contract", errContractAlreadySettled)
+	order := []string{}
+	err := finishForceCloseContract(
+		concurrentSettlement,
+		func() error {
+			order = append(order, "quarantine")
+			return nil
+		},
+		func() error {
+			order = append(order, "cleanup")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("verified concurrent settlement remained an error: %v", err)
+	}
+	if !slices.Equal(order, []string{"cleanup"}) {
+		t.Fatalf("concurrent settlement operations = %v, want cleanup only", order)
+	}
+
+	cleanupErr := errors.New("synthetic stream cleanup failed")
+	err = finishForceCloseContract(concurrentSettlement, func() error {
+		t.Fatal("concurrent settlement with cleanup failure was quarantined")
+		return nil
+	}, func() error {
+		return cleanupErr
+	})
+	if err == nil ||
+		!errors.Is(err, errContractAlreadySettled) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("concurrent settlement masked cleanup failure: %v", err)
+	}
+
+	malformedErr := errors.New("synthetic malformed settlement")
+	order = order[:0]
+	err = finishForceCloseContract(malformedErr, func() error {
+		order = append(order, "quarantine")
+		return nil
+	}, func() error {
+		order = append(order, "cleanup")
+		return nil
+	})
+	if !errors.Is(err, malformedErr) {
+		t.Fatalf("malformed settlement was suppressed: %v", err)
+	}
+	if !slices.Equal(order, []string{"quarantine", "cleanup"}) {
+		t.Fatalf("malformed settlement operations = %v, want quarantine then cleanup", order)
+	}
+
+	order = order[:0]
+	joinedErr := errors.Join(concurrentSettlement, malformedErr)
+	err = finishForceCloseContract(joinedErr, func() error {
+		order = append(order, "quarantine")
+		return nil
+	}, func() error {
+		order = append(order, "cleanup")
+		return nil
+	})
+	if !errors.Is(err, errContractAlreadySettled) || !errors.Is(err, malformedErr) {
+		t.Fatalf("joined settlement error was suppressed: %v", err)
+	}
+	if !slices.Equal(order, []string{"quarantine", "cleanup"}) {
+		t.Fatalf("joined settlement operations = %v, want quarantine then cleanup", order)
+	}
 }
 
 // Covers both one-sided checkpoint orientations emitted when a transfer

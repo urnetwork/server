@@ -264,8 +264,9 @@ func pointsEpochObserved(
 	provenance string,
 ) string {
 	return fmt.Sprintf(
-		"st_enabled=%t active_deployment_configured=%t active_deployment_present=%t finalized_epochs=%d snapshot_epoch_metrics_available=%t active_latest_epoch=%d snapshot_latest_epoch=%d snapshot_age_seconds=%d latest_finalized_age_known=%t latest_finalized_age_seconds=%d provenance=%s positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
-		env.cfg.verificationEnabled, env.cfg.stDeploymentKey != "", activePresent,
+		"st_enabled=%t st_configuration_status=%s active_deployment_configured=%t active_deployment_present=%t finalized_epochs=%d snapshot_epoch_metrics_available=%t active_latest_epoch=%d snapshot_latest_epoch=%d snapshot_age_seconds=%d latest_finalized_age_known=%t latest_finalized_age_seconds=%d provenance=%s positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
+		env.cfg.verificationEnabled, env.cfg.stConfigStatus.normalized(),
+		env.cfg.stDeploymentKey != "", activePresent,
 		active.finalized, snapshot.epochAvailable, active.latest, snapshot.latestEpoch,
 		snapshot.ageSeconds, active.latestFinalizedAgeKnown, active.latestFinalizedAge,
 		provenance, snapshot.positiveBlocks, snapshot.positiveStreak, snapshot.positiveLongest,
@@ -347,6 +348,28 @@ func pointsReadinessTarget(env *probeEnv) string {
 		return host.name
 	}
 	return "pg"
+}
+
+func pointsUnavailableSTReason(env *probeEnv, activePresent bool) string {
+	switch env.cfg.stConfigStatus.normalized() {
+	case STConfigurationExplicitDisabled:
+		return "the Main ST configuration is explicitly disabled"
+	case STConfigurationUnavailable:
+		return "the Main ST configuration status is unavailable"
+	case STConfigurationEnabledInvalid:
+		return "the enabled Main ST configuration has no valid deployment namespace"
+	}
+	if env.cfg.verificationEnabled {
+		switch {
+		case env.cfg.stDeploymentKey == "":
+			return "the enabled ST subsystem has no observable deployment identity"
+		case !activePresent:
+			return "the active ST deployment has no mirror rows"
+		default:
+			return "the active ST deployment has no finalized epoch"
+		}
+	}
+	return "the ST configuration state is unknown"
 }
 
 func (pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -437,18 +460,8 @@ func (pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 
 	if !sourceAvailable {
-		reason := "the ST subsystem is disabled"
+		reason := pointsUnavailableSTReason(env, activePresent)
 		sourceConfigured := activeKey != ""
-		if env.cfg.verificationEnabled {
-			switch {
-			case activeKey == "":
-				reason = "the enabled ST subsystem has no observable deployment identity"
-			case !activePresent:
-				reason = "the active ST deployment has no mirror rows"
-			default:
-				reason = "the active ST deployment has no finalized epoch"
-			}
-		}
 		findings = append(findings, finding{
 			probeId: "pg/points-readiness", tier: tierWarn,
 			class: "points-epoch-metrics-unavailable", target: target, sustain: 1,
@@ -456,8 +469,9 @@ func (pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			mechanism: "Blocks, current streak, and longest streak are derived exclusively from finalized ST epoch windows. The persisted false availability bit correctly keeps those fields unavailable while total points continue to rank normally.",
 			baseline:  "Before finalization, the snapshot persists epoch_metrics_available=false and every client treats epoch-derived values and ranks as unavailable. After the exact active deployment has at least one finalized epoch, the next snapshot persists true.",
 			observed: fmt.Sprintf(
-				"st_enabled=%t active_deployment_configured=%t active_deployment_present=%t finalized_epochs=%d snapshot_epoch_metrics_available=%t snapshot_latest_epoch=%d total_ranked=%d positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
-				env.cfg.verificationEnabled, sourceConfigured, activePresent, active.finalized,
+				"st_enabled=%t st_configuration_status=%s active_deployment_configured=%t active_deployment_present=%t finalized_epochs=%d snapshot_epoch_metrics_available=%t snapshot_latest_epoch=%d total_ranked=%d positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
+				env.cfg.verificationEnabled, env.cfg.stConfigStatus.normalized(),
+				sourceConfigured, activePresent, active.finalized,
 				snapshot.epochAvailable, snapshot.latestEpoch, snapshot.totalRanked, snapshot.positiveBlocks,
 				snapshot.positiveStreak, snapshot.positiveLongest,
 			),

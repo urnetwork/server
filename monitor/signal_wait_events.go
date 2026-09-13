@@ -28,7 +28,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		       (array_agg(pid ORDER BY query_start, pid))[1] AS oldest_pid,
 		       (array_agg(coalesce(query_id::text,'unknown') ORDER BY query_start, pid))[1] AS oldest_query_id,
 		       (array_agg(coalesce(nullif(application_name,''),'-') ORDER BY query_start, pid))[1] AS oldest_application,
-		       (array_agg(coalesce(client_addr::text,'local') ORDER BY query_start, pid))[1] AS oldest_client
+		       (array_agg(coalesce(client_addr::text,'local') ORDER BY query_start, pid))[1] AS oldest_client_address
 		FROM pg_stat_activity
 		WHERE backend_type='client backend' AND state='active' AND wait_event IS NOT NULL
 		GROUP BY 1,2 HAVING count(*) >= 5 OR max(clock_timestamp()-query_start) > interval '1 minute'
@@ -39,6 +39,9 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 	findings := []finding{}
 	for _, row := range rows {
+		if len(row) != 9 {
+			return nil, fmt.Errorf("PostgreSQL wait-event query returned %d columns, want 9", len(row))
+		}
 		wait := row.str(0) + ":" + row.str(1)
 		oldestSeconds := atoi(row.str(3))
 		if wait == "Client:ClientRead" && oldestSeconds < 60 {
@@ -59,7 +62,8 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 		mechanism := waitEventMeaning(wait)
 		action := waitEventAction(wait)
-		contextDetail := "The PID, query ID, application, client address, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query."
+		clientOwner := privacySafePostgresClientOwner(env.cfg, row.str(8))
+		contextDetail := "The PID, query ID, application, privacy-safe client owner, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query; exact client addresses and CIDRs remain private."
 		if wait == "IO:DataFileExtend" && concurrentReindexQuery(row.str(4)) {
 			mechanism = "REINDEX CONCURRENTLY is waiting while PostgreSQL extends the replacement relation on disk. For a very large, high-churn table this makes the maintenance selection itself the load owner; a simultaneous WALInsert/WALWrite cluster is downstream write pressure, not an independent PgBouncer failure."
 			action = "Identify the relation in pg_stat_progress_create_index and check reindex-debris before changing PostgreSQL or PgBouncer. Let the protected in-progress operation reach its configured outcome; prevent the next recurrence by skipping any table too large for the two-hour full-table policy and by cleaning incomplete indexes immediately around every future rebuild."
@@ -76,7 +80,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: mechanism,
 			baseline:  "No non-ClientRead wait event is shared by five active client backends, and no individual active command remains on one wait event for more than one minute. ClientRead count alone is healthy until its oldest command reaches one minute.",
 			observed:  fmt.Sprintf("wait=%s active=%s oldest_s=%s count_guard=5 age_guard_s=60 oldest_pid=%s oldest_query_id=%s", wait, row.str(2), row.str(3), row.str(5), row.str(6)),
-			evidence:  fmt.Sprintf("oldest waiter snapshot: pid=%s query_id=%s application=%s client=%s\nsample query: %s", row.str(5), row.str(6), row.str(7), row.str(8), row.str(4)),
+			evidence:  fmt.Sprintf("oldest waiter snapshot: pid=%s query_id=%s application=%s client_owner=%s\nsample query: %s", row.str(5), row.str(6), row.str(7), clientOwner, row.str(4)),
 			context:   contextDetail,
 			action:    action,
 			verify:    "Fewer than five active backends share the wait, no individual command remains on it beyond one minute on consecutive samples, and the attributed query completes inside its historical band.",

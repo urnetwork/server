@@ -1232,6 +1232,48 @@ const (
 	ContractOutcomeDisputeResolvedToDestination ContractOutcome = "dispute_resolved_to_destination"
 )
 
+// errContractAlreadySettled distinguishes a benign duplicate close from
+// malformed settlement and conflicting terminal outcomes. The expiry sweep
+// can select an open contract immediately before a live close settles it; that
+// race is successful convergence once the sweep verifies the terminal row and
+// removes the stale stream entry.
+var errContractAlreadySettled = errors.New("Contract already closed with outcome settled")
+
+func isOnlyContractAlreadySettled(err error) bool {
+	for err != nil {
+		if err == errContractAlreadySettled {
+			return true
+		}
+		// errors.Join and other multi-errors may contain the settled sentinel
+		// alongside a real failure. They must remain fail-closed.
+		if _, ok := err.(interface{ Unwrap() []error }); ok {
+			return false
+		}
+		unwrapper, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = unwrapper.Unwrap()
+	}
+	return false
+}
+
+func finishForceCloseContract(closeErr error, quarantine func() error, cleanup func() error) error {
+	alreadySettled := isOnlyContractAlreadySettled(closeErr)
+	if closeErr != nil && !alreadySettled {
+		closeErr = errors.Join(closeErr, quarantine())
+	}
+
+	// A live close may settle a contract after the sweep selected its open
+	// snapshot. Accept only that exact terminal outcome, and only when the
+	// independent final-state check and stream cleanup both succeeded.
+	cleanupErr := cleanup()
+	if cleanupErr == nil && alreadySettled {
+		return nil
+	}
+	return errors.Join(closeErr, cleanupErr)
+}
+
 type ContractParty = string
 
 const (
@@ -2208,7 +2250,11 @@ func CloseContract(
 			return
 		}
 		if outcome != nil {
-			returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			if *outcome == ContractOutcomeSettled {
+				returnErr = fmt.Errorf("%w: %s %s %s->%s", errContractAlreadySettled, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			} else {
+				returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			}
 			return
 		}
 		if dispute {
@@ -3914,18 +3960,20 @@ func ForceCloseOpenContractIds(
 					closeErr := runForceClose(func() error {
 						return closeContract(tag, openContract)
 					})
-					if closeErr != nil {
-						quarantineErr := runForceClose(func() error {
-							closeMalformedContract(tag, openContract, closeErr)
-							return nil
-						})
-						closeErr = errors.Join(closeErr, quarantineErr)
-					}
-
-					streamErr := runForceClose(func() error {
-						return removeFinalizedContractFromStream(openContract)
-					})
-					contractErrors[j] = errors.Join(closeErr, streamErr)
+					contractErrors[j] = finishForceCloseContract(
+						closeErr,
+						func() error {
+							return runForceClose(func() error {
+								closeMalformedContract(tag, openContract, closeErr)
+								return nil
+							})
+						},
+						func() error {
+							return runForceClose(func() error {
+								return removeFinalizedContractFromStream(openContract)
+							})
+						},
+					)
 				}
 			})
 			if recovered != nil {
@@ -4226,6 +4274,30 @@ func LockPaymentNetworkInTx(
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrPaymentNetworkNotFound
 	}
+	return err
+}
+
+// LockPlaySubscriptionPurchaseInTx serializes a Play purchase's credit and end
+// paths. Both take the network lifecycle lock first and this token advisory
+// lock second, so a terminal poll that follows an in-flight ACTIVE response
+// sees and ends the committed credit rather than racing past it.
+func LockPlaySubscriptionPurchaseInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	purchaseToken string,
+) error {
+	if purchaseToken == "" {
+		return errors.New("Play purchase token is empty")
+	}
+	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		purchaseToken,
+	)
 	return err
 }
 

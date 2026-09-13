@@ -275,6 +275,13 @@ type connectDayCache struct {
 
 var connectDaySeen = &connectDayCache{}
 
+// connectDayPostCommitTimeout matches the existing finite post-commit
+// projection budget used by clockTransferPost. The connection is already
+// durable before this optional analytics write begins, so caller cancellation
+// must not discard it; the bound prevents a stalled database from retaining
+// the connection goroutine indefinitely.
+const connectDayPostCommitTimeout = 10 * time.Second
+
 // remember returns false when the client's connection for this UTC day is
 // already recorded, true (and remembers it) when it still has to be written.
 func (c *connectDayCache) remember(clientId server.Id, day time.Time) bool {
@@ -310,15 +317,20 @@ func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.
 	if !connectDaySeen.remember(clientId, day) {
 		return
 	}
+	writeCtx, writeCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		connectDayPostCommitTimeout,
+	)
+	defer writeCancel()
 	defer func() {
 		if r := recover(); r != nil {
 			connectDaySeen.forget(clientId, day)
 			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", clientId, r)
 		}
 	}()
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.Tx(writeCtx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
-			ctx,
+			writeCtx,
 			`
 				INSERT INTO network_onboarding_event (
 					event_id,

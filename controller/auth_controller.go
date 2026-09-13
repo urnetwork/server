@@ -218,14 +218,15 @@ func AuthVerify(
 ) (*model.AuthVerifyResult, error) {
 	result, err := model.AuthVerify(verify, session)
 	if err == nil && result.Network != nil {
+		byJwt := enrollAuthVerifyOnboardingPostPrimary(result, verify.UserAuth, session)
+
 		awsMessageSender := GetAWSMessageSender()
 		awsMessageSender.SendAccountMessageTemplate(
 			verify.UserAuth,
 			&NetworkWelcomeTemplate{},
 		)
 
-		byJwt, err := jwt.ParseByJwt(session.Ctx, result.Network.ByJwt)
-		if err == nil {
+		if byJwt != nil {
 			// the preference the sign-up form asked for was persisted by
 			// NetworkCreate; completing verification syncs it, it never
 			// overrides an opt-out with a default
@@ -239,11 +240,30 @@ func AuthVerify(
 				},
 				session.WithByJwt(byJwt),
 			)
-			// the onboarding campaign starts once the address is verified
-			EnrollNetworkOnboarding(session, byJwt.NetworkId, verify.UserAuth, false)
 		}
 	}
 	return result, err
+}
+
+func enrollAuthVerifyOnboardingPostPrimary(
+	result *model.AuthVerifyResult,
+	userAuth string,
+	clientSession *session.ClientSession,
+) (byJwt *jwt.ByJwt) {
+	if result == nil || result.Network == nil {
+		return nil
+	}
+	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
+		parsedByJwt, err := jwt.ParseByJwt(postSession.Ctx, result.Network.ByJwt)
+		if err != nil {
+			return
+		}
+		byJwt = parsedByJwt
+		// Verification is already committed. Enroll before optional welcome
+		// and preference projections so their failures cannot skip the row.
+		EnrollNetworkOnboarding(postSession, byJwt.NetworkId, userAuth, false)
+	})
+	return
 }
 
 /**

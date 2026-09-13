@@ -55,7 +55,7 @@ suspend_log=$(timeout 10s journalctl -q -k -b 0 --since '30 days ago' \
   --grep 'PM: suspend (entry|exit)' -n 128 --no-pager -o short-unix 2>/dev/null)
 journal_status=$?
 case "$journal_status" in 0|1) ;; *) exit 34 ;; esac
-set -- $(printf '%s\n' "$suspend_log" | awk '
+set -- $(printf '%s\n' "$suspend_log" | LC_ALL=C sort -n -k1,1 | awk '
   /PM: suspend entry/ {
     split($1, stamp, "."); pending=stamp[1]+0; entries++; latest_suspend=pending
   }

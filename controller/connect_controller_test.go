@@ -243,6 +243,7 @@ func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
 	count := func(
 		requestCompanion bool,
 		senderRole string,
+		sourceOwner string,
 		resolution string,
 		relationship string,
 		sourceLifecycle string,
@@ -251,6 +252,7 @@ func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
 		return testutil.ToFloat64(inactiveDestinationDetailsCounter.WithLabelValues(
 			fmt.Sprintf("%t", requestCompanion),
 			senderRole,
+			sourceOwner,
 			resolution,
 			relationship,
 			sourceLifecycle,
@@ -264,9 +266,10 @@ func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
 		relationship:         model.ProvideModePublic,
 		sourceLifecycle:      model.NetworkClientLifecycleActiveTop,
 		destinationLifecycle: model.NetworkClientLifecycleInactiveDerived,
+		sourceOwner:          model.NetworkClientSourceOwnerEgressProber,
 		senderRole:           &serverRole,
 	}
-	before := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived")
+	before := count(true, "server", "egress_prober", "requested_companion", "public", "active_top", "inactive_derived")
 	recordContractFailureResolved(
 		server.NewId(),
 		server.NewId(),
@@ -275,23 +278,23 @@ func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
 		errContractDestinationInactive,
 		resolution,
 	)
-	if after := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived"); after != before+1 {
+	if after := count(true, "server", "egress_prober", "requested_companion", "public", "active_top", "inactive_derived"); after != before+1 {
 		t.Fatalf("inactive-destination detail counter = %v, want %v", after, before+1)
 	}
 
 	// Absence proves only that the sender did not report the additive field;
 	// explicitly unknown and future values stay in a separate bounded bucket.
-	absentBefore := count(false, "absent", "unknown", "unknown", "unknown", "unknown")
+	absentBefore := count(false, "absent", "unknown", "unknown", "unknown", "unknown", "unknown")
 	recordContractFailureResolved(
 		server.NewId(), server.NewId(), false, 16384, errContractDestinationInactive,
 		contractResolution{},
 	)
-	if after := count(false, "absent", "unknown", "unknown", "unknown", "unknown"); after != absentBefore+1 {
+	if after := count(false, "absent", "unknown", "unknown", "unknown", "unknown", "unknown"); after != absentBefore+1 {
 		t.Fatalf("absent-role detail counter = %v, want %v", after, absentBefore+1)
 	}
 
 	futureRole := protocol.SequenceRole(999)
-	unknownBefore := count(false, "unknown", "unknown", "unknown", "unknown", "unknown")
+	unknownBefore := count(false, "unknown", "unknown", "unknown", "unknown", "unknown", "unknown")
 	recordContractFailureResolved(
 		server.NewId(), server.NewId(), false, 16384, errContractDestinationInactive,
 		contractResolution{
@@ -299,19 +302,20 @@ func TestRecordInactiveDestinationDetailsAreBounded(t *testing.T) {
 			relationship:         999,
 			sourceLifecycle:      model.NetworkClientLifecycle("unbounded-source"),
 			destinationLifecycle: model.NetworkClientLifecycle("unbounded-destination"),
+			sourceOwner:          model.NetworkClientSourceOwner("unbounded-owner"),
 			senderRole:           &futureRole,
 		},
 	)
-	if after := count(false, "unknown", "unknown", "unknown", "unknown", "unknown"); after != unknownBefore+1 {
+	if after := count(false, "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"); after != unknownBefore+1 {
 		t.Fatalf("unknown-role detail counter = %v, want %v", after, unknownBefore+1)
 	}
 
 	// Other causes must not enter the inactive-destination diagnostic family.
-	before = count(true, "server", "requested_companion", "public", "active_top", "inactive_derived")
+	before = count(true, "server", "egress_prober", "requested_companion", "public", "active_top", "inactive_derived")
 	recordContractFailureResolved(
 		server.NewId(), server.NewId(), true, 16384, fmt.Errorf("postgres unavailable"), resolution,
 	)
-	if after := count(true, "server", "requested_companion", "public", "active_top", "inactive_derived"); after != before {
+	if after := count(true, "server", "egress_prober", "requested_companion", "public", "active_top", "inactive_derived"); after != before {
 		t.Fatalf("other failure moved inactive-destination detail counter: %v -> %v", before, after)
 	}
 }

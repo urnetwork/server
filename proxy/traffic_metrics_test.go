@@ -3,6 +3,7 @@ package proxy
 import (
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,31 @@ func TestProxySessionMaximumResetsAtIntervalBoundary(t *testing.T) {
 	metrics.observeSessionClose("socks", "completed", 500*time.Millisecond)
 	if got := metrics.sessionMaximums["socks"].seconds; got != 0.5 {
 		t.Fatalf("next-interval maximum = %v, want 0.5", got)
+	}
+}
+
+func TestProxySessionDurationSummaryExportsExactSumCountWithoutBuckets(t *testing.T) {
+	registry := prometheus.NewPedanticRegistry()
+	metrics := newProxyTrafficMetrics(registry)
+	metrics.observeSessionClose("socks", "completed", 2250*time.Millisecond)
+	metrics.observeSessionClose("socks", "completed", time.Second)
+
+	families := gatherProxyMetricFamilies(t, registry)
+	duration := families["urnetwork_proxy_session_duration_seconds"]
+	if duration == nil || duration.GetType() != dto.MetricType_SUMMARY || len(duration.Metric) != 1 {
+		t.Fatalf("proxy session duration family = %+v, want one summary", duration)
+	}
+	summary := duration.Metric[0].GetSummary()
+	if summary.GetSampleCount() != 2 || summary.GetSampleSum() != 3.25 || len(summary.Quantile) != 0 {
+		t.Fatalf("proxy session duration summary = %+v, want count=2 sum=3.25 and no quantiles", summary)
+	}
+	want := strings.NewReader(`# HELP urnetwork_proxy_session_duration_seconds Completed HTTP/SOCKS upstream-session duration by finite protocol.
+# TYPE urnetwork_proxy_session_duration_seconds summary
+urnetwork_proxy_session_duration_seconds_sum{protocol="socks"} 3.25
+urnetwork_proxy_session_duration_seconds_count{protocol="socks"} 2
+`)
+	if err := testutil.GatherAndCompare(registry, want, "urnetwork_proxy_session_duration_seconds"); err != nil {
+		t.Fatalf("proxy session duration exposition contains more than exact sum/count: %v", err)
 	}
 }
 

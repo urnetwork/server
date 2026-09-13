@@ -33,10 +33,10 @@ func (poolRetentionProbe) id() string             { return "pg/pool-retention" }
 func (poolRetentionProbe) tier() string           { return tierWarn }
 func (poolRetentionProbe) cadence() time.Duration { return 30 * time.Second }
 
-// poolRetentionQuery deliberately exports no SQL text, PIDs, customer
-// identifiers, or credentials. Loopback client backends are candidates rather
-// than assumed PgBouncer owners; the action requires a host socket census to
-// prove that final attribution.
+// poolRetentionQuery deliberately exports no SQL text, PIDs, client addresses,
+// customer identifiers, or credentials. Loopback client backends are reduced
+// inside PostgreSQL to aggregate candidates rather than assumed PgBouncer
+// owners; the action requires a host socket census to prove final attribution.
 const poolRetentionQuery = `
 	WITH settings AS MATERIALIZED (
 		SELECT max(setting::int) FILTER (WHERE name = 'max_connections')
@@ -47,7 +47,7 @@ const poolRetentionQuery = `
 		WHERE name IN ('max_connections', 'superuser_reserved_connections', 'reserved_connections')
 	), activity AS MATERIALIZED (
 		SELECT state, state_change,
-		       (client_addr <<= inet '127.0.0.0/8' OR client_addr = inet '::1') AS loopback
+		       ` + postgresLoopbackClientSQL + ` AS loopback
 		FROM pg_stat_activity
 		WHERE backend_type = 'client backend'
 	)

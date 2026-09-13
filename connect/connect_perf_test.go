@@ -721,39 +721,25 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 		var elapsed time.Duration
 		if noAck {
 			// wait for the receiver count to stop moving
-			stableCount := 0
-			lastReceived := atomic.LoadInt64(&peerStats.receiveCount)
-			for stableCount < 8 {
-				select {
-				case <-time.After(250 * time.Millisecond):
-				}
-				received := atomic.LoadInt64(&peerStats.receiveCount)
-				if received == lastReceived {
-					stableCount += 1
-				} else {
-					stableCount = 0
-					lastReceived = received
-				}
+			if err := waitForPerformanceCountToSettle(ctx, func() int64 {
+				return atomic.LoadInt64(&peerStats.receiveCount)
+			}); err != nil {
+				panic(fmt.Errorf("[%s]receive settle: %w", label, err))
 			}
 			delivered = atomic.LoadInt64(&peerStats.receiveCount) - recvCountStart
 			lastRecv := time.Unix(0, atomic.LoadInt64(&peerStats.lastRecvNanos))
 			elapsed = lastRecv.Sub(startTime)
 		} else {
-			settleDeadline := time.Now().Add(perfSettleTimeout)
-			for atomic.LoadInt64(&acked)+atomic.LoadInt64(&ackErrs) < sent {
-				if settleDeadline.Before(time.Now()) {
-					panic(fmt.Errorf(
-						"[%s]settle timeout: sent=%d acked=%d ackErrs=%d received=%d",
-						label,
-						sent,
-						atomic.LoadInt64(&acked),
-						atomic.LoadInt64(&ackErrs),
-						atomic.LoadInt64(&peerStats.receiveCount)-recvCountStart,
-					))
-				}
-				select {
-				case <-time.After(50 * time.Millisecond):
-				}
+			err := connectserver.TestingWaitForConnectCondition(ctx, perfSettleTimeout, 50*time.Millisecond, func(context.Context) (bool, string) {
+				ackCount := atomic.LoadInt64(&acked)
+				ackErrorCount := atomic.LoadInt64(&ackErrs)
+				return sent <= ackCount+ackErrorCount, fmt.Sprintf(
+					"sent=%d acked=%d ackErrs=%d received=%d", sent, ackCount, ackErrorCount,
+					atomic.LoadInt64(&peerStats.receiveCount)-recvCountStart,
+				)
+			})
+			if err != nil {
+				panic(fmt.Errorf("[%s]ack settle: %w", label, err))
 			}
 			if errs := atomic.LoadInt64(&ackErrs); 0 < errs {
 				panic(fmt.Errorf("[%s]ack errors = %d", label, errs))

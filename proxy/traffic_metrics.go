@@ -43,7 +43,7 @@ type proxySessionMaximum struct {
 type proxyTrafficMetrics struct {
 	admissions     *prometheus.CounterVec
 	sessions       *prometheus.CounterVec
-	sessionSeconds *prometheus.HistogramVec
+	sessionSeconds *prometheus.SummaryVec
 	sessionsActive *prometheus.GaugeVec
 	bytes          *prometheus.CounterVec
 	wgPackets      *prometheus.CounterVec
@@ -71,10 +71,10 @@ func newProxyTrafficMetrics(registerer prometheus.Registerer) *proxyTrafficMetri
 			Namespace: "urnetwork", Subsystem: "proxy", Name: "sessions_total",
 			Help: "Completed HTTP/SOCKS upstream sessions by finite protocol and bounded terminal outcome.",
 		}, []string{"protocol", "outcome"}),
-		sessionSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		sessionSeconds: prometheus.NewSummaryVec(prometheus.SummaryOpts{
 			Namespace: "urnetwork", Subsystem: "proxy", Name: "session_duration_seconds",
-			Help:    "Completed HTTP/SOCKS upstream-session duration by finite protocol.",
-			Buckets: []float64{0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 300, 900, 3600},
+			Help:       "Completed HTTP/SOCKS upstream-session duration by finite protocol.",
+			Objectives: nil,
 		}, []string{"protocol"}),
 		sessionsActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork", Subsystem: "proxy", Name: "sessions_active",

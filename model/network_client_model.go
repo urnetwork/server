@@ -1670,10 +1670,24 @@ const (
 	NetworkClientLifecycleInactiveDerived NetworkClientLifecycle = "inactive_derived"
 )
 
+// NetworkClientSourceOwner is a server-derived, bounded owner class for a
+// contract source. It distinguishes the durable egress-prober network from
+// every other known network and keeps incomplete identity state explicit. The
+// value is safe for a metric label because it is never accepted from a client
+// and cannot carry a client, network, device, or application identifier.
+type NetworkClientSourceOwner string
+
+const (
+	NetworkClientSourceOwnerUnknown      NetworkClientSourceOwner = "unknown"
+	NetworkClientSourceOwnerEgressProber NetworkClientSourceOwner = "egress_prober"
+	NetworkClientSourceOwnerOther        NetworkClientSourceOwner = "other"
+)
+
 type ProvideRelationshipDetails struct {
 	Mode                 ProvideMode
 	SourceLifecycle      NetworkClientLifecycle
 	DestinationLifecycle NetworkClientLifecycle
+	SourceOwner          NetworkClientSourceOwner
 }
 
 func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClientLifecycle {
@@ -1693,15 +1707,19 @@ func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClie
 }
 
 // GetProvideRelationshipDetails resolves the same relationship as
-// GetProvideRelationship while carrying bounded endpoint lifecycle classes
-// from that exact database snapshot. CreateContract already needs this lookup;
-// returning the extra columns makes missing-origin telemetry causal without an
-// additional query on the failure path.
+// GetProvideRelationship while carrying bounded endpoint lifecycle and source
+// owner classes from that exact database snapshot. CreateContract already
+// needs this lookup; returning the extra columns makes failure telemetry causal
+// without an additional query on the hot path. Ownership compares the source's
+// network with the durable prober network, so client credential rotation and
+// arbitrarily nested derived clients retain the same bounded owner without
+// exposing either identity.
 func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideRelationshipDetails {
 	details := ProvideRelationshipDetails{
 		Mode:                 ProvideModePublic,
 		SourceLifecycle:      NetworkClientLifecycleMissing,
 		DestinationLifecycle: NetworkClientLifecycleMissing,
+		SourceOwner:          NetworkClientSourceOwnerUnknown,
 	}
 	if clientIdA == clientIdB {
 		details.Mode = ProvideModeNetwork
@@ -1717,10 +1735,12 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				a.source_client_id,
 				b.network_id,
 				b.active,
-				b.source_client_id
+				b.source_client_id,
+				prober.network_id
 			FROM (VALUES (true)) AS seed(value)
 			LEFT JOIN network_client a ON a.client_id = $1
 			LEFT JOIN network_client b ON b.client_id = $2
+			LEFT JOIN prober_identity prober ON prober.singleton
 			`,
 			clientIdA,
 			clientIdB,
@@ -1733,6 +1753,7 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				var networkIdB *server.Id
 				var activeB *bool
 				var sourceClientIdB *server.Id
+				var proberNetworkId *server.Id
 				server.Raise(result.Scan(
 					&networkIdA,
 					&activeA,
@@ -1740,9 +1761,17 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 					&networkIdB,
 					&activeB,
 					&sourceClientIdB,
+					&proberNetworkId,
 				))
 				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
 				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
+				if networkIdA != nil && proberNetworkId != nil {
+					if *networkIdA == *proberNetworkId {
+						details.SourceOwner = NetworkClientSourceOwnerEgressProber
+					} else {
+						details.SourceOwner = NetworkClientSourceOwnerOther
+					}
+				}
 				if networkIdA != nil && networkIdB != nil && *networkIdA == *networkIdB {
 					details.Mode = ProvideModeNetwork
 				}
