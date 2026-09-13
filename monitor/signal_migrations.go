@@ -117,6 +117,13 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_client_connection.ip_family_intent", requiredVersion: 659, rowColumn: 70},
 	{name: "network_client_location_reliability.ipv4_proven", requiredVersion: 660, rowColumn: 71},
 	{name: "network_client_location_reliability.ipv6_proven", requiredVersion: 661, rowColumn: 72},
+	{name: "network_extender table and identity keys", requiredVersion: 662, rowColumn: 73},
+	{name: "network_extender_address table and publish index", requiredVersion: 663, rowColumn: 74},
+	{name: "network_extender_publish table and queue index", requiredVersion: 664, rowColumn: 75},
+	{name: "network_client_connection.extender_id", requiredVersion: 665, rowColumn: 76},
+	{name: "network_client_connection_client_id_connected_extender_id", requiredVersion: 666, rowColumn: 77},
+	{name: "contract_extender table and primary key", requiredVersion: 667, rowColumn: 78},
+	{name: "network_extender_address.dns_ports", requiredVersion: 668, rowColumn: 79},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -784,6 +791,190 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND column_name = 'ipv6_proven'
 		             AND data_type = 'boolean' AND is_nullable = 'NO'
 		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
+		       ),
+		       (
+		           to_regclass('public.network_extender') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 13
+		               FROM (VALUES
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('network_id', 'uuid', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('public_key', 'bytea', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO'),
+		                   ('tcp_port', 'integer', 'NO'),
+		                   ('udp_port', 'integer', 'NO'),
+		                   ('dns_port', 'integer', 'NO'),
+		                   ('dns_tld', 'character varying', 'NO'),
+		                   ('country_code', 'character varying', 'NO'),
+		                   ('active', 'boolean', 'NO'),
+		                   ('revoke_time', 'timestamp without time zone', 'YES'),
+		                   ('record_issue_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('p', 'PRIMARY KEY (extender_id)'),
+		                   ('u', 'UNIQUE (public_key)')
+		               ) AS expected(constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = 'network_extender'
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		       ),
+		       (
+		           to_regclass('public.network_extender_address') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 10
+		               FROM (VALUES
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('ip_version', 'smallint', 'NO'),
+		                   ('ip', 'inet', 'NO'),
+		                   ('carriers', 'character varying', 'NO'),
+		                   ('activate_time', 'timestamp without time zone', 'NO'),
+		                   ('last_probe_time', 'timestamp without time zone', 'YES'),
+		                   ('last_probe_success_time', 'timestamp without time zone', 'YES'),
+		                   ('consecutive_probe_failures', 'integer', 'NO'),
+		                   ('active', 'boolean', 'NO'),
+		                   ('last_publish_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_address'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_address'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (extender_id, ip_version)'
+		                 AND validated
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'network_extender_address'
+		                 AND index_name = 'network_extender_address_active_last_publish_time'
+		                 AND definition LIKE 'CREATE INDEX %'
+		                 AND definition LIKE '%(active, last_publish_time)%'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
+		           )
+		       ),
+		       (
+		           to_regclass('public.network_extender_publish') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 6
+		               FROM (VALUES
+		                   ('publish_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('kind', 'smallint', 'NO'),
+		                   ('message', 'bytea', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO'),
+		                   ('published_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_publish'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_publish'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (publish_id)'
+		                 AND validated
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'network_extender_publish'
+		                 AND index_name = 'network_extender_publish_published_time_create_time'
+		                 AND definition LIKE 'CREATE INDEX %'
+		                 AND definition LIKE '%(published_time, create_time)%'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'extender_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_client_connection'
+		             AND index_name = 'network_client_connection_client_id_connected_extender_id'
+		             AND definition LIKE 'CREATE INDEX %'
+		             AND definition LIKE '%(client_id, connected, extender_id)%'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.contract_extender') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 5
+		               FROM (VALUES
+		                   ('contract_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('party', 'character varying', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('network_id', 'uuid', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'contract_extender'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'contract_extender'
+		                 AND column_name = 'party'
+		                 AND character_maximum_length = 16
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'contract_extender'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (contract_id, extender_id, party)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender_address'
+		             AND column_name = 'dns_ports'
+		             AND data_type = 'character varying' AND is_nullable = 'NO'
+		             AND column_default IN (
+		                 quote_literal(''),
+		                 quote_literal('') || '::character varying',
+		                 quote_literal('') || '::text'
+		             )
 		       )
 		FROM version;
 	`)

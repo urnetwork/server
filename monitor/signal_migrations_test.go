@@ -84,6 +84,12 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"provider_egress_health_measured_at_client_id",
 			providerEgressHealthDeadlineIndexDefinition,
 			"predicate_definition IS NULL",
+			"UNIQUE (public_key)",
+			"network_extender_address_active_last_publish_time",
+			"network_extender_publish_published_time_create_time",
+			"network_client_connection_client_id_connected_extender_id",
+			"contract_extender",
+			"dns_ports",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -492,6 +498,45 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	}}
 	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
 		t.Fatalf("complete appended artifact catalog is not coherent: %+v, %v", alerts, err)
+	}
+}
+
+func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 668 {
+		t.Fatalf("test requires extender migrations through version 668, got head %d", head)
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		for _, want := range []string{
+			"SELECT count(*) = 13 FROM (VALUES ('extender_id', 'uuid', 'NO'), ('network_id', 'uuid', 'NO'), ('client_id', 'uuid', 'NO'), ('public_key', 'bytea', 'NO')",
+			"('u', 'UNIQUE (public_key)')",
+			"SELECT count(*) = 10 FROM (VALUES ('extender_id', 'uuid', 'NO'), ('ip_version', 'smallint', 'NO'), ('ip', 'inet', 'NO')",
+			"index_name = 'network_extender_address_active_last_publish_time'",
+			"definition LIKE '%(active, last_publish_time)%'",
+			"SELECT count(*) = 6 FROM (VALUES ('publish_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('kind', 'smallint', 'NO'), ('message', 'bytea', 'NO')",
+			"index_name = 'network_extender_publish_published_time_create_time'",
+			"definition LIKE '%(published_time, create_time)%'",
+			"table_name = 'network_client_connection' AND column_name = 'extender_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"index_name = 'network_client_connection_client_id_connected_extender_id'",
+			"definition LIKE '%(client_id, connected, extender_id)%'",
+			"SELECT count(*) = 5 FROM (VALUES ('contract_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('party', 'character varying', 'NO')",
+			"table_name = 'contract_extender' AND column_name = 'party' AND character_maximum_length = 16",
+			"definition = 'PRIMARY KEY (contract_id, extender_id, party)'",
+			"table_name = 'network_extender_address' AND column_name = 'dns_ports' AND data_type = 'character varying' AND is_nullable = 'NO'",
+			"quote_literal('') || '::character varying'",
+		} {
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("extender migration query lost %q:\n%s", want, query)
+			}
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("complete extender migration artifact catalog is not coherent: %+v, %v", alerts, err)
 	}
 }
 
