@@ -123,8 +123,8 @@ type ProxyDeviceManager struct {
 	// observed during the whole process lifetime.
 	lockCache *proxyLockCache
 
-	// platformPreemptions converts per-DeviceLocal lifetime counters into one
-	// process-monotonic, identity-free metric for carrier churn diagnosis.
+	// Converts observed device lifetime counters into identity-free process
+	// deltas; sampled slot-full state does not establish event-time saturation.
 	platformPreemptions proxyPlatformPreemptionTracker
 }
 

@@ -647,6 +647,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 }
 
+// Preserves bounded metric coverage, query scope, and actionable capacity context.
 func TestProxyDashboardCoversBoundedServiceTrafficAndCapacity(t *testing.T) {
 	dashboard := readTestDashboard(t, "proxy.json")
 	if dashboard.Uid != "urnetwork-proxy" || dashboard.Title != "urnetwork / proxy" {
@@ -1401,6 +1402,45 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
+// Keeps carrier rates, instantaneous queue occupancy, and wait duration distinct.
+func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
+	dashboard := readTestDashboard(t, "connect.json")
+	for _, expected := range []struct {
+		panelId int
+		metric  string
+		unit    string
+		rate    bool
+	}{
+		{panelId: 14, metric: "urnetwork_connect_h3_datagram_events_total", unit: "ops", rate: true},
+		{panelId: 15, metric: "urnetwork_connect_h3_datagram_bytes_total", unit: "Bps", rate: true},
+		{panelId: 16, metric: "urnetwork_connect_h3_hybrid_stream_queue_messages", unit: "short"},
+		{panelId: 17, metric: "urnetwork_connect_h3_hybrid_stream_queue_bytes", unit: "bytes"},
+		{panelId: 18, metric: "urnetwork_connect_h3_hybrid_stream_queue_wait_seconds_total", unit: "s", rate: true},
+	} {
+		panel := dashboardPanelById(dashboard, expected.panelId)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("carrier panel %d is missing its query", expected.panelId)
+		}
+		if panel.FieldConfig.Defaults.Unit != expected.unit {
+			t.Errorf("carrier panel %d unit = %q, want %q", expected.panelId, panel.FieldConfig.Defaults.Unit, expected.unit)
+		}
+		expression := panel.Targets[0].Expr
+		for _, required := range []string{expected.metric, `env="$env"`, `block=~"$block"`, `host=~"$host"`, `instance!=""`} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("carrier panel %d query omits %q", expected.panelId, required)
+			}
+		}
+		if strings.Contains(expression, "rate(") != expected.rate {
+			t.Errorf("carrier panel %d has the wrong counter/gauge treatment", expected.panelId)
+		}
+	}
+	wait := dashboardPanelById(dashboard, 18)
+	if !strings.Contains(wait.Targets[0].Expr, `/ sum(rate(urnetwork_connect_h3_datagram_events_total{`) ||
+		!strings.Contains(wait.Targets[0].Expr, `event="hybrid_stream_queue_wait"`) {
+		t.Fatal("mean queue wait must divide duration by the matching wait-event count")
+	}
+}
+
 func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	signalExpressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
 	for _, expression := range []string{
@@ -1520,6 +1560,11 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
+				if function, ok := call.Fun.(*ast.SelectorExpr); ok && function.Sel.Name == "NewDesc" && 0 < len(call.Args) {
+					if name, ok := stringLiteral(call.Args[0]); ok && strings.HasPrefix(name, "urnetwork_") {
+						metrics[name] = true
+					}
+				}
 				if function, ok := call.Fun.(*ast.Ident); ok && (function.Name == "newStatsGauge" || function.Name == "newStatsGaugeVec") && 0 < len(call.Args) {
 					if name, ok := stringLiteral(call.Args[0]); ok {
 						metrics["urnetwork_stats_"+name] = true
@@ -1578,6 +1623,30 @@ func registeredApplicationMetrics(t *testing.T) []string {
 	return names
 }
 
+// Keeps custom collector descriptors in the same inventory as direct gauges.
+func TestProxyMemoryDescriptorsRemainInMetricInventory(t *testing.T) {
+	metrics := registeredApplicationMetrics(t)
+	for _, name := range []string{
+		"urnetwork_proxy_devices_live",
+		"urnetwork_proxy_device_memory_target_bytes",
+		"urnetwork_proxy_device_memory_tracked_used_bytes",
+		"urnetwork_proxy_platform_transport_budget_bytes",
+		"urnetwork_proxy_platform_transport_used_bytes",
+		"urnetwork_proxy_platform_transports_max",
+		"urnetwork_proxy_platform_transports_used",
+		"urnetwork_proxy_platform_transports_pending_h1",
+		"urnetwork_proxy_platform_transports_pending_h1_bytes",
+		"urnetwork_proxy_platform_transport_slot_full_pending_h1_devices",
+		"urnetwork_proxy_platform_transport_h3_preemptions_total",
+		"urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total",
+	} {
+		if !slices.Contains(metrics, name) {
+			t.Errorf("custom collector descriptor %s is absent from the metric inventory", name)
+		}
+	}
+}
+
+// Requires each application family to have an authenticated dashboard query.
 func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 	entries, err := dashboardsFs.ReadDir("dashboards")
 	if err != nil {

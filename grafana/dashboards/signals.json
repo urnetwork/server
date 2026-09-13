@@ -2829,7 +2829,7 @@
     {
       "type": "timeseries",
       "title": "proxy platform-carrier admission",
-      "description": "Fleet carrier slots: private per-device limits, acquired carriers, H1 reservations waiting for admission, slot-full private budgets, and same-device H3 preemption churn. The limit should scale with live hosted devices; sustained slot-full pending plus the joined preemption rate identifies the connect#211 CPU-loop shape.",
+      "description": "Fleet carrier slots, pending H1 admission, and sampled same-device preemptions. Limits should scale with live hosted devices. Sustained slot-full pending and recent preemptions suggest the connect#211 loop; verify event-time slot state before attributing a software defect.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"

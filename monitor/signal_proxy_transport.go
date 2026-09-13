@@ -1,3 +1,4 @@
+// Correlates fresh carrier-budget snapshots with sampled preemption pressure.
 package monitor
 
 import (
@@ -15,14 +16,13 @@ const (
 	proxyTransportFreshness              = 90 * time.Second
 	proxyTransportSourceSuffix           = "__source_timestamp"
 	proxyTransportPerDeviceCount         = 16
-	proxyTransportMinimumBudgetPerDevice = float64(3 << 20)
+	proxyTransportMinimumBudgetPerDevice = float64(3 * 1024 * 1024)
 	proxyTransportChurnRate              = 0.1
-	proxyTransportChurnCPUCores          = 0.5
+	proxyTransportChurnCpuCores          = 0.5
 )
 
-// Signal proxy-transport implements SIGNALS.md §14.6. It observes each
-// newest Proxy process's identity-free aggregate DeviceLocal carrier budgets,
-// including the slot-full H1 and H3-preemption boundary from connect#211.
+// Implements SIGNALS.md §14.6 for the newest proxy process's aggregate private
+// carrier budgets; sampled preemptions indicate pressure without proving its cause.
 func NewProxyTransportSignal() Signal {
 	return &signalAdapter{
 		number: "14.6", key: "proxy-transport", name: "Proxy carrier-budget admission",
@@ -30,10 +30,16 @@ func NewProxyTransportSignal() Signal {
 	}
 }
 
+// Queries the metrics gateway without retaining hosted device identity.
 type proxyTransportProbe struct{}
 
-func (proxyTransportProbe) id() string             { return "runtime/proxy-transport-budget" }
-func (proxyTransportProbe) tier() string           { return tierWarn }
+// Uses one stable identity for admission, visibility, and accounting findings.
+func (proxyTransportProbe) id() string { return "runtime/proxy-transport-budget" }
+
+// Reports suspected pressure and observability gaps at warning severity.
+func (proxyTransportProbe) tier() string { return tierWarn }
+
+// Samples once per minute; pressure findings require two observations.
 func (proxyTransportProbe) cadence() time.Duration { return time.Minute }
 
 var proxyTransportMetricNames = []string{
@@ -54,10 +60,11 @@ var proxyTransportMetricNames = []string{
 }
 
 const (
-	proxyTransportCPURateMetric        = "monitor_cpu_rate"
+	proxyTransportCpuRateMetric        = "monitor_cpu_rate"
 	proxyTransportPreemptionRateMetric = "monitor_h3_preemption_rate"
 )
 
+// Groups values and producer timestamps by one exact process identity.
 type proxyTransportMetrics struct {
 	host        string
 	block       string
@@ -66,6 +73,8 @@ type proxyTransportMetrics struct {
 	sourceTimes map[string]float64
 }
 
+// Filters each required family by producer freshness and preserves its source
+// timestamp; counter rates stay optional while their range warms.
 func proxyTransportQuery(environment string) string {
 	parts := make([]string, 0, 2*len(proxyTransportMetricNames)+2)
 	for _, metricName := range proxyTransportMetricNames {
@@ -104,7 +113,7 @@ func proxyTransportQuery(environment string) string {
 		fmt.Sprintf(
 			`label_replace(rate(process_cpu_seconds_total{env=%s,job="proxy"}[2m]),"monitor_metric",%s,"job",".*")`,
 			strconv.Quote(environment),
-			strconv.Quote(proxyTransportCPURateMetric),
+			strconv.Quote(proxyTransportCpuRateMetric),
 		),
 		fmt.Sprintf(
 			`label_replace(rate(urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total{env=%s,job="proxy"}[2m]),"monitor_metric",%s,"job",".*")`,
@@ -115,6 +124,8 @@ func proxyTransportQuery(environment string) string {
 	return strings.Join(parts, " or ")
 }
 
+// Selects the newest process before checking scrape coherence and private
+// budget invariants; sampled preemptions require separate causal verification.
 func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
@@ -227,16 +238,16 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if pendingH1 <= 0 {
 			continue
 		}
-		cpuRate, hasCPURate := process.values[proxyTransportCPURateMetric]
+		cpuRate, hasCpuRate := process.values[proxyTransportCpuRateMetric]
 		preemptionRate, hasPreemptionRate := process.values[proxyTransportPreemptionRateMetric]
 		observation := proxyTransportObservation(process)
-		if hasCPURate && hasPreemptionRate &&
+		if hasCpuRate && hasPreemptionRate &&
 			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"] > 0 &&
 			preemptionRate >= proxyTransportChurnRate &&
-			cpuRate >= proxyTransportChurnCPUCores {
+			cpuRate >= proxyTransportChurnCpuCores {
 			churn = append(churn, observation)
 		} else {
-			if !hasCPURate || !hasPreemptionRate {
+			if !hasCpuRate || !hasPreemptionRate {
 				observation += ",churn_rates=warming-or-unobservable"
 			}
 			pending = append(pending, observation)
@@ -308,13 +319,13 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
 			class: "proxy-transport-preemption-churn", target: "proxy-fleet", frame: metricHost.name, sustain: 2,
-			symptom:   fmt.Sprintf("%d newest fresh proxy identities repeatedly preempt H3 while an H1 waits at a full private carrier-count cap and CPU stays active", len(churn)),
-			mechanism: "Before Connect f10a173, an H1 claim with both byte and slot deficits could preempt a slotless Auto-H3 lease merely because it freed bytes. H3 then reacquired because the H1 still could not fit, producing an endless yield/reacquire loop. Slot-full pending-device count, an advancing H3-preemption counter, and process CPU jointly observe that exact mechanism without transport or customer labels.",
-			baseline:  fmt.Sprintf("No two-minute window combines a slot-full pending DeviceLocal, at least %.1f H3 preemptions/second, and at least %.1f CPU cores on the same newest Proxy identity.", proxyTransportChurnRate, proxyTransportChurnCPUCores),
+			symptom:   fmt.Sprintf("%d newest fresh proxy identities combine recent H3 preemptions, sampled slot-full H1 admission, and active CPU", len(churn)),
+			mechanism: "Before Connect f10a173, an H1 claim with both byte and slot deficits could preempt a slotless Auto-H3 lease merely because it freed bytes. H3 then reacquired because the H1 still could not fit, producing an endless yield/reacquire loop. Slot-full pending-device count, an advancing H3-preemption counter, and process CPU identify a similar pressure pattern without transport or customer labels. Sampling cannot establish that every preemption occurred while the carrier slots were full.",
+			baseline:  fmt.Sprintf("No two-minute window combines a slot-full pending DeviceLocal, at least %.1f H3 preemptions/second, and at least %.1f CPU cores on the same newest Proxy identity.", proxyTransportChurnRate, proxyTransportChurnCpuCores),
 			observed:  fmt.Sprintf("churning_identities=%d churn=%s metrics_gateway=%s", len(churn), strings.Join(churn, ";"), metricHost.name),
-			evidence:  "The CPU rate uses the process counter over two minutes. The preemption rate is the process-monotonic sampled subset whose increment and slot-full pending state came from the same DeviceLocal observation; a new/reset device's first value is excluded because its history cannot be joined safely. A device removed between samples can make this detector undercount, but a positive rate is affirmative and cannot be supplied by another device's ordinary transition.",
-			context:   "This is the urnetwork/connect#211 software loop. It is distinct from legitimate fixed-code capacity pressure and from §14.7 hardware-backed fleet capacity.",
-			action:    "Prove the running Connect input. If it lacks f10a173, build and deploy the affected Proxy-bearing artifact with f10a173/ab74d62 or a descendant through the ordinary serialized rollout. If it contains the fix, preserve the generation and diagnose the unexpected preemption producer before changing policy.",
+			evidence:  "The CPU rate uses the process counter over two minutes. The preemption rate is the process-monotonic sampled subset whose increment and slot-full pending state came from the same DeviceLocal observation; a new/reset device's first value is excluded because its history cannot be joined safely. A device removed between samples can make this detector undercount. The same device can also preempt normally before becoming slot-full within a sampling interval, so a positive rate does not prove event-time saturation.",
+			context:   "This is a suspected software loop resembling urnetwork/connect#211. Confirm the event ordering before distinguishing it from legitimate fixed-code transitions; §14.7 owns hardware-backed fleet capacity.",
+			action:    "Prove the running Connect input. If it lacks f10a173, build and deploy the affected Proxy-bearing artifact with f10a173/ab74d62 or a descendant through the ordinary serialized rollout. If it contains the fix, preserve the generation and correlate preemption-time slot state with the blocked transition before attributing a software defect or changing policy.",
 			verify:    "For ten minutes under comparable multi-device load, the preemption rate returns to zero, CPU returns to its traffic baseline, pending H1 drains, and concurrent protocol acceptance remains healthy.",
 			playbook:  "SIGNALS.md §14.6 and urnetwork/connect#211",
 		})
@@ -340,11 +351,13 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	return findings, nil
 }
 
+// Selects the latest start within each host/block and keeps unplaced instances
+// separate when no block label establishes their shared slot.
 func newestProxyTransportProcesses(processes map[string]*proxyTransportMetrics) ([]*proxyTransportMetrics, error) {
 	newest := map[string]*proxyTransportMetrics{}
 	for _, process := range processes {
-		rss, hasRSS := process.values["process_resident_memory_bytes"]
-		if !hasRSS || rss <= 0 {
+		rss, hasRss := process.values["process_resident_memory_bytes"]
+		if !hasRss || rss <= 0 {
 			continue
 		}
 		start, hasStart := process.values["process_start_time_seconds"]
@@ -368,6 +381,7 @@ func newestProxyTransportProcesses(processes map[string]*proxyTransportMetrics) 
 	return current, nil
 }
 
+// Formats only the process identity already supplied by the metrics gateway.
 func proxyTransportLabel(process *proxyTransportMetrics) string {
 	label := process.host
 	if process.block != "" {
@@ -379,6 +393,7 @@ func proxyTransportLabel(process *proxyTransportMetrics) string {
 	return label
 }
 
+// Treats absent required telemetry as unknown admission state.
 func proxyTransportMissingMetrics(process *proxyTransportMetrics) []string {
 	missing := []string{}
 	for _, metricName := range proxyTransportMetricNames {
@@ -389,6 +404,7 @@ func proxyTransportMissingMetrics(process *proxyTransportMetrics) []string {
 	return missing
 }
 
+// Rejects joins across producer scrapes before comparing aggregate invariants.
 func proxyTransportSnapshotReason(process *proxyTransportMetrics) string {
 	var sourceTime float64
 	for i, metricName := range proxyTransportMetricNames {
@@ -405,6 +421,7 @@ func proxyTransportSnapshotReason(process *proxyTransportMetrics) string {
 	return ""
 }
 
+// Validates aggregate count and pending-state invariants before diagnosis.
 func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 	counts := []string{
 		"urnetwork_proxy_devices_live",
@@ -456,6 +473,7 @@ func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 	return ""
 }
 
+// Checks private target-derived budgets for the uniform hosted-device policy.
 func proxyTransportIsolationReason(process *proxyTransportMetrics) string {
 	devices := process.values["urnetwork_proxy_devices_live"]
 	if devices == 0 {
@@ -481,6 +499,7 @@ func proxyTransportIsolationReason(process *proxyTransportMetrics) string {
 	return ""
 }
 
+// Formats bounded aggregate values and marks missing rates explicitly.
 func proxyTransportObservation(process *proxyTransportMetrics) string {
 	value := func(metricName string) string {
 		if observed, ok := process.values[metricName]; ok {
@@ -503,6 +522,6 @@ func proxyTransportObservation(process *proxyTransportMetrics) string {
 		value("urnetwork_proxy_platform_transport_h3_preemptions_total"),
 		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total"),
 		value(proxyTransportPreemptionRateMetric),
-		value(proxyTransportCPURateMetric),
+		value(proxyTransportCpuRateMetric),
 	)
 }

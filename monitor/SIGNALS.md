@@ -15490,11 +15490,12 @@ identity-free metrics:
   process-monotonic counter assembled from private DeviceLocal lifetime
   counters. `urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total`
   is the sampled subset whose increment and slot-full pending state came from
-  the same DeviceLocal observation. Its two-minute rate distinguishes a stable
-  pending capacity condition from repeated H1/H3 yield-and-reacquire churn
-  without cross-joining two unrelated hosted devices. A device created and
-  removed entirely between samples can make this subset undercount; a positive
-  rate remains affirmative. The first observation of a new or reset device is
+  the same DeviceLocal observation. Its two-minute rate highlights recent
+  preemptions in devices sampled with pending admission, without cross-joining
+  unrelated hosted devices. A device can preempt normally before becoming
+  slot-full within one interval, so the subset does not prove event-time
+  saturation. Devices removed between samples can also make it undercount.
+  The first observation of a new or reset device is
   excluded from the subset because its historical preemptions cannot be joined
   safely to the current slot-full state.
 - `urnetwork_proxy_device_memory_tracked_used_bytes` is live budget-accounted
@@ -15508,8 +15509,10 @@ sustained, compare `transports_used` with `transports_max` and verify both the
 24 MiB config and the per-device SDK build before blaming the provider fleet.
 
 The `proxy-transport` probe performs that identity-free aggregate check on the
-newest actual-scrape-fresh process generation. It requires one coherent source
-scrape, validates the per-device `16`-slot and target-derived byte scaling, and
+newest actual-scrape-fresh process generation. The exporter captures all device
+memory gauges and preemption counters together before emitting a scrape. The
+probe requires matching source timestamps, validates the per-device `16`-slot
+and target-derived byte scaling, and
 separates:
 
 - `proxy-transport-budget-isolation`: the deployed aggregate does not scale as
@@ -15519,7 +15522,9 @@ separates:
   one-minute probes, but a preemption loop is not proved. Correlate window
   readiness and transport policy before changing a cap.
 - `proxy-transport-preemption-churn`: slot-full pending devices coexist for two
-  probes with at least 0.1 H3 preemptions/second and 0.5 process CPU cores.
+  probes with at least 0.1 sampled H3 preemptions/second and 0.5 process CPU
+  cores. This is a suspected loop; verify the slot state at preemption time
+  before attributing a software defect.
   Before Connect `f10a173`, an H1 with both byte and slot deficits could
   preempt a slotless Auto-H3 that could resolve only the bytes; H3 immediately
   reacquired and repeated the loop. The deterministic 16-slot boundary is
@@ -15529,8 +15534,9 @@ separates:
   scrapes, and impossible aggregate accounting remain unknown rather than
   green.
 
-The churn class is a software bug. Do not classify it as the hardware-backed
-active-client ceiling in §14.7 or prescribe more proxy hosts. Conversely, a
+The churn class calls for software/transition diagnosis. Its sampled evidence
+does not establish a software bug or the hardware-backed active-client ceiling
+in §14.7, and does not justify more proxy hosts. Conversely, a
 corrected build with isolated budgets and no preemption churn can still reach
 the separately configured fleet client ceiling; only §14.7's measured host
 reserve and capacity contract can justify an operational/hardware response.

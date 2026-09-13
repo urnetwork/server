@@ -1,14 +1,18 @@
+// Exercises carrier-budget classification using deterministic synthetic scrapes.
 package monitor
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
+// Describes one synthetic process, including omitted families and scrape skew.
 type proxyTransportFixtureProcess struct {
 	host          string
 	block         string
@@ -21,15 +25,17 @@ type proxyTransportFixtureProcess struct {
 	omitRates     bool
 }
 
+// Keeps coherent private budgets healthy when admission is clear.
 func TestProxyTransportSignalSyntheticHealthyPrivateBudgets(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	if len(alerts) != 0 {
 		t.Fatalf("healthy private carrier budgets alerted: %+v", alerts)
 	}
 }
 
+// Excludes a draining generation before evaluating its missing telemetry.
 func TestProxyTransportSignalSyntheticRolloutSelectsNewestGeneration(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 0, 30, 0, time.UTC)
 	old := healthyProxyTransportFixture(now)
@@ -40,21 +46,22 @@ func TestProxyTransportSignalSyntheticRolloutSelectsNewestGeneration(t *testing.
 	current.instance = "generation-current"
 	current.values["process_start_time_seconds"] = float64(now.Add(-time.Minute).Unix())
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, old, current))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, old, current))
 	if len(alerts) != 0 {
 		t.Fatalf("draining generation contaminated current carrier state: %+v", alerts)
 	}
 }
 
+// Detects a process-wide slot cap shared by multiple hosted devices.
 func TestProxyTransportSignalSyntheticLegacySharedBudget(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 1, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.values["urnetwork_proxy_devices_live"] = 3
-	process.values["urnetwork_proxy_device_memory_target_bytes"] = 72 << 20
-	process.values["urnetwork_proxy_platform_transport_budget_bytes"] = 18 << 20
+	process.values["urnetwork_proxy_device_memory_target_bytes"] = 72 * 1024 * 1024
+	process.values["urnetwork_proxy_platform_transport_budget_bytes"] = 18 * 1024 * 1024
 	process.values["urnetwork_proxy_platform_transports_max"] = 16
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-budget-isolation")
 	if alert.SignalNumber != "14.6" || alert.SignalKey != "proxy-transport" || alert.Sustain != 2 {
 		t.Fatalf("wrong isolation alert identity: %+v", alert)
@@ -72,17 +79,18 @@ func TestProxyTransportSignalSyntheticLegacySharedBudget(t *testing.T) {
 	}
 }
 
+// Keeps stable pending admission distinct from recent preemption pressure.
 func TestProxyTransportSignalSyntheticSustainedPendingWithoutChurn(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 2, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.values["urnetwork_proxy_platform_transports_used"] = 32
 	process.values["urnetwork_proxy_platform_transports_pending_h1"] = 2
-	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 512 << 10
+	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 512 * 1024
 	process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"] = 1
-	process.values[proxyTransportCPURateMetric] = 0.9
+	process.values[proxyTransportCpuRateMetric] = 0.9
 	process.values[proxyTransportPreemptionRateMetric] = 0
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-admission-pending")
 	if alert.Sustain != 2 {
 		t.Fatalf("pending sustain = %d, want 2", alert.Sustain)
@@ -105,19 +113,20 @@ func TestProxyTransportSignalSyntheticSustainedPendingWithoutChurn(t *testing.T)
 	}
 }
 
+// Reports the known loop's sampled signature while retaining causal limits.
 func TestProxyTransportSignalSyntheticIssue211PreemptionLoop(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 3, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.values["urnetwork_proxy_platform_transports_used"] = 32
 	process.values["urnetwork_proxy_platform_transports_pending_h1"] = 1
-	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 256 << 10
+	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 256 * 1024
 	process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"] = 1
 	process.values["urnetwork_proxy_platform_transport_h3_preemptions_total"] = 900
 	process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total"] = 850
-	process.values[proxyTransportCPURateMetric] = 0.91
+	process.values[proxyTransportCpuRateMetric] = 0.91
 	process.values[proxyTransportPreemptionRateMetric] = 4.5
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-preemption-churn")
 	if alert.Sustain != 2 {
 		t.Fatalf("churn sustain = %d, want 2", alert.Sustain)
@@ -128,7 +137,9 @@ func TestProxyTransportSignalSyntheticIssue211PreemptionLoop(t *testing.T) {
 		"cpu_cores=0.91",
 		"Connect f10a173",
 		"urnetwork/connect#211",
-		"software loop",
+		"suspected software loop",
+		"Sampling cannot establish",
+		"positive rate does not prove event-time saturation",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("churn alert lacks %q:\n%s", want, alert.Markdown())
@@ -141,12 +152,13 @@ func TestProxyTransportSignalSyntheticIssue211PreemptionLoop(t *testing.T) {
 	}
 }
 
+// Refuses to treat a missing preemption counter as zero pressure.
 func TestProxyTransportSignalSyntheticMissingTelemetryIsUnknown(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 4, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.omit["urnetwork_proxy_platform_transport_h3_preemptions_total"] = true
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-unobservable")
 	for _, want := range []string{
 		"platform_transport_h3_preemptions_total",
@@ -159,12 +171,13 @@ func TestProxyTransportSignalSyntheticMissingTelemetryIsUnknown(t *testing.T) {
 	}
 }
 
+// Classifies mixed producer timestamps before comparing budget equations.
 func TestProxyTransportSignalSyntheticMixedScrapeIsUnknown(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 5, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.sourceOffsets["urnetwork_proxy_platform_transport_budget_bytes"] = -15 * time.Second
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-snapshot-unobservable")
 	for _, want := range []string{
 		"same-scrape carrier-budget snapshot",
@@ -177,12 +190,13 @@ func TestProxyTransportSignalSyntheticMixedScrapeIsUnknown(t *testing.T) {
 	}
 }
 
+// Rejects used carrier counts above the aggregate maximum.
 func TestProxyTransportSignalSyntheticImpossibleCounts(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 6, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.values["urnetwork_proxy_platform_transports_used"] = 33
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-metrics-invalid")
 	for _, want := range []string{
 		"used-carriers-exceed-maximum",
@@ -195,32 +209,75 @@ func TestProxyTransportSignalSyntheticImpossibleCounts(t *testing.T) {
 	}
 }
 
+// Preserves pending admission while counter-rate ranges warm.
 func TestProxyTransportSignalSyntheticRateWarmupDoesNotHidePending(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 7, 0, 0, time.UTC)
 	process := healthyProxyTransportFixture(now)
 	process.omitRates = true
 	process.values["urnetwork_proxy_platform_transports_pending_h1"] = 1
-	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 256 << 10
+	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 256 * 1024
 
-	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJSON(t, process))
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
 	alert := requireAlertClass(t, alerts, "proxy-transport-admission-pending")
 	if !strings.Contains(alert.Markdown(), "churn_rates=warming-or-unobservable") {
 		t.Fatalf("rate warmup was hidden:\n%s", alert.Markdown())
 	}
 }
 
+// Parses the actual remote shell arguments without starting curl or any network.
+func TestProxyTransportSignalQuotesApostropheEnvironment(t *testing.T) {
+	now := time.Date(2026, 9, 13, 18, 8, 0, 0, time.UTC)
+	environment := "synthetic'quoted"
+	payload := proxyTransportFixtureJson(t, healthyProxyTransportFixture(now))
+	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		arguments, ok := strings.CutPrefix(command, "curl ")
+		if !ok {
+			return "", fmt.Errorf("unexpected query command")
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "/bin/sh", "-c",
+			"set -- "+arguments+"; printf '%s\\000' \"$@\"").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("parse query arguments: %w: %s", err, out)
+		}
+		got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+		want := []string{
+			"-fsS", "--max-time", "15", "--data-urlencode",
+			"query=" + proxyTransportQuery(environment),
+			"http://127.0.0.1:3100/prometheus/api/v1/query",
+		}
+		if !slices.Equal(got, want) {
+			return "", fmt.Errorf("query arguments = %q, want %q", got, want)
+		}
+		return payload, nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Environment = environment
+	settings.Now = func() time.Time { return now }
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.example", Roles: []string{"services"}})
+	alerts, err := NewProxyTransportSignal().Run(t.Context(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("healthy quoted environment alerted: %+v", alerts)
+	}
+}
+
+// Builds one coherent, healthy process with two private carrier budgets.
 func healthyProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
 	return proxyTransportFixtureProcess{
 		host: "proxy-node.invalid", block: "lane-a", instance: "generation-a",
 		sampleTime: now, sourceTime: now,
 		values: map[string]float64{
-			"process_resident_memory_bytes":                                                1 << 30,
+			"process_resident_memory_bytes":                                                1024 * 1024 * 1024,
 			"process_start_time_seconds":                                                   float64(now.Add(-10 * time.Minute).Unix()),
 			"process_cpu_seconds_total":                                                    100,
 			"urnetwork_proxy_devices_live":                                                 2,
-			"urnetwork_proxy_device_memory_target_bytes":                                   48 << 20,
-			"urnetwork_proxy_platform_transport_budget_bytes":                              12 << 20,
-			"urnetwork_proxy_platform_transport_used_bytes":                                2 << 20,
+			"urnetwork_proxy_device_memory_target_bytes":                                   48 * 1024 * 1024,
+			"urnetwork_proxy_platform_transport_budget_bytes":                              12 * 1024 * 1024,
+			"urnetwork_proxy_platform_transport_used_bytes":                                2 * 1024 * 1024,
 			"urnetwork_proxy_platform_transports_max":                                      32,
 			"urnetwork_proxy_platform_transports_used":                                     4,
 			"urnetwork_proxy_platform_transports_pending_h1":                               0,
@@ -228,13 +285,14 @@ func healthyProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
 			"urnetwork_proxy_platform_transport_slot_full_pending_h1_devices":              0,
 			"urnetwork_proxy_platform_transport_h3_preemptions_total":                      2,
 			"urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total": 0,
-			proxyTransportCPURateMetric:                                                    0.2,
+			proxyTransportCpuRateMetric:                                                    0.2,
 			proxyTransportPreemptionRateMetric:                                             0,
 		},
 		omit: map[string]bool{}, sourceOffsets: map[string]time.Duration{},
 	}
 }
 
+// Supplies the generated query with a synthetic metrics gateway response.
 func runProxyTransportFixture(t testing.TB, now time.Time, payload string) Alerts {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
@@ -260,7 +318,8 @@ func runProxyTransportFixture(t testing.TB, now time.Time, payload string) Alert
 	return alerts
 }
 
-func proxyTransportFixtureJSON(t testing.TB, processes ...proxyTransportFixtureProcess) string {
+// Encodes independent values and producer timestamps as an instant vector.
+func proxyTransportFixtureJson(t testing.TB, processes ...proxyTransportFixtureProcess) string {
 	t.Helper()
 	result := []map[string]any{}
 	for _, process := range processes {
@@ -290,7 +349,7 @@ func proxyTransportFixtureJSON(t testing.TB, processes ...proxyTransportFixtureP
 			})
 		}
 		if !process.omitRates {
-			for _, metricName := range []string{proxyTransportCPURateMetric, proxyTransportPreemptionRateMetric} {
+			for _, metricName := range []string{proxyTransportCpuRateMetric, proxyTransportPreemptionRateMetric} {
 				result = append(result, map[string]any{
 					"metric": map[string]string{
 						"host": process.host, "block": process.block, "instance": process.instance,
