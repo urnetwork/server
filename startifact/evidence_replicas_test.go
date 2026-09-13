@@ -229,8 +229,8 @@ func TestPreparedEvidenceReplicasRejectInvalidOwnershipBeforeStorage(t *testing.
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 	for _, input := range []struct {
-		owner *PreparedEvidence
-		ctx context.Context
+		owner  *PreparedEvidence
+		ctx    context.Context
 		stores []server.BlobStore
 	}{
 		{owner: prepared, ctx: nil, stores: []server.BlobStore{store}},
