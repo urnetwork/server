@@ -52,6 +52,13 @@ const (
 	// on one carrier.
 	ExtenderActivateProbeTimeout = 10 * time.Second
 
+	// The budget of one dns carrier port (L2). The dns carrier is probed once
+	// per listed port, and a udp port with nothing bound gives no answer to
+	// fail fast on, so a dead port under the shared budget alone would spend
+	// it all and fail every port and the forward behind it. Two dead ports
+	// still leave four seconds of the activation budget for the rest.
+	ExtenderActivateDnsPortProbeTimeout = 3 * time.Second
+
 	// Activation attempts per client per hour (C2). An activation costs the
 	// operator several dials back to the caller, so the budget is what stops
 	// one client from using the api as a probe engine.
@@ -94,12 +101,16 @@ var extenderForwardProbeTlsConfig = func() *tls.Config {
 }
 
 type ExtenderActivateArgs struct {
-	PublicKeyHex string   `json:"public_key_hex"`
-	TcpPort      int      `json:"tcp_port"`
-	UdpPort      int      `json:"udp_port"`
-	DnsPort      int      `json:"dns_port"`
-	DnsTld       string   `json:"dns_tld"`
-	Carriers     []string `json:"carriers"`
+	PublicKeyHex string `json:"public_key_hex"`
+	TcpPort      int    `json:"tcp_port"`
+	UdpPort      int    `json:"udp_port"`
+	DnsPort      int    `json:"dns_port"`
+	// every dns port the caller is listening on, each probed on its own (L2).
+	// Empty offers DnsPort alone, which is what an extender that predates the
+	// list sends.
+	DnsPorts []int    `json:"dns_ports"`
+	DnsTld   string   `json:"dns_tld"`
+	Carriers []string `json:"carriers"`
 }
 
 type ExtenderActivateResult struct {
@@ -109,6 +120,10 @@ type ExtenderActivateResult struct {
 	// the carriers that passed their probe, which is what the stored address
 	// and the signed record list
 	Carriers []string `json:"carriers,omitempty"`
+	// the dns ports that passed their probe, ascending, which is what the
+	// stored address and the signed record list (L2). Empty when the dns
+	// carrier was not offered.
+	DnsPorts []int `json:"dns_ports,omitempty"`
 	// why the activation was refused, empty on success. A refusal is a normal
 	// answer, not a request error: the caller is told which carrier failed so
 	// it can fix its own binding.
@@ -145,6 +160,11 @@ func extenderCarrierConnectMode(carrier string) (connect.ExtenderConnectMode, bo
 // different places: the record answers the activating caller, and the message
 // is what the publish queue carries. Signing once for both is what keeps them
 // the same record.
+//
+// The dns ports are the union of what the addresses answered on (L2),
+// ascending, because the record names one extender's ports and not one
+// address's, and a client dials the lowest first. DnsPort stays the extender's
+// configured port, which is what a reader that predates the list dials.
 func SignExtenderRecord(
 	config *ExtenderConfig,
 	rootPrivateKey ed25519.PrivateKey,
@@ -153,19 +173,27 @@ func SignExtenderRecord(
 	issueTime time.Time,
 ) (*protocol.ExtenderRecord, []byte, error) {
 	recordAddresses := []*protocol.ExtenderAddress{}
+	dnsPorts := []uint32{}
 	for _, address := range addresses {
 		recordAddresses = append(recordAddresses, &protocol.ExtenderAddress{
 			Ip:        address.Ip.String(),
 			IpVersion: uint32(address.IpVersion),
 			Carriers:  slices.Clone(address.Carriers),
 		})
+		for _, dnsPort := range address.DnsPorts {
+			if !slices.Contains(dnsPorts, uint32(dnsPort)) {
+				dnsPorts = append(dnsPorts, uint32(dnsPort))
+			}
+		}
 	}
+	slices.Sort(dnsPorts)
 	record, err := connect.SignExtenderRecord(rootPrivateKey, &protocol.ExtenderRecordBody{
 		PublicKey:    extender.PublicKey,
 		Addresses:    recordAddresses,
 		TcpPort:      uint32(extender.TcpPort),
 		UdpPort:      uint32(extender.UdpPort),
 		DnsPort:      uint32(extender.DnsPort),
+		DnsPorts:     dnsPorts,
 		DnsTld:       extender.DnsTld,
 		CountryCode:  extender.CountryCode,
 		IssueTimeMs:  uint64(issueTime.UnixMilli()),
@@ -277,7 +305,9 @@ func ExtenderActivate(
 	}
 	dnsPort := args.DnsPort
 	if dnsPort == 0 {
-		dnsPort = 53
+		// the whodis port, which every extender binds; 53 is offered only by
+		// the platforms that can bind it without privilege (L2)
+		dnsPort = connect.ExtenderDnsPort
 	}
 	for _, port := range []struct {
 		name  string
@@ -291,6 +321,22 @@ func ExtenderActivate(
 			return refuse(fmt.Sprintf("%s is out of range", port.name))
 		}
 	}
+	// the dns ports to probe, ascending, which is the dial order of L2 and the
+	// order the record lists them in. A caller that lists none offers its one
+	// configured port, which is what an extender that predates the list sends.
+	dnsPorts := []int{}
+	for _, listedDnsPort := range args.DnsPorts {
+		if listedDnsPort < 1 || 65535 < listedDnsPort {
+			return refuse("dns_ports is out of range")
+		}
+		if !slices.Contains(dnsPorts, listedDnsPort) {
+			dnsPorts = append(dnsPorts, listedDnsPort)
+		}
+	}
+	if len(dnsPorts) == 0 {
+		dnsPorts = []int{dnsPort}
+	}
+	slices.Sort(dnsPorts)
 	dnsTld := strings.ToLower(strings.TrimSpace(args.DnsTld))
 	if dnsTld == "" {
 		dnsTld = connect.DefaultExtenderDnsTld
@@ -349,17 +395,13 @@ func ExtenderActivate(
 	defer probeCancel()
 
 	connectSettings := ExtenderProbeConnectSettings()
-	for _, carrier := range carriers {
-		connectMode, _ := extenderCarrierConnectMode(carrier)
-		port := tcpPort
-		switch carrier {
-		case connect.ExtenderCarrierQuic:
-			port = udpPort
-		case connect.ExtenderCarrierDns:
-			port = dnsPort
-		}
-		if _, err := connect.ProbeExtenderCarrier(
-			probeCtx,
+	probeCarrier := func(
+		ctx context.Context,
+		connectMode connect.ExtenderConnectMode,
+		port int,
+	) error {
+		_, err := connect.ProbeExtenderCarrier(
+			ctx,
 			connectSettings,
 			clientIp,
 			connectMode,
@@ -369,7 +411,44 @@ func ExtenderActivate(
 			publicKey,
 			apiHost,
 			ExtenderProbeDestinationPort,
-		); err != nil {
+		)
+		return err
+	}
+
+	// the dns ports that answered, which is what the address row and the
+	// record list (L2). Empty unless the dns carrier was offered.
+	activeDnsPorts := []int{}
+	for _, carrier := range carriers {
+		connectMode, _ := extenderCarrierConnectMode(carrier)
+		if carrier == connect.ExtenderCarrierDns {
+			// one dns port failing is not the carrier failing: an extender
+			// that offers 53 and 4053 on a path that blocks 53 is still
+			// reachable on 4053, and the record must say which. Only a carrier
+			// with no port left is refused.
+			var firstErr error
+			for _, port := range dnsPorts {
+				portCtx, portCancel := context.WithTimeout(
+					probeCtx,
+					ExtenderActivateDnsPortProbeTimeout,
+				)
+				err := probeCarrier(portCtx, connectMode, port)
+				portCancel()
+				if err == nil {
+					activeDnsPorts = append(activeDnsPorts, port)
+				} else if firstErr == nil {
+					firstErr = err
+				}
+			}
+			if len(activeDnsPorts) == 0 {
+				return refuse(fmt.Sprintf("the %s carrier did not answer: %s", carrier, firstErr))
+			}
+			continue
+		}
+		port := tcpPort
+		if carrier == connect.ExtenderCarrierQuic {
+			port = udpPort
+		}
+		if err := probeCarrier(probeCtx, connectMode, port); err != nil {
 			return refuse(fmt.Sprintf("the %s carrier did not answer: %s", carrier, err))
 		}
 	}
@@ -421,6 +500,7 @@ func ExtenderActivate(
 			IpVersion:   ipVersion,
 			Ip:          clientIp,
 			Carriers:    carriers,
+			DnsPorts:    activeDnsPorts,
 		},
 		func(
 			extender *model.NetworkExtender,
@@ -482,6 +562,7 @@ func ExtenderActivate(
 		Ip:           clientIp.String(),
 		IpVersion:    ipVersion,
 		Carriers:     carriers,
+		DnsPorts:     activeDnsPorts,
 		ExpireTime:   &expireTime,
 		AllowedHosts: config.AllowedHosts(),
 		Record:       recordBase64,

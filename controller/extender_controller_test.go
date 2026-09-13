@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -485,6 +486,15 @@ func TestExtenderActivateValidatesArguments(t *testing.T) {
 			wantError: "dns_port",
 		},
 		{
+			name: "a dns port in the list out of range",
+			args: &ExtenderActivateArgs{
+				PublicKeyHex: publicKeyHex,
+				Carriers:     []string{"tcp"},
+				DnsPorts:     []int{4053, 65536},
+			},
+			wantError: "dns_ports",
+		},
+		{
 			name: "dns tld too long",
 			args: &ExtenderActivateArgs{
 				PublicKeyHex: publicKeyHex,
@@ -512,10 +522,15 @@ func TestExtenderActivateValidatesArguments(t *testing.T) {
 	}
 }
 
-// Zero ports and an empty tld take the C1 defaults, which is what a provider
-// that configured nothing sends. The record is what every client dials from, so
-// a default that was dropped rather than filled in would publish an extender on
+// Zero ports and an empty tld take the defaults, which is what a provider that
+// configured nothing sends. The record is what every client dials from, so a
+// default that was dropped rather than filled in would publish an extender on
 // port zero.
+//
+// The dns default is the whodis port, which every extender binds, rather than
+// 53, which only the platforms that can bind it without privilege offer (L2):
+// an old reader dials `DnsPort` alone, and 53 would send it to a port this
+// extender never bound.
 //
 // The tcp port cannot be defaulted in a test, since 443 is not bindable here;
 // the three ports share one defaulting and one range check, and the udp and dns
@@ -547,13 +562,18 @@ func TestExtenderActivateDefaultsThePortsAndTld(t *testing.T) {
 		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
 		connect.AssertEqual(t, int(body.TcpPort), fixture.tcpPort)
 		connect.AssertEqual(t, int(body.UdpPort), 443)
-		connect.AssertEqual(t, int(body.DnsPort), 53)
+		connect.AssertEqual(t, int(body.DnsPort), connect.ExtenderDnsPort)
 		connect.AssertEqual(t, body.DnsTld, connect.DefaultExtenderDnsTld)
+		// the dns carrier was not offered, so no port was probed and the record
+		// promises none (L2)
+		connect.AssertEqual(t, len(result.DnsPorts), 0)
+		connect.AssertEqual(t, len(body.DnsPorts), 0)
 
 		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
 		connect.AssertEqual(t, stored.Extender.UdpPort, 443)
-		connect.AssertEqual(t, stored.Extender.DnsPort, 53)
+		connect.AssertEqual(t, stored.Extender.DnsPort, connect.ExtenderDnsPort)
 		connect.AssertEqual(t, stored.Extender.DnsTld, connect.DefaultExtenderDnsTld)
+		connect.AssertEqual(t, len(stored.Addresses[0].DnsPorts), 0)
 	})
 }
 
@@ -685,5 +705,233 @@ func TestExtenderActivateSurvivesAGeolocationThatFindsNothing(t *testing.T) {
 		// out of the one signing transaction
 		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
 		connect.AssertEqual(t, body.CountryCode, stored.Extender.CountryCode)
+	})
+}
+
+// The dns ports of a record body as ints, which is the form a test compares
+// against the fixture's own ports.
+func testRecordDnsPorts(body *protocol.ExtenderRecordBody) []int {
+	dnsPorts := []int{}
+	for _, dnsPort := range body.DnsPorts {
+		dnsPorts = append(dnsPorts, int(dnsPort))
+	}
+	return dnsPorts
+}
+
+// Every listed dns port is probed on its own, and the ones that answer are what
+// the address row, the answer and the record carry, ascending (L2). The order
+// is the operator's rather than the caller's, because it is the order a client
+// dials them in: 53 before the whodis port when both are served.
+func TestExtenderActivateProbesEveryDnsPortAndRecordsThemAscending(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixtureWithDnsPorts(t, 2)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		// the caller's order reversed and one repeat: each port is probed once
+		// and the list that comes back is ascending
+		args.DnsPorts = []int{fixture.dnsPorts[1], fixture.dnsPorts[0], fixture.dnsPorts[1]}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+		if !slices.Equal(result.DnsPorts, fixture.dnsPorts) {
+			t.Fatalf("dns ports = %v, want %v", result.DnsPorts, fixture.dnsPorts)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		if !slices.Equal(testRecordDnsPorts(body), fixture.dnsPorts) {
+			t.Fatalf("record dns ports = %v, want %v", testRecordDnsPorts(body), fixture.dnsPorts)
+		}
+		// the configured port stays what it was, since a reader that predates
+		// the list dials it alone
+		connect.AssertEqual(t, int(body.DnsPort), fixture.dnsPort)
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		connect.AssertEqual(t, len(stored.Addresses), 1)
+		if !slices.Equal(stored.Addresses[0].DnsPorts, fixture.dnsPorts) {
+			t.Fatalf("stored dns ports = %v, want %v", stored.Addresses[0].DnsPorts, fixture.dnsPorts)
+		}
+	})
+}
+
+// A dns port that does not answer costs its own budget and nothing else: the
+// extender still activates on the ports that do, and the record names only
+// those. This is the ordinary case of an extender that binds 53 on a path that
+// blocks it.
+func TestExtenderActivateRecordsOnlyTheDnsPortsThatAnswer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		// the dead port leads, so the served port and the forward behind it are
+		// reached only if the dead one is bounded on its own
+		args.DnsPorts = []int{testClosedUdpPortBelow(t, fixture.dnsPort), fixture.dnsPort}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+		if !slices.Equal(result.DnsPorts, []int{fixture.dnsPort}) {
+			t.Fatalf("dns ports = %v, want only the served port %d", result.DnsPorts, fixture.dnsPort)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		if !slices.Equal(testRecordDnsPorts(body), []int{fixture.dnsPort}) {
+			t.Fatalf("record dns ports = %v, want only %d", testRecordDnsPorts(body), fixture.dnsPort)
+		}
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		if !slices.Equal(stored.Addresses[0].DnsPorts, []int{fixture.dnsPort}) {
+			t.Fatalf("stored dns ports = %v, want only %d", stored.Addresses[0].DnsPorts, fixture.dnsPort)
+		}
+	})
+}
+
+// A dns carrier with no port left is the carrier failing, and it is refused
+// exactly as an unserved carrier is, with nothing stored: a record must not
+// promise a dns carrier that answers on no port at all.
+func TestExtenderActivateRefusesWhenNoDnsPortAnswers(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+
+		firstDeadPort := testClosedUdpPortBelow(t, fixture.dnsPort)
+		args := fixture.activateArgs()
+		args.Carriers = []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns}
+		args.DnsPorts = []int{firstDeadPort, testClosedUdpPortBelow(t, firstDeadPort)}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, result.Activated, false)
+		if !strings.Contains(result.Error, "dns carrier") {
+			t.Fatalf("error = %q, want the dns carrier named", result.Error)
+		}
+		connect.AssertEqual(t, len(model.GetRandomActiveNetworkExtenders(ctx, 8, server.Id{})), 0)
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
+	})
+}
+
+// An activation that lists no dns ports offers the one configured port, which
+// is what an extender that predates the list sends. The record then names that
+// port in both fields, so a reader of either finds the same carrier.
+func TestExtenderActivateDefaultsTheDnsPortsToTheConfiguredPort(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		args := fixture.activateArgs()
+		args.DnsPorts = nil
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+		if !slices.Equal(result.DnsPorts, []int{fixture.dnsPort}) {
+			t.Fatalf("dns ports = %v, want the configured port %d", result.DnsPorts, fixture.dnsPort)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, int(body.DnsPort), fixture.dnsPort)
+		if !slices.Equal(testRecordDnsPorts(body), []int{fixture.dnsPort}) {
+			t.Fatalf("record dns ports = %v, want %d", testRecordDnsPorts(body), fixture.dnsPort)
+		}
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		if !slices.Equal(stored.Addresses[0].DnsPorts, []int{fixture.dnsPort}) {
+			t.Fatalf("stored dns ports = %v, want %d", stored.Addresses[0].DnsPorts, fixture.dnsPort)
+		}
+	})
+}
+
+// A bootstrap record carries the dns ports too, unioned over the families of
+// the extender it describes: the sample is the whole directory an app has
+// before it has any peer, so a port missing here is a carrier it never dials.
+func TestExtenderActivateBootstrapRecordsCarryTheDnsPorts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
+
+		// one other active extender whose families answered on different port
+		// sets, which is what a host that binds 53 on one family only looks like
+		otherPublicKey := []byte("extender-public-key-bootstrap-001")
+		otherCreateTime := server.NowUtc()
+		model.Testing_CreateNetworkExtender(
+			ctx,
+			&model.NetworkExtender{
+				ExtenderId:  server.NewId(),
+				NetworkId:   server.NewId(),
+				ClientId:    server.NewId(),
+				PublicKey:   otherPublicKey,
+				CreateTime:  otherCreateTime,
+				TcpPort:     443,
+				UdpPort:     443,
+				DnsPort:     connect.DefaultWhodisPort,
+				DnsTld:      connect.DefaultExtenderDnsTld,
+				CountryCode: "US",
+				Active:      true,
+			},
+			[]*model.NetworkExtenderAddress{
+				{
+					IpVersion:    4,
+					Ip:           netip.MustParseAddr("192.0.2.20"),
+					Carriers:     []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns},
+					DnsPorts:     []int{connect.DefaultWhodisPort},
+					ActivateTime: otherCreateTime,
+					Active:       true,
+				},
+				{
+					IpVersion:    6,
+					Ip:           netip.MustParseAddr("2001:db8::20"),
+					Carriers:     []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns},
+					DnsPorts:     []int{connect.DefaultDnsPort, connect.DefaultWhodisPort},
+					ActivateTime: otherCreateTime,
+					Active:       true,
+				},
+			},
+		)
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(fixture.activateArgs(), clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused: %s", result.Error)
+		}
+		connect.AssertEqual(t, len(result.Bootstrap), 1)
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Bootstrap[0])
+		connect.AssertEqual(t, hex.EncodeToString(body.PublicKey), hex.EncodeToString(otherPublicKey))
+		wantDnsPorts := []int{connect.DefaultDnsPort, connect.DefaultWhodisPort}
+		if !slices.Equal(testRecordDnsPorts(body), wantDnsPorts) {
+			t.Fatalf("bootstrap dns ports = %v, want %v", testRecordDnsPorts(body), wantDnsPorts)
+		}
 	})
 }

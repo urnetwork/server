@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,33 @@ func TestExtenderMigrationsApply(t *testing.T) {
 				t.Fatalf("index %s is missing: %v", wantIndex, indexes)
 			}
 		}
+
+		// the dns ports of an address (L2). The default is what every address
+		// activated before the column has, and it is not nullable, so a reader
+		// never has to tell an empty list from a missing one.
+		isNullable := ""
+		columnDefault := ""
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT is_nullable, coalesce(column_default, '')
+				FROM information_schema.columns
+				WHERE table_schema = 'public' AND
+					table_name = 'network_extender_address' AND
+					column_name = 'dns_ports'
+				`,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&isNullable, &columnDefault))
+				}
+			})
+		})
+		connect.AssertEqual(t, isNullable, "NO")
+		if !strings.HasPrefix(columnDefault, "''") {
+			t.Fatalf("dns_ports default = %q, want the empty list", columnDefault)
+		}
 	})
 }
 
@@ -154,6 +182,49 @@ func TestExtenderCarriersRoundTrip(t *testing.T) {
 		read := splitExtenderCarriers(stored)
 		if !slices.Equal(read, c.read) {
 			t.Errorf("splitExtenderCarriers(%q) = %v, want %v", stored, read, c.read)
+		}
+	}
+}
+
+// The dns ports of an address are stored ascending however the caller ordered
+// them, because ascending is the order a client dials them in (L2) and the
+// order the record lists them in. A value that is not a port is dropped on the
+// way out rather than raised: the column is the operator's own data, and a
+// record is better short one port than not signed at all.
+func TestExtenderDnsPortsRoundTrip(t *testing.T) {
+	cases := []struct {
+		dnsPorts []int
+		stored   string
+		read     []int
+	}{
+		{dnsPorts: []int{53, 4053}, stored: "53,4053", read: []int{53, 4053}},
+		{dnsPorts: []int{4053, 53}, stored: "53,4053", read: []int{53, 4053}},
+		{dnsPorts: []int{4053, 53, 4053}, stored: "53,4053", read: []int{53, 4053}},
+		{dnsPorts: []int{0, -1, 65536}, stored: "", read: []int{}},
+		{dnsPorts: nil, stored: "", read: []int{}},
+	}
+	for _, c := range cases {
+		stored := joinExtenderDnsPorts(c.dnsPorts)
+		if stored != c.stored {
+			t.Errorf("joinExtenderDnsPorts(%v) = %q, want %q", c.dnsPorts, stored, c.stored)
+		}
+		read := splitExtenderDnsPorts(stored)
+		if !slices.Equal(read, c.read) {
+			t.Errorf("splitExtenderDnsPorts(%q) = %v, want %v", stored, read, c.read)
+		}
+	}
+	// a column no writer of ours produced, which a read must survive
+	for _, c := range []struct {
+		stored string
+		read   []int
+	}{
+		{stored: "", read: []int{}},
+		{stored: " 4053 , 53 ", read: []int{53, 4053}},
+		{stored: "53,,x,70000,4053", read: []int{53, 4053}},
+	} {
+		read := splitExtenderDnsPorts(c.stored)
+		if !slices.Equal(read, c.read) {
+			t.Errorf("splitExtenderDnsPorts(%q) = %v, want %v", c.stored, read, c.read)
 		}
 	}
 }
@@ -203,6 +274,56 @@ func TestActivateNetworkExtenderStoresTheAddressAndPublishesTheRecord(t *testing
 		connect.AssertEqual(t, publishes[0].PublishedTime == nil, true)
 		connect.AssertEqual(t, string(publishes[0].Message), "record:[192.0.2.10]")
 		connect.AssertEqual(t, len(signed()), 1)
+	})
+}
+
+// The dns ports an activation reports are stored on the address it activated,
+// ascending, and a re-activation replaces them rather than accumulating: the
+// list is what the operator's probe found on THIS pass, so a port that stopped
+// answering must leave the record on the next one.
+func TestActivateNetworkExtenderStoresTheDnsPorts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		publicKey := []byte("extender-public-key-dnsports-001")
+
+		sign, _ := testRecordSigner()
+		activation := testExtenderActivation(publicKey, 4, "192.0.2.14")
+		activation.Carriers = []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns}
+		activation.DnsPorts = []int{4053, 53}
+		activated := ActivateNetworkExtender(ctx, activation, sign)
+		if activated == nil {
+			t.Fatal("the activation stored nothing")
+		}
+		// the addresses the record was signed over carry them too, since both
+		// come out of the one transaction
+		if !slices.Equal(activated.Addresses[0].DnsPorts, []int{53, 4053}) {
+			t.Fatalf("signed dns ports = %v, want [53 4053]", activated.Addresses[0].DnsPorts)
+		}
+
+		stored := Testing_GetNetworkExtender(ctx, activated.Extender.ExtenderId)
+		if !slices.Equal(stored.Addresses[0].DnsPorts, []int{53, 4053}) {
+			t.Fatalf("stored dns ports = %v, want [53 4053]", stored.Addresses[0].DnsPorts)
+		}
+
+		// 53 stopped answering, so it leaves the address
+		activation = testExtenderActivation(publicKey, 4, "192.0.2.14")
+		activation.Carriers = []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns}
+		activation.DnsPorts = []int{4053}
+		ActivateNetworkExtender(ctx, activation, sign)
+		stored = Testing_GetNetworkExtender(ctx, activated.Extender.ExtenderId)
+		if !slices.Equal(stored.Addresses[0].DnsPorts, []int{4053}) {
+			t.Fatalf("stored dns ports = %v, want [4053]", stored.Addresses[0].DnsPorts)
+		}
+
+		// and an activation with no dns carrier leaves none, which is what the
+		// sample reader and the drip then sign
+		activation = testExtenderActivation(publicKey, 4, "192.0.2.14")
+		ActivateNetworkExtender(ctx, activation, sign)
+		stored = Testing_GetNetworkExtender(ctx, activated.Extender.ExtenderId)
+		connect.AssertEqual(t, len(stored.Addresses[0].DnsPorts), 0)
+		sampled := GetRandomActiveNetworkExtenders(ctx, 8, server.Id{})
+		connect.AssertEqual(t, len(sampled), 1)
+		connect.AssertEqual(t, len(sampled[0].Addresses[0].DnsPorts), 0)
 	})
 }
 

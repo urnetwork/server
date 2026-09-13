@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -192,6 +193,77 @@ func TestExtenderPublishGrowsTheBatchWithThePopulation(t *testing.T) {
 		connect.AssertEqual(t, result.BatchSize, 9)
 		connect.AssertEqual(t, result.Published, 9)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 9)
+	})
+}
+
+// A dripped record carries the dns ports of every family the extender has, as
+// one ascending union (L2, C4). The record names one extender rather than one
+// address, so a port that only the v6 family answered on still has to be in it
+// -- a client that reads the record picks its own family's address and dials
+// the ports the record lists.
+func TestExtenderPublishCarriesTheDnsPortUnion(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		rootPublicKey := installTestExtenderWorkConfig(t)
+
+		extenderId := server.NewId()
+		createTime := server.NowUtc()
+		model.Testing_CreateNetworkExtender(
+			ctx,
+			&model.NetworkExtender{
+				ExtenderId:  extenderId,
+				NetworkId:   server.NewId(),
+				ClientId:    server.NewId(),
+				PublicKey:   []byte("extender-public-key-work-dnsports"),
+				CreateTime:  createTime,
+				TcpPort:     443,
+				UdpPort:     443,
+				DnsPort:     connect.DefaultWhodisPort,
+				DnsTld:      connect.DefaultExtenderDnsTld,
+				CountryCode: "US",
+				Active:      true,
+			},
+			[]*model.NetworkExtenderAddress{
+				{
+					IpVersion:    4,
+					Ip:           netip.MustParseAddr("192.0.2.40"),
+					Carriers:     []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns},
+					DnsPorts:     []int{connect.DefaultWhodisPort},
+					ActivateTime: createTime,
+					Active:       true,
+				},
+				{
+					IpVersion:    6,
+					Ip:           netip.MustParseAddr("2001:db8::40"),
+					Carriers:     []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns},
+					DnsPorts:     []int{connect.DefaultWhodisPort, connect.DefaultDnsPort},
+					ActivateTime: createTime,
+					Active:       true,
+				},
+			},
+		)
+
+		result := runTestExtenderPublish(t, ctx)
+		connect.AssertEqual(t, result.Published, 1)
+
+		publishes := model.Testing_GetNetworkExtenderPublishes(ctx)
+		connect.AssertEqual(t, len(publishes), 1)
+		message := &protocol.ExtenderGossipMessage{}
+		if err := proto.Unmarshal(publishes[0].Message, message); err != nil {
+			t.Fatalf("the publish row is not a gossip message: %v", err)
+		}
+		body, err := connect.NewExtenderRootKeySet(rootPublicKey).VerifyRecord(message.GetRecord())
+		if err != nil {
+			t.Fatalf("the published record does not verify: %v", err)
+		}
+		connect.AssertEqual(t, len(body.Addresses), 2)
+		wantDnsPorts := []uint32{connect.DefaultDnsPort, connect.DefaultWhodisPort}
+		if !slices.Equal(body.DnsPorts, wantDnsPorts) {
+			t.Fatalf("record dns ports = %v, want %v", body.DnsPorts, wantDnsPorts)
+		}
+		// the configured port is still the extender's own, for a reader that
+		// predates the list
+		connect.AssertEqual(t, int(body.DnsPort), connect.DefaultWhodisPort)
 	})
 }
 

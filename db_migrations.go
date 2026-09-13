@@ -7804,4 +7804,13 @@ var migrations = []any{
 			PRIMARY KEY (contract_id, extender_id, party)
 		)
 	`),
+
+	// The dns carrier ports one address answered on (connect/EXTENDER.md L2),
+	// comma separated and ascending, which is the order a client dials them
+	// in. Empty when the dns carrier was not offered, which is also what every
+	// address activated before this column carries.
+	newSqlMigration(`
+		ALTER TABLE network_extender_address
+		ADD COLUMN dns_ports varchar NOT NULL DEFAULT ''
+	`),
 }

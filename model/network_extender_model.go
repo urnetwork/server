@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,12 +57,15 @@ type NetworkExtender struct {
 	RecordIssueTime *time.Time
 }
 
-// One family an extender was activated and is probed on.
+// One family an extender was activated and is probed on. DnsPorts are the dns
+// carrier ports this address answered on (L2), ascending; empty when the dns
+// carrier was not offered.
 type NetworkExtenderAddress struct {
 	ExtenderId               server.Id
 	IpVersion                int
 	Ip                       netip.Addr
 	Carriers                 []string
+	DnsPorts                 []int
 	ActivateTime             time.Time
 	LastProbeTime            *time.Time
 	LastProbeSuccessTime     *time.Time
@@ -138,6 +142,8 @@ type NetworkExtenderActivation struct {
 	IpVersion   int
 	Ip          netip.Addr
 	Carriers    []string
+	// the dns ports that passed their probe on this address (L2)
+	DnsPorts []int
 }
 
 // The wire form of a carrier list, which the column holds as one
@@ -167,6 +173,43 @@ func splitExtenderCarriers(carriers string) []string {
 	return kept
 }
 
+// The wire form of a dns port list, which the column holds as one
+// comma-separated value. Unlike the carriers, the order is not the caller's:
+// the ports are stored ascending, because that is the order a client dials
+// them in (L2) and the record lists them in.
+func joinExtenderDnsPorts(dnsPorts []int) string {
+	kept := []int{}
+	for _, dnsPort := range dnsPorts {
+		if dnsPort < 1 || 65535 < dnsPort || slices.Contains(kept, dnsPort) {
+			continue
+		}
+		kept = append(kept, dnsPort)
+	}
+	slices.Sort(kept)
+	ports := []string{}
+	for _, dnsPort := range kept {
+		ports = append(ports, strconv.Itoa(dnsPort))
+	}
+	return strings.Join(ports, ",")
+}
+
+// The inverse, tolerant of the empty column an address activated without the
+// dns carrier -- or before the column existed -- has. A value that is not a
+// port is dropped rather than raised: the column is data the operator wrote,
+// and a record is better short one port than not signed at all.
+func splitExtenderDnsPorts(dnsPorts string) []int {
+	kept := []int{}
+	for _, dnsPortString := range strings.Split(dnsPorts, ",") {
+		dnsPort, err := strconv.Atoi(strings.TrimSpace(dnsPortString))
+		if err != nil || dnsPort < 1 || 65535 < dnsPort || slices.Contains(kept, dnsPort) {
+			continue
+		}
+		kept = append(kept, dnsPort)
+	}
+	slices.Sort(kept)
+	return kept
+}
+
 // Reads the active addresses of one extender inside an open transaction,
 // ordered by family so a signed record has a stable address order.
 //
@@ -191,6 +234,7 @@ func getActiveNetworkExtenderAddressesInTx(
 			ip_version,
 			ip,
 			carriers,
+			dns_ports,
 			activate_time,
 			last_probe_time,
 			last_probe_success_time,
@@ -210,10 +254,12 @@ func getActiveNetworkExtenderAddressesInTx(
 				Active:     true,
 			}
 			var carriers string
+			var dnsPorts string
 			server.Raise(result.Scan(
 				&address.IpVersion,
 				&address.Ip,
 				&carriers,
+				&dnsPorts,
 				&address.ActivateTime,
 				&address.LastProbeTime,
 				&address.LastProbeSuccessTime,
@@ -221,6 +267,7 @@ func getActiveNetworkExtenderAddressesInTx(
 				&address.LastPublishTime,
 			))
 			address.Carriers = splitExtenderCarriers(carriers)
+			address.DnsPorts = splitExtenderDnsPorts(dnsPorts)
 			addresses = append(addresses, address)
 		}
 	})
@@ -395,16 +442,18 @@ func ActivateNetworkExtender(
 				ip_version,
 				ip,
 				carriers,
+				dns_ports,
 				activate_time,
 				consecutive_probe_failures,
 				active
 			)
-			VALUES ($1, $2, $3, $4, $5, 0, true)
+			VALUES ($1, $2, $3, $4, $5, $6, 0, true)
 			ON CONFLICT (extender_id, ip_version) DO UPDATE
 			SET
 				ip = $3,
 				carriers = $4,
-				activate_time = $5,
+				dns_ports = $5,
+				activate_time = $6,
 				consecutive_probe_failures = 0,
 				active = true
 			`,
@@ -412,6 +461,7 @@ func ActivateNetworkExtender(
 			activation.IpVersion,
 			activation.Ip,
 			joinExtenderCarriers(activation.Carriers),
+			joinExtenderDnsPorts(activation.DnsPorts),
 			issueTime,
 		))
 
@@ -857,6 +907,7 @@ func GetRandomActiveNetworkExtenders(
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender_address.carriers,
+				network_extender_address.dns_ports,
 				network_extender_address.activate_time,
 				network_extender_address.last_publish_time
 			FROM network_extender
@@ -884,6 +935,7 @@ func GetRandomActiveNetworkExtenders(
 				extender := &NetworkExtender{Active: true}
 				address := &NetworkExtenderAddress{Active: true}
 				var carriers string
+				var dnsPorts string
 				server.Raise(result.Scan(
 					&extender.ExtenderId,
 					&extender.NetworkId,
@@ -899,11 +951,13 @@ func GetRandomActiveNetworkExtenders(
 					&address.IpVersion,
 					&address.Ip,
 					&carriers,
+					&dnsPorts,
 					&address.ActivateTime,
 					&address.LastPublishTime,
 				))
 				address.ExtenderId = extender.ExtenderId
 				address.Carriers = splitExtenderCarriers(carriers)
+				address.DnsPorts = splitExtenderDnsPorts(dnsPorts)
 
 				entry, ok := extenderWithAddresses[extender.ExtenderId]
 				if !ok {
@@ -1046,6 +1100,7 @@ func Testing_CreateNetworkExtender(
 					ip_version,
 					ip,
 					carriers,
+					dns_ports,
 					activate_time,
 					last_probe_time,
 					last_probe_success_time,
@@ -1053,12 +1108,13 @@ func Testing_CreateNetworkExtender(
 					active,
 					last_publish_time
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 				`,
 				extender.ExtenderId,
 				address.IpVersion,
 				address.Ip,
 				joinExtenderCarriers(address.Carriers),
+				joinExtenderDnsPorts(address.DnsPorts),
 				address.ActivateTime.UTC(),
 				address.LastProbeTime,
 				address.LastProbeSuccessTime,
@@ -1195,6 +1251,7 @@ func Testing_GetNetworkExtender(
 				ip_version,
 				ip,
 				carriers,
+				dns_ports,
 				activate_time,
 				last_probe_time,
 				last_probe_success_time,
@@ -1211,10 +1268,12 @@ func Testing_GetNetworkExtender(
 			for result.Next() {
 				address := &NetworkExtenderAddress{ExtenderId: extenderId}
 				var carriers string
+				var dnsPorts string
 				server.Raise(result.Scan(
 					&address.IpVersion,
 					&address.Ip,
 					&carriers,
+					&dnsPorts,
 					&address.ActivateTime,
 					&address.LastProbeTime,
 					&address.LastProbeSuccessTime,
@@ -1223,6 +1282,7 @@ func Testing_GetNetworkExtender(
 					&address.LastPublishTime,
 				))
 				address.Carriers = splitExtenderCarriers(carriers)
+				address.DnsPorts = splitExtenderDnsPorts(dnsPorts)
 				entry.Addresses = append(entry.Addresses, address)
 			}
 		})

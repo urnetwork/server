@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -143,10 +144,13 @@ func newTestExtenderApi(t testing.TB) *testExtenderApi {
 // reach the same ports for the second one to add an address rather than
 // replace the first.
 type testExtenderFixture struct {
-	api       *testExtenderApi
-	server    *extender.ExtenderServer
-	tcpPort   int
-	quicPort  int
+	api      *testExtenderApi
+	server   *extender.ExtenderServer
+	tcpPort  int
+	quicPort int
+	// every bound dns carrier port, ascending, and the first of them, which is
+	// the configured port an activation names in `dns_port` (L2)
+	dnsPorts  []int
 	dnsPort   int
 	publicKey ed25519.PublicKey
 	errors    chan error
@@ -157,6 +161,16 @@ type testExtenderFixture struct {
 // secret list is an open extender, which is what an operator activated
 // extender is (A4).
 func newTestExtenderFixture(t testing.TB) *testExtenderFixture {
+	t.Helper()
+	return newTestExtenderFixtureWithDnsPorts(t, 1)
+}
+
+// The same fixture with dnsPortCount dns carrier ports bound rather than one,
+// which is what an extender that binds 53 as well as the whodis port looks
+// like (L2). The ports are held ascending, so a test can assert the order a
+// record lists them in without knowing which ephemeral ports the kernel gave
+// it.
+func newTestExtenderFixtureWithDnsPorts(t testing.TB, dnsPortCount int) *testExtenderFixture {
 	t.Helper()
 	api := newTestExtenderApi(t)
 
@@ -177,15 +191,24 @@ func newTestExtenderFixture(t testing.TB) *testExtenderFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dnsPacketConn, err := net.ListenPacket("udp", ":0")
-	if err != nil {
-		t.Fatal(err)
+	dnsPacketConns := map[int]net.PacketConn{}
+	dnsPorts := []int{}
+	for range dnsPortCount {
+		dnsPacketConn, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dnsPort := dnsPacketConn.LocalAddr().(*net.UDPAddr).Port
+		dnsPacketConns[dnsPort] = dnsPacketConn
+		dnsPorts = append(dnsPorts, dnsPort)
 	}
+	slices.Sort(dnsPorts)
 	fixture := &testExtenderFixture{
 		api:       api,
 		tcpPort:   tcpListener.Addr().(*net.TCPAddr).Port,
 		quicPort:  quicPacketConn.LocalAddr().(*net.UDPAddr).Port,
-		dnsPort:   dnsPacketConn.LocalAddr().(*net.UDPAddr).Port,
+		dnsPorts:  dnsPorts,
+		dnsPort:   dnsPorts[0],
 		publicKey: publicKey,
 		errors:    make(chan error, 64),
 	}
@@ -203,14 +226,15 @@ func newTestExtenderFixture(t testing.TB) *testExtenderFixture {
 		return tcpListener, nil
 	}
 	settings.ListenPacket = func(network string, address string) (net.PacketConn, error) {
-		switch address {
-		case fmt.Sprintf(":%d", fixture.quicPort):
+		if address == fmt.Sprintf(":%d", fixture.quicPort) {
 			return quicPacketConn, nil
-		case fmt.Sprintf(":%d", fixture.dnsPort):
-			return dnsPacketConn, nil
-		default:
-			return nil, fmt.Errorf("unexpected extender listen packet %s %s", network, address)
 		}
+		for dnsPort, dnsPacketConn := range dnsPacketConns {
+			if address == fmt.Sprintf(":%d", dnsPort) {
+				return dnsPacketConn, nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected extender listen packet %s %s", network, address)
 	}
 	// the forward resolves the api name to the loopback listener of the family
 	// the extender narrowed the dial to (A7), so a forward that arrives on the
@@ -236,16 +260,20 @@ func newTestExtenderFixture(t testing.TB) *testExtenderFixture {
 		}
 	}
 
+	ports := map[int][]connect.ExtenderConnectMode{
+		fixture.tcpPort:  {connect.ExtenderConnectModeTcpTls},
+		fixture.quicPort: {connect.ExtenderConnectModeQuic},
+	}
+	for _, dnsPort := range dnsPorts {
+		ports[dnsPort] = []connect.ExtenderConnectMode{connect.ExtenderConnectModeDns}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	fixture.server = extender.NewExtenderServer(
 		ctx,
 		[]string{},
 		[]string{testExtenderApiHost},
-		map[int][]connect.ExtenderConnectMode{
-			fixture.tcpPort:  {connect.ExtenderConnectModeTcpTls},
-			fixture.quicPort: {connect.ExtenderConnectModeQuic},
-			fixture.dnsPort:  {connect.ExtenderConnectModeDns},
-		},
+		ports,
 		&net.Dialer{},
 		settings,
 	)
@@ -282,6 +310,27 @@ func (self *testExtenderFixture) activateArgs() *ExtenderActivateArgs {
 			connect.ExtenderCarrierDns,
 		},
 	}
+}
+
+// A udp port with nothing bound to it, the highest free one below belowPort so
+// it sorts ahead of the fixture's own ports in a dns port list.
+//
+// A probe of a dead udp port has nothing to fail fast on -- it spends its whole
+// budget -- so a list that LEADS with one is what proves the per-port budget:
+// the ports behind it must still be probed and the forward must still have
+// budget left.
+func testClosedUdpPortBelow(t testing.TB, belowPort int) int {
+	t.Helper()
+	for port := belowPort - 1; 1024 < port; port -= 1 {
+		packetConn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			continue
+		}
+		packetConn.Close()
+		return port
+	}
+	t.Fatalf("no free udp port below %d", belowPort)
+	return 0
 }
 
 // The caller address an activation against this fixture arrives from on one
