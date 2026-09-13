@@ -1256,6 +1256,14 @@ type perfvarReceiveHandoffCounters struct {
 	PackHandoffDropCount     uint64 `json:"pack_handoff_drop_count"`
 	PackHandoffDropByteCount uint64 `json:"pack_handoff_drop_byte_count"`
 	AckHandoffDropCount      uint64 `json:"ack_handoff_drop_count"`
+	// ReceiveQueueDropCount is FLIGHTGATEFIX §34.2's drop: the receive queue
+	// held its whole budget and the arrival sat above everything in it, so
+	// nothing could be evicted to fit and the arrival was dropped
+	// unacknowledged. It is the discriminator between the receiver deadlock
+	// that reproduces in process and the lane rule's own proof-chain wedge
+	// (§33.9), so it is read by name and reads zero on arms that predate it.
+	ReceiveQueueDropCount     uint64 `json:"receive_queue_drop_count"`
+	ReceiveQueueDropByteCount uint64 `json:"receive_queue_drop_byte_count"`
 	// ACK route writes by the carrier the ACK worker actually used, with the
 	// accumulated route-write wait and the timeouts (FLIGHTGATEFIX M2).
 	AckRouteWriteCountByTransport   map[clientconnect.TransportType]uint64        `json:"ack_route_write_count_by_transport,omitempty"`
@@ -1285,13 +1293,15 @@ func perfvarSubtractTransportCounts[T uint64 | time.Duration](
 }
 
 type perfvarReceiveHandoffObservation struct {
-	Available                bool                          `json:"available"`
-	GenerationChanged        bool                          `json:"generation_changed"`
-	StartLifetime            perfvarReceiveHandoffCounters `json:"start_lifetime"`
-	EndLifetime              perfvarReceiveHandoffCounters `json:"end_lifetime"`
-	PackHandoffDropCount     uint64                        `json:"pack_handoff_drop_count"`
-	PackHandoffDropByteCount uint64                        `json:"pack_handoff_drop_byte_count"`
-	AckHandoffDropCount      uint64                        `json:"ack_handoff_drop_count"`
+	Available                 bool                          `json:"available"`
+	GenerationChanged         bool                          `json:"generation_changed"`
+	StartLifetime             perfvarReceiveHandoffCounters `json:"start_lifetime"`
+	EndLifetime               perfvarReceiveHandoffCounters `json:"end_lifetime"`
+	PackHandoffDropCount      uint64                        `json:"pack_handoff_drop_count"`
+	PackHandoffDropByteCount  uint64                        `json:"pack_handoff_drop_byte_count"`
+	AckHandoffDropCount       uint64                        `json:"ack_handoff_drop_count"`
+	ReceiveQueueDropCount     uint64                        `json:"receive_queue_drop_count"`
+	ReceiveQueueDropByteCount uint64                        `json:"receive_queue_drop_byte_count"`
 	// Interval deltas of the per-carrier ACK route writes.
 	AckRouteWriteCountByTransport   map[clientconnect.TransportType]uint64        `json:"ack_route_write_count_by_transport,omitempty"`
 	AckRouteWriteWaitByTransport    map[clientconnect.TransportType]time.Duration `json:"ack_route_write_wait_by_transport_nanoseconds,omitempty"`
@@ -1709,6 +1719,8 @@ func subtractPerfvarClientReceive(
 			PackHandoffDropCount:            snapshot.PackHandoffDropCount,
 			PackHandoffDropByteCount:        snapshot.PackHandoffDropByteCount,
 			AckHandoffDropCount:             snapshot.AckHandoffDropCount,
+			ReceiveQueueDropCount:           perfvarUint64Field(&snapshot, "ReceiveQueueDropCount"),
+			ReceiveQueueDropByteCount:       perfvarUint64Field(&snapshot, "ReceiveQueueDropByteCount"),
 			AckRouteWriteCountByTransport:   snapshot.AckRouteWriteCountByTransport,
 			AckRouteWriteWaitByTransport:    snapshot.AckRouteWriteWaitByTransport,
 			AckRouteWriteTimeoutByTransport: snapshot.AckRouteWriteTimeoutByTransport,
@@ -1729,6 +1741,10 @@ func subtractPerfvarClientReceive(
 		before.stats.PackHandoffDropByteCount
 	observation.AckHandoffDropCount = after.stats.AckHandoffDropCount -
 		before.stats.AckHandoffDropCount
+	observation.ReceiveQueueDropCount = perfvarUint64Field(&after.stats, "ReceiveQueueDropCount") -
+		perfvarUint64Field(&before.stats, "ReceiveQueueDropCount")
+	observation.ReceiveQueueDropByteCount = perfvarUint64Field(&after.stats, "ReceiveQueueDropByteCount") -
+		perfvarUint64Field(&before.stats, "ReceiveQueueDropByteCount")
 	observation.AckRouteWriteCountByTransport = perfvarSubtractTransportCounts(
 		before.stats.AckRouteWriteCountByTransport,
 		after.stats.AckRouteWriteCountByTransport,
