@@ -144,4 +144,25 @@ func TestNewAltRefusesOverlappingHostLists(t *testing.T) {
 	if !strings.Contains(err.Error(), "g1.connect.alt.example") {
 		t.Fatalf("overlap error = %s", err)
 	}
+
+	// a presented name never matches a wildcard entry, so two equal wildcards
+	// are invisible to the name checks above and have to be compared directly
+	err = validateDisjointHosts(
+		NewHostSet([]string{"*.connect.alt.example"}),
+		NewHostSet([]string{"*.connect.alt.example"}),
+	)
+	if err == nil {
+		t.Fatal("one wildcard on both fronts was accepted")
+	}
+	if !strings.Contains(err.Error(), "*.connect.alt.example") {
+		t.Fatalf("wildcard overlap error = %s", err)
+	}
+
+	// and a wildcard that covers no name of the other front is not an overlap
+	if err := validateDisjointHosts(
+		NewHostSet([]string{"*.api.alt.example", "api.alt.example"}),
+		NewHostSet([]string{"*.connect.alt.example", "connect.alt.example"}),
+	); err != nil {
+		t.Fatalf("two disjoint wildcards were refused: %s", err)
+	}
 }

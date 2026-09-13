@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/warp/services"
+
 	"github.com/urnetwork/server"
 )
 
@@ -255,5 +257,201 @@ func TestLimitsSweepDiscardsIdleAddressState(t *testing.T) {
 	limits.sweep(now.Add(time.Minute))
 	if count := addrCount(); count != 0 {
 		t.Fatalf("idle address state = %d entries, want 0", count)
+	}
+}
+
+// The block is read the way the nginx template reads it: `requests_per_minute`
+// wins over `requests_per_second`, and a zero value leaves that directive out
+// entirely rather than becoming a limit of zero, which would refuse everything.
+func TestLimitsSettingsFromRateLimit(t *testing.T) {
+	cases := []struct {
+		name              string
+		rateLimit         *services.RateLimit
+		requestsPerSecond float64
+		burst             int
+		netConnections    int
+		excludePrefixes   []netip.Prefix
+	}{
+		{
+			name:              "requests per minute wins",
+			rateLimit:         &services.RateLimit{RequestsPerMinute: 120, RequestsPerSecond: 99, Burst: 3, NetConnections: 4},
+			requestsPerSecond: 2,
+			burst:             3,
+			netConnections:    4,
+			excludePrefixes:   []netip.Prefix{},
+		},
+		{
+			name:              "requests per second when there is no minute rate",
+			rateLimit:         &services.RateLimit{RequestsPerSecond: 5},
+			requestsPerSecond: 5,
+			excludePrefixes:   []netip.Prefix{},
+		},
+		{
+			name:            "no rate at all leaves the bucket out",
+			rateLimit:       &services.RateLimit{NetConnections: 2},
+			netConnections:  2,
+			excludePrefixes: []netip.Prefix{},
+		},
+		{
+			name:      "the exclusions are the block's own",
+			rateLimit: &services.RateLimit{ExcludeSubnets: []string{"192.0.2.0/24", "2001:db8::/32"}},
+			excludePrefixes: []netip.Prefix{
+				netip.MustParsePrefix("192.0.2.0/24"),
+				netip.MustParsePrefix("2001:db8::/32"),
+			},
+		},
+	}
+	for _, c := range cases {
+		settings := LimitsSettingsFromRateLimit(c.rateLimit)
+		if settings.RequestsPerSecond != c.requestsPerSecond {
+			t.Errorf("%s: requests per second = %f, want %f", c.name, settings.RequestsPerSecond, c.requestsPerSecond)
+		}
+		if settings.Burst != c.burst || settings.NetConnections != c.netConnections {
+			t.Errorf(
+				"%s: burst/net connections = %d/%d, want %d/%d",
+				c.name,
+				settings.Burst,
+				settings.NetConnections,
+				c.burst,
+				c.netConnections,
+			)
+		}
+		if !slices.Equal(settings.ExcludePrefixes, c.excludePrefixes) {
+			t.Errorf("%s: exclude prefixes = %v, want %v", c.name, settings.ExcludePrefixes, c.excludePrefixes)
+		}
+		if settings.SweepTimeout <= 0 {
+			t.Errorf("%s: sweep timeout = %s", c.name, settings.SweepTimeout)
+		}
+	}
+}
+
+// A limiter with no rate admits every request the concurrency cap allows, and
+// one with no concurrency cap admits every request the bucket allows. An absent
+// nginx directive is no directive, not a limit of zero.
+func TestLimitsWithNoRateOrNoCapLimitOnlyTheOther(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Now()
+
+	// no rate: only the cap of two concurrent requests applies
+	uncapped := NewLimits(ctx, &LimitsSettings{NetConnections: 2})
+	addr := netip.MustParseAddr("198.51.100.20")
+	releases := []func(){}
+	for i := range 2 {
+		release, ok := uncapped.AcquireRequest(addr, now)
+		if !ok {
+			t.Fatalf("request %d was refused with no rate configured", i)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := uncapped.AcquireRequest(addr, now); ok {
+		t.Fatal("a request above the cap was admitted with no rate configured")
+	}
+	for _, release := range releases {
+		release()
+	}
+	// and many in sequence, which a bucket would have refused
+	for i := range 32 {
+		release, ok := uncapped.AcquireRequest(addr, now)
+		if !ok {
+			t.Fatalf("sequential request %d was refused with no rate configured", i)
+		}
+		release()
+	}
+
+	// no cap: only the bucket applies, and connections are never refused
+	unlimited := NewLimits(ctx, &LimitsSettings{RequestsPerSecond: 1, Burst: 1})
+	connectionReleases := []func(){}
+	for i := range 32 {
+		release, ok := unlimited.AcquireConnection(addr, now)
+		if !ok {
+			t.Fatalf("connection %d was refused with no cap configured", i)
+		}
+		connectionReleases = append(connectionReleases, release)
+	}
+	for _, release := range connectionReleases {
+		release()
+	}
+	for i := range 2 {
+		release, ok := unlimited.AcquireRequest(addr, now)
+		if !ok {
+			t.Fatalf("request %d of the burst was refused", i)
+		}
+		release()
+	}
+	if _, ok := unlimited.AcquireRequest(addr, now); ok {
+		t.Fatal("a request above the bucket was admitted with no cap configured")
+	}
+}
+
+// The bucket is charged before the concurrency cap, as nginx evaluates
+// limit_req before limit_conn. A request refused by the cap has already spent
+// its token, so the two limits cannot be played off against each other to get
+// more requests through than either allows.
+func TestLimitsChargeTheBucketBeforeTheConcurrencyCap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// one concurrent request, and a bucket of three
+	limits := NewLimits(ctx, &LimitsSettings{
+		RequestsPerSecond: 2,
+		Burst:             2,
+		NetConnections:    1,
+	})
+	addr := netip.MustParseAddr("198.51.100.21")
+	now := time.Now()
+
+	release, ok := limits.AcquireRequest(addr, now)
+	if !ok {
+		t.Fatal("the first request was refused")
+	}
+	// two more are refused by the cap, and each spends a token doing it
+	for i := range 2 {
+		if _, ok := limits.AcquireRequest(addr, now); ok {
+			t.Fatalf("request %d above the cap was admitted", i)
+		}
+	}
+	release()
+
+	// the bucket is now empty, so the next request is refused by the rate even
+	// though the cap has a slot
+	if _, ok := limits.AcquireRequest(addr, now); ok {
+		t.Fatal("a request was admitted from an empty bucket")
+	}
+	// and it comes back at the configured rate
+	release, ok = limits.AcquireRequest(addr, now.Add(500*time.Millisecond))
+	if !ok {
+		t.Fatal("the refilled token was refused")
+	}
+	release()
+}
+
+// A caller whose address the limiter cannot read is served rather than refused:
+// alt only ever serves real udp peers, and dropping valid traffic on a parse
+// quirk is worse than not counting it.
+func TestLimitedHandlerServesAnUnparseableAddress(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := 0
+	handler := NewLimitedHandler(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			served += 1
+			w.WriteHeader(http.StatusOK)
+		}),
+		NewLimits(ctx, testLimitsSettings(t)),
+	)
+
+	// well past the burst of the configured block
+	const requestCount = 8
+	for i := range requestCount {
+		r := httptest.NewRequest(http.MethodGet, "/hello", nil)
+		r.RemoteAddr = "not-an-address"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d from an unparseable address = %d", i, w.Code)
+		}
+	}
+	if served != requestCount {
+		t.Fatalf("served = %d, want %d", served, requestCount)
 	}
 }

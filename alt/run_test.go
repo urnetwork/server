@@ -6,9 +6,11 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
 	"github.com/urnetwork/server/router"
@@ -120,4 +122,63 @@ func TestLbFrontedApiRoutesAnswerAboveTheAltBurst(t *testing.T) {
 			t.Fatalf("the lb-fronted api router refused request %d of %d", i, requestCount)
 		}
 	}
+}
+
+// A host list given explicitly is used as is, which is how a test pins
+// synthetic names; an empty one derives from the environment's services config,
+// so production needs no flags and an alias added there reaches alt with no
+// code change.
+func TestRunOptionsSettingsDeriveTheHostsFromTheServicesConfig(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		popResource := server.Vault.PushSimpleResource(servicesResourceName, []byte(testServicesYml))
+		defer popResource()
+
+		explicit := RunOptions{
+			ApiHosts:     []string{"api.alt.example"},
+			ConnectHosts: []string{"connect.alt.example"},
+			DnsTlds:      []string{"x.example."},
+		}
+		settings, err := explicit.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(settings.ApiHosts, explicit.ApiHosts) ||
+			!slices.Equal(settings.ConnectHosts, explicit.ConnectHosts) ||
+			!slices.Equal(settings.DnsTlds, explicit.DnsTlds) {
+			t.Fatalf("explicit settings = %+v", settings)
+		}
+
+		env, err := server.Env()
+		if err != nil {
+			t.Fatal(err)
+		}
+		servicesConfig := testServicesConfig(t)
+		settings, err = RunOptions{}.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantApiHosts := serviceHosts(servicesConfig, env, ApiServiceName)
+		wantConnectHosts := serviceHosts(servicesConfig, env, ConnectServiceName)
+		if !slices.Equal(settings.ApiHosts, wantApiHosts) {
+			t.Fatalf("derived api hosts = %v, want %v", settings.ApiHosts, wantApiHosts)
+		}
+		if !slices.Equal(settings.ConnectHosts, wantConnectHosts) {
+			t.Fatalf("derived connect hosts = %v, want %v", settings.ConnectHosts, wantConnectHosts)
+		}
+		// the whodis listener falls back to the client default
+		if !slices.Equal(settings.DnsTlds, []string{DefaultDnsTld}) {
+			t.Fatalf("derived dns tlds = %v", settings.DnsTlds)
+		}
+
+		// a service that exposes no name has no front, so alt refuses to start
+		// rather than answering for nothing
+		popEmpty := server.Vault.PushSimpleResource(
+			servicesResourceName,
+			[]byte("domain: alt.example\nversions:\n-   services: {}\n"),
+		)
+		defer popEmpty()
+		if _, err := (RunOptions{}).Settings(); err == nil {
+			t.Fatal("a services config with no api front was accepted")
+		}
+	})
 }
