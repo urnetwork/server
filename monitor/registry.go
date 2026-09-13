@@ -129,6 +129,7 @@ func NewSignals() []Signal {
 		NewAppleCrashesSignal(),
 		NewVPNSessionsSignal(),
 		NewHostpowerSignal(),
+		NewSubnetCoverageSignal(),
 	}
 }
 

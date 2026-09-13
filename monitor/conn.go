@@ -152,15 +152,16 @@ func (self *host) redisNodePorts() []int {
 // monitorConfig is the monitor's view of the environment
 // (from monitor.yml + pg.yml + config settings.yml).
 type monitorConfig struct {
-	env                 string              // WARP_ENV
-	publicDomain        string              // active services.yml domain
-	websiteDomain       string              // canonical managed product website, when present
-	managerHostname     string              // configured manager alias, when exposed
-	logServices         []string            // active services.yml service inventory
-	logServiceBlocks    map[string][]string // active per-service block inventory
-	verificationEnabled bool
-	stConfigStatus      STConfigurationStatus
-	stDeploymentKey     string
+	env                    string              // WARP_ENV
+	publicDomain           string              // active services.yml domain
+	websiteDomain          string              // canonical managed product website, when present
+	managerHostname        string              // configured manager alias, when exposed
+	logServices            []string            // active services.yml service inventory
+	logServiceBlocks       map[string][]string // active per-service block inventory
+	proxyPathExpectedHosts int                 // active services.yml proxy placements
+	verificationEnabled    bool
+	stConfigStatus         STConfigurationStatus
+	stDeploymentKey        string
 
 	sshUser     string // deployed login user
 	sshDevUser  string // login user for local dev over the overlay

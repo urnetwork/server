@@ -284,6 +284,10 @@ type SignalSettings struct {
 	// tailer then repeats the same absolute window per block, preserving late
 	// ingestion coverage without raising the backend-wide query limit.
 	LogServiceBlocks map[string][]string
+	// ProxyPathExpectedHosts is the active services.yml proxy-host count. It
+	// lets §14.5 distinguish an environment with no proxy service from a
+	// broken inventory join that would otherwise produce a silent green run.
+	ProxyPathExpectedHosts int
 	// VerificationEnabled is the canonical st-subsystem feature intent. It lets
 	// task probes distinguish a legitimately slow or misconfigured enabled
 	// verification job from a stale recurring chain that must not exist while
@@ -468,32 +472,33 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
-		env:                  settings.Environment,
-		publicDomain:         settings.PublicDomain,
-		websiteDomain:        settings.WebsiteDomain,
-		managerHostname:      settings.ManagerHostname,
-		logServices:          append([]string(nil), settings.LogServices...),
-		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
-		verificationEnabled:  settings.VerificationEnabled,
-		stConfigStatus:       settings.STConfigStatus.normalized(),
-		stDeploymentKey:      settings.STDeploymentKey,
-		sshUser:              settings.SSHUser,
-		sshDevUser:           settings.SSHDevUser,
-		sshKeyPaths:          append([]string(nil), settings.SSHKeyPaths...),
-		addressMode:          string(settings.AddressMode),
-		pgPort:               settings.PostgreSQL.Port,
-		pgbouncerPort:        settings.PostgreSQL.PgBouncerPort,
-		pgUser:               settings.PostgreSQL.User,
-		pgPassword:           settings.PostgreSQL.Password,
-		pgDb:                 settings.PostgreSQL.Database,
-		grafanaAdminPassword: settings.Grafana.AdminPassword,
-		sourceIPv4URL:        settings.SourceAttribution.IPv4URL,
-		sourceIPv6URL:        settings.SourceAttribution.IPv6URL,
-		expectedSourceIPv4:   settings.SourceAttribution.ExpectedIPv4,
-		expectedSourceIPv6:   settings.SourceAttribution.ExpectedIPv6,
-		stateDir:             settings.StateDir,
-		sshConnectTimeout:    settings.SSHConnectTimeout,
-		commandTimeout:       settings.CommandTimeout,
+		env:                    settings.Environment,
+		publicDomain:           settings.PublicDomain,
+		websiteDomain:          settings.WebsiteDomain,
+		managerHostname:        settings.ManagerHostname,
+		logServices:            append([]string(nil), settings.LogServices...),
+		logServiceBlocks:       cloneLogServiceBlocks(settings.LogServiceBlocks),
+		proxyPathExpectedHosts: settings.ProxyPathExpectedHosts,
+		verificationEnabled:    settings.VerificationEnabled,
+		stConfigStatus:         settings.STConfigStatus.normalized(),
+		stDeploymentKey:        settings.STDeploymentKey,
+		sshUser:                settings.SSHUser,
+		sshDevUser:             settings.SSHDevUser,
+		sshKeyPaths:            append([]string(nil), settings.SSHKeyPaths...),
+		addressMode:            string(settings.AddressMode),
+		pgPort:                 settings.PostgreSQL.Port,
+		pgbouncerPort:          settings.PostgreSQL.PgBouncerPort,
+		pgUser:                 settings.PostgreSQL.User,
+		pgPassword:             settings.PostgreSQL.Password,
+		pgDb:                   settings.PostgreSQL.Database,
+		grafanaAdminPassword:   settings.Grafana.AdminPassword,
+		sourceIPv4URL:          settings.SourceAttribution.IPv4URL,
+		sourceIPv6URL:          settings.SourceAttribution.IPv6URL,
+		expectedSourceIPv4:     settings.SourceAttribution.ExpectedIPv4,
+		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
+		stateDir:               settings.StateDir,
+		sshConnectTimeout:      settings.SSHConnectTimeout,
+		commandTimeout:         settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands

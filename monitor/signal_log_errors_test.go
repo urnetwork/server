@@ -59,6 +59,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"payment processor rate limit", `Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`, "payment-processor-rate-limit"},
 		{"net escrow ttl", `[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139393191s-from-now exceeds 9600h0m0s`, "redis-netescrow-ttl"},
 		{"redis ttl", "[redis][ttl] suspicious ttl on key", "redis-ttl-suspect"},
+		{"HTTP drain hard cut", "[http]drain deadline after 1m10.25s: 2 connection(s) cut", "http-drain-cut"},
 		{"taskworker drain", "[taskworker]drain gave up with 2 tasks", "taskworker-drain-gave-up"},
 		{"legacy database maintenance", "[db]maintenance reindex[16/22] contract_close", "db-maintenance-legacy-reindex"},
 		{"legacy signal send", "[fixture-edge][taskworker][g2][cid:fixture][I][2026-09-11T22:04:45Z][transport_p2p_webrtc.go:149][signal]send failed ->11111111-1111-1111-1111-111111111111", "signal-send-unclassified"},

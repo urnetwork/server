@@ -247,6 +247,23 @@ func TestIncludeSignalsFailsClosed(t *testing.T) {
 	}
 }
 
+func TestIncludeSignalsRejectsActualSharedProbeIDs(t *testing.T) {
+	for _, identifier := range []string{
+		"pg/task-lease-stranded",
+		"redis/node-mem",
+	} {
+		t.Run(identifier, func(t *testing.T) {
+			selected, err := IncludeSignals(NewSignals(), identifier)
+			if err == nil || !strings.Contains(err.Error(), "matches multiple registered signals") {
+				t.Fatalf("IncludeSignals(%q) error = %v, want actual-registry ambiguity", identifier, err)
+			}
+			if selected != nil {
+				t.Fatalf("IncludeSignals(%q) returned partial selection %v", identifier, signalKeys(selected))
+			}
+		})
+	}
+}
+
 func signalKeys(signals []Signal) []string {
 	keys := make([]string, 0, len(signals))
 	for _, signal := range signals {

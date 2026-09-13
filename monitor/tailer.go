@@ -150,6 +150,9 @@ var txRollbackMaskRe = regexp.MustCompile(
 // change can publish that compatibility transition while the failed latch is
 // still set. Retain both shapes and keep them out of the generic novel detector.
 var (
+	httpDrainCutRe = regexp.MustCompile(
+		`\[http\]drain deadline after ((?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))+): ([1-9][0-9]{0,18}) connection\(s\) cut[[:space:]]*$`,
+	)
 	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
 	windowFailedEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+(?:[[:space:]]|$)`)
 	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
@@ -159,6 +162,21 @@ var (
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
 )
+
+// Keep only the fixed drain outcome. The surrounding Warp identity can carry
+// a host, generation, and container id; those are already represented by the
+// tailer's stable service target and must not enter the alert sample.
+func httpDrainCutLogSample(line string) string {
+	match := httpDrainCutRe.FindStringSubmatch(line)
+	if len(match) != 3 {
+		return "[http]drain deadline: connection(s) cut (malformed values omitted)"
+	}
+	return fmt.Sprintf(
+		"[http]drain deadline after %s: %s connection(s) cut",
+		match[1],
+		match[2],
+	)
+}
 
 var circleTransferAdmissionObservedRe = regexp.MustCompile(
 	`\[circlec\]\[transfer-admission\] admitted observable=v1 redis_second=([0-9]{1,19}) sequence=[0-9]{1,20} deferrals=[0-9]{1,20} wait_ms=[0-9]{1,20}[[:space:]]*$`,
@@ -646,6 +664,18 @@ var logClasses = []logClass{
 	{name: "redis-ttl-suspect", re: regexp.MustCompile(`\[redis\]\[ttl\]`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,
 		meaning: "a redis write carried a ttl beyond its family limit or a raw time.Duration arg — inspect the named command/key to distinguish a unit conversion from an unbounded durable deadline"},
+	// Shared HTTP drain outcome (§13.1). A zero cut count is deliberately not
+	// matched: the page contract is specifically a nonzero hard cut, while the
+	// clean completion line and gauges provide ordinary drain observability.
+	{name: "http-drain-cut", re: httpDrainCutRe,
+		sample:        httpDrainCutLogSample,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §13.1",
+		meaning:   "the shared HTTP drain exhausted its shutdown deadline with one or more connections still open and hard-cut those connections at process exit",
+		mechanism: "After the keepalive-retirement grace, http.Server.Shutdown waits only for the configured bounded shutdown timeout. A nonzero remainder means a handler or connection outlived that ceiling, or the service's request and drain timeouts violate the documented ordering; process exit then closes the remaining transport instead of completing it cleanly.",
+		context:   "The dying process flushes the nonzero drain-cut gauge, but its replacement can overwrite the same series with zero on the next metrics push, so this exact log outcome is durable incident evidence. The count is open connections, not necessarily distinct requests or confirmed duplicate executions. A sent-but-unanswered non-idempotent request can nevertheless be retried by an upstream and must be treated as an ambiguous execution outcome.",
+		action:    "Identify the emitting service, host, and generation, then correlate its drain duration, in-flight count, request route, handler stack, dependency waits, and configured read/write/shutdown timeouts. Repair the handler or timeout-ordering cause. Do not merely lengthen the drain ceiling, restart the same artifact, or assume every cut request was safely replayed.",
+		verify:    "Through two controlled drain cadences, every retiring process logs a clean drain, max_over_time(urnetwork_http_server_drain_cut_connections[15m]) remains zero, no http-drain-cut line recurs, and route outcomes show no unresolved or ambiguously replayed non-idempotent request.",
+	},
 	// taskworker drain outcome (§12.1): the drain phases log exactly one
 	// outcome line; "finished cleanly" / "finished after cancel" are healthy
 	// and not classified — only "gave up" means a ctx-ignoring task rode to

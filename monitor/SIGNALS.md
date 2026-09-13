@@ -154,6 +154,91 @@ maps to `server/monitor/signal_short_key.go` and
 `signal_short_key_test.go`; the Go file keeps a comment linking back to this
 section number. Use the same convention for every new automated entry.
 
+Numbered headings without their own `Probe:` line are cross-referenced here so
+they cannot be mistaken for silently missing standalone probes. “Runbook” means
+the heading interprets findings produced by the named probes; it does not claim
+an additional detector. “Shared contract” means the named probes directly own
+the executable checks described by the heading. “Coverage gap” remains an
+active missing capability and must not be read as green.
+
+<!-- numbered-coverage-start -->
+| Section | Kind | Executable boundary |
+|---|---|---|
+| 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
+| 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
+| 5.3 | Runbook | `redis-cluster`, `log-errors` |
+| 5.4 | Runbook | `redis-memory`, `redis-buffers`, `redis-process`, `log-errors` |
+| 5.5 | Runbook | `redis-buffers`, `redis-connections`, `redis-keyevents`, `log-errors` |
+| 5.6 | Runbook | `pg-state`, `pg-capacity`, `pool-retention`, `wait-events` |
+| 5.7 | Runbook | `task-canaries`, `task-health`, `stuck-leases`, `task-convergence`, `log-errors` |
+| 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
+| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
+| 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
+| 8.1 | Runbook | `provenance`, `rollout-guard` |
+| 8.1a | Shared contract | `proxy-path`, `provenance` |
+| 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
+| 8.3 | Runbook | `contract-rate`, `task-canaries`, `connection-rate` plus the owning service probe |
+| 8.4 | Runbook | `provenance`, `rollout-guard`; a deploy annotation is not an alert |
+| 8.5 | Shared contract | `reboot-collision`, `rollout-guard`, `hostpower` |
+| 8.6 | Shared contract | `provenance`, `rollout-guard`, `connection-rate`, `log-errors` |
+| 10.1 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `key-publication` |
+| 10.2 | Shared contract | `rollout-guard`, `log-errors`, `connection-rate` |
+| 10.3 | Shared contract | `reliability-drift`, `selection-freshness`, `connection-rate` |
+| 10.4 | Runbook | Access recipe for focused `rollout-guard`, `provenance`, and `log-errors` checks |
+| 11.1 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `log-shipper` |
+| 11.2 | Shared contract | `grafana-node`, `provenance`, `rollout-guard` |
+| 11.3 | Runbook | `grafana-node`, `log-errors` |
+| 11.4 | Runbook | `log-errors`, `grafana-node` |
+| 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
+| 11.6 | Shared contract | `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.7 | Runbook | `rollout-guard`, `log-errors` |
+| 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
+| 11.7c | Runbook | `rollout-guard`, `provenance` |
+| 11.8 | Shared contract | `provenance`, `grafana-node` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
+| 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
+| 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
+| 11.13 | Runbook | `grafana-node`, `log-errors`, `loki-tailers` |
+| 11.16 | Shared contract | `grafana-ingress` |
+| 12.1 | Shared contract | `log-errors` owns the taskworker drain outcome class |
+| 12.2 | Shared contract | `task-convergence`, `rollout-guard`, `log-errors` |
+| 13.1 | Shared contract | `log-errors` owns the cut-connection line; `provenance` and `rollout-guard` own generation context |
+| 13.2 | Runbook | API drain metrics are diagnostic context for `log-errors`, `provenance`, and `rollout-guard` |
+| 13.3 | Runbook | `log-errors`, `contract-rate`, `connection-rate`, `rollout-guard` |
+| 13.4 | Shared contract | `rollout-guard`, `provenance`, `log-errors` |
+| 13.5 | Runbook | `log-errors`; deterministic API and acceptance tests own the wire contract |
+| 13.6 | Runbook | `log-errors`; platform acceptance suites own the client-side contract |
+| 14.1 | Shared contract | `proxy-path`, `proxy-runtime`, `rollout-guard`, `provenance` |
+| 14.2 | Shared contract | `proxy-runtime`, `proxy-memory`, `rollout-guard`, `log-errors` |
+| 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
+| 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
+| 14.6 | Shared contract | `log-errors`, `proxy-pool`, `proxy-runtime` |
+| 15.2 | Shared contract | `key-publication`, `log-errors` |
+| 15.3 | Shared contract | `key-publication`, `log-errors` |
+| 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
+| 16.2 | Shared contract | `key-publication`, `log-errors` |
+| 16.3 | Shared contract | `key-publication`, `log-errors` |
+| 16.4 | Shared contract | `edge-ipv6`, `key-publication`, `proxy-path` |
+| 16.5 | Runbook | `edge-ipv6`, `key-publication`, `log-errors` |
+| 16.6 | Shared contract | `edge-ipv6`, `key-publication`, `log-errors` |
+| 16.7 | Runbook | `rollout-guard`, `provenance`, `key-publication`, `log-errors` |
+| 16.8 | Runbook | `edge-ipv6`, `key-publication`, `rollout-guard`, `provenance`, `log-errors` |
+| 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
+| 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
+| 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
+| 22.1 | Coverage gap | `subnet-coverage` reports missing finalized chain, deployment, policy, and governance readers |
+| 22.2 | Coverage gap | `subnet-coverage` reports missing pool, validator, fleet, and commitment readers |
+| 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
+| 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
+| 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
+| 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
+| 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
+| 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
+| 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
+| 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+<!-- numbered-coverage-end -->
+
 Cadence mode starts each probe immediately, but admits at most four concurrent
 probe executions. Most probes reach the production boundary through SSH; an
 unbounded 29-probe startup wave caused a real SSH connection rejection on
@@ -905,6 +990,8 @@ and `abfd976b` hashes from before main was rewritten.
 ### 1.3b PgBouncer idle-backend retention
 Probe: `pool-retention`
 
+Alert class: `pgbouncer-idle-retention`.
+
 This is the reserve-shape companion to §1.3a. Read it through direct 5432 and
 count loopback client backends by state; do not assume that every loopback
 backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
@@ -1123,6 +1210,23 @@ the shape, omit the whole Warp identity prefix from the sample, and redact
 UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
+
+The following machine classifier names share the playbooks already specified
+below and in §4; retaining their exact identifiers makes implementation and
+ledger crosswalks deterministic:
+
+- `connection-refused`, `clusterdown`, and `redis-loading` distinguish a TCP
+  refusal, Redis slot-coverage loss, and Redis load/failover state. The text
+  alone does not identify the restart or rollout cause.
+- `missing-origin-contract` is the metric-only raw log classifier feeding the
+  independently bounded §2.17 missing-origin analysis.
+- `circle-transfer-admitted` is non-alerting admission evidence for §2.14;
+  `circle-transfer-admission-failed` is its fail-closed error class.
+- `signal-send-not-admitted`, `signal-send-encryption-not-ready`,
+  `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
+  reason-specific successors to the legacy sender class in §14.6. They keep
+  admission, encryption readiness, lifecycle closure, and unknown errors
+  causally separate.
 
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
@@ -4690,6 +4794,9 @@ Markdown rendering without identifiers.
 
 ### 2.18 Stale contract destination rejection — dead routes must not authorize
 Probe: `stale-destination`
+
+Alert class: `stale-destination-rate` for a complete, above-band aggregate;
+the visibility classes below remain separate identities.
 
 The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
@@ -8774,6 +8881,7 @@ Tier-1 (warn):
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
 | netescrow-mirror-write | standing logs | `[netescrow]mirror write failed after` | any warns; never blindly replay the non-idempotent mutation |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
+| proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
 
@@ -8782,6 +8890,21 @@ matching playbook section (5.x), the ACTION line, and last control-plane
 event age. Alerts auto-resolve when the signal returns to its healthy band
 for 5 minutes, and emit the resolution (recovery confirmation is part of the
 loop, per 6.8).
+
+Historical ledger class aliases remain readable but must not be emitted by new
+probes:
+
+- `mimir-ingestion-rate-limited` was an early ledger spelling of the current
+  `mimir-ingestion-rate-limit` class.
+- `backup-archive-integrity-unverified` predates the split between
+  `backup-archive-integrity-unobservable` (the current verification could not
+  run) and `backup-archive-integrity-legacy-unverified` (a retained archive has
+  no qualifying historical integrity evidence). Historical context decides
+  which successor applies; the old name is never rewritten in the ledger.
+- `known-open Mimir rate admission with distributor skew` is a historical
+  causal-boundary description, not an alert class. Its constituent current
+  classes are `mimir-ingestion-rate-limit` and the appropriate
+  `mimir-distributor-*` finding from §11.20b.
 
 Identity discipline (learned 2026-07-18): the identity's `target` must be
 the STABLE thing the healthy signal is emitted for (the service, the host),
@@ -13160,6 +13283,10 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   (ReadTimeout 15s + WriteTimeout 30s), so a nonzero means a handler is
   wedged past its write deadline or the timeouts were misconfigured.
   Log line: `[http]drain deadline after <dur>: N connection(s) cut`.
+  The `log-errors` probe classifies an exact nonzero outcome as
+  `http-drain-cut` (PAGE at the first line); it retains only the bounded
+  duration and count, while service, generation, and rollout context stay in
+  their structured owners.
 
 ### 13.2 Drain-window observability
 - `urnetwork_http_server_draining` 1 during the drain sequence;
@@ -14341,6 +14468,23 @@ boundary is `TestContainerNamePrefixFilterSeparatesG1FromG10` in
 ### 14.5 Public proxy protocol and return-path proof
 Probe: `proxy-path`
 
+The active `services.yml` topology is authoritative for proxy placement,
+public host/interface families, and the stable routing-table allocation
+reconstructed across retained versions. A declared proxy service with zero
+placed hosts means zero intended targets; it must not resurrect a stale
+duplicate monitor target. The legacy `monitor.yml` proxy block is used only
+when the active topology has no proxy service at all. The probe compares the
+derived placement count with its armed host count so a failed inventory join
+cannot silently no-op.
+
+Current allocation discovery is also a visibility boundary. A nonzero
+container-runtime enumeration or inspection command is `cannot-observe` with
+`error_class=observation-access-denied` and `allocation_count=unknown`, never
+`allocations=0`. Repair requires a reviewed, narrowly scoped read-only helper
+or equivalent inventory surface. Adding the monitor identity to the Docker
+group (effectively root) or running the complete monitor as root is not an
+acceptable shortcut. This is an operational access prerequisite; it is not
+evidence that the public Proxy path is down.
 
 Proxy health has five layers; none substitutes for the next:
 
@@ -14349,6 +14493,10 @@ Proxy health has five layers; none substitutes for the next:
    the allocation across a rollout: crisp g1 moved status `12688 -> 12689`
    and SOCKS `12718 -> 12719` while this audit was running. A stale direct
    probe produces a false failure.
+   If allocations exist but no generation is 2xx-ready, emit
+   `proxy-allocation-unready`; do not skip the block or mislabel the untested
+   public path. A draining unready sibling is tolerated only while the same
+   stable block still has a ready generation.
 2. **Full public TCP handshake:** SYN, SYN-ACK, and final ACK must all cross the
    public interface. `nc -z`/a listening socket is weaker than a packet-level
    proof and says nothing about DNAT or the return route.
@@ -18803,14 +18951,16 @@ or adding a production query. Record arrival order is not suspend chronology.
 
 ## 22. Subnet continuous correctness — SUBNET1
 
-Status (2026-09-06): **required monitoring specification; new subnet probes are
-not implemented or registered by this documentation change**. Existing §17
+Status (2026-09-13): **required monitoring specification; the registered
+`subnet-coverage` sentinel makes missing coverage visible, but the nine subnet
+correctness families are not implemented or qualified**. Existing §17
 `subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
-or settlement correctness. The `subnet-*` identifiers below are reserved alert
-classes, not `Probe:` declarations or metric names. Implement each family with
-its source adapter, deterministic tests and registry entry before claiming
-automated coverage. Until then, a deployed subnet requiring that family has an
-explicit coverage gap, never a green result from an absent metric.
+or settlement correctness. The `subnet-*` identifiers below, other than the
+sentinel's `subnet-monitor-coverage`, remain reserved alert classes rather than
+metric names. Implement each family with its source adapter, deterministic
+tests and registry entry before claiming automated coverage. Until then, a
+deployed subnet requiring that family has an explicit alert, never a green
+result from an absent metric.
 
 Sources of requirements: sibling `sn/WHITEPAPER.md` version 1.0, `sn/VALIDATOR.md`,
 `sn/protocol`, `sn/validator`, `sn/evm/src`, and the real server `/verify` and
@@ -18819,6 +18969,16 @@ integration; a proposed helper or authored test is not a deployed signal.
 These requirements apply after testnet validation as well as during it.
 
 ### 22.0 Observation contract, clocks, and severity
+Probe: `subnet-coverage`
+
+The coverage sentinel reads only the authoritative privacy-safe desired-state
+classification. When the subnet is explicitly disabled, the economic battery
+is correctly **not deployed**. For enabled, invalid, unavailable, or ambiguous
+state, it emits `subnet-monitor-coverage` with the nine missing reader families
+and their source prerequisites. It deliberately cannot certify any economic
+invariant. Retire this warning only as the real typed family readers below are
+registered and independently qualified; §17 node health and log silence are
+not substitutes.
 
 Observe the complete configured operator and validator census, all live native
 UIDs and eligible head candidates, every due operator/epoch, and every finalized

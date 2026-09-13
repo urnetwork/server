@@ -442,14 +442,6 @@ hosts:                # only monitor-specific facts; lan ips come
     overlay_ip: 172.28.208.177
     roles: [redis-cluster, minio]
     redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
-  - name: fireside.bringyour.com
-    roles: [services]
-    proxy:
-      public_hostname: fireside.bringyour.com
-      public_interface: eno1
-      routing_table: 100
-      load_balancer_unit: warp-main-lb-eno1.service
-      address_families: [ipv4, ipv6]
   - name: snow
     overlay_ip: 172.28.208.185
     roles: [subtensor]
@@ -481,7 +473,14 @@ credentials from `vault/<env>/redis.yml`, LAN routes from
 `config/<env>/settings.yml`, the Grafana admin credential used only for the
 authenticated datasource control from `vault/<env>/grafana.yml`, and active
 nontransparent edge IPv6 interfaces from the first
-`vault/<env>/services.yml` version. The Google package and Apple numeric app ID
+`vault/<env>/services.yml` version. Transparent proxy hostnames, interfaces,
+address families, LB units, and stable routing-table assignments are likewise
+derived from the active topology plus its retained assignment history. The
+proxy-path probe compares the expected placement count with the armed monitor
+hosts, so a missing inventory join is a visibility alert rather than a silent
+no-op. Its dynamic allocation read requires observation access to the host's
+container runtime; a denied runtime command is classified as unobservable and
+must never be interpreted as zero allocations. The Google package and Apple numeric app ID
 remain authoritative in `google.yml` and `apple.yml`; the dedicated reporting
 resources contain only provider identities. Either reporting resource may be
 absent, in which case its corresponding §20 signal performs no validation,
