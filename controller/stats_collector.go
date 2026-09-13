@@ -24,6 +24,10 @@ package controller
 //	urnetwork_stats_online_providers_by_country      the same, per country {country_code, country} (db)
 //	urnetwork_stats_provider_regions                 distinct regions with a connected valid public provider (db)
 //	urnetwork_stats_provider_cities                  distinct cities with a connected valid public provider (db)
+//	urnetwork_stats_online_extenders                 active extenders with at least one active address (db)
+//	urnetwork_stats_online_extenders_by_country      the same, per country {country_code, country} (db)
+//	urnetwork_stats_online_providers_by_ip_family    online providers by proven family {ip_family} (db)
+//	urnetwork_stats_online_extenders_by_ip_family    online extenders by active address family {ip_family} (db)
 //	urnetwork_stats_block_number                     the current subnet block number (clock)
 //	urnetwork_stats_block_start_seconds              unix open time of the current subnet block (clock)
 //	urnetwork_stats_block_end_seconds                unix close time of the current subnet block (clock)
@@ -31,6 +35,21 @@ package controller
 //	urnetwork_stats_block_miners_claimed             distinct miner coldkeys that claimed this block (st_event mirror)
 //	urnetwork_stats_prev_block_miner_claims_alpha    alpha claimed by miners in the last finished block
 //	urnetwork_stats_prev_block_miners_claimed        distinct miner coldkeys that claimed in the last finished block
+//
+// the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
+// only by grafana/dashboards/providers.json:
+//
+//	urnetwork_stats_open_contracts                   transfer contracts open now (db)
+//	urnetwork_stats_contracts_24h                    transfer contracts created in the trailing 24 hours (db + redis hour buckets)
+//	urnetwork_stats_open_contracts_with_extender     of the open contracts, those with an extender party (db)
+//	urnetwork_stats_contracts_with_extender_24h      the same over the trailing 24 hours (db + redis hour buckets)
+//	urnetwork_stats_open_disputes                    disputes raised and not yet decided (db)
+//	urnetwork_stats_disputes_24h                     contracts created in the trailing 24 hours that are disputed (db + redis hour buckets)
+//
+// the 24 hour contract numbers are summed from one hour buckets of
+// create_time; a complete bucket is computed once by whichever host needs it
+// first and cached in redis, so a refresh normally scans only the current
+// partial hour (model/contract_stats_model.go).
 //
 // the block accumulators reset when a block rolls over, so the feed also
 // serves the finished block as a stable reference. deposits and emissions
@@ -217,6 +236,72 @@ var statsProviderCitiesGauge = newStatsGauge(
 	"provider_cities",
 	"Distinct cities with a connected valid public provider",
 )
+var statsOnlineExtendersGauge = newStatsGauge(
+	"online_extenders",
+	"Active extenders with at least one active address",
+)
+var statsOnlineExtendersByCountryGauge = newStatsGaugeVec(
+	"online_extenders_by_country",
+	"Active extenders with at least one active address, per country",
+	"country_code",
+	"country",
+)
+var statsOnlineProvidersByIpFamilyGauge = newStatsGaugeVec(
+	"online_providers_by_ip_family",
+	"Connected valid public providers by the ip families they have proven",
+	"ip_family",
+)
+var statsOnlineExtendersByIpFamilyGauge = newStatsGaugeVec(
+	"online_extenders_by_ip_family",
+	"Online extenders by the ip families they have an active address on",
+	"ip_family",
+)
+var statsOpenContractsGauge = newStatsGauge(
+	"open_contracts",
+	"Transfer contracts open now",
+)
+var statsContracts24hGauge = newStatsGauge(
+	"contracts_24h",
+	"Transfer contracts created in the last 24 hours",
+)
+var statsOpenContractsWithExtenderGauge = newStatsGauge(
+	"open_contracts_with_extender",
+	"Open transfer contracts with at least one extender party",
+)
+var statsContractsWithExtender24hGauge = newStatsGauge(
+	"contracts_with_extender_24h",
+	"Transfer contracts created in the last 24 hours with at least one extender party",
+)
+var statsOpenDisputesGauge = newStatsGauge(
+	"open_disputes",
+	"Disputed contracts with no outcome yet",
+)
+var statsDisputes24hGauge = newStatsGauge(
+	"disputes_24h",
+	"Transfer contracts created in the last 24 hours that are disputed",
+)
+
+// the ip family label values, in publication order. every family gauge
+// publishes all three on every refresh, so a family with no members is a zero
+// rather than an absent series (M4)
+var statsIpFamilies = []string{"ipv4", "ipv6", "dualstack"}
+
+func statsIpFamilyValues(ipv4 int64, ipv6 int64, dualstack int64) []statsLabeledValue {
+	counts := map[string]int64{
+		"ipv4":      ipv4,
+		"ipv6":      ipv6,
+		"dualstack": dualstack,
+	}
+	values := make([]statsLabeledValue, 0, len(statsIpFamilies))
+	for _, ipFamily := range statsIpFamilies {
+		values = append(values, statsLabeledValue{
+			labelValues: []string{ipFamily},
+			value:       float64(counts[ipFamily]),
+		})
+	}
+	return values
+}
+
 var statsBlockNumberGauge = newStatsGauge(
 	"block_number",
 	"The current subnet block number (1-based, 7 days per block from the genesis Sunday 00:00 UTC)",
@@ -305,6 +390,9 @@ func statsRefreshDb(ctx context.Context) {
 	var providers int64
 	var regions int64
 	var cities int64
+	var providersIpv4 int64
+	var providersIpv6 int64
+	var providersDualstack int64
 	for _, providerCountry := range providerCountries {
 		byCountry = append(byCountry, statsLabeledValue{
 			labelValues: []string{providerCountry.CountryCode, providerCountry.Country},
@@ -313,12 +401,63 @@ func statsRefreshDb(ctx context.Context) {
 		providers += providerCountry.Count
 		regions += providerCountry.RegionCount
 		cities += providerCountry.CityCount
+		providersIpv4 += providerCountry.Ipv4Count
+		providersIpv6 += providerCountry.Ipv6Count
+		providersDualstack += providerCountry.DualstackCount
 	}
 	statsCountriesGauge.set(float64(len(providerCountries)))
 	statsOnlineProvidersGauge.set(float64(providers))
 	statsOnlineProvidersByCountryGauge.replace(byCountry)
 	statsProviderRegionsGauge.set(float64(regions))
 	statsProviderCitiesGauge.set(float64(cities))
+	// the family split comes from the same per-country scan, so the population
+	// is never counted twice (M4)
+	statsOnlineProvidersByIpFamilyGauge.replace(statsIpFamilyValues(
+		providersIpv4,
+		providersIpv6,
+		providersDualstack,
+	))
+
+	// one scan of the online extenders, grouped by country with the same
+	// family filters (M2). an extender whose activation resolved no country
+	// counts in the population and its family but has no country to label, so
+	// it is left out of the per-country gauge rather than published under an
+	// empty code
+	extenderCountries := model.CountExtendersByCountry(ctx)
+	extendersByCountry := make([]statsLabeledValue, 0, len(extenderCountries))
+	var extenders int64
+	var extendersIpv4 int64
+	var extendersIpv6 int64
+	var extendersDualstack int64
+	for _, extenderCountry := range extenderCountries {
+		extenders += extenderCountry.Count
+		extendersIpv4 += extenderCountry.Ipv4Count
+		extendersIpv6 += extenderCountry.Ipv6Count
+		extendersDualstack += extenderCountry.DualstackCount
+		if extenderCountry.CountryCode == "" {
+			continue
+		}
+		extendersByCountry = append(extendersByCountry, statsLabeledValue{
+			labelValues: []string{extenderCountry.CountryCode, extenderCountry.Country},
+			value:       float64(extenderCountry.Count),
+		})
+	}
+	statsOnlineExtendersGauge.set(float64(extenders))
+	statsOnlineExtendersByCountryGauge.replace(extendersByCountry)
+	statsOnlineExtendersByIpFamilyGauge.replace(statsIpFamilyValues(
+		extendersIpv4,
+		extendersIpv6,
+		extendersDualstack,
+	))
+
+	// the contract gauges, each open now and over the trailing 24 hours (M3)
+	contracts := model.CountContracts(ctx, now)
+	statsOpenContractsGauge.set(float64(contracts.OpenContracts))
+	statsOpenContractsWithExtenderGauge.set(float64(contracts.OpenContractsWithExtender))
+	statsOpenDisputesGauge.set(float64(contracts.OpenDisputes))
+	statsContracts24hGauge.set(float64(contracts.Contracts24h))
+	statsContractsWithExtender24hGauge.set(float64(contracts.ContractsWithExtender24h))
+	statsDisputes24hGauge.set(float64(contracts.Disputes24h))
 
 	statsUsers24hGauge.set(float64(model.CountTopLevelClientsWithContractSince(ctx, now.Add(-24*time.Hour))))
 
