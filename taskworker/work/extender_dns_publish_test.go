@@ -1124,3 +1124,254 @@ func TestExtenderDnsPublishFailureDoesNotStopTheDrip(t *testing.T) {
 		}
 	})
 }
+
+// The name a comparison is made on is the form the zone returns: fully
+// qualified and lower case. A client may configure any of these spellings and
+// the listing must still line up with the record it is about.
+func TestExtenderDnsFqdn(t *testing.T) {
+	cases := []struct {
+		recordName string
+		fqdn       string
+	}{
+		{recordName: "extender.ur.example", fqdn: "extender.ur.example."},
+		{recordName: "extender.ur.example.", fqdn: "extender.ur.example."},
+		{recordName: "  EXTENDER.UR.Example. ", fqdn: "extender.ur.example."},
+		{recordName: "", fqdn: "."},
+		{recordName: "   ", fqdn: "."},
+	}
+	for _, c := range cases {
+		if fqdn := extenderDnsFqdn(c.recordName); fqdn != c.fqdn {
+			t.Errorf("extenderDnsFqdn(%q) = %q, want %q", c.recordName, fqdn, c.fqdn)
+		}
+	}
+}
+
+// What an apply removes is exactly the sets of ours the zone holds that this
+// tick no longer wants. A desired set is never deleted and re-upserted, and a
+// zone that lists one of ours twice produces one delete, since a second delete
+// of the same set fails the whole batch.
+func TestExtenderDnsDeletedSetIdentifiers(t *testing.T) {
+	desiredSets := []*extenderDnsRecordSet{
+		{continentCode: "EU", ipVersion: 4},
+		{ipVersion: 6},
+	}
+	cases := []struct {
+		name                   string
+		existingSetIdentifiers []string
+		deletedSetIdentifiers  []string
+	}{
+		{
+			name:                   "an empty zone deletes nothing",
+			existingSetIdentifiers: []string{},
+			deletedSetIdentifiers:  []string{},
+		},
+		{
+			name:                   "a desired set is upserted rather than deleted",
+			existingSetIdentifiers: []string{"extender-EU-A", "extender-default-AAAA"},
+			deletedSetIdentifiers:  []string{},
+		},
+		{
+			name:                   "a set that is no longer desired is deleted",
+			existingSetIdentifiers: []string{"extender-EU-A", "extender-AS-A", "extender-default-A"},
+			deletedSetIdentifiers:  []string{"extender-AS-A", "extender-default-A"},
+		},
+		{
+			name:                   "a repeated listing is one delete",
+			existingSetIdentifiers: []string{"extender-AS-A", "extender-AS-A"},
+			deletedSetIdentifiers:  []string{"extender-AS-A"},
+		},
+	}
+	for _, c := range cases {
+		deleted := extenderDnsDeletedSetIdentifiers(c.existingSetIdentifiers, desiredSets)
+		if !slices.Equal(deleted, c.deletedSetIdentifiers) {
+			t.Errorf("%s: deleted = %v, want %v", c.name, deleted, c.deletedSetIdentifiers)
+		}
+	}
+}
+
+// A zone holds more at one name than this publisher's address sets. A record of
+// another type, a set another owner put there, and the same set of ours listed
+// twice must all leave the batch with exactly one delete of our own stale set:
+// anything else either destroys someone's record or fails the whole batch on a
+// repeated change.
+func TestRoute53ExtenderDnsIgnoresForeignAndNonAddressSets(t *testing.T) {
+	name := testExtenderDnsRecordName + "."
+	staleSet := testRoute53RecordSet(name, "extender-AS-A", route53.RRTypeA, "198.51.100.95")
+	repeatedStaleSet := testRoute53RecordSet(name, "extender-AS-A", route53.RRTypeA, "198.51.100.96")
+	txtSet := testRoute53RecordSet(name, "extender-AS-TXT", route53.RRTypeTxt, "\"not an address\"")
+	foreignSet := testRoute53RecordSet(name, "operator-A", route53.RRTypeA, "198.51.100.97")
+	api := &testRoute53Api{
+		existingRecordSets: []*route53.ResourceRecordSet{
+			staleSet,
+			txtSet,
+			foreignSet,
+			repeatedStaleSet,
+		},
+	}
+	publisher := &route53ExtenderDnsPublisher{
+		api:          api,
+		hostedZoneId: testExtenderDnsHostedZoneId,
+	}
+
+	desiredSets := []*extenderDnsRecordSet{
+		{continentCode: "EU", ipVersion: 4, ips: testExtenderDnsIps(4, 1)},
+	}
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		desiredSets,
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	connect.AssertEqual(t, len(api.changeInputs), 1)
+	changes := api.changeInputs[0].ChangeBatch.Changes
+	connect.AssertEqual(t, len(changes), 2)
+	connect.AssertEqual(t, aws.StringValue(changes[0].Action), route53.ChangeActionUpsert)
+	connect.AssertEqual(t, aws.StringValue(changes[0].ResourceRecordSet.SetIdentifier), "extender-EU-A")
+	connect.AssertEqual(t, aws.StringValue(changes[1].Action), route53.ChangeActionDelete)
+	// the first listing of the set is the one the delete carries
+	if changes[1].ResourceRecordSet != staleSet {
+		t.Fatal("the delete does not carry the set as the zone first listed it")
+	}
+	for _, change := range changes {
+		if change.ResourceRecordSet == txtSet || change.ResourceRecordSet == foreignSet {
+			t.Fatalf("a record that is not ours was changed: %v", change.ResourceRecordSet)
+		}
+	}
+}
+
+// Only a successful resolution is remembered. A zone that is missing now may be
+// created later, and caching the failure would need a process restart to clear
+// it -- which is a deploy to fix a dns record.
+func TestRoute53ExtenderDnsRetriesAZoneThatDidNotResolve(t *testing.T) {
+	resetTestExtenderDnsHostedZoneIds(t)
+
+	api := &testRoute53Api{hostedZonesErr: errTestRoute53Unreachable}
+	publisher := &route53ExtenderDnsPublisher{
+		api:            api,
+		hostedZoneName: testExtenderDnsHostedZoneName,
+	}
+	desiredSets := []*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}}
+
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		desiredSets,
+	); err == nil {
+		t.Fatal("an unresolvable zone must fail the apply")
+	}
+	connect.AssertEqual(t, len(api.changeInputs), 0)
+
+	// the zone exists on the next tick, with no restart in between
+	api.hostedZonesErr = nil
+	api.hostedZones = []*route53.HostedZone{
+		testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
+	}
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		desiredSets,
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	connect.AssertEqual(t, len(api.hostedZoneInputs), 2)
+	connect.AssertEqual(t, len(api.changeInputs), 1)
+	connect.AssertEqual(
+		t,
+		aws.StringValue(api.changeInputs[0].HostedZoneId),
+		testExtenderDnsNamedZoneId,
+	)
+
+	// a block that names no zone at all has nowhere to write and costs no call
+	if _, err := resolveExtenderDnsHostedZoneId(context.Background(), api, "", "  "); err == nil {
+		t.Fatal("a dns block with no zone resolved to one")
+	}
+	connect.AssertEqual(t, len(api.hostedZoneInputs), 2)
+}
+
+// What a route 53 call fails with when the api cannot be reached.
+var errTestRoute53Unreachable = fmt.Errorf("route 53 is unreachable")
+
+// Static credentials are used only when both halves are configured. A
+// half-configured pair is a typo rather than an intent, and signing with it
+// would fail every call rather than fall back to the instance role the host
+// already has.
+func TestExtenderRoute53ApiUsesStaticCredentialsOnlyWhenBothHalvesAreSet(t *testing.T) {
+	// a resolvable default chain, so the fallback costs no metadata call
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLECHAINKEY")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "example-chain-secret")
+
+	const configuredAccessKeyId = "AKIAEXAMPLESTATICKEY"
+	const configuredSecretAccessKey = "example-static-secret"
+	cases := []struct {
+		name               string
+		awsRegion          string
+		awsAccessKeyId     string
+		awsSecretAccessKey string
+		region             string
+		accessKeyId        string
+	}{
+		{
+			name:               "both halves",
+			awsRegion:          "eu-west-1",
+			awsAccessKeyId:     configuredAccessKeyId,
+			awsSecretAccessKey: configuredSecretAccessKey,
+			region:             "eu-west-1",
+			accessKeyId:        configuredAccessKeyId,
+		},
+		{
+			name:           "only the key id",
+			awsAccessKeyId: configuredAccessKeyId,
+			region:         ExtenderDnsDefaultAwsRegion,
+			accessKeyId:    "AKIAEXAMPLECHAINKEY",
+		},
+		{
+			name:               "only the secret",
+			awsSecretAccessKey: configuredSecretAccessKey,
+			region:             ExtenderDnsDefaultAwsRegion,
+			accessKeyId:        "AKIAEXAMPLECHAINKEY",
+		},
+		{
+			name:        "neither half",
+			region:      ExtenderDnsDefaultAwsRegion,
+			accessKeyId: "AKIAEXAMPLECHAINKEY",
+		},
+		{
+			name:               "blank halves are not configuration",
+			awsRegion:          "  ",
+			awsAccessKeyId:     "  ",
+			awsSecretAccessKey: "  ",
+			region:             ExtenderDnsDefaultAwsRegion,
+			accessKeyId:        "AKIAEXAMPLECHAINKEY",
+		},
+	}
+	for _, c := range cases {
+		api, err := newExtenderRoute53Api(c.awsRegion, c.awsAccessKeyId, c.awsSecretAccessKey)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		route53Client, ok := api.(*route53.Route53)
+		if !ok {
+			t.Fatalf("%s: the api is %T", c.name, api)
+		}
+		if region := aws.StringValue(route53Client.Config.Region); region != c.region {
+			t.Errorf("%s: region = %q, want %q", c.name, region, c.region)
+		}
+		value, err := route53Client.Config.Credentials.Get()
+		if err != nil {
+			t.Errorf("%s: credentials: %v", c.name, err)
+			continue
+		}
+		if value.AccessKeyID != c.accessKeyId {
+			t.Errorf("%s: access key = %q, want %q", c.name, value.AccessKeyID, c.accessKeyId)
+		}
+		if c.accessKeyId == configuredAccessKeyId && value.SecretAccessKey != configuredSecretAccessKey {
+			t.Errorf("%s: the configured secret was not used", c.name)
+		}
+	}
+}

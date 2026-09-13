@@ -412,3 +412,146 @@ func testExtenderTaskRunAt(t testing.TB, ctx context.Context, runOnceKey string)
 	})
 	return runAt
 }
+
+// Without an api host there is no destination to ask an extender to forward to,
+// so the probe would be a dial with nothing to prove. The task probes nothing
+// rather than failing addresses for a fault of the operator's own configuration.
+func TestExtenderProbePausesWithoutAnApiHost(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		rootKeySeed, err := connect.NewExtenderKeySeed()
+		if err != nil {
+			t.Fatal(err)
+		}
+		installTestExtenderWorkConfigYaml(t, strings.Join([]string{
+			"root_private_key_hex: " + connect.ExtenderKeySeedHex(rootKeySeed),
+			"network_host: " + testExtenderWorkNetworkHost,
+		}, "\n"))
+		extenderId := createTestExtender(ctx, 5, 4)
+
+		calls := stubExtenderProbe(t, func() error {
+			return fmt.Errorf("the extender did not answer")
+		})
+
+		result := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.Probed, 0)
+		connect.AssertEqual(t, len(calls()), 0)
+
+		stored := model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, true)
+		connect.AssertEqual(t, stored.Addresses[0].ConsecutiveProbeFailures, 0)
+	})
+}
+
+// A deployment with no extender network at all runs both tasks as no-ops. The
+// chain still re-arms, so configuring one later needs no restart, and neither
+// task is an error the task worker would back off on.
+func TestExtenderTasksAreInertWithoutAnExtenderNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		// no extender.yml is pushed, so the configuration read fails
+		controller.Testing_ResetExtenderConfig()
+		t.Cleanup(controller.Testing_ResetExtenderConfig)
+		if _, err := controller.EnvExtenderConfig(); err == nil {
+			t.Fatal("this test requires an environment with no extender.yml")
+		}
+
+		extenderId := createTestExtender(ctx, 6, 4)
+		calls := stubExtenderProbe(t, func() error {
+			return fmt.Errorf("the extender did not answer")
+		})
+
+		probeResult := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, probeResult.Probed, 0)
+		connect.AssertEqual(t, len(calls()), 0)
+
+		publishResult := runTestExtenderPublish(t, ctx)
+		connect.AssertEqual(t, publishResult.Active, 0)
+		connect.AssertEqual(t, publishResult.Published, 0)
+
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
+		stored := model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, true)
+		connect.AssertEqual(t, stored.Addresses[0].LastPublishTime == nil, true)
+	})
+}
+
+// How long the concurrency barrier waits before it reports a stall. Generous,
+// because nothing waits this long when the bound holds.
+const testExtenderProbeConcurrencyTimeout = 60 * time.Second
+
+// The pass is bounded at ExtenderProbeConcurrency addresses at once, so a large
+// directory does not open thousands of sockets from one process.
+//
+// The bound is made exact rather than sampled: every probe blocks until exactly
+// that many are in flight, so a lower bound never reaches the barrier and a
+// higher one is seen in the high-water mark. Nothing here depends on timing
+// except the watchdog, which only turns a stall into a readable failure.
+func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderWorkConfig(t)
+
+		const targetCount = 2 * ExtenderProbeConcurrency
+		for i := range targetCount {
+			createTestExtender(ctx, 200+i, 4)
+		}
+
+		stateLock := sync.Mutex{}
+		inFlight := 0
+		maxInFlight := 0
+		atConcurrency := make(chan struct{})
+		release := make(chan struct{})
+		reached := sync.Once{}
+		stubExtenderProbe(t, func() error {
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				inFlight += 1
+				maxInFlight = max(maxInFlight, inFlight)
+				if inFlight == ExtenderProbeConcurrency {
+					reached.Do(func() { close(atConcurrency) })
+				}
+			}()
+			<-release
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			inFlight -= 1
+			return nil
+		})
+
+		// the watchdog exists so a bound that is too low fails with a message
+		// rather than hanging until the suite timeout
+		stalled := false
+		watchdogDone := make(chan struct{})
+		go func() {
+			defer close(watchdogDone)
+			select {
+			case <-atConcurrency:
+			case <-time.After(testExtenderProbeConcurrencyTimeout):
+				stalled = true
+			}
+			close(release)
+		}()
+
+		result := runTestExtenderProbe(t, ctx)
+		<-watchdogDone
+
+		if stalled {
+			t.Fatalf(
+				"the task never had %d probes in flight; the high-water mark was %d",
+				ExtenderProbeConcurrency,
+				maxInFlight,
+			)
+		}
+		connect.AssertEqual(t, result.Probed, targetCount)
+		connect.AssertEqual(t, result.Succeeded, targetCount)
+		if ExtenderProbeConcurrency < maxInFlight {
+			t.Fatalf(
+				"the task had %d probes in flight, above the bound of %d",
+				maxInFlight,
+				ExtenderProbeConcurrency,
+			)
+		}
+	})
+}
