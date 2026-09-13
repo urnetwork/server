@@ -586,6 +586,97 @@ func TestRoute53ExtenderDnsPublishesOneBatch(t *testing.T) {
 	}
 }
 
+// The first tick after a deployment: the zone holds no set at the record name
+// at all, so every set the sample wants is created and the batch is an upsert
+// per set with no delete in it. A neighbouring name carrying our own prefix is
+// still not ours -- only the name being published is.
+func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
+	name := testExtenderDnsRecordName + "."
+	otherName := "other." + testExtenderWorkNetworkHost + "."
+	api := &testRoute53Api{
+		existingRecordSets: []*route53.ResourceRecordSet{
+			testRoute53RecordSet(otherName, "extender-EU-A", route53.RRTypeA, "198.51.100.90"),
+			testRoute53RecordSet(otherName, "extender-default-A", route53.RRTypeA, "198.51.100.91"),
+		},
+	}
+	publisher := &route53ExtenderDnsPublisher{
+		api:          api,
+		hostedZoneId: testExtenderDnsHostedZoneId,
+	}
+
+	// a sampled state rather than a hand written one: two continents in v4 and
+	// one in v6, so the batch carries continent sets and the default set of
+	// both families
+	desiredSets := sampleTestExtenderDnsRecordSets(
+		slices.Concat(
+			testExtenderDnsAddresses("DE", 4, 1, 2),
+			testExtenderDnsAddresses("US", 4, 3, 4),
+			testExtenderDnsAddresses("DE", 6, 1, 2),
+		),
+		testExtenderDnsSampleCount,
+	)
+	setIdentifiers := []string{}
+	for _, desiredSet := range desiredSets {
+		setIdentifiers = append(setIdentifiers, desiredSet.setIdentifier())
+	}
+	connect.AssertEqual(t, setIdentifiers, []string{
+		"extender-EU-A",
+		"extender-NA-A",
+		"extender-default-A",
+		"extender-EU-AAAA",
+		"extender-default-AAAA",
+	})
+
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		desiredSets,
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// the listing stops at the first record of another name, so nothing of the
+	// neighbour is read as a set of ours
+	connect.AssertEqual(t, len(api.listInputs), 1)
+	connect.AssertEqual(t, aws.StringValue(api.listInputs[0].HostedZoneId), testExtenderDnsHostedZoneId)
+	connect.AssertEqual(t, aws.StringValue(api.listInputs[0].StartRecordName), name)
+	connect.AssertEqual(t, api.deliveredPageCount, 1)
+
+	// one batch, one upsert per desired set in the order the sample drew them,
+	// and nothing to delete because the zone held nothing of ours
+	connect.AssertEqual(t, len(api.changeInputs), 1)
+	connect.AssertEqual(t, aws.StringValue(api.changeInputs[0].HostedZoneId), testExtenderDnsHostedZoneId)
+	changes := api.changeInputs[0].ChangeBatch.Changes
+	connect.AssertEqual(t, len(changes), len(desiredSets))
+	for i, change := range changes {
+		desiredSet := desiredSets[i]
+		connect.AssertEqual(t, aws.StringValue(change.Action), route53.ChangeActionUpsert)
+		recordSet := change.ResourceRecordSet
+		connect.AssertEqual(t, aws.StringValue(recordSet.Name), name)
+		connect.AssertEqual(t, aws.StringValue(recordSet.Type), desiredSet.recordType())
+		connect.AssertEqual(t, aws.Int64Value(recordSet.TTL), int64(testExtenderDnsTtl))
+		connect.AssertEqual(t, aws.StringValue(recordSet.SetIdentifier), desiredSet.setIdentifier())
+		if desiredSet.continentCode == "" {
+			// the default set is the `*` country rather than a continent
+			connect.AssertEqual(t, aws.StringValue(recordSet.GeoLocation.CountryCode), "*")
+			connect.AssertEqual(t, recordSet.GeoLocation.ContinentCode, nil)
+		} else {
+			connect.AssertEqual(
+				t,
+				aws.StringValue(recordSet.GeoLocation.ContinentCode),
+				desiredSet.continentCode,
+			)
+			connect.AssertEqual(t, recordSet.GeoLocation.CountryCode, nil)
+		}
+		ips := []string{}
+		for _, resourceRecord := range recordSet.ResourceRecords {
+			ips = append(ips, aws.StringValue(resourceRecord.Value))
+		}
+		connect.AssertEqual(t, ips, desiredSet.ips)
+	}
+}
+
 // An operator with no active extenders and nothing of ours in the zone writes
 // nothing at all: an empty change batch is rejected by the api.
 func TestRoute53ExtenderDnsWritesNothingWithoutChanges(t *testing.T) {
