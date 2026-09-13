@@ -917,6 +917,9 @@ type contractExtenderPayoutSpec struct {
 	// the extender's provider client is the egress client, so the two roles
 	// collapse to one participant
 	egressClient bool
+	// the extender's provider client is the contract's intermediary, which is
+	// the same collapse through the other role
+	intermediaryClient bool
 }
 
 // An extender is a hop like any other (connect/EXTENDER.md J3): it joins the
@@ -952,6 +955,27 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				extenders:    []contractExtenderPayoutSpec{{}, {}},
 				intermediary: true,
 			},
+			// the zero-extender case is the ordinary contract, kept in this
+			// matrix so the extender rows are proved to add nothing when there
+			// are none rather than only when there are
+			{
+				name:      "no extender leaves the egress with the whole payout",
+				extenders: nil,
+			},
+			{
+				name:         "no extender with an intermediary splits two ways",
+				extenders:    nil,
+				intermediary: true,
+			},
+			{
+				name:         "an extender whose client is the intermediary is paid once",
+				extenders:    []contractExtenderPayoutSpec{{intermediaryClient: true}},
+				intermediary: true,
+			},
+			{
+				name:      "two extenders on the payer network leave the egress alone",
+				extenders: []contractExtenderPayoutSpec{{payerNetwork: true}, {payerNetwork: true}},
+			},
 		} {
 			originNetworkId := server.NewId()
 			originClientId := server.NewId()
@@ -983,9 +1007,9 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 			addParticipant(egressClientId, egressNetworkId)
 
 			intermediaryIds := []server.Id{}
+			intermediaryNetworkId := server.NewId()
 			if test.intermediary {
 				intermediaryId := server.NewId()
-				intermediaryNetworkId := server.NewId()
 				clients[intermediaryId] = intermediaryNetworkId
 				intermediaryIds = append(intermediaryIds, intermediaryId)
 				addParticipant(intermediaryId, intermediaryNetworkId)
@@ -1002,6 +1026,10 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				if spec.egressClient {
 					extenderClientId = egressClientId
 					extenderNetworkId = egressNetworkId
+				}
+				if spec.intermediaryClient && 0 < len(intermediaryIds) {
+					extenderClientId = intermediaryIds[0]
+					extenderNetworkId = intermediaryNetworkId
 				}
 				clients[extenderClientId] = extenderNetworkId
 
@@ -1086,5 +1114,153 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 			assertContractPayoutTestAccounts(t, ctx, networkIds, want)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, usedByteCount)
 		}
+	})
+}
+
+// A companion contract reverses the payer, so its extender parties are the
+// reverse of the origin contract's and its payout is split over ITS own
+// participant set (connect/EXTENDER.md J2, J3). The companion is a separate
+// insert and a separate settlement from the forward direction, so it needs its
+// own proof that an extender is a hop there too.
+//
+// The origin contract is the zero-byte anchor of the pair, exactly as a live
+// companion stream is created, and the odd byte count keeps the remainder
+// observable.
+func TestCompanionContractExtenderPayoutPaysTheReversedParties(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const usedByteCount = ByteCount(121)
+
+		originNetworkId := server.NewId()
+		originClientId := server.NewId()
+		egressNetworkId := server.NewId()
+		egressClientId := server.NewId()
+
+		originExtenderClientId := server.NewId()
+		originExtenderNetworkId := server.NewId()
+		originExtender := testContractExtender(
+			ctx,
+			"companion-payout-origin",
+			originExtenderClientId,
+			originExtenderNetworkId,
+			"203.0.113.50",
+		)
+		egressExtenderClientId := server.NewId()
+		egressExtenderNetworkId := server.NewId()
+		egressExtender := testContractExtender(
+			ctx,
+			"companion-payout-egress",
+			egressExtenderClientId,
+			egressExtenderNetworkId,
+			"203.0.113.51",
+		)
+
+		addContractPayoutTestClients(ctx, map[server.Id]server.Id{
+			originClientId:         originNetworkId,
+			egressClientId:         egressNetworkId,
+			originExtenderClientId: originExtenderNetworkId,
+			egressExtenderClientId: egressExtenderNetworkId,
+		})
+		testConnectFrom(t, ctx, originClientId, "203.0.113.50")
+		testConnectFrom(t, ctx, egressClientId, "203.0.113.51")
+		// both directions are paid by the origin network, since the companion's
+		// payer is its destination
+		balance := addContractPayoutTestBalance(ctx, originNetworkId, usedByteCount)
+
+		originEscrow, err := CreateTransferEscrow(
+			ctx,
+			originNetworkId,
+			originClientId,
+			egressNetworkId,
+			egressClientId,
+			0,
+		)
+		if err != nil {
+			t.Fatalf("create origin escrow: %v", err)
+		}
+		companionEscrow, err := CreateCompanionTransferEscrow(
+			ctx,
+			egressNetworkId,
+			egressClientId,
+			originNetworkId,
+			originClientId,
+			usedByteCount,
+			time.Hour,
+		)
+		if err != nil {
+			t.Fatalf("create companion escrow: %v", err)
+		}
+
+		// the parties swap with the endpoints
+		assertContractExtenderParties(t, ctx, "origin", originEscrow.ContractId, []testContractExtenderParty{
+			{
+				extenderId: originExtender.ExtenderId,
+				party:      ContractPartySource,
+				clientId:   originExtenderClientId,
+				networkId:  originExtenderNetworkId,
+			},
+			{
+				extenderId: egressExtender.ExtenderId,
+				party:      ContractPartyDestination,
+				clientId:   egressExtenderClientId,
+				networkId:  egressExtenderNetworkId,
+			},
+		})
+		assertContractExtenderParties(t, ctx, "companion", companionEscrow.ContractId, []testContractExtenderParty{
+			{
+				extenderId: egressExtender.ExtenderId,
+				party:      ContractPartySource,
+				clientId:   egressExtenderClientId,
+				networkId:  egressExtenderNetworkId,
+			},
+			{
+				extenderId: originExtender.ExtenderId,
+				party:      ContractPartyDestination,
+				clientId:   originExtenderClientId,
+				networkId:  originExtenderNetworkId,
+			},
+		})
+
+		if err := CloseContract(ctx, companionEscrow.ContractId, egressClientId, usedByteCount, false); err != nil {
+			t.Fatalf("close companion egress: %v", err)
+		}
+		if err := CloseContract(ctx, companionEscrow.ContractId, originClientId, usedByteCount, false); err != nil {
+			t.Fatalf("close companion origin: %v", err)
+		}
+
+		// the companion's payer endpoint is out; the far endpoint and both
+		// extenders are hops of equal weight
+		participants := []ContractParticipant{
+			{ClientId: egressClientId, NetworkId: egressNetworkId},
+			{ClientId: originExtenderClientId, NetworkId: originExtenderNetworkId},
+			{ClientId: egressExtenderClientId, NetworkId: egressExtenderNetworkId},
+		}
+		slices.SortFunc(participants, func(a ContractParticipant, b ContractParticipant) int {
+			return a.ClientId.Cmp(b.ClientId)
+		})
+		want := map[server.Id]contractPayoutTestAmount{}
+		wantProviders := map[server.Id]int64{}
+		networkIds := []server.Id{originNetworkId}
+		for participantIndex, participant := range participants {
+			networkIds = append(networkIds, participant.NetworkId)
+			share := ByteCount(evenContractPayoutShare(
+				int64(usedByteCount),
+				participantIndex,
+				len(participants),
+			))
+			wantProviders[participant.ClientId] = int64(share)
+			amount := want[participant.NetworkId]
+			amount.byteCount += share
+			amount.payout += NanoCents(share)
+			want[participant.NetworkId] = amount
+		}
+
+		got := contractPayoutTestAmounts(t, ctx, companionEscrow.ContractId)
+		if !maps.Equal(got, want) {
+			t.Fatalf("companion payout = %v, want %v", got, want)
+		}
+		assertContractPayoutTestProviderAllocations(t, ctx, companionEscrow.ContractId, wantProviders)
+		assertContractPayoutTestAccounts(t, ctx, networkIds, want)
+		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, companionEscrow.ContractId, usedByteCount)
 	})
 }

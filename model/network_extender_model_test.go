@@ -826,3 +826,313 @@ func TestGetActiveNetworkExtenderDnsAddressesExcludesTheInactive(t *testing.T) {
 		})
 	})
 }
+
+// The drip publishes nothing for an extender that went away between being
+// selected and being signed, which is the expected race with a probe tick
+// rather than a fault. A record signed here would promise an address the
+// directory has already been told is gone, and a stamp without a record would
+// skip the extender for a whole rotation.
+func TestPublishNetworkExtenderRecordSkipsAnExtenderThatWentAway(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sign, signed := testRecordSigner()
+
+		revoked := ActivateNetworkExtender(
+			ctx,
+			testExtenderActivation([]byte("extender-public-key-gone-0000001"), 4, "192.0.2.50"),
+			sign,
+		)
+		for range ExtenderTestingMaxConsecutiveProbeFailures {
+			RecordNetworkExtenderProbeResult(
+				ctx,
+				revoked.Extender.ExtenderId,
+				4,
+				false,
+				server.NowUtc(),
+				ExtenderTestingMaxConsecutiveProbeFailures,
+				testRevocationSigner(),
+			)
+		}
+
+		// still marked active but with no address left, which is what a probe
+		// worker that has just spent the last of its budget leaves behind
+		addressless := ActivateNetworkExtender(
+			ctx,
+			testExtenderActivation([]byte("extender-public-key-gone-0000002"), 4, "192.0.2.51"),
+			sign,
+		)
+		Testing_DeactivateNetworkExtenderAddress(ctx, addressless.Extender.ExtenderId, 4)
+
+		signedCount := len(signed())
+		publishCount := len(Testing_GetNetworkExtenderPublishes(ctx))
+		for _, extenderId := range []server.Id{
+			revoked.Extender.ExtenderId,
+			addressless.Extender.ExtenderId,
+			// an extender that never existed
+			server.NewId(),
+		} {
+			if PublishNetworkExtenderRecord(ctx, extenderId, sign) {
+				t.Fatalf("extender %s was published", extenderId)
+			}
+		}
+		connect.AssertEqual(t, len(signed()), signedCount)
+		connect.AssertEqual(t, len(Testing_GetNetworkExtenderPublishes(ctx)), publishCount)
+		// and neither is ever selected for a batch in the first place
+		connect.AssertEqual(t, len(GetNetworkExtenderIdsForPublish(ctx, 8)), 0)
+
+		// the stamps are untouched, so a later activation is still the oldest
+		stored := Testing_GetNetworkExtender(ctx, addressless.Extender.ExtenderId)
+		connect.AssertEqual(t, stored.Addresses[0].LastPublishTime == nil, true)
+	})
+}
+
+// A probe result for an address that is gone, or for an extender that never
+// existed, changes nothing and signs nothing. The task probes from a snapshot
+// of the directory, so a result can always arrive for a row another worker has
+// already removed.
+func TestRecordNetworkExtenderProbeResultIgnoresAnUnknownAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sign, _ := testRecordSigner()
+
+		activated := ActivateNetworkExtender(
+			ctx,
+			testExtenderActivation([]byte("extender-public-key-unknown-0001"), 4, "192.0.2.52"),
+			sign,
+		)
+
+		signCount := 0
+		signRevocation := func(extender *NetworkExtender, issueTime time.Time) ([]byte, error) {
+			signCount += 1
+			return []byte("revocation"), nil
+		}
+		cases := []struct {
+			name       string
+			extenderId server.Id
+			ipVersion  int
+			success    bool
+		}{
+			{name: "a family that was never activated", extenderId: activated.Extender.ExtenderId, ipVersion: 6},
+			{name: "a family that was never activated, success", extenderId: activated.Extender.ExtenderId, ipVersion: 6, success: true},
+			{name: "an extender that never existed", extenderId: server.NewId(), ipVersion: 4},
+		}
+		for _, c := range cases {
+			outcome := RecordNetworkExtenderProbeResult(
+				ctx,
+				c.extenderId,
+				c.ipVersion,
+				c.success,
+				server.NowUtc(),
+				ExtenderTestingMaxConsecutiveProbeFailures,
+				signRevocation,
+			)
+			if outcome.AddressDeactivated || outcome.ExtenderRevoked {
+				t.Errorf("%s: outcome = %+v, want nothing", c.name, outcome)
+			}
+		}
+		connect.AssertEqual(t, signCount, 0)
+
+		stored := Testing_GetNetworkExtender(ctx, activated.Extender.ExtenderId)
+		connect.AssertEqual(t, stored.Extender.Active, true)
+		connect.AssertEqual(t, len(stored.Addresses), 1)
+		connect.AssertEqual(t, stored.Addresses[0].Active, true)
+		connect.AssertEqual(t, stored.Addresses[0].ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, stored.Addresses[0].LastProbeTime == nil, true)
+		// only the activation record
+		connect.AssertEqual(t, len(Testing_GetNetworkExtenderPublishes(ctx)), 1)
+	})
+}
+
+// A redelivery after a crash between the publish and the stamp must not move
+// the stamp forward. The row is already delivered, and a second stamp would
+// record the retry rather than the delivery.
+func TestMarkExtenderPublishPublishedLeavesAStampedRowAlone(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sign, _ := testRecordSigner()
+
+		ActivateNetworkExtender(
+			ctx,
+			testExtenderActivation([]byte("extender-public-key-stamp-00001"), 4, "192.0.2.53"),
+			sign,
+		)
+		publishes := Testing_GetNetworkExtenderPublishes(ctx)
+		connect.AssertEqual(t, len(publishes), 1)
+		publishId := publishes[0].PublishId
+
+		MarkExtenderPublishPublished(ctx, publishId)
+		first := Testing_GetNetworkExtenderPublishes(ctx)[0].PublishedTime
+		if first == nil {
+			t.Fatal("the row was not stamped")
+		}
+
+		MarkExtenderPublishPublished(ctx, publishId)
+		second := Testing_GetNetworkExtenderPublishes(ctx)[0].PublishedTime
+		if second == nil || !second.Equal(*first) {
+			t.Fatalf("the stamp moved from %s to %v", first, second)
+		}
+		// and a stamped row never comes back to a claim
+		connect.AssertEqual(t, len(ClaimUnpublishedExtenderPublishes(ctx, 10)), 0)
+	})
+}
+
+// Re-activating one identity key carries the new ports, tld, country and owner
+// onto the same extender row. An operator that moved its extender to another
+// client or another port must not leave the directory advertising the old one,
+// and the record signed by the re-activation is what the directory keeps (B5).
+func TestActivateNetworkExtenderUpdatesThePortsAndOwnerOfOneKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		publicKey := []byte("extender-public-key-moved-00001")
+		sign, _ := testRecordSigner()
+
+		first := testExtenderActivation(publicKey, 4, "192.0.2.54")
+		activated := ActivateNetworkExtender(ctx, first, sign)
+
+		second := testExtenderActivation(publicKey, 4, "192.0.2.55")
+		second.TcpPort = 8443
+		second.UdpPort = 8444
+		second.DnsPort = 8453
+		second.DnsTld = "moved.example."
+		second.CountryCode = "DE"
+		second.Carriers = []string{connect.ExtenderCarrierTcp}
+		reactivated := ActivateNetworkExtender(ctx, second, sign)
+
+		connect.AssertEqual(t, reactivated.Extender.ExtenderId, activated.Extender.ExtenderId)
+
+		stored := Testing_GetNetworkExtender(ctx, activated.Extender.ExtenderId)
+		connect.AssertEqual(t, stored.Extender.NetworkId, second.NetworkId)
+		connect.AssertEqual(t, stored.Extender.ClientId, second.ClientId)
+		connect.AssertEqual(t, stored.Extender.TcpPort, 8443)
+		connect.AssertEqual(t, stored.Extender.UdpPort, 8444)
+		connect.AssertEqual(t, stored.Extender.DnsPort, 8453)
+		connect.AssertEqual(t, stored.Extender.DnsTld, "moved.example.")
+		connect.AssertEqual(t, stored.Extender.CountryCode, "DE")
+		// the create time is the first activation's; only an update happened
+		connect.AssertEqual(t, stored.Extender.CreateTime.Equal(activated.Extender.CreateTime), true)
+		// one row per family, so the family's address moved rather than doubling
+		connect.AssertEqual(t, len(stored.Addresses), 1)
+		connect.AssertEqual(t, stored.Addresses[0].Ip.String(), "192.0.2.55")
+		connect.AssertEqual(t, slices.Equal(stored.Addresses[0].Carriers, []string{"tcp"}), true)
+
+		publishes := Testing_GetNetworkExtenderPublishes(ctx)
+		connect.AssertEqual(t, len(publishes), 2)
+		connect.AssertEqual(t, string(publishes[1].Message), "record:[192.0.2.55]")
+	})
+}
+
+// The probe task reads never-probed addresses first and then the oldest probe,
+// so a run that is cut short makes progress through the set rather than
+// re-probing the same head forever. The target also carries everything one dial
+// needs, so the task never goes back to the directory per address.
+func TestGetActiveNetworkExtenderProbeTargetsTakeTheOldestProbeFirst(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		baseTime := server.NowUtc().Add(-24 * time.Hour)
+
+		type probeOrderCase struct {
+			lastProbeAt *time.Time
+			ip          string
+		}
+		// deliberately created newest-probe first, so the order under test
+		// cannot be the insertion order
+		cases := []probeOrderCase{
+			{lastProbeAt: timePtr(baseTime.Add(2 * time.Hour)), ip: "192.0.2.60"},
+			{lastProbeAt: timePtr(baseTime.Add(1 * time.Hour)), ip: "192.0.2.61"},
+			{lastProbeAt: nil, ip: "192.0.2.62"},
+			{lastProbeAt: timePtr(baseTime), ip: "192.0.2.63"},
+		}
+		for i, c := range cases {
+			Testing_CreateNetworkExtender(
+				ctx,
+				&NetworkExtender{
+					ExtenderId:  server.NewId(),
+					NetworkId:   networkId,
+					ClientId:    clientId,
+					PublicKey:   []byte(fmt.Sprintf("extender-public-key-probeord-%02d", i)),
+					CreateTime:  baseTime,
+					TcpPort:     8443,
+					UdpPort:     443,
+					DnsPort:     53,
+					DnsTld:      "probe.example.",
+					CountryCode: "US",
+					Active:      true,
+				},
+				[]*NetworkExtenderAddress{
+					{
+						IpVersion:     4,
+						Ip:            netip.MustParseAddr(c.ip),
+						Carriers:      []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns},
+						ActivateTime:  baseTime,
+						Active:        true,
+						LastProbeTime: c.lastProbeAt,
+					},
+				},
+			)
+		}
+		// an inactive address of an active extender, and every address of a
+		// revoked one, are out of the set entirely
+		Testing_CreateNetworkExtender(
+			ctx,
+			&NetworkExtender{
+				ExtenderId: server.NewId(),
+				NetworkId:  networkId,
+				ClientId:   clientId,
+				PublicKey:  []byte("extender-public-key-probeord-90"),
+				CreateTime: baseTime,
+				DnsTld:     connect.DefaultExtenderDnsTld,
+				Active:     true,
+			},
+			[]*NetworkExtenderAddress{
+				{
+					IpVersion:    4,
+					Ip:           netip.MustParseAddr("192.0.2.64"),
+					Carriers:     []string{connect.ExtenderCarrierTcp},
+					ActivateTime: baseTime,
+					Active:       false,
+				},
+			},
+		)
+		Testing_CreateNetworkExtender(
+			ctx,
+			&NetworkExtender{
+				ExtenderId: server.NewId(),
+				NetworkId:  networkId,
+				ClientId:   clientId,
+				PublicKey:  []byte("extender-public-key-probeord-91"),
+				CreateTime: baseTime,
+				DnsTld:     connect.DefaultExtenderDnsTld,
+				Active:     false,
+			},
+			[]*NetworkExtenderAddress{
+				{
+					IpVersion:    4,
+					Ip:           netip.MustParseAddr("192.0.2.65"),
+					Carriers:     []string{connect.ExtenderCarrierTcp},
+					ActivateTime: baseTime,
+					Active:       true,
+				},
+			},
+		)
+
+		targets := GetActiveNetworkExtenderProbeTargets(ctx)
+		ips := []string{}
+		for _, target := range targets {
+			ips = append(ips, target.Ip.String())
+		}
+		want := []string{"192.0.2.62", "192.0.2.63", "192.0.2.61", "192.0.2.60"}
+		if !slices.Equal(ips, want) {
+			t.Fatalf("probe order = %v, want %v", ips, want)
+		}
+
+		// every field one dial needs travels with the target
+		head := targets[0]
+		connect.AssertEqual(t, head.TcpPort, 8443)
+		connect.AssertEqual(t, head.DnsTld, "probe.example.")
+		connect.AssertEqual(t, head.IpVersion, 4)
+		connect.AssertEqual(t, slices.Equal(head.Carriers, []string{"tcp", "dns"}), true)
+		connect.AssertEqual(t, 0 < len(head.PublicKey), true)
+	})
+}

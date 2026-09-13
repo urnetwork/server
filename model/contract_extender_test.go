@@ -333,6 +333,27 @@ func TestCreateTransferEscrowWritesTheExtenderParties(t *testing.T) {
 					partyB(ContractPartyDestination),
 				},
 			},
+			{
+				// zero to many per side: every active extender of an endpoint
+				// counts, which is fuzzy per contract and averages right
+				name:           "two extenders on one side",
+				sourceIps:      []string{"192.0.2.10", "192.0.2.11"},
+				destinationIps: []string{"198.51.100.21"},
+				wantParties: []testContractExtenderParty{
+					partyA(ContractPartySource),
+					partyB(ContractPartySource),
+				},
+			},
+			{
+				name:           "one extender on both sides and another on one",
+				sourceIps:      []string{"192.0.2.10"},
+				destinationIps: []string{"192.0.2.10", "192.0.2.11"},
+				wantParties: []testContractExtenderParty{
+					partyA(ContractPartySource),
+					partyA(ContractPartyDestination),
+					partyB(ContractPartyDestination),
+				},
+			},
 		} {
 			sourceNetworkId, sourceId, destinationNetworkId, destinationId := testContractEndpoints(ctx)
 			for _, ip := range test.sourceIps {
@@ -592,6 +613,185 @@ func TestContractExtenderRowsGoWithTheContract(t *testing.T) {
 		assertContractExtenderParties(t, ctx, "orphan", orphanContractId, []testContractExtenderParty{})
 		if got := len(testContractExtenderParties(t, ctx, liveContractId)); got != 1 {
 			t.Fatalf("live contract parties after the sweep = %d, want 1", got)
+		}
+	})
+}
+
+// The parties are what the operator believes NOW, not what it believed when
+// the connection was tagged: a connection that has gone away and an extender
+// that has since been revoked are both attribution nothing stands behind, and
+// paying for either would credit a hop that is carrying nothing.
+func TestContractExtenderPartiesSkipAClosedConnectionAndARevokedExtender(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		liveClientId := server.NewId()
+		liveNetworkId := server.NewId()
+		live := testContractExtender(ctx, "live", liveClientId, liveNetworkId, "203.0.113.40")
+		testContractExtender(ctx, "closed", server.NewId(), server.NewId(), "203.0.113.41")
+		revoked := testContractExtender(ctx, "revoked", server.NewId(), server.NewId(), "203.0.113.42")
+
+		sourceNetworkId, sourceId, destinationNetworkId, destinationId := testContractEndpoints(ctx)
+		testConnectFrom(t, ctx, sourceId, "203.0.113.40")
+		closedConnectionId := testConnectFromWithConnectionId(t, ctx, sourceId, "203.0.113.41")
+		testConnectFrom(t, ctx, sourceId, "203.0.113.42")
+
+		// one endpoint connection goes away after it was tagged
+		if err := DisconnectNetworkClient(ctx, closedConnectionId); err != nil {
+			t.Fatalf("disconnect: %v", err)
+		}
+		// and one extender loses its last address, which revokes it
+		outcome := RecordNetworkExtenderProbeResult(
+			ctx,
+			revoked.ExtenderId,
+			4,
+			false,
+			server.NowUtc(),
+			1,
+			func(extender *NetworkExtender, issueTime time.Time) ([]byte, error) {
+				return []byte("revocation"), nil
+			},
+		)
+		if !outcome.ExtenderRevoked {
+			t.Fatal("the extender was not revoked")
+		}
+
+		contractId, err := CreateContractNoEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			ByteCount(1024),
+		)
+		if err != nil {
+			t.Fatalf("create contract: %v", err)
+		}
+		assertContractExtenderParties(t, ctx, "live only", contractId, []testContractExtenderParty{
+			{
+				extenderId: live.ExtenderId,
+				party:      ContractPartySource,
+				clientId:   liveClientId,
+				networkId:  liveNetworkId,
+			},
+		})
+	})
+}
+
+// Connects clientId from ip and returns the connection, so a test can close it
+// again.
+func testConnectFromWithConnectionId(
+	t testing.TB,
+	ctx context.Context,
+	clientId server.Id,
+	ip string,
+) server.Id {
+	t.Helper()
+	handlerId := CreateNetworkClientHandler(ctx)
+	connectionId, _, _, _, err := ConnectNetworkClient(
+		ctx,
+		clientId,
+		net.JoinHostPort(ip, "443"),
+		handlerId,
+	)
+	if err != nil {
+		t.Fatalf("connect %s from %s: %v", clientId, ip, err)
+	}
+	return connectionId
+}
+
+// The orphan sweep pages contract_extender by its whole three column key, so a
+// pass that runs out of budget mid-table resumes where it stopped rather than
+// restarting the table or skipping the rest of it. The key is the one part of
+// the step that is not shared with the tables beside it: it has three columns
+// where they have two, and a cursor that did not round trip would silently
+// leave rows behind forever.
+func TestContractExtenderOrphanSweepResumesAcrossItsCursor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		extenderClientId := server.NewId()
+		extenderNetworkId := server.NewId()
+		testContractExtender(
+			ctx,
+			"sweep-cursor",
+			extenderClientId,
+			extenderNetworkId,
+			"203.0.113.60",
+		)
+		sourceNetworkId, sourceId, destinationNetworkId, destinationId := testContractEndpoints(ctx)
+		testConnectFrom(t, ctx, sourceId, "203.0.113.60")
+
+		liveContractId, err := CreateContractNoEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			ByteCount(1024),
+		)
+		if err != nil {
+			t.Fatalf("create live contract: %v", err)
+		}
+
+		// several orphans, spread over the key so the order under the cursor is
+		// not the insert order
+		orphanContractIds := []server.Id{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			for range 3 {
+				orphanContractId := server.NewId()
+				orphanContractIds = append(orphanContractIds, orphanContractId)
+				for _, party := range []ContractParty{ContractPartySource, ContractPartyDestination} {
+					server.RaisePgResult(tx.Exec(
+						ctx,
+						`
+						INSERT INTO contract_extender (
+							contract_id,
+							extender_id,
+							party,
+							client_id,
+							network_id
+						)
+						VALUES ($1, $2, $3, $4, $5)
+						`,
+						orphanContractId,
+						server.NewId(),
+						party,
+						extenderClientId,
+						extenderNetworkId,
+					))
+				}
+			}
+		})
+
+		// one row of budget per call, so every call but the last resumes from a
+		// cursor the previous one produced
+		removed := int64(0)
+		cursor := SweepOrphanCursor{}
+		callCount := 0
+		for {
+			callCount += 1
+			if 64 < callCount {
+				t.Fatal("the sweep never finished")
+			}
+			stepRemoved, endCursor, done := SweepOrphanContractData(ctx, cursor, 1, 1)
+			removed += stepRemoved
+			if done {
+				break
+			}
+			cursor = endCursor
+		}
+		if removed != 6 {
+			t.Fatalf("the sweep removed %d rows, want the 6 orphans", removed)
+		}
+		if callCount < 2 {
+			t.Fatalf("the sweep finished in %d call, so no cursor was carried", callCount)
+		}
+		for _, orphanContractId := range orphanContractIds {
+			assertContractExtenderParties(t, ctx, "orphan", orphanContractId, []testContractExtenderParty{})
+		}
+		if got := len(testContractExtenderParties(t, ctx, liveContractId)); got != 1 {
+			t.Fatalf("the live contract's parties = %d, want 1", got)
 		}
 	})
 }
