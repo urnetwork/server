@@ -203,6 +203,7 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 					schemaname = 'public' AND
 					indexname IN (
 						'contract_extender_pkey',
+						'contract_extender_create_time_contract_id',
 						'network_client_connection_client_id_connected_extender_id'
 					)
 				ORDER BY indexname
@@ -221,6 +222,9 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 			// contract_extender
 			"client_id",
 			"contract_id",
+			// the hour bucket key of the 24 hour contract counts
+			// (connect/EXTENDER.md M3)
+			"create_time",
 			"extender_id",
 			"network_id",
 			"party",
@@ -231,6 +235,9 @@ func TestContractExtenderMigrationsApply(t *testing.T) {
 			t.Fatalf("extender party columns = %v, want %v", columns, wantColumns)
 		}
 		wantIndexes := []string{
+			// the range scan the hourly count of contracts with an extender
+			// party reads, instead of an existence probe per contract (M3)
+			"contract_extender_create_time_contract_id",
 			"contract_extender_pkey",
 			"network_client_connection_client_id_connected_extender_id",
 		}

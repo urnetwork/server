@@ -7813,4 +7813,44 @@ var migrations = []any{
 		ALTER TABLE network_extender_address
 		ADD COLUMN dns_ports varchar NOT NULL DEFAULT ''
 	`),
+
+	// The location the extender was last activated from
+	// (connect/EXTENDER.md M1), resolved from the activating address the same
+	// way a connection's is and stored beside country_code so the map and the
+	// by-country gauge read a named location rather than a bare code. All four
+	// are nullable: a country-only lookup has no city and no region, a lookup
+	// that fails has none of them, and an activation must never fail to store
+	// for either reason. Rows written before these columns carry null until
+	// their next activation, which the 24 hour re-activation guarantees within
+	// a day.
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN city_location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN region_location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN country_location_id uuid NULL
+	`),
+
+	// The creation time of a contract's extender parties
+	// (connect/EXTENDER.md M3). The rows are written in the transaction that
+	// creates the contract, so now() is the contract's own create_time, and the
+	// index makes the hourly count of contracts with an extender party a range
+	// scan of this small table rather than an existence probe per contract.
+	newSqlMigration(`
+		ALTER TABLE contract_extender
+		ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
+	`),
+	newSqlMigration(`
+		CREATE INDEX contract_extender_create_time_contract_id
+		ON contract_extender (create_time, contract_id)
+	`),
 }
