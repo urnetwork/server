@@ -35,12 +35,20 @@ import (
 //	dns:
 //	  enabled: false
 //	  hosted_zone_id: <zone>
+//	  hosted_zone_name: ur.example
 //	  record_name: extender.ur.example
 //	  ttl: 60
 //	  sample_count: 8
 //	  aws_region: <region>
 //	  aws_access_key_id: <key id>
 //	  aws_secret_access_key: <secret>
+//	gossip_dns:
+//	  enabled: false
+//	  aws_region: <region>
+//	  records:
+//	    - hosted_zone_name: ur.example
+//	      name: gossip.ur.example
+//	      source_name: connect.ur.example
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
@@ -50,8 +58,9 @@ import (
 // gossip_identity_key_hex is the mesh identity of the operator's gossip node
 // (C6): the service runs under it and hello publishes the peer id derived from
 // it, so it must outlive a redeploy or every member loses the operator it was
-// told to dial. The dns block is read by the Route 53 publisher (C5) and is
-// carried here so operations configure one resource rather than two.
+// told to dial. The dns block is read by the Route 53 publisher (C5) and the
+// gossip_dns block by the gossip record setup task (C6); both are carried here
+// so operations configure one resource rather than three.
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -71,23 +80,54 @@ type ExtenderConfig struct {
 	// the public api url a forward probe reaches through an extender
 	ApiUrl string `yaml:"api_url"`
 	// the ed25519 seed of the operator's gossip node identity (C6, C7)
-	GossipIdentityKeyHex string            `yaml:"gossip_identity_key_hex"`
-	Dns                  ExtenderDnsConfig `yaml:"dns"`
+	GossipIdentityKeyHex string                  `yaml:"gossip_identity_key_hex"`
+	Dns                  ExtenderDnsConfig       `yaml:"dns"`
+	GossipDns            ExtenderGossipDnsConfig `yaml:"gossip_dns"`
 }
 
 // Geo dns publishing (C5), read by the dns half of the publish tick. An unset
 // ttl is 60 seconds and an unset sample_count is 8 addresses per set. The
 // record name is configured rather than derived from the host, since which
 // name an operator serves is an operations decision.
+//
+// The zone is named either way: hosted_zone_id is the zone verbatim, and
+// hosted_zone_name is the zone's domain, which the publisher resolves to an id
+// through the aws api once per process. The name is what operations knows, and
+// naming it means a zone recreated under a new id does not need this resource
+// edited; an explicit id still wins, which is the escape hatch for two zones of
+// the same name.
 type ExtenderDnsConfig struct {
 	Enabled            bool   `yaml:"enabled"`
 	HostedZoneId       string `yaml:"hosted_zone_id"`
+	HostedZoneName     string `yaml:"hosted_zone_name"`
 	RecordName         string `yaml:"record_name"`
 	Ttl                int    `yaml:"ttl"`
 	SampleCount        int    `yaml:"sample_count"`
 	AwsRegion          string `yaml:"aws_region"`
 	AwsAccessKeyId     string `yaml:"aws_access_key_id"`
 	AwsSecretAccessKey string `yaml:"aws_secret_access_key"`
+}
+
+// The gossip service records (C6), read by the setup task that mirrors each
+// source name onto its gossip name.
+//
+// There is no ttl or sample here on purpose: the gossip name is not a rotating
+// sample of anything, it is the same address the operator's connect host
+// already answers with, so whatever the source carries is what the gossip name
+// carries. Credentials come from the host, as the dns block's do when it
+// carries none.
+type ExtenderGossipDnsConfig struct {
+	Enabled   bool                             `yaml:"enabled"`
+	AwsRegion string                           `yaml:"aws_region"`
+	Records   []*ExtenderGossipDnsRecordConfig `yaml:"records"`
+}
+
+// One name to mirror: the source whose A and AAAA sets are read, and the
+// gossip name they are written to, both in the zone named here.
+type ExtenderGossipDnsRecordConfig struct {
+	HostedZoneName string `yaml:"hosted_zone_name"`
+	Name           string `yaml:"name"`
+	SourceName     string `yaml:"source_name"`
 }
 
 // The parse outcome, cached whole so a missing resource is remembered as

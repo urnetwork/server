@@ -6,6 +6,7 @@ import (
 	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,10 +32,12 @@ import (
 // the geolocation fields are pinned.
 
 const (
-	testExtenderDnsRecordName   = "extender." + testExtenderWorkNetworkHost
-	testExtenderDnsHostedZoneId = "Z0EXAMPLEZONEID"
-	testExtenderDnsTtl          = 90
-	testExtenderDnsSampleCount  = 3
+	testExtenderDnsRecordName     = "extender." + testExtenderWorkNetworkHost
+	testExtenderDnsHostedZoneId   = "Z0EXAMPLEZONEID"
+	testExtenderDnsHostedZoneName = testExtenderWorkNetworkHost
+	testExtenderDnsNamedZoneId    = "Z0EXAMPLENAMEDZONE"
+	testExtenderDnsTtl            = 90
+	testExtenderDnsSampleCount    = 3
 )
 
 // The dns block the tick tests run with.
@@ -411,13 +414,47 @@ func TestExtenderDnsSampleRotatesBetweenTicks(t *testing.T) {
 	connect.AssertEqual(t, first[0].ips, repeated[0].ips)
 }
 
-// The two Route 53 calls, delivered one record per page so the pager's early
-// stop is observable.
+// The Route 53 calls, delivered one record per page so the pager's early stop
+// is observable.
+//
+// A zone with an entry in zoneRecordSets is listed with its own sets and every
+// other zone with the flat existingRecordSets, so a single-zone test says
+// nothing about zones and a multi-zone one says everything. Used from the test
+// goroutine only, as every tick here is synchronous.
 type testRoute53Api struct {
+	hostedZones        []*route53.HostedZone
+	hostedZonesErr     error
+	zoneRecordSets     map[string][]*route53.ResourceRecordSet
 	existingRecordSets []*route53.ResourceRecordSet
 	deliveredPageCount int
+	hostedZoneInputs   []*route53.ListHostedZonesByNameInput
 	listInputs         []*route53.ListResourceRecordSetsInput
 	changeInputs       []*route53.ChangeResourceRecordSetsInput
+}
+
+// Route 53 positions the listing at the name given and orders zones by name,
+// so a zone before it is not in the answer at all.
+func (self *testRoute53Api) ListHostedZonesByNameWithContext(
+	_ aws.Context,
+	input *route53.ListHostedZonesByNameInput,
+	_ ...request.Option,
+) (*route53.ListHostedZonesByNameOutput, error) {
+	self.hostedZoneInputs = append(self.hostedZoneInputs, input)
+	if self.hostedZonesErr != nil {
+		return nil, self.hostedZonesErr
+	}
+	dnsName := extenderDnsFqdn(aws.StringValue(input.DNSName))
+	hostedZones := []*route53.HostedZone{}
+	for _, hostedZone := range self.hostedZones {
+		if extenderDnsFqdn(aws.StringValue(hostedZone.Name)) < dnsName {
+			continue
+		}
+		hostedZones = append(hostedZones, hostedZone)
+	}
+	return &route53.ListHostedZonesByNameOutput{
+		HostedZones: hostedZones,
+		IsTruncated: aws.Bool(false),
+	}, nil
 }
 
 func (self *testRoute53Api) ListResourceRecordSetsPagesWithContext(
@@ -427,9 +464,13 @@ func (self *testRoute53Api) ListResourceRecordSetsPagesWithContext(
 	_ ...request.Option,
 ) error {
 	self.listInputs = append(self.listInputs, input)
-	for i, recordSet := range self.existingRecordSets {
+	recordSets, ok := self.zoneRecordSets[aws.StringValue(input.HostedZoneId)]
+	if !ok {
+		recordSets = self.existingRecordSets
+	}
+	for i, recordSet := range recordSets {
 		self.deliveredPageCount += 1
-		lastPage := i == len(self.existingRecordSets)-1
+		lastPage := i == len(recordSets)-1
 		output := &route53.ListResourceRecordSetsOutput{
 			ResourceRecordSets: []*route53.ResourceRecordSet{recordSet},
 		}
@@ -580,6 +621,217 @@ func TestRoute53ExtenderDnsWritesNothingWithoutChanges(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	connect.AssertEqual(t, len(api.changeInputs), 0)
+}
+
+// One zone as the api returns it: the id carries the `/hostedzone/` prefix
+// every answer carries and no call takes.
+func testRoute53HostedZone(name string, hostedZoneId string) *route53.HostedZone {
+	return &route53.HostedZone{
+		Name: aws.String(name),
+		Id:   aws.String("/hostedzone/" + hostedZoneId),
+	}
+}
+
+// Drops the zone ids resolved by an earlier test, so a test that counts
+// resolutions counts its own.
+func resetTestExtenderDnsHostedZoneIds(t testing.TB) {
+	t.Helper()
+	Testing_ResetExtenderDnsHostedZoneIds()
+	t.Cleanup(Testing_ResetExtenderDnsHostedZoneIds)
+}
+
+// A zone configured by name is resolved to its id, and the id every later call
+// carries is the bare one rather than the `/hostedzone/` path the answer holds.
+// Only a zone whose name matches exactly is a match: a zone under it shares the
+// suffix and is a different zone entirely.
+func TestRoute53ExtenderDnsResolvesTheZoneByName(t *testing.T) {
+	resetTestExtenderDnsHostedZoneIds(t)
+
+	api := &testRoute53Api{
+		hostedZones: []*route53.HostedZone{
+			testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
+			testRoute53HostedZone("sub."+testExtenderDnsHostedZoneName+".", "Z0EXAMPLESUBZONE"),
+			testRoute53HostedZone("zz.example.", "Z0EXAMPLEOTHERZONE"),
+		},
+	}
+	publisher := &route53ExtenderDnsPublisher{
+		api:            api,
+		hostedZoneName: testExtenderDnsHostedZoneName,
+	}
+
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		[]*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}},
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	connect.AssertEqual(t, len(api.hostedZoneInputs), 1)
+	connect.AssertEqual(
+		t,
+		aws.StringValue(api.hostedZoneInputs[0].DNSName),
+		testExtenderDnsHostedZoneName+".",
+	)
+	connect.AssertEqual(t, len(api.listInputs), 1)
+	connect.AssertEqual(
+		t,
+		aws.StringValue(api.listInputs[0].HostedZoneId),
+		testExtenderDnsNamedZoneId,
+	)
+	connect.AssertEqual(t, len(api.changeInputs), 1)
+	connect.AssertEqual(
+		t,
+		aws.StringValue(api.changeInputs[0].HostedZoneId),
+		testExtenderDnsNamedZoneId,
+	)
+}
+
+// A configured id is the zone, whatever the name says. It is the escape hatch
+// for an account with two zones of one name, so it must not cost a resolution
+// and must not be second-guessed.
+func TestRoute53ExtenderDnsZoneIdOverridesTheName(t *testing.T) {
+	resetTestExtenderDnsHostedZoneIds(t)
+
+	api := &testRoute53Api{
+		hostedZones: []*route53.HostedZone{
+			testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
+		},
+	}
+	publisher := &route53ExtenderDnsPublisher{
+		api:            api,
+		hostedZoneId:   testExtenderDnsHostedZoneId,
+		hostedZoneName: testExtenderDnsHostedZoneName,
+	}
+
+	if err := publisher.publish(
+		context.Background(),
+		testExtenderDnsRecordName,
+		testExtenderDnsTtl,
+		[]*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}},
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	connect.AssertEqual(t, len(api.hostedZoneInputs), 0)
+	connect.AssertEqual(t, len(api.changeInputs), 1)
+	connect.AssertEqual(
+		t,
+		aws.StringValue(api.changeInputs[0].HostedZoneId),
+		testExtenderDnsHostedZoneId,
+	)
+}
+
+// A name that does not resolve to exactly one zone writes nothing. Guessing
+// would publish the record into a zone nobody resolves, which looks exactly
+// like a working publisher until someone asks why the name is dead.
+func TestRoute53ExtenderDnsRefusesAZoneItCannotName(t *testing.T) {
+	resetTestExtenderDnsHostedZoneIds(t)
+
+	cases := []struct {
+		hostedZones  []*route53.HostedZone
+		errSubstring string
+	}{
+		{
+			hostedZones: []*route53.HostedZone{
+				testRoute53HostedZone("zz.example.", "Z0EXAMPLEOTHERZONE"),
+			},
+			errSubstring: "there is no hosted zone named " + testExtenderDnsHostedZoneName + ".",
+		},
+		{
+			// a public and a private zone of the same name
+			hostedZones: []*route53.HostedZone{
+				testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
+				testRoute53HostedZone(testExtenderDnsHostedZoneName+".", "Z0EXAMPLEPRIVATEZONE"),
+			},
+			errSubstring: "there are 2 hosted zones named " + testExtenderDnsHostedZoneName + ".",
+		},
+	}
+	for _, c := range cases {
+		api := &testRoute53Api{hostedZones: c.hostedZones}
+		publisher := &route53ExtenderDnsPublisher{
+			api:            api,
+			hostedZoneName: testExtenderDnsHostedZoneName,
+		}
+		err := publisher.publish(
+			context.Background(),
+			testExtenderDnsRecordName,
+			testExtenderDnsTtl,
+			[]*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}},
+		)
+		if err == nil {
+			t.Errorf("%v must not resolve to a zone", c.hostedZones)
+		} else if !strings.Contains(err.Error(), c.errSubstring) {
+			t.Errorf("publish error %q does not say %q", err, c.errSubstring)
+		}
+		// nothing was listed and nothing was written
+		connect.AssertEqual(t, len(api.listInputs), 0)
+		connect.AssertEqual(t, len(api.changeInputs), 0)
+	}
+}
+
+// The zone of a name does not change while the process runs, so it is resolved
+// once. A lookup on every tick would spend an api call every ten minutes to
+// learn the same id.
+func TestRoute53ExtenderDnsReusesTheResolvedZoneId(t *testing.T) {
+	resetTestExtenderDnsHostedZoneIds(t)
+
+	api := &testRoute53Api{
+		hostedZones: []*route53.HostedZone{
+			testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
+		},
+	}
+	publisher := &route53ExtenderDnsPublisher{
+		api:            api,
+		hostedZoneName: testExtenderDnsHostedZoneName,
+	}
+
+	for range 3 {
+		if err := publisher.publish(
+			context.Background(),
+			testExtenderDnsRecordName,
+			testExtenderDnsTtl,
+			[]*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}},
+		); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	connect.AssertEqual(t, len(api.hostedZoneInputs), 1)
+	connect.AssertEqual(t, len(api.changeInputs), 3)
+	for _, changeInput := range api.changeInputs {
+		connect.AssertEqual(
+			t,
+			aws.StringValue(changeInput.HostedZoneId),
+			testExtenderDnsNamedZoneId,
+		)
+	}
+}
+
+// The zone is configured by name as well as by id, and a block that carries
+// neither has nowhere to write.
+func TestExtenderDnsConfigurationParsesTheZoneName(t *testing.T) {
+	installTestExtenderWorkConfig(
+		t,
+		"dns:",
+		"  enabled: true",
+		"  hosted_zone_name: "+testExtenderDnsHostedZoneName,
+		"  record_name: "+testExtenderDnsRecordName,
+	)
+	config, err := controller.EnvExtenderConfig()
+	if err != nil {
+		t.Fatalf("EnvExtenderConfig: %v", err)
+	}
+	connect.AssertEqual(t, config.Dns.Enabled, true)
+	connect.AssertEqual(t, config.Dns.HostedZoneName, testExtenderDnsHostedZoneName)
+	connect.AssertEqual(t, config.Dns.HostedZoneId, "")
+
+	if _, err := newRoute53ExtenderDnsPublisher(&controller.ExtenderConfig{
+		Dns: controller.ExtenderDnsConfig{Enabled: true},
+	}); err == nil {
+		t.Fatalf("a dns block with no zone must not build a publisher")
+	}
 }
 
 // A deployment with no dns block, or with it disabled, leaves dns untouched.

@@ -6,6 +6,7 @@ import (
 	mathrand "math/rand/v2"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -45,6 +46,10 @@ import (
 // Nothing here fails the tick. The caller logs and continues, because the
 // record drip and the dns sets are independent publishers of the same
 // directory and one being unreachable must not cost the other its turn.
+//
+// The zone the batch goes to is configured by name as well as by id, and the
+// name is resolved to an id once per process here (resolveExtenderDnsHostedZoneId),
+// shared with the gossip record setup task of extender_gossip_dns_work.go.
 
 const (
 	// Addresses per set when the configuration does not say.
@@ -305,9 +310,14 @@ func extenderDnsFqdn(recordName string) string {
 	return recordName
 }
 
-// The two Route 53 calls the publisher makes, which is the seam a test drives
-// the real batch builder through.
+// The Route 53 calls the extender tasks make, which is the seam a test drives
+// the real batch builders through.
 type route53Api interface {
+	ListHostedZonesByNameWithContext(
+		ctx aws.Context,
+		input *route53.ListHostedZonesByNameInput,
+		opts ...request.Option,
+	) (*route53.ListHostedZonesByNameOutput, error)
 	ListResourceRecordSetsPagesWithContext(
 		ctx aws.Context,
 		input *route53.ListResourceRecordSetsInput,
@@ -321,36 +331,28 @@ type route53Api interface {
 	) (*route53.ChangeResourceRecordSetsOutput, error)
 }
 
-// The publisher an operator runs (C5).
-type route53ExtenderDnsPublisher struct {
-	api          route53Api
-	hostedZoneId string
-}
-
-// newRoute53ExtenderDnsPublisher builds the aws session from the dns block.
+// newExtenderRoute53Api builds an aws session for one of the extender dns
+// blocks.
 //
 // Static credentials are used only when both halves are configured; anything
 // else falls back to the default chain, which is what an instance role or the
 // environment provides. A half-configured pair is a typo rather than an
 // intent, and using it would fail every call with a signature error instead of
 // the working default.
-func newRoute53ExtenderDnsPublisher(
-	config *controller.ExtenderConfig,
-) (*route53ExtenderDnsPublisher, error) {
-	hostedZoneId := strings.TrimSpace(config.Dns.HostedZoneId)
-	if hostedZoneId == "" {
-		return nil, fmt.Errorf("the extender dns has no hosted zone")
-	}
-
-	awsRegion := strings.TrimSpace(config.Dns.AwsRegion)
+func newExtenderRoute53Api(
+	awsRegion string,
+	awsAccessKeyId string,
+	awsSecretAccessKey string,
+) (route53Api, error) {
+	awsRegion = strings.TrimSpace(awsRegion)
 	if awsRegion == "" {
 		awsRegion = ExtenderDnsDefaultAwsRegion
 	}
 	awsConfig := &aws.Config{
 		Region: aws.String(awsRegion),
 	}
-	awsAccessKeyId := strings.TrimSpace(config.Dns.AwsAccessKeyId)
-	awsSecretAccessKey := strings.TrimSpace(config.Dns.AwsSecretAccessKey)
+	awsAccessKeyId = strings.TrimSpace(awsAccessKeyId)
+	awsSecretAccessKey = strings.TrimSpace(awsSecretAccessKey)
 	if awsAccessKeyId != "" && awsSecretAccessKey != "" {
 		awsConfig.Credentials = credentials.NewStaticCredentials(
 			awsAccessKeyId,
@@ -363,9 +365,137 @@ func newRoute53ExtenderDnsPublisher(
 	if err != nil {
 		return nil, err
 	}
+	return route53.New(awsSession), nil
+}
+
+// The zone ids already resolved from a name, shared by every extender task in
+// the process and guarded by extenderDnsHostedZoneIdsStateLock.
+//
+// One resolution per name per process is the point: the zone of a name does not
+// change while the process runs, and a lookup on every tick would spend an api
+// call to learn the same id every ten minutes. Only a success is remembered --
+// a zone that is missing now may be created later, and caching that failure
+// would need a restart to clear.
+var extenderDnsHostedZoneIdsStateLock sync.Mutex
+var extenderDnsHostedZoneIds = map[string]string{}
+
+// Testing_ResetExtenderDnsHostedZoneIds drops the resolved zone ids so a test
+// starts from an unresolved process. Call it from the test goroutine only.
+func Testing_ResetExtenderDnsHostedZoneIds() {
+	extenderDnsHostedZoneIdsStateLock.Lock()
+	defer extenderDnsHostedZoneIdsStateLock.Unlock()
+	clear(extenderDnsHostedZoneIds)
+}
+
+// resolveExtenderDnsHostedZoneId is the zone a tick writes to.
+//
+// A configured id wins outright and costs no call at all, which is both the
+// escape hatch for an operator with two zones of one name and what keeps a
+// deployment that already names its zone by id working unchanged. Otherwise
+// the name is resolved through the api and remembered for the process.
+//
+// The listing is positioned at the name, and Route 53 orders zones by name, so
+// every zone of that name is at the head of the answer. Exactly one match is
+// required: no match is a zone that does not exist in this account, and more
+// than one is a public and a private zone of the same name, where guessing
+// which one the operator meant would publish the record where nobody resolves
+// it.
+func resolveExtenderDnsHostedZoneId(
+	ctx context.Context,
+	api route53Api,
+	hostedZoneId string,
+	hostedZoneName string,
+) (string, error) {
+	if hostedZoneId = strings.TrimSpace(hostedZoneId); hostedZoneId != "" {
+		return hostedZoneId, nil
+	}
+	name := extenderDnsFqdn(hostedZoneName)
+	if name == "." {
+		return "", fmt.Errorf("the extender dns has no hosted zone")
+	}
+
+	cachedHostedZoneId := func() string {
+		extenderDnsHostedZoneIdsStateLock.Lock()
+		defer extenderDnsHostedZoneIdsStateLock.Unlock()
+		return extenderDnsHostedZoneIds[name]
+	}()
+	if cachedHostedZoneId != "" {
+		return cachedHostedZoneId, nil
+	}
+
+	output, err := api.ListHostedZonesByNameWithContext(
+		ctx,
+		&route53.ListHostedZonesByNameInput{
+			DNSName: aws.String(name),
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	matchedHostedZoneIds := []string{}
+	for _, hostedZone := range output.HostedZones {
+		if extenderDnsFqdn(aws.StringValue(hostedZone.Name)) != name {
+			continue
+		}
+		// the id comes back as `/hostedzone/<id>`; every call takes the bare id
+		matchedHostedZoneIds = append(
+			matchedHostedZoneIds,
+			strings.TrimPrefix(aws.StringValue(hostedZone.Id), "/hostedzone/"),
+		)
+	}
+	switch len(matchedHostedZoneIds) {
+	case 0:
+		return "", fmt.Errorf("there is no hosted zone named %s", name)
+	case 1:
+	default:
+		return "", fmt.Errorf(
+			"there are %d hosted zones named %s; configure hosted_zone_id",
+			len(matchedHostedZoneIds),
+			name,
+		)
+	}
+
+	func() {
+		extenderDnsHostedZoneIdsStateLock.Lock()
+		defer extenderDnsHostedZoneIdsStateLock.Unlock()
+		extenderDnsHostedZoneIds[name] = matchedHostedZoneIds[0]
+	}()
+	return matchedHostedZoneIds[0], nil
+}
+
+// The publisher an operator runs (C5).
+//
+// The zone is held as it was configured rather than as an id: an id is
+// resolved from a name on the first apply, so a publisher built before aws is
+// reachable is still a usable publisher.
+type route53ExtenderDnsPublisher struct {
+	api            route53Api
+	hostedZoneId   string
+	hostedZoneName string
+}
+
+// newRoute53ExtenderDnsPublisher builds the aws session from the dns block.
+func newRoute53ExtenderDnsPublisher(
+	config *controller.ExtenderConfig,
+) (*route53ExtenderDnsPublisher, error) {
+	hostedZoneId := strings.TrimSpace(config.Dns.HostedZoneId)
+	hostedZoneName := strings.TrimSpace(config.Dns.HostedZoneName)
+	if hostedZoneId == "" && hostedZoneName == "" {
+		return nil, fmt.Errorf("the extender dns has no hosted zone")
+	}
+
+	api, err := newExtenderRoute53Api(
+		config.Dns.AwsRegion,
+		config.Dns.AwsAccessKeyId,
+		config.Dns.AwsSecretAccessKey,
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &route53ExtenderDnsPublisher{
-		api:          route53.New(awsSession),
-		hostedZoneId: hostedZoneId,
+		api:            api,
+		hostedZoneId:   hostedZoneId,
+		hostedZoneName: hostedZoneName,
 	}, nil
 }
 
@@ -378,7 +508,17 @@ func (self *route53ExtenderDnsPublisher) publish(
 ) error {
 	name := extenderDnsFqdn(recordName)
 
-	existingSetIdentifiers, existingRecordSets, err := self.listRecordSets(ctx, name)
+	hostedZoneId, err := resolveExtenderDnsHostedZoneId(
+		ctx,
+		self.api,
+		self.hostedZoneId,
+		self.hostedZoneName,
+	)
+	if err != nil {
+		return err
+	}
+
+	existingSetIdentifiers, existingRecordSets, err := self.listRecordSets(ctx, hostedZoneId, name)
 	if err != nil {
 		return err
 	}
@@ -410,7 +550,7 @@ func (self *route53ExtenderDnsPublisher) publish(
 	_, err = self.api.ChangeResourceRecordSetsWithContext(
 		ctx,
 		&route53.ChangeResourceRecordSetsInput{
-			HostedZoneId: aws.String(self.hostedZoneId),
+			HostedZoneId: aws.String(hostedZoneId),
 			ChangeBatch: &route53.ChangeBatch{
 				Changes: changes,
 			},
@@ -428,6 +568,7 @@ func (self *route53ExtenderDnsPublisher) publish(
 // records.
 func (self *route53ExtenderDnsPublisher) listRecordSets(
 	ctx context.Context,
+	hostedZoneId string,
 	name string,
 ) ([]string, map[string]*route53.ResourceRecordSet, error) {
 	setIdentifiers := []string{}
@@ -436,7 +577,7 @@ func (self *route53ExtenderDnsPublisher) listRecordSets(
 	err := self.api.ListResourceRecordSetsPagesWithContext(
 		ctx,
 		&route53.ListResourceRecordSetsInput{
-			HostedZoneId:    aws.String(self.hostedZoneId),
+			HostedZoneId:    aws.String(hostedZoneId),
 			StartRecordName: aws.String(name),
 		},
 		func(output *route53.ListResourceRecordSetsOutput, _ bool) bool {

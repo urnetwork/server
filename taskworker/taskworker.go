@@ -81,6 +81,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		work.ScheduleExtenderGossipDns(clientSession, tx)
 		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
@@ -321,6 +322,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ExtenderGossipDns,
+			work.ExtenderGossipDnsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredBulkClientRemovalQuota,
