@@ -23,6 +23,8 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -33,6 +35,7 @@ import (
 
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
+	"github.com/urnetwork/server/router"
 )
 
 // The tld the whodis listener decodes. It must be one of the tlds the
@@ -108,9 +111,23 @@ type Alt struct {
 	apiServer      *http3.Server
 	limits         *Limits
 
+	listenerStateLock sync.RWMutex
+	listenerStates    map[altListenerKey]bool
+
 	// Nil outside package tests. Records the front one accepted connection
 	// reached, after its name is known and before the front is entered.
 	dispatchObserverForTest func(serverName string, front string)
+}
+
+// One registered udp socket. The address distinguishes the two families of
+// one service port, which are separate listeners.
+type altListenerKey struct {
+	transport string
+	address   string
+}
+
+func (self altListenerKey) String() string {
+	return fmt.Sprintf("%s/%s", self.transport, self.address)
 }
 
 func NewAlt(
@@ -147,7 +164,8 @@ func NewAlt(
 		apiServer: &http3.Server{
 			Handler: NewLimitedHandler(apiHandler, limits),
 		},
-		limits: limits,
+		limits:         limits,
+		listenerStates: map[altListenerKey]bool{},
 	}, nil
 }
 
@@ -174,26 +192,25 @@ func validateDisjointHosts(apiHosts *HostSet, connectHosts *HostSet) error {
 	return nil
 }
 
-// Serves the H3 front on one already bound udp socket until the context is
-// canceled or the listener fails. The socket carries QUIC directly.
-func (self *Alt) ListenH3(packetConn net.PacketConn) error {
-	return self.listenQuic(
-		ListenerTransportH3,
-		packetConn,
-		func(packetConn net.PacketConn) (net.PacketConn, error) {
-			return packetConn, nil
-		},
-	)
-}
-
-// Serves the whodis front on one already bound udp socket. The socket carries
-// QUIC inside dns messages, which the decode53 translation unwraps before the
-// same sni dispatch, so whodis reaches the api as well as connect.
-func (self *Alt) ListenWhodis(packetConn net.PacketConn) error {
-	return self.listenQuic(
-		ListenerTransportWhodis,
-		packetConn,
-		func(packetConn net.PacketConn) (net.PacketConn, error) {
+// AddListener registers one already bound udp socket and returns the function
+// that serves it until the context is canceled or the listener fails.
+// Registration is synchronous, so readiness reports the complete listener set
+// from the moment the sockets are bound, before any of them accepts.
+//
+// The transport decides how the socket is read: the H3 listener carries QUIC
+// directly, and the whodis listener carries it inside dns messages, which the
+// decode53 translation unwraps before the same sni dispatch, so whodis reaches
+// the api as well as connect.
+func (self *Alt) AddListener(transport string, packetConn net.PacketConn) func() error {
+	key := altListenerKey{
+		transport: transport,
+		address:   packetConn.LocalAddr().String(),
+	}
+	transform := func(packetConn net.PacketConn) (net.PacketConn, error) {
+		return packetConn, nil
+	}
+	if transport == ListenerTransportWhodis {
+		transform = func(packetConn net.PacketConn) (net.PacketConn, error) {
 			ptSettings := connectcore.DefaultPacketTranslationSettings()
 			ptSettings.DnsTlds = [][]byte{}
 			for _, dnsTld := range self.settings.DnsTlds {
@@ -205,19 +222,81 @@ func (self *Alt) ListenWhodis(packetConn net.PacketConn) error {
 				packetConn,
 				ptSettings,
 			)
-		},
-	)
+		}
+	}
+	self.registerListener(key)
+	return func() error {
+		return self.listenQuic(key, packetConn, transform)
+	}
+}
+
+// Registers and serves one H3 socket in one call.
+func (self *Alt) ListenH3(packetConn net.PacketConn) error {
+	return self.AddListener(ListenerTransportH3, packetConn)()
+}
+
+// Registers and serves one whodis socket in one call.
+func (self *Alt) ListenWhodis(packetConn net.PacketConn) error {
+	return self.AddListener(ListenerTransportWhodis, packetConn)()
+}
+
+func (self *Alt) registerListener(key altListenerKey) {
+	self.listenerStateLock.Lock()
+	defer self.listenerStateLock.Unlock()
+	self.listenerStates[key] = false
+}
+
+func (self *Alt) setListenerUp(key altListenerKey, up bool) {
+	self.listenerStateLock.Lock()
+	defer self.listenerStateLock.Unlock()
+	if _, registered := self.listenerStates[key]; registered {
+		self.listenerStates[key] = up
+	}
+}
+
+// ListenerReady reports whether every registered socket is accepting. Warp
+// must not activate a replacement alt before both udp fronts are up, and a
+// listener that exits makes this block unready again. A process with no
+// listener at all is never ready.
+func (self *Alt) ListenerReady() error {
+	self.listenerStateLock.RLock()
+	defer self.listenerStateLock.RUnlock()
+	if len(self.listenerStates) == 0 {
+		return fmt.Errorf("no QUIC listener")
+	}
+	down := make([]string, 0, len(self.listenerStates))
+	for key, up := range self.listenerStates {
+		if !up {
+			down = append(down, key.String())
+		}
+	}
+	if len(down) == 0 {
+		return nil
+	}
+	slices.Sort(down)
+	return fmt.Errorf("QUIC listener down: %s", strings.Join(down, ", "))
+}
+
+// Status is the warp deploy poll's readiness surface. Alt serves no other
+// route over H1: its api and connect fronts are the udp listeners below.
+func (self *Alt) Status(w http.ResponseWriter, r *http.Request) {
+	if err := self.ListenerReady(); err != nil {
+		http.Error(w, fmt.Sprintf("not ready: %s", err), http.StatusServiceUnavailable)
+		return
+	}
+	router.WarpStatus(w, r)
 }
 
 func (self *Alt) listenQuic(
-	transport string,
+	key altListenerKey,
 	packetConn net.PacketConn,
 	transform func(net.PacketConn) (net.PacketConn, error),
 ) error {
 	listenCtx, listenCancel := context.WithCancel(self.ctx)
 	defer listenCancel()
 
-	listenAddress := packetConn.LocalAddr().String()
+	transport := key.transport
+	listenAddress := key.address
 	transformed, err := transform(packetConn)
 	if err != nil {
 		return fmt.Errorf("alt %s transform %s: %w", transport, listenAddress, err)
@@ -238,6 +317,8 @@ func (self *Alt) listenQuic(
 		return fmt.Errorf("alt %s listen %s: %w", transport, listenAddress, err)
 	}
 	defer listener.Close()
+	self.setListenerUp(key, true)
+	defer self.setListenerUp(key, false)
 	glog.Infof("[alt]%s listener up address=%s\n", transport, listenAddress)
 	defer glog.Infof("[alt]%s listener down address=%s\n", transport, listenAddress)
 

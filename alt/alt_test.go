@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -323,6 +325,14 @@ func (self *altEnv) newTransport(
 	)
 }
 
+// The warp deploy poll's view of this alt.
+func (self *altEnv) status() int {
+	r := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	self.alt.Status(w, r)
+	return w.Code
+}
+
 // Waits for the exact next dispatch record.
 func (self *altEnv) nextDispatch() altDispatch {
 	select {
@@ -514,6 +524,67 @@ func TestAltDispatchNeverCrossesBetweenFronts(t *testing.T) {
 		}
 		if code != http.StatusOK || body != "hello" {
 			t.Fatalf("api over whodis = %d %q", code, body)
+		}
+	})
+}
+
+// Warp must not activate a replacement alt before both udp fronts accept, so
+// a registered socket that is not yet serving keeps the status route at 503.
+func TestAltStatusWaitsForEveryListener(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		env := testing_newAltEnv(ctx, t, nil)
+		defer env.Close()
+
+		// the fixture's listeners are up once a request has been served
+		if _, _, err := altGet(t, env.apiClient(testApiHost, false), testApiHost, "/hello"); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.alt.ListenerReady(); err != nil {
+			t.Fatalf("alt is not ready with both listeners up: %s", err)
+		}
+		if code := env.status(); code != http.StatusOK {
+			t.Fatalf("status with both listeners up = %d", code)
+		}
+
+		// one more registered socket that never serves
+		packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer packetConn.Close()
+		env.alt.AddListener(ListenerTransportH3, packetConn)
+		if err := env.alt.ListenerReady(); err == nil {
+			t.Fatal("alt is ready with a listener that never started")
+		} else if !strings.Contains(err.Error(), packetConn.LocalAddr().String()) {
+			t.Fatalf("readiness error does not name the down listener: %s", err)
+		}
+		if code := env.status(); code != http.StatusServiceUnavailable {
+			t.Fatalf("status with a down listener = %d", code)
+		}
+	})
+}
+
+// An alt with no socket at all is never ready, so an empty allocation cannot
+// authorize an activation.
+func TestAltStatusIsNotReadyWithoutAListener(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		env := testing_newAltEnv(ctx, t, nil)
+		defer env.Close()
+
+		settings := DefaultSettings()
+		settings.ApiHosts = []string{testApiHost}
+		settings.ConnectHosts = []string{testConnectHost}
+		bare, err := NewAlt(ctx, env.connectHandler, http.NotFoundHandler(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer bare.cancel()
+		if err := bare.ListenerReady(); err == nil {
+			t.Fatal("an alt with no listener is ready")
 		}
 	})
 }

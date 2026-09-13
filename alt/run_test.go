@@ -17,23 +17,33 @@ import (
 // The alt package's own import path, which nothing behind the lb may reach.
 const altPackagePath = "github.com/urnetwork/server/alt"
 
+func defaultRunOptions() RunOptions {
+	return RunOptions{
+		Port:    DefaultStatusPort,
+		H3Port:  DefaultH3Port,
+		DnsPort: DefaultDnsPort,
+	}
+}
+
 func TestRunRejectsInvalidInputsBeforeEnvironmentAccess(t *testing.T) {
-	if err := Run(nil, RunOptions{H3Port: DefaultH3Port, DnsPort: DefaultDnsPort}); err == nil {
+	if err := Run(nil, defaultRunOptions()); err == nil {
 		t.Fatal("nil context was accepted")
 	}
 	cases := []RunOptions{
-		{H3Port: 0, DnsPort: DefaultDnsPort},
-		{H3Port: 65_536, DnsPort: DefaultDnsPort},
-		{H3Port: DefaultH3Port, DnsPort: 0},
-		{H3Port: DefaultH3Port, DnsPort: 65_536},
-		{H3Port: DefaultH3Port, DnsPort: DefaultH3Port},
+		{Port: DefaultStatusPort, H3Port: 0, DnsPort: DefaultDnsPort},
+		{Port: DefaultStatusPort, H3Port: 65_536, DnsPort: DefaultDnsPort},
+		{Port: DefaultStatusPort, H3Port: DefaultH3Port, DnsPort: 0},
+		{Port: DefaultStatusPort, H3Port: DefaultH3Port, DnsPort: 65_536},
+		{Port: DefaultStatusPort, H3Port: DefaultH3Port, DnsPort: DefaultH3Port},
+		{Port: 0, H3Port: DefaultH3Port, DnsPort: DefaultDnsPort},
+		{Port: 65_536, H3Port: DefaultH3Port, DnsPort: DefaultDnsPort},
 	}
 	for _, options := range cases {
 		if err := options.Validate(); err == nil {
 			t.Errorf("%+v was accepted", options)
 		}
 	}
-	if err := (RunOptions{H3Port: DefaultH3Port, DnsPort: DefaultDnsPort}).Validate(); err != nil {
+	if err := defaultRunOptions().Validate(); err != nil {
 		t.Fatal(err)
 	}
 }

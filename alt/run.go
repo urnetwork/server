@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"runtime"
 	"strconv"
 	"time"
@@ -24,11 +25,16 @@ import (
 const (
 	DefaultH3Port  = 443
 	DefaultDnsPort = 4053
+	// Alt has no load balancer in front, so this http port carries only the
+	// warp deploy poll's readiness route.
+	DefaultStatusPort = 80
 )
 
 type RunOptions struct {
 	H3Port  int
 	DnsPort int
+	// the http port serving the warp status route, and nothing else
+	Port int
 	// the sni names of each front. Empty derives them from the environment's
 	// services config, so production needs no flags.
 	ApiHosts     []string
@@ -38,7 +44,7 @@ type RunOptions struct {
 }
 
 func (self RunOptions) Validate() error {
-	for name, port := range map[string]int{"H3": self.H3Port, "DNS": self.DnsPort} {
+	for name, port := range map[string]int{"H3": self.H3Port, "DNS": self.DnsPort, "status": self.Port} {
 		if port < 1 || port > 65_535 {
 			return fmt.Errorf("alt %s port %d is outside [1,65535]", name, port)
 		}
@@ -119,22 +125,31 @@ func listenPacketFromEnv(ctx context.Context, port int) ([]net.PacketConn, error
 
 // Run serves the alt module until ctx is canceled.
 func Run(ctx context.Context, options RunOptions) error {
-	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher, listenPacketFromEnv)
+	return runWithDependencies(
+		ctx,
+		options,
+		router.StartupReadiness,
+		server.StartStatsPusher,
+		listenPacketFromEnv,
+		server.HttpListenAndServeWithReusePort,
+	)
 }
 
 // The command and tests exercise the same startup and drain wiring. Only the
-// external readiness, metrics transport, and socket binding are replaceable.
+// external readiness, metrics transport, socket binding, and http listener
+// are replaceable.
 //
-// Unlike the lb-fronted services, alt serves no H1 status route: its only
-// ingress is the two udp sockets, and its `/status` is the api router's,
-// reached over H3 and whodis. A process that is not ready therefore reports
-// the failure and exits instead of serving an unreachable status.
+// Alt has no lb in front, so its only client ingress is the two udp sockets.
+// The http listener carries the warp deploy poll's readiness route alone; a
+// process that is not ready reports the failure and exits rather than serving
+// a route no client can reach.
 func runWithDependencies(
 	ctx context.Context,
 	options RunOptions,
 	readiness func(context.Context) error,
 	startStatsPusher func(context.Context) func(),
 	listenPacket func(context.Context, int) ([]net.PacketConn, error),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
 ) error {
 	if ctx == nil {
 		return errors.New("alt run context is nil")
@@ -178,34 +193,51 @@ func runWithDependencies(
 			packetConn.Close()
 		}
 	}()
-	h3PacketConns, err := listenPacket(runCtx, options.H3Port)
-	if err != nil {
-		return fmt.Errorf("bind alt H3 %d: %w", options.H3Port, err)
+	// every socket is registered before any of them serves, so the status
+	// route reports the complete set from the first poll
+	serves := []func() error{}
+	for transport, port := range map[string]int{
+		ListenerTransportH3:     options.H3Port,
+		ListenerTransportWhodis: options.DnsPort,
+	} {
+		transportPacketConns, err := listenPacket(runCtx, port)
+		if err != nil {
+			return fmt.Errorf("bind alt %s %d: %w", transport, port, err)
+		}
+		packetConns = append(packetConns, transportPacketConns...)
+		for _, packetConn := range transportPacketConns {
+			serves = append(serves, altServer.AddListener(transport, packetConn))
+		}
 	}
-	packetConns = append(packetConns, h3PacketConns...)
-	dnsPacketConns, err := listenPacket(runCtx, options.DnsPort)
-	if err != nil {
-		return fmt.Errorf("bind alt whodis %d: %w", options.DnsPort, err)
-	}
-	packetConns = append(packetConns, dnsPacketConns...)
 
 	server.Warmup(altWarmupTargets()...)
 	flushStats := startStatsPusher(runCtx)
 
-	// a listener is alt's only ingress, so losing one makes the process
-	// useless: it reports the failure and exits for warp to replace
-	listenErrs := make(chan error, len(packetConns))
-	listen := func(serve func() error) {
+	// a listener is alt's only client ingress, so losing one makes the
+	// process useless: it reports the failure and exits for warp to replace
+	listenErrs := make(chan error, len(serves)+1)
+	for _, serve := range serves {
 		go server.HandleError(func() {
 			listenErrs <- serve()
 		})
 	}
-	for _, packetConn := range h3PacketConns {
-		listen(func() error { return altServer.ListenH3(packetConn) })
-	}
-	for _, packetConn := range dnsPacketConns {
-		listen(func() error { return altServer.ListenWhodis(packetConn) })
-	}
+	statusIpv4, _, statusPort := server.RequireListenIpPort(options.Port)
+	go server.HandleError(func() {
+		listenErrs <- listenAndServe(
+			runCtx,
+			net.JoinHostPort(statusIpv4, strconv.Itoa(statusPort)),
+			router.NewRouter(runCtx, []*router.Route{
+				router.NewRoute("GET", "/status", altServer.Status),
+			}),
+			false,
+			server.HttpServerOptions{
+				ReadTimeout:     15 * time.Second,
+				WriteTimeout:    30 * time.Second,
+				IdleTimeout:     5 * time.Minute,
+				ShutdownTimeout: 30 * time.Second,
+			},
+		)
+	})
 
 	draining := make(chan struct{})
 	go func() {
@@ -233,17 +265,20 @@ func runWithDependencies(
 	})
 
 	glog.Infof(
-		"[alt]serving %s %s on *:%d (h3) and *:%d (whodis)\n",
+		"[alt]serving %s %s on *:%d (h3), *:%d (whodis) and *:%d (status)\n",
 		server.RequireEnv(),
 		server.RequireVersion(),
 		options.H3Port,
 		options.DnsPort,
+		options.Port,
 	)
 	var runErr error
 	select {
 	case <-runCtx.Done():
 	case listenErr := <-listenErrs:
-		runErr = listenErr
+		if runCtx.Err() == nil {
+			runErr = listenErr
+		}
 		cancel()
 	}
 	altServer.Close()

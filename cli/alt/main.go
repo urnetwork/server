@@ -34,7 +34,7 @@ func main() {
 directly on public UDP, with no load balancer in front.
 
 Usage:
-  alt [--h3-port=<h3port>] [--dns-port=<dnsport>]
+  alt [--port=<port>] [--h3-port=<h3port>] [--dns-port=<dnsport>]
       [--api-hosts=<apihosts>] [--connect-hosts=<connecthosts>]
       [--dns-tlds=<dnstlds>]
   alt -h | --help
@@ -43,6 +43,7 @@ Usage:
 Options:
   -h --help     Show this screen.
   --version     Show version.
+  -p --port=<port>                Status listen port [default: 80].
   --h3-port=<h3port>              H3 listen port [default: 443].
   --dns-port=<dnsport>            Whodis listen port [default: 4053].
   --api-hosts=<apihosts>          Comma separated API server names. Defaults to the services config.
@@ -50,6 +51,10 @@ Options:
   --dns-tlds=<dnstlds>            Comma separated whodis tlds. Defaults to the client tld.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
+	if err != nil {
+		panic(err)
+	}
+	port, err := opts.Int("--port")
 	if err != nil {
 		panic(err)
 	}
@@ -64,6 +69,7 @@ Options:
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := alt.Run(ctx, alt.RunOptions{
+		Port:         port,
 		H3Port:       h3Port,
 		DnsPort:      dnsPort,
 		ApiHosts:     splitOption(opts, "--api-hosts"),
