@@ -3032,6 +3032,33 @@ func (self *fixedMultiHopApiGenerator) NextDestinations(
 	}, nil
 }
 
+// The production window prefers this optional interface. Inheriting the API
+// implementation would replace the explicit stream with its direct exit spec.
+func (self *fixedMultiHopApiGenerator) NextDestinationsWithIpFamily(
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	ipFamily clientconnect.IpFamilyFilter,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	if !ipFamily.Matches(clientconnect.IpFamilyLegacy) {
+		return map[clientconnect.MultiHopId]clientconnect.DestinationStats{}, nil
+	}
+	return self.NextDestinations(count, excludeDestinations, rankMode)
+}
+
+// Context-aware callers use the same fixed path without entering API discovery.
+func (self *fixedMultiHopApiGenerator) NextDestinationsContext(
+	ctx context.Context,
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return self.NextDestinations(count, excludeDestinations, rankMode)
+}
+
 // One explicit path uses the same single quality window as a fixed provider.
 func (self *fixedMultiHopApiGenerator) FixedDestinationSize() (int, bool) {
 	return 1, true
