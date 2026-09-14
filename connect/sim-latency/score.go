@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/model"
 	"google.golang.org/protobuf/proto"
 
 	statspkg "github.com/urnetwork/server/stats"
@@ -1408,6 +1409,15 @@ func marshalScoreResult(result *ScoreResult) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if result != nil && result.EvalError == nil {
+		var contract model.CompetitionScoreResult
+		if err := json.Unmarshal(content, &contract); err != nil {
+			return nil, fmt.Errorf("decode shared score contract: %w", err)
+		}
+		if err := model.ValidateCompetitionScore(&contract); err != nil {
+			return nil, fmt.Errorf("shared score contract: %w", err)
+		}
+	}
 	return append(content, '\n'), nil
 }
 
@@ -1459,7 +1469,7 @@ func runScore(opts docopt.Opts) {
 	result := Score(inputs)
 	content, err := marshalScoreResult(result)
 	if err != nil {
-		content = []byte("{\"score_schema\":1,\"raw_score\":0,\"normalized_score\":0,\"placeable\":false,\"gates\":{},\"diagnostics\":{},\"eval_error\":{\"kind\":\"infrastructure\",\"code\":\"json_encode_failed\",\"message\":\"scorer output encoding failed\"}}\n")
+		content = []byte("{\"score_schema\":1,\"raw_score\":0,\"normalized_score\":0,\"placeable\":false,\"gates\":{},\"diagnostics\":{},\"eval_error\":{\"kind\":\"infrastructure\",\"code\":\"score_result_invalid\",\"message\":\"scorer output failed its shared contract\"}}\n")
 	}
 	if outPath := optString(opts, "--out", ""); outPath != "" {
 		if err := writeAtomicFile(outPath, content, 0o644); err != nil {

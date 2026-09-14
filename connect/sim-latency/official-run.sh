@@ -324,8 +324,25 @@ score_bundle() {
         --resource-report "$APEX_CANDIDATE_RESOURCES" \
         --marker "$APEX_CANDIDATE_MARKERS" \
         --out "$APEX_SCORE_OUTPUT" >/dev/null
-    jq -e '.score_schema == 1 and (.placeable | type == "boolean")' "$APEX_SCORE_OUTPUT" >/dev/null ||
-        die "scorer did not emit score_schema 1"
+    jq -e '.score_schema == 1 and (.placeable | type == "boolean") and
+        if .eval_error == null then
+            (.raw_score | type == "number" and isfinite and . > 0) and
+            (.normalized_score | type == "number" and isfinite and . >= 1 and . <= 200) and
+            (.gates | type == "object") and
+            (.significance | type == "object") and
+            .significance.method == "one-sided-welch-t" and
+            .significance.alpha == 0.05 and
+            (.significance.replicate_count | type == "number" and . > 0 and . <= 9 and . % 2 == 1) and
+            (.significance.baseline_mean_raw_score | type == "number" and isfinite and . > 0) and
+            (.significance.candidate_mean_raw_score | type == "number" and isfinite and . > 0) and
+            (.significance.statistically_significant | type == "boolean") and
+            (.significance.recommended_next_epoch_takeover_margin_supported | type == "boolean")
+        else
+            (.eval_error.kind == "submission" or .eval_error.kind == "infrastructure") and
+            (.eval_error.code | type == "string" and length > 0) and
+            (.eval_error.message | type == "string" and length > 0)
+        end' "$APEX_SCORE_OUTPUT" >/dev/null ||
+        die "scorer did not emit the complete score_schema 1 contract"
     log "score written to $APEX_SCORE_OUTPUT"
 }
 

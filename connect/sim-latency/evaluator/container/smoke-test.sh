@@ -598,7 +598,13 @@ smoke_stage=score
 active_project="urnetwork-container-smoke-score-${candidate_sha:0:12}"
 compose --profile score up --abort-on-container-exit --exit-code-from scorer >&2
 sudo -n jq -e '.score_schema == 1 and .placeable == true and
-       ([.gates[] | .passed] | all)' "$score_output/score.json" >/dev/null
+       ([.gates[] | .passed] | all) and
+       .significance.method == "one-sided-welch-t" and
+       .significance.alpha == 0.05 and
+       .significance.replicate_count == 1 and
+       .significance.statistically_significant == false and
+       .significance.recommended_next_epoch_takeover_margin_supported == false' \
+    "$score_output/score.json" >/dev/null
 compose --profile score down --volumes --remove-orphans >&2
 active_project=""
 verify_local_sources_unchanged

@@ -96,7 +96,16 @@ write_worker_result() {
         --argjson completion_bytes "$(file_bytes "$completion")" \
         --argjson evidence_bytes "$(file_bytes "$evidence")" \
         '{schema:1,job_id:$job_id,eval_error:null,
-          score:{score_schema:1,placeable:true,gates:{G1:{passed:true}}},
+          score:{score_schema:1,raw_score:80,normalized_score:125,placeable:true,
+            gates:{G1:{passed:true}},significance:{method:"one-sided-welch-t",alpha:0.05,
+              replicate_count:1,baseline_mean_raw_score:100,candidate_mean_raw_score:80,
+              baseline_sample_variance:null,candidate_sample_variance:null,
+              observed_improvement_percent:20,takeover_margin_percent:16.1,
+              minimum_significant_improvement_percent:null,required_improvement_percent:null,
+              one_sided_p_value:null,statistically_significant:false,
+              next_epoch_minimum_improvement_percent:null,
+              recommended_next_epoch_takeover_margin_percent:null,
+              recommended_next_epoch_takeover_margin_supported:false}},
           security:{template_database_reset:true,redis_reset:true,cgroup_contained:true,
             resource_limits:true,management_cpu_reserved:true,management_memory_reserved:true,
             default_deny_network:true,offline_build:true,offline_build_resource_limits:true,

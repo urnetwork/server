@@ -1102,7 +1102,8 @@ func (f *fakeStore) Complete(_ context.Context, settings *Settings, _ string, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.completed = append(f.completed, outcome)
-	return outcome.Infrastructure && len(f.completed) < settings.MaxInfrastructureAttempts, nil
+	return outcome.Error != nil && outcome.Error.Kind == "infrastructure" &&
+		outcome.Error.Retriable && len(f.completed) < settings.MaxInfrastructureAttempts, nil
 }
 
 func (f *fakeStore) completedCount() int {
@@ -1411,7 +1412,8 @@ func TestWorkerDoesNotLaunchExpiredSubmission(t *testing.T) {
 	}
 	outcomes := store.outcomes()
 	if evaluator.calls != 0 || len(outcomes) != 1 || outcomes[0].Error == nil ||
-		outcomes[0].Error.Code != "evaluation_time_budget_exhausted" {
+		outcomes[0].Error.Code != "evaluation_time_budget_exhausted" ||
+		outcomes[0].Error.Retriable {
 		t.Fatalf("expired execution: evaluator_calls=%d outcomes=%#v", evaluator.calls, outcomes)
 	}
 }
@@ -1536,7 +1538,7 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 	evaluator := &fakeEvaluator{
 		check: hostCheck,
 		outcomes: []EvaluationOutcome{
-			{Error: infrastructureError("host_transient", "host transient"), Infrastructure: true},
+			{Error: infrastructureError("host_transient", "host transient")},
 			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"g1": {Passed: true, Details: map[string]any{}}}, Significance: testScoreSignificance(false)}, ArtifactManifest: []byte(`{"schema":1}`)},
 		},
 	}
@@ -1558,8 +1560,52 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 	cancel()
 	<-done
 	outcomes := store.outcomes()
-	if evaluator.calls != 2 || store.claims != 2 || !outcomes[0].Infrastructure || outcomes[1].Score == nil {
+	if evaluator.calls != 2 || store.claims != 2 || outcomes[0].Error == nil ||
+		!outcomes[0].Error.Retriable || outcomes[1].Score == nil {
 		t.Fatalf("unexpected worker sequence: calls=%d claims=%d outcomes=%#v", evaluator.calls, store.claims, outcomes)
+	}
+}
+
+// A score contract defect is deterministic for an immutable evaluator image;
+// retrying it only spends the remainder of the submission's three-hour cap.
+func TestWorkerDoesNotRetryPinnedScorerContractFailure(t *testing.T) {
+	settings := validSettings()
+	startedAt := server.NowUtc()
+	rawScore := 80.0
+	normalizedScore := 125.0
+	job := &queuedJob{ScoreJobResult: ScoreJobResult{
+		JobId: server.NewId(), RoundId: server.NewId(), Staging: true,
+		StartedAt: &startedAt, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+	}}
+	store := &fakeStore{}
+	evaluator := &fakeEvaluator{outcomes: []EvaluationOutcome{{
+		Score: &ScoreResult{
+			ScoreSchema: ScoreSchema, RawScore: &rawScore, NormalizedScore: &normalizedScore,
+			Placeable: true,
+			Gates: map[string]Gate{
+				"G1_success": {Passed: true, Details: map[string]any{}},
+			},
+		},
+	}}}
+	worker, err := newWorkerWithImageDigest(
+		settings,
+		store,
+		evaluator,
+		"box-a-worker",
+		testWorkerImageDigest(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.evaluateOne(context.Background(), job, HostSelfCheck{}); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := store.outcomes()
+	if evaluator.calls != 1 || len(outcomes) != 1 ||
+		outcomes[0].Score != nil || outcomes[0].Error == nil ||
+		outcomes[0].Error.Code != "score_result_invalid" || outcomes[0].Error.Retriable {
+		t.Fatalf("pinned score contract outcome = %#v, evaluator calls=%d", outcomes, evaluator.calls)
 	}
 }
 
@@ -1715,6 +1761,65 @@ func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 	} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("smoke profile reintroduced unstable setting %q", forbidden)
+		}
+	}
+}
+
+// Every image and promotion boundary must require the significance fields the
+// API validates, including the named deterministic source test at build time.
+func TestEvaluatorScoreBoundariesRequireSharedSignificanceContract(t *testing.T) {
+	tests := []struct {
+		path     string
+		required []string
+	}{
+		{
+			path: "../connect/sim-latency/evaluator/container/Dockerfile.base",
+			required: []string{
+				"go test -list '^TestScoreProducesSharedContract$'",
+				"grep -Fx 'TestScoreProducesSharedContract'",
+				"go test -run '^TestScoreProducesSharedContract$' -count=1",
+			},
+		},
+		{
+			path: "../connect/sim-latency/official-run.sh",
+			required: []string{
+				`.significance | type == "object"`,
+				`.significance.method == "one-sided-welch-t"`,
+				`.significance.recommended_next_epoch_takeover_margin_supported | type == "boolean"`,
+			},
+		},
+		{
+			path: "../connect/sim-latency/evaluator/container/smoke-test.sh",
+			required: []string{
+				`.significance.method == "one-sided-welch-t"`,
+				`.significance.replicate_count == 1`,
+				`.significance.statistically_significant == false`,
+			},
+		},
+		{
+			path: "../connect/sim-latency/evaluator/promote-host-containment.sh",
+			required: []string{
+				`.score.significance.method == "one-sided-welch-t"`,
+				`.score.significance.replicate_count | type == "number"`,
+				`.score.significance.statistically_significant | type == "boolean"`,
+			},
+		},
+		{
+			path: "../connect/sim-latency/evaluator/container/evaluator.sh",
+			required: []string{
+				`.code != "score_result_invalid"`,
+			},
+		},
+	}
+	for _, test := range tests {
+		content, err := os.ReadFile(test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range test.required {
+			if !strings.Contains(string(content), required) {
+				t.Errorf("%s is missing score contract check %q", test.path, required)
+			}
 		}
 	}
 }
@@ -4621,7 +4726,6 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 		retry, err := store.Complete(ctx, settings, "worker-a", claimed3.JobId, EvaluationOutcome{
 			Error:            infrastructureError("host_transient", "transient host fault"),
 			ArtifactManifest: []byte(`{"schema":1,"attempt":1}`),
-			Infrastructure:   true,
 		})
 		if err != nil || !retry {
 			t.Fatalf("infrastructure retry = %v, %v", retry, err)
@@ -4798,6 +4902,55 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 		}, server.OptReadWrite())
 		if immutableErr == nil || !strings.Contains(immutableErr.Error(), "append-only") {
 			t.Fatalf("event append-only update error = %v", immutableErr)
+		}
+	})
+}
+
+// Finalized staging rows written before the admission marker existed remain
+// public after their scheduled close instead of disappearing from history.
+func TestCompetitionLegacyNaturalStagingClosePublishesLeaderboard(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.ArtifactRoot = t.TempDir()
+		settings.EvaluationPolicy.ProviderCount = 5
+		settings.workloadGenerator = nil
+		settings.artifactArchive = &blobArtifactArchive{
+			store: server.NewLocalBlobStore(t.TempDir(), "competition").(server.RetainedBlobStore),
+		}
+		settings.CompetitionId += "-legacy-natural-staging-close"
+		currentTime := server.NowUtc().Add(-2 * time.Hour).Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt:  currentTime,
+			ClosesAt: currentTime.Add(time.Hour),
+			RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		currentTime = currentTime.Add(2 * time.Hour)
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `
+				UPDATE competition_round SET finalized_at = $2, winner_job_id = NULL
+				WHERE round_id = $1
+			`, round.RoundId, currentTime))
+		}, server.OptReadWrite())
+		legacy, err := store.GetRound(ctx, settings, round.RoundId)
+		if err != nil || legacy.FinalizedAt == nil || legacy.AdmissionClosedAt != nil {
+			t.Fatalf("legacy finalized staging round = %#v, %v", legacy, err)
+		}
+
+		leaderboards, err := store.Leaderboards(ctx, settings, true)
+		if err != nil || len(leaderboards.Epochs) != 1 ||
+			leaderboards.Epochs[0].RoundId != round.RoundId ||
+			!leaderboards.Epochs[0].Staging {
+			t.Fatalf("legacy natural-close staging leaderboard = %#v, %v", leaderboards, err)
 		}
 	})
 }

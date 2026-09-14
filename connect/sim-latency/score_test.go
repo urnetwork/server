@@ -623,6 +623,7 @@ func TestScoreGateBoundariesInclusive(t *testing.T) {
 	}
 	replicates := []candidateReplicate{{
 		diagnostics: ScoreReplicateDiagnostics{
+			RawScore:                        candidate.RawScore,
 			FindProvidersSamples:            2,
 			FindProvidersPoolP05:            90,
 			FindProvidersSampleSpanFraction: minimumFindProvidersSampleSpanFraction,
@@ -643,6 +644,11 @@ func TestScoreGateBoundariesInclusive(t *testing.T) {
 		NormalizedScore: clampScore(100*baseline.RawScore/candidate.RawScore, 1, 200),
 		Placeable:       allScoreGatesPass(gates),
 		Gates:           gates,
+		Significance: scoreSignificance(
+			[]ScoreBaselineReplicate{{RawScore: baseline.RawScore}},
+			replicates,
+			0.01,
+		),
 		Diagnostics: ScoreDiagnostics{
 			RoundId:                  "boundary-fixture",
 			ReplicateCount:           1,
@@ -903,6 +909,38 @@ func TestScoreDeterministicJSON(t *testing.T) {
 	}
 	if string(a) != string(b) {
 		t.Fatal("identical artifact bytes produced different scorer JSON")
+	}
+}
+
+// The scorer must reject a successful document that the worker/API contract
+// would discard after an otherwise complete multi-hour evaluation.
+func TestMarshalScoreResultRejectsMissingSignificance(t *testing.T) {
+	result := &ScoreResult{
+		ScoreSchema:     apexScoreSchema,
+		RawScore:        80,
+		NormalizedScore: 125,
+		Placeable:       true,
+		Gates: map[string]ScoreGate{
+			"G1_success": {Passed: true, Details: map[string]any{}},
+		},
+		Diagnostics: ScoreDiagnostics{},
+	}
+	if _, err := marshalScoreResult(result); err == nil ||
+		!strings.Contains(err.Error(), "significance metadata") {
+		t.Fatalf("missing significance error = %v", err)
+	}
+}
+
+// The evaluator image build names this test as its cross-version score
+// contract gate, so a frozen source without current statistical output fails.
+func TestScoreProducesSharedContract(t *testing.T) {
+	fixture := newScoreFixture(t, defaultScoreFixtureOptions())
+	result := Score(fixture.inputs)
+	if result.EvalError != nil {
+		t.Fatalf("score contract fixture failed: %+v", result.EvalError)
+	}
+	if _, err := marshalScoreResult(result); err != nil {
+		t.Fatalf("shared score contract rejected scorer output: %v", err)
 	}
 }
 

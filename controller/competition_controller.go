@@ -1068,7 +1068,7 @@ func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) 
 
 func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *queuedJob) (outcome EvaluationOutcome) {
 	infrastructureFailure := func(code, message string) EvaluationOutcome {
-		return EvaluationOutcome{Error: infrastructureError(code, message), Infrastructure: true}
+		return EvaluationOutcome{Error: infrastructureError(code, message)}
 	}
 	if err := verifyPinnedExecutable(settings.EvaluatorCommand, settings.EvaluatorCommandSha256); err != nil {
 		return infrastructureFailure("evaluator_identity_mismatch", "pinned evaluator identity check failed")
@@ -1165,7 +1165,12 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	}
 	if result.Score != nil {
 		if err := validateScore(result.Score); err != nil {
-			return infrastructureFailure("score_result_invalid", "pinned scorer returned an invalid result")
+			return EvaluationOutcome{
+				Error: terminalInfrastructureError(
+					"score_result_invalid",
+					"pinned scorer returned an invalid result",
+				),
+			}
 		}
 	}
 	if result.EvalError != nil {
@@ -1219,7 +1224,6 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	return EvaluationOutcome{
 		Score: result.Score, Error: result.EvalError,
 		ArtifactManifest: archivedManifest,
-		Infrastructure:   result.EvalError != nil && result.EvalError.Kind == "infrastructure",
 	}
 }
 
@@ -3374,109 +3378,17 @@ func isStagingDiscardedJob(job ScoreJobResult) bool {
 }
 
 func validateScore(score *ScoreResult) error {
-	if score == nil || score.ScoreSchema != ScoreSchema || score.RawScore == nil || score.NormalizedScore == nil {
-		return errors.New("score result is missing required fields")
-	}
-	if math.IsNaN(*score.RawScore) || math.IsInf(*score.RawScore, 0) || *score.RawScore <= 0 {
-		return errors.New("raw score must be finite and positive")
-	}
-	if math.IsNaN(*score.NormalizedScore) || math.IsInf(*score.NormalizedScore, 0) || *score.NormalizedScore < 1 || 200 < *score.NormalizedScore {
-		return errors.New("normalized score must be finite and in [1, 200]")
-	}
-	if score.Gates == nil {
-		return errors.New("score gates are missing")
-	}
-	if err := validateScoreSignificance(score.Significance); err != nil {
-		return err
-	}
-	if score.TakeoverEligible && (!score.Placeable ||
-		!score.Significance.StatisticallySignificant ||
-		!score.Significance.RecommendedNextEpochTakeoverMarginSupported) {
-		return errors.New("takeover eligibility contradicts statistical significance")
-	}
-	for name, gate := range score.Gates {
-		if strings.TrimSpace(name) == "" || gate.Details == nil {
-			return fmt.Errorf("score gate %q is malformed", name)
-		}
-	}
-	return nil
-}
-
-func validateScoreSignificance(significance *ScoreSignificance) error {
-	if significance == nil || significance.Method != "one-sided-welch-t" ||
-		significance.Alpha != 0.05 || significance.ReplicateCount <= 0 ||
-		9 < significance.ReplicateCount || significance.ReplicateCount%2 == 0 ||
-		!finitePositiveNumber(significance.BaselineMeanRawScore) ||
-		!finitePositiveNumber(significance.CandidateMeanRawScore) ||
-		!finiteNumber(significance.ObservedImprovementPercent) ||
-		!finitePositiveNumber(significance.TakeoverMarginPercent) ||
-		50 < significance.TakeoverMarginPercent {
-		return errors.New("score significance metadata is malformed")
-	}
-	if significance.ReplicateCount == 1 {
-		if significance.BaselineSampleVariance != nil ||
-			significance.CandidateSampleVariance != nil ||
-			significance.MinimumSignificantImprovementPercent != nil ||
-			significance.RequiredImprovementPercent != nil ||
-			significance.OneSidedPValue != nil || significance.WelchT != nil ||
-			significance.WelchDegreesOfFreedom != nil ||
-			significance.StatisticallySignificant ||
-			significance.NextEpochMinimumImprovementPercent != nil ||
-			significance.RecommendedNextEpochTakeoverMarginPercent != nil ||
-			significance.RecommendedNextEpochTakeoverMarginSupported {
-			return errors.New("single-replicate score claims unavailable significance")
-		}
-		return nil
-	}
-	if !finiteNonnegativePointer(significance.BaselineSampleVariance) ||
-		!finiteNonnegativePointer(significance.CandidateSampleVariance) ||
-		!finiteNonnegativePointer(significance.MinimumSignificantImprovementPercent) ||
-		!finiteNonnegativePointer(significance.RequiredImprovementPercent) ||
-		!finiteNonnegativePointer(significance.NextEpochMinimumImprovementPercent) ||
-		!finitePositivePointer(significance.RecommendedNextEpochTakeoverMarginPercent) ||
-		significance.OneSidedPValue == nil ||
-		!finiteNumber(*significance.OneSidedPValue) ||
-		*significance.OneSidedPValue < 0 || 1 < *significance.OneSidedPValue {
-		return errors.New("score significance calculation is incomplete")
-	}
-	if significance.WelchT != nil && !finiteNumber(*significance.WelchT) {
-		return errors.New("score Welch statistic is not finite")
-	}
-	if significance.WelchDegreesOfFreedom != nil &&
-		!finitePositiveNumber(*significance.WelchDegreesOfFreedom) {
-		return errors.New("score Welch degrees of freedom are invalid")
-	}
-	statisticallySignificant := 0 < significance.ObservedImprovementPercent &&
-		*significance.OneSidedPValue <= significance.Alpha
-	if significance.StatisticallySignificant != statisticallySignificant {
-		return errors.New("score significance decision is inconsistent")
-	}
-	supported := 0 < *significance.RecommendedNextEpochTakeoverMarginPercent &&
-		*significance.RecommendedNextEpochTakeoverMarginPercent <= 50
-	if significance.RecommendedNextEpochTakeoverMarginSupported != supported {
-		return errors.New("next-epoch significance margin support is inconsistent")
-	}
-	return nil
-}
-
-func finiteNumber(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0)
-}
-
-func finitePositiveNumber(value float64) bool {
-	return finiteNumber(value) && 0 < value
-}
-
-func finiteNonnegativePointer(value *float64) bool {
-	return value != nil && finiteNumber(*value) && 0 <= *value
-}
-
-func finitePositivePointer(value *float64) bool {
-	return value != nil && finitePositiveNumber(*value)
+	return model.ValidateCompetitionScore(score)
 }
 
 func infrastructureError(code, message string) *CompetitionError {
 	return &CompetitionError{Kind: "infrastructure", Code: code, Message: message, Retriable: true}
+}
+
+// Identifies a deterministic evaluator defect that cannot change while the
+// job remains bound to the same immutable evaluator image.
+func terminalInfrastructureError(code, message string) *CompetitionError {
+	return &CompetitionError{Kind: "infrastructure", Code: code, Message: message, Retriable: false}
 }
 
 var (
@@ -4498,7 +4410,7 @@ func (self PostgresStore) Leaderboards(
 				  AND (staging = false OR $3)
 				  AND (
 				      (staging = false AND reveal_at <= $2) OR
-				      (staging = true AND admission_closed_at IS NOT NULL AND admission_closed_at <= $2)
+				      (staging = true AND COALESCE(admission_closed_at, closes_at) <= $2)
 				  )
 				ORDER BY staging, epoch_number
 			`, settings.CompetitionId, self.nowUtc(), includeStaging)
@@ -4997,7 +4909,6 @@ type EvaluationOutcome struct {
 	Score            *ScoreResult
 	Error            *CompetitionError
 	ArtifactManifest json.RawMessage
-	Infrastructure   bool
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -5036,9 +4947,11 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				panic(errors.New("competition job runtime image identity is invalid"))
 			}
 			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
-			if outcome.Infrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+			retryableInfrastructure := outcome.Error != nil &&
+				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
+			if retryableInfrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
 				outcome.Score = nil
-				outcome.Error = infrastructureError(
+				outcome.Error = terminalInfrastructureError(
 					"evaluation_time_budget_exhausted",
 					"submission exhausted its total evaluation time budget",
 				)
@@ -5052,7 +4965,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				h := sha256.Sum256(manifestJson)
 				manifestHash = hex.EncodeToString(h[:])
 			}
-			if outcome.Infrastructure && retryBudgetAvailable {
+			if retryableInfrastructure && retryBudgetAvailable {
 				retry = true
 				server.RaisePgResult(tx.Exec(ctx, `
 					UPDATE competition_job SET state = 'queued', available_at = $2,
@@ -5574,11 +5487,10 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	)
 	if !server.NowUtc().Before(executionDeadline) {
 		outcome := EvaluationOutcome{
-			Error: infrastructureError(
+			Error: terminalInfrastructureError(
 				"evaluation_time_budget_exhausted",
 				"submission exhausted its total evaluation time budget",
 			),
-			Infrastructure: false,
 		}
 		retry, err := self.store.Complete(
 			context.WithoutCancel(parent),
@@ -5611,8 +5523,10 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			if result.outcome.Score != nil {
 				if err := validateScore(result.outcome.Score); err != nil {
 					result.outcome = EvaluationOutcome{
-						Error:          infrastructureError("score_result_invalid", "pinned scorer returned an invalid result"),
-						Infrastructure: true,
+						Error: terminalInfrastructureError(
+							"score_result_invalid",
+							"pinned scorer returned an invalid result",
+						),
 					}
 				}
 			}

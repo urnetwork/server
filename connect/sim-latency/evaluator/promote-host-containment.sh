@@ -152,9 +152,14 @@ runner_memory_limit_bytes="$(jq -er '.runner_memory_limit_bytes' <<<"$boundary_j
 
 readonly security_keys='["accounting_complete","cgroup_contained","cleanup_complete","default_deny_network","immutable_reports","management_cpu_reserved","management_memory_reserved","no_production_secrets","offline_build","offline_build_resource_limits","redis_reset","resource_limits","resource_report_complete","structural_patch_check","template_database_reset"]'
 jq -e --argjson security_keys "$security_keys" \
-    '.schema == 1 and .eval_error == null and .score != null and
-     .score.score_schema == 1 and .score.placeable == true and
-     ([.score.gates[] | .passed == true] | all) and
+	'.schema == 1 and .eval_error == null and .score != null and
+	 .score.score_schema == 1 and .score.placeable == true and
+	 .score.significance.method == "one-sided-welch-t" and
+	 .score.significance.alpha == 0.05 and
+	 (.score.significance.replicate_count | type == "number" and . > 0 and . <= 9 and . % 2 == 1) and
+	 (.score.significance.statistically_significant | type == "boolean") and
+	 (.score.significance.recommended_next_epoch_takeover_margin_supported | type == "boolean") and
+	 ([.score.gates[] | .passed == true] | all) and
      ([.security | to_entries[] | select(.value | type == "boolean") | .key] | sort) == $security_keys and
      ([.security | to_entries[] | select(.value | type == "boolean") | .value == true] | all) and
      (.security.cgroup_id | type == "string" and length > 0) and

@@ -85,6 +85,9 @@ RUN go mod download \
 RUN GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitionpatch ./cli/competitionpatch \
     && GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitiondbinit ./cli/competitiondbinit \
     && GOFLAGS=-mod=readonly go build -trimpath -o /opt/urnetwork/bin/sim-latency ./connect/sim-latency
+RUN --network=none GOFLAGS=-mod=readonly go test -list '^TestScoreProducesSharedContract$' ./connect/sim-latency \
+        | grep -Fx 'TestScoreProducesSharedContract' \
+    && GOFLAGS=-mod=readonly go test -run '^TestScoreProducesSharedContract$' -count=1 ./connect/sim-latency
 RUN test "$(sha256sum /opt/urnetwork/sim-latency.yml | awk '{print $1}')" = "${SOURCE_CONFIG_SHA256}" \
     && /opt/urnetwork/bin/sim-latency source-check \
         --epoch "${SOURCE_EPOCH}" \

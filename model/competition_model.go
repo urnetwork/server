@@ -4,6 +4,10 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -253,6 +257,119 @@ type CompetitionScoreSignificance struct {
 type CompetitionGate struct {
 	Passed  bool           `json:"passed"`
 	Details map[string]any `json:"details"`
+}
+
+// Validates the score contract shared by the trusted scorer, worker, stored
+// leaderboard, and public API. A successful scorer result must pass here
+// before it can cross any of those boundaries.
+func ValidateCompetitionScore(score *CompetitionScoreResult) error {
+	if score == nil || score.ScoreSchema != CompetitionScoreSchema ||
+		score.RawScore == nil || score.NormalizedScore == nil {
+		return errors.New("score result is missing required fields")
+	}
+	if !competitionFinitePositive(*score.RawScore) {
+		return errors.New("raw score must be finite and positive")
+	}
+	if !competitionFinite(*score.NormalizedScore) ||
+		*score.NormalizedScore < 1 || 200 < *score.NormalizedScore {
+		return errors.New("normalized score must be finite and in [1, 200]")
+	}
+	if score.Gates == nil {
+		return errors.New("score gates are missing")
+	}
+	if err := validateCompetitionScoreSignificance(score.Significance); err != nil {
+		return err
+	}
+	if score.TakeoverEligible && (!score.Placeable ||
+		!score.Significance.StatisticallySignificant ||
+		!score.Significance.RecommendedNextEpochTakeoverMarginSupported) {
+		return errors.New("takeover eligibility contradicts statistical significance")
+	}
+	for name, gate := range score.Gates {
+		if strings.TrimSpace(name) == "" || gate.Details == nil {
+			return fmt.Errorf("score gate %q is malformed", name)
+		}
+	}
+	return nil
+}
+
+// Checks the complete run-level variance record. A one-replicate development
+// smoke has no inferential values; production's odd replicated samples do.
+func validateCompetitionScoreSignificance(significance *CompetitionScoreSignificance) error {
+	if significance == nil || significance.Method != "one-sided-welch-t" ||
+		significance.Alpha != 0.05 || significance.ReplicateCount <= 0 ||
+		9 < significance.ReplicateCount || significance.ReplicateCount%2 == 0 ||
+		!competitionFinitePositive(significance.BaselineMeanRawScore) ||
+		!competitionFinitePositive(significance.CandidateMeanRawScore) ||
+		!competitionFinite(significance.ObservedImprovementPercent) ||
+		!competitionFinitePositive(significance.TakeoverMarginPercent) ||
+		50 < significance.TakeoverMarginPercent {
+		return errors.New("score significance metadata is malformed")
+	}
+	if significance.ReplicateCount == 1 {
+		if significance.BaselineSampleVariance != nil ||
+			significance.CandidateSampleVariance != nil ||
+			significance.MinimumSignificantImprovementPercent != nil ||
+			significance.RequiredImprovementPercent != nil ||
+			significance.OneSidedPValue != nil || significance.WelchT != nil ||
+			significance.WelchDegreesOfFreedom != nil ||
+			significance.StatisticallySignificant ||
+			significance.NextEpochMinimumImprovementPercent != nil ||
+			significance.RecommendedNextEpochTakeoverMarginPercent != nil ||
+			significance.RecommendedNextEpochTakeoverMarginSupported {
+			return errors.New("single-replicate score claims unavailable significance")
+		}
+		return nil
+	}
+	if !competitionFiniteNonnegativePointer(significance.BaselineSampleVariance) ||
+		!competitionFiniteNonnegativePointer(significance.CandidateSampleVariance) ||
+		!competitionFiniteNonnegativePointer(significance.MinimumSignificantImprovementPercent) ||
+		!competitionFiniteNonnegativePointer(significance.RequiredImprovementPercent) ||
+		!competitionFiniteNonnegativePointer(significance.NextEpochMinimumImprovementPercent) ||
+		!competitionFinitePositivePointer(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		significance.OneSidedPValue == nil ||
+		!competitionFinite(*significance.OneSidedPValue) ||
+		*significance.OneSidedPValue < 0 || 1 < *significance.OneSidedPValue {
+		return errors.New("score significance calculation is incomplete")
+	}
+	if significance.WelchT != nil && !competitionFinite(*significance.WelchT) {
+		return errors.New("score Welch statistic is not finite")
+	}
+	if significance.WelchDegreesOfFreedom != nil &&
+		!competitionFinitePositive(*significance.WelchDegreesOfFreedom) {
+		return errors.New("score Welch degrees of freedom are invalid")
+	}
+	statisticallySignificant := 0 < significance.ObservedImprovementPercent &&
+		*significance.OneSidedPValue <= significance.Alpha
+	if significance.StatisticallySignificant != statisticallySignificant {
+		return errors.New("score significance decision is inconsistent")
+	}
+	supported := 0 < *significance.RecommendedNextEpochTakeoverMarginPercent &&
+		*significance.RecommendedNextEpochTakeoverMarginPercent <= 50
+	if significance.RecommendedNextEpochTakeoverMarginSupported != supported {
+		return errors.New("next-epoch significance margin support is inconsistent")
+	}
+	return nil
+}
+
+// Rejects non-finite values before they can enter JSON or PostgreSQL.
+func competitionFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+// Requires a finite value above zero.
+func competitionFinitePositive(value float64) bool {
+	return competitionFinite(value) && 0 < value
+}
+
+// Requires a present finite value at or above zero.
+func competitionFiniteNonnegativePointer(value *float64) bool {
+	return value != nil && competitionFinite(*value) && 0 <= *value
+}
+
+// Requires a present finite value above zero.
+func competitionFinitePositivePointer(value *float64) bool {
+	return value != nil && competitionFinitePositive(*value)
 }
 
 type CompetitionError struct {

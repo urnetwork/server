@@ -1481,7 +1481,7 @@ if jq -e '.eval_error == null' "$artifact_dir/score.json" >/dev/null; then
 else
     score_json=null
     eval_error_json="$(jq \
-        '.eval_error | {kind,code,message,retriable:(.kind == "infrastructure")}' \
+        '.eval_error | {kind,code,message,retriable:(.kind == "infrastructure" and .code != "score_result_invalid")}' \
         "$artifact_dir/score.json")"
 fi
 
