@@ -94,11 +94,17 @@ type mimirContinuityGapHistory struct {
 	recoveryElapsed  time.Duration
 }
 
+// Current query-boundary comparisons remain separate from restoration totals
+// frozen at the last positive advance of this history.
 type mimirContinuityAssessment struct {
-	gap              mimirContinuityGap
-	classification   mimirContinuityClassification
-	recoveryMovement time.Duration
-	recoveryElapsed  time.Duration
+	gap                 mimirContinuityGap
+	classification      mimirContinuityClassification
+	comparisonAvailable bool
+	stepMovement        time.Duration
+	stepElapsed         time.Duration
+	stationaryTicks     int
+	recoveryMovement    time.Duration
+	recoveryElapsed     time.Duration
 }
 
 func mimirContinuityQuery(environment string) string {
@@ -188,19 +194,21 @@ func mimirContinuityHealthyFindings(
 	return findings
 }
 
-func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuityGap) []mimirContinuityAssessment {
-	p.historyLock.Lock()
-	defer p.historyLock.Unlock()
+// Preserve classification/history transitions while retaining the latest
+// comparable step before replacing its previous query boundary.
+func (self *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuityGap) []mimirContinuityAssessment {
+	self.historyLock.Lock()
+	defer self.historyLock.Unlock()
 
-	if p.history == nil {
-		p.history = map[int64]mimirContinuityGapHistory{}
+	if self.history == nil {
+		self.history = map[int64]mimirContinuityGapHistory{}
 	}
 	next := make(map[int64]mimirContinuityGapHistory, len(gaps))
 	assessments := make([]mimirContinuityAssessment, 0, len(gaps))
 	for _, gap := range gaps {
 		key := gap.resumed.Unix()
 		missingStart := gap.missingStart()
-		history, observedBefore := p.history[key]
+		history, observedBefore := self.history[key]
 		if !observedBefore || !now.After(history.lastObservedAt) || missingStart.Before(history.lastStart) {
 			history = mimirContinuityGapHistory{
 				anchorStart: missingStart, anchorObservedAt: now,
@@ -210,8 +218,10 @@ func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuity
 		}
 
 		classification := mimirContinuityUnclassified
+		var stepMovement, stepElapsed time.Duration
 		if observedBefore {
-			stepMovement := missingStart.Sub(history.lastStart)
+			stepMovement = missingStart.Sub(history.lastStart)
+			stepElapsed = now.Sub(history.lastObservedAt)
 			switch {
 			case stepMovement > 0:
 				// The fixed right edge identifies the same gap. Any forward
@@ -226,9 +236,8 @@ func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuity
 			case missingStart.Equal(history.lastStart):
 				history.stationaryTicks++
 				if history.recovering {
-					// One stationary cadence can be range rounding or store
-					// discovery jitter. A second one proves that the boundary
-					// is no longer advancing with wall clock.
+					// Keep the historical restoration class until the
+					// existing store-age/stationarity guard selects fixed loss.
 					classification = mimirContinuityRecovering
 				}
 			default:
@@ -259,14 +268,20 @@ func (p *mimirContinuityProbe) observeGaps(now time.Time, gaps []mimirContinuity
 		next[key] = history
 		assessments = append(assessments, mimirContinuityAssessment{
 			gap: gap, classification: classification,
-			recoveryMovement: history.recoveryMovement,
-			recoveryElapsed:  history.recoveryElapsed,
+			comparisonAvailable: observedBefore,
+			stepMovement:        stepMovement,
+			stepElapsed:         stepElapsed,
+			stationaryTicks:     history.stationaryTicks,
+			recoveryMovement:    history.recoveryMovement,
+			recoveryElapsed:     history.recoveryElapsed,
 		})
 	}
-	p.history = next
+	self.history = next
 	return assessments
 }
 
+// Aggregate every gap's latest comparator without presenting last-positive
+// historical restoration as current movement or still-missing steps as restored.
 func mimirContinuityGapFinding(
 	classification mimirContinuityClassification,
 	assessments []mimirContinuityAssessment,
@@ -275,6 +290,7 @@ func mimirContinuityGapFinding(
 	gateway string,
 ) finding {
 	totalMissing := 0
+	movingCount, stationaryCount, uncomparedCount := 0, 0, 0
 	worst := assessments[0]
 	evidence := make([]string, 0, len(assessments))
 	for _, assessment := range assessments {
@@ -291,9 +307,26 @@ func mimirContinuityGapFinding(
 			gap.previous.Format(time.RFC3339),
 			gap.resumed.Format(time.RFC3339),
 		)
-		if assessment.classification == mimirContinuityRecovering {
+		comparisonAvailability, comparisonMovement, comparisonElapsed := "unavailable", "unknown", "unknown"
+		if assessment.comparisonAvailable {
+			comparisonAvailability = "available"
+			comparisonMovement = assessment.stepMovement.String()
+			comparisonElapsed = assessment.stepElapsed.String()
+			if assessment.stepMovement > 0 {
+				movingCount++
+			} else {
+				stationaryCount++
+			}
+		} else {
+			uncomparedCount++
+		}
+		line += fmt.Sprintf(
+			"; current_comparison=%s current_boundary_movement=%s current_elapsed=%s stationary_observations=%d",
+			comparisonAvailability, comparisonMovement, comparisonElapsed, assessment.stationaryTicks,
+		)
+		if assessment.recoveryMovement > 0 {
 			line += fmt.Sprintf(
-				"; observed boundary movement=%s over elapsed=%s",
+				"; historical_restoration_movement=%s historical_restoration_elapsed=%s",
 				assessment.recoveryMovement, assessment.recoveryElapsed,
 			)
 		}
@@ -308,10 +341,11 @@ func mimirContinuityGapFinding(
 			mimirContinuityStep, mimirContinuityWindow, mimirContinuityMissingSteps,
 		),
 		observed: fmt.Sprintf(
-			"classification=%s query_start=%s query_end=%s gateway=%s gaps=%d total_missing_steps=%d worst_missing_start=%s worst_missing_end=%s worst_missing_steps=%d",
+			"classification=%s query_start=%s query_end=%s gateway=%s gaps=%d total_missing_steps=%d worst_missing_start=%s worst_missing_end=%s worst_missing_steps=%d current_moving_gaps=%d current_stationary_gaps=%d current_uncompared_gaps=%d",
 			classification, queryStart.Format(time.RFC3339), queryEnd.Format(time.RFC3339), gateway,
 			len(assessments), totalMissing, worst.gap.missingStart().Format(time.RFC3339),
 			worst.gap.missingEnd().Format(time.RFC3339), worst.gap.missing,
+			movingCount, stationaryCount, uncomparedCount,
 		),
 		evidence: strings.Join(evidence, "\n"),
 		playbook: "SIGNALS.md §11.20 and §11.21",
@@ -320,14 +354,27 @@ func mimirContinuityGapFinding(
 	switch classification {
 	case mimirContinuityRecovering:
 		result.class = "mimir-query-store-visibility-gap"
-		result.symptom = fmt.Sprintf(
-			"Mimir is progressively restoring %d five-minute control evaluations across %d bounded query gap(s)",
-			totalMissing, len(assessments),
-		)
-		result.mechanism = "The same gap's right edge stayed fixed while its left edge advanced between observations. Previously absent historical evaluations therefore became readable without producer backfill. Query/store discovery can expose several steps in one batch, so individual movement need not match wall clock. This is query-store visibility recovery, not permanent raw-sample loss; an approximately wall-clock series is the stronger recent-store cutoff signature."
-		result.context = "Build-info is independent of user traffic and the range query bypasses the Grafana panel. The metrics front assigns receive time, so a current producer cannot recreate those old timestamps. Exact-process §11.21 values distinguish the known compacted-store cutoff from another store-visibility mechanism."
-		result.action = "Run §11.21 and preserve the moving boundaries. Do not zero the store horizons solely to clear this alert: Mimir 3.1.1 warns that doing so queries replicated non-compacted blocks. Choosing zero-horizon reads, a long read-only handoff, or a dedicated persistent Mimir tier is an operator architecture decision, not an automatic monitor repair."
-		result.verify = "The existing gap becomes fully queryable by its configured store-age boundary. After an explicitly selected replacement design is deployed, a controlled and full replacement creates no new bounded gap through its complete handoff and discovery window."
+		switch {
+		case movingCount == len(assessments):
+			result.symptom = fmt.Sprintf(
+				"Mimir query-store visibility advanced on the latest comparison across %d gap(s); %d five-minute control evaluations remain unavailable",
+				len(assessments), totalMissing,
+			)
+		case stationaryCount == len(assessments):
+			result.symptom = fmt.Sprintf(
+				"Mimir query-store visibility is unchanged on the latest comparison across %d gap(s) with historical restoration; %d five-minute control evaluations remain unavailable",
+				len(assessments), totalMissing,
+			)
+		default:
+			result.symptom = fmt.Sprintf(
+				"Mimir query-store visibility comparisons: %d moving, %d stationary, %d uncompared gap(s); %d five-minute control evaluations remain unavailable",
+				movingCount, stationaryCount, uncomparedCount, totalMissing,
+			)
+		}
+		result.mechanism = "Historical restoration proved the same gap's right edge stayed fixed while its left edge advanced between observations: previously absent historical evaluations became readable without producer backfill. Current comparison deltas are separate evidence, and an unchanged boundary does not prove continuing restoration or permanent loss. Query/store discovery can expose several steps in one batch, so individual movement need not match wall clock. The evaluations that became readable were a query-store visibility gap, not permanent raw-sample loss. Permanence of the remaining unavailable evaluations is not established by that restoration history; an approximately wall-clock series is the stronger recent-store cutoff signature."
+		result.context = "Build-info is independent of user traffic and the range query bypasses the Grafana panel. The metrics front assigns receive time, so a current producer cannot recreate those old timestamps. Historical restoration totals run from the anchor observation to the last positive boundary advance and stay frozen during stationary observations. Current elapsed is the interval between comparable query evaluations, not probe runtime. Exact-process §11.21 values distinguish the known compacted-store cutoff from another store-visibility mechanism."
+		result.action = "Run §11.21 and preserve both moving and stationary boundaries with their current-comparison and historical restoration evidence. Do not zero the store horizons solely to clear this alert: Mimir 3.1.1 warns that doing so queries replicated non-compacted blocks. Choosing zero-horizon reads, a long read-only handoff, or a dedicated persistent Mimir tier is an operator architecture decision, not an automatic monitor repair."
+		result.verify = "Actual complete queryability of every residual gap establishes recovery. Historical movement or reclassification alone is not recovery, and no emitted Alert is not proof that the residual became readable. A remaining interval that satisfies the existing fixed-loss guard needs independent source/store reconciliation, not a restoration promise. After an explicitly selected replacement design is deployed, a controlled and full replacement creates no new bounded gap through its complete handoff and discovery window."
 	case mimirContinuityFixedLoss:
 		result.class = "mimir-ingestion-gap"
 		result.symptom = fmt.Sprintf(

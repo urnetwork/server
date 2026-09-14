@@ -505,7 +505,10 @@ func TestMimirContinuityNarrationSeparatesCurrentAndHistoricalRestoration(t *tes
 			"21 five-minute control evaluations remain unavailable",
 			"unchanged on the latest comparison",
 			"anchor observation to the last positive boundary advance",
-			"not permanent raw-sample loss",
+			"The evaluations that became readable were a query-store visibility gap, not permanent raw-sample loss.",
+			"Permanence of the remaining unavailable evaluations is not established by that restoration history",
+			"Historical movement or reclassification alone is not recovery",
+			"no emitted Alert is not proof that the residual became readable",
 			"SIGNALS.md §11.20",
 		} {
 			if !strings.Contains(alert.Markdown(), want) {
@@ -592,6 +595,46 @@ func TestMimirContinuityNarrationAggregatesMovingAndStationaryGaps(t *testing.T)
 	if !strings.Contains(moving.Markdown(), "current_moving_gaps=2 current_stationary_gaps=0 current_uncompared_gaps=0") {
 		t.Fatalf("all-moving group lost per-gap aggregation: %s", moving.Markdown())
 	}
+}
+
+// A newly seen gap and a stationary previously seen gap share the existing
+// unclassified group without inventing a comparator for the new gap.
+func TestMimirContinuityNarrationAggregatesStationaryAndUncomparedGaps(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	firstNow := time.Date(2099, 11, 8, 12, 0, 0, 0, time.UTC)
+	firstStart := firstNow.Add(-9 * time.Hour)
+	firstEnd := firstNow.Add(-6 * time.Hour)
+	run := func(now time.Time, withNewGap bool) []Alert {
+		t.Helper()
+		omit := mimirContinuityOmitRange(firstStart, firstEnd)
+		if withNewGap {
+			for timestamp := range mimirContinuityOmitRange(firstNow.Add(-4*time.Hour), firstNow.Add(-2*time.Hour)) {
+				omit[timestamp] = true
+			}
+		}
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t, signal, now,
+			mimirContinuityTimes(now.Add(-mimirContinuityWindow), now, omit),
+			map[string]string{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+	requireAlertClass(t, run(firstNow, false), "mimir-continuity-gap-unclassified")
+	alert := requireAlertClass(t, run(firstNow.Add(mimirContinuityStep), true), "mimir-continuity-gap-unclassified")
+	for _, want := range []string{
+		"current_moving_gaps=0 current_stationary_gaps=1 current_uncompared_gaps=1",
+		"current_comparison=available current_boundary_movement=0s current_elapsed=5m0s stationary_observations=1",
+		"current_comparison=unavailable current_boundary_movement=unknown current_elapsed=unknown stationary_observations=0",
+		"gaps=2 total_missing_steps=62",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("stationary/uncompared group lacks %q: %s", want, alert.Markdown())
+		}
+	}
+	requireAlertOmits(t, alert, "historical_restoration_movement=")
 }
 
 // No previous comparable observation is different from an observed zero delta.
