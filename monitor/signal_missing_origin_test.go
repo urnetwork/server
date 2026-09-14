@@ -76,6 +76,38 @@ func TestMissingOriginSignalDocumentationContract(t *testing.T) {
 	}
 }
 
+// Pin the rolling-rate trigger separately from sustained recovery verification.
+func TestMissingOriginSignalDocumentationRollingSampleTrigger(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summaryRow string
+	for _, line := range strings.Split(string(catalogBytes), "\n") {
+		if strings.HasPrefix(line, "| missing-origin-rate |") {
+			if summaryRow != "" {
+				t.Fatal("SIGNALS.md repeats the missing-origin-rate summary row")
+			}
+			summaryRow = strings.Join(strings.Fields(line), " ")
+		}
+	}
+	if summaryRow == "" {
+		t.Fatal("SIGNALS.md is missing the missing-origin-rate summary row")
+	}
+	for _, want := range []string{
+		"> 500/min on one validated rolling-[5m] sample",
+		"WARN/Sustain1",
+		"two comparable complete five-minute windows are recovery verification, not extra trigger sustain",
+	} {
+		if !strings.Contains(summaryRow, want) {
+			t.Fatalf("missing-origin summary omits %q: %s", want, summaryRow)
+		}
+	}
+	if strings.Contains(summaryRow, "> 500/min for 5 min") {
+		t.Fatalf("missing-origin summary retained an extra sustain gate: %s", summaryRow)
+	}
+}
+
 func TestMissingOriginSignalSyntheticCompleteDetailedCohorts(t *testing.T) {
 	now := time.Date(2026, 9, 2, 15, 37, 0, 0, time.UTC)
 	payload := missingOriginFixtureWithDetailsJSON(t, now, 1411.325, []missingOriginDetailFixture{

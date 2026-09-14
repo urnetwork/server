@@ -2702,10 +2702,11 @@ Probe: `vacuum-health`
 SELECT relname, n_dead_tup, last_autovacuum FROM pg_stat_user_tables
 ORDER BY n_dead_tup DESC LIMIT 10;
 ```
-`n_dead_tup` above 10M on a hot table, or an old `backend_xid`/`backend_xmin`
-horizon candidate → warn. If a table declares a larger fixed
-`autovacuum_vacuum_threshold`, use that value as the dead-tuple alert floor;
-the effective threshold is `max(10M, configured fixed threshold)`. Rank the
+`dead-tuples` warns only when
+`n_dead_tup > max(10M, configured fixed threshold)`. Use the 10M floor unless
+the table declares an explicit larger fixed `autovacuum_vacuum_threshold`.
+An old `backend_xid`/`backend_xmin` horizon candidate is attribution context for
+that debt warning, not an independent trigger. Rank the
 oldest combined horizon, then break equal-horizon ties by the oldest
 transaction/query start; fresh snapshots inherit an old in-progress xid and
 must not arbitrarily displace its real long-running owner. Report PID, both
@@ -9160,7 +9161,7 @@ Tier-1 (warn):
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; marker-ready score attribution additionally requires the complete fixed phase family | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source-owner, resolution, relationship, and lifecycle cohorts | > 500/min for 5 min; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source-owner, resolution, relationship, and lifecycle cohorts | > 500/min on one validated rolling-[5m] sample, WARN/Sustain1; two comparable complete five-minute windows are recovery verification, not extra trigger sustain; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |

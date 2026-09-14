@@ -2,10 +2,62 @@ package monitor
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// A horizon describes a debt warning's attribution, not another trigger.
+func TestVacuumHealthSignalDocumentationDebtOnlyTrigger(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	sectionStart := strings.Index(catalog, "### 2.4 Vacuum health")
+	sectionEnd := strings.Index(catalog, "### 2.5 Task-system meta-health")
+	if sectionStart < 0 || sectionEnd <= sectionStart {
+		t.Fatal("SIGNALS.md does not contain a bounded vacuum-health section")
+	}
+	section := catalog[sectionStart:sectionEnd]
+	openingEnd := strings.Index(section, "\nThat configured-threshold rule")
+	if openingEnd < 0 {
+		t.Fatal("SIGNALS.md is missing the vacuum-health opening boundary")
+	}
+	opening := strings.Join(strings.Fields(section[:openingEnd]), " ")
+	for _, want := range []string{
+		"`dead-tuples` warns only when `n_dead_tup > max(10M, configured fixed threshold)`",
+		"explicit larger fixed `autovacuum_vacuum_threshold`",
+		"horizon candidate is attribution context for that debt warning, not an independent trigger",
+	} {
+		if !strings.Contains(opening, want) {
+			t.Fatalf("vacuum-health opening omits %q: %s", want, opening)
+		}
+	}
+}
+
+// An old snapshot cannot override a larger table-specific dead-space floor.
+func TestVacuumHealthSignalSyntheticOldHorizonBelowFixedFloor(t *testing.T) {
+	row := Row{
+		"synthetic_table", "15000000", "01-01 00:00",
+		"20000000", "", "0", "0", "0", "0", "0", "0", "0",
+		"42", "1000", "99", "98", "120", "active", "client backend", "synthetic-maintenance", "SELECT 1",
+	}
+	if !vacuumHasOldHorizon(pgRow(row)) {
+		t.Fatal("synthetic below-floor fixture does not contain an old horizon")
+	}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{row}, nil
+	}}
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("old horizon independently triggered below the fixed debt floor: %+v", alerts)
+	}
+}
 
 func TestVacuumHealthSignalSyntheticDeadTuples(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
