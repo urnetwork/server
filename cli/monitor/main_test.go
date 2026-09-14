@@ -21,12 +21,15 @@ func TestEffectiveSettingsGenerationReappliesCLIOverridesAndExclusions(t *testin
 		Hosts: []servermonitor.HostSettings{{
 			Name:     "edge-a.example.test",
 			EdgeIPv6: []servermonitor.EdgeIPv6InterfaceSettings{{Interface: "public-a"}},
+		}, {
+			Name: "paused.example.test", Roles: []string{"subtensor"},
 		}},
 	}
 	load := func() (servermonitor.SignalSettings, error) { return current, nil }
 	opts := monitorOptions{
 		mode:                  string(servermonitor.AddressModeLAN),
 		keys:                  stringFlags{"testdata/key-one", "testdata/key-two"},
+		excludedHosts:         stringFlags{"paused.example.test", "paused.example.test"},
 		excludedEdgeIPv6Hosts: stringFlags{"edge-a.example.test"},
 	}
 	loadEffective := func() (servermonitor.SignalSettings, error) {
@@ -49,7 +52,8 @@ func TestEffectiveSettingsGenerationReappliesCLIOverridesAndExclusions(t *testin
 	}
 	if startup.AddressMode != servermonitor.AddressModeLAN ||
 		!reflect.DeepEqual(startup.SSHKeyPaths, []string{"testdata/key-one", "testdata/key-two"}) ||
-		len(startup.Hosts[0].EdgeIPv6) != 0 {
+		len(startup.Hosts[0].EdgeIPv6) != 0 || len(startup.Hosts) != 2 ||
+		!reflect.DeepEqual(startup.ExcludedHosts, []string{"paused.example.test"}) {
 		t.Fatalf("CLI overrides not applied exactly: %+v", startup)
 	}
 
@@ -57,6 +61,57 @@ func TestEffectiveSettingsGenerationReappliesCLIOverridesAndExclusions(t *testin
 	matched, err = check(context.Background(), startup)
 	if err != nil || matched {
 		t.Fatalf("underlying generation change matched=%t err=%v", matched, err)
+	}
+}
+
+// Repeated host policies preserve exact parsed names and coexist with the
+// narrower IPv6 pause; the full inventory remains unchanged.
+func TestParseMonitorOptionsAcceptsRepeatableHostExclusions(t *testing.T) {
+	opts, err := parseMonitorOptions([]string{"-exclude-host", "a.example.test", "-exclude-host", "b.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual([]string(opts.excludedHosts), []string{"a.example.test", "b.example.test"}) {
+		t.Fatalf("host selectors changed: %v", opts.excludedHosts)
+	}
+	settings, err := applyMonitorSettingsOptions(
+		servermonitor.SignalSettings{Hosts: []servermonitor.HostSettings{{Name: "a.example.test", EdgeIPv6: []servermonitor.EdgeIPv6InterfaceSettings{{Interface: "public"}}}}},
+		monitorOptions{excludedHosts: stringFlags{"a.example.test"}, excludedEdgeIPv6Hosts: stringFlags{"a.example.test"}},
+	)
+	if err != nil || len(settings.Hosts) != 1 || len(settings.Hosts[0].EdgeIPv6) != 0 || len(settings.ExcludedHosts) != 1 {
+		t.Fatalf("combined same-host pauses are not deterministic: %v", err)
+	}
+}
+
+// A current loader failure or disappearing exact selector must be unknown;
+// it must not clear a policy or capture a second baseline during comparison.
+func TestEffectiveHostScopeGenerationFailsClosedOnReloadErrors(t *testing.T) {
+	current := servermonitor.SignalSettings{Hosts: []servermonitor.HostSettings{{Name: "a.example.test"}}}
+	var loadErr error
+	opts := monitorOptions{excludedHosts: stringFlags{"a.example.test"}}
+	loadEffective := func() (servermonitor.SignalSettings, error) {
+		if loadErr != nil {
+			return servermonitor.SignalSettings{}, loadErr
+		}
+		return applyMonitorSettingsOptions(current, opts)
+	}
+	startup, err := loadEffective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := servermonitor.NewSettingsGenerationCheck(loadEffective)
+	current.Hosts = []servermonitor.HostSettings{{Name: "b.example.test"}}
+	if matched, err := check(context.Background(), startup); err == nil || matched {
+		t.Fatalf("removed exact selector was silently ignored: matched=%t err=%v", matched, err)
+	}
+	loadErr = errors.New("synthetic-secret-reload-failure")
+	if matched, err := check(context.Background(), startup); err == nil || matched {
+		t.Fatalf("failed loader matched startup: %t %v", matched, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if matched, err := check(ctx, startup); !errors.Is(err, context.Canceled) || matched {
+		t.Fatalf("canceled scope reload matched startup: %t %v", matched, err)
 	}
 }
 

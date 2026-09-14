@@ -129,7 +129,7 @@ func queryGrafanaDatasource(
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.SetBasicAuth("admin", adminPassword)
-	response, err := client.Do(request)
+	response, err := doScopedGrafanaRequest(client, request)
 	if err != nil {
 		return grafanaDatasourceQuerySample{}, err
 	}

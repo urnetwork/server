@@ -374,7 +374,7 @@ func observeSubscriptionMetricsDashboard(
 		return subscriptionMetricsDashboardObservation{}, err
 	}
 	request.SetBasicAuth("admin", password)
-	response, err := client.Do(request)
+	response, err := doScopedGrafanaRequest(client, request)
 	if err != nil {
 		return subscriptionMetricsDashboardObservation{}, err
 	}

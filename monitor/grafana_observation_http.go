@@ -50,9 +50,21 @@ func newGrafanaObservationHTTPClientWithTransports(
 	ipv4 http.RoundTripper,
 ) *grafanaObservationHTTPClient {
 	return newGrafanaObservationHTTPClientWithClients(
-		&http.Client{Transport: primary, Timeout: timeout},
-		&http.Client{Transport: ipv4, Timeout: timeout},
+		&http.Client{Transport: primary, Timeout: timeout, CheckRedirect: checkGrafanaObservationRedirect},
+		&http.Client{Transport: ipv4, Timeout: timeout, CheckRedirect: checkGrafanaObservationRedirect},
 	)
+}
+
+// Only newly owned clients use this per-request policy. Preserve the standard
+// redirect bound without changing injected clients, transports, or resolvers.
+func checkGrafanaObservationRedirect(request *http.Request, via []*http.Request) error {
+	if err := guardGrafanaObservationRequest(request); err != nil {
+		return err
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
 }
 
 func newGrafanaObservationHTTPClientWithClients(
@@ -87,11 +99,19 @@ func forceDialNetwork(network string, dial dialContextFunc) dialContextFunc {
 }
 
 func (c *grafanaObservationHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	if err := guardGrafanaObservationRequest(request); err != nil {
+		return nil, err
+	}
 	response, err := c.primary.Do(request)
 	if err == nil {
 		return response, nil
 	}
 	closeGrafanaErrorResponse(response)
+	if hostScopeOnlyError(err) {
+		// http.Client wraps redirect refusals in a URL-bearing error. Keep
+		// intentional policy recognition, but never return that wrapper.
+		return nil, &hostScopeExcludedError{}
+	}
 	primaryClass, retryable := classifyGrafanaTransportError(request.Context(), err)
 	if !retryable || request.Context().Err() != nil {
 		return nil, grafanaObservationTransportError{primary: primaryClass}
@@ -109,6 +129,9 @@ func (c *grafanaObservationHTTPClient) Do(request *http.Request) (*http.Response
 		return response, nil
 	}
 	closeGrafanaErrorResponse(response)
+	if hostScopeOnlyError(err) {
+		return nil, &hostScopeExcludedError{}
+	}
 	ipv4Class, _ := classifyGrafanaTransportError(request.Context(), err)
 	return nil, grafanaObservationTransportError{
 		primary: primaryClass,

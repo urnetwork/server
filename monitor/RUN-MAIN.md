@@ -311,6 +311,29 @@ Unknown exclusions fail closed. Inventory-disabled hosts are excluded across
 all probes automatically; `-exclude-edge-ipv6-host` disables only that host's
 exact public IPv6 paths.
 
+For a whole-host pause, use repeatable exact inventory names:
+
+```sh
+WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -exclude-host HOSTNAME
+```
+
+`-exclude-host` is an immutable transport policy: retain desired topology,
+service blocks, and expected denominators while denying excluded
+inventory-target contact. Record its operator reason, owner, UTC start, and
+re-enable condition in the ledger. `monitor-host-scope-partial` keeps excluded
+coverage explicitly unknown; it is not full-fleet recovery. Whole-environment
+service tails and permitted targets remain observed. Empty, wildcard, unknown,
+or ambiguous names fail closed. Reapply exactly the same host/IPv6 exclusions,
+mode, and SSH overrides to every settings-freshness reload and the pre-promotion
+one-shot. Do not remove a selector merely to quiet this operational WARN.
+
+`-exclude-signal` excludes only probe constructors, not hosts selected by other
+probes. A separately host-filtered helper proves its own scope only; never
+transfer that proof to the current authoritative watcher. Re-enable a paused
+host only when its recorded operator condition is met and a current-generation
+validation and controlled handoff succeed.
+
 ## Safe watcher promotion
 
 Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or

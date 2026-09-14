@@ -50,3 +50,25 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 		t.Fatal("RUN-MAIN.md assigns the primary ledger to Terra")
 	}
 }
+
+func TestRunMainRetainsWholeHostScopeSafety(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"-exclude-host HOSTNAME",
+		"immutable transport policy",
+		"retain desired topology, service blocks, and expected denominators",
+		"monitor-host-scope-partial",
+		"explicitly unknown",
+		"operator reason, owner, UTC start, and re-enable condition",
+		"Empty, wildcard, unknown, or ambiguous names fail closed",
+		"settings-freshness reload",
+		"`-exclude-signal` excludes only probe constructors",
+		"helper proves its own scope only",
+		"controlled handoff",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md does not retain %q", required)
+		}
+	}
+}

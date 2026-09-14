@@ -385,7 +385,10 @@ type SignalSettings struct {
 	SSHKeyPaths []string
 	AddressMode AddressMode
 
-	Hosts             []HostSettings
+	Hosts []HostSettings
+	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
+	// authoritative topology; exclusions never remove placements or capacity.
+	ExcludedHosts     []string
 	PostgreSQL        PostgreSQLSettings
 	Grafana           GrafanaSettings
 	GooglePlay        GooglePlayReportingSettings
@@ -517,6 +520,9 @@ func (s SignalSettings) validate() error {
 			seenBlocks[block] = struct{}{}
 		}
 	}
+	if _, err := ExcludeHosts(s); err != nil {
+		return err
+	}
 	if s.Source != nil {
 		return nil
 	}
@@ -536,6 +542,9 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 		transport = &sourceRunner{source: settings.Source}
 	} else {
 		transport = newRunner(cfg)
+	}
+	if len(settings.ExcludedHosts) != 0 {
+		transport = newHostScopeRunner(transport, cfg, settings.ExcludedHosts)
 	}
 
 	var baseline *baselineStore

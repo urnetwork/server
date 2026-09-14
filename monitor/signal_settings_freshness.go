@@ -23,16 +23,23 @@ func (*settingsFreshnessSignal) Name() string           { return "Monitor settin
 func (*settingsFreshnessSignal) Cadence() time.Duration { return time.Minute }
 
 func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettings) (Alerts, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	settings = settings.withDefaults()
 	if err := settings.validate(); err != nil {
 		return nil, err
+	}
+	scopeAlerts := Alerts{}
+	if len(settings.ExcludedHosts) != 0 {
+		scopeAlerts = append(scopeAlerts, hostScopeCoverageAlert(settings, hostScopeCoverageFinding(settings, 0)))
 	}
 	if settings.SettingsGenerationCheck == nil {
 		// Manually assembled and embedded SignalSettings predate this optional
 		// local-only observation seam. Production LoadSignalSettings always arms
 		// it; absence therefore preserves API compatibility without fabricating a
 		// filesystem generation for synthetic callers.
-		return nil, nil
+		return scopeAlerts, nil
 	}
 
 	current, err := settings.SettingsGenerationCheck(ctx, settings)
@@ -41,7 +48,7 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 	}
 	if err != nil {
 		errorClass := classifyObservationError(err)
-		return Alerts{{
+		return append(scopeAlerts, Alert{
 			SignalNumber: s.Number(),
 			SignalKey:    s.Key(),
 			SignalID:     s.ID(),
@@ -61,13 +68,13 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 			Action:       "Repair the local Config/Vault resolution path, run a current-source one-shot, then use the controlled watcher-promotion procedure. Do not trust configuration-derived green findings, print resource values, or hot-reload only part of the inventory.",
 			Verify:       "A newly built watcher loads the complete effective settings, starts every expected tail and probe, and this class remains absent through two one-minute cadences after promotion.",
 			Playbook:     "SIGNALS.md §1.6 and RUN-MAIN.md Safe watcher promotion",
-		}}, nil
+		}), nil
 	}
 	if current {
-		return nil, nil
+		return scopeAlerts, nil
 	}
 
-	return Alerts{{
+	return append(scopeAlerts, Alert{
 		SignalNumber: s.Number(),
 		SignalKey:    s.Key(),
 		SignalID:     s.ID(),
@@ -88,7 +95,7 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 		Action:       "Build a fresh immutable monitor, run its current-source one-shot, and perform the controlled overlap/promotion procedure. If a host was newly disabled, stop using the stale watcher for host contact as soon as the replacement is proven. Do not hot-reload a partial inventory or suppress this boundary.",
 		Verify:       "The replacement watcher loads the intended generation, owns every expected standing tail and probe, and this class remains absent through two one-minute cadences after the old watcher exits.",
 		Playbook:     "SIGNALS.md §1.6 and RUN-MAIN.md Safe watcher promotion",
-	}}, nil
+	}), nil
 }
 
 // NewSettingsGenerationCheck creates the local-only comparison seam used by

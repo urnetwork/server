@@ -53,6 +53,64 @@ func TestSettingsFreshnessSignalAcceptsUnchangedEffectiveSettings(t *testing.T) 
 	}
 }
 
+// Excluded topology remains part of the complete desired-state generation;
+// suppressing its contacts must not hide a changed address or desired member.
+func TestSettingsFreshnessHostScopeRetainsExcludedDesiredStateChanges(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.Hosts = []HostSettings{{Name: "excluded.example.test", LANAddress: "192.0.2.1"}}
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := settings
+	settings.SettingsGenerationCheck = NewSettingsGenerationCheck(func() (SignalSettings, error) { return ExcludeHosts(current, "excluded.example.test") })
+	alerts, err := NewSettingsFreshnessSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 1 || alerts[0].Class != "monitor-host-scope-partial" {
+		t.Fatalf("unchanged policy became stale: %d %v", len(alerts), err)
+	}
+	current.Hosts = append([]HostSettings(nil), current.Hosts...)
+	current.Hosts[0].LANAddress = "192.0.2.2"
+	alerts, err = NewSettingsFreshnessSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "settings-generation-stale")
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+	for _, alert := range alerts {
+		requireAlertOmits(t, alert, "excluded.example.test", "192.0.2.1", "192.0.2.2")
+	}
+}
+
+// Failure of the effective policy reload is unknown, not stale/healthy; the
+// failed error body and selected values never reach Markdown.
+func TestSettingsFreshnessHostScopeReloadFailureAndCancellation(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.Hosts = []HostSettings{{Name: "excluded.example.test"}}
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	settings.SettingsGenerationCheck = NewSettingsGenerationCheck(func() (SignalSettings, error) {
+		calls++
+		return SignalSettings{}, errors.New("synthetic-secret-loader-error")
+	})
+	alerts, err := NewSettingsFreshnessSignal().Run(context.Background(), settings)
+	if err != nil || calls != 1 {
+		t.Fatalf("reload failure was not observed once: %d %v", calls, err)
+	}
+	requireAlertClass(t, alerts, "settings-generation-unobservable")
+	for _, alert := range alerts {
+		requireAlertOmits(t, alert, "synthetic-secret-loader-error", "excluded.example.test")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	alerts, err = NewSettingsFreshnessSignal().Run(ctx, settings)
+	if !errors.Is(err, context.Canceled) || len(alerts) != 0 || calls != 1 {
+		t.Fatalf("canceled freshness produced coverage or loaded settings: %d %d %v", len(alerts), calls, err)
+	}
+}
+
 func TestSettingsFreshnessComparisonIgnoresOnlyProcessSeams(t *testing.T) {
 	settings, current := settingsFreshnessFixture(t)
 	current.Now = func() time.Time { return time.Unix(1, 0) }

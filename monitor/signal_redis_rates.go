@@ -313,7 +313,7 @@ func getBoundedGrafanaJSON(
 		return err
 	}
 	request.SetBasicAuth("admin", adminPassword)
-	response, err := client.Do(request)
+	response, err := doScopedGrafanaRequest(client, request)
 	if err != nil {
 		return err
 	}

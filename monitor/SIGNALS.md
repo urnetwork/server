@@ -1977,6 +1977,34 @@ manually assembled library settings may omit it for compatibility.
 - Context cancellation is watcher lifecycle, not settings loss, and returns
   `context.Canceled` without an Alert.
 
+An explicit whole-host pause uses repeatable `-exclude-host HOSTNAME` selectors.
+Match exact current inventory names; empty, wildcard, unknown, or ambiguous
+selectors fail closed. Keep the full desired inventory, service block lists,
+publisher placement, and expected denominators intact. The exclusion is a
+separate immutable policy, not removal of a required member from the topology.
+Reapply host and IPv6 exclusions, address mode, and SSH overrides on every
+freshness reload before comparing the effective settings in memory.
+
+`monitor-host-scope-partial` is an operational WARN while whole-host coverage is
+explicitly excluded; persistence alone must not page. Deny excluded
+inventory-target host, database/Redis, and exact inventory-owned transport
+operations before contacting their source. Withhold excluded-target findings
+and recovery claims; partial fleet evidence cannot establish placement,
+capacity, or complete-fleet health. Preserve permitted-target evidence and
+whole-environment service log streams. Export only fixed coverage counts and
+status, never selector values, resource contents, or credentials.
+
+Coverage alerts retain the originating probe number and key, identifying which
+observation lost coverage. Their cross-cutting `monitor-host-scope-partial`
+class and `monitor/host-scope` ID link here; the settings-freshness probe also
+emits the process-wide policy warning under §1.6.
+
+Record the pause's operator reason, owner, start time, and re-enable condition
+in the run ledger. Restore coverage only after that condition is met and a
+current-settings validation plus controlled promotion succeeds. Neither a
+signal-selector exclusion nor a host-filtered diagnostic helper proves the
+current authoritative watcher has this whole-host boundary.
+
 ACTION: preserve the old watcher while a fresh immutable candidate loads the
 complete intended settings, then use the §Safe watcher promotion overlap. If a
 host was newly disabled, stop using the stale watcher for host contact as soon
