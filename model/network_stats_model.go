@@ -102,13 +102,23 @@ type ProviderCountryCount struct {
 	RegionCount int64
 	// distinct located cities with a provider
 	CityCount int64
+	// the same providers split by the families they have proven (M2):
+	// dualstack is both proven, ipv6 is v6 alone, ipv4 is everything else,
+	// because a reliability row written before the proven columns existed
+	// reads as v4-only everywhere else in this schema. The three sum to
+	// Count.
+	Ipv4Count      int64
+	Ipv6Count      int64
+	DualstackCount int64
 }
 
 // CountProvidersByCountry returns the active top-level, connected, valid,
 // Public provider count per country — the same population and predicate as
 // CountProviderCountries and the public providers map
 // (GetProvidersMap), grouped by country code — with the distinct region
-// and city counts of that population. Region and city location ids are
+// and city counts of that population, and its split by proven ip family (M2:
+// dualstack, ipv6 alone, everything else ipv4), which the same scan produces
+// so the population is never counted twice. Region and city location ids are
 // scoped to their country, so summing the per-country region (city) counts
 // gives the distinct region (city) count of the whole population. Country
 // codes are stored lower case; they are returned upper case, the ISO form
@@ -137,7 +147,20 @@ func countProvidersByCountry(ctx context.Context, conn server.PgConn) []Provider
                     MIN(location.location_name),
                     COUNT(DISTINCT network_client_location_reliability.client_id),
                     COUNT(DISTINCT network_client_location_reliability.region_location_id),
-                    COUNT(DISTINCT network_client_location_reliability.city_location_id)
+                    COUNT(DISTINCT network_client_location_reliability.city_location_id),
+                    COUNT(DISTINCT network_client_location_reliability.client_id) FILTER (
+                        WHERE NOT network_client_location_reliability.ipv6_proven
+                    ),
+                    COUNT(DISTINCT network_client_location_reliability.client_id) FILTER (
+                        WHERE
+                            network_client_location_reliability.ipv6_proven AND
+                            NOT network_client_location_reliability.ipv4_proven
+                    ),
+                    COUNT(DISTINCT network_client_location_reliability.client_id) FILTER (
+                        WHERE
+                            network_client_location_reliability.ipv4_proven AND
+                            network_client_location_reliability.ipv6_proven
+                    )
                 FROM network_client_location_reliability
                 INNER JOIN network_client ON
                     network_client.client_id = network_client_location_reliability.client_id
@@ -168,6 +191,9 @@ func countProvidersByCountry(ctx context.Context, conn server.PgConn) []Provider
 				&count.Count,
 				&count.RegionCount,
 				&count.CityCount,
+				&count.Ipv4Count,
+				&count.Ipv6Count,
+				&count.DualstackCount,
 			))
 			count.CountryCode = strings.ToUpper(strings.TrimSpace(count.CountryCode))
 			counts = append(counts, count)

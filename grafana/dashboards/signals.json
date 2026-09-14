@@ -2155,6 +2155,210 @@
       "description": "The block clock the collector publishes for the public dashboard's progress gauge: the 1-based block number and the current block's open and close unix times (as seconds relative to now here). A flat block number with a sawtooth remaining time is healthy; a jump at any time other than Sunday 00:00 UTC is a clock or collector fault."
     },
     {
+      "type": "timeseries",
+      "title": "online extenders",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "extenders"
+        }
+      ],
+      "description": "Extenders that are active with at least one active probed address \u2014 the population the directory publishes and the drip rotates through. Every taskworker publishes the same measurement, so max selects it without replica skew."
+    },
+    {
+      "type": "timeseries",
+      "title": "extenders by country (top 10)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(10, max by (country_code) (urnetwork_stats_online_extenders_by_country{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        }
+      ],
+      "description": "The per-country extender gauge behind the public dashboard's extender map, top 10 by count. A country that lost its last extender has its series deleted on the next refresh, so it goes stale rather than pushing a stale count forever."
+    },
+    {
+      "type": "timeseries",
+      "title": "providers by ip family",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_providers_by_ip_family{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{ip_family}}"
+        }
+      ],
+      "description": "Connected valid public providers by the families they have proven: both is dualstack, IPv6 alone is ipv6, and everything else \u2014 including a reliability row written before the proven columns existed \u2014 is ipv4. All three series are published every refresh, so a zero is a zero and never an absence."
+    },
+    {
+      "type": "timeseries",
+      "title": "extenders by ip family",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_extenders_by_ip_family{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{ip_family}}"
+        }
+      ],
+      "description": "Online extenders by the families they have an active address on: both is dualstack, otherwise the one family the host has a global address for. All three series are published every refresh."
+    },
+    {
       "type": "row",
       "title": "application correctness + resource lifecycle",
       "collapsed": false,
@@ -2162,7 +2366,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 115
+        "y": 123
       }
     },
     {
@@ -2177,7 +2381,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2240,7 +2444,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2303,7 +2507,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2375,7 +2579,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2447,7 +2651,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2519,7 +2723,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2595,7 +2799,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 140
       }
     },
     {
@@ -2610,7 +2814,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 133
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -2673,7 +2877,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 133
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -2733,7 +2937,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 141
+        "y": 149
       }
     },
     {
@@ -2748,7 +2952,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 142
+        "y": 150
       },
       "fieldConfig": {
         "defaults": {
@@ -2838,7 +3042,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 142
+        "y": 150
       },
       "fieldConfig": {
         "defaults": {
@@ -2929,7 +3133,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 150
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -3001,7 +3205,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 150
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -3069,7 +3273,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 158
+        "y": 166
       }
     },
     {
@@ -3084,7 +3288,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 159
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3156,7 +3360,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 159
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3228,7 +3432,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 167
+        "y": 175
       },
       "fieldConfig": {
         "defaults": {
@@ -3283,7 +3487,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 175
+        "y": 183
       },
       "fieldConfig": {
         "defaults": {
@@ -3347,7 +3551,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 175
+        "y": 183
       },
       "fieldConfig": {
         "defaults": {
@@ -3424,7 +3628,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 183
+        "y": 191
       }
     },
     {
@@ -3439,7 +3643,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 184
+        "y": 192
       },
       "fieldConfig": {
         "defaults": {
@@ -3488,7 +3692,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 192
+        "y": 200
       }
     },
     {
@@ -3499,7 +3703,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 193
+        "y": 201
       },
       "options": {
         "mode": "markdown",

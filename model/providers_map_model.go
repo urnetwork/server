@@ -52,51 +52,136 @@ func centroidFor(countryCode string, region string) (lat float64, lon float64, o
 }
 
 // RegionProviders is the per-region entry in the providers map.
+//
+// ExtenderCount is always present, never omitted: a region the feed reports
+// with no extender_count at all is an old blob, and the site reads that as
+// zero, so a present zero and an absent field must not mean different things
+// (connect/EXTENDER.md M8).
 type RegionProviders struct {
 	ProviderCount int     `json:"provider_count"`
+	ExtenderCount int     `json:"extender_count"`
 	Lat           float64 `json:"lat"`
 	Lon           float64 `json:"lon"`
 }
 
 // regionProviderCount is a minimal input row for buildProvidersMap, kept
-// separate from ClientLocation so the reshaping logic is unit-testable.
+// separate from ClientLocation so the reshaping logic is unit-testable. The
+// same shape carries the extender aggregate, whose Region is the extender's
+// region location name — or, for an extender located only to its country, that
+// country location's own name, which centroidFor resolves to the country
+// centroid.
 type regionProviderCount struct {
 	CountryCode string
 	Region      string
 	Count       int
 }
 
-// buildProvidersMap reshapes region provider counts into
-// country code -> region -> {provider_count, lat, lon}, attaching a centroid to
-// each region. Regions with no known centroid (region or country) are skipped,
-// and duplicate (country, region) rows are summed.
-func buildProvidersMap(rows []regionProviderCount) map[string]map[string]*RegionProviders {
+// buildProvidersMap merges the two aggregates into
+// country code -> region -> {provider_count, extender_count, lat, lon},
+// attaching a centroid to each region. Regions with no known centroid (region
+// or country) are skipped, and duplicate (country, region) rows are summed.
+//
+// The two aggregates are independent populations over the same key: a region
+// with extenders and no providers is in the map with provider_count 0, and a
+// region with providers and no extenders with extender_count 0. Neither side
+// can drop a region the other found.
+func buildProvidersMap(
+	providerRows []regionProviderCount,
+	extenderRows []regionProviderCount,
+) map[string]map[string]*RegionProviders {
 	out := map[string]map[string]*RegionProviders{}
-	for _, row := range rows {
+	entry := func(row regionProviderCount) *RegionProviders {
 		if row.Count <= 0 || row.Region == "" || row.CountryCode == "" {
-			continue
+			return nil
 		}
 		lat, lon, ok := centroidFor(row.CountryCode, row.Region)
 		if !ok {
-			continue
+			return nil
 		}
 		byRegion, found := out[row.CountryCode]
 		if !found {
 			byRegion = map[string]*RegionProviders{}
 			out[row.CountryCode] = byRegion
 		}
-		if existing, found := byRegion[row.Region]; found {
-			existing.ProviderCount += row.Count
-		} else {
-			byRegion[row.Region] = &RegionProviders{ProviderCount: row.Count, Lat: lat, Lon: lon}
+		existing, found := byRegion[row.Region]
+		if !found {
+			existing = &RegionProviders{Lat: lat, Lon: lon}
+			byRegion[row.Region] = existing
+		}
+		return existing
+	}
+	for _, row := range providerRows {
+		if region := entry(row); region != nil {
+			region.ProviderCount += row.Count
+		}
+	}
+	for _, row := range extenderRows {
+		if region := entry(row); region != nil {
+			region.ExtenderCount += row.Count
 		}
 	}
 	return out
 }
 
+// getOnlineExtendersByRegion aggregates the online extender population (M2:
+// active, with at least one active address) by the location its last
+// activation resolved (M1).
+//
+// An extender located to a region is keyed under the region's name. One
+// located only to its country is keyed under the country location's own name,
+// which centroidFor falls back to the country centroid for, so it is counted
+// and hoverable rather than dropped. One with no location at all has no place
+// on a map and is left out; it still counts in the by-country gauge and the
+// population total.
+func getOnlineExtendersByRegion(ctx context.Context, conn server.PgConn) []regionProviderCount {
+	rows := []regionProviderCount{}
+	result, err := conn.Query(
+		ctx,
+		`
+			SELECT
+				COALESCE(region.country_code, country.country_code),
+				COALESCE(region.location_name, country.location_name),
+				COUNT(*)
+
+			FROM network_extender
+
+			LEFT JOIN location AS region ON
+				region.location_id = network_extender.region_location_id
+
+			LEFT JOIN location AS country ON
+				country.location_id = network_extender.country_location_id
+
+			WHERE
+				network_extender.active AND
+				(
+					network_extender.region_location_id IS NOT NULL OR
+					network_extender.country_location_id IS NOT NULL
+				) AND
+				EXISTS (
+					SELECT 1
+					FROM network_extender_address
+					WHERE
+						network_extender_address.extender_id = network_extender.extender_id AND
+						network_extender_address.active
+				)
+
+			GROUP BY 1, 2
+		`,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var row regionProviderCount
+			server.Raise(result.Scan(&row.CountryCode, &row.Region, &row.Count))
+			rows = append(rows, row)
+		}
+	})
+	return rows
+}
+
 // GetProvidersMap aggregates active top-level, connected, valid, scored
 // providers by country -> region, attaching a representative centroid to each
-// region.
+// region, and merges the online extenders of the same regions into
+// extender_count (connect/EXTENDER.md M8).
 //
 // This queries the reliability tables directly — the same population
 // UpdateClientLocations counts — NOT the InitialClientLocations snapshot. That
@@ -106,6 +191,7 @@ func buildProvidersMap(rows []regionProviderCount) map[string]map[string]*Region
 // map was permanently `{}` in every environment.
 func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProviders, error) {
 	rows := []regionProviderCount{}
+	extenderRows := []regionProviderCount{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -171,9 +257,13 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 				rows = append(rows, row)
 			}
 		})
+
+		// the second aggregate of M8, on the same connection: the online
+		// extenders by the region their activation located them in
+		extenderRows = getOnlineExtendersByRegion(ctx, conn)
 	})
 
-	return buildProvidersMap(rows), nil
+	return buildProvidersMap(rows, extenderRows), nil
 }
 
 const providersMapRedisKey = "stats.providers-map"

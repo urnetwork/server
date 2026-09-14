@@ -55,6 +55,14 @@ type NetworkExtender struct {
 	Active          bool
 	RevokeTime      *time.Time
 	RecordIssueTime *time.Time
+	// The location the extender was last activated from (M1), resolved from
+	// the activating address. Null until the extender's first activation after
+	// the columns existed, and the city and the region are null for a
+	// country-only lookup.
+	LocationId        *server.Id
+	CityLocationId    *server.Id
+	RegionLocationId  *server.Id
+	CountryLocationId *server.Id
 }
 
 // One family an extender was activated and is probed on. DnsPorts are the dns
@@ -144,6 +152,43 @@ type NetworkExtenderActivation struct {
 	Carriers    []string
 	// the dns ports that passed their probe on this address (L2)
 	DnsPorts []int
+	// the location the activating address resolved to (M1), already created in
+	// the location table by the caller. Each field is nil when the lookup did
+	// not reach that granularity; all four nil is a lookup that failed, which
+	// must still store the activation.
+	LocationId        *server.Id
+	CityLocationId    *server.Id
+	RegionLocationId  *server.Id
+	CountryLocationId *server.Id
+}
+
+// WithLocation stores the location the activating address resolved to (M1),
+// which the caller has already passed through CreateLocation so every id it
+// carries names a row. A nil location, and any level the lookup did not reach,
+// leaves the matching id null: the four ids are a refinement of the country
+// code, never a precondition of storing the activation.
+//
+// CreateLocation degrades a location it cannot name all the way to the country
+// (an unnamed city resolves at region granularity, an unnamed region at
+// country granularity) and leaves the finer ids zero when it does, so the zero
+// id, not the location type, is what decides which columns are written.
+func (self *NetworkExtenderActivation) WithLocation(
+	location *Location,
+) *NetworkExtenderActivation {
+	if location == nil {
+		return self
+	}
+	id := func(locationId server.Id) *server.Id {
+		if locationId == (server.Id{}) {
+			return nil
+		}
+		return &locationId
+	}
+	self.LocationId = id(location.LocationId)
+	self.CityLocationId = id(location.CityLocationId)
+	self.RegionLocationId = id(location.RegionLocationId)
+	self.CountryLocationId = id(location.CountryLocationId)
+	return self
 }
 
 // The wire form of a carrier list, which the column holds as one
@@ -399,9 +444,13 @@ func ActivateNetworkExtender(
 				country_code,
 				active,
 				revoke_time,
-				record_issue_time
+				record_issue_time,
+				location_id,
+				city_location_id,
+				region_location_id,
+				country_location_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15)
 			ON CONFLICT (public_key) DO UPDATE
 			SET
 				network_id = $2,
@@ -413,7 +462,11 @@ func ActivateNetworkExtender(
 				country_code = $10,
 				active = true,
 				revoke_time = NULL,
-				record_issue_time = $11
+				record_issue_time = $11,
+				location_id = $12,
+				city_location_id = $13,
+				region_location_id = $14,
+				country_location_id = $15
 			RETURNING extender_id, create_time
 			`,
 			server.NewId(),
@@ -427,6 +480,10 @@ func ActivateNetworkExtender(
 			activation.DnsTld,
 			activation.CountryCode,
 			issueTime,
+			activation.LocationId,
+			activation.CityLocationId,
+			activation.RegionLocationId,
+			activation.CountryLocationId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -478,6 +535,13 @@ func ActivateNetworkExtender(
 			CountryCode:     activation.CountryCode,
 			Active:          true,
 			RecordIssueTime: &issueTime,
+			// the four ids this activation just wrote; the last activation of
+			// either family wins, so an extender's location is always the one
+			// its most recent address resolved to (M1)
+			LocationId:        activation.LocationId,
+			CityLocationId:    activation.CityLocationId,
+			RegionLocationId:  activation.RegionLocationId,
+			CountryLocationId: activation.CountryLocationId,
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
@@ -1073,9 +1137,13 @@ func Testing_CreateNetworkExtender(
 				country_code,
 				active,
 				revoke_time,
-				record_issue_time
+				record_issue_time,
+				location_id,
+				city_location_id,
+				region_location_id,
+				country_location_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 			`,
 			extender.ExtenderId,
 			extender.NetworkId,
@@ -1090,6 +1158,10 @@ func Testing_CreateNetworkExtender(
 			extender.Active,
 			extender.RevokeTime,
 			extender.RecordIssueTime,
+			extender.LocationId,
+			extender.CityLocationId,
+			extender.RegionLocationId,
+			extender.CountryLocationId,
 		))
 		for _, address := range addresses {
 			server.RaisePgResult(tx.Exec(
@@ -1211,7 +1283,11 @@ func Testing_GetNetworkExtender(
 				country_code,
 				active,
 				revoke_time,
-				record_issue_time
+				record_issue_time,
+				location_id,
+				city_location_id,
+				region_location_id,
+				country_location_id
 			FROM network_extender
 			WHERE extender_id = $1
 			`,
@@ -1233,6 +1309,10 @@ func Testing_GetNetworkExtender(
 					&extender.Active,
 					&extender.RevokeTime,
 					&extender.RecordIssueTime,
+					&extender.LocationId,
+					&extender.CityLocationId,
+					&extender.RegionLocationId,
+					&extender.CountryLocationId,
 				))
 				entry = &NetworkExtenderWithAddresses{
 					Extender:  extender,

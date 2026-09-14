@@ -1202,11 +1202,40 @@ var networkMeasurementMetrics = []string{
 	"urnetwork_stats_block_miners_claimed",
 	"urnetwork_stats_prev_block_miner_claims_alpha",
 	"urnetwork_stats_prev_block_miners_claimed",
+	"urnetwork_stats_online_extenders",
 }
 
 // the labeled operator network measurements, read with max by (labels)
 var networkLabeledMeasurementMetrics = []string{
 	"urnetwork_stats_online_providers_by_country",
+	"urnetwork_stats_online_extenders_by_country",
+	"urnetwork_stats_online_providers_by_ip_family",
+	"urnetwork_stats_online_extenders_by_ip_family",
+}
+
+// the operator network measurements that stay internal
+// (connect/EXTENDER.md M4). they are replicated by every taskworker like the
+// public ones, so they are read the same way — with max and the env selector —
+// but they are never admitted to publicSafeMetrics: how much of the network's
+// contract volume flows through extenders, and how much of it is disputed, is
+// operator business. the providers dashboard is where they live
+var internalMeasurementMetrics = []string{
+	"urnetwork_stats_open_contracts",
+	"urnetwork_stats_contracts_24h",
+	"urnetwork_stats_open_contracts_with_extender",
+	"urnetwork_stats_contracts_with_extender_24h",
+	"urnetwork_stats_open_disputes",
+	"urnetwork_stats_disputes_24h",
+}
+
+// the population measurements the providers dashboard shows beside them
+var providersDashboardPopulationMetrics = []string{
+	"urnetwork_stats_online_providers",
+	"urnetwork_stats_online_extenders",
+	"urnetwork_stats_online_providers_by_ip_family",
+	"urnetwork_stats_online_extenders_by_ip_family",
+	"urnetwork_stats_online_providers_by_country",
+	"urnetwork_stats_online_extenders_by_country",
 }
 
 // the only metrics a public (no login) dashboard may query. everything
@@ -1334,35 +1363,236 @@ func TestPublicDashboardsQueryOnlyPublicSafeMetrics(t *testing.T) {
 // query of the per-country gauge, placed by looking the ISO country code up
 // in grafana's bundled country gazetteer. the collector exports the code
 // upper case to match the gazetteer keys
-func TestPublicNetworkStatsProviderMap(t *testing.T) {
-	dashboard := readTestDashboard(t, "public-traffic.json")
-	var maps []testPanel
-	for _, panel := range dashboard.Panels {
-		if panel.Type == "geomap" {
-			maps = append(maps, panel)
-		}
+//
+// The extender map (connect/EXTENDER.md M5) is the same shape over the
+// extender gauge, so the structure is asserted once and applied to each.
+func assertPublicCountryGeomap(
+	t *testing.T,
+	dashboard testDashboard,
+	id int,
+	title string,
+	expression string,
+) {
+	t.Helper()
+	geomap := dashboardPanelById(dashboard, id)
+	if geomap == nil || geomap.Type != "geomap" {
+		t.Fatalf("public country map panel %d is missing", id)
 	}
-	if len(maps) != 1 {
-		t.Fatalf("public network stats has %d geomap panels, want 1", len(maps))
+	if geomap.Title != title {
+		t.Errorf("country map %d title = %q, want %q", id, geomap.Title, title)
 	}
-	geomap := maps[0]
 	if len(geomap.Targets) != 1 {
-		t.Fatalf("provider map has %d targets, want 1", len(geomap.Targets))
+		t.Fatalf("country map %q has %d targets, want 1", title, len(geomap.Targets))
 	}
 	target := geomap.Targets[0]
-	if target.Expr != "max by (country_code, country) (urnetwork_stats_online_providers_by_country)" {
-		t.Errorf("provider map query = %q", target.Expr)
+	if target.Expr != expression {
+		t.Errorf("country map %q query = %q, want %q", title, target.Expr, expression)
 	}
 	if !target.Instant || target.Format != "table" {
-		t.Error("provider map must be an instant table query so the country code is a lookup field")
+		t.Errorf("country map %q must be an instant table query so the country code is a lookup field", title)
 	}
 	if len(geomap.Options.Layers) != 1 {
-		t.Fatalf("provider map has %d layers, want 1", len(geomap.Options.Layers))
+		t.Fatalf("country map %q has %d layers, want 1", title, len(geomap.Options.Layers))
 	}
 	layer := geomap.Options.Layers[0]
 	if layer.Type != "markers" || layer.Location.Mode != "lookup" || layer.Location.Lookup != "country_code" || layer.Location.Gazetteer != "public/gazetteer/countries.json" {
-		t.Errorf("provider map layer = %+v", layer)
+		t.Errorf("country map %q layer = %+v", title, layer)
 	}
+}
+
+func TestPublicNetworkStatsProviderMap(t *testing.T) {
+	dashboard := readTestDashboard(t, "public-traffic.json")
+	// the provider map and the extender map, and nothing else: another
+	// geomap would be another population published per country
+	maps := 0
+	for _, panel := range dashboard.Panels {
+		if panel.Type == "geomap" {
+			maps += 1
+		}
+	}
+	if maps != 2 {
+		t.Fatalf("public network stats has %d geomap panels, want 2", maps)
+	}
+	assertPublicCountryGeomap(
+		t,
+		dashboard,
+		33,
+		"providers by country",
+		"max by (country_code, country) (urnetwork_stats_online_providers_by_country)",
+	)
+}
+
+// The public extender row (connect/EXTENDER.md M5): the extender population
+// with its map and its top countries, and the two family breakdowns, each
+// read with max and without a template variable, which is what a grafana
+// public dashboard can execute.
+func TestPublicNetworkStatsExtenderRow(t *testing.T) {
+	dashboard := readTestDashboard(t, "public-traffic.json")
+
+	row := dashboardPanelById(dashboard, 60)
+	if row == nil || row.Type != "row" || row.Title != "extender network" {
+		t.Fatal("the public extender network row is missing")
+	}
+	providerRow := dashboardPanelById(dashboard, 10)
+	if providerRow == nil || providerRow.GridPos.Y >= row.GridPos.Y {
+		t.Fatal("the extender row must follow the provider network row")
+	}
+
+	// the map, the same markers layer shape as the provider map over the
+	// extender gauge
+	assertPublicCountryGeomap(
+		t,
+		dashboard,
+		71,
+		"extenders by country",
+		"max by (country_code, country) (urnetwork_stats_online_extenders_by_country)",
+	)
+
+	// every panel of the row, by id, with the query it must carry
+	rowPanels := map[int]struct {
+		panelType  string
+		title      string
+		expression string
+	}{
+		61: {"stat", "online extenders", "max(urnetwork_stats_online_extenders)"},
+		62: {"timeseries", "online extenders", "max(urnetwork_stats_online_extenders)"},
+		63: {"stat", "providers IPv4", `max(urnetwork_stats_online_providers_by_ip_family{ip_family="ipv4"})`},
+		64: {"stat", "providers IPv6", `max(urnetwork_stats_online_providers_by_ip_family{ip_family="ipv6"})`},
+		65: {"stat", "providers dual-stack", `max(urnetwork_stats_online_providers_by_ip_family{ip_family="dualstack"})`},
+		66: {"stat", "extenders IPv4", `max(urnetwork_stats_online_extenders_by_ip_family{ip_family="ipv4"})`},
+		67: {"stat", "extenders IPv6", `max(urnetwork_stats_online_extenders_by_ip_family{ip_family="ipv6"})`},
+		68: {"stat", "extenders dual-stack", `max(urnetwork_stats_online_extenders_by_ip_family{ip_family="dualstack"})`},
+		69: {"timeseries", "providers by ip family", "max by (ip_family) (urnetwork_stats_online_providers_by_ip_family)"},
+		70: {"timeseries", "extenders by ip family", "max by (ip_family) (urnetwork_stats_online_extenders_by_ip_family)"},
+		72: {"bargauge", "top extender countries", "sort_desc(topk(15, max by (country) (urnetwork_stats_online_extenders_by_country)))"},
+	}
+	for id, want := range rowPanels {
+		panel := dashboardPanelById(dashboard, id)
+		if panel == nil {
+			t.Errorf("extender row panel %d (%s) is missing", id, want.title)
+			continue
+		}
+		if panel.Type != want.panelType || panel.Title != want.title {
+			t.Errorf("extender row panel %d = %s %q, want %s %q", id, panel.Type, panel.Title, want.panelType, want.title)
+		}
+		if len(panel.Targets) != 1 || panel.Targets[0].Expr != want.expression {
+			t.Errorf("extender row panel %d query = %+v, want %q", id, panel.Targets, want.expression)
+		}
+	}
+
+	// the whole row, the map and the two stacked family series included, is
+	// read with max and carries no template variable
+	for id := 60; id <= 72; id += 1 {
+		panel := dashboardPanelById(dashboard, id)
+		if panel == nil {
+			continue
+		}
+		for _, target := range panel.Targets {
+			if strings.Contains(target.Expr, "$env") {
+				t.Errorf("extender row panel %d uses a template variable: %s", id, target.Expr)
+			}
+			for _, metric := range metricNamePattern.FindAllString(target.Expr, -1) {
+				assertReplicaSafeReads(t, "public extender row", target.Expr, metric, "")
+			}
+		}
+	}
+
+	// both family gauges are on the row, so the two populations are shown on
+	// the same terms
+	joined := strings.Join(dashboardExpressions(dashboard), "\n")
+	for _, metric := range []string{
+		"urnetwork_stats_online_extenders",
+		"urnetwork_stats_online_extenders_by_country",
+		"urnetwork_stats_online_providers_by_ip_family",
+		"urnetwork_stats_online_extenders_by_ip_family",
+	} {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("the public dashboard does not read %s", metric)
+		}
+	}
+}
+
+// The internal providers dashboard (connect/EXTENDER.md M6). The six contract
+// gauges live only here, so this is the test that keeps them off a public
+// dashboard and on an internal one at the same time.
+func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
+	dashboard := readTestDashboard(t, "providers.json")
+	if dashboard.Uid != "urnetwork-providers" || dashboard.Title != "urnetwork / providers" {
+		t.Fatalf("providers dashboard identity = %q / %q", dashboard.Uid, dashboard.Title)
+	}
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("the providers dashboard must remain authenticated")
+	}
+
+	// one variable, the env, from a gauge this dashboard reads. no block or
+	// host variable: every gauge is replicated by every taskworker and read
+	// with max, so a fleet breakout would only split one measurement
+	if len(dashboard.Templating.List) != 1 {
+		t.Fatalf("providers dashboard has %d template variables, want only env", len(dashboard.Templating.List))
+	}
+	variable, ok := dashboard.Templating.List[0].(map[string]any)
+	if !ok || variable["name"] != "env" {
+		t.Fatalf("providers dashboard variable = %+v, want env", dashboard.Templating.List[0])
+	}
+	if variable["query"] != "label_values(urnetwork_stats_online_providers, env)" {
+		t.Errorf("providers env variable query = %v", variable["query"])
+	}
+
+	expressions := dashboardExpressions(dashboard)
+	if len(expressions) == 0 {
+		t.Fatal("providers dashboard has no queries")
+	}
+	joined := strings.Join(expressions, "\n")
+	for _, metric := range append(
+		slices.Clone(internalMeasurementMetrics),
+		providersDashboardPopulationMetrics...,
+	) {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("providers dashboard is missing %s", metric)
+		}
+	}
+	// every read is max-wrapped and env-scoped. the selector is the prefix
+	// rather than the whole matcher because the per-family stats select their
+	// family beside the env; a matcher list continues with a comma or closes
+	// with a brace, so `{env="$env"` still pins the env as the first matcher
+	for _, expression := range expressions {
+		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
+			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)
+		}
+	}
+
+	// the contract gauges are internal: admitting one to publicSafeMetrics is
+	// a publication decision, and this is where it would have to be made
+	for _, metric := range internalMeasurementMetrics {
+		if slices.Contains(publicSafeMetrics, metric) {
+			t.Errorf("%s is an internal contract measurement and must not be public-safe", metric)
+		}
+	}
+	for _, entry := range mustReadDashboardDir(t) {
+		other := readTestDashboard(t, entry)
+		if !slices.Contains(other.Tags, PublicTag) {
+			continue
+		}
+		otherJoined := strings.Join(dashboardExpressions(other), "\n")
+		for _, metric := range internalMeasurementMetrics {
+			if len(metricOccurrences(otherJoined, metric)) != 0 {
+				t.Errorf("public dashboard %s reads the internal measurement %s", entry, metric)
+			}
+		}
+	}
+}
+
+func mustReadDashboardDir(t *testing.T) []string {
+	t.Helper()
+	entries, err := dashboardsFs.ReadDir("dashboards")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
 }
 
 func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {

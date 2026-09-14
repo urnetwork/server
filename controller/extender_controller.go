@@ -477,9 +477,30 @@ func ExtenderActivate(
 		))
 	}
 
+	// The location of the activating address (M1). The country code goes on the
+	// record's country field as it always has; the four location ids go beside
+	// it so the map and the by-country gauge read a named location rather than
+	// a bare code. CreateLocation fills the ids in place, exactly as the mmdb
+	// path of a connection does (network_client_controller.go).
+	//
+	// Nothing here is allowed to fail the activation: a lookup that finds
+	// nothing, a country the location table refuses to name, and a country-only
+	// answer with neither a city nor a region all leave what they could not
+	// resolve unset and store the rest.
 	countryCode := ""
+	var activationLocation *model.Location
 	if location, _, err := GetLocationForIp(clientSession.Ctx, clientIpStr); err == nil {
 		countryCode = location.CountryCode
+		// CreateLocation raises on a country it cannot name, and it is the
+		// only thing here that writes: contain it so a location the table
+		// refuses can never turn a successful probe into a refused activation
+		if r := server.HandleError(func() {
+			model.CreateLocation(clientSession.Ctx, location)
+		}); r == nil {
+			activationLocation = location
+		} else if glog.V(1) {
+			glog.Infof("[extender]no location row for the activating address: %s\n", r)
+		}
 	} else if glog.V(1) {
 		glog.Infof("[extender]no location for the activating address: %s\n", err)
 	}
@@ -488,7 +509,7 @@ func ExtenderActivate(
 	var expireTime time.Time
 	activated := model.ActivateNetworkExtender(
 		clientSession.Ctx,
-		&model.NetworkExtenderActivation{
+		(&model.NetworkExtenderActivation{
 			NetworkId:   clientSession.ByJwt.NetworkId,
 			ClientId:    *clientSession.ByJwt.ClientId,
 			PublicKey:   publicKey,
@@ -501,7 +522,7 @@ func ExtenderActivate(
 			Ip:          clientIp,
 			Carriers:    carriers,
 			DnsPorts:    activeDnsPorts,
-		},
+		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,
 			addresses []*model.NetworkExtenderAddress,
