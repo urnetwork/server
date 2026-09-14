@@ -764,7 +764,7 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		})
 	}
 	if secondHead <= firstHead {
-		mechanism := "The RPC is serving a static local database; peer loss, import failure, or resource pressure can freeze it without closing the listener."
+		mechanism := "No best-head increase was observed in this bounded source window. Sustained alerts count repeated bounded pauses, not proof of continuous freezing between runs; peer loss, import failure or resource pressure require independent corroboration."
 		evidence := ""
 		action := "Inspect peer state and bounded aggregate import outcomes, then distinguish a frozen node from an unusually long block interval with a longer sample."
 		verify := "Require repeated head progress and a nonzero peer population."
@@ -780,9 +780,10 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 			target: target.name, frame: configured.Name, sustain: 3, pageSustain: 5,
 			symptom:   fmt.Sprintf("%s did not advance across the bounded head sample", identity),
 			mechanism: mechanism,
-			baseline:  "The best head advances across the fifteen-second source-of-truth sample while the public chain advances.",
+			baseline:  "The best head advances across a paired source-of-truth read with at least the fifteen-second wait. Reference advancement during that interval must be independently observed; one public-head read does not prove it.",
 			observed:  fmt.Sprintf("first_head=%d second_head=%d peers=%d", firstHead, secondHead, node.Direct.Health.Peers),
 			evidence:  evidence,
+			context:   "The escalation gate counts repeated bounded pauses at this alert identity. This is not proof of continuous immobility between runs, a same-generation interval, or reference advancement from the single public-head read. A complete peer-loss sibling remains independent evidence.",
 			action:    action,
 			verify:    verify,
 			playbook:  "SIGNALS.md §17.2",

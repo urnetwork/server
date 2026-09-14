@@ -208,7 +208,7 @@ func subtensorConvergencePromQLSeries(mode string) string {
 				values[name] = append(values[name], value)
 			}
 		}
-		labels := `env="main",host="snow",chain="bittensor",job=` + strconv.Quote(job)
+		labels := `env="main",host="subtensor.example.test",chain="synthetic-chain",job=` + strconv.Quote(job)
 		for _, measure := range []struct{ key, metric, extra string }{
 			{key: "best", metric: "substrate_block_height", extra: `,status="best"`},
 			{key: "sync_target", metric: "substrate_block_height", extra: `,status="sync_target"`},
@@ -229,8 +229,8 @@ func subtensorConvergencePromQLSeries(mode string) string {
 func subtensorConvergencePromQLScript(t testing.TB) string {
 	t.Helper()
 	targets := map[string]subtensorConvergenceTarget{
-		"snow\x00subtensor":           {host: "snow", job: "subtensor"},
-		"snow\x00subtensor-lightnode": {host: "snow", job: "subtensor-lightnode"},
+		"subtensor.example.test\x00subtensor":           {host: "subtensor.example.test", job: "subtensor"},
+		"subtensor.example.test\x00subtensor-lightnode": {host: "subtensor.example.test", job: "subtensor-lightnode"},
 	}
 	query := subtensorConvergenceQuery("main", targets)
 	measure := func(name string) string {
@@ -238,7 +238,7 @@ func subtensorConvergencePromQLScript(t testing.TB) string {
 	}
 	dashboard := subtensorConvergenceDashboardExpressions(t)
 	for id, expression := range dashboard {
-		dashboard[id] = strings.NewReplacer("$env", "main", "$host", "snow", "$chain", "bittensor", "$node", "subtensor-lightnode").Replace(expression)
+		dashboard[id] = strings.NewReplacer("$env", "main", "$host", "subtensor.example.test", "$chain", "synthetic-chain", "$node", "subtensor-lightnode").Replace(expression)
 	}
 	var script strings.Builder
 	eval := func(expression, expected string) {
@@ -250,7 +250,7 @@ func subtensorConvergencePromQLScript(t testing.TB) string {
 	near := func(expression, expected string) {
 		eval("abs(sum("+expression+") - ("+expected+")) < bool 0.000001", "1")
 	}
-	legacyLabels := `env="main",host="snow",chain="bittensor",job="subtensor-lightnode"`
+	legacyLabels := `env="main",host="subtensor.example.test",chain="synthetic-chain",job="subtensor-lightnode"`
 	legacyBest := `substrate_block_height{` + legacyLabels + `,status="best"}`
 	legacyTarget := `substrate_block_height{` + legacyLabels + `,status="sync_target"}`
 	legacyNet := `deriv(` + legacyBest + `[1h]) - ignoring (status) deriv(` + legacyTarget + `[1h])`
@@ -307,14 +307,14 @@ func subtensorConvergencePromQLScript(t testing.TB) string {
 	count(dashboard[13], 0)
 	count(dashboard[14], 0)
 
-	// The configured pairs are snow/archive and other/lightnode. Poison the
-	// other two pairs with a much faster target; a Cartesian selector admits
-	// both bogus references even though each label is individually allowed.
+	// Each synthetic host configures just one job. Poison the other two pairs
+	// with a much faster target; a Cartesian selector admits both bogus
+	// references even though each label is individually allowed.
 	script.WriteString("# exact inventory pairs exclude cross-host job pollution\nclear\nload 15s\n")
-	pairedSeries := subtensorConvergencePromQLSeries("") + strings.ReplaceAll(subtensorConvergencePromQLSeries(""), `host="snow"`, `host="other"`)
+	pairedSeries := subtensorConvergencePromQLSeries("") + strings.ReplaceAll(subtensorConvergencePromQLSeries(""), `host="subtensor.example.test"`, `host="other.example.test"`)
 	for _, line := range strings.Split(strings.TrimSuffix(pairedSeries, "\n"), "\n") {
-		unconfigured := (strings.Contains(line, `host="snow"`) && strings.Contains(line, `job="subtensor-lightnode"`)) ||
-			(strings.Contains(line, `host="other"`) && strings.Contains(line, `job="subtensor"`))
+		unconfigured := (strings.Contains(line, `host="subtensor.example.test"`) && strings.Contains(line, `job="subtensor-lightnode"`)) ||
+			(strings.Contains(line, `host="other.example.test"`) && strings.Contains(line, `job="subtensor"`))
 		if unconfigured && strings.Contains(line, `status="sync_target"`) {
 			line = line[:strings.Index(line, "}")+1] + " 900000+1000x240"
 		}
@@ -322,33 +322,33 @@ func subtensorConvergencePromQLScript(t testing.TB) string {
 	}
 	script.WriteByte('\n')
 	pairedQuery := subtensorConvergenceQuery("main", map[string]subtensorConvergenceTarget{
-		"snow\x00subtensor":            {host: "snow", job: "subtensor"},
-		"other\x00subtensor-lightnode": {host: "other", job: "subtensor-lightnode"},
+		"subtensor.example.test\x00subtensor":       {host: "subtensor.example.test", job: "subtensor"},
+		"other.example.test\x00subtensor-lightnode": {host: "other.example.test", job: "subtensor-lightnode"},
 	})
 	count(pairedQuery, 18)
 	near("("+pairedQuery+") and on (monitor_measure) label_replace(vector(1),\"monitor_measure\",\"lag\",\"\",\"\")", "190280")
-	legacyCrossedTarget := `max by (host) (substrate_block_height{env="main",host=~"snow|other",job=~"subtensor|subtensor-lightnode",status="sync_target"})`
+	legacyCrossedTarget := `max by (host) (substrate_block_height{env="main",host=~"subtensor.example.test|other.example.test",job=~"subtensor|subtensor-lightnode",status="sync_target"})`
 	near(legacyCrossedTarget, "2280000")
 
 	// A second chain remains separate in PromQL, then is rejected as an
 	// ambiguous node identity by the parser tests. Other hosts, environments,
-	// and unconfigured jobs cannot supply a target for snow/bittensor.
+	// and unconfigured jobs cannot supply the selected synthetic target.
 	script.WriteString("# preserve chain grouping and exclude unrelated hosts, environments, and jobs\nclear\nload 15s\n")
 	script.WriteString(subtensorConvergencePromQLSeries("one fallback"))
 	noise := strings.ReplaceAll(subtensorConvergencePromQLSeries("caught up"), "100000", "900000")
-	script.WriteString(strings.ReplaceAll(noise, `chain="bittensor"`, `chain="other-chain"`))
-	script.WriteString(strings.ReplaceAll(noise, `host="snow"`, `host="other"`))
+	script.WriteString(strings.ReplaceAll(noise, `chain="synthetic-chain"`, `chain="synthetic-other-chain"`))
+	script.WriteString(strings.ReplaceAll(noise, `host="subtensor.example.test"`, `host="other.example.test"`))
 	script.WriteString(strings.ReplaceAll(noise, `env="main"`, `env="other"`))
 	script.WriteString(strings.NewReplacer(`job="subtensor"`, `job="unconfigured"`, `job="subtensor-lightnode"`, `job="unconfigured-lightnode"`).Replace(noise))
 	script.WriteByte('\n')
 	count(query, 36)
-	near("("+measure("lag")+") and on (chain) label_replace(vector(1),\"chain\",\"bittensor\",\"\",\"\")", "190280")
-	near("("+measure("lag")+") and on (chain) label_replace(vector(1),\"chain\",\"other-chain\",\"\",\"\")", "0")
+	near("("+measure("lag")+") and on (chain) label_replace(vector(1),\"chain\",\"synthetic-chain\",\"\",\"\")", "190280")
+	near("("+measure("lag")+") and on (chain) label_replace(vector(1),\"chain\",\"synthetic-other-chain\",\"\",\"\")", "0")
 	near(dashboard[13], "94640")
 	near(dashboard[14], "14/15")
 	for _, scope := range []struct{ host, chain string }{
-		{host: "snow", chain: "bittensor|other-chain"},
-		{host: "snow|other", chain: "bittensor"},
+		{host: "subtensor.example.test", chain: "synthetic-chain|synthetic-other-chain"},
+		{host: "subtensor.example.test|other.example.test", chain: "synthetic-chain"},
 	} {
 		multiScope := strings.NewReplacer("$env", "main", "$host", scope.host, "$chain", scope.chain, "$node", "subtensor-lightnode").Replace(subtensorConvergenceDashboardExpressions(t)[13])
 		count(multiScope, 2)

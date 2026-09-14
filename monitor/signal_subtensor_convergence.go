@@ -3,13 +3,17 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +26,13 @@ const (
 	subtensorConvergenceBusyFraction   = 0.80
 	subtensorConvergenceFutureSkew     = 30 * time.Second
 	subtensorConvergenceDefaultWarpLag = int64(4096)
+
+	// The entire added qualification is bounded, including both helper phases
+	// and the intervening query; slow observations remain visibility.
+	subtensorConvergenceGenerationDeadline    = 55 * time.Second
+	subtensorConvergenceGenerationCallTimeout = 25 * time.Second
+	subtensorConvergenceGenerationWorkers     = 4
+	subtensorConvergenceGenerationMaxBytes    = 64 * 1024
 )
 
 // SIGNALS.md §17.5 maps to signal_subtensor_convergence.go and
@@ -70,15 +81,17 @@ var subtensorConvergenceMeasureNames = []struct {
 }
 
 type subtensorConvergenceTarget struct {
-	host     string
-	node     string
-	job      string
-	lagBand  int64
-	syncMode string
+	host          string
+	node          string
+	job           string
+	containerName string
+	lagBand       int64
+	syncMode      string
 }
 
 type subtensorConvergenceMetrics struct {
 	target        subtensorConvergenceTarget
+	observedAt    time.Time
 	chain         string
 	lag           float64
 	netRate       float64
@@ -99,10 +112,8 @@ func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergence
 			return nil, fmt.Errorf("subtensor convergence: %s has no configured nodes", configuredHost.name)
 		}
 		for _, node := range configuredHost.subtensor.Nodes {
-			// Snow's metrics jobs deliberately match the independently supervised
-			// container names. Falling back to the semantic node name keeps the
-			// reusable settings shape useful when no container identity is needed;
-			// absent matching series still fail closed below.
+			// Metrics jobs follow independently supervised container names.
+			// A semantic fallback cannot qualify a container generation.
 			job := strings.TrimSpace(node.ContainerName)
 			if job == "" {
 				job = strings.TrimSpace(node.Name)
@@ -123,7 +134,8 @@ func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergence
 			}
 			targets[key] = subtensorConvergenceTarget{
 				host: configuredHost.name, node: node.Name, job: job,
-				lagBand: lagBand, syncMode: node.SyncMode,
+				containerName: node.ContainerName,
+				lagBand:       lagBand, syncMode: node.SyncMode,
 			}
 		}
 	}
@@ -207,7 +219,10 @@ func subtensorConvergenceExpressions(targetLabels, nodeLabels string) map[string
 	}
 }
 
-func (subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	subtensorHosts := env.cfg.hostsWithRole("subtensor")
 	if len(subtensorHosts) == 0 {
 		return nil, fmt.Errorf("subtensor convergence: no subtensor host in inventory")
@@ -221,35 +236,310 @@ func (subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		return nil, fmt.Errorf("subtensor convergence: no services host in inventory for the loopback Mimir query")
 	}
 
+	qualificationCtx, cancel := context.WithTimeout(ctx, subtensorConvergenceGenerationDeadline)
+	defer cancel()
+	beforeGenerationKVs := observeSubtensorConvergenceGenerations(qualificationCtx, env, targets)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pinnedTime := env.now().UTC().Truncate(time.Millisecond)
+	hostStateKVs := map[string]string{}
+	for _, key := range sortedSubtensorConvergenceTargetKeys(targets) {
+		target := targets[key]
+		observation := beforeGenerationKVs[key]
+		state := observation.state
+		if state == "qualified" {
+			if observation.identity.started.After(pinnedTime) {
+				state = "future"
+			} else if observation.identity.started.After(pinnedTime.Add(-time.Hour)) {
+				state = "young"
+			}
+		}
+		if state != "qualified" && hostStateKVs[target.host] == "" {
+			hostStateKVs[target.host] = state
+		}
+	}
+	if qualificationCtx.Err() != nil {
+		for _, target := range targets {
+			hostStateKVs[target.host] = "deadline"
+		}
+	}
+	activeTargets := map[string]subtensorConvergenceTarget{}
+	for key, target := range targets {
+		if hostStateKVs[target.host] == "" {
+			activeTargets[key] = target
+		}
+	}
+	visibilityFindings := func() []finding {
+		findings := []finding{}
+		for _, key := range sortedSubtensorConvergenceTargetKeys(targets) {
+			target := targets[key]
+			if state := hostStateKVs[target.host]; state != "" {
+				findings = append(findings, subtensorConvergenceGenerationFinding(target, state))
+			}
+		}
+		return findings
+	}
+	observationFailure := func(err error) ([]finding, error) {
+		if parentErr := ctx.Err(); parentErr != nil {
+			return nil, parentErr
+		}
+		if len(hostStateKVs) == 0 {
+			return nil, err
+		}
+		// Preserve already established per-host generation visibility when an
+		// independent metrics source fails; never render its private error.
+		for _, target := range activeTargets {
+			hostStateKVs[target.host] = "metrics-unobservable"
+		}
+		return visibilityFindings(), nil
+	}
+	if len(activeTargets) == 0 {
+		return visibilityFindings(), nil
+	}
+
+	// The query retains the full desired population. Explicit visibility, not
+	// a reduced denominator, withholds unqualified same-host histories.
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
-		url.QueryEscape(subtensorConvergenceQuery(env.cfg.env, targets))
+		url.QueryEscape(subtensorConvergenceQuery(env.cfg.env, targets)) +
+		"&time=" + url.QueryEscape(pinnedTime.Format(time.RFC3339Nano))
 	out, metricHost, err := shellFirstServiceGateway(
-		ctx,
+		qualificationCtx,
 		env.runner,
 		metricHosts,
 		nil,
 		"curl -fsS --max-time 15 '"+queryURL+"'",
 	)
-	if err != nil {
-		return nil, fmt.Errorf("subtensor convergence: query Mimir through service gateways: %w", err)
-	}
-
-	metrics, err := parseSubtensorConvergence(out, targets, env.now().UTC())
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(metrics))
-	for key := range metrics {
-		keys = append(keys, key)
+	if qualificationCtx.Err() != nil {
+		for _, target := range activeTargets {
+			hostStateKVs[target.host] = "deadline"
+		}
+		return visibilityFindings(), nil
 	}
-	sort.Strings(keys)
-	findings := make([]finding, 0, len(keys))
-	for _, key := range keys {
-		if finding, ok := evaluateSubtensorConvergence(metrics[key], metricHost.name); ok {
-			findings = append(findings, finding)
+	if err != nil {
+		return observationFailure(fmt.Errorf("subtensor convergence: query Mimir through service gateways: %w", err))
+	}
+
+	if len(activeTargets) != len(targets) {
+		var response mimirInstantResponse
+		if err := json.Unmarshal([]byte(out), &response); err != nil {
+			return observationFailure(fmt.Errorf("subtensor convergence: decode Mimir response: %w", err))
+		}
+		selectedSeries := response.Data.Result[:0]
+		for _, series := range response.Data.Result {
+			key := series.Metric["host"] + "\x00" + series.Metric["job"]
+			if _, expected := targets[key]; !expected {
+				return observationFailure(fmt.Errorf("subtensor convergence: unexpected metrics identity"))
+			}
+			if _, active := activeTargets[key]; active {
+				selectedSeries = append(selectedSeries, series)
+			}
+		}
+		response.Data.Result = selectedSeries
+		filtered, err := json.Marshal(response)
+		if err != nil {
+			return observationFailure(fmt.Errorf("subtensor convergence: reduce qualified histories: %w", err))
+		}
+		out = string(filtered)
+	}
+	metrics, err := parseSubtensorConvergence(out, activeTargets, env.now().UTC())
+	if err != nil {
+		return observationFailure(err)
+	}
+	for _, metric := range metrics {
+		if !metric.observedAt.Round(time.Millisecond).Equal(pinnedTime) {
+			return observationFailure(fmt.Errorf("subtensor convergence: Mimir evaluation does not match pinned time"))
 		}
 	}
+
+	afterGenerationKVs := observeSubtensorConvergenceGenerations(qualificationCtx, env, activeTargets)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, key := range sortedSubtensorConvergenceTargetKeys(activeTargets) {
+		target := activeTargets[key]
+		before := beforeGenerationKVs[key]
+		after := afterGenerationKVs[key]
+		state := after.state
+		if state == "qualified" && (!before.identity.started.Equal(after.identity.started) ||
+			before.identity.image != after.identity.image || before.identity.dataPath != after.identity.dataPath) {
+			state = "changed"
+		}
+		if state != "qualified" && hostStateKVs[target.host] == "" {
+			hostStateKVs[target.host] = state
+		}
+	}
+	checkedAt := env.now().UTC()
+	for key, metric := range metrics {
+		metric.sampleAge += checkedAt.Sub(pinnedTime).Seconds()
+		metrics[key] = metric
+		if checkedAt.Before(pinnedTime) || checkedAt.Sub(pinnedTime) > subtensorConvergenceFreshness ||
+			metric.sampleAge > subtensorConvergenceFreshness.Seconds() || metric.sampleAge < -subtensorConvergenceFutureSkew.Seconds() {
+			if hostStateKVs[metric.target.host] == "" {
+				hostStateKVs[metric.target.host] = "source-stale"
+			}
+		}
+	}
+	// A child deadline on one sibling does not erase completed independent
+	// brackets; parent cancellation above remains authoritative lifecycle.
+	findings := visibilityFindings()
+	for _, key := range sortedSubtensorConvergenceTargetKeys(activeTargets) {
+		metric := metrics[key]
+		if hostStateKVs[metric.target.host] == "" {
+			if finding, ok := evaluateSubtensorConvergence(metric, metricHost.name); ok {
+				findings = append(findings, finding)
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return findings, nil
+}
+
+// Raw identity values stay only in this run's private comparison state.
+type subtensorConvergenceGenerationIdentity struct {
+	started  time.Time
+	image    string
+	dataPath string
+}
+
+type subtensorConvergenceGenerationObservation struct {
+	identity subtensorConvergenceGenerationIdentity
+	state    string
+}
+
+// Bounded workers reuse inventory admission and join their context-aware
+// transports before returning; no helper/schema or shared client is changed.
+func observeSubtensorConvergenceGenerations(ctx context.Context, env *probeEnv, targets map[string]subtensorConvergenceTarget) map[string]subtensorConvergenceGenerationObservation {
+	hostKVs := map[string]*host{}
+	for _, configured := range env.cfg.hosts {
+		hostKVs[configured.name] = configured
+	}
+	keys := sortedSubtensorConvergenceTargetKeys(targets)
+	jobs := make(chan string, len(keys))
+	type result struct {
+		key         string
+		observation subtensorConvergenceGenerationObservation
+	}
+	results := make(chan result, len(keys))
+	for _, key := range keys {
+		jobs <- key
+	}
+	close(jobs)
+	var workers sync.WaitGroup
+	for worker := 0; worker < min(subtensorConvergenceGenerationWorkers, len(keys)); worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for key := range jobs {
+				target := targets[key]
+				observation := subtensorConvergenceGenerationObservation{state: "helper-unobservable"}
+				if ctx.Err() != nil {
+					observation.state = "deadline"
+				} else if target.containerName == "" {
+					observation.state = "missing-container"
+				} else if target.containerName != "subtensor" && target.containerName != "subtensor-lightnode" {
+					observation.state = "unsupported-container"
+				} else if configured := hostKVs[target.host]; configured != nil {
+					commandCtx, cancel := context.WithTimeout(ctx, subtensorConvergenceGenerationCallTimeout)
+					output, err := env.runner.shell(commandCtx, configured,
+						"sudo -n /usr/local/sbin/subtensor-monitor "+shellSingleQuote(target.containerName))
+					commandErr := commandCtx.Err()
+					cancel()
+					if hostScopeOnlyError(err) {
+						observation.state = "scope-excluded"
+					} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(commandErr, context.DeadlineExceeded) || ctx.Err() != nil {
+						observation.state = "deadline"
+					} else if err == nil && commandErr == nil {
+						observation.identity, observation.state = parseSubtensorConvergenceGeneration(output)
+					}
+				}
+				results <- result{key: key, observation: observation}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+	observations := map[string]subtensorConvergenceGenerationObservation{}
+	for result := range results {
+		observations[result.key] = result.observation
+	}
+	return observations
+}
+
+// Reject duplicate/trailing JSON and incomplete helper identities, including
+// exit-zero container_error. No private payload or parse detail is rendered.
+func parseSubtensorConvergenceGeneration(output string) (subtensorConvergenceGenerationIdentity, string) {
+	unknown := subtensorConvergenceGenerationIdentity{}
+	if len(output) > subtensorConvergenceGenerationMaxBytes {
+		return unknown, "helper-unobservable"
+	}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	open, err := decoder.Token()
+	if err != nil || open != json.Delim('{') {
+		return unknown, "helper-unobservable"
+	}
+	fields := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, named := token.(string)
+		if err != nil || !named {
+			return unknown, "helper-unobservable"
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return unknown, "helper-unobservable"
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return unknown, "helper-unobservable"
+		}
+		fields[name] = value
+	}
+	closingToken, err := decoder.Token()
+	var trailing json.RawMessage
+	if err != nil || closingToken != json.Delim('}') || decoder.Decode(&trailing) != io.EOF {
+		return unknown, "helper-unobservable"
+	}
+	if _, failed := fields["container_error"]; failed {
+		return unknown, "helper-unobservable"
+	}
+	var startString, image, dataPath string
+	if json.Unmarshal(fields["container_started"], &startString) != nil ||
+		json.Unmarshal(fields["container_image"], &image) != nil || strings.TrimSpace(image) == "" ||
+		json.Unmarshal(fields["data_path"], &dataPath) != nil || !filepath.IsAbs(dataPath) {
+		return unknown, "helper-unobservable"
+	}
+	started, err := time.Parse(time.RFC3339Nano, startString)
+	if err != nil || started.IsZero() || started.Unix() <= 0 {
+		return unknown, "helper-unobservable"
+	}
+	return subtensorConvergenceGenerationIdentity{started: started.UTC(), image: image, dataPath: dataPath}, "qualified"
+}
+
+// Generation uncertainty is visibility for all same-host reference
+// contributors, not a production outage or convergence/healthy measurement.
+func subtensorConvergenceGenerationFinding(target subtensorConvergenceTarget, state string) finding {
+	f := cannotObserveFinding(target.host, fmt.Errorf("Subtensor generation qualification unavailable"))
+	f.frame = target.node
+	f.symptom = "The monitor could not qualify this node's same-generation Subtensor hour"
+	f.mechanism = "Count and freshness do not prove process continuity. Every configured same-host canonical-reference contributor must have complete, stable helper identity bracketing the pinned Mimir evaluation before this node's convergence is known."
+	f.baseline = "An explicit supported container returns a valid start no later than the one-hour boundary and unchanged start/image/data identity before and after the query, with current source samples still inside their freshness band."
+	f.observed = fmt.Sprintf("generation_state=%s window=%s generation_window_qualified=false helper_values_rendered=false", state, subtensorConvergenceWindow)
+	f.evidence = "Qualification requires the existing restricted helper under a 55-second total child deadline, with at most four workers and 25-second per-call deadlines. Available identity fields are compared privately; absent identity is never zero. Unqualified histories remain explicit coverage loss and the full desired inventory is retained."
+	f.context = "This records observed container/data continuity, not universal proof against a hidden child-process or collector restart. Missing, young or changed identity is not nonconvergence, outage or recovery."
+	f.action = "Preserve the generation. Restore missing helper/identity visibility or wait for a complete same-generation hour, then repeat the bounded comparison; do not restart the node or reduce the sample threshold from this finding."
+	f.verify = "All configured contributors on this host return complete stable identity, each start is no later than the pinned hour boundary, and the existing raw-count, trusted-target and source-freshness gates pass. Only then evaluate convergence; a restart alone cannot resolve the boundary."
+	f.playbook = "SIGNALS.md §17.5"
+	if state == "metrics-unobservable" {
+		f.symptom = "The monitor could not observe this node's pinned Subtensor convergence metrics"
+		f.mechanism = "Another host's generation visibility remains independently established, but this node's metrics source was unavailable or incompatible. Missing metrics cannot establish a typed convergence result or healthy recovery."
+		f.evidence += " The pinned metrics observation was not interpretable; private transport and parse details are omitted."
+	}
+	return f
 }
 
 func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergenceTarget, now time.Time) (map[string]subtensorConvergenceMetrics, error) {
@@ -290,6 +580,10 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 
 		metric := metrics[key]
 		metric.target = target
+		if metric.mask != 0 && !metric.observedAt.Equal(observedAt) {
+			return nil, fmt.Errorf("subtensor convergence: inconsistent Mimir evaluation times")
+		}
+		metric.observedAt = observedAt
 		chain := series.Metric["chain"]
 		if chain == "" || (metric.chain != "" && metric.chain != chain) {
 			return nil, fmt.Errorf("subtensor convergence: missing or mixed chain identity for %s/%s", host, job)

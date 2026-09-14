@@ -3736,16 +3736,39 @@ ForceMinimum value was 1,142 bytes. Compare the pair rather than making 18 a
 permanent encoding contract. Repeat with rank `s` and caller=`target` if the
 incident is caller/rank-specific.
 
-- HEALTHY: normal decoded sum is nonzero and tracks the eligible active
-  top-level supply band;
-  ForceMinimum is normally larger because it bypasses reliability/score gates.
+The legacy un-faceted `c_l` pair is not the current representation after the
+IP-family migration. A completed writer publishes
+`client_score_ip_family_v1_ready=1`; later exports intentionally omit those
+legacy payloads and let them expire. The current reader uses the same
+caller/target tag's `c_l_d`, `c_l_4`, and `c_l_6` Gob count arrays, representing
+disjoint dual-stack, IPv4-only, and IPv6-only buckets. Inspect both normal and
+ForceMinimum facet sets and sum each set without double-counting dual-stack
+providers. Resolve the existing caller alias before comparing a nonzero-caller
+pair; the zero-caller canary already names the shared baseline.
+
+A completed family marker requires complete, valid facet observations, even
+when stale legacy payloads still exist. During a pre-marker transition, a
+present facet representation must not be hidden by a legacy payload; legacy
+fallback applies only when no facets are present and the legacy pair is
+actually available. A missing GET is unknown cache visibility, not an encoded
+empty population; partial facets, an invalid marker, malformed/negative counts,
+or a schema change across the observation have that same boundary. Preserve
+the genuine empty-export and gate-wipe alerts for complete decoded zero
+documents. Overall market counts do not certify every IP family, caller,
+rank, location, sampled provider, or API release.
+
+- POPULATED CANARY: the complete current normal count set has a nonzero
+  decoded sum for this sampled market. ForceMinimum is normally larger because
+  it bypasses reliability/score gates. Global eligible supply is context, not
+  the expected exact count for every target or proof of provider reachability.
 - INELIGIBLE SUPPLY: the ready marker is absent and the raw pool contains
   derived or inactive clients. Deploy the filtered writer and let the existing
   serialized score task finish. Do not delete client, location, provide-key, or
   cache state manually.
 - GATE WIPE: connected/eligible are large, normal sum is 0, ForceMinimum is
-  large. Provider connectivity is healthy; a minimum predicate ate the market.
-  Split the predicates: reliability lookbacks, score cutoff, then egress health.
+  large. The observed input remains populated; a minimum predicate ate the
+  market. This does not independently establish provider reachability. Split
+  the predicates: reliability lookbacks, score cutoff, then egress health.
 - TLS-INTEGRITY DISCRIMINATOR: `fresh_passing_health_rows` excludes a provider
   whose otherwise-passing ratio contains a hard certificate-authentication
   failure. `tls_authentication_failures` is aggregate-only evidence; never put
@@ -3771,6 +3794,8 @@ incident is caller/rank-specific.
   that every connected provider independently failed a test.
 - UPSTREAM EMPTY: normal and ForceMinimum both decode to 0. Investigate the
   connected/valid/provide-mode pool and target location before the minimums.
+  Require complete documents for the current representation; absent retired
+  keys must not select this diagnosis.
 
 2026-08-17 signature: contracts fell from ~8k/min to tens/min while new connects,
 pg, redis, and score-task freshness stayed healthy. Pg still held 100,442
@@ -3792,11 +3817,26 @@ one post-convergence `UpdateClientScores` run to complete, and require the marke
 bounded cache inspection, destination diversity, and child-churn recovery. It
 does not require hardware and must not be repaired with manual data deletion.
 
+2026-09-14 monitor false attribution: Main's completed IP-family marker was
+`1`; both legacy GETs were absent, while all six current count facets were
+present. An offline Gob decode of that single bounded, read-only capture found
+15,312 normal and 69,121 ForceMinimum candidates for the exact zero-caller
+country canary. Only the IPv4-only facets were nonzero; the dual-stack and
+IPv6-only facets were complete encoded-empty arrays. The old monitor consulted
+only retired legacy keys and interpreted missing GETs as zero, producing a
+false `upstream-empty` PAGE. Correct the monitor's representation and missing
+data handling, not the writer, cache contents, or eligibility gates. These
+counts do not certify other families, callers, ranks, locations, provider
+reachability, or API health, and cannot resolve an independent prior fault.
+
 Implementation convention: SIGNALS.md §2.9 (`selection-population`) maps to
 `signal_selection_population.go` and
 `signal_selection_population_test.go`. Synthetic tests cover a fresh empty
-normal cache, a legacy export with derived/inactive supply, and harmless raw
-residue after a completed filtered export.
+normal cache, a legacy export with derived/inactive supply, harmless raw
+residue after a completed filtered export, completed and transitional facet
+representations, stale legacy data, missing/partial/malformed count documents,
+and schema changes across an observation. Missing cache visibility must not
+erase an independently observed ineligible-supply finding.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
@@ -17968,7 +18008,7 @@ head, then rediscovered outbound peers without a process restart and resumed.
 The cycle repeated. Metrics showed 155 discovered peers, zero inbound
 connections, and only outbound opened sessions; an independent edge timed out
 to snow's WAN TCP/30333. Treat any zero-peer/frozen-head sample as degraded;
-alert if it persists for three minutes, and page if it persists for five.
+warn after three consecutive failed probe cadences and page after five.
 Recovery requires both public inbound reachability and more than one good RPC
 sample. The observed temporary post-recovery proof was 12/12 five-second
 samples with two peers and `isSyncing=true`, while the head advanced from
@@ -17978,10 +18018,39 @@ signal.
 The `subtensor-progress` finding therefore carries a three-cadence warning
 threshold and a five-cadence page threshold. The scheduler promotes the copied
 alert at the fifth consecutive failure without changing its
-`(signal_id,class,target,frame)` identity; one healthy cadence resets both
-thresholds. Implementation: SIGNALS.md §17.2 (`subtensor`) maps to
+`(signal_id,class,target,frame)` identity. Its condition compares the two heads
+within one run; head values are not part of the alert identity. Repeated
+within-run pauses can therefore reach PAGE even while heads advance between
+runs. That escalation does not prove a continuously frozen process or an
+exact five-minute stationary interval. RPC/helper work precedes the existing
+15-second wait, and each cadence waits until the prior observation completes;
+neither the source interval nor cadence spacing is exactly 15 or 60 seconds.
+A single public-header response also does not prove public progress across
+the comparison window. Obtain a longer, timestamped observation before
+attributing importer, peer, or resource failure.
+
+A completed cadence without this identity resets its process-local counter,
+including when visibility is lost; only affirmative progress/peer evidence
+can establish healthy recovery. Do not use a reset or silence as recovery.
+Implementation: SIGNALS.md §17.2 (`subtensor`) maps to
 `signal_subtensor.go` and `signal_subtensor_test.go`, with the generic stable-
 identity escalation contract pinned in `run_test.go`.
+
+On 2026-09-14, restored read-only Main checks observed repeated flat lightnode
+RPC samples with two peers, including PAGE escalations, while its observed
+head advanced by 85 blocks between 14:35 and 14:52Z. A separately pinned raw
+hour at 15:01:36Z corroborated 299 archive and 296 lightnode blocks of advance
+for both best and finalized heads. Each series retained 238 samples, about
+4.3-second latest-source age, and a maximum scrape gap around 45 seconds.
+Lightnode sampled flat spans reached about 60 seconds for best head and 75
+for finalized head; archive heads advanced at every retained adjacent sample.
+This is repeated bounded pauses during observed progress, not evidence of a
+continuous hour-long freeze. Process-start and `up` controls remained absent,
+and no helper generation bracket was collected, so these values do not
+establish same-generation continuity, readiness, ETA, recovery, or a peer,
+importer, hardware, or Mimir-discard cause. Preserve the generation and keep
+the existing thresholds; correct unsupported alert narration instead of
+restarting a node or changing its deployment.
 
 On 2026-09-08, the lightnode again held zero peers for more than three monitor
 samples and reported `isSyncing=false` with its target equal to its own stale
@@ -18428,6 +18497,46 @@ catch-up panels use both `subtensor` and `subtensor-lightnode` as reference
 sources even when `$node` displays only the lightnode. They still scope
 environment, host, and chain, preserve host/chain in aggregation, and show
 `target unavailable` when the reference or required history is absent.
+
+Native Subtensor Prometheus inputs are configured to scrape every 15 seconds,
+or approximately 240 raw samples per hour. Fluent Bit's five-second output
+flush is not a scrape cadence and does not create additional samples. These
+native inputs publish directly to Mimir, unlike the service pusher's
+receive-time-restamped metrics. Keep the 200-raw-sample qualification; do not
+lower it to explain an incomplete hour. To discriminate collection loss from
+window warmup, pin one evaluation time and read a bounded instant-query raw
+`[1h]` matrix for the exact configured jobs. Inspect each original label set's
+count, span, age, and timestamp gaps independently. A stepped `query_range`
+or the canonical target's 15-second subquery can reuse source points and is
+not a census of distinct native scrapes. Missing `up` or process-start series
+are unavailable controls, never healthy zeros.
+
+Generation qualification is separate from count and freshness. The exact
+configured `container_name` must return complete `container_started`, image,
+and sole-data-mount identity through the existing restricted read-only helper
+before and after the single pinned-time Mimir query. Require a valid start no
+later than one hour before that evaluation and unchanged start/image/data
+identity across the bracket. Missing explicit container identity, helper
+failure, invalid/future/recent start, or a changed tuple is generation
+visibility, not convergence, outage, or recovery. All configured reference
+contributors on that host must qualify because its canonical target combines
+their histories; independently qualified other hosts keep their findings.
+Bound the additional helper work and retain parent cancellation and host-scope
+admission. This records observed container/data-generation continuity, not
+universal proof against an unobserved child-process or collector restart.
+
+On 2026-09-14, restored read-only Main monitoring initially observed only 168
+archive best-head samples in the trailing hour. A later, separately pinned
+raw-matrix read at 14:26:36Z found 240 best and 240 finalized samples for each
+configured node, with median gaps of 15 seconds, maximum gaps below 15.012
+seconds, no gaps above 30 seconds, and latest samples about 4.3 seconds old.
+Both best heads advanced over that hour. Process-start and `up` controls were
+absent. This qualifies the later hour's raw coverage, not its catch-up ETA or
+generation/recovery boundary, and does not reconstruct why the earlier window
+was incomplete. Fleet-wide Mimir admission discards are separately affirmative
+ingestion-loss evidence, but do not by themselves identify Subtensor as the
+discarded family. Do not restart a node or reduce the threshold from that
+correlation.
 
 - READY: lag is at most 128 blocks for a full node or the configured
   `warp_max_lag` for a warp node. No catch-up alert is needed inside that band.

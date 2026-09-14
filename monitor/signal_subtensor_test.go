@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -923,3 +924,125 @@ func healthySubtensorRPC(head int64) subtensorRPCObservation {
 }
 
 func blockHex(block int64) string { return fmt.Sprintf("0x%x", block) }
+
+// Complete synthetic observations exercise the existing Signal and cadence
+// gate without executing the native RPC/helper script or adding product state.
+func subtensorProgressPauseTestAlerts(t *testing.T, first, second int64, peers int64) Alerts {
+	t.Helper()
+	now := time.Date(2099, 4, 5, 6, 7, 8, 0, time.UTC)
+	settings := subtensorSyntheticSettings(nil)
+	settings.Now = func() time.Time { return now }
+	observation := healthySubtensorObservation()
+	configuredHosts := []HostSettings{}
+	for index := range settings.Hosts {
+		if configured := settings.Hosts[index].Subtensor; configured != nil {
+			configured.PublicRPCURL = "https://reference.example.test"
+			configured.ExpectedChain = "synthetic-chain"
+			configured.ExpectedSpecName = "synthetic-subtensor"
+			configured.ExpectedSpecVersion = 77
+			configured.ExpectedTransactionVersion = 8
+			configured.ExpectedEVMChainID = "0x7b"
+			configuredHosts = append(configuredHosts, settings.Hosts[index])
+		}
+	}
+	settings.Hosts = configuredHosts
+	qualifyRPC := func(rpc *subtensorRPCObservation, head int64) {
+		rpc.Chain = "synthetic-chain"
+		rpc.Runtime = subtensorRuntimeVersion{SpecName: "synthetic-subtensor", SpecVersion: 77, TransactionVersion: 8}
+		rpc.EVMChainID = "0x7b"
+		rpc.Head = blockHex(head)
+	}
+	qualifyRPC(&observation.Public, first+16)
+	for index := range observation.Nodes {
+		node := &observation.Nodes[index]
+		nodeFirst, nodeSecond := first-3, first-2
+		nodePeers := int64(3)
+		if node.Name == "lightnode" {
+			nodeFirst, nodeSecond, nodePeers = first, second, peers
+		}
+		node.FirstHead, node.SecondHead = blockHex(nodeFirst), blockHex(nodeSecond)
+		node.ContainerStarted = now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+		qualifyRPC(&node.Direct, nodeFirst)
+		qualifyRPC(&node.Gateway, nodeSecond)
+		node.Direct.Health = subtensorHealth{Peers: nodePeers}
+		node.Direct.Sync = subtensorSyncState{StartingBlock: 100, CurrentBlock: nodeSecond, HighestBlock: first + 16}
+	}
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Source = &syntheticSource{hostFn: func(configured HostSettings, command string) (string, error) {
+		if configured.Name != "chain.example.test" || !strings.Contains(command, subtensorMarker) {
+			return "", errors.New("unsupported synthetic progress command")
+		}
+		return string(encoded), nil
+	}}
+	alerts, err := NewSubtensorSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return alerts
+}
+
+func TestSubtensorProgressRepeatedPauseEscalationNarration(t *testing.T) {
+	signal := NewSubtensorSignal()
+	gate := newCadenceAlertGate()
+	var page Alert
+	for cadence := 0; cadence < 5; cadence++ {
+		head := int64(1000 + 11*cadence)
+		progress := requireAlertClass(t, subtensorProgressPauseTestAlerts(t, head, head, 3), "subtensor-progress")
+		ready := gate.filter(signal, Alerts{progress})
+		if cadence == 4 {
+			page = requireAlertClass(t, ready, "subtensor-progress")
+		}
+	}
+	if page.Severity != SeverityPage || page.Sustain != 3 || page.PageSustain != 5 {
+		t.Fatal("repeated bounded pauses changed the existing five-cadence escalation")
+	}
+	for _, want := range []string{"repeated bounded pauses", "not proof of continuous", "reference advancement"} {
+		if !strings.Contains(page.Markdown(), want) {
+			t.Errorf("bounded-pause narration lacks required qualification: %s", want)
+		}
+	}
+	if strings.Contains(page.Baseline, "while the public chain advances") {
+		t.Error("a single public reference read was narrated as proved advancement during the sample")
+	}
+}
+
+func TestSubtensorProgressTrueFlatAndAdvancingResetControls(t *testing.T) {
+	signal := NewSubtensorSignal()
+	gate := newCadenceAlertGate()
+	for cadence := 0; cadence < 5; cadence++ {
+		progress := requireAlertClass(t, subtensorProgressPauseTestAlerts(t, 1200, 1200, 3), "subtensor-progress")
+		ready := gate.filter(signal, Alerts{progress})
+		if cadence == 4 && requireAlertClass(t, ready, "subtensor-progress").Severity != SeverityPage {
+			t.Fatal("true-flat control lost its existing page threshold")
+		}
+	}
+	advancing := subtensorProgressPauseTestAlerts(t, 1200, 1201, 3)
+	for _, alert := range advancing {
+		if alert.Class == "subtensor-progress" {
+			t.Fatal("one advancing within-run sample retained progress failure")
+		}
+	}
+	gate.filter(signal, advancing)
+	for cadence := 0; cadence < 3; cadence++ {
+		progress := requireAlertClass(t, subtensorProgressPauseTestAlerts(t, 1201, 1201, 3), "subtensor-progress")
+		ready := gate.filter(signal, Alerts{progress})
+		if cadence < 2 && len(ready) != 0 {
+			t.Fatal("advancing/reset control retained the prior progress streak")
+		}
+		if cadence == 2 && requireAlertClass(t, ready, "subtensor-progress").Severity != SeverityWarn {
+			t.Fatal("post-reset warning did not restart at the existing three-cadence threshold")
+		}
+	}
+}
+
+func TestSubtensorProgressPeerLossContextUnchanged(t *testing.T) {
+	alerts := subtensorProgressPauseTestAlerts(t, 1400, 1400, 0)
+	progress := requireAlertClass(t, alerts, "subtensor-progress")
+	peer := requireAlertClass(t, alerts, "subtensor-peers")
+	if !strings.Contains(progress.Mechanism, "co-resident with complete peer loss") || progress.Sustain != 3 || progress.PageSustain != 5 || peer.Sustain != 3 || peer.PageSustain != 5 {
+		t.Fatal("bounded narration correction changed independently observed peer-loss context or escalation")
+	}
+}
