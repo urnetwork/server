@@ -86,10 +86,137 @@ func hasPlatformRouteMessage(
 	return false
 }
 
+// Synthetic route queues remain fixture-owned after Client shutdown. Joining
+// every writer before the final drain includes late startup and control work.
+func closePlatformRouteClient(
+	ctx context.Context,
+	client *clientconnect.Client,
+	routes ...clientconnect.Route,
+) error {
+	if err := client.CloseAndWait(ctx); err != nil {
+		return err
+	}
+	for _, route := range routes {
+		func() {
+			for {
+				select {
+				case message, ok := <-route:
+					if !ok {
+						return
+					}
+					clientconnect.MessagePoolReturn(message)
+				default:
+					return
+				}
+			}
+		}()
+	}
+	return nil
+}
+
+// A startup key can reach a synthetic route after its last assertion drain.
+// The first-write barrier establishes that exact queue ownership before close.
+func TestPlatformRouteClientCloseReleasesLateStartupKey(t *testing.T) {
+	poolBefore := captureRouteMessagePoolSnapshot(nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	keyStarted := make(chan struct{})
+	releaseKey := make(chan struct{})
+	keyWritten := make(chan error, 1)
+	settings := clientconnect.DefaultClientSettings()
+	settings.ControlPingTimeout = 0
+	settings.ContractManagerSettings.NetworkEventTimeEnableContracts = time.Now().Add(time.Hour)
+	settings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+	settings.SendBufferSettings.SendPackLifecycleObserver = func(observation clientconnect.SendPackLifecycleObservation) {
+		if observation.MessageType != protocol.MessageType_TransferClientKey {
+			return
+		}
+		switch observation.Phase {
+		case clientconnect.SendPackLifecyclePhaseStarted:
+			close(keyStarted)
+			select {
+			case <-releaseKey:
+			case <-ctx.Done():
+			}
+		case clientconnect.SendPackLifecyclePhaseFirstRouteWrite:
+			keyWritten <- observation.Err
+		}
+	}
+	client := clientconnect.NewClient(
+		ctx,
+		clientconnect.NewId(),
+		clientconnect.NewNoContractClientOob(),
+		settings,
+	)
+	route := make(clientconnect.Route, 8)
+	defer func() {
+		cancel()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if err := client.CloseAndWait(cleanupCtx); err != nil {
+			t.Errorf("join startup-key fixture: %v", err)
+		}
+		drainPlatformRouteFrames(t, route)
+	}()
+	client.ContractManager().AddNoContractPeer(clientconnect.ControlId)
+	client.RouteManager().UpdateTransport(
+		clientconnect.NewSendGatewayTransport(),
+		[]clientconnect.Route{route},
+	)
+	select {
+	case <-keyStarted:
+	case <-ctx.Done():
+		t.Fatalf("startup key did not reach admission barrier: %v", ctx.Err())
+	}
+	if frames := drainPlatformRouteFrames(t, route); len(frames) != 0 {
+		t.Fatalf("startup key crossed its admission barrier: %+v", frames)
+	}
+	close(releaseKey)
+	select {
+	case err := <-keyWritten:
+		if err != nil {
+			t.Fatalf("late startup-key write: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("late startup key did not reach the route: %v", ctx.Err())
+	}
+	if err := closePlatformRouteClient(ctx, client, route); err != nil {
+		t.Fatalf("close platform-route client: %v", err)
+	}
+	// Joining again separates any internal client ownership from a wire
+	// buffer abandoned in the externally owned route queue.
+	if err := client.CloseAndWait(ctx); err != nil {
+		t.Fatalf("join platform-route client: %v", err)
+	}
+	poolAfter, balanced := routeMessagePoolBalance(poolBefore.outstanding)
+	if !balanced {
+		t.Fatalf(
+			"late startup-key ownership did not reconcile: %d -> %d classes=%v -> %v",
+			poolBefore.outstanding,
+			poolAfter.outstanding,
+			poolBefore.classes,
+			poolAfter.classes,
+		)
+	}
+}
+
 // Direct P2P suppresses only provider payload on the exchange route. A
 // ControlId Pack still reaches a terminal platform write, while a provider
 // Pack reaches only the already-live P2P route.
 func TestDirectP2pSuppressionPreservesControlAndExcludesPayloadExchange(t *testing.T) {
+	poolBefore := captureRouteMessagePoolSnapshot(nil)
+	t.Cleanup(func() {
+		poolAfter, balanced := routeMessagePoolBalance(poolBefore.outstanding)
+		if !balanced {
+			t.Errorf(
+				"direct-P2P route ownership did not reconcile: %d -> %d classes=%v -> %v",
+				poolBefore.outstanding,
+				poolAfter.outstanding,
+				poolBefore.classes,
+				poolAfter.classes,
+			)
+		}
+	})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	clientId := clientconnect.NewId()
@@ -108,7 +235,6 @@ func TestDirectP2pSuppressionPreservesControlAndExcludesPayloadExchange(t *testi
 		clientconnect.NewNoContractClientOob(),
 		settings,
 	)
-	defer client.Cancel()
 	client.ContractManager().AddNoContractPeer(providerId)
 	client.ContractManager().AddNoContractPeer(clientconnect.ControlId)
 
@@ -120,6 +246,13 @@ func TestDirectP2pSuppressionPreservesControlAndExcludesPayloadExchange(t *testi
 	controller.observe(platformTransport, platformRoute, true)
 	p2pTransport := clientconnect.NewSendClientTransport(clientconnect.DestinationId(providerId))
 	p2pRoute := make(clientconnect.Route, 8)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if err := closePlatformRouteClient(cleanupCtx, client, platformRoute, p2pRoute); err != nil {
+			t.Errorf("close direct-P2P route client: %v", err)
+		}
+	}()
 	client.RouteManager().UpdateTransport(p2pTransport, []clientconnect.Route{p2pRoute})
 	controller.observeP2pRoute(clientconnect.P2pRouteState{
 		PeerId:    providerId,
