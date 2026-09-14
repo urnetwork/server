@@ -27,6 +27,56 @@ func TestSubtensorSignalHealthySyntheticNodes(t *testing.T) {
 	}
 }
 
+func TestSubtensorSignalDistinguishesStaleConvergenceFromActivelySyncingLag(t *testing.T) {
+	for _, syncing := range []bool{false, true} {
+		observation := healthySubtensorObservation()
+		archive := &observation.Nodes[0]
+		archive.FirstHead = blockHex(7_909_798)
+		archive.SecondHead = blockHex(7_909_800)
+		archive.Direct.Head = archive.FirstHead
+		archive.Gateway.Head = archive.SecondHead
+		archive.Direct.Sync.CurrentBlock = 7_909_800
+		archive.Direct.Sync.HighestBlock = 7_909_800
+		archive.Direct.Health.IsSyncing = syncing
+		wantClass, wrongClass := "subtensor-stale-convergence", "subtensor-sync-lag"
+		if syncing {
+			wantClass, wrongClass = wrongClass, wantClass
+		}
+		alerts, err := runSyntheticSubtensor(t, observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, wantClass)
+		if alert.Frame != "archive" || alert.Severity != SeverityWarn || alert.Sustain != 1 || !strings.Contains(alert.Observed, "lag=200") || !strings.Contains(alert.Markdown(), "SIGNALS.md §17.2") {
+			t.Fatalf("sync state did not select its exact bounded lag identity: syncing=%t", syncing)
+		}
+		for _, other := range alerts {
+			if other.Class == wrongClass {
+				t.Errorf("syncing=%t emitted the opposite lag discriminator", syncing)
+			}
+		}
+	}
+}
+
+func TestSubtensorSignalNearHeadCompletedSyncIsHealthy(t *testing.T) {
+	observation := healthySubtensorObservation()
+	archive := &observation.Nodes[0]
+	archive.FirstHead = blockHex(7_909_872)
+	archive.SecondHead = blockHex(7_909_874)
+	archive.Direct.Head = archive.FirstHead
+	archive.Gateway.Head = archive.SecondHead
+	archive.Direct.Sync.CurrentBlock = 7_909_874
+	archive.Direct.Sync.HighestBlock = 7_910_000
+	archive.Direct.Health.IsSyncing = false
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("completed sync in the near-head band produced %d alerts", len(alerts))
+	}
+}
+
 func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	observation := healthySubtensorObservation()
 	observation.Public.Head = blockHex(7_910_000)
@@ -431,7 +481,7 @@ func TestSubtensorSignalKeepsOlderHelperAsCannotObserve(t *testing.T) {
 		t.Fatal(err)
 	}
 	visibility := requireAlertClass(t, alerts, "cannot-observe")
-	if visibility.Target != "snow/lightnode/peer-diagnostics" ||
+	if visibility.Target != "chain.example.test/lightnode/peer-diagnostics" ||
 		!strings.Contains(visibility.Observed, "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("older helper did not retain an exact visibility boundary: %+v", visibility)
 	}
@@ -596,7 +646,7 @@ func TestSubtensorSignalClassifiesPublicRuntimeAhead(t *testing.T) {
 		t.Fatal(err)
 	}
 	alert := requireAlertClass(t, alerts, "subtensor-runtime-ahead")
-	if alert.Severity != SeverityPage || alert.Target != "snow" || alert.Frame != "public-reference" || alert.Sustain != 1 {
+	if alert.Severity != SeverityPage || alert.Target != "chain.example.test" || alert.Frame != "public-reference" || alert.Sustain != 1 {
 		t.Fatalf("runtime-ahead alert framing = %+v", alert)
 	}
 	for _, want := range []string{
@@ -733,7 +783,7 @@ func TestSubtensorSignalTurnsMalformedObservationIntoVisibilityAlert(t *testing.
 
 func TestSubtensorSignalRequiresExplicitHostConfiguration(t *testing.T) {
 	settings := syntheticSettings(&syntheticSource{})
-	settings.Hosts = append(settings.Hosts, HostSettings{Name: "snow", Roles: []string{"subtensor"}})
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "chain.example.test", Roles: []string{"subtensor"}})
 	alerts, err := NewSubtensorSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
@@ -755,7 +805,7 @@ func runSyntheticSubtensorAtRuntime(t *testing.T, observation subtensorObservati
 		t.Fatal(err)
 	}
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "snow" || host.Subtensor == nil {
+		if host.Name != "chain.example.test" || host.Subtensor == nil {
 			return "", fmt.Errorf("unexpected host settings: %+v", host)
 		}
 		if !strings.Contains(command, subtensorMarker) {
@@ -775,7 +825,7 @@ func runSyntheticSubtensorAtRuntime(t *testing.T, observation subtensorObservati
 func subtensorSyntheticSettings(source SignalSource) SignalSettings {
 	settings := syntheticSettings(source)
 	settings.Hosts = append(settings.Hosts, HostSettings{
-		Name: "snow", OverlayAddress: "172.28.208.185", Roles: []string{"subtensor"},
+		Name: "chain.example.test", OverlayAddress: "192.0.2.88", Roles: []string{"subtensor"},
 		Subtensor: &SubtensorHostSettings{
 			PublicRPCURL:               "https://reference.example",
 			ExpectedChain:              "Bittensor",

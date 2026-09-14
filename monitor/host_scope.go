@@ -157,6 +157,18 @@ func (self *hostScopeRunner) guardHost(ctx context.Context, configured *host) er
 	return nil
 }
 
+// Named SSH-backed observations dial the selected address, not the logical
+// name. Keep non-SSH logical admission separate for nested overlay checks.
+func (self *hostScopeRunner) guardSshHost(ctx context.Context, configured *host) error {
+	if err := self.guardHost(ctx, configured); err != nil {
+		return err
+	}
+	if configured == nil {
+		return nil
+	}
+	return self.guardEndpoint(ctx, configured.addr(self.cfg.addressMode))
+}
+
 // Shared raw endpoints are denied if any owner is excluded: an address alone
 // cannot prove that a permitted logical host owns the transport destination.
 func (self *hostScopeRunner) guardEndpoint(ctx context.Context, endpoint string) error {
@@ -178,7 +190,7 @@ func (self *hostScopeRunner) guardEndpoint(ctx context.Context, endpoint string)
 // The exported PostgreSQL seam omits the host argument; enforce production's
 // first pg-primary authority before invoking either underlying transport.
 func (self *hostScopeRunner) pg(ctx context.Context, query string) ([]pgRow, error) {
-	if err := self.guardHost(ctx, self.cfg.hostByRole("pg-primary")); err != nil {
+	if err := self.guardSshHost(ctx, self.cfg.hostByRole("pg-primary")); err != nil {
 		return nil, err
 	}
 	return self.probeRunner.pg(ctx, query)
@@ -186,7 +198,7 @@ func (self *hostScopeRunner) pg(ctx context.Context, query string) ([]pgRow, err
 
 // Redis entry and raw commands share the named-host boundary.
 func (self *hostScopeRunner) redis(ctx context.Context, configured *host, port int, args ...string) (string, error) {
-	if err := self.guardHost(ctx, configured); err != nil {
+	if err := self.guardSshHost(ctx, configured); err != nil {
 		return "", err
 	}
 	return self.probeRunner.redis(ctx, configured, port, args...)
@@ -194,7 +206,7 @@ func (self *hostScopeRunner) redis(ctx context.Context, configured *host, port i
 
 // Raw output does not bypass the host policy.
 func (self *hostScopeRunner) redisRaw(ctx context.Context, configured *host, port int, args ...string) (string, error) {
-	if err := self.guardHost(ctx, configured); err != nil {
+	if err := self.guardSshHost(ctx, configured); err != nil {
 		return "", err
 	}
 	return self.probeRunner.redisRaw(ctx, configured, port, args...)
@@ -202,7 +214,7 @@ func (self *hostScopeRunner) redisRaw(ctx context.Context, configured *host, por
 
 // Independent role selectors still pass their full-inventory host.
 func (self *hostScopeRunner) shell(ctx context.Context, configured *host, command string) (string, error) {
-	if err := self.guardHost(ctx, configured); err != nil {
+	if err := self.guardSshHost(ctx, configured); err != nil {
 		return "", err
 	}
 	return self.probeRunner.shell(ctx, configured, command)
@@ -210,7 +222,7 @@ func (self *hostScopeRunner) shell(ctx context.Context, configured *host, comman
 
 // A longer timeout or stdin cannot bypass the observation pause.
 func (self *hostScopeRunner) sshTimeout(ctx context.Context, configured *host, command string, stdin string, timeout time.Duration) (string, error) {
-	if err := self.guardHost(ctx, configured); err != nil {
+	if err := self.guardSshHost(ctx, configured); err != nil {
 		return "", err
 	}
 	return self.probeRunner.sshTimeout(ctx, configured, command, stdin, timeout)

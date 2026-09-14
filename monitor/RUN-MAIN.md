@@ -447,6 +447,11 @@ Research all three directions:
    same behavior and ownership. Flag orphan files, registrations, classes,
    stale actions, hidden fallbacks, unsafe cardinality, and tests that exercise
    only strings instead of the actual reducer.
+   Include shared monitoring utilities, fixed constants/local class
+   alternatives, and actual log/burst emission, not only `signal_*.go`
+   literals. Canonical metric and correlation-only names are not emitted Alert
+   classes. Unresolved computed/interprocedural producers remain explicit
+   audit limits, not a green completeness verdict.
 3. **ledger → catalog and implementation:** reduce the append-only ledger by
    causal identity and follow corrections/closures without rewriting history.
    For every new discriminator, false attribution, visibility gap, operational

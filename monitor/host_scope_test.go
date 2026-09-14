@@ -66,6 +66,191 @@ func TestHostScopeBlocksIndependentLogShipperTransport(t *testing.T) {
 	}
 }
 
+func TestHostScopeNamedSshBlocksSharedSelectedAddressAcrossEverySeam(t *testing.T) {
+	for _, test := range []struct {
+		mode        AddressMode
+		excludedLan string
+		allowedLan  string
+		excludedTun string
+		allowedTun  string
+	}{
+		{mode: AddressModeLAN, excludedLan: "192.0.2.1", allowedLan: "192.0.2.1", excludedTun: "198.51.100.1", allowedTun: "198.51.100.2"},
+		{mode: AddressModeOverlay, excludedLan: "192.0.2.1", allowedLan: "192.0.2.2", excludedTun: "2001:db8::1", allowedTun: "2001:db8:0:0:0:0:0:1"},
+	} {
+		calls := 0
+		source := hostScopeNamedSshSource(&calls)
+		settings := syntheticSettings(source)
+		settings.AddressMode = test.mode
+		settings.Hosts = []HostSettings{
+			{Name: "excluded.example.test", LANAddress: test.excludedLan, OverlayAddress: test.excludedTun},
+			{Name: "allowed.example.test", LANAddress: test.allowedLan, OverlayAddress: test.allowedTun, Roles: []string{"pg-primary", "redis-cluster"}},
+		}
+		settings, err := ExcludeHosts(settings, "excluded.example.test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, err := newProbeEnv(settings.withDefaults())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, seam := range hostScopeNamedSshSeams(env, env.cfg.hosts[1]) {
+			if err := seam.run(context.Background()); !hostScopeOnlyError(err) || calls != 0 {
+				t.Errorf("%s %s delegated a shared excluded physical endpoint: calls=%d err=%v", test.mode, seam.name, calls, err)
+			}
+		}
+		if err := env.runner.(*hostScopeRunner).guardHost(context.Background(), env.cfg.hosts[1]); err != nil {
+			t.Error("logical admission was incorrectly coupled to an inactive/non-SSH destination")
+		}
+		if len(env.cfg.hosts) != 2 || !reflect.DeepEqual(settings.Hosts, []HostSettings{
+			{Name: "excluded.example.test", LANAddress: test.excludedLan, OverlayAddress: test.excludedTun},
+			{Name: "allowed.example.test", LANAddress: test.allowedLan, OverlayAddress: test.allowedTun, Roles: []string{"pg-primary", "redis-cluster"}},
+		}) {
+			t.Fatal("shared-endpoint scope changed desired inventory")
+		}
+	}
+}
+
+func TestHostScopeNamedSshPreservesInactiveModeOverlapAndNoPolicy(t *testing.T) {
+	for _, test := range []struct {
+		mode   AddressMode
+		policy bool
+	}{
+		{mode: AddressModeLAN, policy: true},
+		{mode: AddressModeOverlay, policy: true},
+		{mode: AddressModeLAN},
+		{mode: AddressModeOverlay},
+	} {
+		calls := 0
+		settings := syntheticSettings(hostScopeNamedSshSource(&calls))
+		settings.AddressMode = test.mode
+		settings.Hosts = []HostSettings{
+			{Name: "excluded.example.test", LANAddress: "192.0.2.1", OverlayAddress: "198.51.100.1"},
+			{Name: "allowed.example.test", LANAddress: "192.0.2.1", OverlayAddress: "198.51.100.1", Roles: []string{"pg-primary", "redis-cluster"}},
+		}
+		if test.policy {
+			if test.mode == AddressModeLAN {
+				settings.Hosts[1].LANAddress = "192.0.2.2"
+			} else {
+				settings.Hosts[1].OverlayAddress = "198.51.100.2"
+			}
+			var err error
+			settings, err = ExcludeHosts(settings, "excluded.example.test")
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		env, err := newProbeEnv(settings.withDefaults())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, seam := range hostScopeNamedSshSeams(env, env.cfg.hosts[1]) {
+			if err := seam.run(context.Background()); err != nil {
+				t.Errorf("%s %s blocked a permitted selected endpoint: policy=%t err=%v", test.mode, seam.name, test.policy, err)
+			}
+		}
+		if calls != 5 {
+			t.Fatalf("selected-mode or no-policy positive control lost transport calls: got=%d", calls)
+		}
+	}
+}
+
+func TestHostScopeNamedSshCancellationRecordsNoDenialOrContact(t *testing.T) {
+	calls := 0
+	settings := syntheticSettings(hostScopeNamedSshSource(&calls))
+	settings.Hosts = []HostSettings{
+		{Name: "excluded.example.test", OverlayAddress: "198.51.100.1"},
+		{Name: "allowed.example.test", OverlayAddress: "198.51.100.1", Roles: []string{"pg-primary"}},
+	}
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := newProbeEnv(settings.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, seam := range hostScopeNamedSshSeams(env, env.cfg.hosts[1]) {
+		if err := seam.run(ctx); !errors.Is(err, context.Canceled) || calls != 0 {
+			t.Errorf("%s cancellation became policy evidence or contacted a source", seam.name)
+		}
+	}
+	if len(env.runner.(*hostScopeRunner).blockedHostNames) != 0 {
+		t.Error("canceled work recorded a new excluded-owner event")
+	}
+}
+
+func TestHostScopeNamedSshSignalRetainsPartialVisibilityAndPermittedSibling(t *testing.T) {
+	seenHostCounts := map[string]int{}
+	var stateLock sync.Mutex
+	settings := syntheticSettings(&syntheticSource{hostFn: func(configured HostSettings, _ string) (string, error) {
+		stateLock.Lock()
+		seenHostCounts[configured.Name]++
+		stateLock.Unlock()
+		return logShipperFixture(map[string]string{"nofile_soft": "1024"}), nil
+	}})
+	settings.Hosts = []HostSettings{
+		{Name: "excluded.example.test", OverlayAddress: "198.51.100.1"},
+		{Name: "shared.example.test", OverlayAddress: "198.51.100.1", Roles: []string{"services"}},
+		{Name: "permitted.example.test", OverlayAddress: "198.51.100.2", Roles: []string{"services"}},
+	}
+	settings.LogServices = []string{"api", "proxy"}
+	settings.LogServiceBlocks = map[string][]string{"api": {"blue"}, "proxy": {"green"}}
+	settings.ProxyPathExpectedHosts = 7
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := append([]HostSettings(nil), settings.Hosts...)
+	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seenHostCounts["shared.example.test"] != 0 || seenHostCounts["permitted.example.test"] != 1 {
+		t.Error("logical alias delegated excluded SSH endpoint or lost permitted sibling")
+	}
+	partial, visibility, sibling := false, false, false
+	for _, alert := range alerts {
+		partial = partial || alert.Class == "monitor-host-scope-partial"
+		visibility = visibility || alert.Class == "cannot-observe" && strings.HasPrefix(alert.Target, "shared.example.test/")
+		sibling = sibling || alert.Class == "log-shipper-fd-budget" && alert.Target == "permitted.example.test"
+		if strings.Contains(alert.Markdown(), "198.51.100.1") {
+			t.Error("policy visibility exposed the excluded shared address")
+		}
+	}
+	if !partial || !visibility || !sibling || !reflect.DeepEqual(settings.Hosts, before) || settings.ProxyPathExpectedHosts != 7 || len(settings.LogServices) != 2 || len(settings.LogServiceBlocks) != 2 {
+		t.Error("shared endpoint denial lost unknown scope, permitted findings or desired topology")
+	}
+}
+
+type hostScopeNamedSshSeam struct {
+	name string
+	run  func(context.Context) error
+}
+
+func hostScopeNamedSshSeams(env *probeEnv, target *host) []hostScopeNamedSshSeam {
+	return []hostScopeNamedSshSeam{
+		{name: "shell", run: func(ctx context.Context) error { _, err := env.runner.shell(ctx, target, "true"); return err }},
+		{name: "sshTimeout", run: func(ctx context.Context) error {
+			_, err := env.runner.sshTimeout(ctx, target, "true", "", time.Second)
+			return err
+		}},
+		{name: "postgres", run: func(ctx context.Context) error { _, err := env.runner.pg(ctx, "SELECT 1"); return err }},
+		{name: "redis", run: func(ctx context.Context) error { _, err := env.runner.redis(ctx, target, 6379, "PING"); return err }},
+		{name: "redisRaw", run: func(ctx context.Context) error { _, err := env.runner.redisRaw(ctx, target, 6379, "PING"); return err }},
+	}
+}
+
+func hostScopeNamedSshSource(calls *int) *syntheticSource {
+	return &syntheticSource{
+		postgresFn:    func(string) ([]Row, error) { *calls++; return nil, nil },
+		redisFn:       func(HostSettings, int, ...string) (string, error) { *calls++; return "", nil },
+		hostFn:        func(HostSettings, string) (string, error) { *calls++; return "", nil },
+		hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) { *calls++; return "", nil },
+	}
+}
+
 // Selector failures are fixed-vocabulary errors, not copies of command-line
 // values or a fuzzy match that could miss the intended excluded target.
 func TestExcludeHostsRejectsInvalidAndAmbiguousSelectors(t *testing.T) {

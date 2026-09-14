@@ -6,6 +6,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -492,10 +493,9 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 	return []finding{healthyFinding("pg/selection-stale", tierWarn, "selection-stale", target)}, nil
 }
 
-// pgbouncerProbe checks 6432 reachability cheaply. pgbouncer queuing/killing
-// clients while direct 5432 connects instantly is the documented discriminator
-// for a pg-side stall (§4 query_wait_timeout) — so the probe's failure mode is
-// itself informative and pairs with the 1.3 active count.
+// A tcp-only listener observation and complete service log windows are
+// independent inputs; missing tools or partial logs prove neither outage nor
+// recovery. Listener admission does not test authentication or backend queues.
 type pgbouncerProbe struct{}
 
 func (self pgbouncerProbe) id() string             { return "pg/pgbouncer" }
@@ -503,6 +503,9 @@ func (self pgbouncerProbe) tier() string           { return tierWarn }
 func (self pgbouncerProbe) cadence() time.Duration { return 5 * time.Minute }
 
 func (self pgbouncerProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	h := env.cfg.hostByRole("pg-primary")
 	if h == nil {
 		return nil, fmt.Errorf("no pg-primary host in inventory")
@@ -511,57 +514,113 @@ func (self pgbouncerProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	if port == 0 {
 		port = 6432
 	}
-	// tcp connect only — a full auth round through a saturated pgbouncer would
-	// occupy a pool slot; reachability vs refused/timeout is the signal
-	out, err := env.runner.shell(ctx, h, fmt.Sprintf(
-		`timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/%d' 2>/dev/null && echo open || echo closed`, port))
-	if err != nil {
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid PgBouncer listener port")
+	}
+	visibilityFinding := func(target string, err error) finding {
+		observed := cannotObserveFinding(target, err)
+		observed.playbook = "SIGNALS.md §2.11"
+		return observed
+	}
+	// Only owned start/outcome pairs prove a connect attempt. Missing tools,
+	// an unstarted timeout, interruption, and inconsistent output stay unknown.
+	out, listenerErr := env.runner.shell(ctx, h, fmt.Sprintf(`
+set -eu
+if ! command -v timeout >/dev/null 2>&1 || ! command -v bash >/dev/null 2>&1; then
+  printf 'unknown\n'
+  exit 0
+fi
+probe_status=0
+probe_output=$(timeout 3 bash -c '
+  printf "started\n"
+  if : 3<> /dev/tcp/127.0.0.1/%d; then
+    printf "open\n"
+  else
+    printf "closed\n"
+  fi
+' 2>/dev/null) || probe_status=$?
+case "$probe_status:$probe_output" in
+  '0:started
+open') printf 'open\n' ;;
+  '0:started
+closed'|'124:started') printf 'closed\n' ;;
+  *) printf 'unknown\n' ;;
+esac
+`, port))
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	listenerTarget := fmt.Sprintf("%s:%d", h.name, port)
 	findings := []finding{}
-	if strings.TrimSpace(out) != "open" {
+	switch {
+	case listenerErr != nil:
+		findings = append(findings, visibilityFinding(listenerTarget+"/listener", listenerErr))
+	case strings.TrimSpace(out) == "closed":
 		findings = append(findings, finding{
 			probeId: "pg/pgbouncer", tier: tierWarn,
-			class: "pgbouncer-unreachable", target: fmt.Sprintf("%s:%d", h.name, port), sustain: 2,
-			symptom:  fmt.Sprintf("pgbouncer %d not accepting tcp on %s", port, h.name),
-			baseline: "accepts instantly; under pg saturation it queues clients and kills them with query_wait_timeout — check 1.3 active count (§4)",
-			observed: strings.TrimSpace(out),
-			playbook: "SIGNALS.md 5.8",
+			class: "pgbouncer-unreachable", target: listenerTarget, sustain: 2,
+			symptom:   fmt.Sprintf("PgBouncer frontend port %d did not accept a bounded local tcp connection", port),
+			mechanism: "The owned listener command ran a tcp connect which was refused or did not finish within three seconds. This does not identify a backend query, authentication, or pool-queue failure.",
+			baseline:  "The configured local frontend accepts a tcp-only connection within three seconds without consuming an authenticated pool slot.",
+			observed:  "listener_tcp=closed connect_deadline_s=3",
+			evidence:  "Validated probe tools and the owned start/outcome contract distinguish connect refusal or timeout from command execution failure; no socket tuple is retained.",
+			context:   "An open tcp listener is not proof of working authentication, PgBouncer shard queues, nginx forwarding, or direct 5432. Service write-timeout observations are separate inputs.",
+			action:    "Split the configured nginx/PgBouncer frontend, every PgBouncer shard listener and queue, and direct 5432; correlate PostgreSQL activity and affected application routes before selecting a repair. Do not restart or raise timeouts solely on this tcp observation.",
+			verify:    "The same local frontend accepts the next two bounded tcp observations and complete service log windows show no recurring client-write timeout while the affected routes are exercised; verify authentication and backend queues independently.",
+			playbook:  "SIGNALS.md §2.11",
 		})
-	} else {
-		findings = append(findings, healthyFinding("pg/pgbouncer", tierWarn, "pgbouncer-unreachable", fmt.Sprintf("%s:%d", h.name, port)))
+	case strings.TrimSpace(out) == "open":
+		findings = append(findings, healthyFinding("pg/pgbouncer", tierWarn, "pgbouncer-unreachable", listenerTarget))
+	default:
+		findings = append(findings, visibilityFinding(listenerTarget+"/listener", fmt.Errorf("PgBouncer listener command observation unavailable or malformed")))
 	}
 
-	// The application write-timeout can coexist with an open listener and a
-	// lightly loaded direct PostgreSQL server. Pull a bounded log window and
-	// keep service as the stable identity; the ephemeral tuple stays evidence.
+	// Destination-port matching avoids source-port and longer-port lookalikes.
+	// Failed or limit-sized windows cannot clear a prior service write stall.
+	const clientLogLimit = 1000
+	writeTimeoutPattern := regexp.MustCompile(fmt.Sprintf(`write tcp \S+(?:->|-\\u003e)\S+:%d: i/o timeout(?:\s|["']|$)`, port))
 	for _, service := range []string{"api", "connect", "taskworker"} {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		logs, pullErr := env.runner.warpctl(ctx, "logs", env.cfg.env, service,
 			"--query=pgproto3.writeError", "--since=2m", "--limit=1000")
-		if pullErr != nil && strings.TrimSpace(logs) == "" {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if pullErr != nil {
+			findings = append(findings, visibilityFinding(service+"/pgbouncer-write-stall", pullErr))
 			continue
 		}
 		count := 0
-		sample := ""
+		lineCount := 0
+		incomplete := false
 		for _, line := range strings.Split(logs, "\n") {
-			if strings.Contains(line, "pgproto3.writeError") && strings.Contains(line, ":6432") && strings.Contains(line, "i/o timeout") {
-				count++
-				if sample == "" {
-					sample = truncateLine(line)
-				}
+			if strings.TrimSpace(line) != "" {
+				lineCount++
 			}
+			if strings.HasPrefix(line, "Warning: at least ") && strings.Contains(line, "range api cannot page within one nanosecond; skipping the rest of this timestamp") {
+				incomplete = true
+			}
+			if strings.Contains(line, "pgproto3.writeError") && writeTimeoutPattern.MatchString(line) {
+				count++
+			}
+		}
+		if incomplete || lineCount >= clientLogLimit {
+			findings = append(findings, visibilityFinding(service+"/pgbouncer-write-stall", fmt.Errorf("PgBouncer service log observation incomplete")))
+			continue
 		}
 		if count > 0 {
 			findings = append(findings, finding{
 				probeId: "pg/pgbouncer-write-stall", tier: tierWarn,
 				class: "pgbouncer-write-stall", target: service, sustain: 2,
-				symptom:   fmt.Sprintf("service %s logged %d PgBouncer :6432 client-write timeout(s) in 2m", service, count),
+				symptom:   fmt.Sprintf("service %s logged %d PgBouncer :%d client-write timeout(s) in 2m", service, count, port),
 				mechanism: "The client could not write a request into nginx/PgBouncer before its socket deadline; the query may never have reached a PostgreSQL backend.",
-				baseline:  "Zero pgproto3 write i/o timeouts to :6432.",
+				baseline:  fmt.Sprintf("Zero pgproto3 write i/o timeouts to the configured frontend :%d in a complete two-minute service log window.", port),
 				observed:  fmt.Sprintf("service=%s count_2m=%d", service, count),
-				evidence:  "sample: " + sample,
-				action:    "Split the 6432 nginx frontend, all PgBouncer shard queues/listeners, and direct 5432; group timeouts by application route.",
-				verify:    "No :6432 client-write timeout recurs while the affected route is exercised.",
+				evidence:  "A successful, below-limit log pull matched pgproto3.writeError plus a write-tcp destination at the configured frontend port and i/o timeout; raw lines and socket tuples are not retained.",
+				action:    "Split the configured nginx frontend, all PgBouncer shard queues/listeners, and direct 5432; group timeouts by application route.",
+				verify:    "The next two complete two-minute service log windows contain no configured-frontend client-write timeout while the affected route is exercised; a failed or truncated window is not recovery.",
 				playbook:  "SIGNALS.md §2.11",
 			})
 		} else {

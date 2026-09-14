@@ -2,10 +2,12 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +16,7 @@ import (
 func TestVPNSessionsSignalSyntheticHealthy(t *testing.T) {
 	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.185 %d 2\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 true\nreach 172.28.208.187 true\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nclient 192.0.2.32 %d 2\nclient 192.0.2.33 %d 2\nreach 192.0.2.31 true\nreach 192.0.2.32 true\nreach 192.0.2.33 true\n",
 		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Unix(),
 	))
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
@@ -29,7 +31,7 @@ func TestVPNSessionsSignalSyntheticHealthy(t *testing.T) {
 func TestVPNSessionsSignalSyntheticSharedSiteLoss(t *testing.T) {
 	now := time.Date(2026, 9, 3, 8, 20, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nreach 172.28.208.173 true\nreach 172.28.208.185 false\nreach 172.28.208.187 false\ntimeout planetoid %d 1\ntimeout snow %d 1\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nreach 192.0.2.31 true\nreach 192.0.2.32 false\nreach 192.0.2.33 false\ntimeout archive.example.test %d 1\ntimeout node.example.test %d 1\n",
 		now.Add(-4*time.Second).Unix(), now.Add(-2*time.Hour).Unix(), now.Add(-14*time.Minute).Unix(), now.Add(-6*time.Minute).Unix(),
 	))
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
@@ -39,14 +41,14 @@ func TestVPNSessionsSignalSyntheticSharedSiteLoss(t *testing.T) {
 	if len(alerts) != 2 {
 		t.Fatalf("shared-site alerts=%d, want 2: %+v", len(alerts), alerts)
 	}
-	for _, target := range []string{"planetoid", "snow"} {
+	for _, target := range []string{"archive.example.test", "node.example.test"} {
 		alert := requireVPNSessionAlert(t, alerts, "vpn-site-session-loss", target)
 		if alert.SignalNumber != "21.1" || alert.SignalKey != "vpn-sessions" || alert.Severity != SeverityPage || alert.Sustain != 2 {
 			t.Fatalf("wrong shared-site identity: %+v", alert)
 		}
 		for _, want := range []string{
 			"shared_public_source=true",
-			"correlated_affected_hosts=planetoid,snow",
+			"correlated_affected_hosts=archive.example.test,node.example.test",
 			"offsite LAN, router/NAT, WAN",
 			"source-address equality",
 			"public source itself is never emitted",
@@ -65,7 +67,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteLoss(t *testing.T) {
 func TestVPNSessionsSignalSyntheticIsolatedLoss(t *testing.T) {
 	now := time.Date(2026, 9, 3, 8, 30, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 false\nreach 172.28.208.187 true\ntimeout snow %d 2\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nclient 192.0.2.33 %d 2\nreach 192.0.2.31 true\nreach 192.0.2.32 false\nreach 192.0.2.33 true\ntimeout node.example.test %d 2\n",
 		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Unix(), now.Add(-3*time.Minute).Unix(),
 	))
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
@@ -75,7 +77,7 @@ func TestVPNSessionsSignalSyntheticIsolatedLoss(t *testing.T) {
 	if len(alerts) != 1 {
 		t.Fatalf("isolated alerts=%d, want 1: %+v", len(alerts), alerts)
 	}
-	alert := requireVPNSessionAlert(t, alerts, "vpn-client-session-loss", "snow")
+	alert := requireVPNSessionAlert(t, alerts, "vpn-client-session-loss", "node.example.test")
 	if alert.Severity != SeverityWarn || alert.Frame != "isolated-or-unknown-source" {
 		t.Fatalf("isolated loss identity: %+v", alert)
 	}
@@ -88,7 +90,7 @@ func TestVPNSessionsSignalSyntheticIsolatedLoss(t *testing.T) {
 func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 	now := time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.185 %d 2\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 false\nreach 172.28.208.187 false\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nclient 192.0.2.32 %d 2\nclient 192.0.2.33 %d 2\nreach 192.0.2.31 true\nreach 192.0.2.32 false\nreach 192.0.2.33 false\n",
 		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(), now.Add(-2*time.Minute).Unix(), now.Add(-2*time.Minute).Unix(),
 	))
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
@@ -98,7 +100,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 	if len(alerts) != 2 {
 		t.Fatalf("shared-site data-path alerts=%d, want 2: %+v", len(alerts), alerts)
 	}
-	for _, target := range []string{"planetoid", "snow"} {
+	for _, target := range []string{"archive.example.test", "node.example.test"} {
 		alert := requireVPNSessionAlert(t, alerts, "vpn-site-data-path-loss", target)
 		if alert.Severity != SeverityPage || alert.Frame != "shared-public-source-data-path" || alert.Sustain != 2 {
 			t.Fatalf("wrong data-path identity for %s: %+v", target, alert)
@@ -107,7 +109,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 			"session_present=true",
 			"data_path_reachable=false",
 			"reachable_controls=1",
-			"correlated_affected_hosts=planetoid,snow",
+			"correlated_affected_hosts=archive.example.test,node.example.test",
 			"CLIENT_LIST row proves a control session, not usable forwarding",
 			"never emits public sources",
 			"same-source configured peers recover",
@@ -122,7 +124,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 func TestVPNSessionsSignalSyntheticCorrelatesMixedSessionStates(t *testing.T) {
 	now := time.Date(2026, 9, 3, 9, 15, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 false\nreach 172.28.208.187 false\ntimeout snow %d 2\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nclient 192.0.2.33 %d 2\nreach 192.0.2.31 true\nreach 192.0.2.32 false\nreach 192.0.2.33 false\ntimeout node.example.test %d 2\n",
 		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(), now.Add(-2*time.Minute).Unix(), now.Add(-time.Minute).Unix(),
 	))
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
@@ -132,11 +134,11 @@ func TestVPNSessionsSignalSyntheticCorrelatesMixedSessionStates(t *testing.T) {
 	if len(alerts) != 2 {
 		t.Fatalf("mixed-state alerts=%d, want 2: %+v", len(alerts), alerts)
 	}
-	planetoid := requireVPNSessionAlert(t, alerts, "vpn-site-data-path-loss", "planetoid")
-	snow := requireVPNSessionAlert(t, alerts, "vpn-site-session-loss", "snow")
-	for _, alert := range []Alert{planetoid, snow} {
+	archiveAlert := requireVPNSessionAlert(t, alerts, "vpn-site-data-path-loss", "archive.example.test")
+	nodeAlert := requireVPNSessionAlert(t, alerts, "vpn-site-session-loss", "node.example.test")
+	for _, alert := range []Alert{archiveAlert, nodeAlert} {
 		markdown := alert.Markdown()
-		if alert.Severity != SeverityPage || !strings.Contains(markdown, "correlated_affected_hosts=planetoid,snow") || !strings.Contains(markdown, "current/recent public source") {
+		if alert.Severity != SeverityPage || !strings.Contains(markdown, "correlated_affected_hosts=archive.example.test,node.example.test") || !strings.Contains(markdown, "current/recent public source") {
 			t.Fatalf("mixed-state alert lost shared-site attribution: %+v\n%s", alert, markdown)
 		}
 	}
@@ -145,10 +147,10 @@ func TestVPNSessionsSignalSyntheticCorrelatesMixedSessionStates(t *testing.T) {
 func TestVPNSessionsSignalSyntheticRequiresEveryReachabilityResult(t *testing.T) {
 	now := time.Date(2026, 9, 3, 9, 5, 0, 0, time.UTC)
 	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
-		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nreach 172.28.208.173 true\nreach 172.28.208.185 false\n",
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nreach 192.0.2.31 true\nreach 192.0.2.32 false\n",
 		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(),
 	))
-	if _, err := NewVPNSessionsSignal().Run(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "missing reachability for planetoid") {
+	if _, err := NewVPNSessionsSignal().Run(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "missing reachability for archive.example.test") {
 		t.Fatalf("incomplete reachability error=%v", err)
 	}
 }
@@ -197,7 +199,7 @@ func TestVPNSessionsSignalSyntheticStatusFreshnessBoundary(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			output := fmt.Sprintf(
-				"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.185 %d 2\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 true\nreach 172.28.208.187 true\n",
+				"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 192.0.2.31 %d 1\nclient 192.0.2.32 %d 2\nclient 192.0.2.33 %d 2\nreach 192.0.2.31 true\nreach 192.0.2.32 true\nreach 192.0.2.33 true\n",
 				now.Add(-test.age).Unix(), now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Unix(), now.Add(-time.Hour).Unix(),
 			)
 			alerts, err := NewVPNSessionsSignal().Run(context.Background(), vpnSessionTestSettings(t, now, output))
@@ -232,9 +234,9 @@ func TestVPNSessionsSignalNoopsWithoutInventory(t *testing.T) {
 
 func TestVPNSessionsCommandPreservesCombinedSourceGrouping(t *testing.T) {
 	command, err := vpnSessionsCommand([]*host{
-		{name: "edge-0", overlayIp: "172.28.208.173"},
-		{name: "planetoid", overlayIp: "172.28.208.187"},
-		{name: "snow", overlayIp: "172.28.208.185"},
+		{name: "control.example.test", overlayIp: "192.0.2.31"},
+		{name: "archive.example.test", overlayIp: "192.0.2.33"},
+		{name: "node.example.test", overlayIp: "192.0.2.32"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -284,16 +286,16 @@ esac
 `)
 	writeExecutable("ping", `#!/bin/sh
 for address do :; done
-[ "$address" = 172.28.208.173 ]
+[ "$address" = 192.0.2.31 ]
 `)
 	execute := exec.Command("sh", "-c", command)
 	execute.Env = append(os.Environ(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"VPN_TEST_MTIME=1788427200",
 		"VPN_TEST_STATUS="+
-			"CLIENT_LIST,edge-0,198.51.100.8:1200,172.28.208.173,x,x,x,x,1788420000\n"+
-			"CLIENT_LIST,planetoid,203.0.113.9:1300,172.28.208.187,x,x,x,x,1788427109\n",
-		"VPN_TEST_JOURNAL=1788427110.000000 host ovpn[1]: snow/203.0.113.9:1400 Inactivity timeout (--ping-restart), restarting\n",
+			"CLIENT_LIST,control.example.test,198.51.100.8:1200,192.0.2.31,x,x,x,x,1788420000\n"+
+			"CLIENT_LIST,archive.example.test,203.0.113.9:1300,192.0.2.33,x,x,x,x,1788427109\n",
+		"VPN_TEST_JOURNAL=1788427110.000000 host ovpn[1]: node.example.test/203.0.113.9:1400 Inactivity timeout (--ping-restart), restarting\n",
 	)
 	output, err := execute.CombinedOutput()
 	if err != nil {
@@ -303,20 +305,20 @@ for address do :; done
 	if err != nil {
 		t.Fatalf("parse generated command output: %v\n%s", err, output)
 	}
-	planetoidGroup := observation.clients["172.28.208.187"].group
-	snowGroup := observation.timeouts["snow"].group
-	if planetoidGroup <= 0 || snowGroup != planetoidGroup {
-		t.Fatalf("current and timed-out clients with one source got different groups: planetoid=%d snow=%d\n%s", planetoidGroup, snowGroup, output)
+	archiveGroup := observation.clients["192.0.2.33"].group
+	nodeGroup := observation.timeouts["node.example.test"].group
+	if archiveGroup <= 0 || nodeGroup != archiveGroup {
+		t.Fatalf("current and timed-out clients with one source got different groups: archive=%d node=%d\n%s", archiveGroup, nodeGroup, output)
 	}
-	if edgeGroup := observation.clients["172.28.208.173"].group; edgeGroup == planetoidGroup {
-		t.Fatalf("different sources got one group: edge=%d planetoid=%d\n%s", edgeGroup, planetoidGroup, output)
+	if edgeGroup := observation.clients["192.0.2.31"].group; edgeGroup == archiveGroup {
+		t.Fatalf("different sources got one group: edge=%d archive=%d\n%s", edgeGroup, archiveGroup, output)
 	}
 }
 
 func vpnSessionTestSettings(t *testing.T, now time.Time, output string) SignalSettings {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "vpn-0" || host.SSHUser != "ubuntu" || len(host.SSHKeyPaths) != 1 || host.SSHKeyPaths[0] != "/keys/vpn" {
+		if host.Name != "server.example.test" || host.SSHUser != "ubuntu" || len(host.SSHKeyPaths) != 1 || host.SSHKeyPaths[0] != "/keys/vpn" {
 			return "", fmt.Errorf("unexpected VPN host settings: %+v", host)
 		}
 		for _, want := range []string{vpnSessionsMarker, "openvpn-status.log", "source_group", "expected_addresses", "ping -n -c 1"} {
@@ -329,10 +331,10 @@ func vpnSessionTestSettings(t *testing.T, now time.Time, output string) SignalSe
 	settings := syntheticSettings(source)
 	settings.Now = func() time.Time { return now }
 	settings.Hosts = []HostSettings{
-		{Name: "vpn-0", OverlayAddress: "172.28.208.1", Roles: []string{"vpn-server"}, SSHUser: "ubuntu", SSHKeyPaths: []string{"/keys/vpn"}},
-		{Name: "edge-0", OverlayAddress: "172.28.208.173", Roles: []string{"vpn-client"}},
-		{Name: "planetoid", OverlayAddress: "172.28.208.187", Roles: []string{"vpn-client"}},
-		{Name: "snow", OverlayAddress: "172.28.208.185", Roles: []string{"vpn-client"}},
+		{Name: "server.example.test", OverlayAddress: "192.0.2.1", Roles: []string{"vpn-server"}, SSHUser: "ubuntu", SSHKeyPaths: []string{"/keys/vpn"}},
+		{Name: "control.example.test", OverlayAddress: "192.0.2.31", Roles: []string{"vpn-client"}},
+		{Name: "archive.example.test", OverlayAddress: "192.0.2.33", Roles: []string{"vpn-client"}},
+		{Name: "node.example.test", OverlayAddress: "192.0.2.32", Roles: []string{"vpn-client"}},
 	}
 	return settings
 }
@@ -346,4 +348,241 @@ func requireVPNSessionAlert(t *testing.T, alerts Alerts, class, target string) A
 	}
 	t.Fatalf("missing %s alert for %s: %+v", class, target, alerts)
 	return Alert{}
+}
+
+func TestVPNSessionsSignalHostScopeStopsNestedClientContact(t *testing.T) {
+	settings, pingLog, shellCalls := vpnSessionScopeTestSettings(t, true)
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *shellCalls != 1 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n" {
+		t.Fatalf("nested host contact escaped policy: calls=%d attempts=%q", *shellCalls, vpnSessionScopePingAttempts(t, pingLog))
+	}
+	if len(settings.Hosts) != 3 || len(scoped.Hosts) != 3 || len(alerts) != 1 {
+		t.Fatalf("desired inventory or partial coverage changed: configured=%d scoped=%d alerts=%+v", len(settings.Hosts), len(scoped.Hosts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "monitor-host-scope-partial")
+	if alert.SignalNumber != "21.1" || alert.SignalKey != "vpn-sessions" || alert.Severity != SeverityWarn {
+		t.Fatalf("scope lost originating probe or unknown state: %+v", alert)
+	}
+	for _, value := range []string{"configured_hosts=3", "excluded_hosts=1", "blocked_hosts=1", "desired_topology_unchanged=true", "SIGNALS.md §1.6"} {
+		if !strings.Contains(alert.Markdown(), value) {
+			t.Errorf("partial-coverage Markdown lacks %q", value)
+		}
+	}
+	for _, value := range []string{"excluded.example.test", "192.0.2.20", "198.51.100.20", "synthetic-vpn-secret"} {
+		if strings.Contains(alert.Markdown(), value) {
+			t.Errorf("partial-coverage Markdown leaked a private fixture value")
+		}
+	}
+}
+
+func TestVPNSessionsSignalHostScopePreservesAllowedClientFailure(t *testing.T) {
+	settings, pingLog, _ := vpnSessionScopeTestSettings(t, false)
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n" {
+		t.Fatalf("permitted-client evidence lost: alerts=%+v attempts=%q", alerts, vpnSessionScopePingAttempts(t, pingLog))
+	}
+	alert := requireVPNSessionAlert(t, alerts, "vpn-client-session-loss", "allowed.example.test")
+	if alert.Severity != SeverityWarn || !strings.Contains(alert.Markdown(), "configured_clients=2") || strings.Contains(alert.Markdown(), "excluded.example.test") {
+		t.Fatalf("permitted-client finding shrank its desired denominator or attributed a paused peer: %+v", alert)
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
+func TestVPNSessionsSignalHostScopeRejectsSharedClientEndpoint(t *testing.T) {
+	settings, pingLog, _ := vpnSessionScopeTestSettings(t, true)
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "shared.example.test", OverlayAddress: "192.0.2.20", Roles: []string{"vpn-client"}})
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n" || len(scoped.Hosts) != 4 {
+		t.Fatalf("ambiguous paused endpoint reached transport or attribution: alerts=%+v attempts=%q", alerts, vpnSessionScopePingAttempts(t, pingLog))
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
+func TestVPNSessionsSignalHostScopeRejectsNormalizedSharedEndpoint(t *testing.T) {
+	settings, pingLog, _ := vpnSessionScopeTestSettings(t, true)
+	settings.Hosts[2].OverlayAddress = " 192.0.2.20 "
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "shared.example.test", OverlayAddress: "192.0.2.20", Roles: []string{"vpn-client"}})
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil || len(alerts) != 1 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n" {
+		t.Fatalf("normalized shared target escaped admission: alerts=%+v err=%v attempts=%q", alerts, err, vpnSessionScopePingAttempts(t, pingLog))
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
+func TestVPNSessionsSignalHostScopeNoPolicyKeepsAllClients(t *testing.T) {
+	settings, pingLog, shellCalls := vpnSessionScopeTestSettings(t, true)
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 0 || *shellCalls != 1 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n192.0.2.20\n" {
+		t.Fatalf("unscoped VPN behavior changed: alerts=%+v err=%v calls=%d attempts=%q", alerts, err, *shellCalls, vpnSessionScopePingAttempts(t, pingLog))
+	}
+}
+
+func TestVPNSessionsSignalHostScopeRetainsCentralServerFailure(t *testing.T) {
+	settings, pingLog, _ := vpnSessionScopeTestSettings(t, true)
+	source := settings.Source.(*syntheticSource)
+	inspect := source.hostFn
+	source.hostFn = func(configured HostSettings, command string) (string, error) {
+		output, err := inspect(configured, command)
+		output = strings.Replace(output, "server_active_state active", "server_active_state failed", 1)
+		return output, err
+	}
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil || len(alerts) != 2 || vpnSessionScopePingAttempts(t, pingLog) != "192.0.2.10\n" {
+		t.Fatalf("central server evidence was lost: alerts=%+v err=%v", alerts, err)
+	}
+	alert := requireVPNSessionAlert(t, alerts, "vpn-server-unhealthy", "server.example.test")
+	if alert.Severity != SeverityPage {
+		t.Fatalf("central server failure lost severity: %+v", alert)
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
+func TestVPNSessionsSignalHostScopeAllClientsPausedStaysUnknown(t *testing.T) {
+	settings, pingLog, shellCalls := vpnSessionScopeTestSettings(t, true)
+	scoped, err := ExcludeHosts(settings, "allowed.example.test", "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil || len(alerts) != 1 || *shellCalls != 1 || vpnSessionScopePingAttempts(t, pingLog) != "" || len(scoped.Hosts) != 3 {
+		t.Fatalf("paused clients became outage/healthy evidence or prevented central observation: alerts=%+v err=%v calls=%d", alerts, err, *shellCalls)
+	}
+	alert := requireAlertClass(t, alerts, "monitor-host-scope-partial")
+	if !strings.Contains(alert.Markdown(), "excluded_hosts=2 blocked_hosts=2") {
+		t.Fatalf("all-paused coverage lacks exact counts: %+v", alert)
+	}
+}
+
+func TestVPNSessionsSignalHostScopeDoesNotContactExcludedServer(t *testing.T) {
+	settings, pingLog, shellCalls := vpnSessionScopeTestSettings(t, true)
+	scoped, err := ExcludeHosts(settings, "server.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), scoped)
+	if err != nil || len(alerts) != 1 || *shellCalls != 0 || vpnSessionScopePingAttempts(t, pingLog) != "" {
+		t.Fatalf("excluded server reached transport or became outage evidence: alerts=%+v err=%v calls=%d", alerts, err, *shellCalls)
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
+func TestVPNSessionsSignalHostScopeCancellationDoesNotContactOrAlert(t *testing.T) {
+	settings, pingLog, shellCalls := vpnSessionScopeTestSettings(t, true)
+	scoped, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	alerts, err := NewVPNSessionsSignal().Run(ctx, scoped)
+	if !errors.Is(err, context.Canceled) || len(alerts) != 0 || *shellCalls != 0 || vpnSessionScopePingAttempts(t, pingLog) != "" {
+		t.Fatalf("cancellation contacted source or became policy evidence: alerts=%+v err=%v calls=%d", alerts, err, *shellCalls)
+	}
+}
+
+func vpnSessionScopeTestSettings(t *testing.T, allowedPresent bool) (SignalSettings, string, *int) {
+	t.Helper()
+	now := time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC)
+	binDir := t.TempDir()
+	pingLog := filepath.Join(binDir, "ping.log")
+	commands := map[string]string{
+		"systemctl": `#!/bin/sh
+case "$*" in
+  *ActiveState*) printf '%s\n' active ;;
+  *SubState*) printf '%s\n' running ;;
+  *NRestarts*) printf '%s\n' 0 ;;
+  *) exit 64 ;;
+esac
+`,
+		"sudo": `#!/bin/sh
+if [ "$1" = -n ]; then shift; fi
+case "$1" in
+  test) exit 0 ;;
+  stat) printf '%s\n' "$VPN_TEST_MTIME" ;;
+  cat) printf '%s' "$VPN_TEST_STATUS" ;;
+  journalctl) printf '%s' "$VPN_TEST_JOURNAL" ;;
+  *) exit 64 ;;
+esac
+`,
+		"ping": `#!/bin/sh
+for address do :; done
+printf '%s\n' "$address" >> "$VPN_TEST_PING_LOG"
+exit 0
+`,
+	}
+	for name, body := range commands {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := fmt.Sprintf("CLIENT_LIST,excluded.example.test,198.51.100.20:1200,192.0.2.20,x,x,x,x,%d\n", now.Add(-time.Hour).Unix())
+	if allowedPresent {
+		status += fmt.Sprintf("CLIENT_LIST,allowed.example.test,198.51.100.10:1300,192.0.2.10,x,x,x,x,%d\n", now.Add(-time.Hour).Unix())
+	}
+	shellCalls := new(int)
+	source := &syntheticSource{hostFn: func(configured HostSettings, command string) (string, error) {
+		*shellCalls++
+		if configured.Name != "server.example.test" {
+			return "", fmt.Errorf("unexpected synthetic VPN server")
+		}
+		execute := exec.Command("sh", "-c", command)
+		execute.Env = append(os.Environ(),
+			"PATH="+binDir+":"+os.Getenv("PATH"),
+			"VPN_TEST_MTIME="+strconv.FormatInt(now.Add(-5*time.Second).Unix(), 10),
+			"VPN_TEST_STATUS="+status,
+			"VPN_TEST_JOURNAL="+fmt.Sprintf("%d.000000 fixture ovpn[1]: excluded.example.test/198.51.100.20:1400 Inactivity timeout (--ping-restart), restarting synthetic-vpn-secret\n", now.Add(-time.Minute).Unix()),
+			"VPN_TEST_PING_LOG="+pingLog,
+		)
+		output, err := execute.CombinedOutput()
+		return string(output), err
+	}}
+	settings := syntheticSettings(source)
+	settings.Now = func() time.Time { return now }
+	settings.Hosts = []HostSettings{
+		{Name: "server.example.test", OverlayAddress: "192.0.2.1", Roles: []string{"vpn-server"}},
+		{Name: "allowed.example.test", OverlayAddress: "192.0.2.10", Roles: []string{"vpn-client"}},
+		{Name: "excluded.example.test", OverlayAddress: "192.0.2.20", Roles: []string{"vpn-client"}},
+	}
+	return settings, pingLog, shellCalls
+}
+
+func vpnSessionScopePingAttempts(t *testing.T, pingLog string) string {
+	t.Helper()
+	data, err := os.ReadFile(pingLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

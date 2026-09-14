@@ -2002,6 +2002,16 @@ emits the process-wide policy warning under §1.6.
 Scope ownership comes from inventory-owned destinations, not external chain
 reference RPCs. Owned Grafana clients also guard redirected requests; injected
 clients are guarded at the submitted-request boundary without being mutated.
+Named SSH-backed transports admit both the inventory name and the actual
+LAN/overlay endpoint selected by this run's address mode before delegation.
+An excluded owner of that selected endpoint blocks the contact; overlap only
+in an inactive address mode is not evidence of excluded-host contact.
+An admitted SSH server does not authorize inventory destinations contacted
+inside its command. The owning probe must admit those destinations before
+assembling the command; §21.1's server-originated client ICMP checks use the
+same named-host and exact-endpoint boundary. Shared endpoints with an excluded
+owner fail closed. This is a built-in observation contract, not a sandbox for
+arbitrary injected shell commands or HTTP clients' internal behavior.
 
 Record the pause's operator reason, owner, start time, and re-enable condition
 in the run ledger. Restore coverage only after that condition is met and a
@@ -3408,6 +3418,19 @@ raise its deadline.
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
 
+The executable probe uses the cumulative `pg_stat_user_tables.n_tup_ins`
+counter for `network_client_connection`, sampled every minute, rather than
+rescanning that high-churn table. WARN `connects-rate` requires five consecutive
+samples below half the learned median, with a median of at least 1,000/min;
+WARN `connects-storm` requires three consecutive samples above 2.5 times the
+median, with a median of at least 500/min. The first counter sample, a reset,
+and an unavailable baseline cannot establish either rate incident. A failed
+observation is an execution/visibility failure, not proof of zero connections.
+The storm's frame distinguishes `reconnect-storm`, `window-child-churn`, and
+the affirmative §2.15 `reliability-window-churn` signature; rate alone does not
+prove a restart or provider-score corruption. A failed diagnostic retains the
+observed high-rate finding without upgrading its causal explanation.
+
 ```sql
 SELECT date_trunc('minute', connect_time), count(*)
 FROM network_client_connection
@@ -3885,6 +3908,27 @@ is distinct from PgBouncer's `FATAL: query_wait_timeout`. The client could not
 write the request to the 6432 frontend before its socket deadline; the query
 may never have reached a postgres backend. A healthy direct-5432 snapshot can
 therefore coexist with real route failures.
+
+The same probe owns `pgbouncer-unreachable`: a three-second local TCP-connect
+check on the configured database host and PgBouncer frontend port (default
+6432), without database authentication or a query. It is WARN with sustain 2
+and target `<configured-host>:<configured-port>` on a five-minute cadence.
+An open listener proves only local TCP admission, not authentication, queue
+progress, PostgreSQL health, or remote application reachability. A failed
+observation is UNKNOWN, not proof that the listener is closed.
+
+The 2026-09-14 detector audit reproduced malformed listener output and missing
+or interrupted tools being reported as a closed listener. Failed empty log
+pulls omitted visibility, failed partial pulls could produce a healthy zero,
+and capped windows could falsely clear a write stall. The corrected contract
+requires an owned command start/outcome and complete service windows;
+invalid/incomplete inputs remain `cannot-observe`, independently valid
+siblings survive, and no raw error or socket tuple enters Alert evidence.
+The follow-up matcher must accept the services' actual JSON-formatted error
+terminator as well as plain text, reject destination-port/error lookalikes,
+and respect a non-default configured frontend port. Keep release verification
+open until the exact batch passes the full attested gate and is promoted;
+focused detector tests do not prove Main recovery.
 
 Diagnosis order:
 1. Sample `pg_stat_activity` through direct 5432. Low active count/no blockers
@@ -4440,6 +4484,9 @@ that the process lacks the registered gate collector.
   families; admission errors are zero; fleet and per-process mean completed
   wait are at most five seconds. Deferrals may be non-zero—they prove the gate
   prevented an unsafe burst.
+  `circle-transfer-admission` is the reducer's healthy-only fallback identity,
+  not an emitted problem class or an additional probe. Do not count it as an
+  admission failure in the implementation/catalog crosswalk.
 - WARN `circle-transfer-admission-unobservable`: a newest process either has no
   fresh capability/activity sample or has fewer than two accepted activity
   samples for a five-minute increase. A missing capability can mean mixed
@@ -6594,6 +6641,14 @@ Observe all three layers every five minutes:
   status and identity-match Booleans enter findings; the credential and
   response body never do.
 
+The dashboard findings are `subscription-dashboard-auth` for absent/denied
+authentication (401/403), `subscription-dashboard-missing` for a 404 lookup,
+`subscription-dashboard-http` for other non-2xx responses, and
+`subscription-dashboard-identity` for a 2xx document with a nonmatching UID or
+title. These are dashboard-publication/visibility failures, not evidence of a
+payment outage. A transport, bounded-body, or decode failure remains
+`cannot-observe`; it cannot clear the dashboard or business-data contract.
+
 The dashboard lookup uses the same signal-private Grafana transport contract
 as §1.4a and §11.15. A route/reset/timeout result gets one fresh IPv4 replay;
 HTTP and dashboard-identity failures do not. Each attempt has its own
@@ -6602,10 +6657,13 @@ retains bounded classes rather than URL or socket details.
 
 PAGE after two consecutive probes for `subscription-metrics-task-chain`,
 `subscription-metrics-snapshot-stale`,
-`subscription-metrics-publication-gap`, or any live-dashboard contract
-failure. A future timestamp is the same fail-closed two-tick page: repair
-clock/timestamp publication rather than extending the freshness range. Restore
-the exact task chain, exporter/scrape path, or load-defaults owner identified
+`subscription-metrics-publication-gap`,
+`subscription-metrics-snapshot-future`, or any live-dashboard contract
+failure. The future class requires a snapshot value more than 30 seconds ahead
+and targets `subscription-metrics-snapshot`; an invalid or stale scrape source
+is instead `cannot-observe`. Repair clock/timestamp publication rather than
+extending the freshness range. Restore the exact task chain, exporter/scrape
+path, or load-defaults owner identified
 by the three-way discriminator. Never seed a second task, replace missing
 telemetry with zero, make the dashboard public, or hand-edit a colliding UID.
 
@@ -7338,6 +7396,17 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | The request did not reach the public edge. In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path, not the broader auth prefix. If absent, keep diagnosis client-side: inspect `[net]http serial`/`[net]http parallel` route selection and the embedded Connect revision. Require the bounded preferred-route scheduler and cold-route parallel discovery regression tests; do not restart API, increase the UI wait, or add an app-level retry. |
 | `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
+
+For `payout-invalid-destination`, `invalid_destination_events` is the
+exact-replay-deduplicated task-evaluator event count, not an additional Alert
+class or a unique-payout count. The internal correlation-only state named
+`payout-wallet-completion-correlation` also emits no Alert: it retains bounded
+wallet-insufficient completion cohorts for the processor-429
+`coincident_wallet_attempts` observation. Neither completion timestamps nor
+these internal names satisfy the separate `payout-retry-microburst` admission
+invariant. Class-coverage audits must distinguish emitted class names from
+canonical metric and correlation-only names instead of declaring phantom
+missing probes.
 
 At `2026-09-03T09:56Z`–`09:59Z`, the authoritative watcher measured
 Fireside Proxy `device_rpc_transport` WebSocket close-1006 unexpected-EOF
@@ -10048,10 +10117,27 @@ plain nonpartial index contracts at versions 614, 616–617, 620, 627, 640–641
 647, 650, 656, 663–664, and 666 now pin the complete normalized btree definition,
 uniqueness, key order, validity, readiness, and absence of a predicate. Synthetic
 wrong-method, expression, INCLUDE, uniqueness, reordering, invalid, not-ready,
-and partial fixtures must not clear `migration-schema-drift`. This does not
-certify exact semantics for the older partial/predicate-substring contracts
-at 618, 623, 629, 632–634, 638, 645, or 652; keep that residual explicit rather
-than treating numeric-head or class-inventory coverage as full schema proof.
+and partial fixtures must not clear `migration-schema-drift`.
+
+The same-day actual-query regression also reproduced false greens in the nine
+older partial-index guards at 618, 623, 629, 632–634, 638, 645, and 652. Those
+guards now pin the complete whitespace-normalized `pg_get_indexdef` and full
+`pg_get_expr` predicate plus validity/readiness, including uniqueness, ordered
+keys, and the exact INCLUDE set/order. The status predicates require all five
+exact statuses; the unresolved-contract CASE preserves its false/NULL behavior
+and family-nonnull term; active staging requires the unique competition key
+and all three predicate terms. The legacy version-618 index remains required
+only through 621 and obsolete from 622; the independent grouped version-652
+constraint/trigger lifecycle checks remain intact.
+
+Synthetic fixtures execute the actual emitted relation-scoped SQL guards in
+local PostgreSQL and pass their results through ordinary Signal/Markdown
+reduction, not a handwritten LIKE model. Wrong methods/keys/INCLUDE/uniqueness,
+predicate lookalikes, changed CASE arms/status sets, invalid/not-ready, missing,
+and nonpartial indexes must produce schema drift after a successful catalog
+observation. Query failure or cancellation cannot become healthy/schema-drift
+evidence. This certifies the tested index contracts, not every non-index
+artifact's semantics or production coherence from a numeric head alone.
 
 Versions 669–674 append four independently nullable UUID location columns,
 the contract-party creation timestamp, and its ordered lookup index. The
@@ -11695,8 +11781,14 @@ Probe: `grafana-ingress`
 Pin `https://<env>-grafana.<domain>/api/health` to every enabled edge IPv6
 address from the active `services.yml` version. HTTP 200 is the only healthy
 response. Transport refusal/timeout remains owned by `edge-ipv6` (§18.1); this
-signal starts after TLS reaches the edge and therefore identifies a
-service-specific response without duplicating the interface ticket.
+signal does not duplicate those interface tickets. Its `grafana-edge-upstream`
+class covers observed 502/503/504 responses; `grafana-edge-response` covers the
+other unsuccessful health-request outcomes, including TLS/SNI failures. Both
+are PAGE with sustain 2 on the one-minute cadence, targeting the exact host
+and interface/address frame. Use the recorded HTTP status and curl exit as
+the discriminator: HTTP `000` is no HTTP response, and the response-class name
+does not prove TLS or HTTP completion. Missing/unparseable source evidence
+remains UNKNOWN, not an affirmative service failure.
 
 The `2026.8.30+1033129380` rollout exposed why a single ordinary DNS request is
 not enough. Edge-0 and edge-1 returned 200 while both edge-4 interfaces returned
@@ -11712,14 +11804,23 @@ The 2026-08-31T01:24Z live root-cause battery closed the remaining manual gap.
 Edge-4's Warp unit was active, but its `/status` continuously reported the
 Grafana child connection refused; the bounded child journal contained the
 exact rejected `interval (15s)` / scheduler `10` error followed by child
-restart. `grafana-ingress` now runs that unprivileged systemd/journal battery
-once per failed host and shares the result across its interface alerts. When
-the signature is present, Markdown records
+restart. `grafana-ingress` runs that unprivileged systemd/journal battery
+once per host with a corroborating observed HTTP 502/503/504 upstream outcome
+and shares the result across its interface alerts. Only that upstream outcome
+plus a valid rejected-interval/scheduler signature permits Markdown to record
 `root_cause=alert-interval-scheduler-grid`, the rejected and scheduler
 intervals, the parent-versus-child lifecycle, and the scheduler-grid test. A
 synthetic host with two 502 interfaces requires one battery call and two fully
 attributed alerts. A 502 still proves IPv6 reached the LB and must not be
 relabelled as an interface-routing failure.
+The battery is a bounded recent same-host journal, not an exact current-child
+or artifact identity. Its scheduler discriminator names a matching recent
+mechanism; confirm that the active failing generation has that provisioning
+failure before selecting an image fix. A predecessor's rejection cannot prove
+the current child's exit or explain a new upstream failure by itself.
+TLS failures, HTTP `000`, 401/404 responses, and an unrelated provisioning log
+do not prove that root cause. Missing or inconsistent curl/HTTP diagnostics
+are UNKNOWN; a pre-HTTP response-class alert must not claim request completion.
 
 At 03:29Z the fleet also exposed a two-generation recovery trap. Edge-0 and
 edge-4 still returned exact-address 502s because the new generation rejected
@@ -11760,6 +11861,41 @@ host independently once per minute:
 - the PostgreSQL LAN endpoint accepts TCP when a primary is configured; and
 - loopback Mimir answers the data-independent `vector(1)` with HTTP 200 in
   under four seconds.
+
+Before assembling the host command, admit the actual scheduler LAN endpoint
+and both the PostgreSQL inventory owner and its LAN endpoint. Admission of the
+Grafana SSH server alone does not authorize either nested TCP destination.
+An excluded/shared owner must receive no 6490 or 5432 attempt. Skipped
+scheduler/database inputs are explicitly unobserved, not false or true;
+independent permitted unit/address/network/query evidence can still diagnose
+the host. Preserve the complete Grafana and primary inventory and the
+originating `monitor-host-scope-partial` WARN (§1.6). A skipped check cannot
+clear an incident or establish full-node readiness, and cancellation is
+lifecycle rather than a new scope finding.
+
+Observation integrity is a separate boundary from node health. Native query
+write-out must contain exactly its required fields, with finite nonnegative
+elapsed time, a valid curl exit status, and a compatible HTTP status. Missing
+or extra fields, NaN/Inf, impossible statuses, and exit zero with HTTP 000 are
+`cannot-observe`, never healthy absence or a definitive query PAGE. Defaults
+must not manufacture evidence that the native command did not return.
+Likewise, missing/not-started/interrupted TCP tools do not prove a closed
+scheduler or database listener. Require an owned connection attempt before
+classifying refusal or timeout, and distinguish PostgreSQL TCP establishment
+from the subsequent SSL-response/protocol stage. An unobserved stage must
+produce explicit visibility rather than a silent skipped value; it cannot
+clear an incident, establish full-node readiness, or invalidate independent
+permitted evidence.
+
+The 2026-09-14 source audit found both former false-inference paths: NaN could
+pass the query-duration comparison, and native command failures or failures
+after PostgreSQL TCP opened could be reported as listener failures. Required
+synthetic controls exercise the actual generated command, not only a guessed
+output model: malformed query tuples, missing/not-started/interrupted tools,
+proved connection refusal/timeout, post-connect protocol outcomes, healthy
+and no-policy cases. Local fixes still require the current full verification
+gate and controlled watcher replacement; no live occurrence or production
+recovery follows from these source findings.
 
 PAGE `grafana-lan-identity` when the configured address is absent. A socket can
 remain bound with non-local/freebind semantics and the Warp unit can remain
@@ -12338,6 +12474,13 @@ Grafana publisher port to loopback and non-loopback counts. Metric labels,
 tenant identities, socket peers, build bodies, and rendered configuration do
 not leave the host. Missing descriptors, malformed values, partial children,
 an inconsistent ring/rate view, a counter reset, or any host loss fails closed.
+
+The exact visibility class is WARN `cannot-observe`, with the affected
+host's Mimir-balance target, when those direct observations or comparisons
+cannot be completed. State read/validation/write failures instead fail the
+probe and are surfaced through the monitor's execution/visibility path. Neither
+failure establishes balanced ingestion or recovery from skew. Baseline arming
+after a first complete sample is a separate, expected warmup, not that alert.
 
 Counter baselines are keyed by host, listener port, and canonical
 full-precision process start, bounded to 1,024 histories, and stored atomically
@@ -16222,6 +16365,13 @@ series was absent for `job="proxy"`; the same counters were visible on API,
 Connect, and taskworker. Do not diagnose a pool leak from that absence. Deploy
 the root server collector first and preserve host RSS/OOM evidence meanwhile.
 
+WARN `cannot-observe` is the separate monitor execution/visibility class for
+failed service-gateway queries, malformed Mimir responses, or invalid samples
+before a trustworthy pool observation can be constructed. It is not the
+affirmative `proxy-message-pool-unobservable` missing-gauge finding or the
+source-time `proxy-message-pool-snapshot-unobservable` finding below. None of
+these visibility failures proves an empty pool, healthy ownership, or recovery.
+
 The 2026-09-01 config-only rollout exposed a freshness bug in the first probe
 implementation. Direct host process tables had already returned to ten proxies
 on Crisp and ten on Fireside, while Mimir's instant query still returned 34
@@ -16322,6 +16472,13 @@ artifact does not prove that its external owner waits for the manager, shared
 mean those owners consume zero bytes. Keeping this separate from
 `proxy-runtime-unobservable` lets the live-set discriminator continue to
 evaluate a legacy process whose fourteen memory metrics are complete.
+
+WARN `cannot-observe` is the monitor execution/visibility class when the
+service-gateway query, Mimir response, or sample decoding fails before a
+trustworthy runtime observation exists. Keep it distinct from the affirmative
+`proxy-runtime-unobservable` missing-owner finding and
+`proxy-lifecycle-join-unverified` capability finding. A failed query cannot
+establish a small live set, complete ownership, or recovery from memory pressure.
 
 Filter each family with its own source timestamp no older than 90 seconds
 before selecting the newest process start. Prometheus's instant-query timestamp
@@ -16611,6 +16768,13 @@ is unknown and must not be interpreted as an empty cache. WARN
 `proxy-lock-cache-bound` immediately when capacity is zero, capacity is above
 16,384, or entries exceed the published capacity. Stop promotion on this
 contract failure: do not raise the capacity or restart away retained entries.
+
+WARN `cannot-observe` is the separate monitor execution/visibility class for
+failed service-gateway queries, malformed Mimir responses, or invalid samples
+before a trustworthy cache observation exists. It is not the affirmative
+`proxy-lock-cache-unobservable` finding for a known fresh identity missing
+instrumentation. Neither absence establishes an empty or bounded cache, and
+neither is evidence that an earlier cache-pressure finding has recovered.
 
 WARN `proxy-lock-cache-pressure` after five one-minute probes when entries are
 at least 90% of capacity. The hard bound still protects the heap, but sustained
@@ -17752,6 +17916,18 @@ therefore report false even though the public chain is millions of blocks
 ahead. Require all of: peers > 0, two advancing head samples, the expected
 current runtime, and a comparison against the official RPC head before
 declaring convergence.
+
+The `subtensor` probe distinguishes `subtensor-sync-lag` from
+`subtensor-stale-convergence`: outside the separate warp-bootstrap branch,
+the first records lag over 128 blocks or an actively syncing node, while the
+second records `isSyncing=false` with lag over 128. Lag uses the larger of the
+reported sync target and an observable public/reference head, never a failed
+reference read treated as zero. Both are WARN with sustain 1, target the
+configured host, and frame the configured node. Advancing archive bootstrap
+is an operational wait, not an outage or readiness; stale convergence is not
+cleared by an open RPC port or a false synchronization flag. Physical-host or
+constructor pauses keep this coverage explicitly unknown and do not authorize
+contacting testnet.
 
 For the P2P layer, distinguish TCP reachability from a retained peer session:
 ```
@@ -19305,14 +19481,32 @@ Configure exactly one enabled monitor host with role `vpn-server` and every
 required client with role `vpn-client`. A VPN server can override the ordinary
 service-host SSH user and identity paths in `monitor.yml`; relative identity
 paths resolve under `WARP_HOME`, so no key material enters the inventory. The
-probe connects only to the server. It reads
+probe's SSH connection is only to the server. It reads
 `openvpn-server@server.service`, the mtime and `CLIENT_LIST` records in the
 server-owned status file, a bounded server-originated ICMP check of each
-configured overlay address, and a bounded two-hour reduction of inactivity
-timeouts. Status rows are joined to clients by the exact configured virtual
-IPv4 address, not by a possibly different certificate common name. The ICMP
+admitted configured overlay address, and a bounded two-hour reduction of
+inactivity timeouts. Status rows are joined to clients by the exact configured
+virtual IPv4 address, not by a possibly different certificate common name. The ICMP
 check is part of this inventory's established host contract: every enabled
 client currently answers it from the VPN server.
+
+Before command assembly, admit both each client's exact inventory name and its
+overlay endpoint through the immutable host-scope policy. Excluded clients and
+shared endpoints with an excluded owner must appear in neither the ICMP target
+set nor client-state attribution. Keep the complete configured-client
+denominator; those clients are UNKNOWN, not absent, unreachable, or recovered.
+The originating §21.1 `monitor-host-scope-partial` warning preserves that missing
+coverage while the admitted central server and permitted clients remain
+observed. A canceled run is lifecycle, not a new coverage violation.
+
+**2026-09-14 detector scope audit:** guarding the SSH server alone allowed its
+generated command to ping a paused client's overlay address. The deterministic
+regression executes the actual generated command with a synthetic ping recorder,
+requiring zero denied-client attempts and continued permitted-client attempts;
+it also exercises ordinary Signal reduction and unchanged no-policy behavior.
+This local source mechanism does not prove that the authoritative predecessor
+contacted a paused client. Its scope remains unproven until current-settings
+validation and controlled watcher promotion complete.
 
 The status and journal are reduced through one source-equality map inside the
 VPN server. This lets a current-but-unreachable session and a recently timed

@@ -2,10 +2,13 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -792,4 +795,335 @@ func syntheticMigrationCatalogRows(head int) []Row {
 		rows = append(rows, Row{fmt.Sprint(index), identity})
 	}
 	return rows
+}
+
+// These shapes are pinned by the attested LOCAL PostgreSQL 18 reconstruction
+// of the append-only migration SQL. Tests execute the emitted production
+// WHERE clause over synthetic catalog values; no LIKE verdict is modeled.
+type syntheticMigrationPartialIndexContract struct {
+	version   int
+	table     string
+	name      string
+	keys      string
+	include   string
+	predicate string
+	unique    bool
+}
+
+func (self syntheticMigrationPartialIndexContract) definition() string {
+	kind := "CREATE INDEX "
+	if self.unique {
+		kind = "CREATE UNIQUE INDEX "
+	}
+	definition := kind + self.name + " ON public." + self.table + " USING btree (" + self.keys + ")"
+	if self.include != "" {
+		definition += " INCLUDE (" + self.include + ")"
+	}
+	return definition + " WHERE " + self.predicate
+}
+
+func syntheticMigrationPartialIndexContracts() []syntheticMigrationPartialIndexContract {
+	statusPredicate := "((status)::text = ANY ((ARRAY['prepared'::character varying, 'signed'::character varying, 'broadcast'::character varying, 'mined'::character varying, 'uncertain'::character varying])::text[]))"
+	return []syntheticMigrationPartialIndexContract{
+		{version: 618, table: "st_transaction_intent", name: "st_transaction_intent_account_reconcile", keys: "chain_id, from_address, nonce", predicate: statusPredicate},
+		{version: 623, table: "st_transaction_intent", name: "st_transaction_intent_account_reconcile_v2", keys: "chain_id, genesis_hash, from_address, nonce", predicate: statusPredicate},
+		{version: 629, table: "transfer_contract", name: "transfer_contract_stream_id", keys: "stream_id", predicate: "(stream_id IS NOT NULL)"},
+		{version: 632, table: "transfer_contract", name: "transfer_contract_unresolved_source_pair_create_time", keys: "source_id, destination_id, create_time", include: "contract_id, companion_contract_id, transfer_byte_count, priority", predicate: "( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (source_id IS NOT NULL))"},
+		{version: 633, table: "transfer_contract", name: "transfer_contract_unresolved_destination_pair_create_time", keys: "destination_id, source_id, create_time", include: "contract_id, companion_contract_id, transfer_byte_count, priority", predicate: "( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (destination_id IS NOT NULL))"},
+		{version: 634, table: "transfer_contract", name: "transfer_contract_unresolved_payer_transfer_byte_count", keys: "payer_network_id", include: "transfer_byte_count", predicate: "( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (payer_network_id IS NOT NULL))"},
+		{version: 638, table: "network_onboarding_apple_offer_code", name: "network_onboarding_apple_offer_code_available", keys: "expires_at, code", predicate: "(network_id IS NULL)"},
+		{version: 645, table: "network_onboarding", name: "network_onboarding_next_send_at", keys: "next_send_at", predicate: "(next_send_at IS NOT NULL)"},
+		{version: 652, table: "competition_round", name: "competition_round_one_active_staging", keys: "competition_id", predicate: "((staging = true) AND (canceled = false) AND (finalized_at IS NULL))", unique: true},
+	}
+}
+
+type syntheticMigrationPartialIndexObservation struct {
+	table      string
+	name       string
+	definition string
+	predicate  *string
+	valid      bool
+	ready      bool
+	present    bool
+}
+
+func syntheticMigrationPartialIndexGuard(t *testing.T, query string, contract syntheticMigrationPartialIndexContract) string {
+	t.Helper()
+	normalized := strings.Join(strings.Fields(query), " ")
+	marker := "WHERE table_name = '" + contract.table + "' AND index_name = '" + contract.name + "'"
+	if strings.Count(normalized, marker) != 1 {
+		t.Fatalf("index %s lacks one exact relation-scoped guard", contract.name)
+	}
+	start := strings.Index(normalized, marker)
+	depth := 0
+	quoted := false
+	for position := start; position < len(normalized); position++ {
+		switch normalized[position] {
+		case '\'':
+			if quoted && position+1 < len(normalized) && normalized[position+1] == '\'' {
+				position++
+			} else {
+				quoted = !quoted
+			}
+		case '(':
+			if !quoted {
+				depth++
+			}
+		case ')':
+			if !quoted {
+				if depth == 0 {
+					return normalized[start:position]
+				}
+				depth--
+			}
+		}
+	}
+	t.Fatalf("index %s guard is unterminated", contract.name)
+	return ""
+}
+
+func syntheticMigrationPartialIndexAdmitted(ctx context.Context, conn server.PgConn, guard string, contract syntheticMigrationPartialIndexContract, observed syntheticMigrationPartialIndexObservation) (bool, error) {
+	var admitted bool
+	err := conn.QueryRow(ctx, `
+		WITH index_artifact AS (
+			SELECT $1::text AS table_name, $2::text AS index_name,
+			       regexp_replace($3::text, '[[:space:]]+', ' ', 'g') AS definition,
+			       regexp_replace($4::text, '[[:space:]]+', ' ', 'g') AS predicate_definition,
+			       $5::boolean AS indisvalid, $6::boolean AS indisready
+			WHERE $7::boolean
+		)
+		SELECT EXISTS (SELECT 1 FROM index_artifact `+guard+`)`,
+		observed.table, observed.name, observed.definition, observed.predicate,
+		observed.valid, observed.ready, observed.present,
+	).Scan(&admitted)
+	return admitted, err
+}
+
+func syntheticMigrationPartialIndexArtifact(t *testing.T, version int) migrationArtifact {
+	t.Helper()
+	for _, artifact := range migrationArtifacts {
+		if artifact.requiredVersion == version {
+			return artifact
+		}
+	}
+	t.Fatalf("partial index v%d has no owning artifact", version)
+	return migrationArtifact{}
+}
+
+func TestMigrationsSignalPartialIndexContractsExecuteExactGuards(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("partial-index query fixtures require the attested local test environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	server.Db(ctx, func(conn server.PgConn) {
+		type partialIndexCase struct {
+			name      string
+			observed  syntheticMigrationPartialIndexObservation
+			wantDrift bool
+		}
+		for _, contract := range syntheticMigrationPartialIndexContracts() {
+			artifact := syntheticMigrationPartialIndexArtifact(t, contract.version)
+			head := server.MigrationCount()
+			if artifact.removedVersion != 0 {
+				head = artifact.removedVersion - 1
+			}
+			healthy := syntheticMigrationPartialIndexObservation{table: contract.table, name: contract.name, definition: contract.definition(), predicate: &contract.predicate, valid: true, ready: true, present: true}
+			cases := []partialIndexCase{{name: "canonical", observed: healthy}}
+			addDefinition := func(name, definition string) {
+				observed := healthy
+				observed.definition = definition
+				cases = append(cases, partialIndexCase{name: name, observed: observed, wantDrift: true})
+			}
+			addPredicate := func(name, predicate string) {
+				observed := healthy
+				observed.predicate = &predicate
+				observed.definition = strings.TrimSuffix(contract.definition(), contract.predicate) + predicate
+				cases = append(cases, partialIndexCase{name: name, observed: observed, wantDrift: true})
+			}
+			spaced := healthy
+			spaced.definition = strings.ReplaceAll(spaced.definition, " ", " \n\t")
+			spacedPredicate := strings.ReplaceAll(contract.predicate, " ", " \n\t")
+			spaced.predicate = &spacedPredicate
+			cases = append(cases, partialIndexCase{name: "canonical whitespace", observed: spaced})
+			addDefinition("wrong access method", strings.Replace(contract.definition(), "USING btree", "USING brin", 1))
+			keys := strings.Split(contract.keys, ", ")
+			expressionKeys := append([]string(nil), keys...)
+			expressionKeys[0] = "(" + keys[0] + " IS NOT NULL)"
+			addDefinition("expression key", strings.Replace(contract.definition(), "("+contract.keys+")", "("+strings.Join(expressionKeys, ", ")+")", 1))
+			if len(keys) > 1 {
+				reordered := append([]string(nil), keys...)
+				reordered[0], reordered[len(reordered)-1] = reordered[len(reordered)-1], reordered[0]
+				addDefinition("reordered keys", strings.Replace(contract.definition(), "("+contract.keys+")", "("+strings.Join(reordered, ", ")+")", 1))
+			}
+			kindChanged := strings.Replace(contract.definition(), "CREATE INDEX ", "CREATE UNIQUE INDEX ", 1)
+			if contract.unique {
+				kindChanged = strings.Replace(contract.definition(), "CREATE UNIQUE INDEX ", "CREATE INDEX ", 1)
+			}
+			addDefinition("changed uniqueness", kindChanged)
+			if contract.include == "" {
+				addDefinition("extra include", strings.Replace(contract.definition(), " WHERE ", " INCLUDE (synthetic_extra_column) WHERE ", 1))
+			} else {
+				addDefinition("missing include", strings.Replace(contract.definition(), " INCLUDE ("+contract.include+")", "", 1))
+				addDefinition("extra include", strings.Replace(contract.definition(), "INCLUDE ("+contract.include+")", "INCLUDE ("+contract.include+", synthetic_extra_column)", 1))
+				included := strings.Split(contract.include, ", ")
+				if len(included) > 1 {
+					included[0], included[len(included)-1] = included[len(included)-1], included[0]
+					addDefinition("reordered include", strings.Replace(contract.definition(), "INCLUDE ("+contract.include+")", "INCLUDE ("+strings.Join(included, ", ")+")", 1))
+				}
+			}
+			addPredicate("extra OR", "("+contract.predicate+" OR true)")
+			addPredicate("extra AND", "("+contract.predicate+" AND false)")
+			addPredicate("predicate prefix lookalike", "('"+strings.ReplaceAll(contract.predicate, "'", "''")+"'::text IS NOT NULL)")
+			addPredicate("predicate suffix", contract.predicate+" AND true")
+			if strings.Contains(contract.predicate, "CASE WHEN") {
+				addPredicate("false CASE arm", strings.Replace(contract.predicate, "THEN (dispute = false) ELSE false", "THEN false ELSE (dispute = false)", 1))
+				addPredicate("omitted family nonnull", strings.Replace(contract.predicate, "AND ("+keys[0]+" IS NOT NULL)", "AND true", 1))
+			}
+			if strings.Contains(contract.predicate, "ARRAY[") {
+				addPredicate("truncated statuses", strings.Replace(contract.predicate, ", 'uncertain'::character varying", "", 1))
+				addPredicate("status lookalike", strings.Replace(contract.predicate, "'uncertain'::character varying", "'uncertain-lookalike'::character varying", 1))
+			}
+			for _, name := range []string{"invalid", "not ready", "missing", "nonpartial", "wrong relation", "wrong index name", "contradictory predicate"} {
+				observed := healthy
+				switch name {
+				case "invalid":
+					observed.valid = false
+				case "not ready":
+					observed.ready = false
+				case "missing":
+					observed.present = false
+				case "nonpartial":
+					observed.predicate = nil
+					observed.definition = strings.TrimSuffix(contract.definition(), " WHERE "+contract.predicate)
+				case "wrong relation":
+					observed.table = "synthetic_other_relation"
+				case "wrong index name":
+					observed.name = "synthetic_other_index"
+				case "contradictory predicate":
+					predicate := "false"
+					observed.predicate = &predicate
+				}
+				cases = append(cases, partialIndexCase{name: name, observed: observed, wantDrift: true})
+			}
+			for _, test := range cases {
+				source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+					if strings.Contains(query, "FROM migration_catalog") {
+						return syntheticMigrationCatalogRows(head), nil
+					}
+					guard := syntheticMigrationPartialIndexGuard(t, query, contract)
+					admitted, err := syntheticMigrationPartialIndexAdmitted(ctx, conn, guard, contract, test.observed)
+					if err != nil {
+						return nil, err
+					}
+					row := syntheticMigrationArtifactRow(head)
+					row[artifact.rowColumn] = fmt.Sprint(admitted)
+					return []Row{row}, nil
+				}}
+				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+				if err != nil {
+					t.Fatalf("%s/%s: actual guard query failed: %v", contract.name, test.name, err)
+				}
+				drift := false
+				for _, alert := range alerts {
+					if alert.Class == "migration-schema-drift" {
+						drift = true
+						if alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), fmt.Sprintf("%s@v%d", artifact.name, contract.version)) {
+							t.Fatalf("%s/%s: exact owning schema gate was lost", contract.name, test.name)
+						}
+						for _, value := range []string{"absent or incompatible", "not proof that migration history was reordered", "exact live artifact definitions first", "valid and ready", "SIGNALS.md §8.9"} {
+							if !strings.Contains(alert.Markdown(), value) {
+								t.Errorf("%s/%s: schema gate lacks %q", contract.name, test.name, value)
+							}
+						}
+					}
+				}
+				if drift != test.wantDrift {
+					t.Errorf("%s/%s: actual SQL admitted incompatible metadata: drift=%t want=%t", contract.name, test.name, drift, test.wantDrift)
+				}
+			}
+		}
+	}, server.OptNoRetry())
+}
+
+func TestMigrationsSignalPartialIndexLegacyLifetimeExecutesGuard(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("partial-index query fixtures require the attested local test environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	contract := syntheticMigrationPartialIndexContracts()[0]
+	artifact := syntheticMigrationPartialIndexArtifact(t, contract.version)
+	server.Db(ctx, func(conn server.PgConn) {
+		for _, head := range []int{617, 618, 621, 622} {
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(head), nil
+				}
+				guard := syntheticMigrationPartialIndexGuard(t, query, contract)
+				admitted, err := syntheticMigrationPartialIndexAdmitted(ctx, conn, guard, contract, syntheticMigrationPartialIndexObservation{})
+				if err != nil {
+					return nil, err
+				}
+				row := syntheticMigrationArtifactRow(head)
+				row[artifact.rowColumn] = fmt.Sprint(admitted)
+				return []Row{row}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drift := false
+			for _, alert := range alerts {
+				drift = drift || alert.Class == "migration-schema-drift"
+			}
+			wantDrift := contract.version <= head && head < artifact.removedVersion
+			if drift != wantDrift {
+				t.Fatalf("legacy index at head%d: drift=%t want=%t", head, drift, wantDrift)
+			}
+		}
+	}, server.OptNoRetry())
+}
+
+func TestMigrationsSignalPartialIndexCanceledQueryCannotBecomeHealth(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("partial-index query fixtures require the attested local test environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	contract := syntheticMigrationPartialIndexContracts()[0]
+	server.Db(ctx, func(conn server.PgConn) {
+		queryCtx, cancelQuery := context.WithCancel(ctx)
+		cancelQuery()
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			guard := syntheticMigrationPartialIndexGuard(t, query, contract)
+			_, err := syntheticMigrationPartialIndexAdmitted(queryCtx, conn, guard, contract, syntheticMigrationPartialIndexObservation{})
+			return nil, err
+		}}
+		alerts, err := NewMigrationsSignal().Run(queryCtx, syntheticSettings(source))
+		if !errors.Is(err, context.Canceled) || len(alerts) != 0 {
+			t.Fatalf("query cancellation became schema or recovery evidence: alerts=%d err=%v", len(alerts), err)
+		}
+	}, server.OptNoRetry())
+}
+
+func TestMigrationsSignalPartialIndexQueryFailureCannotBecomeHealth(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("partial-index query fixtures require the attested local test environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	contract := syntheticMigrationPartialIndexContracts()[0]
+	server.Db(ctx, func(conn server.PgConn) {
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			guard := syntheticMigrationPartialIndexGuard(t, query, contract)
+			observed := syntheticMigrationPartialIndexObservation{table: contract.table, name: contract.name, definition: contract.definition(), predicate: &contract.predicate, valid: true, ready: true, present: true}
+			_, err := syntheticMigrationPartialIndexAdmitted(ctx, conn, guard+" AND synthetic_observation_column", contract, observed)
+			return nil, err
+		}}
+		alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+		if err == nil || len(alerts) != 0 {
+			t.Fatalf("failed actual metadata query became schema or recovery evidence: alerts=%d error_present=%t", len(alerts), err != nil)
+		}
+	}, server.OptNoRetry())
 }

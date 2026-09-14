@@ -13,8 +13,11 @@ The signal catalog — WHAT to measure, HOW, healthy/broken bands — lives in
 SIGNALS.md (this directory). This document is the architecture of the program
 that encodes those signals as automated probes.
 
-Related: RUN-MAIN.md (continuous root-cause agent harness), FOLLOWUP.md (open
-items ledger), SIGNALS.md §7 (the alert emission spec this service implements).
+Related: RUN-MAIN.md (continuous root-cause agent harness), ../FOLLOWUP.md
+(historical deferred work), SIGNALS.md §7 (the alert emission spec this service
+implements). Current open items and their corrections belong to the chained
+run ledger described in RUN-MAIN.md; the historical checklist is not live
+authorization to execute its operational or architectural proposals.
 
 ---
 

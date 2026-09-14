@@ -75,6 +75,25 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 	clients = append([]*host(nil), clients...)
 	sort.Slice(clients, func(i, j int) bool { return clients[i].name < clients[j].name })
+	configuredClientCount := len(clients)
+	if scoped, ok := env.runner.(*hostScopeRunner); ok {
+		permittedClients := make([]*host, 0, len(clients))
+		for _, client := range clients {
+			// The SSH server owns the command, but each nested ICMP target
+			// needs its own admission. A shared endpoint cannot establish
+			// that the permitted logical client owns the destination.
+			if err := vpnSessionScopeClient(ctx, scoped, client); err != nil {
+				if hostScopeOnlyError(err) {
+					continue
+				}
+				return nil, err
+			}
+			permittedClients = append(permittedClients, client)
+		}
+		// Use the same admitted set for shell destinations and attribution;
+		// cfg and the desired client denominator remain complete.
+		clients = permittedClients
+	}
 
 	command, err := vpnSessionsCommand(clients)
 	if err != nil {
@@ -187,9 +206,9 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			baseline:  "Every enabled vpn-client has its exact overlay address in the fresh server snapshot and answers a bounded server-originated overlay reachability check.",
 			observed: fmt.Sprintf(
 				"host=%s overlay_address=%s session_present=true data_path_reachable=false reachable_controls=%d configured_clients=%d shared_public_source=%t correlated_affected_hosts=%s connected_since=%s server_restarts=%d",
-				client.name, client.overlayIp, reachableClients, len(clients), sharedSite, peerText, session.connectedAt.Format(time.RFC3339), observation.restarts,
+				client.name, client.overlayIp, reachableClients, configuredClientCount, sharedSite, peerText, session.connectedAt.Format(time.RFC3339), observation.restarts,
 			),
-			evidence: "The current status snapshot groups real-source equality only inside the VPN server and exports configured private overlay addresses plus configured host names; it never emits public sources, source ports, certificates, or unrelated identities. The server then probes each configured overlay address directly.",
+			evidence: "The current status snapshot groups real-source equality only inside the VPN server and exports configured private overlay addresses plus configured host names; it never emits public sources, source ports, certificates, or unrelated identities. The server then probes each admitted configured overlay address directly.",
 			context:  "A CLIENT_LIST row proves a control session, not usable forwarding. Correlate the dedicated direct public backup path: if it also disappears, the failure is broader than OpenVPN; if it advances, keep the diagnosis at the tunnel data path. Bulk backups must never move onto the management VPN.",
 			action:   "Inspect the affected host and site router through an independent console: tunnel counters, address/route ownership, rp_filter/firewall state, WAN/link history, NAT/conntrack, UDP/443 reachability, and openvpn@by-pre journal. Preserve advancing Subtensor databases and the single Planetoid backup writer; do not restart databases, launch a duplicate transfer, or redesign the central VPN.",
 			verify:   "The current session remains present and its exact overlay address answers two consecutive server-originated checks; all same-source configured peers recover; the dedicated non-VPN backup path advances when scheduled; and dependent host probes remain observable for ten minutes.",
@@ -232,7 +251,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			baseline:  "Every enabled vpn-client host has its exact configured overlay address in the VPN server's fresh CLIENT_LIST snapshot.",
 			observed: fmt.Sprintf(
 				"missing_host=%s overlay_address=%s missing_clients=%d configured_clients=%d last_inactivity_timeout=%s shared_public_source=%t correlated_affected_hosts=%s server_restarts=%d",
-				client.name, client.overlayIp, len(missing), len(clients), lastTimeout, sharedSite, peerText, observation.restarts,
+				client.name, client.overlayIp, len(missing), configuredClientCount, lastTimeout, sharedSite, peerText, observation.restarts,
 			),
 			evidence: "The current status and bounded two-hour journal are reduced through one source-address equality map inside the VPN host. Only configured virtual addresses and names in the same group are exported; the public source itself is never emitted.",
 			context:  "This proves management-session loss, not application death. Correlate a dedicated direct-path control: if Planetoid's public PostgreSQL/Redis SSH transfer also disappears, the fault is broader than OpenVPN; if that transfer advances, keep the diagnosis at the UDP/VPN path. Bulk backups must never move onto the management VPN.",
@@ -242,6 +261,25 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		})
 	}
 	return findings, nil
+}
+
+func vpnSessionScopeClient(ctx context.Context, scoped *hostScopeRunner, client *host) error {
+	if err := scoped.guardHost(ctx, client); err != nil {
+		return err
+	}
+	// Admit exactly the trimmed destination that vpnSessionsCommand emits.
+	destination := normalizeHostScopeEndpoint(strings.TrimSpace(client.overlayIp))
+	if err := scoped.guardEndpoint(ctx, destination); err != nil {
+		return err
+	}
+	for _, owner := range scoped.cfg.hosts {
+		if normalizeHostScopeEndpoint(strings.TrimSpace(owner.overlayIp)) == destination {
+			if err := scoped.guardHost(ctx, owner); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func recentVPNSessionTimeout(now time.Time, timeout vpnSessionTimeout) bool {

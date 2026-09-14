@@ -341,13 +341,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_account_reconcile'
-		             AND definition LIKE '%(chain_id, from_address, nonce)%'
-		             AND definition LIKE '%WHERE%'
-		             AND definition LIKE '%prepared%'
-		             AND definition LIKE '%signed%'
-		             AND definition LIKE '%broadcast%'
-		             AND definition LIKE '%mined%'
-		             AND definition LIKE '%uncertain%'
+		             AND definition = 'CREATE INDEX st_transaction_intent_account_reconcile ON public.st_transaction_intent USING btree (chain_id, from_address, nonce) WHERE ((status)::text = ANY ((ARRAY[''prepared''::character varying, ''signed''::character varying, ''broadcast''::character varying, ''mined''::character varying, ''uncertain''::character varying])::text[]))'
+		             AND predicate_definition = '((status)::text = ANY ((ARRAY[''prepared''::character varying, ''signed''::character varying, ''broadcast''::character varying, ''mined''::character varying, ''uncertain''::character varying])::text[]))'
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM information_schema.columns
@@ -379,13 +375,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_account_reconcile_v2'
-		             AND definition LIKE '%(chain_id, genesis_hash, from_address, nonce)%'
-		             AND definition LIKE '%WHERE%'
-		             AND definition LIKE '%prepared%'
-		             AND definition LIKE '%signed%'
-		             AND definition LIKE '%broadcast%'
-		             AND definition LIKE '%mined%'
-		             AND definition LIKE '%uncertain%'
+		             AND definition = 'CREATE INDEX st_transaction_intent_account_reconcile_v2 ON public.st_transaction_intent USING btree (chain_id, genesis_hash, from_address, nonce) WHERE ((status)::text = ANY ((ARRAY[''prepared''::character varying, ''signed''::character varying, ''broadcast''::character varying, ''mined''::character varying, ''uncertain''::character varying])::text[]))'
+		             AND predicate_definition = '((status)::text = ANY ((ARRAY[''prepared''::character varying, ''signed''::character varying, ''broadcast''::character varying, ''mined''::character varying, ''uncertain''::character varying])::text[]))'
+		             AND indisvalid AND indisready
 		       ),
 		       (
 		           SELECT count(*) = 2
@@ -493,8 +485,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'transfer_contract'
 		             AND index_name = 'transfer_contract_stream_id'
-		             AND definition LIKE '%(stream_id)%'
-		             AND definition LIKE '%stream_id IS NOT NULL%'
+		             AND definition = 'CREATE INDEX transfer_contract_stream_id ON public.transfer_contract USING btree (stream_id) WHERE (stream_id IS NOT NULL)'
+		             AND predicate_definition = '(stream_id IS NOT NULL)'
+		             AND indisvalid AND indisready
 		       ),
 		       (
 		           EXISTS (
@@ -548,37 +541,25 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'transfer_contract'
 		             AND index_name = 'transfer_contract_unresolved_source_pair_create_time'
-		             AND indisvalid
-		             AND indisready
-		             AND definition LIKE '%(source_id, destination_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
-		             AND predicate_definition ILIKE '%CASE%'
-		             AND predicate_definition ILIKE '%outcome IS NULL%'
-		             AND predicate_definition ILIKE '%dispute = false%'
-		             AND predicate_definition ILIKE '%source_id IS NOT NULL%'
+		             AND definition = 'CREATE INDEX transfer_contract_unresolved_source_pair_create_time ON public.transfer_contract USING btree (source_id, destination_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority) WHERE ( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (source_id IS NOT NULL))'
+		             AND predicate_definition = '( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (source_id IS NOT NULL))'
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'transfer_contract'
 		             AND index_name = 'transfer_contract_unresolved_destination_pair_create_time'
-		             AND indisvalid
-		             AND indisready
-		             AND definition LIKE '%(destination_id, source_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority)%'
-		             AND predicate_definition ILIKE '%CASE%'
-		             AND predicate_definition ILIKE '%outcome IS NULL%'
-		             AND predicate_definition ILIKE '%dispute = false%'
-		             AND predicate_definition ILIKE '%destination_id IS NOT NULL%'
+		             AND definition = 'CREATE INDEX transfer_contract_unresolved_destination_pair_create_time ON public.transfer_contract USING btree (destination_id, source_id, create_time) INCLUDE (contract_id, companion_contract_id, transfer_byte_count, priority) WHERE ( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (destination_id IS NOT NULL))'
+		             AND predicate_definition = '( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (destination_id IS NOT NULL))'
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'transfer_contract'
 		             AND index_name = 'transfer_contract_unresolved_payer_transfer_byte_count'
-		             AND indisvalid
-		             AND indisready
-		             AND definition LIKE '%(payer_network_id) INCLUDE (transfer_byte_count)%'
-		             AND predicate_definition ILIKE '%CASE%'
-		             AND predicate_definition ILIKE '%outcome IS NULL%'
-		             AND predicate_definition ILIKE '%dispute = false%'
-		             AND predicate_definition ILIKE '%payer_network_id IS NOT NULL%'
+		             AND definition = 'CREATE INDEX transfer_contract_unresolved_payer_transfer_byte_count ON public.transfer_contract USING btree (payer_network_id) INCLUDE (transfer_byte_count) WHERE ( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (payer_network_id IS NOT NULL))'
+		             AND predicate_definition = '( CASE WHEN (outcome IS NULL) THEN (dispute = false) ELSE false END AND (payer_network_id IS NOT NULL))'
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1
@@ -600,7 +581,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_apple_offer_code'
 		             AND index_name = 'network_onboarding_apple_offer_code_available'
-		             AND predicate_definition LIKE '%network_id IS NULL%'
+		             AND definition = 'CREATE INDEX network_onboarding_apple_offer_code_available ON public.network_onboarding_apple_offer_code USING btree (expires_at, code) WHERE (network_id IS NULL)'
+		             AND predicate_definition = '(network_id IS NULL)'
 		             AND indisvalid AND indisready
 		       ),
 		       to_regclass('public.network_onboarding_event') IS NOT NULL,
@@ -637,8 +619,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding'
 		             AND index_name = 'network_onboarding_next_send_at'
-		             AND definition LIKE '%(next_send_at)%'
-		             AND predicate_definition LIKE '%next_send_at IS NOT NULL%'
+		             AND definition = 'CREATE INDEX network_onboarding_next_send_at ON public.network_onboarding USING btree (next_send_at) WHERE (next_send_at IS NOT NULL)'
+		             AND predicate_definition = '(next_send_at IS NOT NULL)'
 		             AND indisvalid AND indisready
 		       ),
 		       to_regclass('public.network_onboarding_email') IS NOT NULL,
@@ -705,10 +687,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT 1 FROM index_artifact
 		               WHERE table_name = 'competition_round'
 		                 AND index_name = 'competition_round_one_active_staging'
-		                 AND definition LIKE '%(competition_id)%'
-		                 AND predicate_definition LIKE '%staging = true%'
-		                 AND predicate_definition LIKE '%canceled = false%'
-		                 AND predicate_definition LIKE '%finalized_at IS NULL%'
+		                 AND definition = 'CREATE UNIQUE INDEX competition_round_one_active_staging ON public.competition_round USING btree (competition_id) WHERE ((staging = true) AND (canceled = false) AND (finalized_at IS NULL))'
+		                 AND predicate_definition = '((staging = true) AND (canceled = false) AND (finalized_at IS NULL))'
 		                 AND indisvalid AND indisready
 		           )
 		           AND NOT EXISTS (
@@ -1104,12 +1084,12 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		findings = append(findings, finding{
 			probeId: "pg/migration-coherence", tier: tierPage,
 			class: "migration-schema-drift", target: target, sustain: 1,
-			symptom:   fmt.Sprintf("database migration audit is at version %d but %d published schema artifact(s) are absent", dbVersion, len(missing)),
-			mechanism: "A migration version was reordered, skipped, removed, or marked successful without leaving its published schema. A service that trusts only the numeric head can then execute code against missing columns or indexes, or replay an older non-idempotent migration into objects that already exist.",
-			baseline:  fmt.Sprintf("Every published artifact through recorded database version %d exists; migration versions never move after release.", dbVersion),
+			symptom:   fmt.Sprintf("database migration audit is at version %d but %d published schema artifact(s) are absent or incompatible", dbVersion, len(missing)),
+			mechanism: "The recorded head disagrees with a required published artifact or immutable migration identity. An absent, look-alike, or non-operative index is not proof that migration history was reordered: compare the original published identities and exact live schema definition before distinguishing skipped history from later schema drift. A service that trusts only the numeric head can execute against missing or incompatible schema, or replay an older non-idempotent migration into existing objects.",
+			baseline:  fmt.Sprintf("Every required published artifact through recorded database version %d matches its operative definition; checked indexes are valid and ready, and migration versions never move after release.", dbVersion),
 			observed:  fmt.Sprintf("db_version=%d code_required_version=%d missing=%s", dbVersion, requiredHead, strings.Join(missing, ",")),
-			action:    "Stop dependent service activation. Restore every published migration to its original index, append new migrations after the published sequence, and apply that corrected stream. Do not edit migration_audit or create production objects by hand merely to clear this alert.",
-			verify:    "The recorded head advances only through the corrected append-only stream, every required artifact exists at its published version, and a fresh migration-coherence run has no schema-drift alert.",
+			action:    "Stop dependent service activation. Compare original published migration identities with the exact live artifact definitions first. Restore each reordered published migration to its original index if that history defect is proved; append reviewed corrective migrations after the published sequence for schema drift, and apply the corrected stream. Do not edit migration_audit or create production objects by hand merely to clear this alert.",
+			verify:    "The recorded head advances only through the corrected append-only stream, every required artifact matches its published operative definition and checked indexes are valid and ready, and a fresh migration-coherence run has no schema-drift alert.",
 			playbook:  "SIGNALS.md §8.9",
 		})
 	} else {
