@@ -287,16 +287,18 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT count(*) = 4
 		               FROM (
 		                   VALUES
-		                       ('st_epoch', 'st_epoch_status', '(deployment_key, status, epoch)'),
-		                       ('st_publish', 'st_publish_epoch_kind', '(deployment_key, epoch, kind, create_time)'),
-		                       ('st_event', 'st_event_kind_block', '(deployment_key, kind, block_number, log_index)'),
-		                       ('st_payout_leaf', 'st_payout_leaf_client_epoch', '(deployment_key, client_id, epoch, no_id)')
-		               ) AS expected(table_name, index_name, key_shape)
+		                       ('st_epoch', 'st_epoch_status', 'CREATE INDEX st_epoch_status ON public.st_epoch USING btree (deployment_key, status, epoch)'),
+		                       ('st_publish', 'st_publish_epoch_kind', 'CREATE INDEX st_publish_epoch_kind ON public.st_publish USING btree (deployment_key, epoch, kind, create_time)'),
+		                       ('st_event', 'st_event_kind_block', 'CREATE INDEX st_event_kind_block ON public.st_event USING btree (deployment_key, kind, block_number, log_index)'),
+		                       ('st_payout_leaf', 'st_payout_leaf_client_epoch', 'CREATE INDEX st_payout_leaf_client_epoch ON public.st_payout_leaf USING btree (deployment_key, client_id, epoch, no_id)')
+		               ) AS expected(table_name, index_name, definition)
 		               WHERE EXISTS (
 		                   SELECT 1 FROM index_artifact AS actual
 		                   WHERE actual.table_name = expected.table_name
 		                     AND actual.index_name = expected.index_name
-		                     AND actual.definition LIKE '%' || expected.key_shape || '%'
+		                     AND actual.definition = expected.definition
+		                     AND actual.predicate_definition IS NULL
+		                     AND actual.indisvalid AND actual.indisready
 		               )
 		           )
 		       ),
@@ -323,15 +325,17 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_chain_account_nonce'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(chain_id, from_address, nonce)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_chain_account_nonce ON public.st_transaction_intent USING btree (chain_id, from_address, nonce)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_logical_generation'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(logical_key, generation)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_logical_generation ON public.st_transaction_intent USING btree (logical_key, generation)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
@@ -359,8 +363,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_genesis_account_nonce'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(chain_id, genesis_hash, from_address, nonce)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_genesis_account_nonce ON public.st_transaction_intent USING btree (chain_id, genesis_hash, from_address, nonce)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       NOT EXISTS (
 		           SELECT 1 FROM index_artifact
@@ -453,7 +458,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT 1 FROM index_artifact
 		               WHERE table_name = 'st_fleet_binding_signature'
 		                 AND index_name = 'st_fleet_binding_signature_network'
-		                 AND definition LIKE '%(deployment_key, network_id, create_time DESC)%'
+		                 AND definition = 'CREATE INDEX st_fleet_binding_signature_network ON public.st_fleet_binding_signature USING btree (deployment_key, network_id, create_time DESC)'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
 		           )
 		       ),
 		       (
@@ -601,14 +608,16 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_event'
 		             AND index_name = 'network_onboarding_event_network_id_at'
-		             AND definition LIKE '%(network_id, at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_event_network_id_at ON public.network_onboarding_event USING btree (network_id, at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_event'
 		             AND index_name = 'network_onboarding_event_name_at'
-		             AND definition LIKE '%(name, at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_event_name_at ON public.network_onboarding_event USING btree (name, at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
@@ -637,7 +646,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_email'
 		             AND index_name = 'network_onboarding_email_network_id_sent_at'
-		             AND definition LIKE '%(network_id, sent_at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_email_network_id_sent_at ON public.network_onboarding_email USING btree (network_id, sent_at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       to_regclass('public.onboarding_results_daily') IS NOT NULL,
@@ -646,7 +656,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding'
 		             AND index_name = 'network_onboarding_created_at'
-		             AND definition LIKE '%(created_at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_created_at ON public.network_onboarding USING btree (created_at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       (
@@ -759,7 +770,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_email'
 		             AND index_name = 'network_onboarding_email_sent_at'
-		             AND definition LIKE '%(sent_at, network_id, step)%'
+		             AND definition = 'CREATE INDEX network_onboarding_email_sent_at ON public.network_onboarding_email USING btree (sent_at, network_id, step)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
@@ -877,8 +889,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT 1 FROM index_artifact
 		               WHERE table_name = 'network_extender_address'
 		                 AND index_name = 'network_extender_address_active_last_publish_time'
-		                 AND definition LIKE 'CREATE INDEX %'
-		                 AND definition LIKE '%(active, last_publish_time)%'
+		                 AND definition = 'CREATE INDEX network_extender_address_active_last_publish_time ON public.network_extender_address USING btree (active, last_publish_time)'
 		                 AND predicate_definition IS NULL
 		                 AND indisvalid AND indisready
 		           )
@@ -915,8 +926,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT 1 FROM index_artifact
 		               WHERE table_name = 'network_extender_publish'
 		                 AND index_name = 'network_extender_publish_published_time_create_time'
-		                 AND definition LIKE 'CREATE INDEX %'
-		                 AND definition LIKE '%(published_time, create_time)%'
+		                 AND definition = 'CREATE INDEX network_extender_publish_published_time_create_time ON public.network_extender_publish USING btree (published_time, create_time)'
 		                 AND predicate_definition IS NULL
 		                 AND indisvalid AND indisready
 		           )
@@ -932,8 +942,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_client_connection'
 		             AND index_name = 'network_client_connection_client_id_connected_extender_id'
-		             AND definition LIKE 'CREATE INDEX %'
-		             AND definition LIKE '%(client_id, connected, extender_id)%'
+		             AND definition = 'CREATE INDEX network_client_connection_client_id_connected_extender_id ON public.network_client_connection USING btree (client_id, connected, extender_id)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),

@@ -43,26 +43,7 @@ func TestEveryFixedProductionAlertClassIsCataloged(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", filepath.Base(path), err)
 		}
-		ast.Inspect(parsed, func(node ast.Node) bool {
-			field, ok := node.(*ast.KeyValueExpr)
-			if !ok {
-				return true
-			}
-			name, ok := field.Key.(*ast.Ident)
-			if !ok || name.Name != "class" {
-				return true
-			}
-			literal, ok := field.Value.(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
-				return true
-			}
-			value, err := strconv.Unquote(literal.Value)
-			if err != nil || value == "" {
-				return true
-			}
-			classes[value] = append(classes[value], filepath.Base(path))
-			return true
-		})
+		collectFixedAlertClassLiterals(parsed, filepath.Base(path), classes)
 	}
 
 	tailerPath := filepath.Join(directory, "tailer.go")
@@ -120,6 +101,52 @@ func TestEveryFixedProductionAlertClassIsCataloged(t *testing.T) {
 	sort.Strings(missing)
 	if len(missing) != 0 {
 		t.Fatalf("fixed production Alert classes absent from SIGNALS.md: %s", strings.Join(missing, ", "))
+	}
+}
+
+func collectFixedAlertClassLiterals(parsed ast.Node, source string, classes map[string][]string) {
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		field, ok := node.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		name, ok := field.Key.(*ast.Ident)
+		if !ok || name.Name != "class" {
+			return true
+		}
+		literal, ok := field.Value.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err == nil && value != "" {
+			classes[value] = append(classes[value], source)
+		}
+		return true
+	})
+}
+
+func TestFixedAlertClassScannerIncludesInternalAndPublicLiteralFields(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "signal_synthetic.go", `package synthetic
+var internal = finding{class: "synthetic-internal-class"}
+var public = Alert{Class: "synthetic-public-class"}
+var unrelated = Alert{Symptom: "not-an-alert-class"}
+var computed = Alert{Class: dynamicClass}
+var empty = Alert{Class: ""}
+var mapped = map[string]string{"Class": "not-a-struct-field"}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	collectFixedAlertClassLiterals(parsed, "signal_synthetic.go", classes)
+	if len(classes) != 2 {
+		t.Fatalf("literal scanner captured %d classes, want internal and public: %+v", len(classes), classes)
+	}
+	for _, expected := range []string{"synthetic-internal-class", "synthetic-public-class"} {
+		if sources := classes[expected]; len(sources) != 1 || sources[0] != "signal_synthetic.go" {
+			t.Fatalf("literal scanner lost exact source for %q: %+v", expected, sources)
+		}
 	}
 }
 

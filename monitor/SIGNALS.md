@@ -10001,7 +10001,7 @@ coherent unless the corresponding table or valid/ready index is present.
 Versions 662–668 append the Extender directory, its independently drained
 signed-record queue, connection attribution, and immutable contract-party
 snapshot. The directory identity is the unique public key, while address rows
-are keyed by identity and IP family. The two queue/read-path indexes are
+are keyed by identity and IP family. The queue/read-path indexes are
 operative schema: a same-name invalid, unfinished, partial, or differently
 ordered index does not satisfy the contract. The final `dns_ports` column is
 non-null with an empty default so addresses written before DNS-carrier probing
@@ -10009,6 +10009,17 @@ remain distinguishable from a missing migration without rewriting history.
 Code that activates, publishes, attributes, or pays Extenders must remain
 behind version 668 and all seven artifact checks; never hand-create one table
 or column after advancing the numeric head.
+
+The 2026-09-14 detector audit found that a same-name ordered index could pass
+column-substring checks with a different access method or expression. The
+plain nonpartial index contracts at versions 614, 616–617, 620, 627, 640–641,
+647, 650, 656, 663–664, and 666 now pin the complete normalized btree definition,
+uniqueness, key order, validity, readiness, and absence of a predicate. Synthetic
+wrong-method, expression, INCLUDE, uniqueness, reordering, invalid, not-ready,
+and partial fixtures must not clear `migration-schema-drift`. This does not
+certify exact semantics for the older partial/predicate-substring contracts
+at 618, 623, 629, 632–634, 638, 645, or 652; keep that residual explicit rather
+than treating numeric-head or class-inventory coverage as full schema proof.
 
 Versions 669–674 append four independently nullable UUID location columns,
 the contract-party creation timestamp, and its ordered lookup index. The
