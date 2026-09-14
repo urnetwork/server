@@ -20,7 +20,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/glog"
 )
@@ -660,6 +662,9 @@ type TestEnv struct {
 	Warmup            bool
 	RerunCount        int
 	RerunTimeout      time.Duration
+
+	// Force an external sweep between lease release and this fixture's drop.
+	beforePgDbDropForTest func(context.Context, string)
 }
 
 // testEnvTeardownBound is how long a failed attempt waits for teardown
@@ -676,8 +681,8 @@ func testEnvTeardownBound() time.Duration {
 }
 
 func DefaultTestEnv() *TestEnv {
-	// Release gates must expose the first assertion or panic; development and
-	// explicit retry-policy meta-tests retain their existing retry behavior.
+	// Release gates must expose the first assertion or panic; development
+	// tests retain their existing retry defaults.
 	rerunCount := 4
 	switch os.Getenv("WARP_TEST_ENV_FAIL_FAST") {
 	case "", "0":
@@ -776,10 +781,15 @@ func (self *TestEnv) runWithSetup(
 		t.Fatalf("local integration test preflight: %v", err)
 	}
 	n := self.RerunCount + 1
+	failFast := os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1"
+	if failFast {
+		// Explicit fixture counts cannot bypass the protocol's attempt limit.
+		n = 1
+	}
 	for i := 0; i < n; i += 1 {
 		// Each attempt runs against a retryTB wrapper, so a failed assertion is
 		// recorded locally instead of failing the real *testing.T (see retryTB).
-		tb := &retryTB{TB: t, propagateLateFailure: os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1"}
+		tb := &retryTB{TB: t, propagateLateFailure: failFast}
 		var panicValue any
 		var panicStack []byte
 		attemptReturned := false
@@ -836,7 +846,7 @@ func (self *TestEnv) runWithSetup(
 				case <-teardownDone:
 				case <-time.After(teardownBound):
 					glog.Errorf("[test_env]teardown blocked >%s (attempt goroutines still holding env resources); abandoning teardown so the failure can report\n", teardownBound)
-					if os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1" {
+					if failFast {
 						tb.Errorf("release test environment abandoned teardown after %s", teardownBound)
 					}
 				}
@@ -1044,6 +1054,13 @@ func (self *TestEnv) setup() func() {
 		Raise(err)
 	}, OptReadWrite())
 
+	testPgDbLease := acquireTestPgDbLease(ctx, testPgDbName)
+	defer func() {
+		if !setupSucceeded {
+			closePgConnection(ctx, testPgDbLease)
+		}
+	}()
+
 	popPgResources := pushTestPgResources(pg, maintenancePg, testPgDbName)
 
 	popRedis := Vault.PushSimpleResource(
@@ -1090,6 +1107,7 @@ cluster: %t`,
 	setupSucceeded = true
 	return func() {
 		defer testRedisLease.release(ctx)
+		defer closePgConnection(ctx, testPgDbLease)
 
 		Reset()
 
@@ -1103,13 +1121,17 @@ cluster: %t`,
 		RedisReset()
 
 		popPgResources()
+		closePgConnection(ctx, testPgDbLease)
+		if self.beforePgDbDropForTest != nil {
+			self.beforePgDbDropForTest(ctx, testPgDbName)
+		}
 
 		Db(ctx, func(conn PgConn) {
 			_, err := conn.Exec(
 				ctx,
 				fmt.Sprintf(
 					`
-						DROP DATABASE %s
+						DROP DATABASE IF EXISTS %s
 					`,
 					testPgDbName,
 				),
@@ -1119,10 +1141,19 @@ cluster: %t`,
 	}
 }
 
-// testPgDbOrphanAge is how old an abandoned test database must be before the
-// reaper drops it. A TestEnv's database lives for one test, so this is orders
-// of magnitude longer than any live database's lifetime — a running suite is
-// never touched even when a single package runs for hours.
+// Keep one direct session alive for the fixture lifetime, independently of
+// application pool resets. Non-forced database deletion then refuses to reap
+// a live fixture even when a stalled test outlives the orphan age.
+func acquireTestPgDbLease(ctx context.Context, datname string) *pgx.Conn {
+	configuration := safeMaintenancePool.open().Config().ConnConfig.Copy()
+	configuration.Database = datname
+	configuration.RuntimeParams["application_name"] = "urnetwork-test-database-owner"
+	connection, err := pgx.ConnectConfig(ctx, configuration)
+	Raise(err)
+	return connection
+}
+
+// Age makes a database eligible for orphan cleanup, not proof that it is dead.
 const testPgDbOrphanAge = 2 * time.Hour
 
 var reapOrphanedTestPgDbsOnce sync.Once
@@ -1134,7 +1165,7 @@ func parseTestPgDbName(datname string) (int64, bool) {
 		return 0, false
 	}
 	millis, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
+	if err != nil || millis < 0 || strconv.FormatInt(millis, 10) != parts[1] {
 		return 0, false
 	}
 	randomBytes, err := hex.DecodeString(parts[2])
@@ -1142,6 +1173,26 @@ func parseTestPgDbName(datname string) (int64, bool) {
 		return 0, false
 	}
 	return millis, true
+}
+
+// A connection may arrive after catalog discovery. Let PostgreSQL atomically
+// refuse that live database instead of terminating its owner with force.
+func dropOrphanedTestPgDb(ctx context.Context, datname string, cutoffMillis int64) bool {
+	millis, ok := parseTestPgDbName(datname)
+	if !ok || cutoffMillis <= millis {
+		return false
+	}
+	dropped := false
+	Db(ctx, func(conn PgConn) {
+		_, err := conn.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s`, datname))
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ObjectInUse {
+			return
+		}
+		Raise(err)
+		dropped = true
+	}, OptReadWrite())
+	return dropped
 }
 
 // reapOrphanedTestPgDbs drops test databases left behind by test processes
@@ -1156,9 +1207,8 @@ func parseTestPgDbName(datname string) (int64, bool) {
 // rendezvous.
 //
 // Age comes from the UnixMilli stamp the name already carries, so no catalog
-// timestamp is needed. Runs once per test binary. Failures are ignored: a drop
-// losing a race with another process's live database (or its own teardown) is
-// expected and must never fail the run that happened to sweep.
+// timestamp is needed. Runs once per test binary. Skip connected databases;
+// non-forced deletion also protects an owner that connects after discovery.
 func reapOrphanedTestPgDbs(ctx context.Context) {
 	reapOrphanedTestPgDbsOnce.Do(func() {
 		HandleError(func() {
@@ -1168,9 +1218,12 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 				result, err := conn.Query(
 					ctx,
 					`
-					SELECT datname
-					FROM pg_database
-					WHERE datname LIKE 'test\_%'
+					SELECT db.datname
+					FROM pg_database db
+					WHERE db.datname LIKE 'test\_%'
+					AND NOT EXISTS (
+						SELECT 1 FROM pg_stat_activity activity WHERE activity.datid = db.oid
+					)
 					`,
 				)
 				WithPgResult(result, err, func() {
@@ -1187,6 +1240,7 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 					}
 				})
 			})
+			reaped := 0
 			for _, datname := range orphans {
 				func() {
 					defer func() {
@@ -1194,17 +1248,13 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 						// teardown right now, is not this sweep's problem
 						recover()
 					}()
-					Db(ctx, func(conn PgConn) {
-						_, err := conn.Exec(
-							ctx,
-							fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, datname),
-						)
-						Raise(err)
-					}, OptReadWrite())
+					if dropOrphanedTestPgDb(ctx, datname, cutoff) {
+						reaped++
+					}
 				}()
 			}
-			if 0 < len(orphans) {
-				glog.Infof("[test]reaped %d orphaned test databases\n", len(orphans))
+			if 0 < reaped {
+				glog.Infof("[test]reaped %d orphaned test databases\n", reaped)
 			}
 		})
 	})

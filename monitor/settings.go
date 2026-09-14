@@ -206,6 +206,23 @@ type SourceAttributionSettings struct {
 	ExpectedIPv6 string
 }
 
+// DNSAliasSettings arms SIGNALS.md §18.3. The expected records are an
+// operator-owned desired state from monitor.yml; the probe never learns its
+// baseline from the DNS answers it is intended to verify.
+type DNSAliasSettings struct {
+	Enabled        bool
+	ManagedDomains []string
+	ExpectedA      []string
+	ExpectedAAAA   []string
+}
+
+// Publisher preferences come from the owning Xops inventory, not live hosts.
+// Values are compared in memory and never rendered into alerts.
+type MimirPublisherSettings struct {
+	PreferredFronts map[string]string
+	LoadState       string
+}
+
 // Row is one machine-readable PostgreSQL result row.
 type Row []string
 
@@ -252,6 +269,65 @@ type TLSCertificateSignalSource interface {
 	TLSCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
 }
 
+// DNSRecordType is one address-family DNS record checked by SIGNALS.md
+// §18.3. Only DNSRecordA and DNSRecordAAAA are valid probe inputs.
+type DNSRecordType string
+
+const (
+	DNSRecordA    DNSRecordType = "A"
+	DNSRecordAAAA DNSRecordType = "AAAA"
+)
+
+// DNSResponseCode is the bounded response classification retained by the DNS
+// probe. Raw wire errors, nameserver identities, and answer addresses are not
+// copied into alerts.
+type DNSResponseCode string
+
+const (
+	DNSResponseSuccess       DNSResponseCode = "success"
+	DNSResponseNameError     DNSResponseCode = "name-error"
+	DNSResponseServerFailure DNSResponseCode = "server-failure"
+	DNSResponseRefused       DNSResponseCode = "refused"
+	DNSResponseOther         DNSResponseCode = "other"
+)
+
+// DNSResponseObservation is one structurally decoded DNS answer. Addresses
+// are compared in memory and reduced to counts before an Alert is created.
+type DNSResponseObservation struct {
+	Addresses     []string
+	ResponseCode  DNSResponseCode
+	Authoritative bool
+	CNAMECount    int
+}
+
+// DNSAuthoritativeObservation aggregates one direct response per discovered
+// authoritative nameserver. FailedNameservers preserves partial visibility
+// without retaining resolver or endpoint details.
+type DNSAuthoritativeObservation struct {
+	NameserverCount   int
+	FailedNameservers int
+	Responses         []DNSResponseObservation
+}
+
+// DNSAliasSignalSource optionally supplies synthetic or alternate DNS
+// observations. Production uses native bounded DNS wire queries.
+type DNSAliasSignalSource interface {
+	DNSAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
+	DNSRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
+}
+
+// SettingsGenerationCheck compares the immutable settings already owned by a
+// monitor with the effective settings available now. The implementation keeps
+// the fresh values only for the duration of the comparison: Alerts expose only
+// whether the generation still matches, never resource contents or
+// fingerprints.
+type SettingsGenerationCheck func(ctx context.Context, startup SignalSettings) (current bool, err error)
+
+// SignalSettingsLoader returns one complete effective settings snapshot.
+// Command wrappers use it to reapply their immutable CLI overrides before a
+// generation comparison.
+type SignalSettingsLoader func() (SignalSettings, error)
+
 // StreamingSignalSource optionally provides long-running local streams. It is
 // used by the standing SIGNALS.md §1.5 log collector.
 type StreamingSignalSource interface {
@@ -279,16 +355,25 @@ type SignalSettings struct {
 	// standing log streams without querying the remote artifact registry.
 	// Alternate callers may leave it empty to use warpctl discovery.
 	LogServices []string
-	// LogServiceBlocks is the active services.yml block inventory used only
-	// when a service-wide Loki overlap reaches the bounded result cap. The
-	// tailer then repeats the same absolute window per block, preserving late
-	// ingestion coverage without raising the backend-wide query limit.
+	// LogServiceBlocks is the active services.yml block inventory. Probes use
+	// it for exact expected-process denominators, and a service-wide Loki
+	// overlap uses it for bounded per-block continuation when the result cap is
+	// reached.
 	LogServiceBlocks map[string][]string
-	// VerificationEnabled is the canonical st-subsystem feature state. It lets
-	// task probes distinguish a legitimately slow enabled verification job
-	// from a stale recurring chain that must not exist while the subsystem is
-	// disabled.
+	// ProxyPathExpectedHosts is the active services.yml proxy-host count. It
+	// lets §14.5 distinguish an environment with no proxy service from a
+	// broken inventory join that would otherwise produce a silent green run.
+	ProxyPathExpectedHosts int
+	// VerificationEnabled is the canonical st-subsystem feature intent. It lets
+	// task probes distinguish a legitimately slow or misconfigured enabled
+	// verification job from a stale recurring chain that must not exist while
+	// the subsystem is explicitly disabled.
 	VerificationEnabled bool
+	// STConfigStatus is Main's privacy-safe desired-state classification.
+	// It distinguishes an explicit disable from an enabled configuration whose
+	// deployment namespace is invalid, without rendering that namespace or
+	// treating the monitor process's environment as deployed-runtime evidence.
+	STConfigStatus STConfigurationStatus
 	// STDeploymentKey is the exact active chain/coordinator namespace used by
 	// the ST mirror. It is compared in memory and must never be rendered into
 	// alerts; an empty value keeps missing or disabled configuration distinct
@@ -300,14 +385,23 @@ type SignalSettings struct {
 	SSHKeyPaths []string
 	AddressMode AddressMode
 
-	Hosts             []HostSettings
+	Hosts []HostSettings
+	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
+	// authoritative topology; exclusions never remove placements or capacity.
+	ExcludedHosts     []string
 	PostgreSQL        PostgreSQLSettings
 	Grafana           GrafanaSettings
 	GooglePlay        GooglePlayReportingSettings
 	AppleReporting    AppleReportingSettings
 	Credentials       []CredentialRequirement
 	SourceAttribution SourceAttributionSettings
+	DNSAliases        DNSAliasSettings
+	MimirPublishers   MimirPublisherSettings
 	StateDir          string
+	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
+	// assemble SignalSettings directly may omit it; synthetic tests inject it
+	// without touching Config or Vault.
+	SettingsGenerationCheck SettingsGenerationCheck
 
 	SSHConnectTimeout time.Duration
 	CommandTimeout    time.Duration
@@ -398,6 +492,9 @@ func (s SignalSettings) validate() error {
 	if s.AddressMode != AddressModeLAN && s.AddressMode != AddressModeOverlay {
 		return fmt.Errorf("monitor: unsupported address mode %q", s.AddressMode)
 	}
+	if err := s.STConfigStatus.validate(s.VerificationEnabled, s.STDeploymentKey); err != nil {
+		return err
+	}
 	seenLogServices := map[string]struct{}{}
 	for _, service := range s.LogServices {
 		if service == "" || strings.TrimSpace(service) != service {
@@ -423,6 +520,9 @@ func (s SignalSettings) validate() error {
 			seenBlocks[block] = struct{}{}
 		}
 	}
+	if _, err := ExcludeHosts(s); err != nil {
+		return err
+	}
 	if s.Source != nil {
 		return nil
 	}
@@ -443,6 +543,9 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 	} else {
 		transport = newRunner(cfg)
 	}
+	if len(settings.ExcludedHosts) != 0 {
+		transport = newHostScopeRunner(transport, cfg, settings.ExcludedHosts)
+	}
 
 	var baseline *baselineStore
 	if settings.runtime != nil {
@@ -460,31 +563,35 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
-		env:                  settings.Environment,
-		publicDomain:         settings.PublicDomain,
-		websiteDomain:        settings.WebsiteDomain,
-		managerHostname:      settings.ManagerHostname,
-		logServices:          append([]string(nil), settings.LogServices...),
-		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
-		verificationEnabled:  settings.VerificationEnabled,
-		stDeploymentKey:      settings.STDeploymentKey,
-		sshUser:              settings.SSHUser,
-		sshDevUser:           settings.SSHDevUser,
-		sshKeyPaths:          append([]string(nil), settings.SSHKeyPaths...),
-		addressMode:          string(settings.AddressMode),
-		pgPort:               settings.PostgreSQL.Port,
-		pgbouncerPort:        settings.PostgreSQL.PgBouncerPort,
-		pgUser:               settings.PostgreSQL.User,
-		pgPassword:           settings.PostgreSQL.Password,
-		pgDb:                 settings.PostgreSQL.Database,
-		grafanaAdminPassword: settings.Grafana.AdminPassword,
-		sourceIPv4URL:        settings.SourceAttribution.IPv4URL,
-		sourceIPv6URL:        settings.SourceAttribution.IPv6URL,
-		expectedSourceIPv4:   settings.SourceAttribution.ExpectedIPv4,
-		expectedSourceIPv6:   settings.SourceAttribution.ExpectedIPv6,
-		stateDir:             settings.StateDir,
-		sshConnectTimeout:    settings.SSHConnectTimeout,
-		commandTimeout:       settings.CommandTimeout,
+		env:                    settings.Environment,
+		publicDomain:           settings.PublicDomain,
+		websiteDomain:          settings.WebsiteDomain,
+		managerHostname:        settings.ManagerHostname,
+		logServices:            append([]string(nil), settings.LogServices...),
+		logServiceBlocks:       cloneLogServiceBlocks(settings.LogServiceBlocks),
+		proxyPathExpectedHosts: settings.ProxyPathExpectedHosts,
+		verificationEnabled:    settings.VerificationEnabled,
+		stConfigStatus:         settings.STConfigStatus.normalized(),
+		stDeploymentKey:        settings.STDeploymentKey,
+		sshUser:                settings.SSHUser,
+		sshDevUser:             settings.SSHDevUser,
+		sshKeyPaths:            append([]string(nil), settings.SSHKeyPaths...),
+		addressMode:            string(settings.AddressMode),
+		pgPort:                 settings.PostgreSQL.Port,
+		pgbouncerPort:          settings.PostgreSQL.PgBouncerPort,
+		pgUser:                 settings.PostgreSQL.User,
+		pgPassword:             settings.PostgreSQL.Password,
+		pgDb:                   settings.PostgreSQL.Database,
+		grafanaAdminPassword:   settings.Grafana.AdminPassword,
+		sourceIPv4URL:          settings.SourceAttribution.IPv4URL,
+		sourceIPv6URL:          settings.SourceAttribution.IPv6URL,
+		expectedSourceIPv4:     settings.SourceAttribution.ExpectedIPv4,
+		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
+		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
+		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
+		stateDir:               settings.StateDir,
+		sshConnectTimeout:      settings.SSHConnectTimeout,
+		commandTimeout:         settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands
@@ -513,6 +620,24 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		cfg.hosts = append(cfg.hosts, h)
 	}
 	return cfg
+}
+
+func cloneDNSAliasSettings(settings DNSAliasSettings) DNSAliasSettings {
+	settings.ManagedDomains = append([]string(nil), settings.ManagedDomains...)
+	settings.ExpectedA = append([]string(nil), settings.ExpectedA...)
+	settings.ExpectedAAAA = append([]string(nil), settings.ExpectedAAAA...)
+	return settings
+}
+
+func cloneMimirPublisherSettings(settings MimirPublisherSettings) MimirPublisherSettings {
+	if settings.PreferredFronts != nil {
+		fronts := make(map[string]string, len(settings.PreferredFronts))
+		for publisher, front := range settings.PreferredFronts {
+			fronts[publisher] = front
+		}
+		settings.PreferredFronts = fronts
+	}
+	return settings
 }
 
 func cloneLogServiceBlocks(source map[string][]string) map[string][]string {
@@ -643,6 +768,22 @@ func (r *sourceRunner) tlsCertificates(ctx context.Context, network, address, se
 		return TLSCertificateObservation{}, fmt.Errorf("monitor: SignalSource does not implement TLSCertificateSignalSource")
 	}
 	return source.TLSCertificates(ctx, network, address, serverName)
+}
+
+func (r *sourceRunner) dnsAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error) {
+	source, ok := r.source.(DNSAliasSignalSource)
+	if !ok {
+		return DNSAuthoritativeObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAliasSignalSource")
+	}
+	return source.DNSAuthoritative(ctx, zone, hostname, recordType)
+}
+
+func (r *sourceRunner) dnsRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSAliasSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAliasSignalSource")
+	}
+	return source.DNSRecursive(ctx, hostname, recordType)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {

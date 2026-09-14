@@ -26,6 +26,70 @@ effective_value() {
   '
 }
 
+login1_service=org.freedesktop.login1
+login1_path=/org/freedesktop/login1
+login1_manager=org.freedesktop.login1.Manager
+login1_introspection=$(timeout 5s busctl --no-pager introspect \
+  "$login1_service" "$login1_path" "$login1_manager" 2>/dev/null)
+login1_introspection_status=$?
+
+login1_property_supported() {
+  property=$1
+  [ "$login1_introspection_status" -eq 0 ] || return 1
+  printf '%s\n' "$login1_introspection" | awk -v property=".$property" '
+    $1 == property && $2 == "property" {found=1}
+    END {exit !found}
+  '
+}
+
+login1_action() {
+  property=$1
+  optional=$2
+  raw=$(timeout 5s busctl get-property "$login1_service" "$login1_path" \
+    "$login1_manager" "$property" 2>/dev/null)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$optional" -eq 1 ] && [ "$login1_introspection_status" -eq 0 ] &&
+       ! login1_property_supported "$property"; then
+      printf '%s\n' unsupported
+    else
+      printf '%s\n' unobservable
+    fi
+    return
+  fi
+  if [ "$optional" -eq 1 ] && [ "$raw" = 's ""' ]; then
+    # login1 exposes an empty external-power action when that optional
+    # override is unset; the required base HandleLidSwitch action applies.
+    printf '%s\n' fallback
+    return
+  fi
+  value=$(printf '%s\n' "$raw" | sed -n 's/^s "\([^"]*\)"$/\1/p')
+  case "$value" in
+    ignore|poweroff|reboot|soft-reboot|halt|kexec|suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep|lock|factory-reset|secure-attention-key)
+      printf '%s\n' "$value"
+      ;;
+    *)
+      printf '%s\n' unobservable
+      ;;
+  esac
+}
+
+runtime_logind_idle_action=$(login1_action IdleAction 0)
+runtime_logind_lid_action=$(login1_action HandleLidSwitch 0)
+runtime_logind_lid_external_action=$(login1_action HandleLidSwitchExternalPower 1)
+runtime_logind_lid_docked_action=$(login1_action HandleLidSwitchDocked 0)
+runtime_can_suspend=unobservable
+can_suspend_raw=$(timeout 5s busctl call "$login1_service" "$login1_path" \
+  "$login1_manager" CanSuspend 2>/dev/null)
+if [ "$?" -eq 0 ]; then
+  can_suspend_value=$(printf '%s\n' "$can_suspend_raw" | sed -n 's/^s "\([^"]*\)"$/\1/p')
+  case "$can_suspend_value" in
+    yes|no|challenge|na|inhibited|inhibitor-blocked|challenge-inhibitor-blocked)
+      runtime_can_suspend=$can_suspend_value
+      ;;
+  esac
+fi
+
 sleep_config=$(systemd-analyze cat-config systemd/sleep.conf 2>/dev/null) || exit 31
 sleep_policy=deny-all
 for pair in AllowSuspend=no AllowHibernation=no AllowSuspendThenHibernate=no AllowHybridSleep=no; do
@@ -55,7 +119,7 @@ suspend_log=$(timeout 10s journalctl -q -k -b 0 --since '30 days ago' \
   --grep 'PM: suspend (entry|exit)' -n 128 --no-pager -o short-unix 2>/dev/null)
 journal_status=$?
 case "$journal_status" in 0|1) ;; *) exit 34 ;; esac
-set -- $(printf '%s\n' "$suspend_log" | awk '
+set -- $(printf '%s\n' "$suspend_log" | LC_ALL=C sort -n -k1,1 | awk '
   /PM: suspend entry/ {
     split($1, stamp, "."); pending=stamp[1]+0; entries++; latest_suspend=pending
   }
@@ -98,10 +162,15 @@ if [ "$archive_expected" -eq 1 ]; then
 fi
 
 printf '%s\n' \
-  'observation_schema=1' \
+  'observation_schema=2' \
   "sleep_policy=$sleep_policy" \
   "logind_policy=$logind_policy" \
   "desktop_policy=$desktop_policy" \
+  "runtime_logind_idle_action=$runtime_logind_idle_action" \
+  "runtime_logind_lid_action=$runtime_logind_lid_action" \
+  "runtime_logind_lid_external_action=$runtime_logind_lid_external_action" \
+  "runtime_logind_lid_docked_action=$runtime_logind_lid_docked_action" \
+  "runtime_can_suspend=$runtime_can_suspend" \
   "suspend_entries=$suspend_entries" \
   "resume_entries=$resume_entries" \
   "suspend_pairs=$suspend_pairs" \
@@ -128,18 +197,23 @@ func (hostpowerProbe) tier() string           { return tierWarn }
 func (hostpowerProbe) cadence() time.Duration { return 5 * time.Minute }
 
 type hostpowerSample struct {
-	sleepPolicy      string
-	logindPolicy     string
-	desktopPolicy    string
-	suspendEntries   int64
-	resumeEntries    int64
-	suspendPairs     int64
-	latestSuspend    time.Time
-	latestResume     time.Time
-	maxSuspend       time.Duration
-	unmatchedSuspend bool
-	topologyState    string
-	mediaHealth      string
+	sleepPolicy       string
+	logindPolicy      string
+	desktopPolicy     string
+	runtimeIdle       string
+	runtimeLid        string
+	runtimeLidPower   string
+	runtimeLidDocked  string
+	runtimeCanSuspend string
+	suspendEntries    int64
+	resumeEntries     int64
+	suspendPairs      int64
+	latestSuspend     time.Time
+	latestResume      time.Time
+	maxSuspend        time.Duration
+	unmatchedSuspend  bool
+	topologyState     string
+	mediaHealth       string
 }
 
 func (hostpowerProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -184,6 +258,9 @@ func (hostpowerProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 func parseHostpowerSample(raw string, now time.Time) (hostpowerSample, error) {
 	keys := []string{
 		"observation_schema", "sleep_policy", "logind_policy", "desktop_policy",
+		"runtime_logind_idle_action", "runtime_logind_lid_action",
+		"runtime_logind_lid_external_action", "runtime_logind_lid_docked_action",
+		"runtime_can_suspend",
 		"suspend_entries", "resume_entries", "suspend_pairs", "latest_suspend_epoch",
 		"latest_resume_epoch", "max_suspend_seconds", "unmatched_suspend",
 		"topology_state", "media_health",
@@ -212,7 +289,7 @@ func parseHostpowerSample(raw string, now time.Time) (hostpowerSample, error) {
 			return hostpowerSample{}, fmt.Errorf("hostpower: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "1" {
+	if values["observation_schema"] != "2" {
 		return hostpowerSample{}, fmt.Errorf("hostpower: unsupported observation schema")
 	}
 	if values["sleep_policy"] != "deny-all" && values["sleep_policy"] != "unsafe" {
@@ -223,6 +300,34 @@ func parseHostpowerSample(raw string, now time.Time) (hostpowerSample, error) {
 	}
 	if values["desktop_policy"] != "nothing-all" && values["desktop_policy"] != "unsafe" {
 		return hostpowerSample{}, fmt.Errorf("hostpower: invalid desktop policy")
+	}
+	validRuntimeAction := func(value string, optional bool) bool {
+		switch value {
+		case "ignore", "poweroff", "reboot", "soft-reboot", "halt", "kexec", "suspend", "hibernate",
+			"hybrid-sleep", "suspend-then-hibernate", "sleep", "lock", "factory-reset",
+			"secure-attention-key", "unobservable":
+			return true
+		case "unsupported", "fallback":
+			return optional
+		default:
+			return false
+		}
+	}
+	for _, key := range []string{
+		"runtime_logind_idle_action", "runtime_logind_lid_action", "runtime_logind_lid_docked_action",
+	} {
+		if !validRuntimeAction(values[key], false) {
+			return hostpowerSample{}, fmt.Errorf("hostpower: invalid runtime policy")
+		}
+	}
+	if !validRuntimeAction(values["runtime_logind_lid_external_action"], true) {
+		return hostpowerSample{}, fmt.Errorf("hostpower: invalid runtime policy")
+	}
+	switch values["runtime_can_suspend"] {
+	case "yes", "no", "challenge", "na", "inhibited", "inhibitor-blocked",
+		"challenge-inhibitor-blocked", "unobservable":
+	default:
+		return hostpowerSample{}, fmt.Errorf("hostpower: invalid runtime suspend capability")
 	}
 	parseCount := func(key string) (int64, error) {
 		value, err := strconv.ParseInt(values[key], 10, 64)
@@ -294,7 +399,10 @@ func parseHostpowerSample(raw string, now time.Time) (hostpowerSample, error) {
 	}
 	return hostpowerSample{
 		sleepPolicy: values["sleep_policy"], logindPolicy: values["logind_policy"], desktopPolicy: values["desktop_policy"],
-		suspendEntries: entries, resumeEntries: resumes, suspendPairs: pairs,
+		runtimeIdle: values["runtime_logind_idle_action"], runtimeLid: values["runtime_logind_lid_action"],
+		runtimeLidPower: values["runtime_logind_lid_external_action"], runtimeLidDocked: values["runtime_logind_lid_docked_action"],
+		runtimeCanSuspend: values["runtime_can_suspend"],
+		suspendEntries:    entries, resumeEntries: resumes, suspendPairs: pairs,
 		latestSuspend: latestSuspend, latestResume: latestResume,
 		maxSuspend: time.Duration(maxSuspendSeconds) * time.Second, unmatchedSuspend: unmatched,
 		topologyState: topology, mediaHealth: media,
@@ -304,20 +412,82 @@ func parseHostpowerSample(raw string, now time.Time) (hostpowerSample, error) {
 func evaluateHostpower(target string, sample hostpowerSample) []finding {
 	findings := []finding{}
 	probeId := "host/power-policy"
-	if sample.sleepPolicy == "deny-all" && sample.logindPolicy == "ignore-all" && sample.desktopPolicy == "nothing-all" {
-		findings = append(findings, healthyFinding(probeId, tierPage, "hostpower-suspend-policy-unsafe", target))
-	} else {
+	configuredSafe := sample.sleepPolicy == "deny-all" && sample.logindPolicy == "ignore-all" && sample.desktopPolicy == "nothing-all"
+	runtimeUnknown := sample.runtimeIdle == "unobservable" || sample.runtimeLid == "unobservable" ||
+		sample.runtimeLidPower == "unobservable" || sample.runtimeLidDocked == "unobservable" ||
+		sample.runtimeCanSuspend == "unobservable"
+	runtimeActionsSafe := sample.runtimeIdle == "ignore" && sample.runtimeLid == "ignore" &&
+		(sample.runtimeLidPower == "ignore" || sample.runtimeLidPower == "unsupported" ||
+			sample.runtimeLidPower == "fallback") &&
+		sample.runtimeLidDocked == "ignore"
+	runtimeDestructive := destructiveHostpowerAction(sample.runtimeIdle) ||
+		destructiveHostpowerAction(sample.runtimeLid) ||
+		destructiveHostpowerAction(sample.runtimeLidPower) ||
+		destructiveHostpowerAction(sample.runtimeLidDocked)
+	runtimeCanSuspendNonaffirmative := sample.runtimeCanSuspend == "no" || sample.runtimeCanSuspend == "na"
+	runtimeCanSuspendAvailable := sample.runtimeCanSuspend == "yes" || sample.runtimeCanSuspend == "challenge" ||
+		sample.runtimeCanSuspend == "inhibited" || sample.runtimeCanSuspend == "inhibitor-blocked" ||
+		sample.runtimeCanSuspend == "challenge-inhibitor-blocked"
+	runtimeObserved := fmt.Sprintf(
+		"runtime_idle=%s runtime_lid=%s runtime_lid_external_power=%s runtime_lid_docked=%s can_suspend_caller_result=%s",
+		sample.runtimeIdle, sample.runtimeLid, sample.runtimeLidPower, sample.runtimeLidDocked, sample.runtimeCanSuspend,
+	)
+	// A known destructive lid/idle action remains dangerous even when the
+	// independent suspend capability is blocked. Likewise, a known available
+	// suspend capability remains a concrete fault when another runtime property
+	// is unreadable. UNKNOWN only withholds the lifecycle verdict when no
+	// independently observed unsafe branch exists.
+	policyUnsafe := !configuredSafe || runtimeDestructive || runtimeCanSuspendAvailable
+	if policyUnsafe {
 		findings = append(findings, finding{
 			probeId: probeId, tier: tierPage, class: "hostpower-suspend-policy-unsafe", target: target, sustain: 1,
-			symptom:   fmt.Sprintf("stationary host %s still permits a session, idle, lid, or system sleep path", target),
-			mechanism: "A stationary backup host that suspends on battery removes its management path, telemetry publisher, and archive writers at the same time a site or dock power event needs them most.",
-			baseline:  "Effective systemd sleep policy denies suspend and hibernation, logind ignores lid and idle actions, and locked GNOME AC/battery idle and lid actions are all nothing.",
-			observed:  fmt.Sprintf("system_sleep=%s logind=%s desktop=%s", sample.sleepPolicy, sample.logindPolicy, sample.desktopPolicy),
-			evidence:  "The host reduces effective layered systemd configuration and locked desktop values to bounded policy classes; it does not export users, sessions, or configuration file contents.",
+			symptom:   fmt.Sprintf("stationary host %s still exposes a destructive or sleep-capable power path", target),
+			mechanism: "A stationary backup host that shuts down, restarts, or suspends from a session, idle, or lid action removes its management path, telemetry publisher, and archive writers at the same time a site or dock power event needs them most.",
+			baseline:  "Configured systemd sleep policy denies suspend and hibernation, configured and running logind ignore lid and idle actions, locked GNOME AC/battery idle and lid actions are all nothing, and login1 does not affirm suspend capability.",
+			observed:  fmt.Sprintf("system_sleep=%s logind_config=%s desktop=%s %s", sample.sleepPolicy, sample.logindPolicy, sample.desktopPolicy, runtimeObserved),
+			evidence:  "The host reduces layered systemd configuration, locked desktop values, fixed-enum login1 runtime properties, and CanSuspend to bounded classes; it does not export users, sessions, process identifiers, or raw D-Bus/configuration output.",
 			context:   "This is a software-owned policy hazard. It is separate from archive filesystem recovery in §11.22 and from the physical cause of an AC or dock loss.",
-			action:    "After archive recovery is complete, apply the reviewed stationary-server Xops policy. Do not restart logind or trigger sleep as a test; verify effective configuration in place.",
-			verify:    "The effective systemd, logind, and locked GNOME reductions are all safe for two probes, and no new same-boot suspend entry occurs.",
+			action:    "Apply the reviewed stationary-server Xops policy and reconcile the running power/session manager through an authorized maintenance procedure. Keep archive recovery independent; do not trigger sleep or reboot merely as a test.",
+			verify:    "Configured and runtime policy reductions are safe for two probes, login1 does not affirm suspend capability, and no new same-boot suspend entry occurs.",
 			playbook:  "SIGNALS.md §21.2 and §11.22",
+		})
+	} else if !runtimeUnknown {
+		findings = append(findings, healthyFinding(probeId, tierPage, "hostpower-suspend-policy-unsafe", target))
+	}
+
+	policyNotLoaded := configuredSafe && !runtimeUnknown && !runtimeActionsSafe &&
+		runtimeCanSuspendNonaffirmative && !runtimeDestructive
+	if policyNotLoaded {
+		findings = append(findings, finding{
+			probeId: probeId, tier: tierWarn, class: "hostpower-policy-not-loaded", target: target, sustain: 2,
+			symptom:   fmt.Sprintf("stationary host %s has safe policy files that are not fully reflected by its running login manager", target),
+			mechanism: "The installed drop-ins and the active login1 manager disagree. The effective deny-all sleep policy blocks sleep operations when they are attempted, but the intended independent lid and idle defenses have not all converged in the running process generation.",
+			baseline:  "Configured and running login1 idle and supported lid actions all resolve to ignore, while CanSuspend is non-affirmative (no or not-applicable).",
+			observed:  fmt.Sprintf("logind_config=%s %s", sample.logindPolicy, runtimeObserved),
+			evidence:  "Only fixed policy enums and capability classes leave the host. Raw D-Bus output, process identifiers, users, sessions, and configuration contents are discarded.",
+			context:   "This is a defense-in-depth convergence warning, not proof of a new suspend. The independent current-boot history finding owns any actual transition.",
+			action:    "Deploy the reviewed Xops conditional logind reconciliation through the authorized Planetoid maintenance procedure. Do not trigger suspend, restart logind ad hoc, or reboot merely to clear retained journal evidence.",
+			verify:    "For two probes, every supported runtime lid/idle action is ignore, CanSuspend remains non-affirmative, and no new suspend entry appears.",
+			playbook:  "SIGNALS.md §21.2",
+		})
+	} else if !runtimeUnknown {
+		findings = append(findings, healthyFinding(probeId, tierWarn, "hostpower-policy-not-loaded", target))
+	}
+
+	if !runtimeUnknown {
+		findings = append(findings, healthyFinding(probeId, tierWarn, "hostpower-policy-runtime-unobservable", target))
+	} else {
+		findings = append(findings, finding{
+			probeId: probeId, tier: tierWarn, class: "hostpower-policy-runtime-unobservable", target: target, sustain: 2,
+			symptom:   fmt.Sprintf("stationary host %s cannot prove its running login-manager sleep policy", target),
+			mechanism: "Configured drop-ins do not prove that a long-lived login manager loaded them. A missing, malformed, or unreadable required login1 property leaves the active suspend path unknown.",
+			baseline:  "Every required login1 runtime action and CanSuspend returns a supported fixed enum; a missing external-power-specific property is explicitly supported only when the base lid action is observable.",
+			observed:  runtimeObserved,
+			evidence:  "Observation is reduced on-host to fixed enums. Raw bus errors, object data, users, sessions, process identifiers, and host details are never rendered.",
+			context:   "UNKNOWN is not healthy. Retained suspend history and archive recovery remain independent findings.",
+			action:    "Restore read-only login1 D-Bus visibility or use the reviewed supported-property path. Do not infer runtime safety from configuration files alone or restart the manager solely to make monitoring readable.",
+			verify:    "Two probes read every required fixed runtime enum, any unsupported external-power property is explicitly classified, CanSuspend is non-affirmative, and runtime actions match policy.",
+			playbook:  "SIGNALS.md §21.2",
 		})
 	}
 
@@ -409,4 +579,13 @@ func evaluateHostpower(target string, sample hostpowerSample) []finding {
 		findings = append(findings, healthyFinding(probeId, tierWarn, "hostpower-media-health-unobservable", target))
 	}
 	return findings
+}
+
+func destructiveHostpowerAction(action string) bool {
+	switch action {
+	case "poweroff", "reboot", "soft-reboot", "halt", "kexec", "factory-reset":
+		return true
+	default:
+		return false
+	}
 }

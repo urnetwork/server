@@ -21,6 +21,8 @@ const (
 	mimirAdmissionSyntheticPort        = 19191
 	mimirAdmissionSyntheticLocalLimit  = 333333
 	mimirAdmissionSyntheticGlobalLimit = 777777
+	mimirAdmissionSyntheticRateLimit   = 12345
+	mimirAdmissionSyntheticBurstLimit  = 234567
 )
 
 // mimirAdmissionFixtureOptions defines one visibly synthetic child frame.
@@ -34,11 +36,15 @@ type mimirAdmissionFixtureOptions struct {
 	removedTotal         int64
 	localLimit           int64
 	globalLimit          int64
+	ingestionRateLimit   float64
+	ingestionBurstLimit  int64
 	discardDescriptor    bool
 	discardFamilyAbsent  bool
 	discardAbsenceSource bool
 	discardPresent       bool
 	discardTotal         int64
+	rateDiscardPresent   bool
+	rateDiscardTotal     int64
 }
 
 // mimirAdmissionSyntheticResponse is one synthetic services-host result.
@@ -62,11 +68,15 @@ func mimirAdmissionInstanceFixture(options mimirAdmissionFixtureOptions) string 
 			"removed_total %d\n"+
 			"local_limit %d\n"+
 			"global_limit %d\n"+
+			"ingestion_rate_limit %g\n"+
+			"ingestion_burst_limit %d\n"+
 			"discard_descriptor %d\n"+
 			"discard_family_absent %d\n"+
 			"discard_absence_source %d\n"+
 			"discard_present %d\n"+
 			"discard_total %d\n"+
+			"rate_discard_present %d\n"+
+			"rate_discard_total %d\n"+
 			"instance_end\n",
 		options.port,
 		options.processStart,
@@ -76,11 +86,15 @@ func mimirAdmissionInstanceFixture(options mimirAdmissionFixtureOptions) string 
 		options.removedTotal,
 		options.localLimit,
 		options.globalLimit,
+		options.ingestionRateLimit,
+		options.ingestionBurstLimit,
 		mimirAdmissionBoolInt(options.discardDescriptor),
 		mimirAdmissionBoolInt(options.discardFamilyAbsent),
 		mimirAdmissionBoolInt(options.discardAbsenceSource),
 		mimirAdmissionBoolInt(options.discardPresent),
 		options.discardTotal,
+		mimirAdmissionBoolInt(options.rateDiscardPresent),
+		options.rateDiscardTotal,
 	)
 }
 
@@ -117,10 +131,66 @@ func mimirAdmissionCompleteInstanceFixtureAt(
 		removedTotal:         removedTotal,
 		localLimit:           mimirAdmissionSyntheticLocalLimit,
 		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
 		discardDescriptor:    true,
 		discardAbsenceSource: true,
 		discardPresent:       true,
 		discardTotal:         discardTotal,
+	})
+}
+
+func mimirAdmissionRateInstanceFixture(
+	processStart int64,
+	rateDiscardTotal int64,
+	createdTotal int64,
+	removedTotal int64,
+) string {
+	return mimirAdmissionInstanceFixture(mimirAdmissionFixtureOptions{
+		port:                 mimirAdmissionSyntheticPort,
+		observable:           true,
+		processStart:         strconv.FormatInt(processStart, 10),
+		memorySeries:         111111,
+		activeSeries:         55555,
+		createdTotal:         createdTotal,
+		removedTotal:         removedTotal,
+		localLimit:           mimirAdmissionSyntheticLocalLimit,
+		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
+		discardDescriptor:    true,
+		discardAbsenceSource: true,
+		discardPresent:       false,
+		rateDiscardPresent:   rateDiscardTotal > 0,
+		rateDiscardTotal:     rateDiscardTotal,
+	})
+}
+
+func mimirAdmissionCounterInstanceFixture(
+	processStart int64,
+	discardTotal int64,
+	rateDiscardTotal int64,
+	createdTotal int64,
+	removedTotal int64,
+) string {
+	return mimirAdmissionInstanceFixture(mimirAdmissionFixtureOptions{
+		port:                 mimirAdmissionSyntheticPort,
+		observable:           true,
+		processStart:         strconv.FormatInt(processStart, 10),
+		memorySeries:         111111,
+		activeSeries:         55555,
+		createdTotal:         createdTotal,
+		removedTotal:         removedTotal,
+		localLimit:           mimirAdmissionSyntheticLocalLimit,
+		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
+		discardDescriptor:    true,
+		discardAbsenceSource: true,
+		discardPresent:       discardTotal > 0,
+		discardTotal:         discardTotal,
+		rateDiscardPresent:   rateDiscardTotal > 0,
+		rateDiscardTotal:     rateDiscardTotal,
 	})
 }
 
@@ -141,6 +211,8 @@ func mimirAdmissionLazyZeroInstanceFixture(
 		removedTotal:         removedTotal,
 		localLimit:           mimirAdmissionSyntheticLocalLimit,
 		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
 		discardDescriptor:    true,
 		discardAbsenceSource: true,
 		discardPresent:       false,
@@ -165,6 +237,8 @@ func mimirAdmissionSourceBackedWholeFamilyZeroInstanceFixture(
 		removedTotal:         removedTotal,
 		localLimit:           mimirAdmissionSyntheticLocalLimit,
 		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
 		discardDescriptor:    false,
 		discardFamilyAbsent:  true,
 		discardAbsenceSource: true,
@@ -234,6 +308,9 @@ func runMimirAdmissionSyntheticWithStateDir(
 			"/config",
 			"/metrics",
 			"per_user_series_limit",
+			"rate_limited",
+			"ingestion_rate",
+			"ingestion_burst_size",
 		} {
 			if !strings.Contains(command, required) {
 				malformedCommand.Store(true)
@@ -311,13 +388,40 @@ func mimirAdmissionSingleHostResponses(
 	}
 }
 
+func mimirAdmissionCounterHostResponses(
+	processStart int64,
+	discardTotal int64,
+	rateDiscardTotal int64,
+	createdTotal int64,
+	removedTotal int64,
+) map[string]mimirAdmissionSyntheticResponse {
+	return map[string]mimirAdmissionSyntheticResponse{
+		"metrics-a.example": {
+			output: mimirAdmissionHostFixture(
+				[]string{mimirAdmissionCounterInstanceFixture(
+					processStart,
+					discardTotal,
+					rateDiscardTotal,
+					createdTotal,
+					removedTotal,
+				)},
+				true,
+				0,
+				0,
+				0,
+			),
+		},
+	}
+}
+
 // A cumulative positive counter pages even before a same-generation baseline.
 func TestMimirAdmissionSignalPagesOnInitialPositiveExactCounter(t *testing.T) {
 	signal := NewMimirAdmissionSignal()
 	if signal.Number() != "11.20a" || signal.Key() != "mimir-admission" ||
+		signal.Name() != "Mimir series and sample-rate admission" ||
 		signal.ID() != "observability/mimir-admission" || signal.Cadence() != time.Minute {
-		t.Fatalf("wrong Mimir admission signal metadata: number=%s key=%s id=%s cadence=%s",
-			signal.Number(), signal.Key(), signal.ID(), signal.Cadence())
+		t.Fatalf("wrong Mimir admission signal metadata: number=%s key=%s name=%s id=%s cadence=%s",
+			signal.Number(), signal.Key(), signal.Name(), signal.ID(), signal.Cadence())
 	}
 	now := time.Date(2032, 1, 2, 3, 4, 0, 0, time.UTC)
 	alerts := runMimirAdmissionSynthetic(
@@ -339,12 +443,246 @@ func TestMimirAdmissionSignalPagesOnInitialPositiveExactCounter(t *testing.T) {
 		"publisher_starts=11",
 		"readiness_rejects=13",
 		"admission_rejects=17",
+		"allowlisted local/global series-limit fields",
 		"same-window context only",
 		"SIGNALS.md §11.20a",
 	} {
 		if !strings.Contains(alert.Markdown(), required) {
 			t.Errorf("Mimir admission alert lacks %q:\n%s", required, alert.Markdown())
 		}
+	}
+}
+
+func TestMimirAdmissionSignalPagesOnRateLimitedCounterGrowth(t *testing.T) {
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2032, 1, 2, 3, 30, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	baseline := mimirAdmissionCounterHostResponses(processStart, 0, 0, 1000, 100)
+	if alerts := runMimirAdmissionSynthetic(t, signal, start, baseline); len(alerts) != 0 {
+		t.Fatalf("zero rate baseline alerted: %+v", alerts)
+	}
+
+	increased := mimirAdmissionCounterHostResponses(processStart, 0, 47564, 1010, 100)
+	alerts := runMimirAdmissionSynthetic(t, signal, start.Add(time.Minute), increased)
+	alert := requireAlertClass(t, alerts, "mimir-ingestion-rate-limit")
+	if alert.Severity != SeverityPage || alert.Target != "mimir-fleet" ||
+		alert.Frame != "rate-limited" || alert.Sustain != 1 {
+		t.Fatalf("wrong rate admission alert identity: %+v", alert)
+	}
+	for _, required := range []string{
+		"rate_discard_counter_increase=47564",
+		"ingestion_rate_limit=12345..12345/s",
+		"ingestion_burst_limit=234567..234567",
+		"does not identify the producer",
+		"not proof that Redis is the only producer",
+		"complete 2h0m0s quiet window",
+	} {
+		if !strings.Contains(alert.Markdown(), required) {
+			t.Errorf("rate admission alert lacks %q:\n%s", required, alert.Markdown())
+		}
+	}
+	for _, other := range alerts {
+		if other.Class == "mimir-series-limit" {
+			t.Fatalf("rate-only growth became series cardinality loss: %+v", other)
+		}
+	}
+}
+
+func TestMimirAdmissionSignalKeepsRateAndSeriesQuietHoldsIndependent(t *testing.T) {
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2032, 1, 2, 4, 30, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	baseline := mimirAdmissionCounterHostResponses(processStart, 0, 0, 2000, 200)
+	if alerts := runMimirAdmissionSynthetic(t, signal, start, baseline); len(alerts) != 0 {
+		t.Fatalf("independent quiet baseline alerted: %+v", alerts)
+	}
+	ratePositiveAt := start.Add(time.Minute)
+	ratePositive := mimirAdmissionCounterHostResponses(processStart, 0, 10, 2010, 200)
+	requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(t, signal, ratePositiveAt, ratePositive),
+		"mimir-ingestion-rate-limit",
+	)
+	rateQuietAt := ratePositiveAt.Add(time.Minute)
+	requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(t, signal, rateQuietAt, ratePositive),
+		"mimir-ingestion-rate-limit",
+	)
+
+	seriesPositiveAt := rateQuietAt.Add(time.Hour)
+	bothCounters := mimirAdmissionCounterHostResponses(processStart, 3, 10, 2020, 200)
+	seriesAlerts := runMimirAdmissionSynthetic(t, signal, seriesPositiveAt, bothCounters)
+	requireAlertClass(t, seriesAlerts, "mimir-series-limit")
+	requireAlertClass(t, seriesAlerts, "mimir-ingestion-rate-limit")
+
+	endRateQuiet := rateQuietAt.Add(mimirAdmissionQuietWindow)
+	afterRateQuiet := runMimirAdmissionSynthetic(t, signal, endRateQuiet, bothCounters)
+	requireAlertClass(t, afterRateQuiet, "mimir-series-limit")
+	for _, alert := range afterRateQuiet {
+		if alert.Class == "mimir-ingestion-rate-limit" {
+			t.Fatalf("series growth reset the independent rate quiet hold: %+v", alert)
+		}
+	}
+}
+
+func TestMimirAdmissionSignalRateGenerationAndResetCannotClearIncident(t *testing.T) {
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2032, 1, 2, 5, 30, 0, 0, time.UTC)
+	firstProcess := start.Add(-time.Hour).Unix()
+	if alerts := runMimirAdmissionSynthetic(
+		t,
+		signal,
+		start,
+		mimirAdmissionCounterHostResponses(firstProcess, 0, 0, 3000, 300),
+	); len(alerts) != 0 {
+		t.Fatalf("rate reset baseline alerted: %+v", alerts)
+	}
+	requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(
+			t,
+			signal,
+			start.Add(time.Minute),
+			mimirAdmissionCounterHostResponses(firstProcess, 0, 7, 3010, 300),
+		),
+		"mimir-ingestion-rate-limit",
+	)
+
+	secondProcess := start.Add(time.Hour).Unix()
+	replacement := mimirAdmissionCounterHostResponses(secondProcess, 0, 0, 10, 1)
+	replaced := requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(t, signal, start.Add(2*time.Minute), replacement),
+		"mimir-ingestion-rate-limit",
+	)
+	for _, required := range []string{"generation_changes=1", "comparable=false", "quiet_complete=0s"} {
+		if !strings.Contains(replaced.Markdown(), required) {
+			t.Errorf("rate generation boundary lacks %q: %s", required, replaced.Markdown())
+		}
+	}
+
+	rateFive := mimirAdmissionCounterHostResponses(secondProcess, 0, 5, 20, 1)
+	requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(t, signal, start.Add(3*time.Minute), rateFive),
+		"mimir-ingestion-rate-limit",
+	)
+	rateFour := mimirAdmissionCounterHostResponses(secondProcess, 0, 4, 20, 1)
+	resetAlerts := runMimirAdmissionSynthetic(t, signal, start.Add(4*time.Minute), rateFour)
+	visibility := requireAlertClass(t, resetAlerts, "cannot-observe")
+	ratePage := requireAlertClass(t, resetAlerts, "mimir-ingestion-rate-limit")
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassCounterReset) ||
+		!strings.Contains(ratePage.Markdown(), "quiet_complete=0s") {
+		t.Fatalf("rate reset did not fail closed:\nvisibility=%s\npage=%s", visibility.Markdown(), ratePage.Markdown())
+	}
+	requireAlertOmits(t, visibility, "monotonic counter decreased within one process generation")
+}
+
+func TestMimirAdmissionSignalRateUnavailableAndMalformedRemainVisible(t *testing.T) {
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2032, 1, 2, 6, 30, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	positive := mimirAdmissionCounterHostResponses(processStart, 0, 8, 4000, 400)
+	requireAlertClass(
+		t,
+		runMimirAdmissionSynthetic(t, signal, start, positive),
+		"mimir-ingestion-rate-limit",
+	)
+
+	malformed := strings.Replace(
+		positive["metrics-a.example"].output,
+		"rate_discard_total 8\n",
+		"rate_discard_total generated-private-fragment\n",
+		1,
+	)
+	malformedAlerts := runMimirAdmissionSynthetic(
+		t,
+		signal,
+		start.Add(time.Minute),
+		map[string]mimirAdmissionSyntheticResponse{
+			"metrics-a.example": {output: malformed},
+		},
+	)
+	malformedVisibility := requireAlertClass(t, malformedAlerts, "cannot-observe")
+	malformedPage := requireAlertClass(t, malformedAlerts, "mimir-ingestion-rate-limit")
+	requireAlertOmits(t, malformedVisibility, "generated-private-fragment")
+	requireAlertOmits(t, malformedPage, "generated-private-fragment")
+
+	unavailable := mimirAdmissionHostFixture(
+		[]string{mimirAdmissionInstanceFixture(mimirAdmissionFixtureOptions{
+			port:       mimirAdmissionSyntheticPort,
+			observable: false,
+		})},
+		true,
+		0,
+		0,
+		0,
+	)
+	unavailableAlerts := runMimirAdmissionSynthetic(
+		t,
+		signal,
+		start.Add(2*time.Minute),
+		map[string]mimirAdmissionSyntheticResponse{
+			"metrics-a.example": {output: unavailable},
+		},
+	)
+	requireAlertClass(t, unavailableAlerts, "cannot-observe")
+	requireAlertClass(t, unavailableAlerts, "mimir-ingestion-rate-limit")
+}
+
+func TestMimirAdmissionSignalMigratesSeriesStateBeforeArmingRateBoundary(t *testing.T) {
+	stateDir := t.TempDir()
+	start := time.Date(2032, 1, 2, 7, 30, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	canonicalStart, err := canonicalMimirAdmissionProcessStart(strconv.FormatInt(processStart, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := mimirAdmissionPersistedStateV1{
+		Histories: []mimirAdmissionPersistedHistoryV1{{
+			Host:         "metrics-a.example",
+			Port:         mimirAdmissionSyntheticPort,
+			ProcessStart: canonicalStart,
+			DiscardTotal: 0,
+			CreatedTotal: 5000,
+			RemovedTotal: 500,
+		}},
+	}
+	if err := saveProviderState(
+		stateDir,
+		"mimir-admission",
+		mimirAdmissionLegacyStateVersion,
+		legacy,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	signal := NewMimirAdmissionSignal()
+	page := requireAlertClass(
+		t,
+		runMimirAdmissionSyntheticWithStateDir(
+			t,
+			signal,
+			start,
+			stateDir,
+			mimirAdmissionCounterHostResponses(processStart, 0, 9, 5010, 500),
+		),
+		"mimir-ingestion-rate-limit",
+	)
+	if !strings.Contains(page.Markdown(), "rate_discard_counter_increase=9") {
+		t.Fatalf("migrated state did not arm rate boundary: %s", page.Markdown())
+	}
+	persisted := mimirAdmissionPersistedState{}
+	loaded, err := loadProviderState(
+		stateDir,
+		"mimir-admission",
+		mimirAdmissionStateVersion,
+		&persisted,
+	)
+	if err != nil || !loaded || !persisted.RateIncident || len(persisted.Histories) != 1 ||
+		persisted.Histories[0].RateDiscardTotal != 9 {
+		t.Fatalf("migrated rate state was not persisted: loaded=%t state=%+v err=%v", loaded, persisted, err)
 	}
 }
 
@@ -396,9 +734,10 @@ func TestMimirAdmissionSignalTreatsDescriptorBackedAbsentRowAsLazyZero(t *testin
 	resetAlerts := runMimirAdmissionSyntheticWithStateDir(t, signal, resetAt, stateDir, lazyZeroAfterPositive)
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
 	requireAlertClass(t, resetAlerts, "mimir-series-limit")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("disappearing positive row was not treated as a reset: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	persisted = mimirAdmissionPersistedState{}
 	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &persisted)
 	if err != nil || !loaded || !persisted.Incident || persisted.QuietSinceUnix != 0 ||
@@ -477,9 +816,10 @@ func TestMimirAdmissionSignalTreatsSourceBackedWholeFamilyAbsenceAsLazyZero(t *t
 		sourceBackedZeroAfterPositive,
 	)
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("whole-family disappearance after a positive was not a reset: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	resetPage := requireAlertClass(t, resetAlerts, "mimir-series-limit")
 	if !strings.Contains(resetPage.Markdown(), "descriptor_instances=0 source_zero_instances=1") {
 		t.Fatalf("source-backed zero path was not rendered independently: %s", resetPage.Markdown())
@@ -500,9 +840,10 @@ func TestMimirAdmissionSignalTreatsSourceBackedWholeFamilyAbsenceAsLazyZero(t *t
 		},
 	)
 	unknownVisibility := requireAlertClass(t, unknownAlerts, "cannot-observe")
-	if !strings.Contains(unknownVisibility.Markdown(), "outside the recognized source contract") {
+	if !strings.Contains(unknownVisibility.Markdown(), "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("unknown artifact family absence did not fail closed: %s", unknownVisibility.Markdown())
 	}
+	requireAlertOmits(t, unknownVisibility, "outside the recognized source contract")
 }
 
 // Port plus canonical sub-second process start keeps concurrent children and
@@ -827,10 +1168,11 @@ func TestMimirAdmissionSignalEarlyStateFailuresRetainMaturePage(t *testing.T) {
 	}
 	visibility := requireAlertClass(t, loadAlerts, "cannot-observe")
 	page := requireAlertClass(t, loadAlerts, "mimir-series-limit")
-	if !strings.Contains(visibility.Markdown(), "durable state is unreadable") ||
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassStateUnavailable) ||
 		!strings.Contains(page.Markdown(), "direct_complete=false") {
 		t.Fatalf("early load failure lost fixed retained boundary:\nvisibility=%s\npage=%s", visibility.Markdown(), page.Markdown())
 	}
+	requireAlertOmits(t, visibility, "durable state is unreadable")
 	if gotState := probe.snapshotState(); !reflect.DeepEqual(gotState, wantState) {
 		t.Fatalf("invalid durable reload changed retained state:\nwant=%+v\ngot=%+v", wantState, gotState)
 	}
@@ -858,6 +1200,8 @@ func TestMimirAdmissionSignalKeepsDescriptorLossAndMalformedFramesUnknown(t *tes
 		removedTotal:         3000,
 		localLimit:           mimirAdmissionSyntheticLocalLimit,
 		globalLimit:          mimirAdmissionSyntheticGlobalLimit,
+		ingestionRateLimit:   mimirAdmissionSyntheticRateLimit,
+		ingestionBurstLimit:  mimirAdmissionSyntheticBurstLimit,
 		discardDescriptor:    false,
 		discardFamilyAbsent:  false,
 		discardAbsenceSource: true,
@@ -874,9 +1218,10 @@ func TestMimirAdmissionSignalKeepsDescriptorLossAndMalformedFramesUnknown(t *tes
 	)
 	descriptorVisibility := requireAlertClass(t, descriptorAlerts, "cannot-observe")
 	requireAlertClass(t, descriptorAlerts, "mimir-series-limit")
-	if !strings.Contains(descriptorVisibility.Markdown(), "discard counter descriptor is unavailable") {
+	if !strings.Contains(descriptorVisibility.Markdown(), "error_class="+observationErrorClassContractMismatch) {
 		t.Fatalf("descriptor absence lost its boundary: %s", descriptorVisibility.Markdown())
 	}
+	requireAlertOmits(t, descriptorVisibility, "discard counter descriptor is unavailable")
 
 	malformed := strings.Replace(
 		mimirAdmissionSingleHostResponses(processStart, 5, 130000, 3000, [3]int64{})["metrics-a.example"].output,
@@ -934,9 +1279,10 @@ func TestMimirAdmissionSignalGenerationAndCounterResetNeverClearIncident(t *test
 	resetAlerts := runMimirAdmissionSynthetic(t, signal, quietStart.Add(time.Hour), decreased)
 	requireAlertClass(t, resetAlerts, "mimir-series-limit")
 	resetVisibility := requireAlertClass(t, resetAlerts, "cannot-observe")
-	if !strings.Contains(resetVisibility.Markdown(), "monotonic counter decreased within one process generation") {
+	if !strings.Contains(resetVisibility.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("counter reset lost its boundary: %s", resetVisibility.Markdown())
 	}
+	requireAlertOmits(t, resetVisibility, "monotonic counter decreased within one process generation")
 	requireAlertClass(
 		t,
 		runMimirAdmissionSynthetic(t, signal, quietStart.Add(4*time.Hour), decreased),
@@ -999,6 +1345,76 @@ func TestMimirAdmissionSignalJournalContextDoesNotChangeRootCause(t *testing.T) 
 	if !strings.Contains(alerts[0].Observed, "publisher_starts=0 readiness_rejects=0 admission_rejects=0") ||
 		!strings.Contains(alerts[1].Observed, "publisher_starts=21 readiness_rejects=22 admission_rejects=23") {
 		t.Fatalf("counterfactual context was not retained:\nzero=%s\nnonzero=%s", alerts[0].Observed, alerts[1].Observed)
+	}
+}
+
+func TestMimirAdmissionCatalogRequiresCardinalityAndCompactionClosure(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "The 2026-09-11 series-limit incident")
+	end := strings.Index(catalog, "### 11.20a Mimir series and sample-rate admission")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("SIGNALS.md lacks the bounded 2026-09-11 series-limit diagnosis")
+	}
+	section := catalog[start:end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
+	for _, required := range []string{
+		"stable Redis series changed by four",
+		"readiness-rejection aggregates stayed zero",
+		"sum/count-only summaries",
+		"Source availability is not deployment",
+		"pause further service rollouts",
+		"restart Mimir: a restart is not controlled series removal",
+		"raise the local or global",
+		"removed-series counter",
+		"complete next-generation overlap",
+		"shard skew",
+		"complete comparable two-hour window",
+		"urnetwork_http_request_duration_seconds",
+		"urnetwork_taskworker_execution_duration_seconds",
+		"urnetwork_proxy_session_duration_seconds",
+		"urnetwork_mcp_call_duration_seconds",
+		"urnetwork_mcp_fetch_wait_duration_seconds",
+	} {
+		if !strings.Contains(normalizedSection, required) {
+			t.Errorf("series-limit closure guidance omits %q", required)
+		}
+	}
+}
+
+func TestMimirAdmissionCatalogRequiresIndependentRateAdmissionClosure(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 11.20a Mimir series and sample-rate admission")
+	end := strings.Index(catalog, "### 11.21 Mimir shutdown durability configuration")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatal("SIGNALS.md lacks the bounded Mimir admission catalog")
+	}
+	section := catalog[start:end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
+	for _, required := range []string{
+		"rate_limited",
+		"mimir-ingestion-rate-limit",
+		"two incident and quiet states are independent",
+		"ingestion rate and burst sizes explain the rate policy",
+		"47,564 aggregate child-counter units",
+		"not proof of 47,564 unique requests",
+		"hardware and",
+		"operational capacity validation",
+		"complete two-hour windows",
+	} {
+		if !strings.Contains(normalizedSection, required) {
+			t.Errorf("rate-admission closure guidance omits %q", required)
+		}
+	}
+	if !strings.Contains(catalog, "| mimir-ingestion-rate-limit | exact child Mimir metrics |") {
+		t.Error("SIGNALS.md alert-emission table omits mimir-ingestion-rate-limit")
 	}
 }
 
@@ -1138,9 +1554,10 @@ func TestMimirAdmissionSignalBoundsCurrentChildIdentities(t *testing.T) {
 		},
 	)
 	visibility := requireAlertClass(t, alerts, "cannot-observe")
-	if !strings.Contains(visibility.Markdown(), "current child identity bound exceeded") {
+	if !strings.Contains(visibility.Markdown(), "error_class="+observationErrorClassBoundExceeded) {
 		t.Fatalf("over-bound observation lost fixed cause: %s", visibility.Markdown())
 	}
+	requireAlertOmits(t, visibility, "current child identity bound exceeded")
 	after := mimirAdmissionPersistedState{}
 	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &after)
 	if err != nil || !loaded {
@@ -1187,6 +1604,8 @@ case "${*}" in
     printf '%s\n' \
       'limits:' \
       '  max_global_series_per_user: 777777' \
+      '  ingestion_rate: 12345' \
+      '  ingestion_burst_size: 234567' \
       'storage:' \
       '  synthetic_marker: generated-config-value-must-not-leave'
     ;;
@@ -1207,7 +1626,9 @@ case "${*}" in
 		  '# HELP cortex_discarded_samples_total Synthetic discarded samples.' \
 		  '# TYPE cortex_discarded_samples_total counter' \
 		  'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-a"} 2' \
-		  'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-b"} 5'
+		  'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-b"} 5' \
+		  'cortex_discarded_samples_total{reason="rate_limited",source="generated-source-c"} 11' \
+		  'cortex_discarded_samples_total{reason="rate_limited",source="generated-source-d"} 13'
 		;;
 	  lazy-zero)
 		printf '%s\n' \
@@ -1220,6 +1641,12 @@ case "${*}" in
 		  '# HELP cortex_discarded_samples_total Synthetic discarded samples.' \
 		  '# TYPE cortex_discarded_samples_total counter' \
 		  'cortex_discarded_samples_total{reason="per_user_series_limit",source="generated-source-d"} generated-malformed-value'
+		;;
+	  malformed-rate)
+		printf '%s\n' \
+		  '# HELP cortex_discarded_samples_total Synthetic discarded samples.' \
+		  '# TYPE cortex_discarded_samples_total counter' \
+		  'cortex_discarded_samples_total{reason="rate_limited",source="generated-source-e"} generated-malformed-value'
 		;;
 	  malformed-descriptor)
 		printf '%s\n' \
@@ -1237,7 +1664,7 @@ esac
 printf '%s\n' \
   '[stats]publishing generated-publisher-a' \
   '[api]not ready generated-candidate-a' \
-  'Stats push rejected (400): per-user series limit; source=generated-source-a'
+  'Stats push rejected status=400 reason=series-limit job=api metric_families=2 time_series=3 family_classes=go:1,process:1 family_classes_truncated=false'
 `)
 	writeSyntheticExecutable("timeout", `#!/bin/sh
 shift
@@ -1279,8 +1706,11 @@ exec "$@"
 		instance.createdTotal != 358023 || instance.removedTotal != 8023 ||
 		instance.localLimit != mimirAdmissionSyntheticLocalLimit ||
 		instance.globalLimit != mimirAdmissionSyntheticGlobalLimit ||
+		instance.ingestionRateLimit != mimirAdmissionSyntheticRateLimit ||
+		instance.ingestionBurstLimit != mimirAdmissionSyntheticBurstLimit ||
 		!instance.discardDescriptor || instance.discardFamilyAbsent || !instance.discardAbsenceSource ||
-		!instance.discardPresent || instance.discardTotal != 7 {
+		!instance.discardPresent || instance.discardTotal != 7 ||
+		!instance.rateDiscardPresent || instance.rateDiscardTotal != 24 {
 		t.Fatalf("reducer lost exact child metrics: %+v\n%s", instance, output)
 	}
 	for _, forbidden := range []string{
@@ -1301,14 +1731,16 @@ exec "$@"
 	if lazySample.count != 1 || len(lazySample.instances) != 1 ||
 		!lazySample.instances[0].observable || !lazySample.instances[0].discardDescriptor ||
 		lazySample.instances[0].discardFamilyAbsent || !lazySample.instances[0].discardAbsenceSource ||
-		lazySample.instances[0].discardPresent || lazySample.instances[0].discardTotal != 0 {
+		lazySample.instances[0].discardPresent || lazySample.instances[0].discardTotal != 0 ||
+		lazySample.instances[0].rateDiscardPresent || lazySample.instances[0].rateDiscardTotal != 0 {
 		t.Fatalf("reducer did not preserve descriptor-backed lazy zero: %+v\n%s", lazySample, lazyOutput)
 	}
 	wholeFamilySample, wholeFamilyOutput := runReducer("whole-family-zero")
 	if wholeFamilySample.count != 1 || len(wholeFamilySample.instances) != 1 ||
 		!wholeFamilySample.instances[0].observable || wholeFamilySample.instances[0].discardDescriptor ||
 		!wholeFamilySample.instances[0].discardFamilyAbsent || !wholeFamilySample.instances[0].discardAbsenceSource ||
-		wholeFamilySample.instances[0].discardPresent || wholeFamilySample.instances[0].discardTotal != 0 {
+		wholeFamilySample.instances[0].discardPresent || wholeFamilySample.instances[0].discardTotal != 0 ||
+		wholeFamilySample.instances[0].rateDiscardPresent || wholeFamilySample.instances[0].rateDiscardTotal != 0 {
 		t.Fatalf("reducer lost source-backed whole-family zero: %+v\n%s", wholeFamilySample, wholeFamilyOutput)
 	}
 	for _, shape := range []string{"future-whole-family-zero", "duplicate-source-whole-family-zero"} {
@@ -1332,6 +1764,13 @@ exec "$@"
 	if strings.Contains(string(malformedOutput), "generated-malformed-value") {
 		t.Fatalf("reducer leaked malformed synthetic source text: %s", malformedOutput)
 	}
+	malformedRateSample, malformedRateOutput := runReducer("malformed-rate")
+	if malformedRateSample.count != 1 || len(malformedRateSample.instances) != 1 || malformedRateSample.instances[0].observable {
+		t.Fatalf("reducer accepted malformed exact rate counter row: %+v\n%s", malformedRateSample, malformedRateOutput)
+	}
+	if strings.Contains(string(malformedRateOutput), "generated-malformed-value") {
+		t.Fatalf("reducer leaked malformed synthetic rate source text: %s", malformedRateOutput)
+	}
 }
 
 // The production command discovers children and restricts journal selectors.
@@ -1350,6 +1789,9 @@ func TestMimirAdmissionCommandUsesBoundedDependencySafeSources(t *testing.T) {
 		"/metrics",
 		"cortex_discarded_samples_total",
 		"reason=\"per_user_series_limit\"",
+		"reason=\"rate_limited\"",
+		"ingestion_rate",
+		"ingestion_burst_size",
 		"lazy_family_version='" + mimirAdmissionLazyFamilyVersion + "'",
 		"lazy_family_source_revision='" + mimirAdmissionLazyFamilySourceRevision + "'",
 		"discard_family_absent",

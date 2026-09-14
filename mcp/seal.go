@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,14 +104,19 @@ func seal(label string, binding string, v any, ttl time.Duration) (string, error
 	return base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
-// Decrypts a blob produced by seal into v. The label must match the one it was
-// sealed under, and an expired blob is rejected with errSealExpired so callers
-// can distinguish "stale, start over" from "corrupt or forged".
+// Decrypts a canonical base64url blob produced by seal into v. The label must
+// match the one it was sealed under, and an expired blob is rejected with
+// errSealExpired so callers can distinguish "stale, start over" from "corrupt
+// or forged".
 func unseal(label string, binding string, sealedStr string, v any) error {
 	if binding == "" {
 		return errors.New("sealed state identity binding is required")
 	}
-	sealed, err := base64.RawURLEncoding.DecodeString(sealedStr)
+	// Strict decoding rejects unused bits, but still ignores embedded newlines.
+	if strings.ContainsAny(sealedStr, "\r\n") {
+		return errors.New("invalid sealed state encoding")
+	}
+	sealed, err := base64.RawURLEncoding.Strict().DecodeString(sealedStr)
 	if err != nil {
 		return err
 	}

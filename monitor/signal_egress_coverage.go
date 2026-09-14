@@ -209,7 +209,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if snapshot.eligible > 0 && snapshot.fullDue() > 0 && (snapshot.fullAgeSeconds < 0 || stallSeconds < snapshot.fullAgeSeconds) {
 			findings = append(findings, egressCoverageStallFinding(
 				target, frame, "full", snapshot.fullDue(), snapshot.fullAgeSeconds,
-				snapshot.eligible, snapshot.fullCurrent, stallSeconds,
+				snapshot.eligible, snapshot.fullCurrent, stallSeconds, snapshot.deferredCurrentDarkDue,
 			))
 		} else {
 			findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-full-stalled", target))
@@ -217,7 +217,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if snapshot.eligible > 0 && snapshot.blackholeDue > 0 && (snapshot.blackholeAgeSeconds < 0 || stallSeconds < snapshot.blackholeAgeSeconds) {
 			findings = append(findings, egressCoverageStallFinding(
 				target, frame, "blackhole", snapshot.blackholeDue, snapshot.blackholeAgeSeconds,
-				snapshot.eligible, snapshot.blackholeCurrent, stallSeconds,
+				snapshot.eligible, snapshot.blackholeCurrent, stallSeconds, 0,
 			))
 		} else {
 			findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-blackhole-stalled", target))
@@ -359,6 +359,11 @@ func egressCoverageActivityQuery(shardCount int) string {
 		 SELECT e.shard_index, e.client_id,
 		        pel.observed_at, pea.attempt_at, peh.measured_at, pbc.checked_at,
 		        pel.client_id IS NULL AS no_location,
+		        COALESCE(
+		          pbc.ok = false AND
+		          pbc.checked_at >= lifecycle_clock.now_utc - interval '3 hours',
+		          false
+		        ) AS current_dark,
 		        CASE
 		          WHEN pel.client_id IS NULL THEN 'no-location'
 		          WHEN peh.client_id IS NULL THEN 'missing-health'
@@ -382,34 +387,41 @@ func egressCoverageActivityQuery(shardCount int) string {
 		), snapshot AS (
 		 SELECT s.shard_index,
 		        count(c.client_id) AS eligible,
-		        count(c.client_id) FILTER (WHERE c.no_location AND c.attempt_due) AS no_location_due,
-		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due) AS stale_location_due,
-		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due) AS stale_health_due,
+		        count(c.client_id) FILTER (WHERE c.no_location AND c.attempt_due AND NOT c.current_dark) AS no_location_due,
+		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due AND NOT c.current_dark) AS stale_location_due,
+		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due AND NOT c.current_dark) AS stale_health_due,
 		        count(c.client_id) FILTER (WHERE
 		          c.urgent_lane = 'stale-location' AND c.attempt_due AND
+		          NOT c.current_dark AND
 		          c.observed_at < c.now_utc - interval '7 days'
 		        ) AS stale_location_expired_due,
 		        count(c.client_id) FILTER (WHERE
 		          c.urgent_lane = 'stale-health' AND c.attempt_due AND
+		          NOT c.current_dark AND
 		          c.measured_at < c.now_utc - interval '24 hours'
 		        ) AS stale_health_expired_due,
 		        count(c.client_id) FILTER (WHERE
 		          c.checked_at IS NULL OR c.checked_at < c.now_utc - interval '90 minutes'
 		        ) AS blackhole_due,
-		        max(GREATEST(c.observed_at, c.attempt_at, c.measured_at)) AS latest_full,
+		        max(GREATEST(c.observed_at, c.attempt_at, c.measured_at))
+		          FILTER (WHERE NOT c.current_dark) AS latest_full,
 		        max(c.checked_at) AS latest_blackhole,
 		        count(c.client_id) FILTER (WHERE c.observed_at >= c.now_utc - interval '7 days') AS full_current,
 		        count(c.client_id) FILTER (WHERE c.checked_at >= c.now_utc - interval '3 hours') AS blackhole_current,
 		        count(c.client_id) FILTER (WHERE c.attempt_at >= c.now_utc - interval '1 hour') AS full_attempted_last_hour,
 		        count(c.client_id) FILTER (WHERE c.checked_at >= c.now_utc - interval '1 hour') AS blackhole_checked_last_hour,
-		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due) AS oldest_stale_location,
-		        min(c.measured_at) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due) AS oldest_stale_health,
-		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due) AS missing_health_due,
+		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due AND NOT c.current_dark) AS oldest_stale_location,
+		        min(c.measured_at) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due AND NOT c.current_dark) AS oldest_stale_health,
+		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due AND NOT c.current_dark) AS missing_health_due,
 		        count(c.client_id) FILTER (WHERE
 		          c.urgent_lane = 'missing-health' AND c.attempt_due AND
+		          NOT c.current_dark AND
 		          c.observed_at < c.now_utc - interval '24 hours'
 		        ) AS missing_health_expired_due,
-		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due) AS oldest_missing_health_anchor,
+		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due AND NOT c.current_dark) AS oldest_missing_health_anchor,
+		        count(c.client_id) FILTER (WHERE
+		          c.current_dark AND c.attempt_due AND c.urgent_lane <> ''
+		        ) AS deferred_current_dark_due,
 		        max(c.now_utc) AS now_utc
 		 FROM shards s
 		 LEFT JOIN classified c USING (shard_index)
@@ -426,7 +438,8 @@ func egressCoverageActivityQuery(shardCount int) string {
 		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_stale_location)))::bigint, -1)::text,
 		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_stale_health)))::bigint, -1)::text,
 		       missing_health_due::text, missing_health_expired_due::text,
-		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_missing_health_anchor)))::bigint, -1)::text
+		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_missing_health_anchor)))::bigint, -1)::text,
+		       deferred_current_dark_due::text
 		FROM snapshot
 		ORDER BY shard_index;
 	`, shardCount, shardCount, shardCount, shardCount)
@@ -452,6 +465,7 @@ type egressCoverageSnapshot struct {
 	missingHealthDue              int64
 	missingHealthExpiredDue       int64
 	missingHealthOldestAgeSeconds int64
+	deferredCurrentDarkDue        int64
 }
 
 func (s egressCoverageSnapshot) fullDue() int64 {
@@ -465,10 +479,10 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 	snapshots := make([]egressCoverageSnapshot, 0, shardCount)
 	seen := map[int]bool{}
 	for _, row := range rows {
-		if len(row) != 19 {
+		if len(row) != 20 {
 			return nil, fmt.Errorf("provider egress activity returned an invalid row shape")
 		}
-		values := make([]int64, 19)
+		values := make([]int64, 20)
 		for i := range row {
 			value, err := strconv.ParseInt(strings.TrimSpace(row.str(i)), 10, 64)
 			isAge := i == 8 || i == 9 || i == 14 || i == 15 || i == 18
@@ -490,10 +504,13 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 			fullCurrent: values[10], blackholeCurrent: values[11], fullAttemptsLastHour: values[12],
 			blackholeLastHour: values[13], staleLocationOldestAgeSeconds: values[14], staleHealthOldestAgeSeconds: values[15],
 			missingHealthDue: values[16], missingHealthExpiredDue: values[17], missingHealthOldestAgeSeconds: values[18],
+			deferredCurrentDarkDue: values[19],
 		}
 		if snapshot.noLocationDue > snapshot.eligible || snapshot.staleLocationDue > snapshot.eligible ||
 			snapshot.staleHealthDue > snapshot.eligible || snapshot.missingHealthDue > snapshot.eligible ||
 			snapshot.fullDue() > snapshot.eligible ||
+			snapshot.deferredCurrentDarkDue > snapshot.eligible ||
+			snapshot.fullDue()+snapshot.deferredCurrentDarkDue > snapshot.eligible ||
 			snapshot.staleLocationExpiredDue > snapshot.staleLocationDue ||
 			snapshot.staleHealthExpiredDue > snapshot.staleHealthDue ||
 			snapshot.missingHealthExpiredDue > snapshot.missingHealthDue ||
@@ -567,12 +584,13 @@ func egressFullCapacityFinding(
 	geometry egressCoverageGeometry,
 	snapshots []egressCoverageSnapshot,
 ) (finding, bool) {
-	var eligible, current, due, attemptedLastHour int64
+	var eligible, current, due, attemptedLastHour, deferredCurrentDarkDue int64
 	for _, snapshot := range snapshots {
 		eligible += snapshot.eligible
 		current += snapshot.fullCurrent
 		due += snapshot.fullDue()
 		attemptedLastHour += snapshot.fullAttemptsLastHour
+		deferredCurrentDarkDue += snapshot.deferredCurrentDarkDue
 	}
 	if eligible == 0 || due == 0 || attemptedLastHour <= 0 {
 		return finding{}, false
@@ -594,17 +612,17 @@ func egressFullCapacityFinding(
 			"Full probes cover %.1f%% of the eligible fleet, and %d due providers at the last-hour attempt rate project a %s drain beyond the %s location lifetime.",
 			coveragePercent, due, (time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderEgressLocationMaxAge,
 		),
-		mechanism: "The durable shards are producing attempts, but their aggregate gross rate is insufficient to serve the current due population inside the existing seven-day evidence lifetime. Deadline ordering prevents stale location, stale health, or missing health from being starved by the unlocated lane; it cannot manufacture the missing probe throughput.",
+		mechanism: "The durable shards are producing attempts, but their aggregate gross rate is insufficient to serve the current non-dark due population inside the existing seven-day evidence lifetime. A current explicit blackhole failure is deferred to the independent cheap recovery queue instead of spending a full slot on a tunnel already proven unable to carry any destination. Deadline ordering prevents stale location, stale health, or missing health from being starved by the unlocated lane; it cannot manufacture the remaining probe throughput.",
 		baseline:  fmt.Sprintf("With incomplete full coverage, the measured gross attempt rate is at least %d unique providers/hour, so the complete due population fits inside %s.", requiredPerHour, model.ProviderEgressLocationMaxAge),
 		observed: fmt.Sprintf(
-			"eligible=%d current=%d current_percent=%.1f due=%d attempted_last_hour=%d required_per_hour=%d projected_drain=%s location_max_age=%s configured_shards=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d configured_total_full_concurrency=%d full_probe_timeout_seconds=%d",
-			eligible, current, coveragePercent, due, attemptedLastHour, requiredPerHour,
+			"eligible=%d current=%d current_percent=%.1f due=%d deferred_current_dark_due=%d attempted_last_hour=%d required_per_hour=%d projected_drain=%s location_max_age=%s configured_shards=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d configured_total_full_concurrency=%d full_probe_timeout_seconds=%d",
+			eligible, current, coveragePercent, due, deferredCurrentDarkDue, attemptedLastHour, requiredPerHour,
 			(time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderEgressLocationMaxAge,
 			geometry.shardCount, geometry.fullLimit, geometry.fullConcurrency, configuredFullConcurrency, geometry.fullTimeoutSeconds,
 		),
-		evidence: "PostgreSQL counts one latest attempt and one latest evidence row per eligible provider, partitions the mutually exclusive due categories inside the normalized shard hash, and exports aggregate counts only. Provider, network, task, endpoint, and failure identities never leave the database.",
-		context:  "This is gross full-probe execution capacity, not proof of any one failure mechanism or a license to increase concurrency without resource gates. The attempt rate includes both successes and failures. The repository still has no product decision for a maximum retry interval or a capacity allocation between first attempts and retries, so this finding does not claim complete unlocated-lane fairness.",
-		action:   "First converge the bounded deadline scheduler and independent blackhole drain, then measure the resulting full rate. If the projection still exceeds seven days, capacity-test a full-probe geometry or latency repair against PostgreSQL/PgBouncer, API, Taskworker, and Proxy headroom. Do not invent fixed lane weights, suppress retries, lengthen evidence lifetimes, or raise concurrency solely from this aggregate.",
+		evidence: "PostgreSQL counts one latest attempt and one latest evidence row per eligible provider, partitions the mutually exclusive non-dark due categories inside the normalized shard hash, and exports aggregate counts only. Current-dark rows remain visible only as one deferred aggregate. Provider, network, task, endpoint, and failure identities never leave the database.",
+		context:  "This is gross full-probe execution capacity, not proof of any one failure mechanism or a license to increase concurrency without resource gates. deferred_current_dark_due is desired scheduler-state accounting and becomes evidence of deployed suppression only after the API artifact converges; before then it is a candidate suppression opportunity, not proof of running queue behavior. The gross attempt rate deliberately includes both successes and failures, including old-deployment attempts against rows now dark, for rollout comparability. The repository still has no product decision for a maximum retry interval or a capacity allocation between first attempts and retries, so this finding does not claim complete unlocated-lane fairness.",
+		action:   "First prove that every API artifact contains the current-dark full-queue exclusion, then converge the bounded deadline scheduler and independent blackhole drain and measure the resulting full rate. If the projection still exceeds seven days after the one-hour gross-rate rollout window clears, capacity-test a full-probe geometry or latency repair against PostgreSQL/PgBouncer, API, Taskworker, and Proxy headroom. Do not invent fixed lane weights, suppress retries, lengthen evidence lifetimes, or raise concurrency solely from this aggregate.",
 		verify:   "After every Taskworker has converged, all shards advance for two cadences, the measured gross full-attempt rate stays at or above the live required rate, and the projected due drain remains inside seven days for a complete seven-day sweep. Preserve more than 25% PostgreSQL normal-role headroom and healthy API, Taskworker, Proxy, and PgBouncer controls.",
 		playbook: "SIGNALS.md §2.19, §1.3a, §1.3b, §2.23, and §2.24",
 	}, true
@@ -679,7 +697,7 @@ func egressFullFairnessFindings(
 					"Full-probe category %s has %d due providers in %s, including %d past its absolute deadline; assigning every recent full attempt to this category projects %s.",
 					category.name, category.due, frame, category.expiredDue, projectedText,
 				),
-				mechanism: "The category has crossed an existing absolute deadline, or cannot meet the oldest row's remaining window even under the optimistic assumption that every gross full-probe attempt serves it. Location and existing-health rows use their hard evidence expiries; missing health uses location observed_at plus the existing 24-hour health lifetime and does not claim that health evidence ever existed. This success-inclusive lower bound avoids treating successful probes that leave a category as missing progress. The corrected scheduler merges bounded indexed evidence heads by absolute deadline before filling from unlocated work.",
+				mechanism: "The category has crossed an existing absolute deadline, or cannot meet the oldest row's remaining window even under the optimistic assumption that every gross full-probe attempt serves it. Location and existing-health rows use their hard evidence expiries; missing health uses location observed_at plus the existing 24-hour health lifetime and does not claim that health evidence ever existed. This success-inclusive lower bound avoids treating successful probes that leave a category as missing progress. The corrected scheduler merges bounded timestamp-indexed location and health heads plus an output-bounded anti-health head by absolute deadline before filling from unlocated work.",
 				baseline: fmt.Sprintf(
 					"No due %s row has crossed its %s category deadline, and when gross attempts are measurable the optimistic all-capacity projection fits inside the oldest row's remaining window.",
 					category.name, category.maxAge,
@@ -702,11 +720,21 @@ func egressFullFairnessFindings(
 	return findings
 }
 
-func egressCoverageStallFinding(target, frame, kind string, due, age, eligible, current, stallSeconds int64) finding {
+func egressCoverageStallFinding(target, frame, kind string, due, age, eligible, current, stallSeconds, deferredCurrentDarkDue int64) finding {
 	class := "egress-" + kind + "-stalled"
 	evidenceName := kind + " probe"
+	mechanism := "The durable shard exists, but due providers are not reaching a persisted probe outcome. Hash-local evidence prevents activity in healthy sibling shards from hiding a stalled slice of the fleet."
+	observedSuffix := ""
+	evidence := "Counts and ages are aggregated inside the shard's normalized PostgreSQL hash partition; no provider or task identifier leaves the database."
+	context := "This is a software execution or operational rollout failure. It does not establish a Proxy memory/hardware ceiling, and raising provider capacity cannot make a non-advancing task persist evidence."
 	if kind == "blackhole" {
 		evidenceName = "blackhole check"
+	} else {
+		evidenceName = "full probe from a provider without a current dark verdict"
+		mechanism = "The durable shard exists, but due providers without a current dark verdict are not reaching a persisted probe outcome. Its newest-activity clock excludes current-dark rows, so old-deployment attempts against those deferred candidates cannot mask a stalled corrected queue in the same shard. Hash-local evidence still prevents activity in healthy sibling shards from hiding the failure."
+		observedSuffix = fmt.Sprintf(" deferred_current_dark_due=%d", deferredCurrentDarkDue)
+		evidence = "Counts and ages are aggregated inside the shard's normalized PostgreSQL hash partition. Current-dark candidates and their full activity are excluded from the due and newest-activity clock and retained only as one deferred aggregate; no provider or task identifier leaves the database."
+		context = "This is a software execution or operational rollout failure. deferred_current_dark_due is desired scheduler-state accounting and proves deployed suppression only after the API artifact converges; before then it is a candidate suppression opportunity. It does not establish a Proxy memory/hardware ceiling, and raising provider capacity cannot make a non-advancing task persist evidence."
 	}
 	ageText := "never"
 	if age >= 0 {
@@ -716,11 +744,11 @@ func egressCoverageStallFinding(target, frame, kind string, due, age, eligible, 
 		probeId: "pg/egress-coverage", tier: tierPage,
 		class: class, target: target, frame: frame, sustain: 2,
 		symptom:   fmt.Sprintf("Provider-egress %s has %d due candidates in %s but its newest aggregate evidence is %s old.", kind, due, frame, ageText),
-		mechanism: "The durable shard exists, but due providers are not reaching a persisted probe outcome. Hash-local evidence prevents activity in healthy sibling shards from hiding a stalled slice of the fleet.",
+		mechanism: mechanism,
 		baseline:  fmt.Sprintf("When a shard has due work, its newest %s evidence is no older than max_time + idle_delay + one monitor cadence (%s).", evidenceName, (time.Duration(stallSeconds) * time.Second).String()),
-		observed:  fmt.Sprintf("frame=%s eligible=%d due=%d current=%d newest_evidence_age=%s derived_stall_bound=%s", frame, eligible, due, current, ageText, (time.Duration(stallSeconds) * time.Second).String()),
-		evidence:  "Counts and ages are aggregated inside the shard's normalized PostgreSQL hash partition; no provider or task identifier leaves the database.",
-		context:   "This is a software execution or operational rollout failure. It does not establish a Proxy memory/hardware ceiling, and raising provider capacity cannot make a non-advancing task persist evidence.",
+		observed:  fmt.Sprintf("frame=%s eligible=%d due=%d current=%d newest_evidence_age=%s derived_stall_bound=%s%s", frame, eligible, due, current, ageText, (time.Duration(stallSeconds) * time.Second).String(), observedSuffix),
+		evidence:  evidence,
+		context:   context,
 		action:    "Correlate the shard frame with ProviderEgressProbe task errors and bounded Taskworker logs. Repair authentication, API reachability, task claim, or probe execution as the evidence identifies; converge the intended Taskworker generation. Do not delete provider evidence or manually rewrite the recurring task.",
 		verify:    "The affected shard's newest evidence advances inside the derived bound for two cadences, or its due count drains to zero, while generic task canaries remain healthy.",
 		playbook:  "SIGNALS.md §2.19, §1.2, and §8.9",

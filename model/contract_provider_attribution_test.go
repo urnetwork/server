@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"strings"
 	"testing"
@@ -64,7 +65,9 @@ func TestContractPayoutPreservesSharedNetworkProviderUsage(t *testing.T) {
 		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId}, wantAccounts)
 		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, 121)
 		// A retry cannot duplicate the provider shares or account payment.
-		if err := CloseContract(ctx, escrow.ContractId, secondId, 121, false); err == nil || !strings.Contains(err.Error(), "already closed with outcome settled") {
+		if err := CloseContract(ctx, escrow.ContractId, secondId, 121, false); err == nil ||
+			!strings.Contains(err.Error(), "already closed with outcome settled") ||
+			!errors.Is(err, errContractAlreadySettled) {
 			t.Fatalf("duplicate close did not report its terminal settlement: %v", err)
 		}
 		if err := SettleEscrow(ctx, escrow.ContractId, ContractOutcomeSettled); err != nil {

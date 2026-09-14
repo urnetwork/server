@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -42,8 +43,74 @@ func TestTaskCanariesSignalSyntheticDeadCanary(t *testing.T) {
 	}
 }
 
-func TestTaskCanariesSignalRedactsTaskIdentifiersFromErrors(t *testing.T) {
+func TestTaskCanariesSignalDeadCanaryBatteryDoesNotRenderDatabaseError(t *testing.T) {
+	hostile := "provider supplied task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa address=192.0.2.46 pointer=0xdeadbeef goroutine synthetic.Stack"
+	lifecycleHostile := "private lifecycle payload address=2001:db8::47 pointer=0xcafebabe goroutine synthetic.Other"
+	failureReads := 0
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "run_end_time > now() - interval '3 minutes'"):
+			return []Row{{"0"}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			failureReads++
+			if failureReads == 1 {
+				return nil, errors.New("decode failure: " + hostile)
+			}
+			return nil, nil
+		case strings.Contains(query, "WITH completion_minutes AS"):
+			return nil, errors.New("permission denied: " + lifecycleHostile)
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "canary-dead")
+	if !strings.Contains(alert.Evidence, "task_error_battery=unavailable error_class="+observationErrorClassInvalidResponse) {
+		t.Fatalf("dead-canary evidence lost the fixed database error class:\n%s", alert.Markdown())
+	}
+	if !strings.Contains(alert.Evidence, "canary_lifecycle_battery=unavailable error_class="+observationErrorClassAccessDenied) {
+		t.Fatalf("dead-canary evidence lost the fixed lifecycle error class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, "provider supplied", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "192.0.2.46", "0xdeadbeef", "synthetic.Stack", "private lifecycle payload", "2001:db8::47", "0xcafebabe", "synthetic.Other")
+}
+
+func TestTaskCanariesSignalHeartbeatFailureDoesNotRenderCommandError(t *testing.T) {
+	const taskID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	hostile := "provider supplied address=2001:db8::46 pointer=0xdeadbeef goroutine synthetic.Stack"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"SyntheticTask", "4000", "900", "t", "7200", "100", taskID}}, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "", errors.New("exit status 1: " + hostile)
+		},
+	}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-overdue")
+	if !strings.Contains(alert.Context, "error_class="+observationErrorClassCommandFailed) {
+		t.Fatalf("task heartbeat fallback lost its fixed command error class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, taskID, "provider supplied", "2001:db8::46", "0xdeadbeef", "synthetic.Stack")
+}
+
+func TestTaskCanariesSignalClassifiesTaskErrorsWithoutRenderingRawText(t *testing.T) {
 	taskID := "019f77ae-de98-582a-1c07-83ea3dbd9d0d"
+	rawError := "[" + taskID + "] provider supplied address=192.0.2.44 pointer=0xdeadbeef goroutine synthetic.Stack"
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "run_end_time > now() - interval '3 minutes'"):
@@ -51,7 +118,7 @@ func TestTaskCanariesSignalRedactsTaskIdentifiersFromErrors(t *testing.T) {
 		case strings.Contains(query, "WITH completion_minutes AS"):
 			return []Row{{"pending", "1", "0", "0", "0", "", ""}}, nil
 		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "1", "1", "0", "2", "600", "[" + taskID + "] synthetic failure", "120", "1", "other=1", "18.6", "32", "8MB"}}, nil
+			return []Row{{"AdvancePayment", "1", "1", "0", "2", "600", rawError, "120", "1", "other=1", "18.6", "32", "8MB"}}, nil
 		default:
 			return nil, nil
 		}
@@ -61,11 +128,15 @@ func TestTaskCanariesSignalRedactsTaskIdentifiersFromErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	markdown := alerts.Markdown()
-	if strings.Contains(markdown, taskID) {
-		t.Fatalf("task identifier leaked into alert:\n%s", markdown)
+	if !strings.Contains(markdown, "representative_error_class=unclassified") ||
+		!strings.Contains(markdown, "error_class=unclassified") {
+		t.Fatalf("fixed task error class missing:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "[<task-id>] synthetic failure") {
-		t.Fatalf("redacted task identifier missing:\n%s", markdown)
+	requireAlertOmits(t, requireAlertClass(t, alerts, "task-parked"), taskID, "192.0.2.44", "0xdeadbeef", "provider supplied", "synthetic.Stack")
+	for _, forbidden := range []string{taskID, "192.0.2.44", "0xdeadbeef", "provider supplied", "synthetic.Stack"} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("complete task alert set leaked %q", forbidden)
+		}
 	}
 }
 
@@ -825,10 +896,10 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"every active taskworker contains typed-reset commit b8af229f",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
-		"verify current-main server commit 66525afc in every active taskworker artifact",
-		"shared Redis-time Circle transfer admission",
+		"verify current-main marker-capable server commit 928abfca in every active taskworker artifact",
+		"66525afc alone proves fail-closed activity/error telemetry but not the capability gauge or exact pre-POST marker",
 		"keep the transfer-admission gate fail closed",
-		"canonical payout attempts stay below four per second for a full 90-minute retry window",
+		"exact pre-POST admission markers stay below four per second for a full 90-minute retry window",
 		"Do not delete or manually replay the mixed family",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -1086,6 +1157,94 @@ func TestTaskCanariesSignalExplainsLiteralTaskDeadlineTimeout(t *testing.T) {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("literal timeout diagnosis missing %q: %s", want, markdown)
 		}
+	}
+}
+
+func TestTaskCanariesSignalClassifiesConcurrentExpiredContractSettlement(t *testing.T) {
+	var failureQuery string
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			failureQuery = query
+			return []Row{{
+				"CloseExpiredContracts", "1", "0", "1", "1", "-3",
+				"force close contract <task-id> at index 7: Contract already closed with outcome settled: <task-id> <task-id> <task-id>-><task-id>",
+				"1800", "1", "concurrent-settled=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"selected an open snapshot immediately before a live or concurrent close settled",
+		"successful convergence",
+		"not malformed escrow",
+		"skips quarantine",
+		"terminal-row verification and Redis stream cleanup both succeed",
+		"Other close errors and other terminal outcomes remain failures",
+		"typed concurrent-settlement convergence handling",
+		"without incrementing reschedule_error_count",
+		"SIGNALS.md §1.2",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("concurrent close diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, reject := range []string{"smaller checkpointed batch"} {
+		if strings.Contains(markdown, reject) {
+			t.Fatalf("concurrent close diagnosis retained unsafe guidance %q: %s", reject, markdown)
+		}
+	}
+	for _, want := range []string{"THEN 'concurrent-settled'", "^force close contract", "[0-9a-f]{12}$"} {
+		if !strings.Contains(failureQuery, want) {
+			t.Fatalf("task failure SQL lacks exact concurrent-settled contract %q", want)
+		}
+	}
+}
+
+func TestTaskCanariesSignalDoesNotClassifyJoinedSettledAndCleanupErrorAsBenign(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"CloseExpiredContracts", "1", "0", "1", "1", "-3",
+				"force close contract <task-id> at index 7: Contract already closed with outcome settled: <task-id>\nsynthetic stream cleanup failed",
+				"1800", "1", "other=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	if strings.Contains(markdown, "successful convergence") || strings.Contains(markdown, "skips quarantine") {
+		t.Fatalf("joined cleanup error received benign guidance: %s", markdown)
+	}
+	for _, want := range []string{"representative_error_class=unclassified", "Follow SIGNALS.md 5.7"} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("joined cleanup error lacks actionable generic evidence %q: %s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "synthetic stream cleanup failed") {
+		t.Fatalf("joined cleanup error leaked raw task text: %s", markdown)
 	}
 }
 

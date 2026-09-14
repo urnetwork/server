@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -46,7 +47,7 @@ func TestBuildProvidersMap(t *testing.T) {
 		{"ZZ", "Nowhere", 3},      // unknown country -> skipped
 		{"US", "New York", -1},    // non-positive -> skipped
 	}
-	m := buildProvidersMap(rows)
+	m := buildProvidersMap(rows, nil)
 
 	us, ok := m["US"]
 	connect.AssertEqual(t, ok, true)
@@ -70,6 +71,76 @@ func TestBuildProvidersMap(t *testing.T) {
 	}
 	if _, present := m["ZZ"]; present {
 		t.Fatal("unknown country should be skipped")
+	}
+
+	// every region carries an extender count, present and zero when the second
+	// aggregate found none (connect/EXTENDER.md M8)
+	connect.AssertEqual(t, us["California"].ExtenderCount, 0)
+}
+
+// M8: the two aggregates are merged by (country, region). A region with
+// extenders and no providers is in the map with provider_count 0; a region
+// with providers and no extenders keeps extender_count 0; and the same
+// skipping rules apply to both sides.
+func TestBuildProvidersMapMergesExtenders(t *testing.T) {
+	providerRows := []regionProviderCount{
+		{"US", "California", 1200},
+		{"DE", "Bavaria", 540},
+	}
+	extenderRows := []regionProviderCount{
+		{"US", "California", 3},
+		{"US", "California", 2}, // duplicate -> summed
+		{"US", "New York", 4},   // extenders only -> provider_count 0
+		{"JP", "Japan", 1},      // an extender located only to its country
+		{"US", "", 9},           // empty region -> skipped
+		{"ZZ", "Nowhere", 9},    // unknown country -> skipped
+		{"US", "Texas", 0},      // non-positive -> no entry at all
+	}
+	m := buildProvidersMap(providerRows, extenderRows)
+
+	us := m["US"]
+	if us == nil {
+		t.Fatal("expected US entries")
+	}
+	connect.AssertEqual(t, us["California"].ProviderCount, 1200)
+	connect.AssertEqual(t, us["California"].ExtenderCount, 5)
+
+	if us["New York"] == nil {
+		t.Fatal("a region with extenders and no providers must be kept")
+	}
+	connect.AssertEqual(t, us["New York"].ProviderCount, 0)
+	connect.AssertEqual(t, us["New York"].ExtenderCount, 4)
+	if us["New York"].Lat == 0 && us["New York"].Lon == 0 {
+		t.Fatal("an extender-only region still needs a centroid")
+	}
+
+	// a region with providers and no extenders
+	connect.AssertEqual(t, m["DE"]["Bavaria"].ExtenderCount, 0)
+
+	// the country's own name resolves to the country centroid
+	jp := m["JP"]
+	if jp == nil || jp["Japan"] == nil {
+		t.Fatal("a country-located extender must be placed at the country centroid")
+	}
+	connect.AssertEqual(t, jp["Japan"].ExtenderCount, 1)
+	connect.AssertEqual(t, jp["Japan"].ProviderCount, 0)
+
+	if _, present := us[""]; present {
+		t.Fatal("an empty extender region should be skipped")
+	}
+	if _, present := us["Texas"]; present {
+		t.Fatal("a zero extender count should create no entry")
+	}
+	if _, present := m["ZZ"]; present {
+		t.Fatal("an unknown extender country should be skipped")
+	}
+
+	// the json the feed serves always carries extender_count, so an old blob's
+	// missing field and a real zero are the same number
+	body, err := json.Marshal(m["DE"]["Bavaria"])
+	connect.AssertEqual(t, err, nil)
+	if !strings.Contains(string(body), `"extender_count":0`) {
+		t.Fatalf("extender_count must always be present: %s", body)
 	}
 }
 
@@ -189,6 +260,130 @@ func TestGetProvidersMapAggregatesRegions(t *testing.T) {
 		// the dots on the globe
 		connect.AssertEqual(t, true, au["New South Wales"].Lat < -28 && au["New South Wales"].Lat > -38)
 		connect.AssertEqual(t, true, au["New South Wales"].Lon > 140)
+	})
+}
+
+// M8: the export runs both aggregates and merges them. A region with extenders
+// and no providers is in the blob with provider_count 0, an extender located
+// only to its country is placed under the country's own name, and one with no
+// location at all is left out of the map entirely.
+func TestGetProvidersMapMergesExtenders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		nsw := testStatsCityLocation(ctx, "Sydney", "New South Wales", "Australia", "au")
+		vic := testStatsCityLocation(ctx, "Melbourne", "Victoria", "Australia", "au")
+		japan := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		CreateLocation(ctx, japan)
+
+		// one provider in New South Wales and none in Victoria
+		clientId := server.NewId()
+		networkId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_client_location_reliability (
+						client_id,
+						network_id,
+						update_block_number,
+						region_location_id,
+						country_location_id,
+						client_address_hash_count,
+						location_count,
+						connected
+					)
+					VALUES ($1, $2, 1, $3, $4, 1, 1, true)
+				`,
+				clientId,
+				networkId,
+				nsw.RegionLocationId,
+				nsw.CountryLocationId,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO client_connection_reliability_score (
+						client_id,
+						lookback_index,
+						independent_reliability_score,
+						independent_reliability_weight,
+						reliability_score,
+						reliability_weight,
+						min_block_number,
+						max_block_number,
+						region_location_id,
+						country_location_id
+					)
+					VALUES ($1, 0, 1, 1, 1, 1, 1, 1, $2, $3)
+				`,
+				clientId,
+				nsw.RegionLocationId,
+				nsw.CountryLocationId,
+			))
+		})
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: []byte("public-secret"),
+		})
+
+		// extenders: one beside the provider, one in a region with no provider
+		// at all, one located only to its country, one with no location, and
+		// one that lost its last address
+		testStatsActivate(ctx, "map-nsw", 4, "192.0.2.40", "au", nsw)
+		testStatsActivate(ctx, "map-vic", 6, "2001:db8::40", "au", vic)
+		testStatsActivate(ctx, "map-jp", 4, "192.0.2.41", "jp", japan)
+		testStatsActivate(ctx, "map-nowhere", 4, "192.0.2.42", "", nil)
+		offline := testStatsActivate(ctx, "map-offline", 4, "192.0.2.43", "au", nsw)
+		Testing_DeactivateNetworkExtenderAddress(ctx, offline.Extender.ExtenderId, 4)
+
+		connect.AssertEqual(t, ExportProvidersMap(ctx), nil)
+		exportedJson := GetExportedProvidersMapJson(ctx)
+		connect.AssertNotEqual(t, exportedJson, nil)
+
+		var exported map[string]map[string]*RegionProviders
+		connect.AssertEqual(t, json.Unmarshal([]byte(*exportedJson), &exported), nil)
+
+		au := exported["au"]
+		connect.AssertNotEqual(t, au, nil)
+		if au["New South Wales"] == nil {
+			t.Fatal("the provider region is missing")
+		}
+		connect.AssertEqual(t, au["New South Wales"].ProviderCount, 1)
+		connect.AssertEqual(t, au["New South Wales"].ExtenderCount, 1)
+
+		if au["Victoria"] == nil {
+			t.Fatal("a region with extenders and no providers must be exported")
+		}
+		connect.AssertEqual(t, au["Victoria"].ProviderCount, 0)
+		connect.AssertEqual(t, au["Victoria"].ExtenderCount, 1)
+		if au["Victoria"].Lat == 0 && au["Victoria"].Lon == 0 {
+			t.Fatal("an extender-only region still needs a centroid")
+		}
+
+		// the country-located extender sits under the country's own name
+		jp := exported["jp"]
+		if jp == nil || jp["Japan"] == nil {
+			t.Fatalf("the country-located extender is missing: %s", *exportedJson)
+		}
+		connect.AssertEqual(t, jp["Japan"].ExtenderCount, 1)
+		connect.AssertEqual(t, jp["Japan"].ProviderCount, 0)
+
+		// the extender with no location and the one with no active address are
+		// nowhere in the map
+		total := 0
+		for _, byRegion := range exported {
+			for _, region := range byRegion {
+				total += region.ExtenderCount
+			}
+		}
+		if total != 3 {
+			t.Fatalf("mapped extenders = %d, want 3 of the 5 rows", total)
+		}
 	})
 }
 

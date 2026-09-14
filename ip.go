@@ -84,6 +84,32 @@ func ClientIpHashForAddrPrefix(addr netip.Addr, v4Prefix int, v6Prefix int) [32]
 	return [32]byte(h.Sum(nil))
 }
 
+// IpVersionForAddr is 4 or 6 for an address after unmapping the v4-mapped
+// v6 form, and 0 for an invalid address. This is the "observed family" of a
+// connection (connect/IPV6.md A3): what the packets actually arrived on.
+func IpVersionForAddr(addr netip.Addr) int {
+	addr = addr.Unmap()
+	switch {
+	case addr.Is4():
+		return 4
+	case addr.Is6():
+		return 6
+	default:
+		return 0
+	}
+}
+
+// ClientAddressIpVersion is IpVersionForAddr over a resolved client address
+// ("ip:port", bracketed v6, or the malformed unbracketed v6 form). 0 when
+// the address does not parse.
+func ClientAddressIpVersion(clientAddress string) int {
+	addrPort, err := ParseClientAddress(clientAddress)
+	if err != nil {
+		return 0
+	}
+	return IpVersionForAddr(addrPort.Addr())
+}
+
 func SplitClientAddress(clientAddress string) (host string, port int, err error) {
 	columnCount := strings.Count(clientAddress, ":")
 	bracketCount := strings.Count(clientAddress, "[")

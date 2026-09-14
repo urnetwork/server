@@ -1113,6 +1113,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		headerAppVersion := r.Header.Get("X-UR-AppVersion")
 		headerInstanceId := r.Header.Get("X-UR-InstanceId")
 		headerTransportVersion := r.Header.Get("X-UR-TransportVersion")
+		headerIpFamily := r.Header.Get(connect.HeaderIpFamily)
 
 		transportVersion := 0
 		if i, err := strconv.Atoi(headerTransportVersion); err == nil {
@@ -1130,6 +1131,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					ByJwt:      jwt,
 					InstanceId: instanceId.Bytes(),
 					AppVersion: headerAppVersion,
+					IpFamily:   ipFamilyIntentFromHeader(headerIpFamily),
 				}, transportVersion
 			} else {
 				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
@@ -1221,6 +1223,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// the declared family rides with the connection record; the observed
+	// family is re-derived from the same address at the model
+	_, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
+
 	connectionId := server.NewId()
 	self.exchange.registerConnection(clientId, connectionId, handleCancel)
 	defer self.exchange.unregisterConnection(clientId, connectionId)
@@ -1240,12 +1246,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		} else {
 			testConfig = DefaultTestConfig()
 		}
-		announce := NewConnectionAnnounce(
+		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
 			clientId,
 			clientAddress,
+			ipFamilyIntent,
 			self.handlerId,
 			announceTimeout,
 			testConfig,
@@ -1678,19 +1685,55 @@ func (self *ConnectHandler) listenQuic(
 
 		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
 		if !self.startHandle(func() {
-			defer conn.CloseWithError(0, "")
-
-			err := self.connectQuic(conn)
-			if err != nil {
-				glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
-			} else {
-				glog.Infof("[c]h3 connection exited %s\n", listenAddress)
-			}
+			self.serveQuicConn(conn, listenAddress)
 		}) {
 			conn.CloseWithError(0, "")
 			return handleCtx.Err()
 		}
 	}
+}
+
+// Serves one accepted QUIC connection on the caller's goroutine and closes it
+// on return. Admission is the caller's: the handler's own listener holds a
+// started worker for it, and HandleQuicConn takes one for an external
+// dispatch.
+func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string) {
+	defer conn.CloseWithError(0, "")
+
+	err := self.connectQuic(conn)
+	if err != nil {
+		glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
+	} else {
+		glog.Infof("[c]h3 connection exited %s\n", listenAddress)
+	}
+}
+
+// HandleQuicConn serves one connection accepted by an external listener and
+// returns when it is finished, reporting false when the handler is closing.
+// The alt front terminates QUIC on its own sockets and dispatches by sni, so
+// this is the same admission and teardown the handler's own listener applies,
+// without its accept loop.
+func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn) bool {
+	if !self.beginHandle() {
+		conn.CloseWithError(0, "")
+		return false
+	}
+	defer self.endHandle()
+	self.serveQuicConn(conn, conn.LocalAddr().String())
+	return true
+}
+
+// The certificate source this handler loaded. An external listener that
+// terminates TLS for the same connections shares it, so one certificate cache
+// and one allowed-host policy stand behind every front.
+func (self *ConnectHandler) TransportTls() *server.TransportTls {
+	return self.transportTls
+}
+
+// NewQuicConfig returns the server half of the H3 configuration. An external
+// listener for the same handler must not build a second, drifting one.
+func NewQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
+	return newConnectQuicConfig(settings)
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to
@@ -1779,13 +1822,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return err
 	}
 
-	// FIXME
-	/*
-		if self.apiHostNames[earlyConn.ConnectionState.TLS.ServerName] {
-			// pass off the stream to the internal api server
-			return self.apiServer.OfferAccept(stream)
-		}
-	*/
+	// an api name never reaches this handler: the alt front dispatches by sni
+	// before the connection is offered here, and behind the lb this listener
+	// only ever carries connect
 
 	framer := connect.NewFramer(self.settings.FramerSettings)
 
@@ -1793,6 +1832,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var clientId server.Id
 	var instanceId server.Id
 	var connectionId server.Id
+	ipFamilyIntent := 0
 	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
@@ -1832,6 +1872,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if networkId == nil || *networkId != byJwt.NetworkId {
 				return fmt.Errorf("Client id is not part of network.")
 			}
+
+			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 
 			connectionId = server.NewId()
 			self.exchange.registerConnection(clientId, connectionId, handleCancel)
@@ -1874,12 +1916,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
 		}
-		announce := NewConnectionAnnounce(
+		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
 			byJwt.NetworkId,
 			clientId,
 			clientAddress,
+			ipFamilyIntent,
 			self.handlerId,
 			announceTimeout,
 			V0TestConfig(),

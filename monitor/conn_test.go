@@ -63,7 +63,8 @@ func TestPostgreSQLRowsFailClosedOnMalformedOrTruncatedOutput(t *testing.T) {
 
 // The production incident put a newline, pipe, and durable identifier in one
 // task error. Legacy delimiter splitting turned its continuation into a second
-// task family and moved the identifier into the unredacted alert frame.
+// task family and moved the identifier into the alert frame. The structured
+// row must preserve the family while the renderer emits only a fixed class.
 func TestPostgreSQLFramingDoesNotCreateTaskIdentifierFrame(t *testing.T) {
 	const taskId = "01a07b25-2590-abcd-1234-56789abcdef0"
 	cfg := &monitorConfig{
@@ -115,9 +116,10 @@ func TestPostgreSQLFramingDoesNotCreateTaskIdentifierFrame(t *testing.T) {
 		Environment: "synthetic", Now: func() time.Time { return time.Unix(0, 0) },
 	}, "1.2", "task-canaries", "Task canaries", taskFindings[0])
 	requireAlertOmits(t, alert, taskId)
-	if !strings.Contains(alert.Markdown(), "<task-id>|private") {
-		t.Fatalf("task error was not retained and redacted in its source cell: %s", alert.Markdown())
+	if !strings.Contains(alert.Markdown(), "representative_error_class=deadline-timeout") {
+		t.Fatalf("task error was not reduced to its fixed class: %s", alert.Markdown())
 	}
+	requireAlertOmits(t, alert, "force close contract", "|private")
 }
 
 // A top-level signal limit is insufficient because individual probes fan out

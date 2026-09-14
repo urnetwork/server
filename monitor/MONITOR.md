@@ -374,7 +374,7 @@ Escalation batteries pull incident windows non-interactively with
 | cadence | probes (SIGNALS.md ref) |
 |---|---|
 | 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
-| 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
+| 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; authoritative/recursive DNS aliases 18.3; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
 | 30m | Google Play crash issue/version advances plus explicit vitals freshness 20.1 |
@@ -442,14 +442,6 @@ hosts:                # only monitor-specific facts; lan ips come
     overlay_ip: 172.28.208.177
     roles: [redis-cluster, minio]
     redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
-  - name: fireside.bringyour.com
-    roles: [services]
-    proxy:
-      public_hostname: fireside.bringyour.com
-      public_interface: eno1
-      routing_table: 100
-      load_balancer_unit: warp-main-lb-eno1.service
-      address_families: [ipv4, ipv6]
   - name: snow
     overlay_ip: 172.28.208.185
     roles: [subtensor]
@@ -471,6 +463,10 @@ pg:
 source_attribution:   # optional; each expected address arms that family
   expected_ipv4: 203.0.113.10
   expected_ipv6: 2001:db8::10
+dns_aliases:          # optional; explicit desired state, never learned from DNS
+  managed_domains: [example.test]
+  expected_a: [192.0.2.10, 198.51.100.20]
+  expected_aaaa: [2001:db8::10, 2001:db8:1::20]
 ```
 
 SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
@@ -481,13 +477,24 @@ credentials from `vault/<env>/redis.yml`, LAN routes from
 `config/<env>/settings.yml`, the Grafana admin credential used only for the
 authenticated datasource control from `vault/<env>/grafana.yml`, and active
 nontransparent edge IPv6 interfaces from the first
-`vault/<env>/services.yml` version. The Google package and Apple numeric app ID
+`vault/<env>/services.yml` version. Transparent proxy hostnames, interfaces,
+address families, LB units, and stable routing-table assignments are likewise
+derived from the active topology plus its retained assignment history. The
+proxy-path probe compares the expected placement count with the armed monitor
+hosts, so a missing inventory join is a visibility alert rather than a silent
+no-op. Its dynamic allocation read requires observation access to the host's
+container runtime; a denied runtime command is classified as unobservable and
+must never be interpreted as zero allocations. The Google package and Apple numeric app ID
 remain authoritative in `google.yml` and `apple.yml`; the dedicated reporting
 resources contain only provider identities. Either reporting resource may be
 absent, in which case its corresponding §20 signal performs no validation,
 opens no network connection, and returns no alert. Once a resource exists,
 malformed or incomplete content is a visibility failure rather than an
-implicit disable.
+implicit disable. The optional `dns_aliases` block is likewise the sole
+desired-state source for §18.3: an absent block noops, while a present invalid
+block alerts before any DNS observation. Its managed domains and expected
+A/AAAA sets are public configuration, remain distinct from `services.yml` LB
+addresses, and are compared in memory without rendering addresses in alerts.
 
 ## 8. Development plan
 

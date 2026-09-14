@@ -29,9 +29,16 @@ import (
 )
 
 const (
-	perfvarSchemaVersion   = 13
-	perfvarTraceVersion    = 1
-	perfvarScheduleVersion = 3
+	perfvarSchemaVersion = 13
+	// Mixed routes default to a bounded payload: a collapsed transfer reaches
+	// its directional deadline inside the run timeout, a healthy one still
+	// spans many relay bandwidth-delay products.
+	perfvarMixedRoutePayloadByteCount = int64(8 * 1024 * 1024)
+	// The two mixed schedule profiles bound both carriers to 20 Mbit/s and
+	// need a payload that outlasts their last event on both carriers.
+	perfvarMixedSchedulePayloadByteCount = int64(48 * 1024 * 1024)
+	perfvarTraceVersion                  = 1
+	perfvarScheduleVersion               = 3
 	// The measured clean queue is 32 MiB. Keeping the accepted payload at or
 	// below it keeps the long-transfer default explicit and also leaves ample
 	// room beside the largest route-local BDP in the 256 MiB test contract.
@@ -81,9 +88,13 @@ const (
 
 // One resolved scenario contains every choice that can affect a comparison.
 type perfvarScenario struct {
-	Route                   fullTunRoute     `json:"route"`
-	Profile                 networkProfile   `json:"application_access_and_p2p_profile"`
-	ProfileSchedule         *profileSchedule `json:"application_access_and_p2p_schedule,omitempty"`
+	Route           fullTunRoute     `json:"route"`
+	Profile         networkProfile   `json:"application_access_and_p2p_profile"`
+	ProfileSchedule *profileSchedule `json:"application_access_and_p2p_schedule,omitempty"`
+	// DeviceAccessProfile is set only for mixed routes: the scenario profile
+	// then conditions the direct P2P link alone and this profile conditions
+	// the device's exchange access path. Nil keeps the shared meaning.
+	DeviceAccessProfile     *networkProfile  `json:"device_access_profile,omitempty"`
 	ProviderAccessProfile   networkProfile   `json:"provider_access_profile"`
 	InternalExchangeProfile *networkProfile  `json:"internal_exchange_profile,omitempty"`
 	Workload                perfvarWorkload  `json:"workload"`
@@ -94,12 +105,16 @@ type perfvarScenario struct {
 	// ApplicationMtu is the advertised VPN-interface MTU, distinct from the
 	// profile's physical-path inner limit. Recording it prevents a product MTU
 	// change from being compared under the same scenario identity.
-	ApplicationMtu   int   `json:"application_mtu"`
-	Seed             int64 `json:"seed"`
-	RunCount         int   `json:"run_count"`
-	PayloadByteCount int64 `json:"payload_byte_count"`
-	WarmupByteCount  int64 `json:"warmup_byte_count,omitempty"`
-	FlowCount        int   `json:"flow_count"`
+	ApplicationMtu int `json:"application_mtu"`
+	// Features are opt-in production settings that ship off by default and
+	// are under measurement. An empty set keeps every existing scenario
+	// identity unchanged; a non-empty one is part of the identity.
+	Features         []string `json:"features,omitempty"`
+	Seed             int64    `json:"seed"`
+	RunCount         int      `json:"run_count"`
+	PayloadByteCount int64    `json:"payload_byte_count"`
+	WarmupByteCount  int64    `json:"warmup_byte_count,omitempty"`
+	FlowCount        int      `json:"flow_count"`
 	// LogicalDataLaneCount is the bounded Transfer sequence fan-out used for
 	// exact five-tuple isolation. Zero is the production-compatible disabled
 	// baseline; measured candidates are 1, 4, and 8.
@@ -125,12 +140,27 @@ type perfvarConfig struct {
 	InternalProfiles     map[string]bool
 	ExtenderCount        int
 	Resources            map[string]bool
+	Features             []string
 	Seed                 int64
 	RunCount             int
 	PayloadBytes         int64
 	PayloadSet           bool
 	LogicalDataLaneCount int
 }
+
+// Opt-in production settings under measurement. Each ships off by default
+// (connect/FLIGHTGATEFIX.md §13.5 and §13.6) and needs its own A/B before a
+// default can flip.
+// A setting under measurement may ship off (measure it on) or on (measure it
+// off), so each has both polarities.
+const (
+	perfvarFeatureDeferTimeoutResend   = "defer-timeout-resend"
+	perfvarFeatureNoDeferTimeoutResend = "no-defer-timeout-resend"
+	perfvarFeatureFastPathSizeAware    = "fast-path-size-aware"
+	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
+	perfvarFeatureLaneRule             = "reliable-lane-proven-recovery"
+	perfvarFeatureNoLaneRule           = "no-reliable-lane-proven-recovery"
+)
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
 // exchange is intentionally not a P2P hop count.
@@ -233,27 +263,201 @@ type perfvarPacketStatsObservation struct {
 	TransportStats           map[clientconnect.TransportType]perfvarTransportPacketStatsObservation `json:"transport_stats"`
 }
 
+// perfvarProgressSample is one payload-progress reading of a measured
+// workload, relative to the workload start.
+type perfvarProgressSample struct {
+	Offset    time.Duration `json:"offset_nanoseconds"`
+	ByteCount int64         `json:"byte_count"`
+}
+
+// perfvarThroughputWindow is one fixed-length window of delivered payload.
+// A window under the dead threshold is the report's "dead window": the
+// pinned-provider collapse shows as consecutive dead windows while the run
+// is still in progress (connect/FLIGHTGATEFIX.md §6.2).
+type perfvarThroughputWindow struct {
+	Start             time.Duration `json:"start_nanoseconds"`
+	End               time.Duration `json:"end_nanoseconds"`
+	ByteCount         int64         `json:"byte_count"`
+	MegabitsPerSecond float64       `json:"megabits_per_second"`
+	Dead              bool          `json:"dead"`
+}
+
+// perfvarProgressObservation is the sampled progress of one tunneled run.
+type perfvarProgressObservation struct {
+	SampleInterval    time.Duration             `json:"sample_interval_nanoseconds"`
+	WindowLength      time.Duration             `json:"window_length_nanoseconds"`
+	DeadThresholdMbps float64                   `json:"dead_threshold_megabits_per_second"`
+	Samples           []perfvarProgressSample   `json:"samples,omitempty"`
+	Windows           []perfvarThroughputWindow `json:"windows,omitempty"`
+	WindowCount       int                       `json:"window_count"`
+	DeadWindowCount   int                       `json:"dead_window_count"`
+	// FirstDeadWindowOffset is the start of the first dead window, or -1.
+	FirstDeadWindowOffset time.Duration `json:"first_dead_window_offset_nanoseconds"`
+	WorstWindowMbps       float64       `json:"worst_window_megabits_per_second"`
+}
+
+const (
+	perfvarProgressSampleInterval    = 250 * time.Millisecond
+	perfvarProgressWindowLength      = 5 * time.Second
+	perfvarProgressDeadThresholdMbps = 5.0
+)
+
+// perfvarProgressWindows folds progress samples into complete fixed windows.
+// The trailing partial window is included only when it spans at least half
+// a window, so a short healthy run is not read as dead at its tail.
+func perfvarProgressWindows(
+	samples []perfvarProgressSample,
+	windowLength time.Duration,
+	deadThresholdMbps float64,
+) []perfvarThroughputWindow {
+	if len(samples) == 0 || windowLength <= 0 {
+		return nil
+	}
+	windows := []perfvarThroughputWindow{}
+	windowStart := time.Duration(0)
+	startByteCount := int64(0)
+	lastOffset := samples[len(samples)-1].Offset
+	lastByteCount := samples[len(samples)-1].ByteCount
+	for windowStart+windowLength <= lastOffset {
+		windowEnd := windowStart + windowLength
+		endByteCount := startByteCount
+		for _, sample := range samples {
+			if windowEnd < sample.Offset {
+				break
+			}
+			endByteCount = sample.ByteCount
+		}
+		windows = append(windows, perfvarThroughputWindowFor(windowStart, windowEnd, startByteCount, endByteCount, deadThresholdMbps))
+		windowStart = windowEnd
+		startByteCount = endByteCount
+	}
+	if tail := lastOffset - windowStart; windowLength/2 <= tail {
+		windows = append(windows, perfvarThroughputWindowFor(windowStart, lastOffset, startByteCount, lastByteCount, deadThresholdMbps))
+	}
+	return windows
+}
+
+func perfvarThroughputWindowFor(
+	start time.Duration,
+	end time.Duration,
+	startByteCount int64,
+	endByteCount int64,
+	deadThresholdMbps float64,
+) perfvarThroughputWindow {
+	byteCount := endByteCount - startByteCount
+	megabits := float64(0)
+	if 0 < end-start {
+		megabits = float64(byteCount*8) / 1_000_000 / (end - start).Seconds()
+	}
+	return perfvarThroughputWindow{
+		Start:             start,
+		End:               end,
+		ByteCount:         byteCount,
+		MegabitsPerSecond: megabits,
+		Dead:              megabits < deadThresholdMbps,
+	}
+}
+
+// perfvarProgressObservationFor derives the window summary from samples.
+func perfvarProgressObservationFor(samples []perfvarProgressSample) perfvarProgressObservation {
+	observation := perfvarProgressObservation{
+		SampleInterval:        perfvarProgressSampleInterval,
+		WindowLength:          perfvarProgressWindowLength,
+		DeadThresholdMbps:     perfvarProgressDeadThresholdMbps,
+		Samples:               samples,
+		FirstDeadWindowOffset: -1,
+	}
+	observation.Windows = perfvarProgressWindows(
+		samples,
+		perfvarProgressWindowLength,
+		perfvarProgressDeadThresholdMbps,
+	)
+	observation.WindowCount = len(observation.Windows)
+	for windowIndex, window := range observation.Windows {
+		if windowIndex == 0 || window.MegabitsPerSecond < observation.WorstWindowMbps {
+			observation.WorstWindowMbps = window.MegabitsPerSecond
+		}
+		if window.Dead {
+			observation.DeadWindowCount += 1
+			if observation.FirstDeadWindowOffset < 0 {
+				observation.FirstDeadWindowOffset = window.Start
+			}
+		}
+	}
+	return observation
+}
+
+// perfvarMemoryObservation is the Go runtime and message-pool footprint of
+// the test process sampled once a second while one tunneled workload runs.
+// Under the mobile surrogate it is the program's memory guardrail
+// (connect/MEMSTEADY.md): a candidate whose heap+stack p95 rises above the
+// control, or that shows any sample above the 24 MiB ceiling where the
+// control stayed below, is a REGRESSION for that item.
+type perfvarMemoryObservation struct {
+	SampleCount          int    `json:"sample_count"`
+	HeapAndStackInuseP50 uint64 `json:"heap_and_stack_inuse_p50_bytes"`
+	HeapAndStackInuseP95 uint64 `json:"heap_and_stack_inuse_p95_bytes"`
+	HeapAndStackInuseMax uint64 `json:"heap_and_stack_inuse_max_bytes"`
+	HeapInuseMax         uint64 `json:"heap_inuse_max_bytes"`
+	SysMax               uint64 `json:"sys_max_bytes"`
+	PoolRetainedCountEnd int    `json:"pool_retained_count_end"`
+	PoolCapacityEnd      int    `json:"pool_capacity_end"`
+	PoolOutstandingEnd   int64  `json:"pool_outstanding_end"`
+	SamplesAboveCeiling  int    `json:"samples_above_ceiling"`
+	CeilingBytes         uint64 `json:"ceiling_bytes"`
+}
+
+// perfvarMemoryCeilingBytes is the MEMSTEADY hard gate (24 MiB).
+const perfvarMemoryCeilingBytes = uint64(24 * 1024 * 1024)
+
+func perfvarMemoryObservationFor(samples []uint64, heapMax uint64, sysMax uint64) perfvarMemoryObservation {
+	observation := perfvarMemoryObservation{
+		SampleCount:  len(samples),
+		HeapInuseMax: heapMax,
+		SysMax:       sysMax,
+		CeilingBytes: perfvarMemoryCeilingBytes,
+	}
+	if len(samples) == 0 {
+		return observation
+	}
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+	observation.HeapAndStackInuseMax = sorted[len(sorted)-1]
+	observation.HeapAndStackInuseP50 = sorted[max(1, (50*len(sorted)+99)/100)-1]
+	observation.HeapAndStackInuseP95 = sorted[max(1, (95*len(sorted)+99)/100)-1]
+	for _, sample := range samples {
+		if perfvarMemoryCeilingBytes < sample {
+			observation.SamplesAboveCeiling += 1
+		}
+	}
+	return observation
+}
+
 // Every run contains the calibration, tunneled result, and exact identities.
 type perfvarRunRecord struct {
-	SchemaVersion      int                       `json:"schema_version"`
-	ScheduleVersion    int                       `json:"schedule_version"`
-	RecordType         string                    `json:"record_type"`
-	ScenarioHash       string                    `json:"scenario_hash"`
-	ProfileHash        string                    `json:"profile_hash"`
-	RunIndex           int                       `json:"run_index"`
-	Trace              perfvarTrace              `json:"trace"`
-	Scenario           perfvarScenario           `json:"scenario"`
-	Host               perfvarHostMetadata       `json:"host"`
-	Underlay           workloadResult            `json:"underlay"`
-	Tunneled           workloadResult            `json:"tunneled"`
-	Carrier            perfvarCarrierObservation `json:"carrier"`
-	RouteSetupDuration time.Duration             `json:"route_setup_duration_nanoseconds"`
-	Efficiency         float64                   `json:"tunneled_underlay_efficiency"`
-	WireEfficiency     float64                   `json:"useful_wire_efficiency"`
-	Correct            bool                      `json:"correct"`
-	FailureStage       string                    `json:"failure_stage,omitempty"`
-	FailureReason      string                    `json:"failure_reason,omitempty"`
-	InvalidReason      string                    `json:"invalid_reason,omitempty"`
+	SchemaVersion   int                       `json:"schema_version"`
+	ScheduleVersion int                       `json:"schedule_version"`
+	RecordType      string                    `json:"record_type"`
+	ScenarioHash    string                    `json:"scenario_hash"`
+	ProfileHash     string                    `json:"profile_hash"`
+	RunIndex        int                       `json:"run_index"`
+	Trace           perfvarTrace              `json:"trace"`
+	Scenario        perfvarScenario           `json:"scenario"`
+	Host            perfvarHostMetadata       `json:"host"`
+	Underlay        workloadResult            `json:"underlay"`
+	Tunneled        workloadResult            `json:"tunneled"`
+	Carrier         perfvarCarrierObservation `json:"carrier"`
+	// Progress is sampled only for the TCP payload workloads; other
+	// workloads leave it empty.
+	Progress           perfvarProgressObservation `json:"progress"`
+	Memory             perfvarMemoryObservation   `json:"memory"`
+	RouteSetupDuration time.Duration              `json:"route_setup_duration_nanoseconds"`
+	Efficiency         float64                    `json:"tunneled_underlay_efficiency"`
+	WireEfficiency     float64                    `json:"useful_wire_efficiency"`
+	Correct            bool                       `json:"correct"`
+	FailureStage       string                     `json:"failure_stage,omitempty"`
+	FailureReason      string                     `json:"failure_reason,omitempty"`
+	InvalidReason      string                     `json:"invalid_reason,omitempty"`
 	// These process-wide point samples aid diagnosis but do not prove route
 	// lifecycle reconciliation; deterministic resource tests own that claim.
 	GoroutinesBefore int `json:"goroutines_before"`
@@ -262,30 +466,41 @@ type perfvarRunRecord struct {
 
 // Aggregate values retain all comparison statistics requested by the plan.
 type perfvarAggregateRecord struct {
-	SchemaVersion      int             `json:"schema_version"`
-	ScheduleVersion    int             `json:"schedule_version"`
-	RecordType         string          `json:"record_type"`
-	ScenarioHash       string          `json:"scenario_hash"`
-	ProfileHash        string          `json:"profile_hash"`
-	Scenario           perfvarScenario `json:"scenario"`
-	RunCount           int             `json:"run_count"`
-	GoodputMedianGbps  float64         `json:"goodput_median_gigabits_per_second"`
-	GoodputP95Gbps     float64         `json:"goodput_p95_gigabits_per_second"`
-	GoodputWorstGbps   float64         `json:"goodput_worst_gigabits_per_second"`
-	DurationMedian     time.Duration   `json:"duration_median_nanoseconds"`
-	DurationP95        time.Duration   `json:"duration_p95_nanoseconds"`
-	DurationWorst      time.Duration   `json:"duration_worst_nanoseconds"`
-	SetupMedian        time.Duration   `json:"setup_median_nanoseconds"`
-	LatencyP95Median   time.Duration   `json:"latency_p95_median_nanoseconds"`
-	LoadedP95Median    time.Duration   `json:"loaded_latency_p95_median_nanoseconds"`
-	EfficiencyMedian   float64         `json:"efficiency_median"`
-	WireEfficiency     float64         `json:"wire_efficiency_median"`
-	CorrectRunCount    int             `json:"correct_run_count"`
-	FailureRunCount    int             `json:"failure_run_count"`
-	InvalidRunCount    int             `json:"invalid_run_count"`
-	ValidRunCount      int             `json:"valid_run_count"`
-	IndividualCorrect  []bool          `json:"individual_run_correct"`
-	IndividualRunValid []bool          `json:"individual_run_valid"`
+	SchemaVersion     int             `json:"schema_version"`
+	ScheduleVersion   int             `json:"schedule_version"`
+	RecordType        string          `json:"record_type"`
+	ScenarioHash      string          `json:"scenario_hash"`
+	ProfileHash       string          `json:"profile_hash"`
+	Scenario          perfvarScenario `json:"scenario"`
+	RunCount          int             `json:"run_count"`
+	GoodputMedianGbps float64         `json:"goodput_median_gigabits_per_second"`
+	GoodputP95Gbps    float64         `json:"goodput_p95_gigabits_per_second"`
+	GoodputWorstGbps  float64         `json:"goodput_worst_gigabits_per_second"`
+	DurationMedian    time.Duration   `json:"duration_median_nanoseconds"`
+	DurationP95       time.Duration   `json:"duration_p95_nanoseconds"`
+	DurationWorst     time.Duration   `json:"duration_worst_nanoseconds"`
+	SetupMedian       time.Duration   `json:"setup_median_nanoseconds"`
+	LatencyP95Median  time.Duration   `json:"latency_p95_median_nanoseconds"`
+	LoadedP95Median   time.Duration   `json:"loaded_latency_p95_median_nanoseconds"`
+	EfficiencyMedian  float64         `json:"efficiency_median"`
+	WireEfficiency    float64         `json:"wire_efficiency_median"`
+	// Dead-window totals include failed runs: a collapse that reaches its
+	// deadline is the primary signal of the pinned-provider campaign.
+	DeadWindowCount    int     `json:"dead_window_count"`
+	DeadWindowRunCount int     `json:"dead_window_run_count"`
+	WindowCount        int     `json:"window_count"`
+	WorstWindowMbps    float64 `json:"worst_window_megabits_per_second"`
+	// Memory guardrails over every run, including failed ones.
+	MemoryP50MedianBytes      uint64 `json:"memory_heap_and_stack_p50_median_bytes"`
+	MemoryP95MedianBytes      uint64 `json:"memory_heap_and_stack_p95_median_bytes"`
+	MemoryMaxBytes            uint64 `json:"memory_heap_and_stack_max_bytes"`
+	MemorySamplesAboveCeiling int    `json:"memory_samples_above_ceiling"`
+	CorrectRunCount           int    `json:"correct_run_count"`
+	FailureRunCount           int    `json:"failure_run_count"`
+	InvalidRunCount           int    `json:"invalid_run_count"`
+	ValidRunCount             int    `json:"valid_run_count"`
+	IndividualCorrect         []bool `json:"individual_run_correct"`
+	IndividualRunValid        []bool `json:"individual_run_valid"`
 }
 
 // A lookup function makes filter validation deterministic without mutating the
@@ -334,9 +549,13 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 		return result, nil
 	}
 
+	allowedRoutes := make([]string, 0, len(allFullTunRoutes()))
+	for _, route := range allFullTunRoutes() {
+		allowedRoutes = append(allowedRoutes, string(route))
+	}
 	routes, err := parseSet(
 		"CONNECT_PERFVAR_ROUTE",
-		[]string{string(fullTunRouteP2pFast), string(fullTunRouteP2pLegacy), string(fullTunRouteExchangeH1), string(fullTunRouteExchangeH3), string(fullTunRouteExchangeAuto)},
+		allowedRoutes,
 		[]string{string(fullTunRouteP2pFast), string(fullTunRouteP2pLegacy), string(fullTunRouteExchangeH1), string(fullTunRouteExchangeH3)},
 	)
 	if err != nil {
@@ -410,6 +629,23 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 	if err != nil {
 		return perfvarConfig{}, err
 	}
+	featureSet, err := parseSet(
+		"CONNECT_PERFVAR_FEATURE",
+		[]string{
+			perfvarFeatureDeferTimeoutResend,
+			perfvarFeatureNoDeferTimeoutResend,
+			perfvarFeatureFastPathSizeAware,
+			perfvarFeatureNoFastPathSizeAware,
+			perfvarFeatureLaneRule,
+			perfvarFeatureNoLaneRule,
+		},
+		[]string{},
+	)
+	if err != nil {
+		return perfvarConfig{}, err
+	}
+	features := slices.Sorted(maps.Keys(featureSet))
+
 	runCount, err := parsePositiveInt("CONNECT_PERFVAR_RUN_COUNT", 5)
 	if err != nil {
 		return perfvarConfig{}, err
@@ -457,6 +693,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 		InternalProfiles:     internalProfiles,
 		ExtenderCount:        extenderCount,
 		Resources:            resources,
+		Features:             features,
 		Seed:                 seed,
 		RunCount:             runCount,
 		PayloadBytes:         payloadBytes,
@@ -480,6 +717,15 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 			providerAccessProfile := profile
 			if strings.HasPrefix(profileName, "single-region-") ||
 				strings.HasPrefix(profileName, "cell-edge-") {
+				providerAccessProfile = profiles["clean-lan"]
+				providerAccessProfile.SourceNote = "synthetic provider colocated with server/connect"
+			}
+			var deviceAccessProfile *networkProfile
+			if fullTunRouteIsMixed(route) {
+				// The scenario profile is the direct P2P link; the relay path is
+				// the fixed mixed-route access profile with a clean provider.
+				relay := mixedRelayAccessProfileFor(profileName, config.Seed)
+				deviceAccessProfile = &relay
 				providerAccessProfile = profiles["clean-lan"]
 				providerAccessProfile.SourceNote = "synthetic provider colocated with server/connect"
 			}
@@ -526,7 +772,16 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 						for _, internalProfileName := range internalProfileNames {
 							for resourceName := range config.Resources {
 								payloadByteCount := config.PayloadBytes
-								if !config.PayloadSet {
+								if !config.PayloadSet && fullTunRouteIsMixed(route) {
+									// Bounded so a collapsed run reaches its deadline
+									// inside the run timeout while a healthy one still
+									// spans many relay bandwidth-delay products.
+									payloadByteCount = perfvarMixedRoutePayloadByteCount
+									if profileSchedule != nil {
+										payloadByteCount = perfvarMixedSchedulePayloadByteCount
+									}
+								}
+								if !config.PayloadSet && !fullTunRouteIsMixed(route) {
 									switch profileName {
 									case cellEdge5mDown1mUpName:
 										payloadByteCount = 1 * 1024 * 1024
@@ -550,12 +805,14 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 									Route:                 route,
 									Profile:               profile,
 									ProfileSchedule:       profileSchedule,
+									DeviceAccessProfile:   deviceAccessProfile,
 									ProviderAccessProfile: providerAccessProfile,
 									Workload:              workload,
 									Direction:             direction,
 									Topology:              topology,
 									ExtenderCount:         config.ExtenderCount,
 									Resource:              perfvarResource(resourceName),
+									Features:              config.Features,
 									ApplicationMtu:        min(clientconnect.DefaultMtu, profile.InnerMtu),
 									Seed:                  config.Seed,
 									RunCount:              config.RunCount,
@@ -661,6 +918,9 @@ func (self perfvarScenario) hash() (string, error) {
 // profile still makes setup comparisons reproducible.
 func (self perfvarScenario) profilesHash() (string, error) {
 	profiles := []networkProfile{self.Profile, self.ProviderAccessProfile}
+	if self.DeviceAccessProfile != nil {
+		profiles = append(profiles, *self.DeviceAccessProfile)
+	}
 	if self.InternalExchangeProfile != nil {
 		profiles = append(profiles, *self.InternalExchangeProfile)
 	}
@@ -1157,7 +1417,29 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 	correctRunCount := 0
 	failureRunCount := 0
 	invalidRunCount := 0
-	for _, record := range records {
+	deadWindowCount := 0
+	deadWindowRunCount := 0
+	windowCount := 0
+	worstWindowMbps := float64(0)
+	memoryP50s := make([]float64, 0, len(records))
+	memoryP95s := make([]float64, 0, len(records))
+	memoryMax := uint64(0)
+	memoryAboveCeiling := 0
+	for recordIndex, record := range records {
+		if 0 < record.Memory.SampleCount {
+			memoryP50s = append(memoryP50s, float64(record.Memory.HeapAndStackInuseP50))
+			memoryP95s = append(memoryP95s, float64(record.Memory.HeapAndStackInuseP95))
+		}
+		memoryMax = max(memoryMax, record.Memory.HeapAndStackInuseMax)
+		memoryAboveCeiling += record.Memory.SamplesAboveCeiling
+		deadWindowCount += record.Progress.DeadWindowCount
+		windowCount += record.Progress.WindowCount
+		if 0 < record.Progress.DeadWindowCount {
+			deadWindowRunCount += 1
+		}
+		if recordIndex == 0 || record.Progress.WorstWindowMbps < worstWindowMbps {
+			worstWindowMbps = record.Progress.WorstWindowMbps
+		}
 		correct = append(correct, record.Correct)
 		isValid := record.Correct && record.InvalidReason == ""
 		valid = append(valid, isValid)
@@ -1185,30 +1467,38 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		durationWorst = slices.Max(durations)
 	}
 	return perfvarAggregateRecord{
-		SchemaVersion:      perfvarSchemaVersion,
-		ScheduleVersion:    first.ScheduleVersion,
-		RecordType:         "aggregate",
-		ScenarioHash:       first.ScenarioHash,
-		ProfileHash:        first.ProfileHash,
-		Scenario:           first.Scenario,
-		RunCount:           len(records),
-		GoodputMedianGbps:  perfvarPercentileFloat(goodputs, 50),
-		GoodputP95Gbps:     perfvarPercentileFloat(goodputs, 95),
-		GoodputWorstGbps:   goodputWorst,
-		DurationMedian:     perfvarPercentileDuration(durations, 50),
-		DurationP95:        perfvarPercentileDuration(durations, 95),
-		DurationWorst:      durationWorst,
-		SetupMedian:        perfvarPercentileDuration(setups, 50),
-		LatencyP95Median:   perfvarPercentileDuration(latencies, 50),
-		LoadedP95Median:    perfvarPercentileDuration(loadedLatencies, 50),
-		EfficiencyMedian:   perfvarPercentileFloat(efficiencies, 50),
-		WireEfficiency:     perfvarPercentileFloat(wireEfficiencies, 50),
-		CorrectRunCount:    correctRunCount,
-		FailureRunCount:    failureRunCount,
-		InvalidRunCount:    invalidRunCount,
-		ValidRunCount:      len(records) - failureRunCount - invalidRunCount,
-		IndividualCorrect:  correct,
-		IndividualRunValid: valid,
+		SchemaVersion:             perfvarSchemaVersion,
+		ScheduleVersion:           first.ScheduleVersion,
+		RecordType:                "aggregate",
+		ScenarioHash:              first.ScenarioHash,
+		ProfileHash:               first.ProfileHash,
+		Scenario:                  first.Scenario,
+		RunCount:                  len(records),
+		GoodputMedianGbps:         perfvarPercentileFloat(goodputs, 50),
+		GoodputP95Gbps:            perfvarPercentileFloat(goodputs, 95),
+		GoodputWorstGbps:          goodputWorst,
+		DurationMedian:            perfvarPercentileDuration(durations, 50),
+		DurationP95:               perfvarPercentileDuration(durations, 95),
+		DurationWorst:             durationWorst,
+		SetupMedian:               perfvarPercentileDuration(setups, 50),
+		LatencyP95Median:          perfvarPercentileDuration(latencies, 50),
+		LoadedP95Median:           perfvarPercentileDuration(loadedLatencies, 50),
+		EfficiencyMedian:          perfvarPercentileFloat(efficiencies, 50),
+		WireEfficiency:            perfvarPercentileFloat(wireEfficiencies, 50),
+		DeadWindowCount:           deadWindowCount,
+		DeadWindowRunCount:        deadWindowRunCount,
+		WindowCount:               windowCount,
+		WorstWindowMbps:           worstWindowMbps,
+		MemoryP50MedianBytes:      uint64(perfvarPercentileFloat(memoryP50s, 50)),
+		MemoryP95MedianBytes:      uint64(perfvarPercentileFloat(memoryP95s, 50)),
+		MemoryMaxBytes:            memoryMax,
+		MemorySamplesAboveCeiling: memoryAboveCeiling,
+		CorrectRunCount:           correctRunCount,
+		FailureRunCount:           failureRunCount,
+		InvalidRunCount:           invalidRunCount,
+		ValidRunCount:             len(records) - failureRunCount - invalidRunCount,
+		IndividualCorrect:         correct,
+		IndividualRunValid:        valid,
 	}
 }
 

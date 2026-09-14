@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSignupQualitySignalSyntheticWave(t *testing.T) {
+func TestSignupQualitySignalSyntheticLowShare(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		for _, want := range []string{
 			"statement_timestamp() AT TIME ZONE 'UTC'",
@@ -40,17 +40,73 @@ func TestSignupQualitySignalSyntheticWave(t *testing.T) {
 		"13.5% of the 14521 networks created on 2026-09-03",
 		"device_networks_48h=1961",
 		"device_share=0.135",
-		"e4c34a21",
-		"do not size or judge an onboarding experiment on the raw sign-up count",
+		"cannot distinguish automation from legitimate device-less creation",
+		"Do not infer automation, change a limiter",
+		"next two complete matured UTC cohorts",
+		"retained only as a legacy stable identity token",
+		"it is not causal attribution",
 		"SIGNALS.md §2.26",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("signup quality alert missing %q:\n%s", want, alert.Markdown())
 		}
 	}
+	for _, overclaim := range []string{
+		"an automated wave of account creation raises",
+		"source of the wave",
+	} {
+		if strings.Contains(alert.Markdown(), overclaim) {
+			t.Fatalf("signup quality alert over-attributes %q:\n%s", overclaim, alert.Markdown())
+		}
+	}
 	for _, forbidden := range []string{"network_id", "client_id"} {
 		if strings.Contains(alert.Markdown(), forbidden+"=") {
 			t.Fatalf("signup quality alert leaks an identifier: %s", alert.Markdown())
+		}
+	}
+}
+
+func TestSignupQualitySignalRetainsLegacyAlertLifecycleIdentity(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"2026-09-03", "200", "20"}}, nil
+	}}
+	signal := NewSignupQualitySignal()
+	alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "signup-quality")
+	legacy := Alert{
+		SignalID: alert.SignalID,
+		Class:    alert.Class,
+		Target:   alert.Target,
+		Frame:    "automated-signup-wave",
+		Sustain:  2,
+	}
+	if alert.Identity() != legacy.Identity() {
+		t.Fatalf("source-neutral correction changed active alert identity: got %q, want %q", alert.Identity(), legacy.Identity())
+	}
+
+	// Model two consecutive failing cadences that straddle the wording
+	// correction. Stable identity must complete the existing sustain streak;
+	// a renamed frame would start a second lifecycle at one.
+	gate := newCadenceAlertGate()
+	if got := gate.filter(signal, Alerts{legacy}); len(got) != 0 {
+		t.Fatalf("first legacy cadence returned %d alert(s), want 0", len(got))
+	}
+	alert.Sustain = 2
+	got := gate.filter(signal, Alerts{alert})
+	if len(got) != 1 || got[0].Identity() != legacy.Identity() {
+		t.Fatalf("corrected cadence did not continue the legacy lifecycle: %+v", got)
+	}
+
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"retained only as a legacy stable identity token",
+		"it is not causal attribution",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("signup quality lifecycle caveat missing %q:\n%s", want, markdown)
 		}
 	}
 }

@@ -13,6 +13,14 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// onboardingPostPrimaryTimeout matches the existing finite post-commit
+// projection budget used by model.clockTransferPost. Onboarding writes are
+// optional, but once their primary account/client operation succeeds they
+// must not be discarded merely because the request context ends. The bound
+// prevents a stalled dependency from retaining the request goroutine
+// indefinitely.
+const onboardingPostPrimaryTimeout = 10 * time.Second
+
 // AuthNetworkClient keeps ordinary client creation in the model while owning
 // the deployment-configured post-allocation verify feed. The model cannot
 // resolve verify.yml without coupling protocol configuration into generic
@@ -30,21 +38,65 @@ func AuthNetworkClient(
 	}
 	result, err := model.AuthNetworkClient(authClient, clientSession)
 	if err == nil && result != nil && result.ClientId != nil && clientSession.ByJwt != nil {
-		// onboarding attribution: an app open that follows a campaign landing
-		// click within 48h (one cheap query, never fails the caller)
-		AttributeAppOpen(clientSession, clientSession.ByJwt.NetworkId)
-		// the device path of campaign enrollment: a network without an email
-		// login enters on its first device (one row lookup per auth-client)
-		EnrollNetworkOnboarding(clientSession, clientSession.ByJwt.NetworkId, "", true)
-		// the device's zone, locale and platform place and render the
-		// onboarding campaign's emails
-		RecordOnboardingClientContext(clientSession, clientSession.ByJwt.NetworkId, authClient.TimeZone, authClient.Locale, authClient.DeviceSpec)
+		recordAuthNetworkClientOnboarding(authClient, clientSession)
 	}
 	if err != nil || result == nil || verifySettings == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil {
 		return result, err
 	}
 	feedAuthNetworkClientVerifyEgress(clientSession.Ctx, result, verifySettings)
 	return result, nil
+}
+
+// recordAuthNetworkClientOnboarding runs only after AuthNetworkClient has
+// committed its primary client creation. Preserve request cancellation for
+// that primary operation, then give its optional onboarding persistence one
+// finite detached budget. A shallow session copy retains authenticated and
+// ingress-derived values without changing ownership of the request session.
+func recordAuthNetworkClientOnboarding(
+	authClient *model.AuthNetworkClientArgs,
+	clientSession *session.ClientSession,
+) {
+	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
+		networkId := clientSession.ByJwt.NetworkId
+
+		// onboarding attribution: an app open that follows a campaign landing
+		// click within 48h (one cheap query, never fails the caller)
+		AttributeAppOpen(postSession, networkId)
+		// the device path of campaign enrollment: a network without an email
+		// login enters on its first device (one row lookup per auth-client)
+		EnrollNetworkOnboarding(postSession, networkId, "", true)
+		// the device's zone, locale and platform place and render the
+		// onboarding campaign's emails
+		RecordOnboardingClientContext(
+			postSession,
+			networkId,
+			authClient.TimeZone,
+			authClient.Locale,
+			authClient.DeviceSpec,
+		)
+	})
+}
+
+func runPostPrimaryOnboarding(
+	clientSession *session.ClientSession,
+	callback func(*session.ClientSession),
+) {
+	postSession, cancel := newPostPrimaryOnboardingSession(clientSession)
+	defer cancel()
+	callback(postSession)
+}
+
+func newPostPrimaryOnboardingSession(
+	clientSession *session.ClientSession,
+) (*session.ClientSession, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(
+		context.WithoutCancel(clientSession.Ctx),
+		onboardingPostPrimaryTimeout,
+	)
+	postSession := *clientSession
+	postSession.Ctx = ctx
+	postSession.Cancel = cancel
+	return &postSession, cancel
 }
 
 func feedAuthNetworkClientVerifyEgress(
@@ -63,6 +115,8 @@ func feedAuthNetworkClientVerifyEgress(
 	)
 }
 
+// ConnectNetworkClient records a legacy, family-agnostic connection (intent
+// 0). Family-pinned transports use ConnectNetworkClientWithIpFamily.
 func ConnectNetworkClient(
 	ctx context.Context,
 	clientId server.Id,
@@ -70,8 +124,22 @@ func ConnectNetworkClient(
 	handlerId server.Id,
 	retryLocationTimeout time.Duration,
 ) (connectionId server.Id, clientAddressHash [32]byte, err error) {
+	return ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, retryLocationTimeout, 0)
+}
+
+// ConnectNetworkClientWithIpFamily is ConnectNetworkClient with the address
+// family the transport declared it intends to prove (0, 4 or 6; see
+// model.ConnectionProvenIpFamily).
+func ConnectNetworkClientWithIpFamily(
+	ctx context.Context,
+	clientId server.Id,
+	clientAddress string,
+	handlerId server.Id,
+	retryLocationTimeout time.Duration,
+	ipFamilyIntent int,
+) (connectionId server.Id, clientAddressHash [32]byte, err error) {
 	var clientIp string
-	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, ipFamilyIntent)
 	if err != nil {
 		return
 	}

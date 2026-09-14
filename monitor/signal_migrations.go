@@ -113,6 +113,23 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "onboarding_email_tracker_daily", requiredVersion: 655, rowColumn: 66},
 	{name: "network_onboarding_email_sent_at", requiredVersion: 656, rowColumn: 67},
 	{name: "provider_egress_health measured_at/client_id deadline index", requiredVersion: 657, rowColumn: 68},
+	{name: "network_client_connection.ip_version", requiredVersion: 658, rowColumn: 69},
+	{name: "network_client_connection.ip_family_intent", requiredVersion: 659, rowColumn: 70},
+	{name: "network_client_location_reliability.ipv4_proven", requiredVersion: 660, rowColumn: 71},
+	{name: "network_client_location_reliability.ipv6_proven", requiredVersion: 661, rowColumn: 72},
+	{name: "network_extender table and identity keys", requiredVersion: 662, rowColumn: 73},
+	{name: "network_extender_address table and publish index", requiredVersion: 663, rowColumn: 74},
+	{name: "network_extender_publish table and queue index", requiredVersion: 664, rowColumn: 75},
+	{name: "network_client_connection.extender_id", requiredVersion: 665, rowColumn: 76},
+	{name: "network_client_connection_client_id_connected_extender_id", requiredVersion: 666, rowColumn: 77},
+	{name: "contract_extender table and primary key", requiredVersion: 667, rowColumn: 78},
+	{name: "network_extender_address.dns_ports", requiredVersion: 668, rowColumn: 79},
+	{name: "network_extender.location_id", requiredVersion: 669, rowColumn: 80},
+	{name: "network_extender.city_location_id", requiredVersion: 670, rowColumn: 81},
+	{name: "network_extender.region_location_id", requiredVersion: 671, rowColumn: 82},
+	{name: "network_extender.country_location_id", requiredVersion: 672, rowColumn: 83},
+	{name: "contract_extender.create_time", requiredVersion: 673, rowColumn: 84},
+	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -270,16 +287,18 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT count(*) = 4
 		               FROM (
 		                   VALUES
-		                       ('st_epoch', 'st_epoch_status', '(deployment_key, status, epoch)'),
-		                       ('st_publish', 'st_publish_epoch_kind', '(deployment_key, epoch, kind, create_time)'),
-		                       ('st_event', 'st_event_kind_block', '(deployment_key, kind, block_number, log_index)'),
-		                       ('st_payout_leaf', 'st_payout_leaf_client_epoch', '(deployment_key, client_id, epoch, no_id)')
-		               ) AS expected(table_name, index_name, key_shape)
+		                       ('st_epoch', 'st_epoch_status', 'CREATE INDEX st_epoch_status ON public.st_epoch USING btree (deployment_key, status, epoch)'),
+		                       ('st_publish', 'st_publish_epoch_kind', 'CREATE INDEX st_publish_epoch_kind ON public.st_publish USING btree (deployment_key, epoch, kind, create_time)'),
+		                       ('st_event', 'st_event_kind_block', 'CREATE INDEX st_event_kind_block ON public.st_event USING btree (deployment_key, kind, block_number, log_index)'),
+		                       ('st_payout_leaf', 'st_payout_leaf_client_epoch', 'CREATE INDEX st_payout_leaf_client_epoch ON public.st_payout_leaf USING btree (deployment_key, client_id, epoch, no_id)')
+		               ) AS expected(table_name, index_name, definition)
 		               WHERE EXISTS (
 		                   SELECT 1 FROM index_artifact AS actual
 		                   WHERE actual.table_name = expected.table_name
 		                     AND actual.index_name = expected.index_name
-		                     AND actual.definition LIKE '%' || expected.key_shape || '%'
+		                     AND actual.definition = expected.definition
+		                     AND actual.predicate_definition IS NULL
+		                     AND actual.indisvalid AND actual.indisready
 		               )
 		           )
 		       ),
@@ -306,15 +325,17 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_chain_account_nonce'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(chain_id, from_address, nonce)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_chain_account_nonce ON public.st_transaction_intent USING btree (chain_id, from_address, nonce)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_logical_generation'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(logical_key, generation)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_logical_generation ON public.st_transaction_intent USING btree (logical_key, generation)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
@@ -342,8 +363,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'st_transaction_intent'
 		             AND index_name = 'st_transaction_intent_genesis_account_nonce'
-		             AND definition LIKE 'CREATE UNIQUE INDEX %'
-		             AND definition LIKE '%(chain_id, genesis_hash, from_address, nonce)%'
+		             AND definition = 'CREATE UNIQUE INDEX st_transaction_intent_genesis_account_nonce ON public.st_transaction_intent USING btree (chain_id, genesis_hash, from_address, nonce)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       ),
 		       NOT EXISTS (
 		           SELECT 1 FROM index_artifact
@@ -436,7 +458,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               SELECT 1 FROM index_artifact
 		               WHERE table_name = 'st_fleet_binding_signature'
 		                 AND index_name = 'st_fleet_binding_signature_network'
-		                 AND definition LIKE '%(deployment_key, network_id, create_time DESC)%'
+		                 AND definition = 'CREATE INDEX st_fleet_binding_signature_network ON public.st_fleet_binding_signature USING btree (deployment_key, network_id, create_time DESC)'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
 		           )
 		       ),
 		       (
@@ -584,14 +608,16 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_event'
 		             AND index_name = 'network_onboarding_event_network_id_at'
-		             AND definition LIKE '%(network_id, at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_event_network_id_at ON public.network_onboarding_event USING btree (network_id, at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_event'
 		             AND index_name = 'network_onboarding_event_name_at'
-		             AND definition LIKE '%(name, at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_event_name_at ON public.network_onboarding_event USING btree (name, at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
@@ -620,7 +646,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_email'
 		             AND index_name = 'network_onboarding_email_network_id_sent_at'
-		             AND definition LIKE '%(network_id, sent_at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_email_network_id_sent_at ON public.network_onboarding_email USING btree (network_id, sent_at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       to_regclass('public.onboarding_results_daily') IS NOT NULL,
@@ -629,7 +656,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding'
 		             AND index_name = 'network_onboarding_created_at'
-		             AND definition LIKE '%(created_at)%'
+		             AND definition = 'CREATE INDEX network_onboarding_created_at ON public.network_onboarding USING btree (created_at)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       (
@@ -742,7 +770,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           SELECT 1 FROM index_artifact
 		           WHERE table_name = 'network_onboarding_email'
 		             AND index_name = 'network_onboarding_email_sent_at'
-		             AND definition LIKE '%(sent_at, network_id, step)%'
+		             AND definition = 'CREATE INDEX network_onboarding_email_sent_at ON public.network_onboarding_email USING btree (sent_at, network_id, step)'
+		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
@@ -750,6 +779,258 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           WHERE table_name = 'provider_egress_health'
 		             AND index_name = 'provider_egress_health_measured_at_client_id'
 		             AND definition = '`+providerEgressHealthDeadlineIndexDefinition+`'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'ip_version'
+		             AND data_type = 'smallint' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'ip_family_intent'
+		             AND data_type = 'smallint' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'ipv4_proven'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'ipv6_proven'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
+		       ),
+		       (
+		           to_regclass('public.network_extender') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 13
+		               FROM (VALUES
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('network_id', 'uuid', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('public_key', 'bytea', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO'),
+		                   ('tcp_port', 'integer', 'NO'),
+		                   ('udp_port', 'integer', 'NO'),
+		                   ('dns_port', 'integer', 'NO'),
+		                   ('dns_tld', 'character varying', 'NO'),
+		                   ('country_code', 'character varying', 'NO'),
+		                   ('active', 'boolean', 'NO'),
+		                   ('revoke_time', 'timestamp without time zone', 'YES'),
+		                   ('record_issue_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('p', 'PRIMARY KEY (extender_id)'),
+		                   ('u', 'UNIQUE (public_key)')
+		               ) AS expected(constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = 'network_extender'
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		       ),
+		       (
+		           to_regclass('public.network_extender_address') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 10
+		               FROM (VALUES
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('ip_version', 'smallint', 'NO'),
+		                   ('ip', 'inet', 'NO'),
+		                   ('carriers', 'character varying', 'NO'),
+		                   ('activate_time', 'timestamp without time zone', 'NO'),
+		                   ('last_probe_time', 'timestamp without time zone', 'YES'),
+		                   ('last_probe_success_time', 'timestamp without time zone', 'YES'),
+		                   ('consecutive_probe_failures', 'integer', 'NO'),
+		                   ('active', 'boolean', 'NO'),
+		                   ('last_publish_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_address'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_address'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (extender_id, ip_version)'
+		                 AND validated
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'network_extender_address'
+		                 AND index_name = 'network_extender_address_active_last_publish_time'
+		                 AND definition = 'CREATE INDEX network_extender_address_active_last_publish_time ON public.network_extender_address USING btree (active, last_publish_time)'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
+		           )
+		       ),
+		       (
+		           to_regclass('public.network_extender_publish') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 6
+		               FROM (VALUES
+		                   ('publish_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('kind', 'smallint', 'NO'),
+		                   ('message', 'bytea', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO'),
+		                   ('published_time', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_publish'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_publish'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (publish_id)'
+		                 AND validated
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM index_artifact
+		               WHERE table_name = 'network_extender_publish'
+		                 AND index_name = 'network_extender_publish_published_time_create_time'
+		                 AND definition = 'CREATE INDEX network_extender_publish_published_time_create_time ON public.network_extender_publish USING btree (published_time, create_time)'
+		                 AND predicate_definition IS NULL
+		                 AND indisvalid AND indisready
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
+		             AND column_name = 'extender_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_client_connection'
+		             AND index_name = 'network_client_connection_client_id_connected_extender_id'
+		             AND definition = 'CREATE INDEX network_client_connection_client_id_connected_extender_id ON public.network_client_connection USING btree (client_id, connected, extender_id)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.contract_extender') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 5
+		               FROM (VALUES
+		                   ('contract_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('party', 'character varying', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('network_id', 'uuid', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'contract_extender'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'contract_extender'
+		                 AND column_name = 'party'
+		                 AND character_maximum_length = 16
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'contract_extender'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (contract_id, extender_id, party)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender_address'
+		             AND column_name = 'dns_ports'
+		             AND data_type = 'character varying' AND is_nullable = 'NO'
+		             AND column_default IN (
+		                 quote_literal(''),
+		                 quote_literal('') || '::character varying',
+		                 quote_literal('') || '::text'
+		             )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'city_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'region_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'country_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'contract_extender'
+		             AND column_name = 'create_time'
+		             AND data_type = 'timestamp without time zone' AND is_nullable = 'NO'
+		             AND column_default = 'now()'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'contract_extender'
+		             AND index_name = 'contract_extender_create_time_contract_id'
+		             AND definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       )

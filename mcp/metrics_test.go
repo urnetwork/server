@@ -2,12 +2,14 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestBoundedMcpTargetNeverExportsCallerMethodOrTool(t *testing.T) {
@@ -42,6 +44,64 @@ func TestMcpRuntimeCollectorReplacesMaximumAcrossIntervals(t *testing.T) {
 	collector.observeCall("tools/call", "fetch", 500*time.Millisecond)
 	if got := collector.maximums[key].seconds; got != 0.5 {
 		t.Fatalf("next-interval maximum = %v, want 0.5", got)
+	}
+}
+
+func TestMcpDurationSummariesExportExactSumCountWithoutBuckets(t *testing.T) {
+	tests := []struct {
+		name       string
+		metricName string
+		newSummary func() *prometheus.SummaryVec
+		labels     []string
+		want       string
+	}{
+		{
+			name:       "call",
+			metricName: "urnetwork_mcp_call_duration_seconds",
+			newSummary: newMcpCallSeconds,
+			labels:     []string{"tools/call", "fetch"},
+			want: `# HELP urnetwork_mcp_call_duration_seconds MCP call duration by finite protocol method and registered tool.
+# TYPE urnetwork_mcp_call_duration_seconds summary
+urnetwork_mcp_call_duration_seconds_sum{method="tools/call",tool="fetch"} 3.25
+urnetwork_mcp_call_duration_seconds_count{method="tools/call",tool="fetch"} 2
+`,
+		},
+		{
+			name:       "fetch wait",
+			metricName: "urnetwork_mcp_fetch_wait_duration_seconds",
+			newSummary: newMcpFetchWaitSeconds,
+			labels:     []string{"global"},
+			want: `# HELP urnetwork_mcp_fetch_wait_duration_seconds Time fetch calls spend at each concurrency gate, including immediate admissions.
+# TYPE urnetwork_mcp_fetch_wait_duration_seconds summary
+urnetwork_mcp_fetch_wait_duration_seconds_sum{stage="global"} 3.25
+urnetwork_mcp_fetch_wait_duration_seconds_count{stage="global"} 2
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := prometheus.NewPedanticRegistry()
+			duration := test.newSummary()
+			registry.MustRegister(duration)
+			duration.WithLabelValues(test.labels...).Observe(2.25)
+			duration.WithLabelValues(test.labels...).Observe(1)
+
+			families, err := registry.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(families) != 1 || families[0].GetName() != test.metricName ||
+				families[0].GetType() != dto.MetricType_SUMMARY || len(families[0].Metric) != 1 {
+				t.Fatalf("%s duration families = %+v, want one summary", test.name, families)
+			}
+			summary := families[0].Metric[0].GetSummary()
+			if summary.GetSampleCount() != 2 || summary.GetSampleSum() != 3.25 || len(summary.Quantile) != 0 {
+				t.Fatalf("%s duration summary = %+v, want count=2 sum=3.25 and no quantiles", test.name, summary)
+			}
+			if err := testutil.GatherAndCompare(registry, strings.NewReader(test.want), test.metricName); err != nil {
+				t.Fatalf("%s duration exposition contains more than exact sum/count: %v", test.name, err)
+			}
+		})
 	}
 }
 

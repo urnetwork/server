@@ -29,13 +29,19 @@ var mcpCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help:      "MCP calls by finite protocol method, registered tool, and bounded terminal outcome.",
 }, []string{"method", "tool", "outcome"})
 
-var mcpCallSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "urnetwork",
-	Subsystem: "mcp",
-	Name:      "call_duration_seconds",
-	Help:      "MCP call duration by finite protocol method and registered tool.",
-	Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30},
-}, []string{"method", "tool"})
+var mcpCallSeconds = newMcpCallSeconds()
+
+// newMcpCallSeconds retains exact sum/count observations without multiplying
+// every finite method/tool pair across classic histogram buckets.
+func newMcpCallSeconds() *prometheus.SummaryVec {
+	return prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace:  "urnetwork",
+		Subsystem:  "mcp",
+		Name:       "call_duration_seconds",
+		Help:       "MCP call duration by finite protocol method and registered tool.",
+		Objectives: nil,
+	}, []string{"method", "tool"})
+}
 
 var mcpCallsInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
@@ -79,13 +85,19 @@ var mcpFetchWaiters = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help:      "Fetch calls currently waiting at the per-identity or global concurrency gate.",
 }, []string{"stage"})
 
-var mcpFetchWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "urnetwork",
-	Subsystem: "mcp",
-	Name:      "fetch_wait_duration_seconds",
-	Help:      "Time fetch calls spend at each concurrency gate, including immediate admissions.",
-	Buckets:   []float64{0.0001, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 20},
-}, []string{"stage"})
+var mcpFetchWaitSeconds = newMcpFetchWaitSeconds()
+
+// newMcpFetchWaitSeconds keeps gate-specific means without a bucket series
+// for every stage and process generation.
+func newMcpFetchWaitSeconds() *prometheus.SummaryVec {
+	return prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Namespace:  "urnetwork",
+		Subsystem:  "mcp",
+		Name:       "fetch_wait_duration_seconds",
+		Help:       "Time fetch calls spend at each concurrency gate, including immediate admissions.",
+		Objectives: nil,
+	}, []string{"stage"})
+}
 
 var mcpFetchAdmissionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",

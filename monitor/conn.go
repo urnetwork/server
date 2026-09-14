@@ -23,12 +23,13 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -151,14 +152,16 @@ func (self *host) redisNodePorts() []int {
 // monitorConfig is the monitor's view of the environment
 // (from monitor.yml + pg.yml + config settings.yml).
 type monitorConfig struct {
-	env                 string              // WARP_ENV
-	publicDomain        string              // active services.yml domain
-	websiteDomain       string              // canonical managed product website, when present
-	managerHostname     string              // configured manager alias, when exposed
-	logServices         []string            // active services.yml service inventory
-	logServiceBlocks    map[string][]string // active per-service block inventory
-	verificationEnabled bool
-	stDeploymentKey     string
+	env                    string              // WARP_ENV
+	publicDomain           string              // active services.yml domain
+	websiteDomain          string              // canonical managed product website, when present
+	managerHostname        string              // configured manager alias, when exposed
+	logServices            []string            // active services.yml service inventory
+	logServiceBlocks       map[string][]string // active blocks and expected-process denominators
+	proxyPathExpectedHosts int                 // active services.yml proxy placements
+	verificationEnabled    bool
+	stConfigStatus         STConfigurationStatus
+	stDeploymentKey        string
 
 	sshUser     string // deployed login user
 	sshDevUser  string // login user for local dev over the overlay
@@ -179,6 +182,8 @@ type monitorConfig struct {
 	sourceIPv6URL      string
 	expectedSourceIPv4 string
 	expectedSourceIPv6 string
+	dnsAliases         DNSAliasSettings
+	mimirPublishers    MimirPublisherSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string
@@ -456,7 +461,7 @@ func (self *runner) tcpExchange(ctx context.Context, network, address string, pa
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	connection, err := (&net.Dialer{Timeout: timeout}).DialContext(commandCtx, network, address)
+	connection, err := server.NewDialer(timeout).DialContext(commandCtx, network, address)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +497,7 @@ func (self *runner) tlsCertificates(ctx context.Context, network, address, serve
 	defer cancel()
 
 	connection, err := (&tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: timeout},
+		NetDialer: server.NewDialer(timeout),
 		Config: &tls.Config{
 			ServerName:         serverName,
 			MinVersion:         tls.VersionTLS12,

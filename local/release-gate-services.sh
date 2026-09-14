@@ -78,6 +78,39 @@ release_gate_service_endpoint() {
   RELEASE_GATE_SERVICE_ENDPOINT="$binding"
 }
 
+# Preserve the failing owned service before normal cleanup removes it. These
+# bounded reads use the original admission deadline and never restart a task.
+# Recheck immutable ID/labels before reading logs; changed ownership is refused.
+release_gate_service_failure() (
+  umask 077
+  local service="$1" id="$2" stage="$3" detail="$4" status
+  release_gate_service_find "$service" || return 1
+  [[ "$RELEASE_GATE_SERVICE_ID" == "$id" ]] || return 1
+  printf 'service=%s\ncontainer_id=%s\nstage=%s\nobservation=%s\n' "$service" "$id" "$stage" "$detail" \
+    > "$release_gate_service_root/$service.failure.txt" || return 1
+  if release_gate_service_docker inspect --type container --format '{{json .State}}' "$id" 2>&1 \
+      | head -c 65536 > "$release_gate_service_root/$service.failure-state.txt"; then status=0; else status=$?; fi
+  printf 'state_capture_exit=%s\n' "$status" >> "$release_gate_service_root/$service.failure.txt" || return 1
+  release_gate_service_find "$service" || return 1
+  [[ "$RELEASE_GATE_SERVICE_ID" == "$id" ]] || return 1
+  if release_gate_service_docker logs --timestamps --tail 100 "$id" 2>&1 \
+      | head -c 1048576 > "$release_gate_service_root/$service.failure-log.txt"; then status=0; else status=$?; fi
+  printf 'log_capture_exit=%s\n' "$status" >> "$release_gate_service_root/$service.failure.txt" || return 1
+)
+
+release_gate_service_require_running() {
+  local service="$1" id="$2" state
+  release_gate_service_find "$service" || return 1
+  [[ "$RELEASE_GATE_SERVICE_ID" == "$id" ]] || return 1
+  state="$(release_gate_service_docker inspect --type container --format \
+    '{{.State.Status}} {{.State.Running}} {{.State.ExitCode}}' "$id")" || return 1
+  if [[ "$state" != 'running true 0' ]]; then
+    printf 'release gate: owned %s container %s is not running: %s\n' "$service" "$id" "$state" >&2
+    release_gate_service_failure "$service" "$id" stopped "$state" || true
+    return 1
+  fi
+}
+
 # The exact frozen Go fixture owns synthetic resources; this command boundary
 # is separate from Docker so tests can run its real prebuilt executable.
 release_gate_service_fixture() (
@@ -164,24 +197,28 @@ release_gate_services_start() {
     # never ask a privileged client to create an unreadable root-owned cidfile.
     (umask 077; printf '%s\n' "$id" > "$release_gate_service_root/$service.cid") || return 1
     release_gate_service_docker start "$id" >/dev/null || return 1
+    (umask 077; : > "$release_gate_service_root/$service.readiness.stderr") || return 1
     ready=0
     for ((attempt=0; attempt<90; attempt++)); do
       (( SECONDS < release_gate_service_deadline )) || return 124
-      release_gate_service_find "$service" || return 1
-      [[ "$RELEASE_GATE_SERVICE_ID" == "$id" ]] || return 1
+      release_gate_service_require_running "$service" "$id" || return 1
       if [[ "$service" == postgres ]]; then
         expected='512:256MB:en_US.UTF-8:t'
         output="$(release_gate_service_docker exec "$id" env PGPASSWORD=urnetwork-local-test PGCONNECT_TIMEOUT=3 \
           psql -h 127.0.0.1 -U bringyour -d bringyour -Atqc \
-          "SELECT current_setting('max_connections') || ':' || current_setting('shared_buffers') || ':' || datcollate || ':' || CASE WHEN rolcreatedb THEN 't' ELSE 'f' END FROM pg_database, pg_roles WHERE datname=current_database() AND rolname=current_user" 2>/dev/null)" || output=''
+          "SELECT current_setting('max_connections') || ':' || current_setting('shared_buffers') || ':' || datcollate || ':' || CASE WHEN rolcreatedb THEN 't' ELSE 'f' END FROM pg_database, pg_roles WHERE datname=current_database() AND rolname=current_user" 2>"$release_gate_service_root/$service.readiness.stderr")" || output="failed readiness command: $output"
       else
         expected=PONG
-        output="$(release_gate_service_docker exec "$id" redis-cli ping 2>/dev/null)" || output=''
+        output="$(release_gate_service_docker exec "$id" redis-cli ping 2>"$release_gate_service_root/$service.readiness.stderr")" || output="failed readiness command: $output"
       fi
       if [[ "$output" == "$expected" ]]; then ready=1; break; fi
       sleep 1
     done
-    [[ "$ready" == 1 ]] || return 1
+    if [[ "$ready" != 1 ]]; then
+      printf 'release gate: owned %s container %s did not reach exact readiness\n' "$service" "$id" >&2
+      release_gate_service_failure "$service" "$id" readiness "$output" || true
+      return 1
+    fi
     release_gate_service_endpoint "$service" "$port" "$id" || return 1
     if [[ "$service" == postgres ]]; then release_gate_postgres_endpoint="$RELEASE_GATE_SERVICE_ENDPOINT"
     else release_gate_redis_endpoint="$RELEASE_GATE_SERVICE_ENDPOINT"; fi

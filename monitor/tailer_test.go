@@ -329,10 +329,17 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	if !activeInterval.matches(event) {
 		t.Fatal("active 27-second IPv6-loss interval did not match the later tail error")
 	}
-	restoredBeforeTail := activeInterval
-	restoredBeforeTail.ipv6RestoredAt = expiredAt.Add(-time.Second)
-	if restoredBeforeTail.matches(event) {
-		t.Fatal("IPv6 loss restored before the tail error was treated as causal")
+	restoredWithinDeliveryGrace := activeInterval
+	restoredWithinDeliveryGrace.ipv6RestoredAt = expiredAt.Add(-time.Second)
+	if !restoredWithinDeliveryGrace.matches(event) {
+		t.Fatal("sub-second restoration-to-diagnostic propagation was not treated as causal")
+	}
+	restoredOutsideDeliveryGrace := activeInterval
+	restoredOutsideDeliveryGrace.ipv6RestoredAt = expiredAt.Add(
+		-monitorIPv6RestorationDiagnosticGracePeriod - 251*time.Millisecond,
+	)
+	if restoredOutsideDeliveryGrace.matches(event) {
+		t.Fatal("route loss restored outside the bounded delivery grace was treated as causal")
 	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
@@ -344,6 +351,72 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	distant.ipv6AbsentAt = distant.routerLifetimeExpiredAt.Add(time.Second)
 	if distant.matches(event) {
 		t.Fatal("distant router expiry was correlated to this transport event")
+	}
+}
+
+func TestTailTransportRouteLossUsesBoundedPostRestoreDiagnosticGrace(t *testing.T) {
+	const diagnostic = "2026/09/12 11:36:27 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting."
+	tailer := newLogTailer("synthetic-service", nil)
+	tailer.recordTransportDiagnostic(diagnostic)
+
+	parseTime := func(value string) time.Time {
+		t.Helper()
+		parsed, err := time.ParseInLocation(monitorIPv6LogTimeLayout, value, time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	probe := &logTailProbe{
+		tailers: []*logTailer{tailer},
+		monitorRouteEvidence: func(context.Context, *probeEnv, map[string]*tailTransportRouteAggregate) tailTransportMonitorRouteEvidence {
+			return tailTransportMonitorRouteEvidence{
+				interfaceName:           "en0",
+				routerLifetimeExpiredAt: parseTime("2026-09-12 11:36:19.284"),
+				ipv6AbsentAt:            parseTime("2026-09-12 11:36:19.313"),
+				ipv6RestoredAt:          parseTime("2026-09-12 11:36:26.067"),
+			}
+		},
+	}
+	env := &probeEnv{cfg: &monitorConfig{hosts: []*host{{
+		name: "synthetic-edge",
+		edgeIPv6: []EdgeIPv6InterfaceSettings{{
+			Interface: "public0",
+			Address:   "2001:db8:2::44",
+		}},
+	}}}}
+
+	findings, err := probe.check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+	if routeLoss.healthy {
+		t.Fatalf("bounded post-restoration diagnostic was not attributed locally: %+v", routeLoss)
+	}
+	alert := alertFromFinding(
+		syntheticSettings(nil),
+		"1.5",
+		"log-errors",
+		"Log error-class rates",
+		routeLoss,
+	)
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"monitor_restoration_before_diagnostic=933ms",
+		"bounded 2s delivery grace",
+		"larger restored gaps remain ineligible",
+		"monitor-side first-hop",
+		"Do not change the named production edge",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("bounded restoration alert Markdown missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, rawLogFragment := range []string{"configd[", "network changed:"} {
+		if strings.Contains(markdown, rawLogFragment) {
+			t.Fatalf("bounded restoration alert retained raw local log fragment %q:\n%s", rawLogFragment, markdown)
+		}
 	}
 }
 
@@ -521,6 +594,309 @@ func TestMimirSeriesLimitStandingWindowHasStablePrivateFrameAndHealthyControl(t 
 	}
 }
 
+func TestMimirStructuredRejectionsRetainOnlyFixedBatchClasses(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		class string
+		frame string
+	}{
+		{
+			name:  "series",
+			line:  "Stats push rejected status=400 reason=series-limit job=proxy metric_families=3 time_series=41 family_classes=process:1,redis:2 family_classes_truncated=false",
+			class: "mimir-series-limit",
+			frame: "job=proxy",
+		},
+		{
+			name:  "rate",
+			line:  "Stats push rejected status=429 reason=rate-limit job=taskworker metric_families=2 time_series=19 family_classes=go:1,process:1 family_classes_truncated=false",
+			class: "mimir-ingestion-rate-limit",
+			frame: "job=taskworker",
+		},
+		{
+			name:  "other",
+			line:  "Stats push rejected status=503 reason=server job=other metric_families=1 time_series=1 family_classes=other:1 family_classes_truncated=false",
+			class: "mimir-push-rejected",
+			frame: "job=other",
+		},
+	}
+	for _, test := range tests {
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify(test.line)
+		finding := findingByClass(t, tailer.drainWindow(), test.class)
+		if finding.healthy || finding.frame != test.frame {
+			t.Fatalf("%s: structured rejection was not classified: %+v", test.name, finding)
+		}
+		if finding.evidence == "" || !strings.Contains(finding.evidence, "metric_families=") ||
+			!strings.Contains(finding.evidence, "family_classes=") {
+			t.Fatalf("%s: bounded rejected-batch evidence missing: %+v", test.name, finding)
+		}
+	}
+}
+
+func TestMimirGenericRejectionMarkdownDoesNotExcludeUnprovenTypedLimits(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected status=400 reason=other-client job=api metric_families=1 time_series=1 family_classes=go:1 family_classes_truncated=false")
+	finding := findingByClass(t, tailer.drainWindow(), "mimir-push-rejected")
+	if finding.healthy || finding.tier != tierWarn {
+		t.Fatalf("generic upstream rejection lost affirmative batch loss: %+v", finding)
+	}
+	markdown := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log errors", finding).Markdown()
+	for _, required := range []string{
+		"unclassified upstream rejection", "without a proven typed limit", "not evidence that either limit was absent",
+		"Unknown, unreadable, or oversized", "direct admission counters remain the loss authority",
+	} {
+		if !strings.Contains(markdown, required) {
+			t.Errorf("generic rejection Markdown lacks conservative attribution %q", required)
+		}
+	}
+	if strings.Contains(markdown, "non-series, non-rate") {
+		t.Fatal("generic rejection Markdown affirmatively excluded an unproven limit")
+	}
+}
+
+func TestMimirStructuredRejectionsFailClosedOnImpossibleOrMalformedTuples(t *testing.T) {
+	const valid = "Stats push rejected status=400 reason=series-limit job=api metric_families=2 time_series=3 family_classes=go:1,process:1 family_classes_truncated=false"
+	for _, test := range []struct {
+		name string
+		line string
+	}{
+		{name: "series on server status", line: strings.Replace(valid, "status=400", "status=503", 1)},
+		{name: "rate on client status", line: strings.Replace(valid, "reason=series-limit", "reason=rate-limit", 1)},
+		{name: "server on client status", line: strings.Replace(valid, "reason=series-limit", "reason=server", 1)},
+		{name: "client on server status", line: strings.Replace(strings.Replace(valid, "status=400", "status=503", 1), "reason=series-limit", "reason=other-client", 1)},
+		{name: "unknown status", line: strings.Replace(valid, "status=400", "status=999", 1)},
+		{name: "zero families", line: strings.Replace(valid, "metric_families=2", "metric_families=0", 1)},
+		{name: "zero series", line: strings.Replace(valid, "time_series=3", "time_series=0", 1)},
+		{name: "overflow", line: strings.Replace(valid, "time_series=3", "time_series=9999999999999999999", 1)},
+		{name: "body bound", line: strings.Replace(valid, "time_series=3", "time_series=8388609", 1)},
+		{name: "missing summary", line: strings.Replace(valid, "go:1,process:1", "none", 1)},
+		{name: "duplicate classes", line: strings.Replace(valid, "go:1,process:1", "go:1,go:1", 1)},
+		{name: "unsorted classes", line: strings.Replace(valid, "go:1,process:1", "process:1,go:1", 1)},
+		{name: "zero class count", line: strings.Replace(valid, "go:1,process:1", "go:0,process:2", 1)},
+		{name: "summary mismatch", line: strings.Replace(valid, "go:1,process:1", "go:1,process:2", 1)},
+		{name: "impossible truncation", line: strings.Replace(valid, "truncated=false", "truncated=true", 1)},
+		{name: "raw job", line: strings.Replace(valid, "job=api", "job=private-fixture", 1)},
+		{name: "raw family", line: strings.Replace(valid, "go:1,process:1", "private-fixture:2", 1)},
+		{name: "unknown reason", line: strings.Replace(valid, "reason=series-limit", "reason=private-fixture", 1)},
+		{name: "missing field", line: strings.Replace(valid, "time_series=3 ", "", 1)},
+		{name: "raw suffix", line: valid + " private-fixture=192.0.2.9"},
+		{name: "missing value", line: "Stats push rejected status="},
+	} {
+		if _, ok := parseMimirRejectedLog(test.line); ok {
+			t.Fatalf("%s: impossible rejection event parsed", test.name)
+		}
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify("[private-fixture.example.test][grafana] " + test.line)
+		findings := tailer.drainWindow()
+		unknown := findingByClass(t, findings, "mimir-rejection-unobservable")
+		if unknown.healthy || unknown.tier != tierWarn || unknown.frame != "rejection-schema" {
+			t.Fatalf("%s: malformed schema lost fixed visibility: %+v", test.name, unknown)
+		}
+		for _, finding := range findings {
+			if finding.class == "mimir-series-limit" || finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected" {
+				t.Fatalf("%s: malformed schema attributed or resolved typed loss: %+v", test.name, finding)
+			}
+		}
+		markdown := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log errors", unknown).Markdown()
+		for _, secret := range []string{"private-fixture", "192.0.2.9"} {
+			if strings.Contains(markdown, secret) {
+				t.Fatalf("%s: malformed rejection retained private payload", test.name)
+			}
+		}
+		for _, required := range []string{"visibility loss", "withholds healthy", "artifact schemas", "ten minutes"} {
+			if !strings.Contains(markdown, required) {
+				t.Errorf("%s: visibility alert lacks %q", test.name, required)
+			}
+		}
+	}
+}
+
+func TestMimirMalformedSchemaWithholdsRecoveryButRetainsConcreteLoss(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected status=400 reason=series-limit job=api metric_families=1 time_series=1 family_classes=process:1 family_classes_truncated=false")
+	tailer.classify("Stats push rejected status=429 reason=private-fixture")
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "mimir-series-limit"); finding.healthy {
+		t.Fatal("a malformed sibling suppressed affirmative series loss")
+	}
+	for _, finding := range findings {
+		if finding.healthy && (finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected") {
+			t.Fatal("unknown schema resolved an unobservable typed sibling")
+		}
+	}
+	clean := tailer.drainWindow()
+	for _, class := range []string{"mimir-series-limit", "mimir-ingestion-rate-limit", "mimir-push-rejected", "mimir-rejection-unobservable"} {
+		if next := findingByClass(t, clean, class); !next.healthy {
+			t.Fatalf("a subsequent complete clean window cannot resolve %s", class)
+		}
+	}
+}
+
+func TestMimirLegacyRejectionCannotInheritReasonFromEchoedCallerLabel(t *testing.T) {
+	for _, line := range []string{
+		`Stats push rejected (400): invalid sample series={note="per-user series limit", address="192.0.2.9", private="synthetic-private-value"}`,
+		`Stats push rejected (503): per-user series limit unavailable private="synthetic-private-value"`,
+	} {
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify(line)
+		findings := tailer.drainWindow()
+		visibility := findingByClass(t, findings, "mimir-rejection-unobservable")
+		if visibility.healthy || strings.Contains(visibility.evidence, "synthetic-private-value") || strings.Contains(visibility.evidence, "192.0.2.9") {
+			t.Fatal("unsupported legacy rejection lost fixed visibility/privacy")
+		}
+		for _, finding := range findings {
+			if finding.class == "mimir-series-limit" || finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected" {
+				t.Fatal("echoed caller phrase attributed or resolved typed Mimir loss")
+			}
+		}
+	}
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected (400): failed pushing to ingester ingester.example.test: user=synthetic-tenant: per-user series limit of 7 exceeded (err-mimir-max-series-per-user)")
+	if finding := findingByClass(t, tailer.drainWindow(), "mimir-series-limit"); finding.healthy || finding.frame != "tenant-series-admission" {
+		t.Fatal("source-reviewed legacy series prefix no longer preserves rollout evidence")
+	}
+}
+
+func TestMimirRejectionTailCancellationHasNoFabricatedEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tailer := newLogTailer("grafana", nil)
+	tailer.stream = func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) { return nil, nil, ctx.Err() }
+	if err := tailer.tailOnce(ctx); err != context.Canceled {
+		t.Fatalf("tail cancellation=%v", err)
+	}
+	for _, finding := range tailer.drainWindow() {
+		if strings.HasPrefix(finding.class, "mimir-") && !finding.healthy {
+			t.Fatalf("cancellation manufactured rejection evidence: %+v", finding)
+		}
+	}
+}
+
+func TestStandingTailAttributesStaleSourceTimeWithoutReplayingProductFailure(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 11, 22, 30, 0, 0, time.UTC)
+	tailer := newLogTailer("grafana", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+
+	stale := `[fixture.example][grafana][g1][cid:synthetic][2026-09-11T21:30:00Z] Stats push rejected (400): per-user series limit exceeded instance="sensitive-fixture"`
+	tailer.ingestStanding(stale, true, true)
+	tailer.ingestStanding(stale, true, true)
+	tailer.ingestStanding(`[fixture.example][grafana][g1][cid:synthetic][2026-09-11T21:45:00Z] ordinary delayed fixture record`, true, true)
+	findings := tailer.drainWindow()
+	if product := findingByClass(t, findings, "mimir-series-limit"); !product.healthy {
+		t.Fatalf("stale source record became a current product failure: %+v", product)
+	}
+	visibility := findingByClass(t, findings, "tailer-stale-arrival")
+	if visibility.healthy || visibility.sustain != 1 {
+		t.Fatalf("stale source record was not attributed to observation visibility: %+v", visibility)
+	}
+	for _, want := range []string{"stale_arrivals=2", "oldest_source_age=1h0m0s"} {
+		if !strings.Contains(visibility.observed, want) {
+			t.Fatalf("stale observation lacks %q: %+v", want, visibility)
+		}
+	}
+	rendered := visibility.symptom + visibility.baseline + visibility.observed +
+		visibility.mechanism + visibility.evidence + visibility.context +
+		visibility.action + visibility.verify
+	if strings.Contains(rendered, "sensitive-fixture") {
+		t.Fatalf("stale observation retained source contents: %+v", visibility)
+	}
+	if novel := findingByClass(t, findings, "novel"); !novel.healthy {
+		t.Fatalf("stale ordinary record became a novel product failure: %+v", novel)
+	}
+
+	current := `[fixture.example][grafana][g1][cid:synthetic][2026-09-11T22:28:30Z] Stats push rejected (400): per-user series limit exceeded instance="sensitive-fixture"`
+	tailer.ingestStanding(current, true, true)
+	findings = tailer.drainWindow()
+	if product := findingByClass(t, findings, "mimir-series-limit"); product.healthy {
+		t.Fatalf("current source record was discarded: %+v", product)
+	}
+	if next := findingByClass(t, findings, "tailer-stale-arrival"); !next.healthy {
+		t.Fatalf("quiet stale-arrival window did not resolve: %+v", next)
+	}
+}
+
+func TestStandingTailStaleGateRequiresAnAuthoritativePastTimestamp(t *testing.T) {
+	fixedNow := time.Date(2026, 9, 11, 22, 30, 0, 0, time.UTC)
+	for _, line := range []string{
+		`[fixture.example][grafana][g1][cid:synthetic][timestamp-unavailable] Stats push rejected (400): per-user series limit exceeded`,
+		`[fixture.example][grafana][g1][cid:synthetic][2026-09-11T22:31:00Z] Stats push rejected (400): per-user series limit exceeded`,
+	} {
+		tailer := newLogTailer("grafana", nil)
+		tailer.clock = func() time.Time { return fixedNow }
+		tailer.ingestStanding(line, true, true)
+		findings := tailer.drainWindow()
+		if product := findingByClass(t, findings, "mimir-series-limit"); product.healthy {
+			t.Fatalf("non-stale source record was hidden: %q", line)
+		}
+		if visibility := findingByClass(t, findings, "tailer-stale-arrival"); !visibility.healthy {
+			t.Fatalf("unproven source staleness raised stale-arrival: %+v", visibility)
+		}
+	}
+}
+
+func TestStandingTailClassifiesWarpctlPreCursorReductionWithoutRawHistory(t *testing.T) {
+	tailer := newLogTailer("fixture-service", nil)
+	tailer.ingestStanding(
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=17`,
+		true,
+		true,
+	)
+
+	finding := findingByClass(t, tailer.drainWindow(), "loki-tail-pre-cursor-entries")
+	if finding.healthy || finding.sustain != 1 {
+		t.Fatalf("pre-cursor reduction was not an immediate visibility warning: %+v", finding)
+	}
+	for _, want := range []string{"fixture-service", "count=17", "monotonic live-tail cursor"} {
+		rendered := finding.symptom + finding.observed + finding.evidence + finding.mechanism
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("pre-cursor finding lacks %q: %+v", want, finding)
+		}
+	}
+	rendered := finding.symptom + finding.baseline + finding.observed +
+		finding.mechanism + finding.evidence + finding.context +
+		finding.action + finding.verify
+	if strings.Contains(rendered, "private-stale-fixture") {
+		t.Fatalf("pre-cursor finding retained suppressed contents: %s", rendered)
+	}
+}
+
+func TestStandingTailRejectsMalformedPreCursorReduction(t *testing.T) {
+	for _, line := range []string{
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=0`,
+		`[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=1 private-stale-fixture`,
+	} {
+		tailer := newLogTailer("fixture-service", nil)
+		tailer.ingestStanding(line, true, true)
+		finding := findingByClass(t, tailer.drainWindow(), "loki-tail-pre-cursor-entries")
+		if !finding.healthy {
+			t.Fatalf("malformed pre-cursor reduction was trusted: %q %+v", line, finding)
+		}
+	}
+}
+
+func TestStandingTailPreCursorReductionIsDocumented(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	for _, required := range []string{
+		"[warpctl][loki-tail-pre-cursor-entries] service=<service> count=<n>",
+		"observation-path evidence rather than a current product failure",
+		"Distinct records at the cursor timestamp",
+		"remain visible",
+		"never replay suppressed contents",
+	} {
+		if !strings.Contains(catalog, required) {
+			t.Errorf("pre-cursor catalog guidance omits %q", required)
+		}
+	}
+	if !strings.Contains(catalog, "| loki-tail-pre-cursor-entries | logs |") {
+		t.Error("SIGNALS.md alert-emission table omits loki-tail-pre-cursor-entries")
+	}
+}
+
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
 	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`
@@ -690,54 +1066,88 @@ func payoutAttemptLogLines(second string, attempt int) (string, string) {
 	return processorLine, evaluatorLine
 }
 
-// Four canonical task attempts in one source second are the exact live shape
-// that immediately preceded a Circle 429. The Circle-client copy of each error
-// contributes to diagnostic volume but not attempt concurrency, and an exact
-// tail replay must not manufacture a fifth attempt.
-func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) {
+func payoutAdmissionLogLine(second string, admission int) string {
+	admittedAt, err := time.Parse(time.RFC3339, second+"Z")
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(
+		`[worker-a.invalid][taskworker][generation-a][cid:synthetic][I][%s.%06dZ][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
+		second,
+		admission+1,
+		admittedAt.Unix(),
+		admission+1,
+	)
+}
+
+// Response and evaluator timestamps occur after POST and can coalesce even
+// when Redis admitted each request in a different rolling second. They retain
+// the separate liquidity finding and 429 correlation state, but must never
+// drive the admission-ceiling finding.
+func TestPayoutRetryMicroburstIgnoresIndependentResponseCompletions(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	var replay string
 	for attempt := 0; attempt < 4; attempt++ {
 		processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", attempt)
 		tailer.classify(processorLine)
 		tailer.classify(evaluatorLine)
-		if attempt == 0 {
-			replay = evaluatorLine
-		}
 	}
-	tailer.classify(replay)
+	processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", 0)
+	tailer.classify(processorLine)
+	tailer.classify(evaluatorLine)
+
+	findings := tailer.drainWindow()
+	if liquidity := findingByClass(t, findings, "payout-wallet-insufficient"); liquidity.healthy {
+		t.Fatal("wallet response controls lost the liquidity finding")
+	}
+	if burst := findingByClass(t, findings, "payout-retry-microburst"); !burst.healthy {
+		t.Fatalf("response completions manufactured an admission burst: %+v", burst)
+	}
+}
+
+// Four exact admission markers in one normalized source second cannot fit
+// under the three-per-rolling-second gate. A replayed marker must not
+// manufacture a fifth admission.
+func TestPayoutRetryMicroburstCountsPrePostAdmissionsPerSecond(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	lines := make([]string, 0, 4)
+	for admission := 0; admission < 4; admission++ {
+		line := payoutAdmissionLogLine("2026-09-12T19:10:23", admission)
+		lines = append(lines, line)
+		tailer.classify(line)
+	}
+	tailer.classify(lines[0])
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
 	if finding.healthy {
-		t.Fatal("four same-second payout attempts did not create a microburst finding")
+		t.Fatal("four same-second admissions did not create a microburst finding")
 	}
 	for _, want := range []string{
-		"peak_task_attempts_per_second=4",
+		"peak_admitted_submissions_per_second=4",
 		"threshold=4/s",
-		"task_attempts=4",
-		"diagnostic_lines=9",
-		"exact-replay-deduplicated task evaluator lines",
-		"separate from the operational liquidity alert",
-		"Proportional 30–90-minute jitter",
-		"independent random choices still cannot impose a fleet-wide per-second ceiling",
-		"five wallet rejections completed and a sixth transfer request received 429",
-		"four of those five rejections came from blocks whose exact executable already contained proportional jitter",
-		"commit 14928f69",
-		"commit 66525afc",
-		"atomic Redis-time rolling gate of three transfer submits/second",
-		"complete §2.14 admission metrics",
-		"peak_task_attempts_per_second stays below 4",
-		"[<id>]eval error",
+		"admitted_submissions=4",
+		"diagnostic_lines=5",
+		"exact-replay-deduplicated pre-POST admission markers",
+		"authoritative Redis TIME second from the atomic admission decision and is emitted before the processor POST",
+		"cannot fit under a three-admission rolling-second ceiling",
+		"mixed rollout or telemetry loss",
+		"absent markers are unknown rather than zero",
+		"Payout-wallet-insufficient remains a separate finance/operations condition",
+		"complete §2.14 admission-observable coverage",
+		"An uninstrumented Circle caller is instead a 429-source investigation",
+		"peak_admitted_submissions_per_second stays below 4",
+		"[circlec][transfer-admission] admitted observable=v1 redis_second=1789240223 sequence=4 deferrals=0 wait_ms=0",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
 			t.Fatalf("microburst finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(finding.context, "eb7e79b6") {
-		t.Fatalf("microburst finding retained former non-ancestor deployment guidance: %+v", finding)
+	for _, forbidden := range []string{"worker-a.invalid", "cid:synthetic"} {
+		if strings.Contains(finding.evidence, forbidden) {
+			t.Fatalf("microburst evidence leaked %q: %q", forbidden, finding.evidence)
+		}
 	}
 	if logIDRe.MatchString(finding.evidence) {
-		t.Fatalf("microburst evidence leaked a payment id: %q", finding.evidence)
+		t.Fatalf("microburst evidence retained an identifier: %q", finding.evidence)
 	}
 }
 
@@ -747,64 +1157,68 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 // 16:31:47 but previously rendered a 16:31:33 sample).
 func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	_, first := payoutAttemptLogLines("2026-08-31T16:31:33", 1)
+	first := payoutAdmissionLogLine("2026-09-12T19:11:33", 1)
 	tailer.classify(first)
-	for attempt := 10; attempt < 15; attempt++ {
-		_, peak := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
+	for admission := 10; admission < 15; admission++ {
+		peak := payoutAdmissionLogLine("2026-09-12T19:11:47", admission)
 		tailer.classify(peak)
 	}
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
 	for _, want := range []string{
-		"peak_task_attempts_per_second=5",
-		"peak_source_second=2026-08-31T16:31:47Z",
-		"peak source second: 2026-08-31T16:31:47Z",
-		"sample from peak second: [edge-3][taskworker][g2][cid:test][I][2026-08-31T16:31:47",
+		"peak_admitted_submissions_per_second=5",
+		"peak_source_second=2026-09-12T19:11:47Z",
+		"peak source second: 2026-09-12T19:11:47Z",
+		"sample from peak second: [circlec][transfer-admission] admitted observable=v1 redis_second=1789240307 sequence=15",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
 			t.Fatalf("peak finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(finding.evidence, "2026-08-31T16:31:33") {
+	if strings.Contains(finding.evidence, "2026-09-12T19:11:33") {
 		t.Fatalf("peak evidence retained the first sparse second: %q", finding.evidence)
 	}
 }
 
-// Production taskworker envelopes use the host's explicit local offset. The
-// burst instant must render in UTC, with a zone, so an operator can join it to
-// Circle, PostgreSQL, and kernel evidence without silently shifting five
-// hours or treating an offset-free wall clock as UTC.
-func TestPayoutRetryMicroburstNormalizesPeakSourceSecondToUTC(t *testing.T) {
+// Host clocks, logger scheduling, and delivery order cannot own the invariant.
+// Four markers with deliberately skewed, out-of-order envelopes must group on
+// the authoritative Redis TIME second returned by the atomic admission script.
+func TestPayoutRetryMicroburstUsesRedisSecondDespiteSkewedOutOfOrderHostTimestamps(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
-	for attempt := 0; attempt < 4; attempt++ {
-		id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
-		timestamp := fmt.Sprintf("2026-08-31T18:31:16.%06dZ", attempt)
-		if attempt >= 2 {
-			timestamp = fmt.Sprintf("2026-08-31T13:31:16.%06d-05:00", attempt)
-		}
+	redisSecond := time.Date(2026, 9, 12, 19, 12, 16, 0, time.UTC).Unix()
+	timestamps := []string{
+		"2031-01-02T03:04:59.000001Z",
+		"2024-02-03T04:05:01.000002Z",
+		"2029-04-05T01:06:42.000003-05:00",
+		"2025-06-07T08:09:03.000004Z",
+	}
+	for admission, timestamp := range timestamps {
 		line := fmt.Sprintf(
-			`[edge-1][taskworker][g2][cid:test][I][%s][task.go:1930][%s]eval error = asset amount owned by the wallet is insufficient`,
+			`[worker-b.invalid][taskworker][generation-b][cid:synthetic][I][%s][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
 			timestamp,
-			id,
+			redisSecond,
+			admission+1,
 		)
 		tailer.classify(line)
 	}
 
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
-	combined := finding.observed + "\n" + finding.evidence
+	combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism
 	for _, want := range []string{
-		"peak_source_second=2026-08-31T18:31:16Z",
-		"peak source second: 2026-08-31T18:31:16Z",
-		"normalized UTC",
-		"sample from peak second: [edge-1][taskworker][g2][cid:test][I][2026-08-31T13:31:16",
+		"peak_source_second=2026-09-12T19:12:16Z",
+		"peak source second: 2026-09-12T19:12:16Z",
+		"authoritative Redis TIME second",
+		"rather than an inference from host clocks",
+		"sample from peak second: [circlec][transfer-admission] admitted observable=v1",
 	} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("UTC-normalized peak finding missing %q: %+v", want, finding)
 		}
 	}
-	if strings.Contains(combined, "peak_source_second=2026-08-31T13:31:16 ") ||
-		strings.Contains(combined, "peak source second: 2026-08-31T13:31:16 (") {
-		t.Fatalf("peak finding retained an offset-free local wall clock: %+v", finding)
+	for _, timestamp := range timestamps {
+		if strings.Contains(combined, timestamp) {
+			t.Fatalf("peak finding retained skewed host time %q: %+v", timestamp, finding)
+		}
 	}
 }
 
@@ -924,7 +1338,7 @@ func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 
 // A connected Loki tail can miss a record ingested behind its source-time
 // cursor. The bounded overlap must add only the absent records, including the
-// canonical 429 and the two missing members of a same-second payout burst;
+// canonical 429 and the two missing members of a same-second admission burst;
 // replaying the same overlap on the next cadence must add nothing.
 func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
@@ -934,25 +1348,32 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	tailer.lastLineTime = tailer.startedAt
 
 	walletLines := make([]string, 0, 4)
+	admissionLines := make([]string, 0, 4)
 	for attempt := 0; attempt < 4; attempt++ {
 		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T18:53:30", attempt)
 		walletLines = append(walletLines, evaluatorLine)
+		admissionLines = append(admissionLines, payoutAdmissionLogLine("2026-08-31T18:53:30", attempt))
 	}
 	rateLimitLine := `[edge-0][taskworker][g1][cid:test][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
 
-	// The stable stream delivered newer traffic but omitted attempts one and
-	// three plus the 429.
+	// The stable stream delivered newer traffic but omitted admissions one and
+	// three plus all response evidence and the 429.
+	tailer.ingestStanding(admissionLines[0], true, true)
+	tailer.ingestStanding(admissionLines[2], true, true)
 	tailer.ingestStanding(walletLines[0], true, true)
 	tailer.ingestStanding(walletLines[2], true, true)
-	reconciled := strings.Join(append(append([]string{}, walletLines...), rateLimitLine), "\n")
+	reconciledLines := append([]string{}, admissionLines...)
+	reconciledLines = append(reconciledLines, walletLines...)
+	reconciledLines = append(reconciledLines, rateLimitLine)
+	reconciled := strings.Join(reconciledLines, "\n")
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return reconciled, nil }
 	tailer.reconcileOnce(context.Background())
 
 	findings := tailer.drainWindow()
 	burst := findingByClass(t, findings, "payout-retry-microburst")
 	for _, want := range []string{
-		"peak_task_attempts_per_second=4",
-		"task_attempts=4",
+		"peak_admitted_submissions_per_second=4",
+		"admitted_submissions=4",
 		"diagnostic_lines=4",
 	} {
 		if !strings.Contains(burst.observed, want) {
@@ -1245,8 +1666,8 @@ func TestStandingTailAttributesDirectDroppedEntriesToAffectedService(t *testing.
 	}
 }
 
-// Minute volume is the liquidity/retry-amplification signal, but it is not a
-// synchronized microburst when canonical attempts occupy different seconds.
+// Minute volume is the liquidity/retry-amplification signal, but admissions
+// spread across distinct seconds do not violate the short-window invariant.
 // The subsequent empty window must also resolve a prior burst identity.
 func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
@@ -1255,6 +1676,7 @@ func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 		processorLine, evaluatorLine := payoutAttemptLogLines(second, attempt)
 		tailer.classify(processorLine)
 		tailer.classify(evaluatorLine)
+		tailer.classify(payoutAdmissionLogLine(second, attempt))
 	}
 	findings := tailer.drainWindow()
 	if payout := findingByClass(t, findings, "payout-wallet-insufficient"); payout.healthy {
@@ -1274,10 +1696,10 @@ func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
 func TestPayoutRetryMicroburstDeduplicatesReplayAcrossDrainBoundary(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
 	lines := make([]string, 0, 4)
-	for attempt := 0; attempt < 4; attempt++ {
-		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:33", attempt)
-		lines = append(lines, evaluatorLine)
-		tailer.classify(evaluatorLine)
+	for admission := 0; admission < 4; admission++ {
+		line := payoutAdmissionLogLine("2026-08-31T15:46:33", admission)
+		lines = append(lines, line)
+		tailer.classify(line)
 	}
 	if first := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); first.healthy {
 		t.Fatal("initial same-second burst was not detected")
@@ -1412,6 +1834,47 @@ func TestLogTailerRendersServiceTargetAndEndpointFrame(t *testing.T) {
 	}
 	if strings.Contains(finding.observed, "target=192.0.2.10:6380") {
 		t.Fatalf("endpoint replaced stable service target: %s", finding.observed)
+	}
+}
+
+func TestHTTPDrainCutIsDetailedPageAndOmitsWarpIdentity(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.classify("[synthetic-edge][api][synthetic-generation][cid:synthetic-container]" +
+		"[I][2026-09-13T07:30:00Z][http]drain deadline after 1m10.25s: 2 connection(s) cut")
+
+	finding := findingByClass(t, tailer.drainWindow(), "http-drain-cut")
+	if finding.healthy || finding.tier != tierPage || finding.sustain != 1 {
+		t.Fatalf("drain-cut finding = %+v, want immediate page", finding)
+	}
+	markdown := alertFromFinding(
+		syntheticSettings(nil),
+		"1.5",
+		"log-errors",
+		"Log error-class rates",
+		finding,
+	).Markdown()
+	for _, want := range []string{
+		"1m10.25s: 2 connection(s) cut",
+		"hard-cut those connections",
+		"ambiguous execution outcome",
+		"Repair the handler or timeout-ordering cause",
+		"max_over_time(urnetwork_http_server_drain_cut_connections[15m]) remains zero",
+		"SIGNALS.md §13.1",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("drain-cut alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, omitted := range []string{"synthetic-edge", "synthetic-generation", "synthetic-container"} {
+		if strings.Contains(markdown, omitted) {
+			t.Fatalf("drain-cut alert retained Warp identity %q:\n%s", omitted, markdown)
+		}
+	}
+
+	zero := newLogTailer("api", nil)
+	zero.classify("[http]drain deadline after 1m10s: 0 connection(s) cut")
+	if zeroFinding := findingByClass(t, zero.drainWindow(), "http-drain-cut"); !zeroFinding.healthy {
+		t.Fatalf("zero connection drain became a hard-cut alert: %+v", zeroFinding)
 	}
 }
 
@@ -1809,11 +2272,14 @@ func TestWindowEvaluationBudgetUsesStructuredClass(t *testing.T) {
 	).Markdown()
 	for _, want := range []string{
 		"event=evaluation_budget_exhausted window=quality candidates=2 effective_min=14980 observed_max=15001 ping_timeout=30000 expand_timeout=15000 suppressed=0",
-		"natural evaluation-budget boundary",
+		"pre-fix artifact signature",
+		"acquisition phase clipped",
+		"b11d722 or later",
 		"not why the receiver stayed silent",
 		"Lifecycle cancellation",
 		"do not lengthen either timeout as an HMAC remedy",
-		"no-late-admission cleanup",
+		"no-overlap/no-late-admission cleanup",
+		"full acquisition-plus-ping safety expiry",
 		"exactly one terminal owner",
 	} {
 		if !strings.Contains(markdown, want) {

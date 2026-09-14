@@ -7692,4 +7692,167 @@ var migrations = []any{
 		CREATE INDEX provider_egress_health_measured_at_client_id
 		ON provider_egress_health (measured_at, client_id)
 	`),
+	// IPv6 dual-stack (connect/IPV6.md A3, A8). ip_version is the family the
+	// connection was observed to arrive on (4 or 6; 0 on rows written before
+	// this migration). ip_family_intent is the family a family-pinned platform
+	// transport declared it intends to prove (4 or 6; 0 is a legacy,
+	// family-agnostic transport, which the reliability aggregation counts as
+	// v4). A declared intent proves its family only when the observed family
+	// agrees; the row keeps both so the rule is applied at aggregation time.
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN ip_version smallint NOT NULL DEFAULT 0
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN ip_family_intent smallint NOT NULL DEFAULT 0
+	`),
+	// The per-client aggregate of the rule above: which families this client
+	// has proven with a currently connected connection. Both false on rows
+	// written before this migration, which the score export reads as v4-only.
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN ipv4_proven bool NOT NULL DEFAULT false
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN ipv6_proven bool NOT NULL DEFAULT false
+	`),
+
+	// Extender directory (connect/EXTENDER.md C1). One row per activated
+	// extender identity key, one address row per family it was probed on, and
+	// one publish row per signed record or revocation waiting for the gossip
+	// service to drain it.
+	newSqlMigration(`
+		CREATE TABLE network_extender (
+			extender_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			public_key bytea NOT NULL UNIQUE,
+			create_time timestamp NOT NULL,
+			tcp_port int NOT NULL DEFAULT 443,
+			udp_port int NOT NULL DEFAULT 443,
+			dns_port int NOT NULL DEFAULT 53,
+			dns_tld varchar NOT NULL DEFAULT 'ur.xyz.',
+			country_code varchar NOT NULL DEFAULT '',
+			active bool NOT NULL DEFAULT false,
+			revoke_time timestamp NULL,
+			record_issue_time timestamp NULL,
+
+			PRIMARY KEY (extender_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_extender_address (
+			extender_id uuid NOT NULL,
+			ip_version smallint NOT NULL,
+			ip inet NOT NULL,
+			carriers varchar NOT NULL,
+			activate_time timestamp NOT NULL,
+			last_probe_time timestamp NULL,
+			last_probe_success_time timestamp NULL,
+			consecutive_probe_failures int NOT NULL DEFAULT 0,
+			active bool NOT NULL DEFAULT true,
+			last_publish_time timestamp NULL,
+
+			PRIMARY KEY (extender_id, ip_version)
+		);
+		CREATE INDEX network_extender_address_active_last_publish_time
+		ON network_extender_address (active, last_publish_time)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_extender_publish (
+			publish_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			kind smallint NOT NULL,
+			message bytea NOT NULL,
+			create_time timestamp NOT NULL,
+			published_time timestamp NULL,
+
+			PRIMARY KEY (publish_id)
+		);
+		CREATE INDEX network_extender_publish_published_time_create_time
+		ON network_extender_publish (published_time, create_time)
+	`),
+
+	// Contract parties (connect/EXTENDER.md J1, J2). extender_id is the active
+	// extender whose address the connection arrived from, or null when the
+	// caller address matched none, which is the common case. The index is the
+	// per-endpoint read the contract insert does: the distinct extenders of a
+	// client's currently connected connections.
+	newSqlMigration(`
+		ALTER TABLE network_client_connection
+		ADD COLUMN extender_id uuid NULL
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_connection_client_id_connected_extender_id
+		ON network_client_connection (client_id, connected, extender_id)
+	`),
+
+	// The extender parties of one contract, zero to many per side. client_id
+	// and network_id are the extender's provider client and network, copied so
+	// settlement pays the participant set without joining the directory. The
+	// rows are deleted with the contract.
+	newSqlMigration(`
+		CREATE TABLE contract_extender (
+			contract_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			party varchar(16) NOT NULL,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+
+			PRIMARY KEY (contract_id, extender_id, party)
+		)
+	`),
+
+	// The dns carrier ports one address answered on (connect/EXTENDER.md L2),
+	// comma separated and ascending, which is the order a client dials them
+	// in. Empty when the dns carrier was not offered, which is also what every
+	// address activated before this column carries.
+	newSqlMigration(`
+		ALTER TABLE network_extender_address
+		ADD COLUMN dns_ports varchar NOT NULL DEFAULT ''
+	`),
+
+	// The location the extender was last activated from
+	// (connect/EXTENDER.md M1), resolved from the activating address the same
+	// way a connection's is and stored beside country_code so the map and the
+	// by-country gauge read a named location rather than a bare code. All four
+	// are nullable: a country-only lookup has no city and no region, a lookup
+	// that fails has none of them, and an activation must never fail to store
+	// for either reason. Rows written before these columns carry null until
+	// their next activation, which the 24 hour re-activation guarantees within
+	// a day.
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN city_location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN region_location_id uuid NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE network_extender
+		ADD COLUMN country_location_id uuid NULL
+	`),
+
+	// The creation time of a contract's extender parties
+	// (connect/EXTENDER.md M3). The insert copies the contract's own
+	// create_time into every party row (contractExtenderInsertSql), so the
+	// hourly counts bucket a contract and its parties at the same instant; the
+	// default covers a row inserted without a value. The index makes the
+	// hourly count of contracts with an extender party a range scan of this
+	// small table rather than an existence probe per contract.
+	newSqlMigration(`
+		ALTER TABLE contract_extender
+		ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
+	`),
+	newSqlMigration(`
+		CREATE INDEX contract_extender_create_time_contract_id
+		ON contract_extender (create_time, contract_id)
+	`),
 }

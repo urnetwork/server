@@ -138,7 +138,7 @@ func spkiPin(cert *x509.Certificate) string {
 // no pin. The caller must leave the stored row alone in that case.
 func observeGeolocationSourcePin(ctx context.Context, host string, addr string) (leafSpki string, intermediateSpki string, err error) {
 	dialer := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: geolocationSourceDialTimeout},
+		NetDialer: server.NewDialer(geolocationSourceDialTimeout),
 		Config:    sourceTLSConfig(host),
 	}
 

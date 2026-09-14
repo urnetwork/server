@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Fake only the Docker boundary, retaining real setup/ownership/endpoint and
@@ -46,6 +50,15 @@ case "$1" in
     [[ -f "$FAKE_STATE/$id.meta" ]] || exit 1
     read -r name owner service restart binding < "$FAKE_STATE/$id.meta"
     if [[ "$*" == *NetworkSettings.Ports* ]]; then printf '%s\n' "$binding"
+    elif [[ "$*" == *State.Running* ]]; then
+      if [[ "${FAKE_STOPPED_SERVICE:-}" == "$service" ]]; then
+        printf 'exited false 1\n'
+        if [[ "${FAKE_CHANGE_OWNER_ON_STATE:-}" == 1 ]]; then
+          printf '%s %s %s %s %s\n' "$name" 00000000000000000000000000000000 "$service" "$restart" "$binding" > "$FAKE_STATE/$id.meta"
+        fi
+      else printf 'running true 0\n'; fi
+    elif [[ "$*" == *'json .State'* ]]; then
+      printf '{"Status":"exited","Running":false,"ExitCode":1}\n'
     else printf '%s /%s %s %s %s\n' "$id" "$name" "$owner" "$service" "$restart"; fi ;;
   container)
     [[ "$2" == ls ]]
@@ -59,7 +72,14 @@ case "$1" in
   start) [[ -f "$FAKE_STATE/$2.meta" ]] ;;
   exec)
     read -r name owner service restart binding < "$FAKE_STATE/$2.meta"
+    printf 'exec\n' >> "$FAKE_STATE/$2.execs"
     if [[ "$service" == postgres ]]; then printf '512:256MB:en_US.UTF-8:t\n'; else printf 'PONG\n'; fi ;;
+  logs)
+    id="${!#}"
+    [[ -f "$FAKE_STATE/$id.meta" ]]
+    printf '%s\n' "$id" >> "$FAKE_STATE/$id.logs-read"
+    printf 'fixture startup failure: permission denied\n'
+    if [[ "${FAKE_LARGE_LOG:-}" == 1 ]]; then head -c 2097152 /dev/zero | tr '\000' x; fi ;;
   rm)
     id="${!#}"; [[ "$id" =~ ^[0-9a-f]{64}$ ]]
     [[ -f "$FAKE_STATE/$id.meta" ]]
@@ -170,6 +190,7 @@ release_gate_service_fixture() { shift 2; "$FIXTURE_GENERATOR" "$@"; }
 		"GATE_ROOT":         self.root, "FIXTURE_WORKSPACE": self.workspace, "FIXTURE_LOCK": self.lock,
 		"FAKE_PG_PORT": "35431", "FAKE_REDIS_PORT": "36371",
 		"APEX_CONTAINER_EVALUATION": "", "FAKE_FAIL_CREATE": "",
+		"FAKE_STOPPED_SERVICE": "", "FAKE_CHANGE_OWNER_ON_STATE": "", "FAKE_LARGE_LOG": "",
 		"PRIVATE_PROBE": self.probe, "WARP_ENV": "local",
 	})
 	return command.CombinedOutput()
@@ -187,7 +208,7 @@ source "$release_gate_service_root/environment.sh"
 [[ "$(stat -c '%a' "$release_gate_service_root/postgres.cid")" == 600 ]]
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/vault/pg_maintenance.yml"
 cmp "$WARP_TEST_ENV_PORTABLE_ROOT/config/db.yml" "$WARP_TEST_ENV_PORTABLE_ROOT/config/db_maintenance.yml"
-[[ "$(< "$WARP_TEST_ENV_PORTABLE_ROOT/config/settings.yml")" == 'all: {}' ]]
+cat "$WARP_TEST_ENV_PORTABLE_ROOT/config/settings.yml"
 [[ -d "$WARP_SITE_HOME" && ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/local" ]]
 [[ -f "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" && ! -L "$WARP_TEST_ENV_PORTABLE_ROOT/vault/auth.yml" ]]
 [[ ! -e "$WARP_TEST_ENV_PORTABLE_ROOT/vault/nonservice.yml" ]]
@@ -201,8 +222,88 @@ done
 	if err != nil {
 		t.Fatalf("private resource setup: %v\n%s", err, output)
 	}
+	// The real private generator owns only these documentation/loopback
+	// locations. Reject extra settings, especially ambient env_vars that
+	// could redirect the isolated database or Redis transports.
+	var settings struct {
+		All struct {
+			IPOverrides []struct {
+				Subnet      string `yaml:"subnet"`
+				CountryCode string `yaml:"country_code"`
+				Country     string `yaml:"country"`
+				Region      string `yaml:"region"`
+				City        string `yaml:"city"`
+			} `yaml:"ip_overrides"`
+		} `yaml:"all"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(output))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&settings); err != nil {
+		t.Fatalf("private settings census: %v", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("private settings have trailing content: %v", err)
+	}
+	expectedSubnets := []string{"192.0.2.0/24", "2001:db8::/32", "127.0.0.0/8", "::1/128"}
+	if len(settings.All.IPOverrides) != len(expectedSubnets) {
+		t.Fatalf("private settings override count=%d, want %d", len(settings.All.IPOverrides), len(expectedSubnets))
+	}
+	for index, subnet := range expectedSubnets {
+		override := settings.All.IPOverrides[index]
+		if override.Subnet != subnet || override.CountryCode != "zz" || override.Country != "Fixture Country" || override.Region != "Fixture Region" || override.City != "Fixture City" {
+			t.Fatalf("private settings override %d differs: %+v", index, override)
+		}
+	}
 	if files, err := filepath.Glob(filepath.Join(self.state, "*.meta")); err != nil || len(files) != 0 {
 		t.Fatalf("owned resources survived cleanup: %v %v", files, err)
+	}
+}
+
+func TestReleaseGateServicesStoppedOwnerRetainsBoundedDiagnostics(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+export FAKE_STOPPED_SERVICE=postgres FAKE_LARGE_LOG=1
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+id="$(< "$release_gate_service_root/postgres.cid")"
+[[ ! -e "$release_gate_service_root/redis.cid" && ! -e "$release_gate_service_root/environment.sh" ]]
+[[ ! -e "$FAKE_STATE/$id.execs" ]]
+[[ "$(< "$FAKE_STATE/$id.logs-read")" == "$id" ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *"container_id=$id"* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *'stage=stopped'* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure.txt")" == *'observation=exited false 1'* ]]
+[[ "$(< "$release_gate_service_root/postgres.failure-state.txt")" == '{"Status":"exited","Running":false,"ExitCode":1}' ]]
+[[ "$(stat -c '%s' "$release_gate_service_root/postgres.failure-log.txt")" == 1048576 ]]
+for suffix in failure.txt failure-state.txt failure-log.txt readiness.stderr; do
+  [[ "$(stat -c '%a' "$release_gate_service_root/postgres.$suffix")" == 600 ]]
+done
+release_gate_services_cleanup
+[[ "$(< "$FAKE_STATE/removed")" == "$id" && ! -e "$FAKE_STATE/$id.meta" ]]
+`)
+	if err != nil {
+		t.Fatalf("stopped owned service diagnostics: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "is not running: exited false 1") {
+		t.Fatalf("stopped owned service lost its concrete refusal: %s", output)
+	}
+}
+
+func TestReleaseGateServicesStoppedOwnerDoesNotReadForeignDiagnostics(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+export FAKE_STOPPED_SERVICE=postgres FAKE_CHANGE_OWNER_ON_STATE=1
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+id="$(< "$release_gate_service_root/postgres.cid")"
+[[ ! -e "$FAKE_STATE/$id.execs" && ! -e "$FAKE_STATE/$id.logs-read" ]]
+[[ ! -e "$release_gate_service_root/postgres.failure.txt" && ! -e "$release_gate_service_root/postgres.failure-log.txt" ]]
+[[ ! -e "$release_gate_service_root/redis.cid" && ! -e "$release_gate_service_root/environment.sh" ]]
+if release_gate_services_cleanup; then exit 91; fi
+[[ -f "$FAKE_STATE/$id.meta" && ! -e "$FAKE_STATE/removed" ]]
+`)
+	if err != nil {
+		t.Fatalf("changed owner diagnostic refusal: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "refusing changed postgres container ownership") {
+		t.Fatalf("changed owner diagnostic refusal was not retained: %s", output)
 	}
 }
 

@@ -84,6 +84,12 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"provider_egress_health_measured_at_client_id",
 			providerEgressHealthDeadlineIndexDefinition,
 			"predicate_definition IS NULL",
+			"UNIQUE (public_key)",
+			"network_extender_address_active_last_publish_time",
+			"network_extender_publish_published_time_create_time",
+			"network_client_connection_client_id_connected_extender_id",
+			"contract_extender",
+			"dns_ports",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -108,8 +114,8 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 
 func TestMigrationsSignalRequiresExactReadyProviderEgressHealthDeadlineIndex(t *testing.T) {
 	head := server.MigrationCount()
-	if head != 657 {
-		t.Fatalf("test pins provider-egress deadline index at migration 657, got head %d", head)
+	if head < 657 {
+		t.Fatalf("test requires the published provider-egress deadline index at migration 657, got head %d", head)
 	}
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
@@ -469,6 +475,76 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	if byVersion[616][0].removedVersion != 621 || byVersion[618][0].removedVersion != 622 {
 		t.Fatalf("superseded index lifetimes are not pinned: v616=%+v v618=%+v", byVersion[616][0], byVersion[618][0])
 	}
+	// The appended IPv6 artifacts must interrogate their actual relation,
+	// type, nullability and legacy default; catalog labels alone are not proof.
+	head := server.MigrationCount()
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		for _, column := range []struct{ table, name, kind, defaults string }{
+			{table: "network_client_connection", name: "ip_version", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
+			{table: "network_client_connection", name: "ip_family_intent", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
+			{table: "network_client_location_reliability", name: "ipv4_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
+			{table: "network_client_location_reliability", name: "ipv6_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
+		} {
+			want := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '" + column.table + "' AND column_name = '" + column.name + "' AND data_type = '" + column.kind + "' AND is_nullable = 'NO' AND column_default IN " + column.defaults + " )"
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("IPv6 artifact %s.%s lost its actual typed schema check", column.table, column.name)
+			}
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("complete appended artifact catalog is not coherent: %+v, %v", alerts, err)
+	}
+}
+
+func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 674 {
+		t.Fatalf("test requires extender migrations through version 674, got head %d", head)
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		for _, want := range []string{
+			"SELECT count(*) = 13 FROM (VALUES ('extender_id', 'uuid', 'NO'), ('network_id', 'uuid', 'NO'), ('client_id', 'uuid', 'NO'), ('public_key', 'bytea', 'NO')",
+			"('u', 'UNIQUE (public_key)')",
+			"SELECT count(*) = 10 FROM (VALUES ('extender_id', 'uuid', 'NO'), ('ip_version', 'smallint', 'NO'), ('ip', 'inet', 'NO')",
+			"index_name = 'network_extender_address_active_last_publish_time'",
+			"definition = 'CREATE INDEX network_extender_address_active_last_publish_time ON public.network_extender_address USING btree (active, last_publish_time)'",
+			"SELECT count(*) = 6 FROM (VALUES ('publish_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('kind', 'smallint', 'NO'), ('message', 'bytea', 'NO')",
+			"index_name = 'network_extender_publish_published_time_create_time'",
+			"definition = 'CREATE INDEX network_extender_publish_published_time_create_time ON public.network_extender_publish USING btree (published_time, create_time)'",
+			"table_name = 'network_client_connection' AND column_name = 'extender_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"index_name = 'network_client_connection_client_id_connected_extender_id'",
+			"definition = 'CREATE INDEX network_client_connection_client_id_connected_extender_id ON public.network_client_connection USING btree (client_id, connected, extender_id)'",
+			"SELECT count(*) = 5 FROM (VALUES ('contract_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('party', 'character varying', 'NO')",
+			"table_name = 'contract_extender' AND column_name = 'party' AND character_maximum_length = 16",
+			"definition = 'PRIMARY KEY (contract_id, extender_id, party)'",
+			"table_name = 'network_extender_address' AND column_name = 'dns_ports' AND data_type = 'character varying' AND is_nullable = 'NO'",
+			"quote_literal('') || '::character varying'",
+			"table_name = 'network_extender' AND column_name = 'location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'city_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'region_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'country_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'contract_extender' AND column_name = 'create_time' AND data_type = 'timestamp without time zone' AND is_nullable = 'NO' AND column_default = 'now()'",
+			"index_name = 'contract_extender_create_time_contract_id'",
+			"definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'",
+		} {
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("extender migration query lost %q:\n%s", want, query)
+			}
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("complete extender migration artifact catalog is not coherent: %+v, %v", alerts, err)
+	}
 }
 
 func TestMigrationsSignalPreservesBehindGateAtCoherentVersion627(t *testing.T) {
@@ -505,6 +581,175 @@ func TestMigrationsSignalPreservesBehindGateAtCoherentVersion627(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("version-627 deployment gate missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+type syntheticMigrationIndexContract struct {
+	version int
+	table   string
+	name    string
+	keys    string
+	unique  bool
+	grouped bool
+}
+
+func (contract syntheticMigrationIndexContract) definition() string {
+	kind := "CREATE INDEX "
+	if contract.unique {
+		kind = "CREATE UNIQUE INDEX "
+	}
+	return kind + contract.name + " ON public." + contract.table + " USING btree " + contract.keys
+}
+
+type syntheticMigrationIndexObservation struct {
+	definition string
+	valid      bool
+	ready      bool
+	partial    bool
+}
+
+// Model only the two source-reviewed index guard forms: the old name/key LIKE
+// contract and the complete definition/readiness contract. Unknown query
+// shapes fail the test, rather than allowing the synthetic source to define
+// health independently of the actual production query. No SQL is executed.
+func syntheticMigrationIndexAdmitted(t *testing.T, query string, contract syntheticMigrationIndexContract, observed syntheticMigrationIndexObservation) bool {
+	t.Helper()
+	normalized := strings.Join(strings.Fields(query), " ")
+	definition := strings.Join(strings.Fields(observed.definition), " ")
+	expected := contract.definition()
+	if contract.grouped {
+		entry := "('" + contract.table + "', '" + contract.name + "', '" + expected + "')"
+		guard := "AND actual.definition = expected.definition AND actual.predicate_definition IS NULL AND actual.indisvalid AND actual.indisready"
+		if strings.Contains(normalized, entry) && strings.Contains(normalized, guard) {
+			return definition == expected && observed.valid && observed.ready && !observed.partial
+		}
+		legacyEntry := "('" + contract.table + "', '" + contract.name + "', '" + contract.keys + "')"
+		if !strings.Contains(normalized, legacyEntry) || !strings.Contains(normalized, "AND actual.definition LIKE '%' || expected.key_shape || '%'") {
+			t.Fatalf("index %s has an unrecognized grouped query contract", contract.name)
+		}
+		return strings.Contains(definition, contract.keys)
+	}
+	where := "WHERE table_name = '" + contract.table + "' AND index_name = '" + contract.name + "'"
+	position := strings.Index(normalized, where)
+	if position < 0 {
+		t.Fatalf("index %s has no relation-scoped query contract", contract.name)
+	}
+	block, _, ok := strings.Cut(normalized[position:], " ),")
+	if !ok {
+		// The final artifact closes the select list without a trailing comma.
+		block, _, ok = strings.Cut(normalized[position:], " ) FROM version;")
+	}
+	if !ok {
+		t.Fatalf("index %s has an unterminated query contract", contract.name)
+	}
+	exact := "AND definition = '" + expected + "' AND predicate_definition IS NULL AND indisvalid AND indisready"
+	if strings.Contains(block, exact) {
+		return definition == expected && observed.valid && observed.ready && !observed.partial
+	}
+	if !strings.Contains(block, "AND definition LIKE '%"+contract.keys+"%'") {
+		t.Fatalf("index %s has an unrecognized query contract", contract.name)
+	}
+	if strings.Contains(block, "definition LIKE 'CREATE UNIQUE INDEX %'") && !strings.HasPrefix(definition, "CREATE UNIQUE INDEX ") {
+		return false
+	}
+	if strings.Contains(block, "definition LIKE 'CREATE INDEX %'") && !strings.HasPrefix(definition, "CREATE INDEX ") {
+		return false
+	}
+	if strings.Contains(block, "predicate_definition IS NULL") && observed.partial {
+		return false
+	}
+	if strings.Contains(block, "indisvalid") && !observed.valid || strings.Contains(block, "indisready") && !observed.ready {
+		return false
+	}
+	return strings.Contains(definition, contract.keys)
+}
+
+func TestMigrationsSignalRejectsLookalikePlainOrderedIndexes(t *testing.T) {
+	contracts := []syntheticMigrationIndexContract{
+		{version: 664, table: "network_extender_publish", name: "network_extender_publish_published_time_create_time", keys: "(published_time, create_time)"},
+		{version: 663, table: "network_extender_address", name: "network_extender_address_active_last_publish_time", keys: "(active, last_publish_time)"},
+		{version: 666, table: "network_client_connection", name: "network_client_connection_client_id_connected_extender_id", keys: "(client_id, connected, extender_id)"},
+		{version: 674, table: "contract_extender", name: "contract_extender_create_time_contract_id", keys: "(create_time, contract_id)"},
+		{version: 614, table: "st_epoch", name: "st_epoch_status", keys: "(deployment_key, status, epoch)", grouped: true},
+		{version: 614, table: "st_publish", name: "st_publish_epoch_kind", keys: "(deployment_key, epoch, kind, create_time)", grouped: true},
+		{version: 614, table: "st_event", name: "st_event_kind_block", keys: "(deployment_key, kind, block_number, log_index)", grouped: true},
+		{version: 614, table: "st_payout_leaf", name: "st_payout_leaf_client_epoch", keys: "(deployment_key, client_id, epoch, no_id)", grouped: true},
+		{version: 616, table: "st_transaction_intent", name: "st_transaction_intent_chain_account_nonce", keys: "(chain_id, from_address, nonce)", unique: true},
+		{version: 617, table: "st_transaction_intent", name: "st_transaction_intent_logical_generation", keys: "(logical_key, generation)", unique: true},
+		{version: 620, table: "st_transaction_intent", name: "st_transaction_intent_genesis_account_nonce", keys: "(chain_id, genesis_hash, from_address, nonce)", unique: true},
+		{version: 627, table: "st_fleet_binding_signature", name: "st_fleet_binding_signature_network", keys: "(deployment_key, network_id, create_time DESC)"},
+		{version: 640, table: "network_onboarding_event", name: "network_onboarding_event_network_id_at", keys: "(network_id, at)"},
+		{version: 641, table: "network_onboarding_event", name: "network_onboarding_event_name_at", keys: "(name, at)"},
+		{version: 647, table: "network_onboarding_email", name: "network_onboarding_email_network_id_sent_at", keys: "(network_id, sent_at)"},
+		{version: 650, table: "network_onboarding", name: "network_onboarding_created_at", keys: "(created_at)"},
+		{version: 656, table: "network_onboarding_email", name: "network_onboarding_email_sent_at", keys: "(sent_at, network_id, step)"},
+	}
+	for _, contract := range contracts {
+		var artifact migrationArtifact
+		for _, published := range migrationArtifacts {
+			if published.requiredVersion == contract.version {
+				artifact = published
+				break
+			}
+		}
+		if artifact.requiredVersion == 0 {
+			t.Fatalf("index %s has no published artifact", contract.name)
+		}
+		head := server.MigrationCount()
+		if artifact.removedVersion != 0 {
+			head = artifact.removedVersion - 1
+		}
+		expected := contract.definition()
+		kindChanged := strings.Replace(expected, "CREATE INDEX ", "CREATE UNIQUE INDEX ", 1)
+		if contract.unique {
+			kindChanged = strings.Replace(expected, "CREATE UNIQUE INDEX ", "CREATE INDEX ", 1)
+		}
+		keys := strings.Split(strings.Trim(contract.keys, "()"), ", ")
+		reordered := append([]string(nil), keys...)
+		reordered[0], reordered[len(reordered)-1] = reordered[len(reordered)-1], reordered[0]
+		for _, test := range []struct {
+			name      string
+			observed  syntheticMigrationIndexObservation
+			wantDrift bool
+		}{
+			{name: "healthy", observed: syntheticMigrationIndexObservation{definition: expected, valid: true, ready: true}},
+			{name: "equivalent whitespace", observed: syntheticMigrationIndexObservation{definition: strings.Replace(expected, " USING ", "   USING   ", 1), valid: true, ready: true}},
+			{name: "wrong access method", observed: syntheticMigrationIndexObservation{definition: strings.Replace(expected, "USING btree", "USING brin", 1), valid: true, ready: true}, wantDrift: true},
+			{name: "expression", observed: syntheticMigrationIndexObservation{definition: strings.Replace(expected, contract.keys, "(synthetic_index_expression"+contract.keys+")", 1), valid: true, ready: true}, wantDrift: true},
+			{name: "extra include", observed: syntheticMigrationIndexObservation{definition: expected + " INCLUDE (synthetic_extra_column)", valid: true, ready: true}, wantDrift: true},
+			{name: "changed uniqueness", observed: syntheticMigrationIndexObservation{definition: kindChanged, valid: true, ready: true}, wantDrift: true},
+			{name: "reordered keys", observed: syntheticMigrationIndexObservation{definition: strings.Replace(expected, contract.keys, "("+strings.Join(reordered, ", ")+")", 1), valid: true, ready: true}, wantDrift: len(keys) > 1},
+			{name: "invalid", observed: syntheticMigrationIndexObservation{definition: expected, ready: true}, wantDrift: true},
+			{name: "not ready", observed: syntheticMigrationIndexObservation{definition: expected, valid: true}, wantDrift: true},
+			{name: "partial", observed: syntheticMigrationIndexObservation{definition: expected + " WHERE synthetic_predicate", valid: true, ready: true, partial: true}, wantDrift: true},
+		} {
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(head), nil
+				}
+				row := syntheticMigrationArtifactRow(head)
+				if !syntheticMigrationIndexAdmitted(t, query, contract, test.observed) {
+					row[artifact.rowColumn] = "f"
+				}
+				return []Row{row}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drift := false
+			for _, alert := range alerts {
+				if alert.Class == "migration-schema-drift" {
+					drift = true
+					if alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), fmt.Sprintf("%s@v%d", artifact.name, contract.version)) {
+						t.Fatalf("%s/%s lost the exact published schema gate", contract.name, test.name)
+					}
+				}
+			}
+			if drift != test.wantDrift {
+				t.Fatalf("%s/%s: schema drift=%t want=%t", contract.name, test.name, drift, test.wantDrift)
+			}
 		}
 	}
 }

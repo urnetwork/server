@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,8 +35,11 @@ func (pgCapacityProbe) id() string             { return "pg/client-capacity" }
 func (pgCapacityProbe) tier() string           { return tierPage }
 func (pgCapacityProbe) cadence() time.Duration { return 30 * time.Second }
 
-// pgCapacityQuery deliberately returns only aggregate state and ten bounded
-// owner groups. It never exports query text, customer identifiers, or secrets.
+// pgCapacityQuery returns aggregate state and at most one owner row per live
+// client-backend group. A client address crosses only the transient query
+// decoder boundary: Go maps it to a configured host alias or a fixed fallback,
+// combines aliases, and ranks the ten largest groups before logging or alerting.
+// Query text, customer identifiers, and secrets remain excluded.
 // The current direct observation session remains in the count: it consumes a
 // real slot and makes the headroom estimate conservative by one connection.
 const pgCapacityQuery = `
@@ -71,13 +75,12 @@ const pgCapacityQuery = `
 	), owners AS (
 		SELECT application_name, role_name, client_address, connection_state,
 		       count(*)::int AS clients,
-		       coalesce(string_agg(DISTINCT coalesce(wait_event_type, '-') || ':' || coalesce(wait_event, '-'), ','), '-') AS waits,
+		       coalesce(string_agg(DISTINCT coalesce(wait_event_type, '-') || ':' || coalesce(wait_event, '-'), ','
+		         ORDER BY coalesce(wait_event_type, '-') || ':' || coalesce(wait_event, '-')), '-') AS waits,
 		       coalesce(round(extract(epoch FROM max(now() - state_change))), 0)::bigint AS oldest_state_s,
 		       coalesce(round(extract(epoch FROM max(now() - backend_start))), 0)::bigint AS oldest_backend_s
 		FROM activity
 		GROUP BY application_name, role_name, client_address, connection_state
-		ORDER BY clients DESC, application_name, role_name, client_address, connection_state
-		LIMIT 10
 	), output AS (
 		SELECT 0 AS sort_key, 'summary'::text AS kind,
 		       max_connections::text AS value_1,
@@ -124,7 +127,7 @@ type pgCapacityState struct {
 type pgCapacityOwner struct {
 	application string
 	role        string
-	address     string
+	clientOwner string
 	state       string
 	clients     int
 	waits       string
@@ -135,14 +138,21 @@ type pgCapacityOwner struct {
 func parsePgCapacityNonnegative(row pgRow, column int, name string) (int, error) {
 	value, err := strconv.Atoi(row.str(column))
 	if err != nil || value < 0 {
-		return 0, fmt.Errorf("invalid PostgreSQL capacity %s %q", name, row.str(column))
+		return 0, fmt.Errorf("invalid PostgreSQL capacity %s", name)
 	}
 	return value, nil
 }
 
-func parsePgCapacityRows(rows []pgRow) (pgCapacityState, []pgCapacityOwner, error) {
+type pgCapacityOwnerKey struct {
+	application string
+	role        string
+	clientOwner string
+	state       string
+}
+
+func parsePgCapacityRows(rows []pgRow, cfg *monitorConfig) (pgCapacityState, []pgCapacityOwner, error) {
 	var state pgCapacityState
-	owners := make([]pgCapacityOwner, 0, 10)
+	ownersByKey := map[pgCapacityOwnerKey]pgCapacityOwner{}
 	foundSummary := false
 	for _, row := range rows {
 		if len(row) != 11 {
@@ -187,18 +197,31 @@ func parsePgCapacityRows(rows []pgRow) (pgCapacityState, []pgCapacityOwner, erro
 			if err != nil {
 				return pgCapacityState{}, nil, err
 			}
-			owners = append(owners, pgCapacityOwner{
+			owner := pgCapacityOwner{
 				application: boundedPgCapacityLabel(row.str(1), 80),
 				role:        boundedPgCapacityLabel(row.str(2), 80),
-				address:     boundedPgCapacityLabel(row.str(3), 80),
+				clientOwner: privacySafePostgresClientOwner(cfg, row.str(3)),
 				state:       boundedPgCapacityLabel(row.str(4), 80),
 				clients:     clients,
 				waits:       boundedPgCapacityLabel(row.str(6), 120),
 				oldestState: oldestState,
 				oldestAge:   oldestAge,
-			})
+			}
+			key := pgCapacityOwnerKey{
+				application: owner.application,
+				role:        owner.role,
+				clientOwner: owner.clientOwner,
+				state:       owner.state,
+			}
+			if current, ok := ownersByKey[key]; ok {
+				owner.clients += current.clients
+				owner.waits = mergePgCapacityWaits(current.waits, owner.waits)
+				owner.oldestState = max(current.oldestState, owner.oldestState)
+				owner.oldestAge = max(current.oldestAge, owner.oldestAge)
+			}
+			ownersByKey[key] = owner
 		default:
-			return pgCapacityState{}, nil, fmt.Errorf("PostgreSQL capacity query returned unknown row kind %q", row.str(0))
+			return pgCapacityState{}, nil, fmt.Errorf("PostgreSQL capacity query returned unknown row kind")
 		}
 	}
 	if !foundSummary {
@@ -211,7 +234,47 @@ func parsePgCapacityRows(rows []pgRow) (pgCapacityState, []pgCapacityOwner, erro
 			state.maxConnections, state.superReserved, state.roleReserved, state.normalCeiling,
 		)
 	}
+	owners := make([]pgCapacityOwner, 0, len(ownersByKey))
+	for _, owner := range ownersByKey {
+		owners = append(owners, owner)
+	}
+	sort.Slice(owners, func(i, j int) bool {
+		if owners[i].clients != owners[j].clients {
+			return owners[i].clients > owners[j].clients
+		}
+		if owners[i].application != owners[j].application {
+			return owners[i].application < owners[j].application
+		}
+		if owners[i].role != owners[j].role {
+			return owners[i].role < owners[j].role
+		}
+		if owners[i].clientOwner != owners[j].clientOwner {
+			return owners[i].clientOwner < owners[j].clientOwner
+		}
+		return owners[i].state < owners[j].state
+	})
+	if len(owners) > 10 {
+		owners = owners[:10]
+	}
 	return state, owners, nil
+}
+
+func mergePgCapacityWaits(left string, right string) string {
+	waits := map[string]bool{}
+	for _, value := range []string{left, right} {
+		for _, wait := range strings.Split(value, ",") {
+			wait = strings.TrimSpace(wait)
+			if wait != "" {
+				waits[wait] = true
+			}
+		}
+	}
+	ordered := make([]string, 0, len(waits))
+	for wait := range waits {
+		ordered = append(ordered, wait)
+	}
+	sort.Strings(ordered)
+	return boundedPgCapacityLabel(strings.Join(ordered, ","), 120)
 }
 
 func boundedPgCapacityLabel(value string, limit int) string {
@@ -238,11 +301,11 @@ func pgCapacityEvidence(owners []pgCapacityOwner) string {
 	if len(owners) == 0 {
 		return "No owner groups were returned; preserve the aggregate result and repeat the direct observation."
 	}
-	lines := []string{"Top client-backend owner groups (bounded to ten; no query text):"}
+	lines := []string{"Top client-backend owner groups (bounded to ten after privacy-safe host aggregation; no client addresses or query text):"}
 	for _, owner := range owners {
 		lines = append(lines, fmt.Sprintf(
-			"application=%s role=%s address=%s state=%s clients=%d waits=%s oldest_state_s=%d oldest_backend_s=%d",
-			owner.application, owner.role, owner.address, owner.state, owner.clients, owner.waits,
+			"application=%s role=%s client_owner=%s state=%s clients=%d waits=%s oldest_state_s=%d oldest_backend_s=%d",
+			owner.application, owner.role, owner.clientOwner, owner.state, owner.clients, owner.waits,
 			owner.oldestState, owner.oldestAge,
 		))
 	}
@@ -275,7 +338,7 @@ func (pgCapacityProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		}}, nil
 	}
 
-	state, owners, err := parsePgCapacityRows(rows)
+	state, owners, err := parsePgCapacityRows(rows, env.cfg)
 	if err != nil {
 		return nil, err
 	}

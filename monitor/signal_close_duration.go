@@ -39,7 +39,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		5000,
 	)
 	active := parseTaskActiveRun(activeLog, "CloseExpiredContracts")
-	terminal := parseTaskTerminalRun(activeLog, "CloseExpiredContracts")
+	terminal := parseTaskTerminalRunAtLeast(activeLog, "CloseExpiredContracts", closeDurationLimit)
 	retryActive := parseTaskActiveRunForID(activeLog, "CloseExpiredContracts", terminal.taskID)
 
 	// These ids come only from taskRunIDRe's fixed hexadecimal shape, so they
@@ -144,7 +144,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	durationSeconds := 0
 	ageSeconds := 0
 	identity := warpLogIdentity{}
-	errorText := ""
+	errorClass := ""
 	failedAt := time.Time{}
 	activeAttemptEnded := !active.observedAt.IsZero() &&
 		!terminal.observedAt.IsZero() &&
@@ -168,7 +168,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		taskID = terminal.taskID
 		durationSeconds = terminal.seconds
 		identity = terminal.identity
-		errorText = terminal.errorText
+		errorClass = terminal.errorClass
 		failedAt = terminal.observedAt
 	} else if hasCompletedOverrun {
 		phase = "completed"
@@ -212,8 +212,8 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			" precursor_failed_duration_s=%d precursor_failed_attempt_correlated=true",
 			terminal.seconds,
 		)
-		if terminal.errorText != "" {
-			observed += fmt.Sprintf(" precursor_failed_error=%q", terminal.errorText)
+		if terminal.errorClass != "" {
+			observed += fmt.Sprintf(" precursor_failed_error_class=%q", terminal.errorClass)
 		}
 		observed += " precursor_failed_at=" + terminal.observedAt.UTC().Format(time.RFC3339Nano)
 		if terminal.identity.host != "" {
@@ -227,8 +227,8 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	retryObserved := false
 	if phase == "failed" {
-		if errorText != "" {
-			observed += fmt.Sprintf(" failed_error=%q", errorText)
+		if errorClass != "" {
+			observed += fmt.Sprintf(" failed_error_class=%q", errorClass)
 		}
 		if !failedAt.IsZero() {
 			observed += " failed_at=" + failedAt.UTC().Format(time.RFC3339Nano)

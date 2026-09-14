@@ -53,6 +53,7 @@ func runPointsReadinessFixture(
 func syntheticPointsSettings() SignalSettings {
 	settings := syntheticSettings(nil)
 	settings.VerificationEnabled = true
+	settings.STConfigStatus = STConfigurationEnabled
 	settings.STDeploymentKey = syntheticPointsDeployment
 	return settings
 }
@@ -99,6 +100,7 @@ func requireNoPointsAlertClass(t testing.TB, alerts Alerts, class string) {
 func TestPointsReadinessSignalDiagnosesUnavailableEpochMetrics(t *testing.T) {
 	settings := syntheticPointsSettings()
 	settings.VerificationEnabled = false
+	settings.STConfigStatus = STConfigurationExplicitDisabled
 	settings.STDeploymentKey = ""
 	alerts := runPointsReadinessFixture(t, settings,
 		syntheticPointsSnapshot(300, 0, 25708, false, 25708, 0, 0, 0),
@@ -107,6 +109,8 @@ func TestPointsReadinessSignalDiagnosesUnavailableEpochMetrics(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
 	for _, want := range []string{
 		"st_enabled=false",
+		"st_configuration_status=explicit-disabled",
+		"Main ST configuration is explicitly disabled",
 		"total_ranked=25708",
 		"snapshot_epoch_metrics_available=false",
 		"positive_blocks=0",
@@ -127,6 +131,27 @@ func TestPointsReadinessSignalDiagnosesUnavailableEpochMetrics(t *testing.T) {
 			t.Fatalf("unavailable alert retains stale software guidance %q:\n%s", stale, alert.Markdown())
 		}
 	}
+}
+
+func TestPointsReadinessSignalKeepsEnabledInvalidConfigurationVisible(t *testing.T) {
+	settings := syntheticPointsSettings()
+	settings.STConfigStatus = STConfigurationEnabledInvalid
+	settings.STDeploymentKey = ""
+	alerts := runPointsReadinessFixture(t, settings,
+		syntheticPointsSnapshot(300, 0, 10, false, 10, 0, 0, 0),
+		nil,
+	)
+	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
+	for _, want := range []string{
+		"st_enabled=true",
+		"st_configuration_status=enabled-invalid",
+		"enabled Main ST configuration has no valid deployment namespace",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("enabled-invalid alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	requireAlertOmits(t, alert, syntheticMainSTCoordinator)
 }
 
 func TestPointsReadinessSignalTreatsFinalizedEpochZeroAsAvailable(t *testing.T) {
@@ -152,6 +177,7 @@ func TestPointsReadinessSignalDoesNotTreatAnOpenEpochAsAvailable(t *testing.T) {
 func TestPointsReadinessSignalPagesOnPersistedAvailabilityContradiction(t *testing.T) {
 	settings := syntheticPointsSettings()
 	settings.VerificationEnabled = false
+	settings.STConfigStatus = STConfigurationExplicitDisabled
 	settings.STDeploymentKey = ""
 	alerts := runPointsReadinessFixture(t, settings,
 		syntheticPointsSnapshot(120, 0, 10, true, 10, 0, 0, 0),
@@ -178,6 +204,7 @@ func TestPointsReadinessSignalPagesOnPersistedAvailabilityContradiction(t *testi
 func TestPointsReadinessSignalPagesWhenUnavailableSnapshotCarriesEpochPayload(t *testing.T) {
 	settings := syntheticPointsSettings()
 	settings.VerificationEnabled = false
+	settings.STConfigStatus = STConfigurationExplicitDisabled
 	settings.STDeploymentKey = ""
 	alerts := runPointsReadinessFixture(t, settings,
 		syntheticPointsSnapshot(120, 7, 10, false, 10, 3, 2, 1),

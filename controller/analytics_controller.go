@@ -1053,7 +1053,7 @@ func runBing(ctx context.Context, config *model.AnalyticsConfig, credentials *an
 		emitProviderResult("bing", "", "missing_auth")
 		return
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
+	client := server.NewHttpClient(45 * time.Second)
 	for _, site := range config.Sites {
 		if site.Properties.BingWebmaster == "" {
 			continue
@@ -1093,7 +1093,7 @@ func runYandex(ctx context.Context, config *model.AnalyticsConfig, credentials *
 		emitProviderResult("yandex", "", "missing_auth")
 		return
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
+	client := server.NewHttpClient(45 * time.Second)
 	for _, site := range config.Sites {
 		if site.Properties.YandexHostID == "" {
 			continue

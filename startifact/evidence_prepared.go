@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/urnetwork/server"
@@ -61,9 +62,10 @@ func (self *PreparedEvidence) publication(store server.BlobStore) (*Published, e
 	return &Published{ContentHash: self.identity.ContentHash, ContentKey: contentKey, HistoryKey: historyKey, Bucket: store.Bucket()}, nil
 }
 
-// Both routes still execute the original immutable create and exact winner
-// readback. Preparation only removes repeated signature and Json work.
-func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (*Published, error) {
+// Both routes execute their immutable create and exact winner readback using
+// one private synced carrier. Staging the same bytes again for the history
+// route adds a redundant synchronous disk flush to every registration.
+func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (result *Published, resultErr error) {
 	if ctx == nil {
 		return nil, errors.New("evidence publication context is missing")
 	}
@@ -74,11 +76,42 @@ func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStor
 	if err != nil {
 		return nil, err
 	}
+	file, err := os.CreateTemp("", "urnetwork-st-artifact-*.json")
+	if err != nil {
+		return nil, err
+	}
+	path := file.Name()
+	defer func() {
+		if file != nil {
+			resultErr = errors.Join(resultErr, file.Close())
+		}
+		resultErr = errors.Join(resultErr, os.Remove(path), ctx.Err())
+		if resultErr != nil {
+			result = nil
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return nil, err
+	}
+	if _, err := file.Write(self.encoded); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := file.Sync(); err != nil {
+		return nil, err
+	}
+	closeErr := file.Close()
+	file = nil
+	if closeErr != nil {
+		return nil, closeErr
+	}
 	for _, key := range []string{published.ContentKey, published.HistoryKey} {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := putImmutable(ctx, store, key, self.encoded); err != nil {
+		if err := putImmutableFromFile(ctx, store, key, path, self.encoded); err != nil {
 			return nil, err
 		}
 	}

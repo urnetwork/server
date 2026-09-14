@@ -1232,6 +1232,48 @@ const (
 	ContractOutcomeDisputeResolvedToDestination ContractOutcome = "dispute_resolved_to_destination"
 )
 
+// errContractAlreadySettled distinguishes a benign duplicate close from
+// malformed settlement and conflicting terminal outcomes. The expiry sweep
+// can select an open contract immediately before a live close settles it; that
+// race is successful convergence once the sweep verifies the terminal row and
+// removes the stale stream entry.
+var errContractAlreadySettled = errors.New("Contract already closed with outcome settled")
+
+func isOnlyContractAlreadySettled(err error) bool {
+	for err != nil {
+		if err == errContractAlreadySettled {
+			return true
+		}
+		// errors.Join and other multi-errors may contain the settled sentinel
+		// alongside a real failure. They must remain fail-closed.
+		if _, ok := err.(interface{ Unwrap() []error }); ok {
+			return false
+		}
+		unwrapper, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = unwrapper.Unwrap()
+	}
+	return false
+}
+
+func finishForceCloseContract(closeErr error, quarantine func() error, cleanup func() error) error {
+	alreadySettled := isOnlyContractAlreadySettled(closeErr)
+	if closeErr != nil && !alreadySettled {
+		closeErr = errors.Join(closeErr, quarantine())
+	}
+
+	// A live close may settle a contract after the sweep selected its open
+	// snapshot. Accept only that exact terminal outcome, and only when the
+	// independent final-state check and stream cleanup both succeeded.
+	cleanupErr := cleanup()
+	if cleanupErr == nil && alreadySettled {
+		return nil
+	}
+	return errors.Join(closeErr, cleanupErr)
+}
+
 type ContractParty = string
 
 const (
@@ -1256,7 +1298,8 @@ type TransferEscrowBalance struct {
 // ContractParticipant is one service client whose hop carries a contract's
 // traffic. The payer/origin endpoint is not a participant; the opposite
 // endpoint (egress) is, along with every intermediary attached to the
-// contract's stream.
+// contract's stream and the provider client of every extender party. Every hop
+// has equal weight, so one client appears at most once whatever its roles.
 type ContractParticipant struct {
 	ClientId  server.Id
 	NetworkId server.Id
@@ -1368,6 +1411,72 @@ func SetContractStream(
 
 	return
 }
+
+// Writes the extender parties of a new contract (connect/EXTENDER.md J2): the
+// distinct active extenders tagged on the currently connected connections of
+// the source client, as party source, and those of the destination client, as
+// party destination. The extender's own
+// provider client and network are copied in, so settlement never joins the
+// directory. Zero rows is the normal case, and a contract need not have
+// carried its data over the extender -- every active extender of an endpoint
+// counts, which is fuzzy per contract but averages to the right allocation.
+//
+// The two branches carry different party values so they cannot collide, and
+// each is distinct in itself, so several connections of one client through one
+// extender are one row.
+//
+// create_time is copied from the contract, not defaulted: the hourly counts of
+// connect/EXTENDER.md M3 bucket these rows by create_time and the contracts by
+// theirs, so the two must be the same instant to the microsecond. The contract
+// writes its own create_time from clock_timestamp(), which the column's
+// DEFAULT now() -- the transaction start -- would only approximate, and a
+// transaction that straddles an hour boundary would put the contract and its
+// parties in different buckets. The join is on the transfer_contract row this
+// same transaction inserted just above, so it is a primary key lookup that
+// always hits; a contract that somehow is not there gets no party rows rather
+// than a null create_time.
+//
+// $1 contract, $2 source client, $3 destination client, $4 source party,
+// $5 destination party.
+const contractExtenderInsertSql = `
+	INSERT INTO contract_extender (
+		contract_id,
+		extender_id,
+		party,
+		client_id,
+		network_id,
+		create_time
+	)
+	SELECT
+		transfer_contract.contract_id,
+		endpoint.extender_id,
+		endpoint.party,
+		network_extender.client_id,
+		network_extender.network_id,
+		transfer_contract.create_time
+	FROM (
+		SELECT DISTINCT extender_id, $4::varchar AS party
+		FROM network_client_connection
+		WHERE
+			client_id = $2 AND
+			connected AND
+			extender_id IS NOT NULL
+
+		UNION ALL
+
+		SELECT DISTINCT extender_id, $5::varchar AS party
+		FROM network_client_connection
+		WHERE
+			client_id = $3 AND
+			connected AND
+			extender_id IS NOT NULL
+	) AS endpoint
+	INNER JOIN network_extender ON
+		network_extender.extender_id = endpoint.extender_id AND
+		network_extender.active
+	INNER JOIN transfer_contract ON
+		transfer_contract.contract_id = $1
+`
 
 func createTransferEscrowInTx(
 	ctx context.Context,
@@ -1581,6 +1690,15 @@ func createTransferEscrowInTx(
 			companionContractId,
 			payerNetworkId,
 			priority,
+		)
+
+		batch.Queue(
+			contractExtenderInsertSql,
+			contractId,
+			sourceId,
+			destinationId,
+			ContractPartySource,
+			ContractPartyDestination,
 		)
 	})
 
@@ -2147,6 +2265,15 @@ func createContractNoEscrowInTx(
 		destinationId,
 		contractTransferByteCount,
 	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		contractExtenderInsertSql,
+		contractId,
+		sourceId,
+		destinationId,
+		ContractPartySource,
+		ContractPartyDestination,
+	))
 	return
 }
 
@@ -2208,7 +2335,11 @@ func CloseContract(
 			return
 		}
 		if outcome != nil {
-			returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			if *outcome == ContractOutcomeSettled {
+				returnErr = fmt.Errorf("%w: %s %s %s->%s", errContractAlreadySettled, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			} else {
+				returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			}
 			return
 		}
 		if dispute {
@@ -2430,10 +2561,11 @@ func claimContractOutcomeInTx(
 }
 
 // contractParticipantsInTx returns the service side of a contract: the
-// non-payer endpoint (the egress hop) plus the intermediary clients persisted
-// for its stream. The participant set deliberately still contains clients on
-// the origin network; settlement uses the full set as the even-split
-// denominator, then suppresses those ineligible shares.
+// non-payer endpoint (the egress hop), the intermediary clients persisted for
+// its stream, and the extenders the endpoints were connected through. The
+// participant set deliberately still contains clients on the origin network;
+// settlement uses the full set as the even-split denominator, then suppresses
+// those ineligible shares.
 func contractParticipantsInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2550,6 +2682,32 @@ func contractParticipantsInTx(
 			}
 		})
 	}
+
+	// The extender parties of the contract are hops like any other
+	// (connect/EXTENDER.md J3), so they join the same map before the split:
+	// keying by client id counts an extender whose provider client is already
+	// a participant once, and an extender on the payer network keeps its even
+	// share out of the payout through the same eligibility rule.
+	result, err = tx.Query(
+		ctx,
+		`
+			SELECT
+				client_id,
+				network_id
+			FROM contract_extender
+			WHERE contract_id = $1
+		`,
+		contractId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var participant ContractParticipant
+			server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
+			if _, exists := participantsByClientId[participant.ClientId]; participant.ClientId != originId && !exists {
+				participantsByClientId[participant.ClientId] = participant
+			}
+		}
+	})
 
 	for _, participant := range participantsByClientId {
 		participants = append(participants, participant)
@@ -3914,18 +4072,20 @@ func ForceCloseOpenContractIds(
 					closeErr := runForceClose(func() error {
 						return closeContract(tag, openContract)
 					})
-					if closeErr != nil {
-						quarantineErr := runForceClose(func() error {
-							closeMalformedContract(tag, openContract, closeErr)
-							return nil
-						})
-						closeErr = errors.Join(closeErr, quarantineErr)
-					}
-
-					streamErr := runForceClose(func() error {
-						return removeFinalizedContractFromStream(openContract)
-					})
-					contractErrors[j] = errors.Join(closeErr, streamErr)
+					contractErrors[j] = finishForceCloseContract(
+						closeErr,
+						func() error {
+							return runForceClose(func() error {
+								closeMalformedContract(tag, openContract, closeErr)
+								return nil
+							})
+						},
+						func() error {
+							return runForceClose(func() error {
+								return removeFinalizedContractFromStream(openContract)
+							})
+						},
+					)
 				}
 			})
 			if recovered != nil {
@@ -4226,6 +4386,30 @@ func LockPaymentNetworkInTx(
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrPaymentNetworkNotFound
 	}
+	return err
+}
+
+// LockPlaySubscriptionPurchaseInTx serializes a Play purchase's credit and end
+// paths. Both take the network lifecycle lock first and this token advisory
+// lock second, so a terminal poll that follows an in-flight ACTIVE response
+// sees and ends the committed credit rather than racing past it.
+func LockPlaySubscriptionPurchaseInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	purchaseToken string,
+) error {
+	if purchaseToken == "" {
+		return errors.New("Play purchase token is empty")
+	}
+	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		purchaseToken,
+	)
 	return err
 }
 
@@ -4858,6 +5042,10 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					DELETE FROM transfer_escrow_sweep
 					USING candidate
 					WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
+				), deleted_extender AS (
+					DELETE FROM contract_extender
+					USING candidate
+					WHERE contract_extender.contract_id = candidate.contract_id
 				), deleted_contract AS (
 					DELETE FROM transfer_contract
 					USING candidate
@@ -4988,9 +5176,9 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 }
 
 // SweepOrphanContractData removes contract_close/transfer_escrow/
-// transfer_escrow_sweep rows whose transfer_contract no longer exists, plus
-// contract_participant rows whose stream is no longer referenced by any
-// retained contract.
+// transfer_escrow_sweep/contract_extender rows whose transfer_contract no
+// longer exists, plus contract_participant rows whose stream is no longer
+// referenced by any retained contract.
 // RemoveCompletedContracts cascades the per-contract rows atomically with the
 // contract delete. Stream participants are shared by all contracts on a stream,
 // so this sweep removes them after the last reference disappears. Each table is
@@ -5173,6 +5361,48 @@ func sweepOrphanContractSteps() []sweepOrphanStep {
 			(SELECT count(*) FROM slice),
 			(SELECT count(*) FROM del),
 			bound.stream_id, bound.client_id
+		FROM bound
+		`,
+		},
+
+		// contract_extender, keyed by (contract_id, extender_id, party).
+		// Appended, not grouped with the other contract-keyed tables, so that
+		// a cursor persisted before this step existed still names the table it
+		// was paging.
+		{
+			table: "contract_extender",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(server.Id), new(string)}
+			},
+			sql: `
+		WITH slice AS (
+			SELECT contract_id, extender_id, party
+			FROM contract_extender
+			WHERE ($1 OR (contract_id, extender_id, party) > ($2, $3, $4))
+			ORDER BY contract_id, extender_id, party
+			LIMIT $5
+		), del AS (
+			DELETE FROM contract_extender
+			USING slice
+			WHERE
+				contract_extender.contract_id = slice.contract_id AND
+				contract_extender.extender_id = slice.extender_id AND
+				contract_extender.party = slice.party AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.contract_id = contract_extender.contract_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT contract_id, extender_id, party
+			FROM slice
+			ORDER BY contract_id DESC, extender_id DESC, party DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.contract_id, bound.extender_id, bound.party
 		FROM bound
 		`,
 		},

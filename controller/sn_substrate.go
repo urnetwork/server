@@ -37,7 +37,7 @@ const snWalletChainCacheMax = 4096
 // source address can trigger per minute (cached answers are free)
 const snWalletValidateIpLimitPerMinute = 30
 
-var snSubstrateHttpClient = &http.Client{Timeout: snSubstrateRequestTimeout}
+var snSubstrateHttpClient = server.NewHttpClient(snSubstrateRequestTimeout)
 
 type snJsonRpcError struct {
 	Code    int    `json:"code"`

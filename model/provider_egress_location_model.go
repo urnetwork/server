@@ -859,6 +859,13 @@ const providerEgressStaleHealthDueQuery = `
 				provider_egress_probe_attempt.client_id = provider_egress_health.client_id AND
 				$3 <= provider_egress_probe_attempt.attempt_at
 		) AND
+		NOT EXISTS (
+			SELECT 1 FROM provider_blackhole_check
+			WHERE
+				provider_blackhole_check.client_id = provider_egress_health.client_id AND
+				provider_blackhole_check.ok = false AND
+				$7 <= provider_blackhole_check.checked_at
+		) AND
 		(
 			$5 <= 1 OR
 			((hashtext(provider_egress_health.client_id::text) % $5) + $5) % $5 = $6
@@ -905,22 +912,32 @@ const providerEgressStaleHealthDueQuery = `
 // probe worked; moving the schedule server-side dropped that protection, and
 // provider_egress_probe_attempt is what restores it.
 //
+// Fourth, a current explicit blackhole failure defers the expensive full
+// probe. The cheap blackhole queue remains independent and retries failures
+// without the full-probe attempt backoff, so a passing recheck makes the
+// provider immediately full-probeable again. If that queue stalls, its verdict
+// ages out after ProviderBlackholeCheckMaxAge and this queue fails open. Missing
+// checks, stale checks, and current passing checks never exclude a provider.
+//
 // The observed-at and attempt-at cutoffs are computed by the caller in Go and
-// bound as parameters. The health cutoff is likewise computed in Go from its
-// model lifetime. All three columns are naive `timestamp` values holding UTC;
-// comparing them to SQL now() would cast through the session timezone.
+// bound as parameters. The health and current-blackhole cutoffs are likewise
+// computed in Go from their model lifetimes. All four timestamps are naive
+// `timestamp` values holding UTC; comparing them to SQL now() would cast
+// through the session timezone.
 //
 // # Bounded indexed heads, not one outer-join sort
 //
 // A single statement over the complete live-provider population cannot use the
 // evidence timestamps' ordered indexes for a global deadline sort. Instead,
 // the location and health tables supply bounded oldest-evidence heads through
-// (timestamp, client_id). A third location-indexed head finds providers whose
-// accepted location has no health row, which is possible because health
-// reporting is non-fatal to location submission. The health head requires an
-// extant location, so retained health history after location cleanup remains
-// exclusively in the unlocated lane. Go deduplicates those heads and merges
-// them by absolute hard expiry: observed_at +
+// (timestamp, client_id). A third output-bounded anti-health head finds
+// providers whose accepted location has no health row, which is possible
+// because health reporting is non-fatal to location submission. Absence in a
+// different table has no observed_at range key; PostgreSQL may correctly scan
+// and sort the small location table when missing-health rows are rare. The
+// health head requires an extant location, so retained health history after
+// location cleanup remains exclusively in the unlocated lane. Go deduplicates
+// those heads and merges them by absolute hard expiry: observed_at +
 // ProviderEgressLocationMaxAge, measured_at + ProviderEgressHealthMaxAge, or
 // observed_at + ProviderEgressHealthMaxAge for missing health. Equal deadlines
 // use client_id, so every limit is deterministic. Taking the requested limit
@@ -977,6 +994,8 @@ func GetProviderEgressLocationDueSharded(
 	shardIndex int,
 	shardCount int,
 ) []server.Id {
+	now := server.NowUtc()
+	minBlackholeCheckedAt := now.Add(-ProviderBlackholeCheckMaxAge)
 	clientIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
 		type dueCandidate struct {
@@ -1026,6 +1045,13 @@ func GetProviderEgressLocationDueSharded(
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
 						$3 <= provider_egress_probe_attempt.attempt_at
 				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_blackhole_check
+					WHERE
+						provider_blackhole_check.client_id = provider_egress_location.client_id AND
+						provider_blackhole_check.ok = false AND
+						$7 <= provider_blackhole_check.checked_at
+				) AND
 				(
 					$5 <= 1 OR
 					((hashtext(provider_egress_location.client_id::text) % $5) + $5) % $5 = $6
@@ -1042,6 +1068,7 @@ func GetProviderEgressLocationDueSharded(
 			headLimit,
 			shardCount,
 			shardIndex,
+			minBlackholeCheckedAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1059,7 +1086,7 @@ func GetProviderEgressLocationDueSharded(
 		// row whose location was removed remains exclusively in the no-location
 		// lane. Located providers may overlap the stale-location head; a provider
 		// with both deadlines keeps the earlier one.
-		minMeasuredAt := server.NowUtc().Add(-ProviderEgressHealthMaxAge / 2)
+		minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge / 2)
 		result, err = conn.Query(
 			ctx,
 			providerEgressStaleHealthDueQuery,
@@ -1069,6 +1096,7 @@ func GetProviderEgressLocationDueSharded(
 			headLimit,
 			shardCount,
 			shardIndex,
+			minBlackholeCheckedAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1085,10 +1113,16 @@ func GetProviderEgressLocationDueSharded(
 		// Missing-health head. Location submission remains valid when the
 		// prober's independent health check is skipped or its non-fatal report
 		// fails, while provider publication fails closed without a health row.
-		// Drive this anti-join from the existing ordered location index and use
-		// the location observation as the start of the existing health lifetime.
-		// The common attempt predicate prevents an immediate retry after the
-		// normal path reports its just-completed full-probe attempt.
+		// Use the location observation as the start of the existing health
+		// lifetime. Unlike the stale-location head, this has no observed_at range:
+		// missing health is absence in another table. The existing ordered index is
+		// available, but PostgreSQL may correctly choose a small-table sequential
+		// scan, anti-join, and bounded output sort when missing rows are rare. The
+		// LIMIT bounds output, not necessarily scanned location rows. Revisit the
+		// storage/query shape only if measured table growth or latency makes that
+		// pre-existing plan material; do not force an index by changing due
+		// semantics. The common attempt predicate prevents an immediate retry after
+		// the normal path reports its just-completed full-probe attempt.
 		result, err = conn.Query(
 			ctx,
 			`
@@ -1123,6 +1157,13 @@ func GetProviderEgressLocationDueSharded(
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
 						$2 <= provider_egress_probe_attempt.attempt_at
 				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_blackhole_check
+					WHERE
+						provider_blackhole_check.client_id = provider_egress_location.client_id AND
+						provider_blackhole_check.ok = false AND
+						$6 <= provider_blackhole_check.checked_at
+				) AND
 				(
 					$4 <= 1 OR
 					((hashtext(provider_egress_location.client_id::text) % $4) + $4) % $4 = $5
@@ -1138,6 +1179,7 @@ func GetProviderEgressLocationDueSharded(
 			headLimit,
 			shardCount,
 			shardIndex,
+			minBlackholeCheckedAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1206,6 +1248,13 @@ func GetProviderEgressLocationDueSharded(
 						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
 						$2 <= provider_egress_probe_attempt.attempt_at
 				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_blackhole_check
+					WHERE
+						provider_blackhole_check.client_id = network_client_location_reliability.client_id AND
+						provider_blackhole_check.ok = false AND
+						$6 <= provider_blackhole_check.checked_at
+				) AND
 				-- hashtext is signed and '%' preserves the sign, so normalize
 				-- the modulo into [0, shardCount).
 				(
@@ -1221,6 +1270,7 @@ func GetProviderEgressLocationDueSharded(
 			limit,
 			shardCount,
 			shardIndex,
+			minBlackholeCheckedAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			seen := map[server.Id]bool{}

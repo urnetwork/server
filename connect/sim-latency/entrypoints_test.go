@@ -144,6 +144,7 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 }
 
 func TestRunMainAdvancesAndExplicitlyReplacesStagingRounds(t *testing.T) {
+	commandPath := runMainTestCommandPath(t)
 	cases := []struct {
 		name           string
 		currentStatus  string
@@ -214,6 +215,7 @@ printf '%s\n' '{"schema":1,"epoch":0,"branch":"sim-latency-staging","repositorie
 		}
 		command := exec.Command("/bin/bash", arguments...)
 		command.Env = append(os.Environ(),
+			"PATH="+commandPath,
 			"SIM_LATENCY_API_URL="+apiServer.URL,
 			"SIM_LATENCY_OPERATOR_TOKEN_FILE="+tokenPath,
 			"SIM_LATENCY_SOURCE_CONFIG="+sourceConfigPath,

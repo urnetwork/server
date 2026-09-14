@@ -292,7 +292,41 @@ func TestStClientKeyRegistrationCohortActualThousandClientsTwoOperators(t *testi
 			}
 			endpoint := stClientKeyRegistrationConnectEndpoint(tb)
 			var workers sync.WaitGroup
-			tb.Cleanup(func() { cancel(); workers.Wait() })
+			var progressLock sync.Mutex
+			var sqlReady, published int
+			var firstSqlReady, lastSqlReady, firstPublished, lastPublished time.Duration
+			var publicationWindows []int
+			dispatchStarted := time.Now()
+			cohorts.afterPublicationAdmissionForTest = func() {
+				progressLock.Lock()
+				defer progressLock.Unlock()
+				sqlReady++
+				lastSqlReady = time.Since(dispatchStarted)
+				if sqlReady == 1 {
+					firstSqlReady = lastSqlReady
+				}
+			}
+			cohorts.afterPublicationWindowForTest = func(_ *server.LocalBlobWriteBatch, count int) {
+				progressLock.Lock()
+				defer progressLock.Unlock()
+				publicationWindows = append(publicationWindows, count)
+			}
+			cohorts.afterPublicationForTest = func() {
+				progressLock.Lock()
+				defer progressLock.Unlock()
+				published++
+				lastPublished = time.Since(dispatchStarted)
+				if published == 1 {
+					firstPublished = lastPublished
+				}
+			}
+			tb.Cleanup(func() {
+				cancel()
+				workers.Wait()
+				progressLock.Lock()
+				defer progressLock.Unlock()
+				tb.Logf("actual operator=%d registration_progress sql_ready=%d first_sql_ready=%s last_sql_ready=%s published_before_final_census=%d first_published=%s last_published=%s ready_window_sizes=%v", noId, sqlReady, firstSqlReady, lastSqlReady, published, firstPublished, lastPublished, publicationWindows)
+			})
 			credentials := make([]*jwt.ByJwt, 500)
 			tokens := make([]string, 500)
 			keys := make([][]byte, 500)
@@ -305,7 +339,7 @@ func TestStClientKeyRegistrationCohortActualThousandClientsTwoOperators(t *testi
 				keys[index] = bytes.Clone(ed25519.NewKeyFromSeed(seed[:])[32:])
 			}
 			results := make(chan error, len(credentials))
-			dispatchStarted := time.Now()
+			dispatchStarted = time.Now()
 			workers.Add(len(credentials))
 			for index := range credentials {
 				go func(index int) {

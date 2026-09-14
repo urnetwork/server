@@ -50,7 +50,7 @@ func TestStaleDestinationSignalSyntheticCompleteJointSenderCohorts(t *testing.T)
 	now := time.Date(2026, 9, 4, 20, 10, 0, 0, time.UTC)
 	details := []staleDestinationDetailFixture{
 		{
-			requestCompanion: "true", senderRole: "server", resolution: "requested_companion",
+			requestCompanion: "true", senderRole: "server", sourceOwner: "egress_prober", resolution: "requested_companion",
 			relationship: "public", sourceLifecycle: "active_top", destinationLifecycle: "inactive_derived",
 			rate: 450,
 		},
@@ -93,18 +93,58 @@ func TestStaleDestinationSignalSyntheticCompleteJointSenderCohorts(t *testing.T)
 		"sender_server_rate_per_minute=450.000",
 		"sender_absent_rate_per_minute=10.000",
 		"sender_unknown_rate_per_minute=1.625",
+		"source_owner_egress_prober_rate_per_minute=450.000",
+		"source_owner_other_rate_per_minute=51.625",
+		"source_owner_unattributed_rate_per_minute=0.000",
 		"dominant_request_companion=true",
 		"dominant_sender_role=server",
+		"dominant_source_owner=egress_prober",
 		"dominant_resolution=requested_companion",
 		"dominant_relationship=public",
 		"dominant_source_lifecycle=active_top",
 		"dominant_destination_lifecycle=inactive_derived",
-		"presence of the additive capability",
-		"absent is unavailable capability",
-		"unknown is an explicit malformed or future value",
+		"server-authoritative internal-owner partition",
+		"other excludes that singleton",
+		"unattributed is an API generation without the owner label",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("complete detail alert missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+func TestStaleDestinationSignalSyntheticLegacyOwnerRemainsUnattributed(t *testing.T) {
+	now := time.Date(2026, 9, 12, 9, 5, 0, 0, time.UTC)
+	payload := staleDestinationFixtureWithDetailsJSON(t, now, []staleDestinationFixtureRate{
+		{companion: "false", rate: 520},
+		{companion: "true", rate: 0},
+	}, []staleDestinationDetailFixture{{
+		requestCompanion: "false", senderRole: "client", omitSourceOwner: true,
+		resolution: "rejected", relationship: "public",
+		sourceLifecycle: "active_derived", destinationLifecycle: "inactive_top",
+		rate: 520,
+	}})
+	alerts, err := NewStaleDestinationSignal().Run(
+		context.Background(),
+		staleDestinationSyntheticSettings(t, now, payload),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts=%+v, want one lifecycle-rejection alert", alerts)
+	}
+	markdown := alerts[0].Markdown()
+	for _, want := range []string{
+		"detail_status=complete",
+		"source_owner_egress_prober_rate_per_minute=0.000",
+		"source_owner_other_rate_per_minute=0.000",
+		"source_owner_unattributed_rate_per_minute=520.000",
+		"dominant_source_owner=unattributed",
+		"mixed API rollout or ingestion",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("legacy owner alert missing %q:\n%s", want, markdown)
 		}
 	}
 }
@@ -140,7 +180,7 @@ func TestStaleDestinationSignalSyntheticPartialDetailCannotAttribute(t *testing.
 			t.Fatalf("partial detail alert missing %q:\n%s", want, markdown)
 		}
 	}
-	for _, forbidden := range []string{"dominant_sender_role=", "dominant_relationship="} {
+	for _, forbidden := range []string{"dominant_sender_role=", "dominant_source_owner=", "dominant_relationship="} {
 		if strings.Contains(markdown, forbidden) {
 			t.Fatalf("partial detail disclosed attribution %q:\n%s", forbidden, markdown)
 		}
@@ -191,6 +231,24 @@ func TestStaleDestinationSignalSyntheticDetailAmbiguityIsRedacted(t *testing.T) 
 			name: "invalid fixed label",
 			details: []staleDestinationDetailFixture{{
 				requestCompanion: "false", senderRole: secret, resolution: "rejected",
+				relationship: "public", sourceLifecycle: "active_top", destinationLifecycle: "inactive_derived",
+				rate: 520,
+			}},
+			reason: "invalid_detail_labels",
+		},
+		{
+			name: "invalid source owner",
+			details: []staleDestinationDetailFixture{{
+				requestCompanion: "false", senderRole: "client", sourceOwner: secret, resolution: "rejected",
+				relationship: "public", sourceLifecycle: "active_top", destinationLifecycle: "inactive_derived",
+				rate: 520,
+			}},
+			reason: "invalid_detail_labels",
+		},
+		{
+			name: "producer cannot emit monitor synthesized owner",
+			details: []staleDestinationDetailFixture{{
+				requestCompanion: "false", senderRole: "client", sourceOwner: "unattributed", resolution: "rejected",
 				relationship: "public", sourceLifecycle: "active_top", destinationLifecycle: "inactive_derived",
 				rate: 520,
 			}},
@@ -251,6 +309,15 @@ func TestStaleDestinationSignalSyntheticDetailAmbiguityIsRedacted(t *testing.T) 
 			reason: "unexpected_detail_label_set",
 		},
 		{
+			name: "legacy labels cannot hide an unexpected extra label",
+			details: []staleDestinationDetailFixture{{
+				requestCompanion: "false", senderRole: "client", omitSourceOwner: true, resolution: "rejected",
+				relationship: "public", sourceLifecycle: "active_top", destinationLifecycle: "inactive_derived",
+				rate: 520, extraLabel: secret,
+			}},
+			reason: "unexpected_detail_label_set",
+		},
+		{
 			name: "duplicate cohort",
 			details: []staleDestinationDetailFixture{
 				{
@@ -301,7 +368,8 @@ func TestStaleDestinationSignalSyntheticDetailAmbiguityIsRedacted(t *testing.T) 
 			t.Fatalf("%s: alerts=%+v, want %s", test.name, alerts, test.reason)
 		}
 		markdown := alerts[0].Markdown()
-		if strings.Contains(markdown, secret) || strings.Contains(markdown, "dominant_sender_role=") {
+		if strings.Contains(markdown, secret) || strings.Contains(markdown, "dominant_sender_role=") ||
+			strings.Contains(markdown, "dominant_source_owner=") {
 			t.Fatalf("%s: ambiguous detail escaped redaction/attribution:\n%s", test.name, markdown)
 		}
 	}
@@ -353,7 +421,13 @@ func TestStaleDestinationSignalDocumentationContract(t *testing.T) {
 	section := strings.Join(strings.Fields(catalog[sectionStart:sectionEnd]), " ")
 	for _, want := range []string{
 		"urnetwork_connect_inactive_destination_details_total",
-		"request_companion,sender_role,resolution,relationship, source_lifecycle,destination_lifecycle",
+		"request_companion,sender_role,source_owner,resolution, relationship,source_lifecycle,destination_lifecycle",
+		"`source_owner=egress_prober|other|unknown`",
+		"durable `prober_identity.network_id`",
+		"stable across prober credential rotation",
+		"explicit producer value of `unattributed` is invalid",
+		"missing owner label is rendered as `unattributed`",
+		"never accepted from the request",
 		"Connect producer in `f8b1b60`",
 		"proves only that reported sequence lane",
 		"Selected/discovery-window requesters also require Connect commit `ec34ce1`",
@@ -519,6 +593,7 @@ func staleDestinationSyntheticSettings(t testing.TB, now time.Time, payload stri
 			!strings.Contains(command, "inactive_destination") ||
 			!strings.Contains(command, "sum+by+%28companion%29") ||
 			!strings.Contains(command, "sender_role") ||
+			!strings.Contains(command, "source_owner") ||
 			!strings.Contains(command, "source_lifecycle") ||
 			!strings.Contains(command, "destination_lifecycle") ||
 			!strings.Contains(command, "monitor_metric") ||
@@ -549,6 +624,8 @@ type staleDestinationFixtureSample struct {
 type staleDestinationDetailFixture struct {
 	requestCompanion     string
 	senderRole           string
+	sourceOwner          string
+	omitSourceOwner      bool
 	resolution           string
 	relationship         string
 	sourceLifecycle      string
@@ -624,6 +701,13 @@ func staleDestinationFixtureWithDetailsJSON(
 			"relationship":          detail.relationship,
 			"source_lifecycle":      detail.sourceLifecycle,
 			"destination_lifecycle": detail.destinationLifecycle,
+		}
+		if !detail.omitSourceOwner {
+			sourceOwner := detail.sourceOwner
+			if sourceOwner == "" {
+				sourceOwner = "other"
+			}
+			metric["source_owner"] = sourceOwner
 		}
 		if detail.extraLabel != "" {
 			metric["customer_id"] = detail.extraLabel

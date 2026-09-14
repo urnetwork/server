@@ -37,6 +37,11 @@ by hash on demand, then returns cause/patch/regressions/prerequisites/window;
 Terra returns gate manifests. Keep both agents and the watcher alive unless
 safe promotion requires a handoff.
 
+The primary agent owns the append-only run ledger. Terra and Sol produce
+immutable, privacy-reviewed manifests and name the intended `prior_record`, but
+must not append ledger records themselves. This keeps process/session ownership,
+production mutation authority, and the single-writer chain in one place.
+
 ## Agent contract
 
 Run every signal; freeze, corroborate, classify, and diagnose each finding;
@@ -260,8 +265,9 @@ environment/mode/start timezone, alert/stderr objects, server commit/dirty
 state, expected tails, exclusions/reasons, boundaries, and deadlines. The
 session must support polling, graceful stop, and liveness proof.
 
-The ledger has one writer: the long-lived Terra runner. Each record is exactly
-one complete compact JSON object on one physical line. Canonicalize a prepared,
+The ledger has one writer: the primary agent that owns the authoritative watcher
+session and production-mutation boundary. Each record is exactly one complete
+compact JSON object on one physical line. Canonicalize a prepared,
 privacy-reviewed record with `jq -ce .` before appending it, append the resulting
 single line once, then parse the exact final line and verify its `record_id` and
 `prior_record`. Never append `jq .` output or another indented object. If a
@@ -269,8 +275,8 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Do not allow two agents to append in
-parallel.
+make its old physical layout valid JSONL. Terra and Sol may prepare manifests;
+they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a
@@ -305,10 +311,36 @@ Unknown exclusions fail closed. Inventory-disabled hosts are excluded across
 all probes automatically; `-exclude-edge-ipv6-host` disables only that host's
 exact public IPv6 paths.
 
+For a whole-host pause, use repeatable exact inventory names:
+
+```sh
+WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -exclude-host HOSTNAME
+```
+
+`-exclude-host` is an immutable transport policy: retain desired topology,
+service blocks, and expected denominators while denying excluded
+inventory-target contact. Record its operator reason, owner, UTC start, and
+re-enable condition in the ledger. `monitor-host-scope-partial` keeps excluded
+coverage explicitly unknown; it is not full-fleet recovery. Whole-environment
+service tails and permitted targets remain observed. Empty, wildcard, unknown,
+or ambiguous names fail closed. Reapply exactly the same host/IPv6 exclusions,
+mode, and SSH overrides to every settings-freshness reload and the pre-promotion
+one-shot. Do not remove a selector merely to quiet this operational WARN.
+
+`-exclude-signal` excludes only probe constructors, not hosts selected by other
+probes. A separately host-filtered helper proves its own scope only; never
+transfer that proof to the current authoritative watcher. Re-enable a paused
+host only when its recorded operator condition is met and a current-generation
+validation and controlled handoff succeed.
+
 ## Safe watcher promotion
 
-Any monitor code, catalog, inventory-loading, tailer, or alert-rendering change
-requires a newly built watcher. Promote it as a controlled handoff:
+Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or
+effective Config/Vault settings-generation change requires a newly built
+watcher. A `settings-freshness` finding means this boundary has already been
+crossed; validate the current generation with a fresh one-shot before
+promotion. Promote it as a controlled handoff:
 
 1. run focused tests, `go test ./monitor`, `go test -race ./monitor`, and
    `go vet ./monitor`;
@@ -387,6 +419,57 @@ Useful source-of-truth pairings are:
 Use the existing SSH and Warpctl transports and the commands documented in
 `SIGNALS.md`; do not improvise a less safe secret path. Never contact a disabled
 host while trying to improve denominator coverage.
+
+## Daily three-way improvement research
+
+Run this research at least once per UTC day, and again after any material
+incident diagnosis. Perform a three-way reconciliation of the monitor
+specification, executable coverage, and accumulated production evidence. Record
+the completed UTC time, the exact catalog/source/ledger identities, the prior
+ledger record, and the next due UTC boundary. A busy incident does not cancel
+the daily pass: do the parts needed for that incident immediately and complete
+the remaining catalog research before the day closes. A live incident discovery
+triggers this reconciliation immediately; the daily cadence does not defer an
+active incident.
+
+Research all three directions:
+
+1. **catalog → implementation:** enumerate every `Probe:` declaration and every
+   explicitly required alert family in `SIGNALS.md`. Require a registered
+   `Signal`, the semantic `signal_<key>.go` and `_test.go` pair, the numbered
+   source comment, a real bounded source adapter, and synthetic violated,
+   healthy, unknown/ambiguous, cancellation, and Markdown/redaction coverage.
+   A documentation-only or reserved class is an open coverage alert, not an
+   implemented probe.
+2. **implementation → catalog:** enumerate every registered probe, emitted
+   class, parser branch, threshold, sustain/page gate, target/frame, cadence,
+   source query/command, and recovery rule. Require the catalog to describe the
+   same behavior and ownership. Flag orphan files, registrations, classes,
+   stale actions, hidden fallbacks, unsafe cardinality, and tests that exercise
+   only strings instead of the actual reducer.
+3. **ledger → catalog and implementation:** reduce the append-only ledger by
+   causal identity and follow corrections/closures without rewriting history.
+   For every new discriminator, false attribution, visibility gap, operational
+   prerequisite, or escaped failure class, either update the owning catalog and
+   probe with a deterministic regression or record why an existing probe
+   already covers it. Historical class names remain documented as aliases when
+   removing them would make old evidence uninterpretable.
+
+Terra owns the reproducible crosswalk, registry/test inventory, current watcher
+delta, and verification manifests. Sol owns semantic review of observation
+authority, causal discrimination, false-positive/false-negative boundaries,
+and the smallest source/test corrections. The primary agent reviews their
+manifests, writes the single chained ledger record, and owns all source and
+production authority decisions.
+
+The pass is complete only when every catalog signal is implemented or remains
+an explicit active coverage finding with a named missing source prerequisite;
+every implementation is documented and tested; every still-relevant ledger
+learning is represented; focused and full monitor gates pass; and any monitor
+change is used to build and promote the watcher through the safe handoff above.
+Do not claim the audit is clean by relabeling an intended signal as a runbook,
+trusting an exporter verdict that should be independently replayed, or treating
+an unavailable source as a healthy zero.
 
 ## Root-cause bar
 

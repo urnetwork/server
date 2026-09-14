@@ -122,6 +122,12 @@ func putImmutable(ctx context.Context, store server.BlobStore, key string, b []b
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	return putImmutableFromFile(ctx, store, key, path, b)
+}
+
+// A caller may retain one fully written, synced source across immutable
+// routes. Each route still owns its conditional write and complete readback.
+func putImmutableFromFile(ctx context.Context, store server.BlobStore, key, path string, b []byte) error {
 	if _, err := store.PutIfAbsent(ctx, key, path, "application/json"); err != nil {
 		return fmt.Errorf("create immutable artifact key: %w", err)
 	}

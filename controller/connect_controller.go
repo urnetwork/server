@@ -75,9 +75,9 @@ var missingOriginDetailsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "missing_origin_details_total",
-		Help:      "Missing companion-origin failures partitioned by bounded request resolution and endpoint lifecycle classes",
+		Help:      "Missing companion-origin failures partitioned by bounded server-derived source owner, sender lane, request resolution, and endpoint lifecycle classes",
 	},
-	[]string{"request_companion", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+	[]string{"request_companion", "sender_role", "source_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
 var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
@@ -85,9 +85,9 @@ var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "inactive_destination_details_total",
-		Help:      "Inactive contract destination failures partitioned by bounded sender lane, request resolution, and endpoint lifecycle classes",
+		Help:      "Inactive contract destination failures partitioned by bounded server-derived source owner, sender lane, request resolution, and endpoint lifecycle classes",
 	},
-	[]string{"request_companion", "sender_role", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+	[]string{"request_companion", "sender_role", "source_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
 var controlFrameFailureCounter = prometheus.NewCounterVec(
@@ -244,6 +244,8 @@ func recordContractFailureResolved(
 	if cause == "missing_companion_origin" {
 		missingOriginDetailsCounter.WithLabelValues(
 			companionLabel,
+			contractSenderRoleLabel(resolution.senderRole),
+			contractSourceOwnerLabel(resolution.sourceOwner),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),
@@ -254,6 +256,7 @@ func recordContractFailureResolved(
 		inactiveDestinationDetailsCounter.WithLabelValues(
 			companionLabel,
 			contractSenderRoleLabel(resolution.senderRole),
+			contractSourceOwnerLabel(resolution.sourceOwner),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),
@@ -502,6 +505,7 @@ type contractResolution struct {
 	relationship         model.ProvideMode
 	sourceLifecycle      model.NetworkClientLifecycle
 	destinationLifecycle model.NetworkClientLifecycle
+	sourceOwner          model.NetworkClientSourceOwner
 	senderRole           *protocol.SequenceRole
 }
 
@@ -572,6 +576,21 @@ func contractSenderRoleLabel(senderRole *protocol.SequenceRole) string {
 	}
 }
 
+// contractSourceOwnerLabel accepts only the server-derived source-owner
+// vocabulary. Unlike sender_role, this label never comes from a wire field: it
+// is resolved from the source identity and the durable prober singleton in the
+// same PostgreSQL snapshot as the lifecycle classes.
+func contractSourceOwnerLabel(sourceOwner model.NetworkClientSourceOwner) string {
+	switch sourceOwner {
+	case model.NetworkClientSourceOwnerEgressProber,
+		model.NetworkClientSourceOwnerOther,
+		model.NetworkClientSourceOwnerUnknown:
+		return string(sourceOwner)
+	default:
+		return "unknown"
+	}
+}
+
 func contractDestinationActive(lifecycle model.NetworkClientLifecycle) bool {
 	switch lifecycle {
 	case model.NetworkClientLifecycleActiveTop,
@@ -636,6 +655,7 @@ func CreateContract(
 		relationship:         relationshipDetails.Mode,
 		sourceLifecycle:      relationshipDetails.SourceLifecycle,
 		destinationLifecycle: relationshipDetails.DestinationLifecycle,
+		sourceOwner:          relationshipDetails.SourceOwner,
 		senderRole:           createContract.SenderRole,
 	}
 

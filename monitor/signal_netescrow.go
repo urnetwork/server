@@ -11,9 +11,9 @@ import (
 )
 
 // SIGNALS.md §5.11 maps to signal_netescrow.go and signal_netescrow_test.go.
-// This root-cause probe watches authoritative task durations, detached
-// database pages, and aggregate drift corrections; log-errors independently
-// reports negative aftermath.
+// This root-cause probe watches authoritative active, failed, and completed
+// task durations, detached database pages, and aggregate drift corrections;
+// log-errors independently reports negative aftermath.
 func NewNetEscrowSignal() Signal {
 	return &signalAdapter{
 		number: "5.11",
@@ -57,12 +57,12 @@ var netEscrowAggregateRe = regexp.MustCompile(
 )
 
 const (
-	netEscrowReconcileRunLimit = 2 * time.Minute
-	netEscrowTaskAttemptLimit  = 30 * time.Minute
-	netEscrowActiveLogLookback = 2 * time.Minute
-	netEscrowIncidentLookback  = 45 * time.Minute
-	netEscrowDriftLogLookback  = 15 * time.Minute
-	netEscrowLargeDriftBytes   = int64(256) << 30
+	netEscrowReconcileRunLimit             = 2 * time.Minute
+	netEscrowTaskAttemptLimit              = 30 * time.Minute
+	netEscrowCompletionCompatibilityWindow = 2 * time.Minute
+	netEscrowIncidentLookback              = 45 * time.Minute
+	netEscrowDriftLogLookback              = 15 * time.Minute
+	netEscrowLargeDriftBytes               = int64(256) << 30
 )
 
 type netEscrowAggregate struct {
@@ -176,50 +176,82 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 
 func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := pgTarget(env)
-	rows, err := env.runner.pg(ctx, `
-		WITH completed_overrun AS (
-			SELECT round(extract(epoch FROM run_end_time-run_start_time))::int AS duration_s,
-			       round(extract(epoch FROM now()-run_end_time))::int AS age_s
+	lifecycleLog, lifecycleLogSource, lifecycleLogErr := readTaskLifecycleLog(
+		ctx,
+		env,
+		"ReconcileNetEscrow",
+		netEscrowIncidentLookback,
+		5000,
+	)
+	activeRun := parseTaskActiveRun(lifecycleLog, "ReconcileNetEscrow")
+	terminalRun := parseTaskTerminalRunAtLeast(
+		lifecycleLog,
+		"ReconcileNetEscrow",
+		netEscrowReconcileRunLimit,
+	)
+	retryActiveRun := parseTaskActiveRunForID(lifecycleLog, "ReconcileNetEscrow", terminalRun.taskID)
+
+	// These ids come only from taskRunIDRe's fixed hexadecimal shape, so they
+	// are safe SQL literals. Selecting both identities prevents later fast
+	// successors from pushing an exact retry completion out of the bounded set.
+	activeTaskIDLiteral := "NULL"
+	if activeRun.taskID != "" {
+		activeTaskIDLiteral = "'" + activeRun.taskID + "'"
+	}
+	terminalTaskIDLiteral := "NULL"
+	if terminalRun.taskID != "" {
+		terminalTaskIDLiteral = "'" + terminalRun.taskID + "'"
+	}
+	rows, err := env.runner.pg(ctx, fmt.Sprintf(`
+		WITH recent AS (
+			SELECT task_id::text AS task_id,
+			       round(extract(epoch FROM run_end_time-run_start_time))::int AS duration_s,
+			       round(extract(epoch FROM now()-run_end_time))::int AS age_s,
+			       extract(epoch FROM run_end_time)::bigint AS completed_unix_s,
+			       run_end_time,
+			       run_end_time-run_start_time >= interval '120 seconds' AS is_overrun
 			FROM finished_task
 			WHERE split_part(function_name,'.',3) = 'ReconcileNetEscrow'
 			  AND run_end_time > now() - interval '45 minutes'
-			  AND run_end_time-run_start_time >= interval '120 seconds'
-			ORDER BY run_end_time DESC
-			LIMIT 1
+		), ranked AS (
+			SELECT recent.*,
+			       row_number() OVER (ORDER BY run_end_time DESC) AS latest_rank,
+			       row_number() OVER (PARTITION BY is_overrun ORDER BY run_end_time DESC) AS band_rank
+			FROM recent
+		), completed_runs AS (
+			SELECT 'completed'::text AS phase,
+			       duration_s,
+			       age_s,
+			       task_id,
+			       completed_unix_s
+			FROM ranked
+			WHERE latest_rank = 1
+			   OR (is_overrun AND band_rank = 1)
+			   OR task_id = %s
+			   OR task_id = %s
 		), active_reservation_pages AS (
 			SELECT count(*)::int AS active_count,
 			       coalesce(max(round(extract(epoch FROM clock_timestamp()-query_start))::int),0) AS oldest_s
 			FROM pg_stat_activity
 			WHERE backend_type='client backend'
 			  AND state='active'
-			  AND query ILIKE '%FROM unnest(%'
-			  AND query ILIKE '%CROSS JOIN LATERAL%'
-			  AND query ILIKE '%requested_balance.balance_id%'
-			  AND query ILIKE '%transfer_contract.outcome IS NULL%'
-			  AND query NOT ILIKE '%FROM pg_stat_activity%'
+			  AND query ILIKE '%%FROM unnest(%%'
+			  AND query ILIKE '%%CROSS JOIN LATERAL%%'
+			  AND query ILIKE '%%requested_balance.balance_id%%'
+			  AND query ILIKE '%%transfer_contract.outcome IS NULL%%'
+			  AND query NOT ILIKE '%%FROM pg_stat_activity%%'
 		)
-		SELECT 'completed'::text, duration_s, age_s
-		FROM completed_overrun
+		SELECT phase, duration_s, age_s, task_id, completed_unix_s
+		FROM completed_runs
 		UNION ALL
-		SELECT 'reservation-page'::text, active_count, oldest_s
+		SELECT 'reservation-page'::text, active_count, oldest_s, ''::text, 0::bigint
 		FROM active_reservation_pages
 		WHERE oldest_s >= 120;
-	`)
+	`, activeTaskIDLiteral, terminalTaskIDLiteral))
 	if err != nil {
 		return nil, err
 	}
 
-	// pending_task has no execution-start column: run_at is the due time and
-	// claim_time is a moving heartbeat. Taskworker's bounded `eval active`
-	// heartbeat is the authoritative live elapsed time.
-	activeLog, activeLogErr := env.runner.warpctl(
-		ctx,
-		"logs", env.cfg.env, "taskworker",
-		fmt.Sprintf("--since=%dm", int(netEscrowActiveLogLookback/time.Minute)),
-		"--limit=1000", "--query=ReconcileNetEscrow", "--utc",
-	)
-	activeRun := parseTaskActiveRun(activeLog, "ReconcileNetEscrow")
-	activeSeconds := activeRun.seconds
 	aggregateLog, aggregateLogErr := env.runner.warpctl(
 		ctx,
 		"logs", env.cfg.env, "taskworker",
@@ -228,43 +260,107 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	)
 	aggregates := netEscrowAggregates(aggregateLog)
 
-	phase := ""
-	durationSeconds := 0
-	ageSeconds := 0
-	completedDurationSeconds := 0
-	completedAgeSeconds := 0
-	completedSeen := false
+	type completion struct {
+		taskID          string
+		durationSeconds int
+		ageSeconds      int
+		unixSeconds     int64
+	}
+	latestCompletion := completion{}
+	hasLatestCompletion := false
+	completedOverrun := completion{}
+	hasCompletedOverrun := false
+	activeCompletion := completion{}
+	hasActiveCompletion := false
+	terminalCompletion := completion{}
+	hasTerminalCompletion := false
 	activeReservationPages := 0
 	oldestReservationPageSeconds := 0
 	for _, row := range rows {
 		switch row.str(0) {
 		case "completed":
-			completedSeen = true
-			completedDurationSeconds = atoi(row.str(1))
-			completedAgeSeconds = atoi(row.str(2))
+			candidate := completion{
+				durationSeconds: atoi(row.str(1)),
+				ageSeconds:      atoi(row.str(2)),
+				taskID:          row.str(3),
+				unixSeconds:     atoi64(row.str(4)),
+			}
+			if !hasLatestCompletion || latestCompletion.unixSeconds < candidate.unixSeconds {
+				latestCompletion = candidate
+				hasLatestCompletion = true
+			}
+			if candidate.durationSeconds >= int(netEscrowReconcileRunLimit/time.Second) &&
+				(!hasCompletedOverrun || completedOverrun.unixSeconds < candidate.unixSeconds) {
+				completedOverrun = candidate
+				hasCompletedOverrun = true
+			}
+			if activeRun.taskID != "" && candidate.taskID == activeRun.taskID &&
+				(!hasActiveCompletion || activeCompletion.unixSeconds < candidate.unixSeconds) {
+				activeCompletion = candidate
+				hasActiveCompletion = true
+			}
+			if terminalRun.taskID != "" && candidate.taskID == terminalRun.taskID &&
+				(!hasTerminalCompletion || terminalCompletion.unixSeconds < candidate.unixSeconds) {
+				terminalCompletion = candidate
+				hasTerminalCompletion = true
+			}
 		case "reservation-page":
 			activeReservationPages = atoi(row.str(1))
 			oldestReservationPageSeconds = atoi(row.str(2))
 		}
 	}
-	// The taskworker log query deliberately overlaps two minutes. Immediately
-	// after a run completes it can therefore still return that run's final
-	// eval-active heartbeat. A newer finished_task row whose duration reaches
-	// or exceeds the heartbeat is authoritative lifecycle evidence for the same
-	// run. Older completed precursors do not mask a genuinely live successor.
-	completionSupersedesHeartbeat := completedSeen &&
-		0 <= completedAgeSeconds &&
-		completedAgeSeconds <= int(netEscrowActiveLogLookback/time.Second) &&
-		activeSeconds <= completedDurationSeconds
-	if activeSeconds >= int(netEscrowReconcileRunLimit/time.Second) && !completionSupersedesHeartbeat {
+	completionForHeartbeat := latestCompletion
+	hasCompletionForHeartbeat := hasLatestCompletion
+	if activeRun.taskID != "" {
+		completionForHeartbeat = activeCompletion
+		hasCompletionForHeartbeat = hasActiveCompletion
+	}
+	completionSupersedesHeartbeat := hasCompletionForHeartbeat && completedTaskSupersedesHeartbeat(
+		completionForHeartbeat.taskID,
+		completionForHeartbeat.durationSeconds,
+		completionForHeartbeat.ageSeconds,
+		activeRun,
+		netEscrowCompletionCompatibilityWindow,
+	)
+
+	phase := ""
+	taskID := ""
+	durationSeconds := 0
+	ageSeconds := 0
+	identity := warpLogIdentity{}
+	errorClass := ""
+	failedAt := time.Time{}
+	activeAttemptEnded := !activeRun.observedAt.IsZero() &&
+		!terminalRun.observedAt.IsZero() &&
+		!terminalRun.observedAt.Before(activeRun.observedAt)
+	terminalIsNewestIncident := terminalRun.seconds >= int(netEscrowReconcileRunLimit/time.Second) &&
+		(!hasCompletedOverrun || terminalRun.observedAt.IsZero() || completedOverrun.unixSeconds == 0 ||
+			completedOverrun.unixSeconds <= terminalRun.observedAt.Unix())
+	failedPrecursorToActive := terminalIsNewestIncident &&
+		!terminalRun.observedAt.IsZero() &&
+		!activeRun.observedAt.IsZero() &&
+		terminalRun.observedAt.Before(activeRun.observedAt)
+	if activeRun.seconds >= int(netEscrowReconcileRunLimit/time.Second) &&
+		!activeAttemptEnded &&
+		!completionSupersedesHeartbeat {
 		phase = "active"
-		durationSeconds = activeSeconds
-	} else if completedSeen {
+		taskID = activeRun.taskID
+		durationSeconds = activeRun.seconds
+		identity = activeRun.identity
+	} else if terminalIsNewestIncident {
+		phase = "failed"
+		taskID = terminalRun.taskID
+		durationSeconds = terminalRun.seconds
+		identity = terminalRun.identity
+		errorClass = terminalRun.errorClass
+		failedAt = terminalRun.observedAt
+	} else if hasCompletedOverrun {
 		phase = "completed"
-		durationSeconds = completedDurationSeconds
-		ageSeconds = completedAgeSeconds
-	} else if activeLogErr != nil {
-		return nil, fmt.Errorf("read active ReconcileNetEscrow task logs: %w", activeLogErr)
+		taskID = completedOverrun.taskID
+		durationSeconds = completedOverrun.durationSeconds
+		ageSeconds = completedOverrun.ageSeconds
+	} else if lifecycleLogErr != nil {
+		return nil, fmt.Errorf("read ReconcileNetEscrow task lifecycle logs: %w", lifecycleLogErr)
 	}
 
 	findings := []finding{}
@@ -368,34 +464,110 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	phaseWithArticle := "a " + phase
 	incidentContext := "A proven completed overrun remains visible for 45 minutes so a quick follow-up run cannot erase the incident precursor."
-	evidence := "Correlate this run with the matching `[sm]reconcile net escrow` aggregate and any `[netescrow]negative counter` burst; large opposite-direction drift in the next run is the repair signature."
-	observed := fmt.Sprintf("phase=%s duration_s=%d lookback_s=%d", phase, durationSeconds, int(netEscrowIncidentLookback/time.Second))
+	evidence := "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled failed attempts that never become a finished duration; finished_task retains completed duration. Correlate the exact run with its `[sm]reconcile net escrow` aggregate. A netescrow-negative line without matching aggregate drift remains separate aftermath evidence, not proof of the duration mechanism."
+	if lifecycleLogSource == "host-journal-fallback" {
+		evidence += " The fleet log gateway was unavailable, so the lifecycle came from bounded taskworker journals on configured service hosts."
+	}
+	observed := fmt.Sprintf(
+		"phase=%s duration_s=%d lookback_s=%d lifecycle_log_source=%s",
+		phase,
+		durationSeconds,
+		int(netEscrowIncidentLookback/time.Second),
+		lifecycleLogSource,
+	)
 	if phase == "active" {
 		phaseWithArticle = "an active"
 		incidentContext = "Taskworker's eval-active heartbeat supplies this live elapsed time; it is not inferred from a scheduling timestamp."
-		if completedSeen {
-			observed += fmt.Sprintf(" precursor_completed_duration_s=%d precursor_completed_age_s=%d", completedDurationSeconds, completedAgeSeconds)
-			incidentContext += fmt.Sprintf(" The active successor follows a completed %ds overrun that ended %ds ago; retain both lifecycle points until the chain converges.", completedDurationSeconds, completedAgeSeconds)
+		if hasCompletedOverrun {
+			observed += fmt.Sprintf(" precursor_completed_duration_s=%d precursor_completed_age_s=%d", completedOverrun.durationSeconds, completedOverrun.ageSeconds)
+			incidentContext += fmt.Sprintf(" The active successor follows a completed %ds overrun that ended %ds ago; retain both lifecycle points until the chain converges.", completedOverrun.durationSeconds, completedOverrun.ageSeconds)
 			evidence += " Compare both consecutive reconcile aggregates; an active successor does not erase its completed overrun precursor."
+		}
+		if failedPrecursorToActive {
+			observed += fmt.Sprintf(" precursor_failed_duration_s=%d precursor_failed_attempt_correlated=true", terminalRun.seconds)
+			if terminalRun.errorClass != "" {
+				observed += fmt.Sprintf(" precursor_failed_error_class=%q", terminalRun.errorClass)
+			}
+			observed += " precursor_failed_at=" + terminalRun.observedAt.UTC().Format(time.RFC3339Nano)
+			if terminalRun.identity.host != "" {
+				observed += fmt.Sprintf(
+					" precursor_failed_host=%s precursor_failed_generation=%s precursor_failed_container=%s",
+					terminalRun.identity.host,
+					terminalRun.identity.generation,
+					terminalRun.identity.container,
+				)
+			}
+			incidentContext += " The precursor fields preserve the latest failed overrun beside its active successor; executor chronology does not uniquely identify the timeout mechanism."
 		}
 		if activeRun.taskID != "" {
 			observed += " active_attempt_correlated=true"
 		}
-		if activeRun.identity.host != "" {
+		if identity.host != "" {
 			observed += fmt.Sprintf(
 				" active_host=%s active_generation=%s active_container=%s",
-				activeRun.identity.host,
-				activeRun.identity.generation,
-				activeRun.identity.container,
+				identity.host,
+				identity.generation,
+				identity.container,
 			)
 			incidentContext += fmt.Sprintf(
 				" The live heartbeat is from %s/%s container %s; retain its lifecycle timestamps and executor identity when the fleet alternates fast and long runs, because one executor's fast pass does not prove the deployed algorithm is fixed.",
-				activeRun.identity.host,
-				activeRun.identity.generation,
-				activeRun.identity.container,
+				identity.host,
+				identity.generation,
+				identity.container,
+			)
+		}
+	} else if phase == "failed" {
+		incidentContext = "A failed overrun remains visible for 45 minutes after its logs leave the former two-minute active window. A later short retry is recovery evidence, but it cannot identify which page or dependency consumed the failed attempt's budget."
+		if taskID != "" {
+			observed += " failed_attempt_correlated=true"
+		}
+		if errorClass != "" {
+			observed += fmt.Sprintf(" failed_error_class=%q", errorClass)
+		}
+		if !failedAt.IsZero() {
+			observed += " failed_at=" + failedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if identity.host != "" {
+			observed += fmt.Sprintf(
+				" failed_host=%s failed_generation=%s failed_container=%s",
+				identity.host,
+				identity.generation,
+				identity.container,
+			)
+		}
+		retryHeartbeatObserved := retryActiveRun.taskID != "" &&
+			!retryActiveRun.observedAt.IsZero() && !terminalRun.observedAt.IsZero() &&
+			terminalRun.observedAt.Before(retryActiveRun.observedAt)
+		retryCompleted := hasTerminalCompletion &&
+			!terminalRun.observedAt.IsZero() && terminalRun.observedAt.Unix() < terminalCompletion.unixSeconds
+		if retryCompleted {
+			observed += fmt.Sprintf(
+				" retry_phase=completed retry_duration_s=%d retry_completed_age_s=%d retry_completed_at=%s",
+				terminalCompletion.durationSeconds,
+				terminalCompletion.ageSeconds,
+				time.Unix(terminalCompletion.unixSeconds, 0).UTC().Format(time.RFC3339),
+			)
+			incidentContext += " The exact durable attempt later completed; that is recovery for the retry, not permission to erase the retained failed precursor."
+		} else if retryHeartbeatObserved {
+			observed += fmt.Sprintf(
+				" retry_phase=active retry_last_heartbeat_duration_s=%d retry_observed_at=%s",
+				retryActiveRun.seconds,
+				retryActiveRun.observedAt.UTC().Format(time.RFC3339Nano),
+			)
+			incidentContext += " The exact durable attempt has a newer retry heartbeat; a short retry is an A/B recovery control, not permission to erase the retained failed precursor."
+		}
+		if (retryCompleted || retryHeartbeatObserved) && retryActiveRun.identity.host != "" {
+			observed += fmt.Sprintf(
+				" retry_host=%s retry_generation=%s retry_container=%s",
+				retryActiveRun.identity.host,
+				retryActiveRun.identity.generation,
+				retryActiveRun.identity.container,
 			)
 		}
 	} else {
+		if taskID != "" {
+			observed += " completed_attempt_correlated=true"
+		}
 		observed += fmt.Sprintf(" completed_age_s=%d", ageSeconds)
 	}
 
@@ -404,7 +576,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	verify := "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval."
 	profile, profileErr := self.statementProfile(ctx, env)
 	if profileErr != nil {
-		evidence += " PostgreSQL statement attribution was unavailable: " + profileErr.Error()
+		evidence += " PostgreSQL statement attribution was unavailable; error_class=" + classifyObservationError(profileErr) + "."
 	} else if 0 < profile.reservationCalls {
 		reservationLifetimeMeanMs := profile.reservationTotalMs / float64(profile.reservationCalls)
 		balanceLifetimeMeanMs := 0.0

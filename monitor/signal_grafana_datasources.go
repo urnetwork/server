@@ -18,14 +18,10 @@ const grafanaDatasourceResponseLimit = 64 * 1024
 // bounded query through Grafana's own /api/ds/query boundary for each required
 // datasource.
 func NewGrafanaDatasourcesSignal() Signal {
-	return newGrafanaDatasourcesSignal(&http.Client{Timeout: 10 * time.Second}, "")
+	return newGrafanaDatasourcesSignal(newGrafanaObservationHTTPClient(10*time.Second), "")
 }
 
-type grafanaDatasourceHTTPClient interface {
-	Do(*http.Request) (*http.Response, error)
-}
-
-func newGrafanaDatasourcesSignal(client grafanaDatasourceHTTPClient, endpoint string) Signal {
+func newGrafanaDatasourcesSignal(client grafanaHTTPClient, endpoint string) Signal {
 	return &signalAdapter{
 		number: "11.15", key: "grafana-datasources", name: "Grafana datasource executability",
 		probe: grafanaDatasourcesProbe{client: client, endpoint: endpoint},
@@ -33,7 +29,7 @@ func newGrafanaDatasourcesSignal(client grafanaDatasourceHTTPClient, endpoint st
 }
 
 type grafanaDatasourcesProbe struct {
-	client   grafanaDatasourceHTTPClient
+	client   grafanaHTTPClient
 	endpoint string
 }
 
@@ -73,7 +69,7 @@ func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 	client := p.client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = newGrafanaObservationHTTPClient(10 * time.Second)
 	}
 	hostname := environment + "-grafana." + domain
 	endpoint := p.endpoint
@@ -102,7 +98,7 @@ func (p grafanaDatasourcesProbe) check(ctx context.Context, env *probeEnv) ([]fi
 
 func queryGrafanaDatasource(
 	ctx context.Context,
-	client grafanaDatasourceHTTPClient,
+	client grafanaHTTPClient,
 	endpoint string,
 	adminPassword string,
 	spec grafanaDatasourceQuerySpec,
@@ -133,7 +129,7 @@ func queryGrafanaDatasource(
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.SetBasicAuth("admin", adminPassword)
-	response, err := client.Do(request)
+	response, err := doScopedGrafanaRequest(client, request)
 	if err != nil {
 		return grafanaDatasourceQuerySample{}, err
 	}

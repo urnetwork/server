@@ -1764,6 +1764,857 @@
       ]
     },
     {
+      "id": 60,
+      "type": "row",
+      "title": "extender network",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "stat",
+      "title": "online extenders",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Extenders that are active and reachable on at least one probed address right now. An extender relays client traffic to the operator and to providers on paths that would otherwise be blocked; it is counted once whether it is reachable over IPv4, IPv6, or both.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders)",
+          "legendFormat": "extenders",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "online extenders",
+      "gridPos": {
+        "h": 6,
+        "w": 20,
+        "x": 4,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders over time (refreshed every five minutes).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders)",
+          "legendFormat": "extenders",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "type": "stat",
+      "title": "providers IPv4",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers that have proven IPv4 only. A provider whose reliability row predates the proven columns reads as IPv4.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers_by_ip_family{ip_family=\"ipv4\"})",
+          "legendFormat": "ipv4",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 64,
+      "type": "stat",
+      "title": "providers IPv6",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers that have proven IPv6 and not IPv4.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers_by_ip_family{ip_family=\"ipv6\"})",
+          "legendFormat": "ipv6",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "type": "stat",
+      "title": "providers dual-stack",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers that have proven both families.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers_by_ip_family{ip_family=\"dualstack\"})",
+          "legendFormat": "dualstack",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 66,
+      "type": "stat",
+      "title": "extenders IPv4",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders with an active IPv4 address and no IPv6 one.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders_by_ip_family{ip_family=\"ipv4\"})",
+          "legendFormat": "ipv4",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 67,
+      "type": "stat",
+      "title": "extenders IPv6",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders with an active IPv6 address and no IPv4 one.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders_by_ip_family{ip_family=\"ipv6\"})",
+          "legendFormat": "ipv6",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "type": "stat",
+      "title": "extenders dual-stack",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders reachable on both families. A host with a global address of each family activates both without configuration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders_by_ip_family{ip_family=\"dualstack\"})",
+          "legendFormat": "dualstack",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "providers by ip family",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers by the families they have proven, stacked to the population total. IPv6 alone is IPv6, both is dual-stack, and everything else is IPv4.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_providers_by_ip_family)",
+          "legendFormat": "{{ip_family}}",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "extenders by ip family",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders by the families they have an active address on, stacked to the population total. An extender with an active address of each family is dual-stack.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_extenders_by_ip_family)",
+          "legendFormat": "{{ip_family}}",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 71,
+      "type": "geomap",
+      "title": "extenders by country",
+      "gridPos": {
+        "h": 15,
+        "w": 16,
+        "x": 0,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Online extenders per country, placed by the country the extender last activated from. Marker size scales with the extender count; hover a marker for the country and its count. Countries with no online extender have no marker.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "extenders"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 24,
+          "lon": 8,
+          "zoom": 1.6,
+          "allLayers": true
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": false,
+          "showAttribution": true,
+          "showScale": false,
+          "showMeasure": false,
+          "showDebug": false
+        },
+        "tooltip": {
+          "mode": "details"
+        },
+        "basemap": {
+          "type": "default",
+          "name": "Basemap",
+          "config": {}
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "extenders by country",
+            "config": {
+              "style": {
+                "size": {
+                  "field": "extenders",
+                  "fixed": 6,
+                  "min": 6,
+                  "max": 40
+                },
+                "color": {
+                  "fixed": "#2ec4b6"
+                },
+                "opacity": 0.7,
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                },
+                "rotation": {
+                  "fixed": 0,
+                  "mode": "mod",
+                  "min": -360,
+                  "max": 360
+                }
+              },
+              "showLegend": false
+            },
+            "location": {
+              "mode": "lookup",
+              "lookup": "country_code",
+              "gazetteer": "public/gazetteer/countries.json"
+            },
+            "tooltip": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code, country) (urnetwork_stats_online_extenders_by_country)",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 72,
+      "type": "bargauge",
+      "title": "top extender countries",
+      "gridPos": {
+        "h": 15,
+        "w": 8,
+        "x": 16,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "The 15 countries with the most online extenders right now.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlYlRd"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "left",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 40,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sort_desc(topk(15, max by (country) (urnetwork_stats_online_extenders_by_country)))",
+          "legendFormat": "{{country}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
       "id": 41,
       "type": "row",
       "title": "growth",
@@ -1772,7 +2623,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 89
       },
       "panels": []
     },
@@ -1784,7 +2635,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -1865,7 +2716,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 90
       },
       "datasource": {
         "type": "prometheus",
@@ -1947,7 +2798,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2055,7 +2906,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 98
       },
       "datasource": {
         "type": "prometheus",
@@ -2137,7 +2988,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 106
       },
       "panels": []
     },
@@ -2149,7 +3000,7 @@
         "h": 6,
         "w": 6,
         "x": 0,
-        "y": 73
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -2213,7 +3064,7 @@
         "h": 6,
         "w": 6,
         "x": 6,
-        "y": 73
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -2270,7 +3121,7 @@
         "h": 6,
         "w": 6,
         "x": 12,
-        "y": 73
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -2327,7 +3178,7 @@
         "h": 6,
         "w": 6,
         "x": 18,
-        "y": 73
+        "y": 107
       },
       "datasource": {
         "type": "prometheus",
@@ -2382,7 +3233,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 79
+        "y": 113
       },
       "datasource": {
         "type": "prometheus",
@@ -2474,7 +3325,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 79
+        "y": 113
       },
       "datasource": {
         "type": "prometheus",
@@ -2566,7 +3417,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 79
+        "y": 113
       },
       "datasource": {
         "type": "prometheus",
@@ -2658,7 +3509,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 85
+        "y": 119
       },
       "datasource": {
         "type": "prometheus",
@@ -2750,7 +3601,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 85
+        "y": 119
       },
       "datasource": {
         "type": "prometheus",
@@ -2842,7 +3693,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 85
+        "y": 119
       },
       "datasource": {
         "type": "prometheus",
@@ -2922,7 +3773,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 91
+        "y": 125
       },
       "datasource": {
         "type": "prometheus",
@@ -3030,7 +3881,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 91
+        "y": 125
       },
       "datasource": {
         "type": "prometheus",
@@ -3138,7 +3989,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 91
+        "y": 125
       },
       "datasource": {
         "type": "prometheus",
@@ -3247,7 +4098,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 133
       },
       "panels": []
     },
@@ -3259,7 +4110,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 100
+        "y": 134
       },
       "datasource": {
         "type": "prometheus",
@@ -3327,7 +4178,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 100
+        "y": 134
       },
       "datasource": {
         "type": "prometheus",
@@ -3385,7 +4236,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 100
+        "y": 134
       },
       "datasource": {
         "type": "prometheus",
@@ -3443,7 +4294,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 100
+        "y": 134
       },
       "datasource": {
         "type": "prometheus",
@@ -3511,7 +4362,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 105
+        "y": 139
       },
       "datasource": {
         "type": "prometheus",
@@ -3591,7 +4442,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 105
+        "y": 139
       },
       "datasource": {
         "type": "prometheus",
@@ -3672,7 +4523,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 113
+        "y": 147
       },
       "panels": []
     },
@@ -3684,7 +4535,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 114
+        "y": 148
       },
       "options": {
         "mode": "markdown",

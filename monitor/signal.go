@@ -46,13 +46,25 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 	if err != nil {
 		return nil, err
 	}
+	if scoped, ok := env.runner.(*hostScopeRunner); ok {
+		ctx = context.WithValue(ctx, hostScopeContextKey{}, scoped)
+	}
 	findings, err := s.probe.check(ctx, env)
+	if scoped, ok := env.runner.(*hostScopeRunner); ok {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if hostScopeOnlyError(err) {
+			err = nil
+		}
+		findings = scoped.reduceFindings(settings, findings)
+	}
 	if err != nil {
 		return nil, err
 	}
 	alerts := make(Alerts, 0, len(findings))
 	for _, finding := range findings {
-		if finding.healthy || (s.accept != nil && !s.accept(finding)) {
+		if finding.healthy || (s.accept != nil && finding.class != "monitor-host-scope-partial" && !s.accept(finding)) {
 			continue
 		}
 		alerts = append(alerts, alertFromFinding(settings, s.number, s.key, s.name, finding))

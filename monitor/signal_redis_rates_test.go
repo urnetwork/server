@@ -129,10 +129,10 @@ func TestRedisRatesSignalDoesNotLeakGrafanaErrorBody(t *testing.T) {
 		t.Fatalf("Grafana visibility alerts = %d, want 2: %+v", len(alerts), alerts)
 	}
 	for _, alert := range alerts {
-		if alert.Class != "cannot-observe" || !strings.Contains(alert.Observed, "HTTP 401") {
+		if alert.Class != "cannot-observe" || !strings.Contains(alert.Observed, "error_class="+observationErrorClassAccessDenied) {
 			t.Fatalf("Grafana visibility alert = %+v", alert)
 		}
-		requireAlertOmits(t, alert, privateMarker)
+		requireAlertOmits(t, alert, privateMarker, "HTTP 401")
 	}
 }
 

@@ -168,11 +168,15 @@ func (self *TestConfig) AllowSpeed() bool {
 // Owns the asynchronous model registration and all measurement children for
 // one transport. Close is nonjoining; the handler owner uses CloseAndWait.
 type ConnectionAnnounce struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
-	networkId       server.Id
-	clientId        server.Id
-	clientAddress   string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	networkId     server.Id
+	clientId      server.Id
+	clientAddress string
+	// ipFamilyIntent is the family the transport declared it intends to
+	// prove: 0 (legacy), 4 or 6. Recorded with the connection; the observed
+	// family is derived from clientAddress at the model.
+	ipFamilyIntent  int
 	handlerId       server.Id
 	announceTimeout time.Duration
 
@@ -242,6 +246,8 @@ func NewConnectionAnnounceWithDefaults(
 	)
 }
 
+// NewConnectionAnnounce announces a legacy, family-agnostic connection
+// (intent 0). Family-pinned transports use NewConnectionAnnounceWithIpFamily.
 func NewConnectionAnnounce(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -253,12 +259,41 @@ func NewConnectionAnnounce(
 	testConfig *TestConfig,
 	settings *ConnectionAnnounceSettings,
 ) *ConnectionAnnounce {
+	return NewConnectionAnnounceWithIpFamily(
+		ctx,
+		cancel,
+		networkId,
+		clientId,
+		clientAddress,
+		0,
+		handlerId,
+		announceTimeout,
+		testConfig,
+		settings,
+	)
+}
+
+// NewConnectionAnnounceWithIpFamily is NewConnectionAnnounce with the address
+// family the transport declared it intends to prove (0, 4 or 6).
+func NewConnectionAnnounceWithIpFamily(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	networkId server.Id,
+	clientId server.Id,
+	clientAddress string,
+	ipFamilyIntent int,
+	handlerId server.Id,
+	announceTimeout time.Duration,
+	testConfig *TestConfig,
+	settings *ConnectionAnnounceSettings,
+) *ConnectionAnnounce {
 	announce := &ConnectionAnnounce{
 		ctx:                    ctx,
 		cancel:                 cancel,
 		networkId:              networkId,
 		clientId:               clientId,
 		clientAddress:          clientAddress,
+		ipFamilyIntent:         ipFamilyIntent,
 		handlerId:              handlerId,
 		announceTimeout:        announceTimeout,
 		settings:               settings,
@@ -369,12 +404,13 @@ func (self *ConnectionAnnounce) run() {
 	// FIXME compute expected latency between client and this edge
 	// FIXME store edge coordinated in the config as host variables
 	// FIXME pass the host coordinate in here so the expected latency can be set
-	connectionId, clientAddressHash, err := controller.ConnectNetworkClient(
+	connectionId, clientAddressHash, err := controller.ConnectNetworkClientWithIpFamily(
 		self.ctx,
 		self.clientId,
 		self.clientAddress,
 		self.handlerId,
 		self.settings.LocationRetryTimeout,
+		self.ipFamilyIntent,
 	)
 	if err != nil {
 		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)

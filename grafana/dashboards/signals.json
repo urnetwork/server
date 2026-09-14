@@ -270,21 +270,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "expr": "sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "G",
-          "legendFormat": "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+          "legendFormat": "missing origin request_companion={{request_companion}} sender={{sender_role}} owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (request_companion, sender_role, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "expr": "sum by (request_companion, sender_role, source_owner, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_inactive_destination_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "H",
-          "legendFormat": "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+          "legendFormat": "inactive destination request_companion={{request_companion}} sender_role={{sender_role}} source_owner={{source_owner}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
         }
       ],
-      "description": "urnetwork_connect_contract_failures_total is the lossless counter behind the sampled contract-error log exemplars. Missing-origin detail partitions only missing_companion_origin; inactive-destination detail partitions only inactive_destination. Both retain bounded original request bit, resolution path, relationship, and endpoint lifecycle without client identifiers. Inactive-destination detail additionally retains sender_role=client|server|absent|unknown: the reported sequence lane, not an application, device, provider, or artifact identity. request_companion is not an endpoint-role label. Details are breakdowns of the aggregate, not additional failures to add to it. Absent or incomplete detail is not zero and cannot establish attribution; reconcile fresh complete detail to its aggregate as specified in SIGNALS sections 2.17 and 2.18. An insufficient_balance step-change can indicate netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
+      "description": "urnetwork_connect_contract_failures_total is the lossless counter behind the sampled contract-error log exemplars. Missing-origin detail partitions only missing_companion_origin; inactive-destination detail partitions only inactive_destination. Both retain bounded original request bit, resolution path, relationship, and endpoint lifecycle without client identifiers. Inactive-destination detail additionally retains sender_role=client|server|absent|unknown: the reported sequence lane, not an application, device, provider, or artifact identity. source_owner=egress_prober|other|unknown is derived by the API from the authenticated source network and durable prober network; it is not accepted from the request and does not identify an application or artifact. A missing source_owner during rollout is unattributed, not zero or other. request_companion is not an endpoint-role label. Details are breakdowns of the aggregate, not additional failures to add to it. Absent or incomplete detail is not zero and cannot establish attribution; reconcile fresh complete detail to its aggregate as specified in SIGNALS sections 2.17 and 2.18. An insufficient_balance step-change can indicate netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
     },
     {
       "type": "timeseries",
@@ -2155,6 +2155,210 @@
       "description": "The block clock the collector publishes for the public dashboard's progress gauge: the 1-based block number and the current block's open and close unix times (as seconds relative to now here). A flat block number with a sawtooth remaining time is healthy; a jump at any time other than Sunday 00:00 UTC is a clock or collector fault."
     },
     {
+      "type": "timeseries",
+      "title": "online extenders",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "extenders"
+        }
+      ],
+      "description": "Extenders that are active with at least one active probed address \u2014 the population the directory publishes and the drip rotates through. Every taskworker publishes the same measurement, so max selects it without replica skew."
+    },
+    {
+      "type": "timeseries",
+      "title": "extenders by country (top 10)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(10, max by (country_code) (urnetwork_stats_online_extenders_by_country{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        }
+      ],
+      "description": "The per-country extender gauge behind the public dashboard's extender map, top 10 by count. A country that lost its last extender has its series deleted on the next refresh, so it goes stale rather than pushing a stale count forever."
+    },
+    {
+      "type": "timeseries",
+      "title": "providers by ip family",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_providers_by_ip_family{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{ip_family}}"
+        }
+      ],
+      "description": "Connected valid public providers by the families they have proven: both is dualstack, IPv6 alone is ipv6, and everything else \u2014 including a reliability row written before the proven columns existed \u2014 is ipv4. All three series are published every refresh, so a zero is a zero and never an absence."
+    },
+    {
+      "type": "timeseries",
+      "title": "extenders by ip family",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 115
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_family) (urnetwork_stats_online_extenders_by_ip_family{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{ip_family}}"
+        }
+      ],
+      "description": "Online extenders by the families they have an active address on: both is dualstack, otherwise the one family the host has a global address for. All three series are published every refresh."
+    },
+    {
       "type": "row",
       "title": "application correctness + resource lifecycle",
       "collapsed": false,
@@ -2162,7 +2366,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 115
+        "y": 123
       }
     },
     {
@@ -2177,7 +2381,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2240,7 +2444,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2303,7 +2507,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 116
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2375,7 +2579,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2447,7 +2651,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2519,7 +2723,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 124
+        "y": 132
       },
       "fieldConfig": {
         "defaults": {
@@ -2595,7 +2799,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 132
+        "y": 140
       }
     },
     {
@@ -2610,7 +2814,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 133
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -2673,7 +2877,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 133
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -2733,7 +2937,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 141
+        "y": 149
       }
     },
     {
@@ -2748,7 +2952,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 142
+        "y": 150
       },
       "fieldConfig": {
         "defaults": {
@@ -2829,7 +3033,7 @@
     {
       "type": "timeseries",
       "title": "proxy platform-carrier admission",
-      "description": "Fleet carrier slots: private per-device limits, acquired carriers, and H1 reservations waiting for admission. The limit should scale with live hosted devices; a flat limit while device count grows indicates a stale shared-budget build. Sustained pending H1 at the limit is the direct carrier-starvation signature.",
+      "description": "Fleet carrier slots, pending H1 admission, and sampled same-device preemptions. Limits should scale with live hosted devices. Sustained slot-full pending and recent preemptions suggest the connect#211 loop; verify event-time slot state before attributing a software defect.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2838,7 +3042,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 142
+        "y": 150
       },
       "fieldConfig": {
         "defaults": {
@@ -2896,6 +3100,24 @@
           "expr": "sum(urnetwork_proxy_platform_transports_pending_h1{env=\"$env\"})",
           "refId": "C",
           "legendFormat": "pending H1"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transport_slot_full_pending_h1_devices{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "slot-full pending devices"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "E",
+          "legendFormat": "H3 preemptions/s"
         }
       ]
     },
@@ -2911,7 +3133,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 150
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -2983,7 +3205,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 150
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -3051,7 +3273,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 158
+        "y": 166
       }
     },
     {
@@ -3066,7 +3288,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 159
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3138,7 +3360,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 159
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3200,6 +3422,61 @@
     },
     {
       "type": "timeseries",
+      "title": "Circle transfer admission event capability by worker",
+      "description": "SIGNALS.md §2.14: 1 means this taskworker emits one bounded pre-POST event for each admitted Circle transfer. This is a build capability gauge; the admission rate and wait panels describe traffic. Each series keeps its host, block, and process instance. Samples older than 90 seconds and missing telemetry remain no-data; the §2.14 monitor checks coverage of every newest worker.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 175
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "last"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (timestamp(urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"}) >= time() - 90)",
+          "refId": "A",
+          "legendFormat": "{{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "proxy lock-cache occupancy",
       "description": "Caller IP-lock cache entries and hard capacity for each Proxy process. A process pinned at capacity while evictions rise is bounded high-cardinality churn; a flat capacity mismatch identifies a stale build or configuration boundary.",
       "datasource": {
@@ -3210,7 +3487,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 167
+        "y": 183
       },
       "fieldConfig": {
         "defaults": {
@@ -3274,7 +3551,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 167
+        "y": 183
       },
       "fieldConfig": {
         "defaults": {
@@ -3351,7 +3628,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 175
+        "y": 191
       }
     },
     {
@@ -3366,7 +3643,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 176
+        "y": 192
       },
       "fieldConfig": {
         "defaults": {
@@ -3415,7 +3692,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 184
+        "y": 200
       }
     },
     {
@@ -3426,7 +3703,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 185
+        "y": 201
       },
       "options": {
         "mode": "markdown",

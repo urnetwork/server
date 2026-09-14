@@ -70,6 +70,38 @@ func TestRecordConnectDayPersistsOncePerNetworkUtcDay(t *testing.T) {
 	})
 }
 
+// The connection transaction is already durable before RecordConnectDay
+// starts. A transport/session cancellation at that boundary must not discard
+// the optional event, and a retry must still remain idempotent.
+func TestRecordConnectDayPersistsOnceAfterCallerCancellation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		queryCtx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		server.Tx(queryCtx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				queryCtx,
+				`INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`,
+				clientId,
+				networkId,
+			))
+		})
+
+		callerCtx, cancelCaller := context.WithCancel(queryCtx)
+		cancelCaller()
+		connectAt := time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC)
+		RecordConnectDay(callerCtx, clientId, connectAt)
+		RecordConnectDay(callerCtx, clientId, connectAt.Add(time.Hour))
+
+		if count := connectDayEventCount(t, queryCtx, networkId); count != 1 {
+			t.Fatalf("canceled-parent connect events = %d, want 1", count)
+		}
+		if connectDaySeen.remember(clientId, ConnectDayStart(connectAt)) {
+			t.Fatal("successful canceled-parent write was forgotten from the daily cache")
+		}
+	})
+}
+
 func connectDayEventCount(t testing.TB, ctx context.Context, networkId server.Id) int {
 	t.Helper()
 	count := 0

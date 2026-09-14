@@ -122,6 +122,10 @@ type ProxyDeviceManager struct {
 	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
 	// observed during the whole process lifetime.
 	lockCache *proxyLockCache
+
+	// Converts observed device lifetime counters into identity-free process
+	// deltas; sampled slot-full state does not establish event-time saturation.
+	platformPreemptions proxyPlatformPreemptionTracker
 }
 
 // proxyLockCacheTtl bounds how long a stale ip lock can be enforced after the proxy

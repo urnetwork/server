@@ -108,12 +108,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialTimeout := 5 * time.Second
 		dialRetries := 4
 
-		dialer := &net.Dialer{
-			Timeout: dialTimeout,
-			KeepAliveConfig: net.KeepAliveConfig{
-				Enable: true,
-			},
-		}
+		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
 		host, _, _ := net.SplitHostPort(authority)

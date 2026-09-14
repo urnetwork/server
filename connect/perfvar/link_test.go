@@ -958,7 +958,8 @@ func (self *directionalLink) run(seed int64) {
 		self.stateLock.Unlock()
 		terminalDropCause := linkTerminalDropNone
 		terminalDropAllowed := false
-		if profile.Blackhole {
+		if profile.Blackhole &&
+			!(profile.BlackholeExceptStun && p2pOuterPacketIsStun(packet.packetBytes)) {
 			terminalDropCause = linkTerminalDropOutage
 			terminalDropAllowed = true
 		} else if dropForLoss(packet, profile) {
@@ -1340,6 +1341,25 @@ func TestDirectionalLinkBeginMeasurementSnapshotHonorsCanceledContext(t *testing
 			t.Fatalf("submit occupied-link packet: %v", err)
 		}
 	}
+}
+
+// p2pOuterPacketIsStun recognizes a STUN message behind the modeled 28-byte
+// IPv4/UDP outer header of a P2P link packet: the two most significant bits
+// of the first byte are zero and the magic cookie follows the length field
+// (RFC 5389 §6). ICE consent checks are STUN binding requests on the same
+// socket pair as the data, so a data-plane blackhole that exempts STUN keeps
+// the candidate pair alive while every SRTP/DTLS datagram is lost. The check
+// is only meaningful on P2P links; gVisor access links carry IP packets.
+func p2pOuterPacketIsStun(outerPacket []byte) bool {
+	const stunHeaderByteCount = 20
+	if len(outerPacket) < p2pIPv4UDPHeaderByteCount+stunHeaderByteCount {
+		return false
+	}
+	payload := outerPacket[p2pIPv4UDPHeaderByteCount:]
+	if payload[0]&0xC0 != 0 {
+		return false
+	}
+	return payload[4] == 0x21 && payload[5] == 0x12 && payload[6] == 0xA4 && payload[7] == 0x42
 }
 
 // A later profile update cannot reclassify a packet dropped under an earlier policy.

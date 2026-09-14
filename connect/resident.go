@@ -2216,10 +2216,7 @@ func NewExchangeConnection(
 
 	authority := fmt.Sprintf("%s:%d", hostRoute, port)
 
-	dialer := &net.Dialer{
-		Timeout: settings.ExchangeConnectTimeout,
-	}
-	dialContext := dialer.DialContext
+	dialContext := server.NewDialer(settings.ExchangeConnectTimeout).DialContext
 	if settings.DialContext != nil {
 		dialContext = settings.DialContext
 	}

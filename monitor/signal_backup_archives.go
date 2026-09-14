@@ -14,13 +14,34 @@ import (
 )
 
 const (
-	backupArchiveMetricFreshness = 90 * time.Second
-	backupArchiveHeartbeatAge    = 90 * time.Second
-	backupArchiveMaximumAge      = 5 * 24 * time.Hour
-	backupArchiveFutureTolerance = 5 * time.Minute
-	backupArchiveStorageLookback = 30 * 24 * time.Hour
-	backupArchiveTimerImminent   = 5 * time.Minute
+	backupArchiveMetricFreshness       = 90 * time.Second
+	backupArchiveHeartbeatAge          = 90 * time.Second
+	backupArchiveMaximumAge            = 5 * 24 * time.Hour
+	backupArchiveIntegrityMaximumAge   = 48 * time.Hour
+	backupArchiveFutureTolerance       = 5 * time.Minute
+	backupArchiveStorageLookback       = 30 * 24 * time.Hour
+	backupArchiveTimerImminent         = 5 * time.Minute
+	backupArchiveGenerationMaximumSize = 200
+	backupArchiveGitHubJournalMaxLines = int64(512)
 )
+
+var backupArchiveGenerationPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+var backupArchiveGitHubFailureBoundaryFields = []struct {
+	boundary string
+	field    string
+}{
+	{boundary: "storage-eio", field: "github_failure_storage_eio_lines"},
+	{boundary: "storage-read-only", field: "github_failure_storage_read_only_lines"},
+	{boundary: "clearance-mount", field: "github_failure_clearance_mount_lines"},
+	{boundary: "auth", field: "github_failure_auth_lines"},
+	{boundary: "api-rate", field: "github_failure_api_rate_lines"},
+	{boundary: "git-transfer", field: "github_failure_git_transfer_lines"},
+	{boundary: "capacity", field: "github_failure_capacity_lines"},
+	{boundary: "compression-integrity", field: "github_failure_compression_integrity_lines"},
+	{boundary: "atomic-publication", field: "github_failure_atomic_publication_lines"},
+	{boundary: "unclassified", field: "github_failure_unclassified_lines"},
+}
 
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
 github_unit_state=$(systemctl show github-backup-archive.service -p ActiveState --value 2>/dev/null || true)
@@ -41,6 +62,127 @@ github_timer_last_epoch=$(date -d "${github_timer_last}" +%s 2>/dev/null || true
 github_environment=$(systemctl show github-backup-archive.service -p Environment --value 2>/dev/null || true)
 github_git_transfer_attempts=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_ATTEMPTS=//p' | tail -n 1)
 github_git_transfer_retry_seconds=$(printf '%s\n' "${github_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_GITHUB_BACKUP_GIT_TRANSFER_RETRY_SECONDS=//p' | tail -n 1)
+emit_github_failure_summary() {
+	printf 'github_failure_journal_status=%s\n' "$1"
+	printf 'github_failure_first_boundary=none\n'
+	printf 'github_failure_journal_lines=0\n'
+	printf 'github_failure_storage_eio_lines=0\n'
+	printf 'github_failure_storage_read_only_lines=0\n'
+	printf 'github_failure_clearance_mount_lines=0\n'
+	printf 'github_failure_auth_lines=0\n'
+	printf 'github_failure_api_rate_lines=0\n'
+	printf 'github_failure_git_transfer_lines=0\n'
+	printf 'github_failure_capacity_lines=0\n'
+	printf 'github_failure_compression_integrity_lines=0\n'
+	printf 'github_failure_atomic_publication_lines=0\n'
+	printf 'github_failure_unclassified_lines=0\n'
+}
+reduce_github_failure_journal() {
+	awk '
+	function classify(message, class_count, class) {
+		message=tolower(message)
+		# A specific operating-system storage result takes precedence over the
+		# command (tar, xz, mv, or git) that happened to encounter it.
+		if (message ~ /input\/output error|i\/o error|(^|[^[:alnum:]_])eio([^[:alnum:]_]|$)/) return "storage-eio"
+		if (message ~ /read-only file system|filesystem[^[:alnum:]]+read-only|(^|[^[:alnum:]_])erofs([^[:alnum:]_]|$)/) return "storage-read-only"
+		if (message ~ /no space left on device|disk quota exceeded|file too large|could not read archive volume capacity/) return "capacity"
+		# Explicit credential and HTTP 401 evidence takes precedence over the
+		# generic GitHub API/curl context carried by those same messages.
+		if (message ~ /authentication failed|permission denied \(publickey\)|publickey authentication|bad credentials|missing github backup ssh key|missing .* github api token file|github api token file.*(must|empty)|returned error: 401|http[^0-9]*401/) return "auth"
+
+		class_count=0
+		class=""
+		if (message ~ /archive write clearance|archive write-clearance|archive mount is not present and read-write|archive mount wait values must|refusing to use \/ as the archive mount|archive mount did not become present and read-write|archive mount identity is not cleared and read-write|archive path is outside|mirror work path must be on the archive drive|configured archive mount|clearance marker|clearance probation|stable archive .*identity|mounted archive does not match/) {class="clearance-mount"; class_count++}
+		if (message ~ /api rate limit|secondary rate limit|github api|returned error: (403|429)|http[^0-9]*(403|429)|curl:|failed to discover every .* repository|github returned no repositories|github organization repositories response|unsafe github repository|unexpected github repository/) {class="api-rate"; class_count++}
+		if (message ~ /connection reset|broken pipe|unexpected disconnect|early eof|remote end hung up|could not read from remote repository|unable to access|ssh: connect|connection timed out|network is unreachable|no route to host|connection refused|could not resolve hostname|repository not found|failed to (update|mirror) .*; preserving the previous .* code archive|failed to fetch git lfs objects .*; preserving the previous .* code archive|git (mirror update|mirror clone|lfs fetch).*failed|refusing unexpected (clone attempt|repository cache) path|cached repository is not a bare mirror|failed to install cached mirror/) {class="git-transfer"; class_count++}
+		if (message ~ /new code archive failed its xz\/tar integrity check|failed to create .*\.tar\.xz|(^|[^[:alnum:]_])xz:|(^|[^[:alnum:]_])tar:|sha256sum:/) {class="compression-integrity"; class_count++}
+		if (message ~ /failed to (initialize|update|refresh).*backup.*metrics|failed to (initialize|update) archive storage metrics|archive storage metrics helper is missing or not executable|backup (integrity |storage )?metrics directory does not exist|refusing conflicting code archive migration target|no (staged|complete) .* code archive|mv:.*\.tar\.xz|ln:.*main-code-|cp:.*main-code-|chmod:.*\.tar\.xz/) {class="atomic-publication"; class_count++}
+		if (class_count != 1) {
+			if (class_count > 1 && first_boundary == "") ambiguous_before_first=1
+			return "unclassified"
+		}
+		return class
+	}
+	{
+		if (journal_lines >= 513) {
+			overflow=1
+			next
+		}
+		journal_lines++
+		class=classify($0)
+		counts[class]++
+		if (first_boundary == "" && class != "unclassified") first_boundary=class
+	}
+	END {
+		status="complete"
+		if (journal_lines == 0) {
+			status="unobservable"
+			first_boundary="none"
+		} else if (overflow || journal_lines > 512 || ambiguous_before_first) {
+			status="ambiguous"
+			first_boundary="unclassified"
+		} else if (first_boundary == "") {
+			first_boundary="unclassified"
+		}
+		printf "github_failure_journal_status=%s\n", status
+		printf "github_failure_first_boundary=%s\n", first_boundary
+		printf "github_failure_journal_lines=%d\n", journal_lines
+		printf "github_failure_storage_eio_lines=%d\n", counts["storage-eio"]
+		printf "github_failure_storage_read_only_lines=%d\n", counts["storage-read-only"]
+		printf "github_failure_clearance_mount_lines=%d\n", counts["clearance-mount"]
+		printf "github_failure_auth_lines=%d\n", counts["auth"]
+		printf "github_failure_api_rate_lines=%d\n", counts["api-rate"]
+		printf "github_failure_git_transfer_lines=%d\n", counts["git-transfer"]
+		printf "github_failure_capacity_lines=%d\n", counts["capacity"]
+		printf "github_failure_compression_integrity_lines=%d\n", counts["compression-integrity"]
+		printf "github_failure_atomic_publication_lines=%d\n", counts["atomic-publication"]
+		printf "github_failure_unclassified_lines=%d\n", counts["unclassified"]
+	}'
+}
+github_failure_exit_status=${github_exit_status}
+case "${github_failure_exit_status}" in ''|*[!0-9]*) github_failure_exit_status=0 ;; esac
+github_writer_failed=1
+case "${github_unit_state}" in
+	active|activating|reloading|deactivating) github_writer_failed=0 ;;
+	inactive)
+		if test "${github_result}" = success && test "${github_failure_exit_status}" = 0; then
+			github_writer_failed=0
+		fi
+		;;
+esac
+github_failure_summary=$(emit_github_failure_summary not-applicable)
+if test "${github_writer_failed}" = 1; then
+	github_failure_summary=$(emit_github_failure_summary unobservable)
+	if printf '%s\n' "${github_invocation_id}" |
+		awk 'NR == 1 && length($0) == 32 && $0 ~ /^[[:xdigit:]]+$/ {valid=1} END {exit !(NR == 1 && valid)}'; then
+		github_failure_journal_source=unavailable
+		if command journalctl --quiet --no-pager -n 1 -o cat \
+			"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+			_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+			awk 'END {exit(NR == 0)}'; then
+			github_failure_journal_source=direct
+		elif sudo -n journalctl --quiet --no-pager -n 1 -o cat \
+			"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+			_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+			awk 'END {exit(NR == 0)}'; then
+			github_failure_journal_source=sudo
+		fi
+		case "${github_failure_journal_source}" in
+			sudo)
+				github_failure_summary=$(sudo -n journalctl --quiet --no-pager -n 513 -o cat \
+					"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+					_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+					reduce_github_failure_journal)
+				;;
+			direct)
+				github_failure_summary=$(command journalctl --quiet --no-pager -n 513 -o cat \
+					"_SYSTEMD_INVOCATION_ID=${github_invocation_id}" \
+					_SYSTEMD_UNIT=github-backup-archive.service 2>/dev/null |
+					reduce_github_failure_journal)
+				;;
+		esac
+	fi
+fi
 remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
 remote_unit_substate=$(systemctl show remote-backup-archive.service -p SubState --value 2>/dev/null || true)
 remote_main_pid=$(systemctl show remote-backup-archive.service -p MainPID --value 2>/dev/null || true)
@@ -185,6 +327,7 @@ printf 'github_timer_next_epoch=%s\n' "${github_timer_next_epoch}"
 printf 'github_timer_last_epoch=%s\n' "${github_timer_last_epoch}"
 printf 'github_git_transfer_attempts=%s\n' "${github_git_transfer_attempts}"
 printf 'github_git_transfer_retry_seconds=%s\n' "${github_git_transfer_retry_seconds}"
+printf '%s\n' "${github_failure_summary}"
 printf 'archive_root_observation=%s\n' "${archive_root_observation}"
 printf 'github_archive_path_state=%s\n' "${github_archive_path_state}"
 printf 'remote_archive_path_state=%s\n' "${remote_archive_path_state}"
@@ -294,7 +437,7 @@ var backupArchiveNames = []string{
 // or Grafana frontend cannot hide missing or stale completed backup archives.
 func NewBackupArchivesSignal() Signal {
 	return &signalAdapter{
-		number: "11.22", key: "backup-archives", name: "Planetoid backup archive freshness",
+		number: "11.22", key: "backup-archives", name: "Planetoid backup archive freshness and integrity",
 		probe: backupArchivesProbe{},
 	}
 }
@@ -310,16 +453,26 @@ type backupArchiveLatestSample struct {
 	createdAt  time.Time
 }
 
+type backupArchiveIntegritySample struct {
+	format     string
+	result     string
+	generation string
+	checkedAt  time.Time
+}
+
 type backupArchiveObservation struct {
-	host             string
-	archive          string
-	latest           []backupArchiveLatestSample
-	progress         []float64
-	heartbeats       []time.Time
-	invalidLatest    []string
-	invalidProgress  []string
-	invalidHeartbeat []string
-	staleScrapes     int
+	host                  string
+	archive               string
+	latest                []backupArchiveLatestSample
+	progress              []float64
+	heartbeats            []time.Time
+	integrity             []backupArchiveIntegritySample
+	invalidLatest         []string
+	invalidProgress       []string
+	invalidHeartbeat      []string
+	invalidIntegrity      []string
+	staleScrapes          int
+	staleIntegrityScrapes int
 }
 
 type backupArchiveWriterObservation struct {
@@ -338,6 +491,7 @@ type backupArchiveWriterObservation struct {
 	timerLast                     time.Time
 	githubGitTransferAttempts     int64
 	githubGitTransferRetrySeconds int64
+	githubFailure                 backupArchiveGitHubFailureObservation
 	archiveRootObservation        string
 	githubArchivePathState        string
 	remoteArchivePathState        string
@@ -376,10 +530,68 @@ type backupArchiveWriterObservation struct {
 	storageEvents                 []backupArchiveStorageEvent
 }
 
+type backupArchiveGitHubFailureObservation struct {
+	journalStatus string
+	firstBoundary string
+	journalLines  int64
+	boundaryLines map[string]int64
+}
+
 type backupArchiveStorageEvent struct {
 	occurredAt time.Time
 	kind       string
 	device     string
+}
+
+func parseBackupArchiveIntegritySample(
+	archive string,
+	labels map[string]string,
+	value float64,
+	now time.Time,
+) (backupArchiveIntegritySample, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return backupArchiveIntegritySample{}, fmt.Errorf("check timestamp is not finite and positive")
+	}
+	checkedAt := unixFloatTime(value)
+	if checkedAt.After(now.Add(backupArchiveFutureTolerance)) {
+		return backupArchiveIntegritySample{}, fmt.Errorf("check timestamp is in the future")
+	}
+
+	format := labels["format"]
+	result := labels["result"]
+	generation := labels["generation"]
+	validContract := false
+	switch archive {
+	case "pg":
+		validContract =
+			(format == "pg-gpg-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "pg-gpg-md5-legacy" && result == "legacy-unverified")
+	case "redis":
+		validContract =
+			(format == "redis-bundle-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "redis-pairs-md5-legacy" && result == "legacy-unverified")
+	case "github-urnetwork", "github-urfoundation":
+		validContract =
+			(format == "github-tar-xz-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "github-tar-xz-legacy" && result == "legacy-unverified")
+	}
+	if format == "none" && result == "missing" && generation == "none" {
+		validContract = true
+	}
+	if !validContract {
+		return backupArchiveIntegritySample{}, fmt.Errorf("labels are outside the bounded archive integrity contract")
+	}
+	if result != "missing" && (generation == "none" || len(generation) > backupArchiveGenerationMaximumSize ||
+		!backupArchiveGenerationPattern.MatchString(generation)) {
+		return backupArchiveIntegritySample{}, fmt.Errorf("generation is outside the bounded archive integrity contract")
+	}
+
+	return backupArchiveIntegritySample{
+		format:     format,
+		result:     result,
+		generation: generation,
+		checkedAt:  checkedAt,
+	}, nil
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -460,23 +672,39 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				series.Metric["__name__"], hostName, archive, err,
 			)
 		}
+		metricName := series.Metric["__name__"]
 		scrapeAge := now.Sub(observedAt)
 		if scrapeAge > backupArchiveMetricFreshness {
 			observation.staleScrapes++
+			if metricName == "urnetwork_backup_archive_integrity_checked_timestamp_seconds" {
+				observation.staleIntegrityScrapes++
+			}
 			continue
 		}
 		if scrapeAge < -30*time.Second {
-			observation.invalidLatest = append(
-				observation.invalidLatest,
-				fmt.Sprintf("future_scrape=%s", observedAt.Format(time.RFC3339)),
-			)
+			if metricName == "urnetwork_backup_archive_integrity_checked_timestamp_seconds" {
+				observation.invalidIntegrity = append(observation.invalidIntegrity, "future-scrape")
+			} else {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					fmt.Sprintf("future_scrape=%s", observedAt.Format(time.RFC3339)),
+				)
+			}
 			continue
 		}
 
-		switch series.Metric["__name__"] {
+		switch metricName {
 		case "urnetwork_backup_archive_latest_timestamp_seconds":
 			generation := strings.TrimSpace(series.Metric["generation"])
-			if generation == "" || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+			if generation == "" || len(generation) > backupArchiveGenerationMaximumSize ||
+				!backupArchiveGenerationPattern.MatchString(generation) {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					"generation-outside-bounded-contract",
+				)
+				continue
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
 				observation.invalidLatest = append(
 					observation.invalidLatest,
 					fmt.Sprintf("generation=%q value=%v", generation, value),
@@ -521,6 +749,13 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				continue
 			}
 			observation.heartbeats = append(observation.heartbeats, heartbeatAt)
+		case "urnetwork_backup_archive_integrity_checked_timestamp_seconds":
+			sample, err := parseBackupArchiveIntegritySample(archive, series.Metric, value, now)
+			if err != nil {
+				observation.invalidIntegrity = append(observation.invalidIntegrity, err.Error())
+				continue
+			}
+			observation.integrity = append(observation.integrity, sample)
 		}
 	}
 
@@ -532,6 +767,11 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	findings := make([]finding, 0, len(keys)*2)
 	for _, key := range keys {
 		observation := observations[key]
+		findings = append(findings, evaluateBackupArchiveIntegrity(
+			now,
+			observation,
+			metricHost.name,
+		)...)
 		findings = append(findings, evaluateBackupArchive(
 			now,
 			observation,
@@ -694,6 +934,19 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_timer_last_epoch",
 		"github_git_transfer_attempts",
 		"github_git_transfer_retry_seconds",
+		"github_failure_journal_status",
+		"github_failure_first_boundary",
+		"github_failure_journal_lines",
+		"github_failure_storage_eio_lines",
+		"github_failure_storage_read_only_lines",
+		"github_failure_clearance_mount_lines",
+		"github_failure_auth_lines",
+		"github_failure_api_rate_lines",
+		"github_failure_git_transfer_lines",
+		"github_failure_capacity_lines",
+		"github_failure_compression_integrity_lines",
+		"github_failure_atomic_publication_lines",
+		"github_failure_unclassified_lines",
 		"archive_root_observation",
 		"github_archive_path_state",
 		"remote_archive_path_state",
@@ -855,6 +1108,18 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil {
 		return backupArchiveWriterObservation{}, err
 	}
+	githubFailure, err := parseBackupArchiveGitHubFailureObservation(values)
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	githubWriterFailed := backupArchiveGitHubWriterFailed(
+		values["github_unit_state"],
+		values["github_result"],
+		githubExitStatus,
+	)
+	if githubWriterFailed == (githubFailure.journalStatus == "not-applicable") {
+		return backupArchiveWriterObservation{}, fmt.Errorf("GitHub failure journal applicability disagrees with terminal unit state")
+	}
 	archivePathBools := map[string]bool{}
 	for _, key := range []string{
 		"archive_paths_match",
@@ -937,6 +1202,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		timerLast:                     unixIntegerTime(githubTimerLastEpoch),
 		githubGitTransferAttempts:     githubGitTransferAttempts,
 		githubGitTransferRetrySeconds: githubGitTransferRetrySeconds,
+		githubFailure:                 githubFailure,
 		archiveRootObservation:        values["archive_root_observation"],
 		githubArchivePathState:        values["github_archive_path_state"],
 		remoteArchivePathState:        values["remote_archive_path_state"],
@@ -977,6 +1243,79 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		clearanceState:     values["remote_clearance_state"],
 		storageReadable:    storageReadable,
 		storageEvents:      storageEvents,
+	}, nil
+}
+
+func parseBackupArchiveGitHubFailureObservation(
+	values map[string]string,
+) (backupArchiveGitHubFailureObservation, error) {
+	status := values["github_failure_journal_status"]
+	switch status {
+	case "not-applicable", "complete", "ambiguous", "unobservable":
+	default:
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub failure journal status")
+	}
+	firstBoundary := values["github_failure_first_boundary"]
+	validFirstBoundary := firstBoundary == "none"
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		if firstBoundary == boundaryField.boundary {
+			validFirstBoundary = true
+			break
+		}
+	}
+	if !validFirstBoundary {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub first failure boundary")
+	}
+
+	journalLines, err := strconv.ParseInt(values["github_failure_journal_lines"], 10, 64)
+	if err != nil || journalLines < 0 || journalLines > backupArchiveGitHubJournalMaxLines+1 {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("invalid GitHub failure journal line count")
+	}
+	boundaryLines := make(map[string]int64, len(backupArchiveGitHubFailureBoundaryFields))
+	var classifiedLines int64
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		count, err := strconv.ParseInt(values[boundaryField.field], 10, 64)
+		if err != nil || count < 0 || count > backupArchiveGitHubJournalMaxLines+1 {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf(
+				"invalid GitHub failure boundary count for %s",
+				boundaryField.boundary,
+			)
+		}
+		boundaryLines[boundaryField.boundary] = count
+		classifiedLines += count
+	}
+	if classifiedLines != journalLines {
+		return backupArchiveGitHubFailureObservation{}, fmt.Errorf("GitHub failure boundary counts do not cover the bounded journal")
+	}
+
+	switch status {
+	case "not-applicable", "unobservable":
+		if journalLines != 0 || firstBoundary != "none" {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("unobserved GitHub failure journal contains classification state")
+		}
+	case "ambiguous":
+		if journalLines == 0 || journalLines > backupArchiveGitHubJournalMaxLines+1 || firstBoundary != "unclassified" {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("ambiguous GitHub failure journal is not fail-closed")
+		}
+	case "complete":
+		if journalLines == 0 || journalLines > backupArchiveGitHubJournalMaxLines {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("complete GitHub failure journal has invalid cardinality")
+		}
+		recognizedLines := journalLines - boundaryLines["unclassified"]
+		if recognizedLines == 0 {
+			if firstBoundary != "unclassified" {
+				return backupArchiveGitHubFailureObservation{}, fmt.Errorf("unclassified GitHub failure journal claims a boundary")
+			}
+		} else if firstBoundary == "none" || firstBoundary == "unclassified" || boundaryLines[firstBoundary] == 0 {
+			return backupArchiveGitHubFailureObservation{}, fmt.Errorf("GitHub first failure boundary is not represented in the journal counts")
+		}
+	}
+
+	return backupArchiveGitHubFailureObservation{
+		journalStatus: status,
+		firstBoundary: firstBoundary,
+		journalLines:  journalLines,
+		boundaryLines: boundaryLines,
 	}, nil
 }
 
@@ -1544,16 +1883,87 @@ func evaluateBackupArchiveRetry(observation backupArchiveWriterObservation) find
 // Reports an unsuccessful GitHub archive invocation independently of archive
 // age. A failed oneshot otherwise remains invisible while its last completed
 // generation is still inside the five-day freshness objective.
+func backupArchiveGitHubWriterFailed(unitState, result string, exitStatus int64) bool {
+	switch unitState {
+	case "active", "activating", "reloading", "deactivating":
+		return false
+	case "inactive":
+		return result != "success" || exitStatus != 0
+	default:
+		return true
+	}
+}
+
+func backupArchiveGitHubFailureText(observation backupArchiveGitHubFailureObservation) string {
+	parts := []string{
+		fmt.Sprintf("failure_journal_status=%s", observation.journalStatus),
+		fmt.Sprintf("first_failure_boundary=%s", observation.firstBoundary),
+		fmt.Sprintf("failure_journal_lines=%d", observation.journalLines),
+	}
+	for _, boundaryField := range backupArchiveGitHubFailureBoundaryFields {
+		parts = append(parts, fmt.Sprintf(
+			"%s_lines=%d",
+			strings.ReplaceAll(boundaryField.boundary, "-", "_"),
+			observation.boundaryLines[boundaryField.boundary],
+		))
+	}
+	return strings.Join(parts, " ")
+}
+
 func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) finding {
 	const class = "backup-archive-writer-failed"
 	target := writer.host + "/github"
-	switch writer.unitState {
-	case "active", "activating", "reloading", "deactivating":
+	if !backupArchiveGitHubWriterFailed(writer.unitState, writer.result, writer.exitStatus) {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
-	case "inactive":
-		if writer.result == "success" && writer.exitStatus == 0 {
-			return healthyFinding("observability/backup-archives", tierPage, class, target)
+	}
+
+	mechanism := "The GitHub archive oneshot is not executing and its effective systemd state does not record a successful exit. Fresh scrape timestamps and a still-young previous tarball can therefore hide a failed writer until the five-day archive-age objective is breached."
+	action := "Keep the single-writer boundary. Preserve completed archives and failed-invocation state, repair only the first proven boundary, and obtain operator authorization before one catch-up invocation."
+	switch writer.githubFailure.journalStatus {
+	case "complete":
+		switch writer.githubFailure.firstBoundary {
+		case "storage-eio":
+			mechanism += " The exact failed invocation's first recognized boundary is an operating-system storage EIO. A currently read-write mount and currently valid clearance are later, independent observations; neither proves that the writer's storage path was usable during this invocation."
+			action += " Reconcile the invocation boundary with exact-lineage filesystem and device evidence, and require the stable-identity clearance interlock to remain valid after that boundary before any retry. Do not relabel the failure as provider, API, or Git transport merely because the volume is read-write now."
+		case "storage-read-only":
+			mechanism += " The exact failed invocation's first recognized boundary is a read-only filesystem result. Present mount options are later state and cannot clear the historical writer failure."
+			action += " Resolve the archive filesystem and stable-device clearance boundary without a live read-write remount of an aborted filesystem, then revalidate the exact archive root before any retry."
+		case "clearance-mount":
+			mechanism += " The exact failed invocation first crossed the archive clearance, mount, stable-identity, or root-placement interlock."
+			action += " Repair the privacy-reduced clearance/mount contract and prove the expected root is on that mounted filesystem; never create a lookalike directory beneath a missing mount."
+		case "auth":
+			mechanism += " The exact failed invocation first exposed a GitHub SSH or API authentication boundary."
+			action += " Validate the installed backup identity and token-file contract through bounded provider checks without copying credential values into logs or alerts."
+		case "api-rate":
+			mechanism += " The exact failed invocation first exposed GitHub API access, response-contract, or rate-limit evidence."
+			action += " Inspect the bounded provider response class and rate-limit window, preserving the prior archive; do not rotate credentials unless authentication is independently proven bad."
+		case "git-transfer":
+			mechanism += " The exact failed invocation first exposed a repository mirror, clone, LFS, SSH, or network-transfer boundary."
+			action += " Preserve the mirror cache and correlate the invocation with bounded client, provider, and path evidence; allow only the configured finite idempotent transfer retry."
+		case "capacity":
+			mechanism += " The exact failed invocation first exposed filesystem capacity, quota, or file-size exhaustion."
+			action += " Prove byte and inode headroom on the exact archive filesystem before retrying; do not prune a last recovery point merely to silence the alert."
+		case "compression-integrity":
+			mechanism += " The exact failed invocation first exposed archive compression, checksum, or tar/xz integrity evidence."
+			action += " Preserve the previous atomic archive, diagnose the bounded compression/integrity stage, and require a full writer-owned validation before publication."
+		case "atomic-publication":
+			mechanism += " The exact failed invocation first exposed metrics, retention, or final atomic-publication evidence."
+			action += " Preserve the previous discoverable archive and repair the exact same-filesystem publication/retention contract before retrying."
+		case "unclassified":
+			mechanism += " The complete bounded invocation journal contains no uniquely recognized failure boundary, so the cause remains unclassified rather than being guessed from present state."
+			action += " Inspect that exact invocation under operator access and extend the closed reducer only from a stable, privacy-safe error class; do not copy raw journal text into the alert."
 		}
+	case "ambiguous":
+		if writer.githubFailure.journalLines > backupArchiveGitHubJournalMaxLines {
+			mechanism += fmt.Sprintf(" The exact invocation exceeded the %d-line classification bound, so the retained tail cannot prove the invocation's first failed boundary.", backupArchiveGitHubJournalMaxLines)
+			action += " Inspect the exact invocation under bounded operator access; do not infer a first boundary from the clipped tail or broaden the monitor to emit raw journal text."
+		} else {
+			mechanism += " Before any unique boundary was established, one exact-invocation message matched multiple closed failure classes. The first failed boundary is therefore ambiguous rather than whichever classifier happened to run first."
+			action += " Inspect the exact invocation under bounded operator access and refine only stable non-overlapping patterns; do not select a boundary by classifier order or emit the raw message."
+		}
+	case "unobservable":
+		mechanism += " The exact failed-invocation journal could not be selected and reduced because its identifier was absent or invalid, access failed, or it contained no observable records. The cause remains unknown."
+		action += " Restore read-only access to the exact InvocationID journal and rerun the reducer; do not substitute another unit generation or an unbounded unit journal."
 	}
 
 	return finding{
@@ -1564,10 +1974,10 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			"%s code archive writer has an unsuccessful terminal unit state",
 			target,
 		),
-		mechanism: "The GitHub archive oneshot is not executing and its effective systemd state does not record a successful exit. Fresh scrape timestamps and a still-young previous tarball can therefore hide a failed writer until the five-day archive-age objective is breached.",
-		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0.",
+		mechanism: mechanism,
+		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0. For an unsuccessful terminal invocation, at most 512 exact InvocationID journal lines are reduced on-host to one closed first-boundary class plus line counts.",
 		observed: fmt.Sprintf(
-			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d invocation_id_present=%t exec_start_monotonic=%d",
+			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d invocation_id_present=%t exec_start_monotonic=%d %s current_mount_state=%s current_clearance_state=%s current_root_observation=%s",
 			writer.unitState,
 			writer.unitSubstate,
 			writer.mainPID,
@@ -1575,10 +1985,14 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			writer.exitStatus,
 			writer.invocationID != "none" && writer.invocationID != "unknown",
 			writer.execStart,
+			backupArchiveGitHubFailureText(writer.githubFailure),
+			writer.remoteMountState,
+			writer.clearanceState,
+			writer.archiveRootObservation,
 		),
-		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, InvocationID presence, and monotonic start time are read directly from the effective GitHub archive unit. The invocation identifier itself, command arguments, credentials, and journal text are not emitted.",
-		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. The archive volume's hardware/filesystem clearance remains a separate prerequisite; clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
-		action:   "Keep the single-writer boundary. Read the bounded unit journal and classify the first failed dependency among archive clearance/mount state, GitHub authentication/API access, local capacity, repository transfer, compression, and atomic publication. Do not delete partial state, clear the failure as a substitute for repair, or manually start a writer while another archive job is active. After the cause and storage prerequisites are proven, obtain operator authorization before enabling a missed trigger or starting one catch-up invocation.",
+		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, InvocationID presence, and monotonic start time are read directly from the effective GitHub archive unit. On that host only, a validated raw InvocationID and unit filter select at most 513 journal messages, where the final record is an overflow sentinel; the reducer returns only a completeness state, first closed boundary, and per-class counts. The invocation identifier, raw messages, repository and path names, endpoints, command arguments, and credentials never leave the host.",
+		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. Current archive mount, clearance, and root results are separate point-in-time controls and cannot erase a historical exact-invocation result. Clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
+		action:   action,
 		verify:   "A subsequent authorized invocation has a new nonzero InvocationID and post-repair start boundary, runs as the sole writer, exits with Result=success and ExecMainStatus=0, validates both code tarballs and manifests, and publishes both new generations on two direct Mimir reads. The timer must independently pass its future-schedule gate.",
 		playbook: "SIGNALS.md §11.22",
 	}
@@ -1876,7 +2290,7 @@ func backupArchivesQuery(environment string, hosts []*host) string {
 	sort.Strings(hostNames)
 	return fmt.Sprintf(
 		`{__name__=~%s,env=%s,host=~%s}`,
-		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress|heartbeat_timestamp_seconds)`),
+		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress|heartbeat_timestamp_seconds|integrity_checked_timestamp_seconds)`),
 		strconv.Quote(environment),
 		strconv.Quote(strings.Join(hostNames, "|")),
 	)
@@ -1945,6 +2359,243 @@ func backupArchiveProgress(observation *backupArchiveObservation) (float64, bool
 	return observation.progress[0], true
 }
 
+func newestBackupArchiveLatest(observation *backupArchiveObservation) (backupArchiveLatestSample, bool) {
+	if observation == nil || len(observation.latest) == 0 {
+		return backupArchiveLatestSample{}, false
+	}
+	latest := observation.latest[0]
+	for _, candidate := range observation.latest[1:] {
+		if candidate.createdAt.After(latest.createdAt) {
+			latest = candidate
+		}
+	}
+	return latest, true
+}
+
+func currentBackupArchiveIntegrity(
+	observation *backupArchiveObservation,
+) (backupArchiveIntegritySample, bool, string) {
+	if observation == nil {
+		return backupArchiveIntegritySample{}, false, "observation-missing"
+	}
+	if len(observation.invalidIntegrity) != 0 {
+		return backupArchiveIntegritySample{}, false, fmt.Sprintf(
+			"invalid_samples=%d first_reason=%s",
+			len(observation.invalidIntegrity),
+			observation.invalidIntegrity[0],
+		)
+	}
+	if len(observation.integrity) == 0 {
+		return backupArchiveIntegritySample{}, false, "fresh_samples=0"
+	}
+	current := observation.integrity[0]
+	currentCount := 1
+	for _, candidate := range observation.integrity[1:] {
+		switch {
+		case candidate.checkedAt.After(current.checkedAt):
+			current = candidate
+			currentCount = 1
+		case candidate.checkedAt.Equal(current.checkedAt):
+			currentCount++
+		}
+	}
+	if currentCount != 1 {
+		return backupArchiveIntegritySample{}, false, fmt.Sprintf(
+			"ambiguous_current_samples=%d",
+			currentCount,
+		)
+	}
+	return current, true, ""
+}
+
+func evaluateBackupArchiveIntegrity(
+	now time.Time,
+	observation *backupArchiveObservation,
+	gateway string,
+) []finding {
+	const (
+		invalidClass      = "backup-archive-integrity-invalid"
+		missingClass      = "backup-archive-integrity-missing"
+		unobservableClass = "backup-archive-integrity-unobservable"
+		staleClass        = "backup-archive-integrity-stale"
+		mismatchClass     = "backup-archive-integrity-generation-mismatch"
+		legacyClass       = "backup-archive-integrity-legacy-unverified"
+	)
+	target := observation.host + "/" + observation.archive
+	current, currentOK, selectionReason := currentBackupArchiveIntegrity(observation)
+	checkAge := time.Duration(0)
+	if currentOK {
+		checkAge = now.Sub(current.checkedAt)
+	}
+	staleScrapeOnly := !currentOK && len(observation.integrity) == 0 && len(observation.invalidIntegrity) == 0 &&
+		observation.staleIntegrityScrapes > 0
+	unobservable := !currentOK && !staleScrapeOnly
+	stale := staleScrapeOnly || (currentOK && checkAge > backupArchiveIntegrityMaximumAge)
+
+	findings := make([]finding, 0, 6)
+	if currentOK && current.result == "invalid" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: invalidClass, target: target, frame: "format-validation", sustain: 1,
+			symptom:   fmt.Sprintf("%s latest format-specific archive integrity check failed", target),
+			mechanism: "The destination read the selected archive bytes and the bounded format validator rejected them. PostgreSQL and Redis validate the encrypted artifact against its adjacent SHA-256 record; GitHub validates that checksum plus the xz and tar streams. A failed newly transferred candidate is not eligible for staging or retention promotion.",
+			baseline:  "The latest integrity report is fresh, names the same generation as the structural latest-timestamp row, and has result=verified.",
+			observed: fmt.Sprintf(
+				"format=%s result=invalid generation=%s checked_at=%s check_age=%s metrics_gateway=%s",
+				current.format, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "The result is producer-owned and comes from a full byte read of the immutable destination artifact; neither a fresh scrape nor a young artifact timestamp overrides it.",
+			context:  "This proves a checksum or bounded container-format failure, not a failed decryption, database restore, Redis load, or Git repository restore drill. Planetoid does not receive the database decryption secret.",
+			action:   "Preserve the failed candidate and its bounded writer evidence. Identify transfer truncation, storage I/O, checksum publication, or container-stream failure before one authorized replacement transfer; do not promote, rename, hand-edit, or mark the candidate verified.",
+			verify:   "A later atomic writer run validates a newly transferred candidate before promotion, and two direct Mimir reads show a fresh verified report joined to the same structural generation. Schedule a separately authorized restore drill for decrypt/restore readiness.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, invalidClass, target,
+		))
+	}
+
+	if currentOK && current.result == "missing" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: missingClass, target: target, frame: "format-validation", sustain: 2,
+			symptom:   fmt.Sprintf("%s integrity validator found no archive candidate", target),
+			mechanism: "The format-specific validator completed and atomically reported result=missing, so it could not select even a legacy recovery-point candidate on the mounted archive at check time.",
+			baseline:  "Each archive has one fresh integrity report for a concrete generation; new-format artifacts are verified and historical artifacts remain explicitly legacy-unverified.",
+			observed: fmt.Sprintf(
+				"format=none result=missing generation=none checked_at=%s check_age=%s metrics_gateway=%s",
+				current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "This is an explicit validator result, distinct from losing the integrity metric or receiving an old check through fresh textfile scrapes.",
+			context:  "The report describes candidate visibility at its check time. It does not prove why media is absent and cannot distinguish removal from an unavailable or wrong archive volume without the independent mount/root controls.",
+			action:   "Resolve simultaneous volume, root, and structural-latest findings first. Inspect the exact mounted tier through the authorized recovery workflow; do not manufacture a generation label or rerun a writer against an unverified destination.",
+			verify:   "A format-specific check completes against the intended mounted volume and reports either verified or legacy-unverified for the same generation exposed by the structural latest metric on two probes.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, missingClass, target,
+		))
+	}
+
+	if unobservable {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: unobservableClass, target: target, frame: "integrity-telemetry", sustain: 2,
+			symptom:   fmt.Sprintf("%s current archive integrity state is unobservable", target),
+			mechanism: "No single fresh integrity report satisfies the bounded archive/format/result/generation contract. The Xops writer, separate atomic integrity textfile, collector, remote-write path, or Mimir series may be absent or ambiguous.",
+			baseline:  "Exactly one newest fresh integrity report can be selected for every archive, with a finite check timestamp and a bounded format/result/generation tuple.",
+			observed: fmt.Sprintf(
+				"reason=%s fresh_integrity_samples=%d invalid_integrity_samples=%d stale_integrity_scrape_samples=%d metrics_gateway=%s",
+				selectionReason, len(observation.integrity), len(observation.invalidIntegrity), observation.staleIntegrityScrapes, gateway,
+			),
+			evidence: "Invalid label values are reduced to a bounded reason and count; raw labels, paths, checksums, credentials, and archive contents are not emitted.",
+			context:  "UNKNOWN integrity is neither verified nor invalid media. A fresh structural latest timestamp or ordinary in-progress metric cannot substitute for the separate full-byte check.",
+			action:   "Inspect only the owning writer's atomic integrity .prom file and an isolated textfile collection. Deploy the producer before this monitor; use the explicit bounded revalidation mode only when a full archive read is intended, never an ordinary metrics refresh.",
+			verify:   "Two direct Mimir reads select one fresh bounded integrity row for this archive and its check timestamp remains independently within 48 hours.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, unobservableClass, target,
+		))
+	}
+
+	if stale {
+		frame := "check-time"
+		observed := fmt.Sprintf(
+			"format=%s result=%s generation=%s checked_at=%s check_age=%s maximum_age=48h metrics_gateway=%s",
+			current.format, current.result, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+		)
+		if staleScrapeOnly {
+			frame = "scrape-time"
+			observed = fmt.Sprintf(
+				"fresh_integrity_samples=0 stale_integrity_scrape_samples=%d maximum_scrape_age=%s metrics_gateway=%s",
+				observation.staleIntegrityScrapes, backupArchiveMetricFreshness, gateway,
+			)
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: staleClass, target: target, frame: frame, sustain: 2,
+			symptom:   fmt.Sprintf("%s archive integrity evidence is stale", target),
+			mechanism: "Either the integrity series itself stopped arriving or its producer-owned check timestamp has not advanced within two daily schedules. Cheap metrics refreshes deliberately preserve the last check time and therefore cannot turn an old full-byte validation into current evidence.",
+			baseline:  "The integrity series scrape is no more than 90 seconds old and its independent check timestamp is no more than 48 hours old.",
+			observed:  observed,
+			evidence:  "Scrape time, integrity check time, and structural artifact time are evaluated independently.",
+			context:   "Stale integrity is UNKNOWN current byte/format state, not proof of corruption. It does not establish decrypt or restore readiness even when the retained result was verified.",
+			action:    "Inspect the owning writer and its last atomic integrity report. Repair a failed scheduled validation or observation path; invoke explicit full-media revalidation only with operator authority and a healthy archive-volume boundary. Do not rewrite the check timestamp through metrics refresh.",
+			verify:    "Two probes receive a scrape-fresh report whose producer-owned check time is within 48 hours and whose generation matches structural latest.",
+			playbook:  "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, staleClass, target,
+		))
+	}
+
+	mismatch := false
+	latest, latestOK := newestBackupArchiveLatest(observation)
+	if currentOK && !stale && len(observation.invalidLatest) == 0 {
+		if current.result == "missing" {
+			mismatch = latestOK
+		} else {
+			mismatch = !latestOK || current.generation != latest.generation
+		}
+	}
+	if mismatch {
+		latestGeneration := "none"
+		if latestOK {
+			latestGeneration = latest.generation
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: mismatchClass, target: target, frame: "generation-join", sustain: 2,
+			symptom:   fmt.Sprintf("%s integrity report and structural latest metric name different generations", target),
+			mechanism: "The two independently atomic textfiles do not currently agree on the selected generation. A short publication/scrape overlap is tolerated by the two-probe sustain, but persistent disagreement can otherwise let an old verified result appear to bless different current bytes.",
+			baseline:  "The fresh integrity generation exactly equals the newest structural latest-timestamp generation; an explicit missing report is paired only with no structural candidate.",
+			observed: fmt.Sprintf(
+				"integrity_generation=%s integrity_result=%s latest_generation=%s checked_at=%s metrics_gateway=%s",
+				current.generation, current.result, latestGeneration, current.checkedAt.Format(time.RFC3339), gateway,
+			),
+			evidence: "The join uses bounded generation labels after independently selecting the newest artifact time and newest integrity check time.",
+			context:  "No integrity result counts as current health across a generation mismatch. This is an exposition/publication join failure, not itself proof that either artifact is corrupt.",
+			action:   "Inspect the two producer-owned atomic textfiles and the writer publication boundary. Preserve both generations; do not relabel or copy a verified result between them. Let one in-flight atomic publication settle before repairing a persistent mismatch.",
+			verify:   "Two consecutive direct reads return a fresh integrity report and structural latest row with the exact same generation; result=verified is then byte/format evidence only.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, mismatchClass, target,
+		))
+	}
+
+	if currentOK && current.result == "legacy-unverified" {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: legacyClass, target: target, frame: "legacy-format", sustain: 1,
+			symptom:   fmt.Sprintf("%s newest archive uses a legacy format without destination verification", target),
+			mechanism: "The validator recognized a structurally complete historical format but no destination-verifiable checksum contract exists for it. Legacy PostgreSQL retains only the decrypted-xz restore MD5; legacy Redis uses encrypted instance/MD5 pairs; legacy GitHub has a tar.xz without its adjacent SHA-256 record.",
+			baseline:  "New candidates publish an adjacent destination-verifiable SHA-256 record and the destination reports result=verified after its format-specific full read.",
+			observed: fmt.Sprintf(
+				"format=%s result=legacy-unverified generation=%s checked_at=%s check_age=%s metrics_gateway=%s",
+				current.format, current.generation, current.checkedAt.Format(time.RFC3339), backupArchiveAge(checkAge), gateway,
+			),
+			evidence: "Legacy is an explicit bounded validator result. It is not inferred from a missing metric and is not silently converted to verified.",
+			context:  "Legacy-unverified does not mean corrupt, and a new-format byte/format verification still would not be a decrypt or restore drill.",
+			action:   "Retain the historical recovery point. Allow the next normal atomic writer generation to replace it with a verified format; do not fabricate a checksum for bytes whose producer-side publication contract cannot be proven retroactively.",
+			verify:   "The next scheduled generation validates before promotion and two direct Mimir reads show result=verified joined to the same structural generation. Restore readiness remains a separate drill.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierWarn, legacyClass, target,
+		))
+	}
+
+	return findings
+}
+
 func evaluateBackupArchive(
 	now time.Time,
 	observation *backupArchiveObservation,
@@ -1970,7 +2621,7 @@ func evaluateBackupArchive(
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-metrics-invalid", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s publishes an invalid or ambiguous backup archive metric", target),
-			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one completed archive, one active-state gauge, and at most one producer heartbeat. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
+			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one structural archive candidate, one active-state gauge, and at most one producer heartbeat. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
 			baseline:  "Each expected archive has exactly one fresh in-progress gauge in {0,1}; every completed-archive and producer-heartbeat value is finite, positive, and no more than five minutes in the future.",
 			observed: fmt.Sprintf(
 				"invalid=%s fresh_latest_samples=%d fresh_progress_samples=%d fresh_heartbeat_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
@@ -1979,7 +2630,7 @@ func evaluateBackupArchive(
 			evidence: "Raw Mimir samples were source-timestamp filtered before their archive timestamp and Boolean value were validated.",
 			context:  "This is a producer or collector contract failure, not proof that the archive media itself is corrupt.",
 			action:   "Inspect the exact Planetoid .prom file and the writer that owns this archive. Restore atomic single-writer exposition and the host clock; do not coerce an invalid value in Grafana or add a second textfile producer.",
-			verify:   "Two consecutive direct Mimir reads return one fresh in-progress series in {0,1}, one unambiguous newest completed generation when present, and no future or malformed value.",
+			verify:   "Two consecutive direct Mimir reads return one fresh in-progress series in {0,1}, one unambiguous newest structural generation when present, and no future or malformed value.",
 			playbook: "SIGNALS.md §11.22",
 		})
 	} else {
@@ -2020,16 +2671,16 @@ func evaluateBackupArchive(
 			findings = append(findings, finding{
 				probeId: "observability/backup-archives", tier: tierPage,
 				class: "backup-archive-missing", target: target, sustain: 2,
-				symptom:   fmt.Sprintf("%s has no observable completed archive generation", target),
+				symptom:   fmt.Sprintf("%s has no observable structurally complete archive generation", target),
 				mechanism: "No fresh latest-timestamp series exists for this archive. This can mean no completed artifact exists, or that a pre-fix writer refreshed its off-volume metric while the archive mount was unavailable and erased the last-known completion row. Metric absence alone cannot distinguish those states.",
-				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation exposes one latest-timestamp row for a complete generation; a writer preserves that last-known row while its archive volume is unavailable.",
+				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation exposes one latest-timestamp row for a structurally complete candidate; a writer preserves that last-known row while its archive volume is unavailable.",
 				observed: fmt.Sprintf(
 					"completed_generations=0 in_progress=%s stale_scrape_samples=%d metrics_gateway=%s",
 					progress, observation.staleScrapes, gateway,
 				),
 				evidence: "The raw Mimir query contains no fresh latest-timestamp row. Temporary and partial files never produce one, but this observation does not inspect the root-owned archive contents directly.",
 				context:  "This is UNKNOWN completion state until the mounted media is inspected. An active first run is operationally pending, while a missing last-known metric is a producer defect; neither state can be repaired by inventing a timestamp. Software cannot create archive capacity or attach unavailable physical media.",
-				action:   "First resolve any simultaneous archive-volume alert. Inspect the exact mounted latest tier and manifests through an authorized root-owned path. If a complete generation exists, deploy the writer that preserves last-known completion rows during volume loss and invoke only its bounded metrics refresh; do not hand-edit the .prom file. If none exists, restore the first failed prerequisite and authorize one single-writer catch-up run; never rename a partial artifact.",
+				action:   "First resolve any simultaneous archive-volume alert. Inspect the exact mounted latest tier and integrity report through an authorized root-owned path. If a structural candidate exists, deploy the writer that preserves last-known completion rows during volume loss and invoke only its bounded metrics refresh; do not hand-edit either .prom file. If none exists, restore the first failed prerequisite and authorize one single-writer catch-up run; never rename a partial artifact.",
 				verify:   "A non-empty completed artifact and its manifest are present, and two fresh Mimir samples expose that real generation timestamp. Then induce the synthetic unavailable-volume boundary and prove a phase reset preserves the same completion row rather than turning it into apparent absence.",
 				playbook: "SIGNALS.md §11.22",
 			})
@@ -2037,12 +2688,7 @@ func evaluateBackupArchive(
 		return findings
 	}
 
-	latest := observation.latest[0]
-	for _, candidate := range observation.latest[1:] {
-		if candidate.createdAt.After(latest.createdAt) {
-			latest = candidate
-		}
-	}
+	latest, _ := newestBackupArchiveLatest(observation)
 	age := now.Sub(latest.createdAt)
 	ageText := backupArchiveAge(age)
 	if age > backupArchiveMaximumAge {
@@ -2099,16 +2745,16 @@ func evaluateBackupArchive(
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-stale", target: target, frame: frame, sustain: 1,
 			symptom: fmt.Sprintf(
-				"%s newest completed generation is %s old",
+				"%s newest structurally complete generation is %s old",
 				target, ageText,
 			),
 			mechanism: mechanism,
-			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
+			baseline:  "Every structural archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale. Integrity health is evaluated independently.",
 			observed: fmt.Sprintf(
 				"generation=%s completed_at=%s age=%s in_progress=%s archive_volume_state=%s fresh_latest_samples=%d metrics_gateway=%s%s",
 				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, volumeState, len(observation.latest), gateway, queueObserved,
 			),
-			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
+			evidence: "Archive age comes from the producer's structural artifact timestamp carried as the metric value, not from the fresh Mimir scrape or integrity-check timestamp.",
 			context:  context,
 			action:   action,
 			verify:   verify,

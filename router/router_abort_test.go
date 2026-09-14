@@ -47,11 +47,7 @@ func TestRouterAbortHandlerPreservesExactSentinel(t *testing.T) {
 // barrier release the panic. A clean EOF plus an appended generic error body
 // is the causal defect, not a missing prefix, refused request or setup timeout.
 func TestRouterAbortHandlerTerminatesFlushedResponse(t *testing.T) {
-	deadline, ok := t.Deadline()
-	if !ok {
-		t.Fatal("flushed abort control requires the original test deadline")
-	}
-	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	ctx, cancel := routerAbortTestContext(t)
 	defer cancel()
 	const prefix = "authenticated-stream-prefix\n"
 	flushed := make(chan struct{})
@@ -110,7 +106,7 @@ func TestRouterAbortHandlerTerminatesFlushedResponse(t *testing.T) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		t.Fatal("flushed abort handler did not join before the original deadline")
+		t.Fatal("flushed abort handler did not join before the fixture deadline")
 	}
 	select {
 	case handlerErr := <-handlerErrors:

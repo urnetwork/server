@@ -337,6 +337,138 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 	})
 }
 
+// A current blackhole failure already proves that a fixed provider tunnel
+// cannot carry any destination. Offering the same provider to the expensive
+// full queue spends its location and health stages without producing evidence.
+// Only that current explicit failure is deferred: a passing, stale, or absent
+// verdict remains fail-open, and the independent cheap queue must still offer
+// deferred failures so recovery can restore full probing.
+func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Synthetic City",
+			Region:       "Synthetic Region",
+			Country:      "Synthetic Country",
+			CountryCode:  "zz",
+		}
+		CreateLocation(ctx, city)
+
+		type verdictState struct {
+			name      string
+			checkedAt time.Time
+			ok        bool
+			present   bool
+		}
+		verdictStates := []verdictState{
+			{
+				name: "current failure", checkedAt: now.Add(-ProviderBlackholeCheckDueAge - time.Minute),
+				present: true,
+			},
+			{
+				name: "stale failure", checkedAt: now.Add(-ProviderBlackholeCheckMaxAge - time.Minute),
+				present: true,
+			},
+			{
+				name: "current pass", checkedAt: now.Add(-time.Minute),
+				ok: true, present: true,
+			},
+			{name: "missing"},
+		}
+		lanes := []string{"no location", "stale location", "stale health", "missing health"}
+
+		currentFailures := map[server.Id]string{}
+		wantFullDue := map[server.Id]string{}
+		addressOctet := 1
+		for _, lane := range lanes {
+			for _, verdict := range verdictStates {
+				clientId := server.NewId()
+				testing_connectProbeableProvider(
+					t, ctx, clientId, city.LocationId,
+					fmt.Sprintf("192.0.2.%d:0", addressOctet), ProvideModePublic,
+				)
+				addressOctet++
+
+				if verdict.present {
+					failure := ""
+					if !verdict.ok {
+						failure = "synthetic_dark"
+					}
+					SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
+						ClientId: clientId, CheckedAt: verdict.checkedAt,
+						OK: verdict.ok, Failure: failure,
+					})
+				}
+
+				label := fmt.Sprintf("%s/%s", lane, verdict.name)
+				if verdict.name == "current failure" {
+					currentFailures[clientId] = label
+				} else {
+					wantFullDue[clientId] = label
+				}
+
+				switch lane {
+				case "stale location":
+					SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+						ClientId: clientId, LocationId: city.LocationId,
+						CountryCode: "zz", ObservedAt: now.Add(-ProviderEgressLocationMaxAge/2 - time.Hour),
+					})
+					SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+						ClientId: clientId, MeasuredAt: now.Add(-time.Minute),
+						OKCount: 1, Total: 1,
+					})
+				case "stale health":
+					SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+						ClientId: clientId, LocationId: city.LocationId,
+						CountryCode: "zz", ObservedAt: now.Add(-time.Hour),
+					})
+					SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+						ClientId: clientId, MeasuredAt: now.Add(-ProviderEgressHealthMaxAge/2 - time.Hour),
+						OKCount: 1, Total: 1,
+					})
+				case "missing health":
+					SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+						ClientId: clientId, LocationId: city.LocationId,
+						CountryCode: "zz", ObservedAt: now.Add(-time.Hour),
+					})
+				}
+			}
+		}
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		fullDue := GetProviderEgressLocationDue(
+			ctx, now.Add(-ProviderEgressLocationMaxAge/2),
+			now.Add(-ProviderEgressProbeAttemptBackoff), 100,
+		)
+		if len(fullDue) != len(wantFullDue) {
+			t.Fatalf("len(full due) = %d, want %d", len(fullDue), len(wantFullDue))
+		}
+		for clientId, label := range currentFailures {
+			if slices.Contains(fullDue, clientId) {
+				t.Errorf("full due contains current blackhole failure %s", label)
+			}
+		}
+		for clientId, label := range wantFullDue {
+			if !slices.Contains(fullDue, clientId) {
+				t.Errorf("full due is missing fail-open provider %s", label)
+			}
+		}
+
+		blackholeDue := GetProviderBlackholeCheckDue(
+			ctx, now.Add(-ProviderBlackholeCheckDueAge), 100, 0, 1,
+		)
+		for clientId, label := range currentFailures {
+			if !slices.Contains(blackholeDue, clientId) {
+				t.Errorf("cheap blackhole due is missing deferred provider %s", label)
+			}
+		}
+	})
+}
+
 // A provider that connects, holds a Public provide key and fails every probe
 // never gets a provider_egress_location row, so its observed_at stays NULL, so
 // it sorts ahead of every stale-but-refreshable provider -- forever, on every
@@ -677,9 +809,10 @@ func TestRemoveExpiredProviderEgressProbeAttempts(t *testing.T) {
 	})
 }
 
-// The due queue takes bounded location, existing-health, and missing-health
-// heads, merges their absolute hard deadlines in Go, and only then fills unused
-// slots from the unlocated lane. This reproduces the saturated-backlog failure:
+// The due queue takes bounded location and existing-health heads plus an
+// output-bounded missing-health head, merges their absolute hard deadlines in
+// Go, and only then fills unused slots from the unlocated lane. This reproduces
+// the saturated-backlog failure:
 // every limit below the unlocated population used to return only unlocated
 // rows, making every urgent lane unreachable.
 func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) {

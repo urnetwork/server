@@ -35,6 +35,7 @@ type monitorOptions struct {
 	keys                  stringFlags
 	includedSignals       stringFlags
 	excludedSignals       stringFlags
+	excludedHosts         stringFlags
 	excludedEdgeIPv6Hosts stringFlags
 }
 
@@ -68,20 +69,21 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		return err
 	}
 
-	settings, err := loadSettings()
+	loadEffectiveSettings := func() (servermonitor.SignalSettings, error) {
+		settings, err := loadSettings()
+		if err != nil {
+			return servermonitor.SignalSettings{}, err
+		}
+		return applyMonitorSettingsOptions(settings, opts)
+	}
+	settings, err := loadEffectiveSettings()
 	if err != nil {
 		return err
 	}
-	if opts.mode != "" {
-		settings.AddressMode = servermonitor.AddressMode(opts.mode)
-	}
-	if len(opts.keys) > 0 {
-		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
-	}
-	settings, err = servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
-	if err != nil {
-		return err
-	}
+	// LoadSignalSettings arms the library default. Replace it here so every
+	// current-generation comparison reapplies this process's immutable CLI
+	// mode, repeated key override, and exact host exclusions before comparing.
+	settings.SettingsGenerationCheck = servermonitor.NewSettingsGenerationCheck(loadEffectiveSettings)
 	if err := settings.Validate(); err != nil {
 		return err
 	}
@@ -104,6 +106,20 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	})
 }
 
+func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
+	if opts.mode != "" {
+		settings.AddressMode = servermonitor.AddressMode(opts.mode)
+	}
+	if len(opts.keys) > 0 {
+		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
+	}
+	settings, err := servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
+	if err != nil {
+		return servermonitor.SignalSettings{}, err
+	}
+	return servermonitor.ExcludeHosts(settings, opts.excludedHosts...)
+}
+
 func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags := flag.NewFlagSet("monitor", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -115,6 +131,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
+	flags.Var(&opts.excludedHosts, "exclude-host", "exact inventory host whose observation should be paused; may be repeated")
 	flags.Var(&opts.excludedEdgeIPv6Hosts, "exclude-edge-ipv6-host", "host whose exact public IPv6 paths should be paused; may be repeated")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-format markdown|jsonl] [-include-signal IDENTIFIER | -exclude-signal IDENTIFIER]")

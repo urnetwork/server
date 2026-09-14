@@ -22,6 +22,9 @@ func TestPoolRetentionSignalSyntheticRetainedFleet(t *testing.T) {
 				t.Fatalf("pool-retention query missing %q:\n%s", want, query)
 			}
 		}
+		if strings.Contains(query, "client_addr::text") {
+			t.Fatalf("pool-retention query exports an exact client address:\n%s", query)
+		}
 		return poolRetentionRows("1021", "714", "608", "600", "4", "4", "384", "1700"), nil
 	}}
 	alerts, err := NewPoolRetentionSignal().Run(context.Background(), syntheticSettings(source))
@@ -51,6 +54,11 @@ func TestPoolRetentionSignalSyntheticRetainedFleet(t *testing.T) {
 	} {
 		if markdown := alert.Markdown(); !strings.Contains(markdown, want) {
 			t.Fatalf("pool-retention alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{"127.0.0.0/8", "::1"} {
+		if markdown := alert.Markdown(); strings.Contains(markdown, forbidden) {
+			t.Fatalf("pool-retention alert leaked address predicate %q: %s", forbidden, markdown)
 		}
 	}
 }

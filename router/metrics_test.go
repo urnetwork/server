@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestRouterMetricsUseConfiguredRouteAndExactIo(t *testing.T) {
@@ -127,6 +128,41 @@ func TestHttpIntervalMaximumCarriesItsOwnFreshness(t *testing.T) {
 	metrics.intervalMaxStateLock.Unlock()
 	if second.seconds != 0.25 || !second.observedAt.Equal(now) {
 		t.Fatalf("second interval max = %+v, want reset 0.25s at %v", second, now)
+	}
+}
+
+func TestHttpDurationSummaryExportsExactSumCountWithoutBuckets(t *testing.T) {
+	registry := prometheus.NewPedanticRegistry()
+	metrics := newHttpMetrics(registry)
+	metrics.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
+	metrics.observe("GET ^/synthetic$", "200", "completed", 2250*time.Millisecond, 0, 0)
+	metrics.observe("GET ^/synthetic$", "200", "completed", time.Second, 0, 0)
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var duration *dto.MetricFamily
+	for _, family := range families {
+		if family.GetName() == "urnetwork_http_request_duration_seconds" {
+			duration = family
+			break
+		}
+	}
+	if duration == nil || duration.GetType() != dto.MetricType_SUMMARY || len(duration.Metric) != 1 {
+		t.Fatalf("HTTP duration family = %+v, want one summary", duration)
+	}
+	summary := duration.Metric[0].GetSummary()
+	if summary.GetSampleCount() != 2 || summary.GetSampleSum() != 3.25 || len(summary.Quantile) != 0 {
+		t.Fatalf("HTTP duration summary = %+v, want count=2 sum=3.25 and no quantiles", summary)
+	}
+	want := strings.NewReader(`# HELP urnetwork_http_request_duration_seconds HTTP handler duration by configured route.
+# TYPE urnetwork_http_request_duration_seconds summary
+urnetwork_http_request_duration_seconds_sum{route="GET ^/synthetic$"} 3.25
+urnetwork_http_request_duration_seconds_count{route="GET ^/synthetic$"} 2
+`)
+	if err := testutil.GatherAndCompare(registry, want, "urnetwork_http_request_duration_seconds"); err != nil {
+		t.Fatalf("HTTP duration exposition contains more than exact sum/count: %v", err)
 	}
 }
 

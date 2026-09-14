@@ -267,3 +267,103 @@ func TestVacuumHealthSignalHonorsExplicitCascadeThreshold(t *testing.T) {
 		t.Fatalf("cascade table below its explicit 25M threshold alerted: %+v", alerts)
 	}
 }
+
+func TestVacuumHealthSignalTreatsProgressingCascadeVacuumAsRecovery(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"transfer_escrow", "25713625", "09-12 07:03",
+			"25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+			"42", "62625", "", "1234", "7", "active", "client backend", "", "UPDATE transfer_escrow SET settled = true WHERE contract_id = $1",
+		}}, nil
+	}}
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "dead-tuples")
+	markdown := alert.Markdown()
+	for _, detail := range []string{
+		"intentionally high-threshold pure-cascade table",
+		"normal trigger-to-completion cleanup",
+		"does not prove that cleanup is stalled",
+		"warning remains useful",
+		"compare its heap and index counters",
+		"Vacuum counters continue advancing",
+		"returns below 25M on consecutive five-minute samples",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("progressing cascade vacuum alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(alert.Action, "Remove or bound the identified write fan-out first") {
+		t.Fatalf("progressing cascade vacuum retained generic defective-writer action:\n%s", markdown)
+	}
+}
+
+func TestVacuumHealthSignalDoesNotCallProgressNormalWithOldGenericHorizon(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"transfer_escrow", "25713625", "09-12 07:03",
+			"25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+			"42", "62625", "", "1234", "60", "active", "client backend", "", "UPDATE bounded_work SET state = $1",
+		}}, nil
+	}}
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "dead-tuples")
+	markdown := alert.Markdown()
+	if strings.Contains(alert.Mechanism, "normal trigger-to-completion cleanup") {
+		t.Fatalf("progressing cascade vacuum with old generic horizon was called normal:\n%s", markdown)
+	}
+	for _, detail := range []string{
+		"old backend_xid/backend_xmin horizon",
+		"Only address a horizon holder after confirming its owner and safety",
+		"active vacuum completes",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("old generic horizon alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestVacuumOldHorizonRequiresCandidateAgeNotXidDistance(t *testing.T) {
+	row := pgRow{
+		"transfer_escrow", "25713625", "09-12 07:03",
+		"25000000", "vacuuming indexes", "787", "20116380", "20116380", "0", "0", "1", "3",
+		"42", "999999999", "", "1234", "59", "active", "client backend", "", "SELECT state FROM bounded_work",
+	}
+	if vacuumHasOldHorizon(row) {
+		t.Fatal("a fresh snapshot's inherited xid distance was treated as an old horizon")
+	}
+	row[16] = "60"
+	if !vacuumHasOldHorizon(row) {
+		t.Fatal("a one-minute horizon candidate was not retained for owner diagnosis")
+	}
+	row[12] = "0"
+	if vacuumHasOldHorizon(row) {
+		t.Fatal("an absent horizon candidate was treated as old")
+	}
+}
+
+func TestVacuumHealthSignalDoesNotAssumeCascadeProgressWithoutWork(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"transfer_escrow", "25713625", "09-12 07:03",
+			"25000000", "", "0", "0", "0", "0", "0", "0", "0",
+			"42", "8179", "", "1234", "7", "active", "client backend", "", "UPDATE transfer_escrow SET settled = true WHERE contract_id = $1",
+		}}, nil
+	}}
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "dead-tuples")
+	if strings.Contains(alert.Mechanism, "normal trigger-to-completion cleanup") {
+		t.Fatalf("cascade table without reported vacuum work was called normal progress:\n%s", alert.Markdown())
+	}
+	if !strings.Contains(alert.Action, "Remove or bound the identified write fan-out first") {
+		t.Fatalf("cascade table without reported vacuum work lost overdue-cleanup action:\n%s", alert.Markdown())
+	}
+}

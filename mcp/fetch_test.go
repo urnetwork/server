@@ -5,7 +5,9 @@ package mcp
 // The end to end path is covered by the stack test.
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -22,6 +24,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// Sealing preserves state while binding its identity and authenticated bytes.
 func TestSealRoundTrip(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		binding := "test-identity"
@@ -53,10 +56,59 @@ func TestSealRoundTrip(t *testing.T) {
 		err = unseal(sealLabelCookies, "other-identity", sealed, out)
 		connect.AssertEqual(t, err != nil, true)
 
-		// tampering must not authenticate
-		tampered := sealed[:len(sealed)-1] + "A"
+		// Change authenticated bytes; replacing a character can leave it unchanged.
+		sealedBytes, err := base64.RawURLEncoding.DecodeString(sealed)
+		connect.AssertEqual(t, nil, err)
+		sealedBytes[len(sealedBytes)-1] ^= 1
+		tampered := base64.RawURLEncoding.EncodeToString(sealedBytes)
 		err = unseal(sealLabelCookies, binding, tampered, out)
 		connect.AssertEqual(t, err != nil, true)
+	})
+}
+
+// Equivalent base64 spellings must not alias authenticated opaque state.
+// Three plaintext lengths cover both trailing-bit widths and no trailing bits.
+func TestSealedStateEncoding(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		binding := "synthetic-cursor-identity"
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+		for payloadLength := 1; payloadLength <= 3; payloadLength++ {
+			payload := strings.Repeat("x", payloadLength)
+			sealed, err := seal(sealLabelContinuation, binding, payload, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored string
+			if err := unseal(sealLabelContinuation, binding, sealed, &restored); err != nil || restored != payload {
+				t.Fatalf("canonical sealed state with payload length %d failed: %v", payloadLength, err)
+			}
+			sealedBytes, err := base64.RawURLEncoding.DecodeString(sealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliases := []string{
+				sealed[:1] + "\r" + sealed[1:],
+				sealed[:1] + "\n" + sealed[1:],
+				sealed[:1] + "\r\n" + sealed[1:],
+			}
+			unusedBitCount := (3 - len(sealedBytes)%3) % 3 * 2
+			lastIndex := strings.IndexByte(alphabet, sealed[len(sealed)-1])
+			for unusedBits := 1; unusedBits < 1<<unusedBitCount; unusedBits++ {
+				aliases = append(aliases, sealed[:len(sealed)-1]+string(alphabet[lastIndex+unusedBits]))
+			}
+			for _, alias := range aliases {
+				aliasBytes, err := base64.RawURLEncoding.DecodeString(alias)
+				if err != nil || !bytes.Equal(sealedBytes, aliasBytes) {
+					t.Fatalf("sealed state fixture must preserve authenticated bytes: %v", err)
+				}
+				var restoredAlias string
+				if err := unseal(sealLabelContinuation, binding, alias, &restoredAlias); err == nil {
+					t.Errorf("sealed state alias with payload length %d was accepted", payloadLength)
+				}
+			}
+		}
 	})
 }
 

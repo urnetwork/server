@@ -200,8 +200,8 @@ func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.
 			return []Row{{oldTaskID, "completed", "1367", "60", "1788099600"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
-			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:21:00.125Z][task.go:1930][" + failedTaskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
-				"[edge-1][taskworker][g2][cid:new][I][2026-08-30T14:22:30Z][task.go:1938][" + newTaskID + "]eval active(130.00s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+			return "[synthetic-edge-a][taskworker][g2][cid:failed][I][2026-08-30T14:21:00.125Z][task.go:1930][" + failedTaskID + "]eval error(1800.83s) (reschedule) synthetic/module/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
+				"[synthetic-edge-b][taskworker][g2][cid:new][I][2026-08-30T14:22:30Z][task.go:1938][" + newTaskID + "]eval active(130.00s) synthetic/module/taskworker/work.CloseExpiredContracts({})", nil
 		},
 	}
 
@@ -213,12 +213,12 @@ func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.
 	for _, want := range []string{
 		"phase=active duration_s=130",
 		"attempt_correlated=true",
-		"active_host=edge-1",
+		"active_host=synthetic-edge-b",
 		"precursor_failed_duration_s=1800",
 		"precursor_failed_attempt_correlated=true",
-		`precursor_failed_error="Timeout"`,
+		`precursor_failed_error_class="deadline-timeout"`,
 		"precursor_failed_at=2026-08-30T14:21:00.125Z",
-		"precursor_failed_host=edge-3",
+		"precursor_failed_host=synthetic-edge-a",
 		"precursor_failed_generation=g2",
 		"precursor_failed_container=failed",
 		"preserve the latest deadline failure alongside the current active attempt",
@@ -231,17 +231,20 @@ func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.
 }
 
 func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testing.T) {
-	taskID := "01a0530c-65aa-153e-19d8-82ad3698cf40"
-	errorTaskID := "01a0530c-aaaa-bbbb-cccc-dddddddddddd"
+	taskID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	errorTaskID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	completedTaskID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	shortErrorTaskID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
 	source := &syntheticSource{
 		postgresFn: func(string) ([]Row, error) {
 			// An older successful overrun is the only finished row. The current
 			// deadline attempt rescheduled and therefore remains pending.
-			return []Row{{"01a052f6-5c55-e78b-110d-dad7afffe710", "completed", "1367", "1902", "1788098400"}}, nil
+			return []Row{{completedTaskID, "completed", "1367", "1902", "1788098400"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
-			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout [" + errorTaskID + "]\n" +
-				"[edge-1][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+			return "[synthetic-edge-a][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) synthetic/module/taskworker/work.CloseExpiredContracts({}) = Timeout [" + errorTaskID + "]\n" +
+				"[synthetic-edge-b][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) synthetic/module/taskworker/work.CloseExpiredContracts({})\n" +
+				"[synthetic-edge][taskworker][g1][cid:short-failure][I][2026-08-30T14:53:00.507527Z][task.go:1930][" + shortErrorTaskID + "]eval error(30.00s) (reschedule) synthetic/module/taskworker/work.CloseExpiredContracts({}) = synthetic short failure", nil
 		},
 	}
 
@@ -253,14 +256,14 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 	for _, want := range []string{
 		"phase=failed duration_s=1800",
 		"attempt_correlated=true",
-		`failed_error="Timeout [<task-id>]"`,
+		`failed_error_class="deadline-timeout"`,
 		"failed_at=2026-08-30T14:52:00.815957Z",
-		"failed_host=edge-3",
+		"failed_host=synthetic-edge-a",
 		"failed_container=failed",
 		"retry_phase=active",
 		"retry_last_heartbeat_duration_s=20",
 		"retry_observed_at=2026-08-30T14:52:25.507527Z",
-		"retry_host=edge-1",
+		"retry_host=synthetic-edge-b",
 		"retry_generation=g2",
 		"retry_container=retry",
 		"a failed checkpoint lasting 1800s",
@@ -271,7 +274,7 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 			t.Fatalf("rescheduled timeout was lost after its short retry, missing %q:\n%s", want, alert.Markdown())
 		}
 	}
-	requireAlertOmits(t, alert, taskID, errorTaskID, "01a052f6-5c55-e78b-110d-dad7afffe710")
+	requireAlertOmits(t, alert, taskID, errorTaskID, completedTaskID, shortErrorTaskID, "synthetic short failure")
 	if strings.Contains(alert.Observed, "phase=completed duration_s=1367") ||
 		strings.HasPrefix(alert.Observed, "phase=active ") {
 		t.Fatalf("older completion or short retry replaced timeout: %+v", alert)
@@ -293,9 +296,9 @@ func TestCloseDurationSignalReportsCompletedSameIDRetryWithoutErasingTimeout(t *
 			}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
-			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
-				"[edge-1][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})\n" +
-				"[edge-4][taskworker][g1][cid:successor][I][2026-08-30T14:53:15.507527Z][task.go:1938][" + successorTaskID + "]eval active(10.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+			return "[synthetic-edge-a][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) synthetic/module/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
+				"[synthetic-edge-b][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) synthetic/module/taskworker/work.CloseExpiredContracts({})\n" +
+				"[synthetic-edge-c][taskworker][g1][cid:successor][I][2026-08-30T14:53:15.507527Z][task.go:1938][" + successorTaskID + "]eval active(10.01s) synthetic/module/taskworker/work.CloseExpiredContracts({})", nil
 		},
 	}
 
@@ -307,12 +310,12 @@ func TestCloseDurationSignalReportsCompletedSameIDRetryWithoutErasingTimeout(t *
 	for _, want := range []string{
 		"phase=failed duration_s=1800",
 		"attempt_correlated=true",
-		`failed_error="Timeout"`,
+		`failed_error_class="deadline-timeout"`,
 		"retry_phase=completed",
 		"retry_duration_s=24",
 		"retry_completed_age_s=5",
 		"retry_completed_at=2026-08-30T14:52:25Z",
-		"retry_host=edge-1",
+		"retry_host=synthetic-edge-b",
 		"retry_generation=g2",
 		"retry_container=retry",
 		"fast peer retry is an A/B control",

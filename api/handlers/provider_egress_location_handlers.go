@@ -229,6 +229,12 @@ type ProviderEgressLocationDueResult struct {
 // must not be handed back on every poll, which is what would starve the rest of
 // the queue (see ProviderEgressLocationAttempt above).
 //
+// A current explicit blackhole failure is also deferred because its cheaper
+// check has already proved that the fixed tunnel cannot carry a destination.
+// The independent blackhole queue retries without this endpoint's attempt
+// backoff; a passing check restores eligibility immediately, while a stale or
+// missing check fails open after ProviderBlackholeCheckMaxAge.
+//
 // Same auth as ProviderEgressLocationSubmit above: operator-to-server, the
 // shared secret header rather than a network jwt, fail-closed when the vault
 // resource is missing.

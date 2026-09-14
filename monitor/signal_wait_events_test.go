@@ -8,7 +8,7 @@ import (
 
 func TestWaitEventsSignalSyntheticWALWaitCluster(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"LWLock", "WALWrite", "12", "75", "INSERT INTO hot_table"}}, nil
+		return []Row{{"LWLock", "WALWrite", "12", "75", "INSERT INTO hot_table", "8123", "unknown", "connect", "local"}}, nil
 	}}
 	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -26,9 +26,20 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		if !strings.Contains(query, "(array_agg(pid ORDER BY query_start, pid))[1]") {
 			t.Fatalf("wait query does not preserve the oldest waiter's PID:\n%s", query)
 		}
-		return []Row{{"IO", "DataFileRead", "1", "71", sample, "8123", "9911", "taskworker", "127.0.0.1/32"}}, nil
+		for _, want := range []string{"client_addr::text", "oldest_client_address"} {
+			if !strings.Contains(query, want) {
+				t.Fatalf("wait query does not collect the transient owner input with %q:\n%s", want, query)
+			}
+		}
+		return []Row{{"IO", "DataFileRead", "1", "71", sample, "8123", "9911", "taskworker", "192.0.2.44/32"}}, nil
 	}}
-	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+	settings := syntheticSettings(source)
+	settings.Hosts = append(settings.Hosts, HostSettings{
+		Name:       "worker-synthetic",
+		LANAddress: "192.0.2.44",
+		Roles:      []string{"services"},
+	})
+	alerts, err := NewWaitEventsSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +53,7 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		"sample attribution":    {alert.Evidence, sample},
 		"pid attribution":       {alert.Evidence, "pid=8123"},
 		"query attribution":     {alert.Evidence, "query_id=9911"},
-		"client attribution":    {alert.Evidence, "client=127.0.0.1/32"},
+		"client attribution":    {alert.Evidence, "client_owner=worker-synthetic"},
 		"read mechanism":        {alert.Mechanism, "relation data page"},
 		"bounded action":        {alert.Action, "Do not cancel one bounded read"},
 	} {
@@ -50,11 +61,46 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 			t.Fatalf("%s missing %q: %q", name, check.want, check.got)
 		}
 	}
+	if strings.Contains(alert.Markdown(), "192.0.2.44/32") {
+		t.Fatalf("wait-event alert leaked exact client address: %s", alert.Markdown())
+	}
+}
+
+func TestWaitEventsSignalDoesNotRenderMalformedClientAddress(t *testing.T) {
+	const malformedAddress = "203.0.113.44/99"
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"IO", "DataFileRead", "1", "71", "SELECT 1", "8123", "unknown", "taskworker", malformedAddress}}, nil
+	}}
+	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "wait-event-cluster").Markdown()
+	if !strings.Contains(markdown, "client_owner=unmapped-service-client") {
+		t.Fatalf("wait-event alert omitted malformed-address fallback: %s", markdown)
+	}
+	if strings.Contains(markdown, malformedAddress) {
+		t.Fatalf("wait-event alert leaked malformed client address: %s", markdown)
+	}
+}
+
+func TestWaitEventsSignalMalformedRowDoesNotEchoAddress(t *testing.T) {
+	const address = "198.51.100.44/32"
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"IO", "DataFileRead", "1", "71", address}}, nil
+	}}
+	_, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+	if err == nil {
+		t.Fatal("malformed wait-event row was accepted")
+	}
+	if strings.Contains(err.Error(), address) {
+		t.Fatalf("malformed wait-event error leaked client address: %v", err)
+	}
 }
 
 func TestWaitEventsSignalExplainsClientWriteBackpressure(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"Client", "ClientWrite", "1", "96", "SELECT result FROM large_plan"}}, nil
+		return []Row{{"Client", "ClientWrite", "1", "96", "SELECT result FROM large_plan", "8123", "unknown", "connect", "local"}}, nil
 	}}
 	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -110,7 +156,7 @@ func TestWaitEventsSignalClientReadRequiresOldWaiter(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-				return []Row{{"Client", "ClientRead", "7", test.oldest, "BEGIN ISOLATION LEVEL REPEATABLE READ"}}, nil
+				return []Row{{"Client", "ClientRead", "7", test.oldest, "BEGIN ISOLATION LEVEL REPEATABLE READ", "8123", "unknown", "connect", "local"}}, nil
 			}}
 			alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
 			if err != nil {
@@ -135,17 +181,17 @@ func TestWaitEventsSignalSyntheticConcurrentReindexBound(t *testing.T) {
 	}{
 		{
 			name:      "expected concurrent reindex inside two hour bound",
-			row:       Row{"Lock", "virtualxid", "1", "533", "REINDEX TABLE CONCURRENTLY pending_task"},
+			row:       Row{"Lock", "virtualxid", "1", "533", "REINDEX TABLE CONCURRENTLY pending_task", "8123", "unknown", "taskworker", "local"},
 			wantAlert: false,
 		},
 		{
 			name:      "concurrent reindex at two hour bound",
-			row:       Row{"Lock", "virtualxid", "1", "7200", "REINDEX TABLE CONCURRENTLY pending_task"},
+			row:       Row{"Lock", "virtualxid", "1", "7200", "REINDEX TABLE CONCURRENTLY pending_task", "8123", "unknown", "taskworker", "local"},
 			wantAlert: true,
 		},
 		{
 			name:      "unrelated virtual xid waiter",
-			row:       Row{"Lock", "virtualxid", "1", "533", "ALTER TABLE pending_task ADD COLUMN surprise int"},
+			row:       Row{"Lock", "virtualxid", "1", "533", "ALTER TABLE pending_task ADD COLUMN surprise int", "8123", "unknown", "taskworker", "local"},
 			wantAlert: true,
 		},
 	}

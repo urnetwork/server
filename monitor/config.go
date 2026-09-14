@@ -10,12 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // monitorYaml mirrors vault/<env>/monitor.yml.
@@ -83,6 +84,16 @@ type monitorYaml struct {
 		ExpectedIPv4 string `yaml:"expected_ipv4"`
 		ExpectedIPv6 string `yaml:"expected_ipv6"`
 	} `yaml:"source_attribution"`
+	// Keep the raw node so an omitted block remains distinguishable from an
+	// explicitly present null or malformed block. SIGNALS.md §18.3 requires
+	// the former to noop and the latter to fail closed as invalid desired state.
+	DNSAliases yaml.Node `yaml:"dns_aliases"`
+}
+
+type dnsAliasesYaml struct {
+	ManagedDomains []string `yaml:"managed_domains"`
+	ExpectedA      []string `yaml:"expected_a"`
+	ExpectedAAAA   []string `yaml:"expected_aaaa"`
 }
 
 // servicesYaml is the narrow active-LB view needed by edge-ipv6. The first
@@ -96,14 +107,16 @@ type servicesYaml struct {
 }
 
 type servicesVersionYaml struct {
-	LB           servicesLBYaml                 `yaml:"lb"`
-	HostServices map[string][]string            `yaml:"host_services"`
-	Services     map[string]servicesServiceYaml `yaml:"services"`
+	RoutingTables any                            `yaml:"routing_tables"`
+	LB            servicesLBYaml                 `yaml:"lb"`
+	HostServices  map[string][]string            `yaml:"host_services"`
+	Services      map[string]servicesServiceYaml `yaml:"services"`
 }
 
 type servicesServiceYaml struct {
 	Blocks        []map[string]int `yaml:"blocks"`
 	ExposeAliases []string         `yaml:"expose_aliases"`
+	Hosts         []string         `yaml:"hosts"`
 }
 
 type servicesLBYaml struct {
@@ -111,9 +124,10 @@ type servicesLBYaml struct {
 }
 
 type servicesLBInterfaceYaml struct {
-	IPv4        string `yaml:"ipv4"`
-	IPv6        string `yaml:"ipv6"`
-	Transparent bool   `yaml:"transparent"`
+	IPv4          string      `yaml:"ipv4"`
+	IPv6          string      `yaml:"ipv6"`
+	Transparent   bool        `yaml:"transparent"`
+	ExternalPorts map[int]int `yaml:"external_ports"`
 }
 
 type grafanaVaultYaml struct {
@@ -163,6 +177,19 @@ type credentialRequirementSpec struct {
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
+	settings, err := loadSignalSettingsSnapshot()
+	if err != nil {
+		return SignalSettings{}, err
+	}
+	settings.SettingsGenerationCheck = NewSettingsGenerationCheck(loadSignalSettingsSnapshot)
+	return settings, nil
+}
+
+// loadSignalSettingsSnapshot deliberately omits the generation checker so a
+// checker can reload current effective settings without recursively wrapping
+// another checker. The returned values are otherwise identical to
+// LoadSignalSettings.
+func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	env, err := server.Env()
 	if err != nil {
 		return SignalSettings{}, err
@@ -209,6 +236,10 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	proxyByHost, proxyServiceConfigured, err := activeProxyPathsFromServices(env, services)
+	if err != nil {
+		return SignalSettings{}, err
+	}
 	logServices, err := activeLogServicesFromServices(services)
 	if err != nil {
 		return SignalSettings{}, err
@@ -226,29 +257,25 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		home = "."
 	}
-	stEnabled := controller.StEnabled()
-	stDeploymentKey := ""
-	if stEnabled {
-		if key, ok := controller.StDeploymentKey(); ok {
-			stDeploymentKey = string(key)
-		}
-	}
+	stConfiguration := loadSTConfigurationObservation(env)
 	settings := SignalSettings{
-		Environment:         env,
-		PublicDomain:        strings.TrimSpace(services.Domain),
-		WebsiteDomain:       activeWebsiteDomainFromServices(services),
-		ManagerHostname:     activeManagerHostnameFromServices(services),
-		LogServices:         logServices,
-		LogServiceBlocks:    logServiceBlocks,
-		VerificationEnabled: stEnabled,
-		STDeploymentKey:     stDeploymentKey,
-		SSHUser:             y.Ssh.User,
-		SSHDevUser:          y.Ssh.DevUser,
-		SSHKeyPaths:         append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
-		AddressMode:         AddressMode(y.AddressMode),
-		StateDir:            filepath.Join(home, ".urnetwork-monitor", env),
-		SSHConnectTimeout:   10 * time.Second,
-		CommandTimeout:      60 * time.Second,
+		Environment:            env,
+		PublicDomain:           strings.TrimSpace(services.Domain),
+		WebsiteDomain:          activeWebsiteDomainFromServices(services),
+		ManagerHostname:        activeManagerHostnameFromServices(services),
+		LogServices:            logServices,
+		LogServiceBlocks:       logServiceBlocks,
+		ProxyPathExpectedHosts: len(proxyByHost),
+		VerificationEnabled:    stConfiguration.configuredEnabled,
+		STConfigStatus:         stConfiguration.status,
+		STDeploymentKey:        stConfiguration.deploymentKey,
+		SSHUser:                y.Ssh.User,
+		SSHDevUser:             y.Ssh.DevUser,
+		SSHKeyPaths:            append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
+		AddressMode:            AddressMode(y.AddressMode),
+		StateDir:               filepath.Join(home, ".urnetwork-monitor", env),
+		SSHConnectTimeout:      10 * time.Second,
+		CommandTimeout:         60 * time.Second,
 		PostgreSQL: PostgreSQLSettings{
 			Port:          y.Pg.Port,
 			PgBouncerPort: y.Pg.PgbouncerPort,
@@ -265,9 +292,11 @@ func LoadSignalSettings() (SignalSettings, error) {
 			ExpectedIPv4: y.SourceAttribution.ExpectedIPv4,
 			ExpectedIPv6: y.SourceAttribution.ExpectedIPv6,
 		},
-		GooglePlay:     loadGooglePlayReportingSettings(),
-		AppleReporting: loadAppleReportingSettings(),
-		Credentials:    loadCredentialRequirements(env, stEnabled, logServices),
+		DNSAliases:      dnsAliasSettingsFromMonitorYaml(y),
+		MimirPublishers: loadMimirPublisherSettings(server.WarpHome(), env),
+		GooglePlay:      loadGooglePlayReportingSettings(),
+		AppleReporting:  loadAppleReportingSettings(),
+		Credentials:     loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -288,6 +317,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 			SSHKeyPaths:    monitorSSHKeyPaths(configured.SSHIdentityFiles),
 			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
 			PublicLB:       clonePublicLBSettings(publicLBByHost[configured.Name]),
+			Proxy:          cloneProxyHostSettings(proxyByHost[configured.Name]),
 		}
 		if grafanaHosts[configured.Name] {
 			h.Roles = appendRole(h.Roles, "grafana")
@@ -303,8 +333,9 @@ func LoadSignalSettings() (SignalSettings, error) {
 				h.RedisNodePorts = append([]int(nil), configured.Redis.NodePorts...)
 			}
 		}
+		var legacyProxy *ProxyHostSettings
 		if configured.Proxy != nil {
-			h.Proxy = &ProxyHostSettings{
+			legacyProxy = &ProxyHostSettings{
 				PublicHostname:   configured.Proxy.PublicHostname,
 				PublicInterface:  configured.Proxy.PublicInterface,
 				RoutingTable:     configured.Proxy.RoutingTable,
@@ -312,6 +343,11 @@ func LoadSignalSettings() (SignalSettings, error) {
 				AddressFamilies:  append([]string(nil), configured.Proxy.AddressFamilies...),
 			}
 		}
+		// Legacy monitor.yml identity is valid only when services.yml has no
+		// proxy service at all. A present service owns desired state even when it
+		// currently places zero hosts, so stale duplicate config cannot resurrect
+		// a disabled placement.
+		h.Proxy = selectedProxyHostSettings(h.Proxy, proxyServiceConfigured, legacyProxy)
 		if configured.Subtensor != nil {
 			h.Subtensor = &SubtensorHostSettings{
 				PublicRPCURL:               configured.Subtensor.PublicRPCURL,
@@ -348,12 +384,235 @@ func LoadSignalSettings() (SignalSettings, error) {
 	return settings, nil
 }
 
+func dnsAliasSettingsFromMonitorYaml(y monitorYaml) DNSAliasSettings {
+	if y.DNSAliases.Kind == 0 {
+		return DNSAliasSettings{}
+	}
+	configured := dnsAliasesYaml{}
+	if y.DNSAliases.Kind != yaml.MappingNode || y.DNSAliases.Decode(&configured) != nil {
+		return DNSAliasSettings{Enabled: true}
+	}
+	return DNSAliasSettings{
+		Enabled:        true,
+		ManagedDomains: append([]string(nil), configured.ManagedDomains...),
+		ExpectedA:      append([]string(nil), configured.ExpectedA...),
+		ExpectedAAAA:   append([]string(nil), configured.ExpectedAAAA...),
+	}
+}
+
+// activeProxyPathsFromServices derives SIGNALS.md §14.5's stable probe
+// identity from warpctl's active topology. Dynamic container ports are still
+// discovered on every run. Routing-table ownership must be reconstructed over
+// all retained versions because warpctl deliberately keeps a block's original
+// assignment when a new version becomes active.
+func activeProxyPathsFromServices(environment string, services servicesYaml) (map[string]*ProxyHostSettings, bool, error) {
+	if len(services.Versions) == 0 {
+		return nil, false, fmt.Errorf("services.yml: no active version")
+	}
+	domain := strings.TrimSpace(services.Domain)
+	if domain == "" {
+		return nil, false, fmt.Errorf("services.yml: domain is required for proxy public paths")
+	}
+	active := services.Versions[0]
+	proxy, ok := active.Services["proxy"]
+	if !ok {
+		return map[string]*ProxyHostSettings{}, false, nil
+	}
+
+	placed := map[string]bool{}
+	for host := range active.LB.Interfaces {
+		placed[host] = true
+	}
+	for host, enabled := range active.HostServices {
+		if !containsTrimmed(enabled, "proxy") {
+			delete(placed, host)
+		}
+	}
+	if len(proxy.Hosts) > 0 {
+		allowed := map[string]bool{}
+		for _, host := range proxy.Hosts {
+			allowed[strings.TrimSpace(host)] = true
+		}
+		for host := range placed {
+			if !allowed[host] {
+				delete(placed, host)
+			}
+		}
+	}
+
+	routingTables, err := assignedLBRoutingTables(services.Versions)
+	if err != nil {
+		return nil, true, err
+	}
+	byHost := map[string]*ProxyHostSettings{}
+	domainSuffix := "." + domain
+	for configuredHost := range placed {
+		interfaces := active.LB.Interfaces[configuredHost]
+		transparent := make([]string, 0, len(interfaces))
+		for interfaceName, configured := range interfaces {
+			if configured.Transparent {
+				transparent = append(transparent, interfaceName)
+			}
+		}
+		sort.Strings(transparent)
+		if len(transparent) != 1 {
+			return nil, true, fmt.Errorf("services.yml: proxy host %q has %d transparent interfaces, want exactly 1", configuredHost, len(transparent))
+		}
+		interfaceName := transparent[0]
+		configured := interfaces[interfaceName]
+		block := configuredHost + "-" + interfaceName
+		table, ok := routingTables[block]
+		if !ok {
+			return nil, true, fmt.Errorf("services.yml: proxy block %q has no routing-table assignment", block)
+		}
+		families := []string{}
+		if strings.TrimSpace(configured.IPv4) != "" {
+			families = append(families, "ipv4")
+		}
+		if strings.TrimSpace(configured.IPv6) != "" {
+			families = append(families, "ipv6")
+		}
+		if len(families) == 0 {
+			return nil, true, fmt.Errorf("services.yml: proxy block %q has no public address family", block)
+		}
+		host := strings.TrimSuffix(strings.TrimSpace(configuredHost), domainSuffix)
+		if host == "" {
+			return nil, true, fmt.Errorf("services.yml: proxy host name is empty")
+		}
+		byHost[host] = &ProxyHostSettings{
+			PublicHostname:   strings.TrimSpace(configuredHost),
+			PublicInterface:  strings.TrimSpace(interfaceName),
+			RoutingTable:     table,
+			LoadBalancerUnit: fmt.Sprintf("warp-%s-lb-%s.service", strings.TrimSpace(environment), strings.TrimSpace(interfaceName)),
+			AddressFamilies:  families,
+		}
+	}
+	return byHost, true, nil
+}
+
+func selectedProxyHostSettings(derived *ProxyHostSettings, serviceConfigured bool, legacy *ProxyHostSettings) *ProxyHostSettings {
+	if derived != nil {
+		return cloneProxyHostSettings(derived)
+	}
+	if serviceConfigured {
+		return nil
+	}
+	return cloneProxyHostSettings(legacy)
+}
+
+func containsTrimmed(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+// assignedLBRoutingTables mirrors only warpctl's documented stable
+// host/interface -> routing-table allocation. Keeping this narrow avoids
+// importing a deployment binary into the reusable monitor package.
+func assignedLBRoutingTables(versions []servicesVersionYaml) (map[string]int, error) {
+	assignedByHost := map[string]map[int]string{}
+	blockTable := map[string]int{}
+	for versionIndex := len(versions) - 1; versionIndex >= 0; versionIndex-- {
+		version := versions[versionIndex]
+		tables, err := expandRoutingTableSpec(version.RoutingTables)
+		if err != nil {
+			return nil, fmt.Errorf("services.yml: version %d routing_tables: %w", versionIndex, err)
+		}
+		sort.Ints(tables)
+		hosts := make([]string, 0, len(version.LB.Interfaces))
+		for host := range version.LB.Interfaces {
+			hosts = append(hosts, host)
+		}
+		sort.Strings(hosts)
+		for _, forced := range []bool{true, false} {
+			for _, host := range hosts {
+				interfaces := version.LB.Interfaces[host]
+				names := make([]string, 0, len(interfaces))
+				for name := range interfaces {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				for _, name := range names {
+					if (len(interfaces[name].ExternalPorts) > 0) != forced {
+						continue
+					}
+					block := host + "-" + name
+					assigned := assignedByHost[host]
+					if assigned == nil {
+						assigned = map[int]string{}
+						assignedByHost[host] = assigned
+					}
+					table := 0
+					for _, candidate := range tables {
+						if assigned[candidate] == block {
+							table = candidate
+							break
+						}
+					}
+					if table == 0 {
+						for _, candidate := range tables {
+							if _, used := assigned[candidate]; !used {
+								table = candidate
+								break
+							}
+						}
+					}
+					if table == 0 {
+						return nil, fmt.Errorf("host %q has no free routing table for block %q", host, block)
+					}
+					assigned[table] = block
+					blockTable[block] = table
+				}
+			}
+		}
+	}
+	return blockTable, nil
+}
+
+func expandRoutingTableSpec(spec any) ([]int, error) {
+	if number, ok := spec.(int); ok {
+		return []int{number}, nil
+	}
+	text, ok := spec.(string)
+	if !ok {
+		return nil, fmt.Errorf("unsupported type %T", spec)
+	}
+	tables := []int{}
+	for _, part := range strings.Split(text, ",") {
+		bounds := strings.Split(strings.TrimSpace(part), "-")
+		if len(bounds) < 1 || len(bounds) > 2 {
+			return nil, fmt.Errorf("invalid range")
+		}
+		first, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid table")
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err != nil || last < first {
+				return nil, fmt.Errorf("invalid range")
+			}
+		}
+		for table := first; table <= last; table++ {
+			tables = append(tables, table)
+		}
+	}
+	if len(tables) == 0 {
+		return nil, fmt.Errorf("empty range")
+	}
+	return tables, nil
+}
+
 // loadCredentialRequirements is the proactive counterpart to SIGNALS.md
 // §8.7's route-failure log classifier. Main runs every listed core and
 // payment integration, so a missing resource or field is a release defect.
 // Crash-report resources remain optional by contract: absence is a no-op, but
 // a present partial credential is still observable.
-func loadCredentialRequirements(environment string, stEnabled bool, services []string) []CredentialRequirement {
+func loadCredentialRequirements(environment string, stConfiguredEnabled bool, services []string) []CredentialRequirement {
 	required := environment == "main"
 	serviceEnabled := func(wanted string) bool {
 		for _, service := range services {
@@ -576,7 +835,7 @@ func loadCredentialRequirements(environment string, stEnabled bool, services []s
 			fields: []credentialFieldSpec{field("anthropic.api_key", "anthropic", "api_key")},
 		})
 	}
-	if stEnabled {
+	if stConfiguredEnabled {
 		specs = append(specs,
 			credentialRequirementSpec{
 				key: "subnet", resource: "st.yml", purpose: "Enabled subnet signing, artifact, and settlement identities", required: true,

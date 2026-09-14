@@ -14,17 +14,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// devicesLiveGauge is the number of proxy ids with an installed embedded
-// device on this instance
-var devicesLiveGauge = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Namespace: "urnetwork",
-		Subsystem: "proxy",
-		Name:      "devices_live",
-		Help:      "Proxy ids with an installed embedded device on this instance",
-	},
-)
-
 // prewarmedDevicesGauge is the devices pre-warmed at startup from the
 // activity set (PROXYDRAIN1.md §3.3)
 var prewarmedDevicesGauge = prometheus.NewGauge(
@@ -37,7 +26,6 @@ var prewarmedDevicesGauge = prometheus.NewGauge(
 )
 
 func init() {
-	prometheus.MustRegister(devicesLiveGauge)
 	prometheus.MustRegister(prewarmedDevicesGauge)
 }
 
@@ -55,7 +43,6 @@ func StartActivityFlusher(
 	}
 	proxyHost := server.RequireHost()
 	block := server.RequireBlock()
-	devicesLiveGauge.Set(float64(proxyDeviceManager.DeviceCount()))
 	updateProxyDeviceMemoryGauges(proxyDeviceManager.DeviceMemoryUsage())
 
 	go server.HandleError(func() {
@@ -66,7 +53,6 @@ func StartActivityFlusher(
 			case <-time.After(settings.ActivityFlushTimeout):
 			}
 
-			devicesLiveGauge.Set(float64(proxyDeviceManager.DeviceCount()))
 			updateProxyDeviceMemoryGauges(proxyDeviceManager.DeviceMemoryUsage())
 
 			// activity within one flush interval plus margin: every device

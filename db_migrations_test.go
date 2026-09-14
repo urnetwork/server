@@ -192,11 +192,24 @@ func TestOnboardingEmailTrackerMigrationIsPrivacySafe(t *testing.T) {
 func providerEgressHealthDeadlineMigration(t testing.TB) *OnlineSqlMigration {
 	t.Helper()
 	index := migrationIndex(t, "provider_egress_health_measured_at_client_id")
+	// The pinned VERSION is the invariant, and it is strictly stronger than
+	// "is the last entry". migration_catalog durably records index -> identity
+	// and validateMigrationCatalog fails startup when a recorded index names
+	// different SQL, so once this migration has run anywhere it can never
+	// move: a later migration must append AFTER it rather than shift it, and
+	// this check is what catches a shift. The former "is the last entry" check
+	// asserted something else -- that nothing had been appended yet -- which
+	// no append could survive and which said nothing about whether this
+	// migration had moved.
 	if index+1 != 657 {
 		t.Fatalf("provider-egress health deadline migration version = %d, want 657", index+1)
 	}
-	if index != len(migrations)-1 {
-		t.Fatalf("provider-egress health deadline migration index = %d, want append-only head %d", index, len(migrations)-1)
+	if index < publishedMigrationPrefixCount {
+		t.Fatalf(
+			"provider-egress health deadline migration index = %d is inside the published prefix %d; it belongs in the append-only tail",
+			index,
+			publishedMigrationPrefixCount,
+		)
 	}
 	migration, ok := migrations[index].(*OnlineSqlMigration)
 	if !ok {

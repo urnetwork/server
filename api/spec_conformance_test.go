@@ -572,9 +572,47 @@ var (
 func normalizePath(p string) string {
 	p = strings.TrimPrefix(p, "^")
 	p = strings.TrimSuffix(p, "$")
+	// route patterns are regexes that escape a literal dot (`/\.well-known/jwks\.json`); the spec writes it plain
+	p = strings.ReplaceAll(p, "\\.", ".")
 	p = reRegexCapture.ReplaceAllString(p, "{}")
 	p = reSpecParam.ReplaceAllString(p, "{}")
 	return p
+}
+
+// TestNormalizePath pins the two route forms normalizePath has to reconcile:
+// the regex the route table registers, and the path the spec documents.
+func TestNormalizePath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		// the oauth discovery routes are the reason the unescape exists
+		{"escaped dot", `^/\.well-known/jwks\.json$`, "/.well-known/jwks.json"},
+		{"escaped dot only", `^/\.well-known/openid-configuration$`, "/.well-known/openid-configuration"},
+		{"unescaped dot is left alone", "^/privacy.txt$", "/privacy.txt"},
+		{"regex capture group", "^/log/([^/]+)/upload$", "/log/{}/upload"},
+		{"spec path param", "/log/{clientId}/upload", "/log/{}/upload"},
+		// a route that needs the unescape and the capture rewrite at once
+		{"capture group and escaped dot", `^/competition/round/([^/]+)/providers\.yml$`, "/competition/round/{}/providers.yml"},
+		{"anchors trimmed", "^/hello$", "/hello"},
+		{"no anchors to trim", "/hello", "/hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizePath(tc.in); got != tc.want {
+				t.Errorf("normalizePath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// a route pattern and the spec path it documents must normalize to the same key
+func TestNormalizePathMatchesSpecForm(t *testing.T) {
+	route := normalizePath(`^/\.well-known/jwks\.json$`)
+	spec := normalizePath("/.well-known/jwks.json")
+	if route != spec {
+		t.Errorf("route form %q and spec form %q do not normalize alike", route, spec)
+	}
 }
 
 // implRouteKeys returns the normalized "METHOD path" keys for every route.

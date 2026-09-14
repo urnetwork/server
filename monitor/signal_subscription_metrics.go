@@ -59,10 +59,10 @@ LEFT JOIN latest_finished ON true
 // SIGNALS.md §2.27 maps to signal_subscription_metrics.go and
 // signal_subscription_metrics_test.go.
 func NewSubscriptionMetricsSignal() Signal {
-	return newSubscriptionMetricsSignal(&http.Client{Timeout: 10 * time.Second}, "")
+	return newSubscriptionMetricsSignal(newGrafanaObservationHTTPClient(10*time.Second), "")
 }
 
-func newSubscriptionMetricsSignal(client grafanaDatasourceHTTPClient, endpoint string) Signal {
+func newSubscriptionMetricsSignal(client grafanaHTTPClient, endpoint string) Signal {
 	return &signalAdapter{
 		number: "2.27", key: "subscription-metrics", name: "Subscription dashboard snapshot liveness",
 		probe: subscriptionMetricsProbe{client: client, endpoint: endpoint},
@@ -70,7 +70,7 @@ func newSubscriptionMetricsSignal(client grafanaDatasourceHTTPClient, endpoint s
 }
 
 type subscriptionMetricsProbe struct {
-	client   grafanaDatasourceHTTPClient
+	client   grafanaHTTPClient
 	endpoint string
 }
 
@@ -331,7 +331,7 @@ func (self subscriptionMetricsProbe) dashboardFindings(ctx context.Context, env 
 	}
 	client := self.client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = newGrafanaObservationHTTPClient(10 * time.Second)
 	}
 	endpoint := strings.TrimRight(self.endpoint, "/")
 	if endpoint == "" {
@@ -365,7 +365,7 @@ func (self subscriptionMetricsProbe) dashboardFindings(ctx context.Context, env 
 
 func observeSubscriptionMetricsDashboard(
 	ctx context.Context,
-	client grafanaDatasourceHTTPClient,
+	client grafanaHTTPClient,
 	endpoint string,
 	password string,
 ) (subscriptionMetricsDashboardObservation, error) {
@@ -374,7 +374,7 @@ func observeSubscriptionMetricsDashboard(
 		return subscriptionMetricsDashboardObservation{}, err
 	}
 	request.SetBasicAuth("admin", password)
-	response, err := client.Do(request)
+	response, err := doScopedGrafanaRequest(client, request)
 	if err != nil {
 		return subscriptionMetricsDashboardObservation{}, err
 	}
