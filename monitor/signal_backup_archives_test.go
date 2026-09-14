@@ -1404,6 +1404,14 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 		{name: "empty API tokens", journal: "GitHub API token files must not be empty", boundary: "auth"},
 		{name: "HTTP 401", journal: "curl: (22) The requested URL returned error: 401", boundary: "auth"},
 		{name: "API rate", journal: "curl: (22) The requested URL returned error: 429", boundary: "api-rate"},
+		{name: "HTTP 403", journal: "curl: (22) The requested URL returned error: 403", boundary: "api-rate"},
+		{name: "curl failure", journal: "curl: (6) Could not resolve host: api-source.example.test", boundary: "api-rate"},
+		{name: "malformed repository list", journal: "GitHub organization repositories response is not a list", boundary: "api-rate"},
+		{name: "unsafe repository name", journal: "unsafe GitHub repository name: '../synthetic-repository'", boundary: "api-rate"},
+		{name: "unexpected repository owner", journal: "unexpected GitHub repository owner: 'synthetic-other-org.example.test/synthetic-repository'", boundary: "api-rate"},
+		{name: "pagination refusal", journal: "refusing more than 17 GitHub API pages for synthetic-org.example.test", boundary: "api-rate"},
+		{name: "no repositories", journal: "GitHub returned no repositories for synthetic-org.example.test; preserving the previous tarball", boundary: "api-rate"},
+		{name: "failed repository discovery", journal: "failed to discover every synthetic-org.example.test repository", boundary: "api-rate"},
 		{name: "Git transfer", journal: "synthetic transport: Connection reset by peer", boundary: "git-transfer"},
 		{name: "Git update wrapper", journal: "failed to update synthetic-org/synthetic-repository; preserving the previous synthetic-org code archive", boundary: "git-transfer"},
 		{name: "invalid mirror cache", journal: "cached repository is not a bare mirror: /synthetic/repository.git", boundary: "git-transfer"},
@@ -1449,6 +1457,113 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 			!strings.Contains(alert.Action, "Establish the owning fatal command and generation") ||
 			!strings.Contains(alert.Action, "remained unresolved at the terminal boundary") {
 			t.Errorf("%s: explicit clearance error lost urgency or fatal-command qualification", testCase.name)
+		}
+	}
+}
+
+// Positive API context must not replace the later explicit compression error.
+func TestBackupArchivesWriterCommandPositiveApiContextPreservesCompressionFailure(t *testing.T) {
+	const privateSyntheticArchive = "compression-marker.example.test/synthetic.tar.xz"
+	for _, positiveApiContext := range []string{
+		"GitHub API response completed with HTTP 200; marker=api-context.example.test",
+		"GitHub organization repositories response is a list; marker=api-context.example.test",
+	} {
+		output := runSyntheticBackupArchiveWriterCommand(
+			t,
+			"failed",
+			"exit-code",
+			1,
+			positiveApiContext+"\n"+
+				"new code archive failed its xz/tar integrity check: "+privateSyntheticArchive,
+		)
+		writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+		if err != nil {
+			t.Fatalf("parse actual synthetic writer command: %v", err)
+		}
+		alert := alertFromFinding(SignalSettings{
+			Environment: "synthetic",
+			Now: func() time.Time {
+				return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+			},
+		}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+		if alert.Class != "backup-archive-writer-failed" ||
+			alert.Severity != SeverityPage || alert.Sustain != 1 {
+			t.Fatalf("explicit compression failure lost writer page/1: %s/%s/%d", alert.Class, alert.Severity, alert.Sustain)
+		}
+		for _, want := range []string{
+			"unit_state=failed",
+			"exit_status=1",
+			"failure_journal_status=complete",
+			"first_failure_boundary=compression-integrity",
+			"failure_journal_lines=2",
+			"api_rate_lines=0",
+			"compression_integrity_lines=1",
+			"unclassified_lines=1",
+		} {
+			if !strings.Contains(alert.Observed, want) {
+				t.Errorf("positive-API compression observation missing %q: %s", want, alert.Observed)
+			}
+		}
+		if !strings.Contains(alert.Mechanism, "archive compression") ||
+			!strings.Contains(alert.Action, "compression/integrity stage") {
+			t.Error("positive API context replaced the explicit compression mechanism/action")
+		}
+		if strings.Contains(alert.Mechanism, "GitHub API access, response-contract, or rate-limit evidence") ||
+			strings.Contains(alert.Action, "Inspect the bounded provider response class and rate-limit window") {
+			t.Error("positive API context produced an unsupported provider failure claim or repair")
+		}
+		for _, forbidden := range []string{positiveApiContext, privateSyntheticArchive} {
+			if strings.Contains(output, forbidden) || strings.Contains(alert.Markdown(), forbidden) {
+				t.Errorf("raw synthetic journal content leaked: %q", forbidden)
+			}
+		}
+	}
+}
+
+// A failed unit with only positive API context keeps its failure cause unknown.
+func TestBackupArchivesWriterCommandPositiveApiOnlyKeepsFailureCauseUnknown(t *testing.T) {
+	for _, positiveApiContext := range []string{
+		"GitHub API response completed with HTTP 200; marker=api-context.example.test",
+		"GitHub organization repositories response is a list; marker=api-context.example.test",
+	} {
+		output := runSyntheticBackupArchiveWriterCommand(t, "failed", "exit-code", 1, positiveApiContext)
+		writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+		if err != nil {
+			t.Fatalf("parse actual synthetic writer command: %v", err)
+		}
+		alert := alertFromFinding(SignalSettings{
+			Environment: "synthetic",
+			Now: func() time.Time {
+				return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+			},
+		}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+		if alert.Class != "backup-archive-writer-failed" ||
+			alert.Severity != SeverityPage || alert.Sustain != 1 {
+			t.Fatalf("positive-only API journal erased the unsuccessful writer page/1: %s/%s/%d", alert.Class, alert.Severity, alert.Sustain)
+		}
+		for _, want := range []string{
+			"unit_state=failed",
+			"exit_status=1",
+			"failure_journal_status=complete",
+			"first_failure_boundary=unclassified",
+			"failure_journal_lines=1",
+			"api_rate_lines=0",
+			"unclassified_lines=1",
+		} {
+			if !strings.Contains(alert.Observed, want) {
+				t.Errorf("positive-only API observation missing %q: %s", want, alert.Observed)
+			}
+		}
+		if !strings.Contains(alert.Mechanism, "cause remains unclassified") ||
+			!strings.Contains(alert.Action, "Establish the owning fatal command and generation") {
+			t.Error("positive-only API context did not retain the unknown writer failure cause")
+		}
+		if strings.Contains(alert.Mechanism, "GitHub API access, response-contract, or rate-limit evidence") ||
+			strings.Contains(alert.Action, "Inspect the bounded provider response class and rate-limit window") {
+			t.Error("positive-only API context produced an unsupported provider failure claim or repair")
+		}
+		if strings.Contains(output, positiveApiContext) || strings.Contains(alert.Markdown(), positiveApiContext) {
+			t.Error("positive-only raw synthetic API context leaked")
 		}
 	}
 }

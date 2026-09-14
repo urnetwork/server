@@ -12947,10 +12947,30 @@ failures are atomic-publication boundaries. Clearance/mount recognition requires
 an explicit rejection, unavailable observation, or mount/root error contract;
 positive clearance recording, valid status, marker, identity, and probation
 progress are unclassified context, as is a nonfatal mount-wait message. Such
-context cannot outrank a later observed explicit error stage. Journal-stage
+context cannot outrank a later observed explicit error stage. Bare GitHub API
+naming and positive repository-list response context do not by themselves
+identify an API error stage. The native pagination refusal requires
+`refusing more than <count> GitHub API pages`, and the organization-response
+error requires `GitHub organization repositories response is not a list`.
+HTTP 403/429, `curl`, rate-limit, failed-discovery, unsafe-name,
+unexpected-owner, and no-repositories contracts retain their API/rate
+recognition; authentication still takes precedence. Journal-stage
 classification and line counts are not fatal-command or archive-generation
-ownership; the generic API-context classifier remains a separate attribution
-limit, not an API root-cause proof.
+ownership or an API root-cause proof.
+
+On 2026-09-14, deterministic synthetic regressions through the actual embedded
+shell/AWK and owning Alert/Markdown seam reproduced two prior false API-stage
+attributions: positive API or valid repository-list context could outrank a
+later explicit compression error, and positive-only text could supply a guessed
+API cause for a failed unit. The correction narrows those two label-only
+predicates to the native negative contracts above. The regressions require
+compression to remain the observed stage in the first case and the cause to
+remain unclassified in the second, preserving the unsuccessful writer's
+PAGE/Sustain1. Toy native-negative rows and existing authentication,
+overlap, overflow/redaction, and healthy journal-skip controls protect the
+retained contracts. This is synthetic monitor-attribution learning, not proof
+that any retained API-count row was positive, which command failed, or which
+archive/process generation owned that failure.
 
 For `github-backup-archive.timer` it reads active state, durable unit-file
 state, and its next realtime trigger. The effective
