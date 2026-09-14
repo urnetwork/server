@@ -395,13 +395,15 @@ retried automatically at the next weekly payout.
 
 Connect a Solana wallet: https://ur.io/app/account/earnings?wallet=solana
 
-In the app: Account > Earnings > the "..." menu next to "Connect
-Bittensor wallet" > "Connect Solana wallet".
+In the app: open Account, then Earnings. In the Bittensor wallet
+section, open the three-dot menu (Wallet options) and choose
+"Connect Solana wallet". Don't see the menu? Update the app, or use
+the link above.
 
 This reminder is sent once per pay period while you have new earnings.
-The contracts behind this payment are deleted after 7 days to preserve
-the anonymity of the network. If something looks wrong, contact
-support@ur.io.
+The contracts behind this payment are deleted 7 days after it is paid,
+to preserve the anonymity of the network. If something looks wrong,
+contact support@ur.io.
 
 Sent once per pay period while you have new USDC earnings and no
 Solana wallet connected.
@@ -633,5 +635,5 @@ auth_password_set: Your URnetwork password was changed. If this wasn't you, cont
 auth_verify: Your URnetwork verification code is {{.VerifyCode}}. It expires in 4 hours.
 network_welcome: Welcome to URnetwork! Get connected at https://ur.io/install
 subscription_missing_wallet: URnetwork: {{.AmountUsd}} USDC is waiting. Connect a Solana wallet at https://ur.io/app/account/earnings?wallet=solana
-subscription_send_payment: URnetwork: you got paid {{.AmountUsd}} USDC. Details at https://ur.io/app/payouts
+subscription_send_payment: (template removed 2026-09-02, b3afe73a; no payout-sent message is sent today)
 ```

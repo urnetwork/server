@@ -208,7 +208,7 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	// USDC is paid only to a Solana (or Polygon) payout wallet, never to the
 	// Bittensor wallet the Earnings screen connects, so the missing wallet
 	// reminder names Solana and opens the Solana connect flow on Earnings; the
-	// old wallets route redirects to Earnings without it
+	// old wallets route only redirects to Earnings
 	missingWallet := &MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "3.87"}
 	subject, bodyHtml, bodyText, err := RenderEmailTemplate(missingWallet)
 	if err != nil {
@@ -226,6 +226,8 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 		"Connect a Solana wallet",
 		"3.87 USDC waiting",
 		"not to a Bittensor wallet",
+		"three-dot menu (Wallet options)",
+		`"Connect Solana wallet"`,
 	} {
 		if !strings.Contains(bodyHtml, want) || !strings.Contains(bodyText, want) {
 			t.Errorf("missing wallet email missing %q", want)
@@ -241,5 +243,14 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 		if strings.Contains(part, "https://ur.io/app/account/wallets") {
 			t.Errorf("missing wallet message still links the old wallets route")
 		}
+	}
+
+	// a phone account gets one GSM-7 segment even at a five-figure amount
+	bigSms, err := RenderSmsTemplate(&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "12345.67"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bigSms) > 160 {
+		t.Errorf("missing wallet sms is %d bytes, over one segment: %q", len(bigSms), bigSms)
 	}
 }
