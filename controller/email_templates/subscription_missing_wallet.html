@@ -1,15 +1,15 @@
-{{define "title"}}Connect a wallet{{end}}
-{{define "preheader"}}Your earnings are waiting. Connect a wallet and the payment retries automatically.{{end}}
+{{define "title"}}Connect a Solana wallet{{end}}
+{{define "preheader"}}Your USDC earnings are waiting. Connect a Solana wallet and the payment is retried automatically.{{end}}
 {{define "eyebrow"}}Action needed{{end}}
 {{define "accent"}}#87fb67{{end}}
-{{define "headline"}}Connect a wallet{{end}}
-{{define "why"}}Sent once per pay period while you have new earnings and no wallet connected.{{end}}
+{{define "headline"}}Connect a Solana wallet{{end}}
+{{define "why"}}Sent once per pay period while you have new USDC earnings and no Solana wallet connected.{{end}}
 {{define "content"}}
 <div class="ur-big ur-ink" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:40px; line-height:44px; font-weight:700; letter-spacing:-0.02em; color:#101010; font-variant-numeric:tabular-nums;">{{.AmountUsd}} USDC waiting</div>
-<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no wallet on your account to send it to. Connect one and the payment is retried automatically.</p>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no Solana wallet on your account to send it to. USDC is paid to a Solana wallet, not to a Bittensor wallet. Connect one and the payment is retried automatically at the next weekly payout.</p>
 
 <table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
-<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account/wallets" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Connect a wallet</a></td>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account/earnings?wallet=solana" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Connect Solana wallet</a></td>
 </tr></table>
-<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">This reminder is sent once per pay period while you have new earnings. The contracts behind this payment are deleted after 7 days to preserve the anonymity of the network. If something looks wrong, contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">In the app: open Account, then Earnings. In the Bittensor wallet section, open the three-dot menu (Wallet options) and choose "Connect Solana wallet". Don't see the menu? Update the app, or use the link above. This reminder is sent once per pay period while you have new earnings. The contracts behind this payment are deleted 7 days after it is paid, to preserve the anonymity of the network. If something looks wrong, contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
 {{end}}

@@ -204,4 +204,53 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	if !strings.Contains(bodyHtml, `href="`+codeLink+`"`) || !strings.Contains(bodyText, codeLink) {
 		t.Errorf("balance code deep link missing: want %s", codeLink)
 	}
+
+	// USDC is paid only to a Solana (or Polygon) payout wallet, never to the
+	// Bittensor wallet the Earnings screen connects, so the missing wallet
+	// reminder names Solana and opens the Solana connect flow on Earnings; the
+	// old wallets route only redirects to Earnings
+	missingWallet := &MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "3.87"}
+	subject, bodyHtml, bodyText, err := RenderEmailTemplate(missingWallet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sms, err := RenderSmsTemplate(missingWallet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walletLink := "https://ur.io/app/account/earnings?wallet=solana"
+	if !strings.Contains(bodyHtml, `href="`+walletLink+`"`) || !strings.Contains(bodyText, walletLink) || !strings.Contains(sms, walletLink) {
+		t.Errorf("missing wallet deep link missing: want %s", walletLink)
+	}
+	for _, want := range []string{
+		"Connect a Solana wallet",
+		"3.87 USDC waiting",
+		"not to a Bittensor wallet",
+		"three-dot menu (Wallet options)",
+		`"Connect Solana wallet"`,
+	} {
+		if !strings.Contains(bodyHtml, want) || !strings.Contains(bodyText, want) {
+			t.Errorf("missing wallet email missing %q", want)
+		}
+	}
+	if !strings.Contains(bodyHtml, ">Connect Solana wallet</a>") {
+		t.Errorf("missing wallet button should read Connect Solana wallet")
+	}
+	if !strings.Contains(subject, "Connect a Solana wallet") || !strings.Contains(sms, "Connect a Solana wallet") {
+		t.Errorf("missing wallet subject and sms should ask for a Solana wallet, got %q and %q", subject, sms)
+	}
+	for _, part := range []string{subject, bodyHtml, bodyText, sms} {
+		if strings.Contains(part, "https://ur.io/app/account/wallets") {
+			t.Errorf("missing wallet message still links the old wallets route")
+		}
+	}
+
+	// a phone account gets one GSM-7 segment even at a five-figure amount
+	bigSms, err := RenderSmsTemplate(&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "12345.67"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bigSms) > 160 {
+		t.Errorf("missing wallet sms is %d bytes, over one segment: %q", len(bigSms), bigSms)
+	}
 }
