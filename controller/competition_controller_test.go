@@ -1765,6 +1765,37 @@ func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 	}
 }
 
+// The smoke must exercise the same epoch-specific margin embedded in the
+// immutable image instead of silently substituting a development threshold.
+func TestContainerSmokeUsesFrozenEpochMargin(t *testing.T) {
+	scriptBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/smoke-test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		`base_source_epoch="$(jq -er '.source_epoch' <<<"$base_identity")"`,
+		`source-check --epoch "$base_source_epoch"`,
+		`--repos-root /workspace --json`,
+		`'.significant_improvement_percent / 100 | select(. > 0 and . <= 0.5)'`,
+		`"APEX_EPOCH=$base_source_epoch"`,
+		`"APEX_TAKEOVER_MARGIN=$takeover_margin"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("smoke is missing frozen epoch setting %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`source-record --epoch "$base_source_epoch"`,
+		"'APEX_EPOCH=0'",
+		"'APEX_TAKEOVER_MARGIN=0.10'",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("smoke retains hard-coded epoch setting %q", forbidden)
+		}
+	}
+}
+
 // Every image and promotion boundary must require the significance fields the
 // API validates, including the named deterministic source test at build time.
 func TestEvaluatorScoreBoundariesRequireSharedSignificanceContract(t *testing.T) {
