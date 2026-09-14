@@ -29,8 +29,63 @@ func (logShipperProbe) cadence() time.Duration { return time.Minute }
 
 const logShipperMarker = "monitor-signal-11.14-log-shipper"
 
+// Redis exporter v1.82.0 uses Go's bool flag parser, with this one process
+// environment default. Read NUL records exactly; newline splitting or an
+// ExecStart substring can turn arbitrary argv values into a false exclusion.
+const logShipperRedisPolicyReducer = boundedNulBytesReader + `
+redis_histogram_policy() {
+  redis_environment_policy=unobservable
+  if redis_environment_bytes=$(bounded_nul_bytes "$2"); then
+    redis_environment_policy=$(printf '%s\n' "$redis_environment_bytes" | LC_ALL=C awk '
+      function observeNulRecord(value) {
+        prefix="REDIS_EXPORTER_EXCLUDE_LATENCY_HISTOGRAM_METRICS="
+        if (index(value, prefix) == 1) {
+          count++
+          value=substr(value, length(prefix)+1)
+          if (value ~ /^(1|t|T|TRUE|true|True)$/) policy="excluded"
+          else policy="enabled"
+        }
+      }
+      BEGIN {policy="enabled"; count=0}
+` + boundedNulRecordsAwk + `
+      END {if (nulInvalid || count > 1) policy="unobservable"; print policy}
+    ') || redis_environment_policy=unobservable
+  fi
+  if ! redis_cmdline_bytes=$(bounded_nul_bytes "$1"); then
+    printf '%s\n' unobservable; return
+  fi
+  printf '%s\n' "$redis_cmdline_bytes" | LC_ALL=C awk -v default_policy="$redis_environment_policy" '
+    function observeNulRecord(value) {
+      if (nulRecords == 1) {if (value == "") nulInvalid=1; return}
+      if (stopped || nulInvalid) return
+      if (consume) {consume=0; return}
+      if (value == "--" || value !~ /^-/) {stopped=1; return}
+      token=value
+      sub(/^--?/, "", token)
+      if (token == "exclude-latency-histogram-metrics") {policy="excluded"; return}
+      if (index(token, "exclude-latency-histogram-metrics=") == 1) {
+        value=substr(token, length("exclude-latency-histogram-metrics=")+1)
+        if (value ~ /^(1|t|T|TRUE|true|True)$/) policy="excluded"
+        else if (value ~ /^(0|f|F|FALSE|false|False)$/) policy="enabled"
+        else nulInvalid=1
+        return
+      }
+      if (index(token, "exclude-latency-histogram-metrics") == 1) {nulInvalid=1; return}
+      if (token == "redis.addr" || token == "web.listen-address") {consume=1; return}
+      # Other name=value flags cannot consume the next argv record. Unknown
+      # bare flags might; do not guess whether a later token is their value.
+      if (index(token, "=") == 0) nulInvalid=1
+    }
+    BEGIN {policy=default_policy; stopped=0; consume=0}
+` + boundedNulRecordsAwk + `
+    END {if (nulInvalid || nulRecords == 0 || consume) policy="unobservable"; print policy}
+  ' || printf '%s\n' unobservable
+}
+`
+
 const logShipperCommand = `# ` + logShipperMarker + `
 set -u
+` + logShipperRedisPolicyReducer + `
 properties=$(systemctl show fluent-bit.service \
   -p ActiveState -p SubState -p Result -p NRestarts \
   -p LimitNOFILE -p LimitNOFILESoft -p ExecMainStartTimestamp \
@@ -70,36 +125,53 @@ if [ "$restarts" -gt 0 ]; then
     restart_reason=prometheus-histogram-decoder-crash
   fi
 fi
-redis_exporter_state=not-applicable
-redis_latency_histogram_policy=not-applicable
+redis_exporter_state=unobservable
+redis_latency_histogram_policy=unobservable
+redis_process_root=/proc
 redis_properties=$(systemctl show redis-exporter.service \
-  -p LoadState -p ActiveState -p SubState -p ExecStart \
+  -p LoadState -p ActiveState -p SubState -p MainPID \
   --no-pager 2>/dev/null) || redis_properties=''
 read_redis_property() {
   printf '%s\n' "$redis_properties" | awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=")+1); found=1} END {exit !found}'
 }
 redis_load_state=$(read_redis_property LoadState 2>/dev/null || true)
-if [ -n "$redis_load_state" ] && [ "$redis_load_state" != not-found ]; then
+if [ "$redis_load_state" = not-found ]; then
+  redis_exporter_state=not-applicable
+  redis_latency_histogram_policy=not-applicable
+elif [ "$redis_load_state" = loaded ]; then
   redis_active_state=$(read_redis_property ActiveState 2>/dev/null || true)
   redis_sub_state=$(read_redis_property SubState 2>/dev/null || true)
   if [ "$redis_active_state" = active ] && [ "$redis_sub_state" = running ]; then
     redis_exporter_state=active
+    redis_pid=$(read_redis_property MainPID 2>/dev/null || true)
+    case "$redis_pid" in
+      ''|0|*[!0-9]*) ;;
+      *)
+        redis_comm=$(head -c 64 "$redis_process_root/$redis_pid/comm" 2>/dev/null || true)
+        redis_start=''
+        if [ "$redis_comm" = redis_exporter ]; then
+          redis_start=$(sed 's/.*) //' "$redis_process_root/$redis_pid/stat" 2>/dev/null | awk '{print $20}')
+        fi
+        case "$redis_start" in
+          ''|*[!0-9]*) ;;
+          *)
+            redis_policy=$(redis_histogram_policy "$redis_process_root/$redis_pid/cmdline" "$redis_process_root/$redis_pid/environ")
+            redis_start_after=$(sed 's/.*) //' "$redis_process_root/$redis_pid/stat" 2>/dev/null | awk '{print $20}')
+            redis_live_pid=$(systemctl show redis-exporter.service -p MainPID --value --no-pager 2>/dev/null || true)
+            if [ "$redis_pid" = "$redis_live_pid" ] && [ "$redis_start" = "$redis_start_after" ]; then
+              redis_latency_histogram_policy=$redis_policy
+            else
+              redis_exporter_state=unobservable
+            fi
+            ;;
+        esac
+        ;;
+    esac
   elif [ -n "$redis_active_state" ] && [ -n "$redis_sub_state" ]; then
     redis_exporter_state=inactive
   else
     redis_exporter_state=unobservable
   fi
-  redis_exec_start=$(read_redis_property ExecStart 2>/dev/null || true)
-  if [ -z "$redis_exec_start" ]; then
-    redis_latency_histogram_policy=unobservable
-  elif printf '%s\n' "$redis_exec_start" | grep -Fq -- '--exclude-latency-histogram-metrics'; then
-    redis_latency_histogram_policy=excluded
-  else
-    redis_latency_histogram_policy=enabled
-  fi
-elif [ -z "$redis_load_state" ] && [ -n "$redis_properties" ]; then
-  redis_exporter_state=unobservable
-  redis_latency_histogram_policy=unobservable
 fi
 printf '%s\n' \
   'observation_schema=3' \
@@ -157,6 +229,9 @@ func logShipperHosts(cfg *monitorConfig) []*host {
 }
 
 func (logShipperProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	hosts := logShipperHosts(env.cfg)
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("log shipper: no managed hosts in inventory")
@@ -187,6 +262,9 @@ func (logShipperProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	}
 	wait.Wait()
 	close(results)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	ordered := make([]logShipperResult, 0, len(hosts))
 	for result := range results {
@@ -280,6 +358,9 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 	}
 	if (redisExporterState == "not-applicable") != (redisLatencyHistogramPolicy == "not-applicable") {
 		return logShipperSample{}, fmt.Errorf("log shipper: inconsistent Redis exporter applicability")
+	}
+	if redisExporterState != "active" && redisExporterState != "not-applicable" && redisLatencyHistogramPolicy != "unobservable" {
+		return logShipperSample{}, fmt.Errorf("log shipper: inactive or unknown exporter cannot prove live policy")
 	}
 	return logShipperSample{
 		activeState: values["active_state"], subState: values["sub_state"],
@@ -382,20 +463,33 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			sample.redisExporterState,
 			sample.redisLatencyHistogramPolicy,
 		)
-		if sample.redisExporterState == "active" && sample.redisLatencyHistogramPolicy == "excluded" {
+		if sample.redisExporterState == "unobservable" ||
+			(sample.redisExporterState == "active" && sample.redisLatencyHistogramPolicy == "unobservable") {
+			findings = append(findings, cannotObserveFinding(
+				target+"/redis-latency-histogram-policy", fmt.Errorf("live Redis exporter policy unavailable"),
+			))
+		} else if sample.redisExporterState == "active" && sample.redisLatencyHistogramPolicy == "excluded" {
 			findings = append(findings, healthyFinding(
 				"observability/log-shipper", tierWarn, "redis-latency-histogram-policy-drift", target,
 			))
 		} else {
+			symptom := fmt.Sprintf("%s live Redis exporter enables the optional latency histogram", target)
+			mechanism := "The exact running process arguments and observable environment default enable redis_commands_latencies_usec. That optional command-dependent histogram can exercise the Fluent Bit duplicate-histogram decoder crash path; required commandstats do not depend on it."
+			contextText := "This is a direct unsafe-input policy finding, not proof of a decoder crash. The independent Redis rates signal must still prove that required commandstats and exporter-health metrics are fresh."
+			if sample.redisExporterState != "active" {
+				symptom = fmt.Sprintf("%s required Redis exporter is not active", target)
+				mechanism = "The required exporter unit is absent or inactive. It cannot supply commandstats, and an unsafe running histogram policy cannot be inferred from a stopped process."
+				contextText = "This is exporter availability loss, not affirmative evidence that an optional histogram is being emitted or caused a decoder crash."
+			}
 			findings = append(findings, finding{
 				probeId: "observability/log-shipper", tier: tierWarn,
 				class: "redis-latency-histogram-policy-drift", target: target, sustain: 1,
-				symptom:   fmt.Sprintf("%s can still feed the unsafe optional Redis latency histogram into Fluent Bit", target),
-				mechanism: "The live Redis exporter unit is inactive, unobservable, or does not carry the narrow exclusion for redis_commands_latencies_usec. That optional command-dependent histogram can crash the Fluent Bit Prometheus decoder before the later restart evidence appears.",
-				baseline:  "redis-exporter.service is active/running and its effective ExecStart excludes only the optional latency histogram.",
+				symptom:   symptom,
+				mechanism: mechanism,
+				baseline:  "redis-exporter.service is active/running and its exact live argv/environment policy excludes only the optional latency histogram.",
 				observed:  redisObserved,
 				evidence:  "The host reducer emits only fixed state and policy enums; unit arguments, paths, credentials, and raw metric data are omitted.",
-				context:   "This is a direct unsafe-input policy finding. The independent Redis rates signal must still prove that required commandstats and exporter-health metrics are fresh.",
+				context:   contextText,
 				action:    "Converge the reviewed Redis exporter unit with --exclude-latency-histogram-metrics while retaining commandstats. Do not disable the whole exporter, raise Mimir limits, or attribute an unrelated decoder crash without the exact stack.",
 				verify:    "The live unit reports active/excluded, redis_commands_processed_total and redis_commands_duration_seconds_total are fresh, and Fluent Bit remains stable with fresh outputs for ten minutes.",
 				playbook:  "SIGNALS.md §11.14 and §3.1a",

@@ -1,3 +1,5 @@
+// SIGNALS.md §11.20c: desired remote-publisher routing and process-owned live
+// connections. Unknown runtime evidence never clears a connection incident.
 package monitor
 
 import (
@@ -49,6 +51,7 @@ type mimirPublisherSample struct {
 	preferredOrdinal         int
 	fluentBitActive          bool
 	processObservable        bool
+	routeState               string
 	connectionsObservable    bool
 	connectionsTotal         int
 	connectionsUnknown       int
@@ -132,7 +135,7 @@ func mimirPublisherFrontAddresses(cfg *monitorConfig) ([]string, error) {
 	seen := map[netip.Addr]bool{}
 	for _, front := range frontHosts {
 		address, err := netip.ParseAddr(strings.TrimSpace(front.lanIp))
-		if err != nil || !address.IsValid() || address.IsUnspecified() || address.IsMulticast() {
+		if err != nil || !address.IsValid() || address.IsUnspecified() || address.IsMulticast() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.Zone() != "" {
 			return nil, fmt.Errorf("an active Grafana front lacks a valid unicast LAN address")
 		}
 		address = address.Unmap()
@@ -169,15 +172,69 @@ func mimirPublisherCommand(alias string, frontAddresses []string) (string, error
 	}
 	return `# ` + mimirPublishersMarker + `
 set -u
+` + boundedNulBytesReader + `
 alias_name=` + shellSingleQuote(alias) + `
 expected_addresses=` + shellSingleQuote(strings.Join(frontAddresses, " ")) + `
 expected_fronts=` + strconv.Itoa(len(frontAddresses)) + `
+address_ordinal() {
+  awk -v address="$1" -v expected="$expected_addresses" '
+    function hex_decimal(value, i, number) {
+      number=0
+      for (i=1; i<=length(value); i++) number=number*16+index("0123456789abcdef",substr(value,i,1))-1
+      return number
+    }
+    function normalize(value, halves, groups, count, left, right, i, part, result, octets, suffix) {
+      value=tolower(value)
+      if (value !~ /:/ || value ~ /\./) {
+        suffix=value; sub(/^.*:/,"",suffix)
+        if (split(suffix,octets,".") != 4) return ""
+        for (i=1; i<=4; i++) if (octets[i] !~ /^[0-9]+$/ || length(octets[i]) > 3 || (length(octets[i]) > 1 && substr(octets[i],1,1) == "0") || octets[i]+0 > 255) return ""
+        if (value !~ /:/) return sprintf("%d.%d.%d.%d",octets[1],octets[2],octets[3],octets[4])
+        value=substr(value,1,length(value)-length(suffix)) sprintf("%x:%x",octets[1]*256+octets[2],octets[3]*256+octets[4])
+      }
+      if (value ~ /%/) return ""
+      count=split(value,halves,"::")
+      if (count > 2) return ""
+      left=halves[1] == "" ? 0 : split(halves[1],groups,":")
+      right=0
+      if (count == 2 && halves[2] != "") right=split(halves[2],groups,":")
+      if ((count == 1 && left != 8) || (count == 2 && left+right >= 8)) return ""
+      value=halves[1]
+      if (count == 2) {
+        for (i=0; i<8-left-right; i++) value=value ":0"
+        value=value ":" halves[2]
+        sub(/^:/,"",value); sub(/:$/,"",value)
+      }
+      if (split(value,groups,":") != 8) return ""
+      result=""
+      for (i=1; i<=8; i++) {
+        part=groups[i]
+        if (length(part) > 4 || part !~ /^[0-9a-f]+$/) return ""
+        sub(/^0+/,"",part); if (part == "") part="0"
+        result=result ":" part
+      }
+      if (result ~ /^:0:0:0:0:0:ffff:/) {
+        split(result,groups,":")
+        left=hex_decimal(groups[8]); right=hex_decimal(groups[9])
+        return sprintf("%d.%d.%d.%d",int(left/256),left%256,int(right/256),right%256)
+      }
+      return result
+    }
+    BEGIN {
+      normalized=normalize(address)
+      if (normalized == "") {print -1; exit}
+      count=split(expected,fronts," ")
+      for (i=1; i<=count; i++) if (normalized != "" && normalized == normalize(fronts[i])) {print i; exit}
+      print 0
+    }
+  '
+}
 alias_values=$(awk -v alias="$alias_name" '
   /^[[:space:]]*#/ {next}
   {
     sub(/#.*/, "")
     for (i=2; i<=NF; i++) {
-      if ($i == alias) { print $1; break }
+      if ($i == alias) {entries++; if (entries > 1024) exit 1; print $1; break}
     }
   }
 ' /etc/hosts 2>/dev/null) || exit 41
@@ -189,15 +246,8 @@ preferred_ordinal=0
 seen_ordinals=' '
 for address in $alias_values; do
   alias_entries=$((alias_entries + 1))
-  ordinal=0
-  index=0
-  for expected in $expected_addresses; do
-    index=$((index + 1))
-    if [ "$address" = "$expected" ]; then
-      ordinal=$index
-      break
-    fi
-  done
+  ordinal=$(address_ordinal "$address") || exit 41
+  if [ "$ordinal" -lt 0 ]; then ordinal=0; fi
   if [ "$alias_entries" -eq 1 ]; then
     preferred_ordinal=$ordinal
   fi
@@ -227,6 +277,7 @@ if [ "$active_state" = active ] && [ "$sub_state" = running ]; then
   fluent_bit_active=true
 fi
 process_observable=false
+route_state=unobservable
 process_pid=$(read_property MainPID)
 process_start=''
 case "$process_pid" in
@@ -240,22 +291,49 @@ case "$process_pid" in
     ;;
 esac
 
+# Reduce only the running process's route inputs; never return its environment.
+if [ "$process_observable" = true ]; then
+  if route_bytes=$(bounded_nul_bytes "/proc/$process_pid/environ" allow-sudo); then
+    route_state=$(printf '%s\n' "$route_bytes" | LC_ALL=C awk -v alias="$alias_name" '
+      function observeNulRecord(value) {
+        if (index(value,"GRAFANA_PUSH_HOST=") == 1) {hosts++; host=substr(value,19)}
+        if (index(value,"GRAFANA_PUSH_PORT=") == 1) {ports++; port=substr(value,19)}
+      }
+` + boundedNulRecordsAwk + `
+      END {
+        if (nulInvalid || hosts != 1 || ports != 1) print "unobservable"
+        else if (host == alias && port == "3100") print "expected"
+        else print "different"
+      }
+    ') || route_state=unobservable
+  fi
+fi
+
 # Socket ownership must be visible; host-wide port matches are not publisher
 # evidence. Noninteractive sudo is read-only and optional, never password-fed.
 connections_observable=true
-peers=$(sudo -n ss -Hntp state established '( dport = :3100 )' 2>/dev/null) || \
-  peers=$(ss -Hntp state established '( dport = :3100 )' 2>/dev/null) || connections_observable=false
+bounded_peers() {
+  ("$@"; printf '\nmonitor_socket_status=%s\n' "$?") | awk '
+    /^monitor_socket_status=/ {statuses++; status=substr($0,23); next}
+    NF {rows++; if (length($0) > 4096) oversized=1; if (rows <= 1024 && !oversized) print}
+    END {exit (statuses != 1 || status != "0" || rows > 1024 || oversized)}
+  '
+}
+peers=$(bounded_peers sudo -n ss -Hntp state established '( dport = :3100 )' 2>/dev/null) || \
+  peers=$(bounded_peers ss -Hntp state established '( dport = :3100 )' 2>/dev/null) || connections_observable=false
 owned_peers=''
 if [ "$connections_observable" = true ] && [ "$process_observable" = true ]; then
   ownership=$(printf '%s\n' "$peers" | awk -v pid="$process_pid" '
-    NF && $0 !~ /pid=[0-9]+,/ {unknown=1}
+` + mimirPublisherSocketOwnersAwk + `
+    NF && (NF < 5 || publisherOwnsSocket($0,pid) < 0) {unknown=1}
     END {print unknown+0}
   ')
   if [ "$ownership" -ne 0 ]; then
     connections_observable=false
   else
     owned_peers=$(printf '%s\n' "$peers" | awk -v pid="$process_pid" '
-      $0 ~ ("pid=" pid ",") {print $4}
+` + mimirPublisherSocketOwnersAwk + `
+      NF && publisherOwnsSocket($0,pid) == 1 {print $4}
     ')
   fi
 else
@@ -268,16 +346,21 @@ connections_distinct_fronts=0
 seen_connection_ordinals=' '
 for peer in $owned_peers; do
   connections_total=$((connections_total + 1))
-  peer_address=$(printf '%s\n' "$peer" | sed -E 's/^\[([^]]+)\]:[0-9]+$/\1/; s/^([^:]+):[0-9]+$/\1/')
-  ordinal=0
-  index=0
-  for expected in $expected_addresses; do
-    index=$((index + 1))
-    if [ "$peer_address" = "$expected" ]; then
-      ordinal=$index
-      break
-    fi
-  done
+  if [ "${peer##*:}" != 3100 ]; then
+    connections_observable=false
+    connections_unknown=$((connections_unknown + 1))
+    continue
+  fi
+  case "$peer" in
+    \[*\]:*) peer_address=$(printf '%s\n' "$peer" | sed -E 's/^\[([^]]+)\]:[0-9]+$/\1/') ;;
+    *) peer_address=${peer%:*} ;;
+  esac
+  ordinal=$(address_ordinal "$peer_address") || exit 43
+  if [ "$ordinal" -lt 0 ]; then
+    connections_observable=false
+    connections_unknown=$((connections_unknown + 1))
+    continue
+  fi
   if [ "$ordinal" -eq 0 ]; then
     connections_unknown=$((connections_unknown + 1))
     continue
@@ -298,6 +381,7 @@ current_pid=$(systemctl show fluent-bit.service -p MainPID --value 2>/dev/null |
 current_start=$(awk '{print $22}' "/proc/$process_pid/stat" 2>/dev/null || true)
 if [ "$current_pid" != "$process_pid" ] || [ "$current_start" != "$process_start" ]; then
   process_observable=false
+  route_state=unobservable
   connections_observable=false
 fi
 
@@ -312,6 +396,7 @@ printf '%s\n' \
   "preferred_ordinal=$preferred_ordinal" \
   "fluent_bit_active=$fluent_bit_active" \
   "process_observable=$process_observable" \
+  "route_state=$route_state" \
   "connections_observable=$connections_observable" \
   "connections_total=$connections_total" \
   "connections_unknown=$connections_unknown" \
@@ -321,10 +406,13 @@ printf '%s\n' \
 }
 
 func parseMimirPublisherSample(raw string) (mimirPublisherSample, error) {
+	if len(raw) > 4096 {
+		return mimirPublisherSample{}, fmt.Errorf("mimir publishers: oversized observation")
+	}
 	required := []string{
 		"observation_schema", "expected_fronts", "alias_entries", "recognized_fronts",
 		"missing_fronts", "unknown_fronts", "duplicate_fronts", "preferred_ordinal",
-		"fluent_bit_active", "process_observable", "connections_observable", "connections_total",
+		"fluent_bit_active", "process_observable", "route_state", "connections_observable", "connections_total",
 		"connections_unknown", "connections_preferred", "connections_distinct_fronts",
 	}
 	allowed := map[string]bool{}
@@ -366,17 +454,17 @@ func parseMimirPublisherSample(raw string) (mimirPublisherSample, error) {
 		key string
 		out *int
 	}{
-		{"expected_fronts", &sample.expectedFronts},
-		{"alias_entries", &sample.aliasEntries},
-		{"recognized_fronts", &sample.recognizedFronts},
-		{"missing_fronts", &sample.missingFronts},
-		{"unknown_fronts", &sample.unknownFronts},
-		{"duplicate_fronts", &sample.duplicateFronts},
-		{"preferred_ordinal", &sample.preferredOrdinal},
-		{"connections_total", &sample.connectionsTotal},
-		{"connections_unknown", &sample.connectionsUnknown},
-		{"connections_preferred", &sample.connectionsPreferred},
-		{"connections_distinct_fronts", &sample.connectionsDistinctFront},
+		{key: "expected_fronts", out: &sample.expectedFronts},
+		{key: "alias_entries", out: &sample.aliasEntries},
+		{key: "recognized_fronts", out: &sample.recognizedFronts},
+		{key: "missing_fronts", out: &sample.missingFronts},
+		{key: "unknown_fronts", out: &sample.unknownFronts},
+		{key: "duplicate_fronts", out: &sample.duplicateFronts},
+		{key: "preferred_ordinal", out: &sample.preferredOrdinal},
+		{key: "connections_total", out: &sample.connectionsTotal},
+		{key: "connections_unknown", out: &sample.connectionsUnknown},
+		{key: "connections_preferred", out: &sample.connectionsPreferred},
+		{key: "connections_distinct_fronts", out: &sample.connectionsDistinctFront},
 	}
 	for _, field := range fields {
 		value, err := parseCount(field.key)
@@ -396,10 +484,18 @@ func parseMimirPublisherSample(raw string) (mimirPublisherSample, error) {
 	}
 	sample.processObservable = values["process_observable"] == "true"
 	sample.connectionsObservable = values["connections_observable"] == "true"
+	sample.routeState = values["route_state"]
+	if sample.routeState != "expected" && sample.routeState != "different" && sample.routeState != "unobservable" {
+		return mimirPublisherSample{}, fmt.Errorf("mimir publishers: invalid route visibility")
+	}
 	if sample.expectedFronts == 0 || sample.recognizedFronts > sample.expectedFronts ||
 		sample.missingFronts != sample.expectedFronts-sample.recognizedFronts ||
 		sample.aliasEntries != sample.recognizedFronts+sample.unknownFronts+sample.duplicateFronts ||
 		sample.preferredOrdinal > sample.expectedFronts ||
+		(sample.aliasEntries == 0 && sample.preferredOrdinal != 0) ||
+		(sample.preferredOrdinal > 0 && sample.recognizedFronts == 0) ||
+		(sample.aliasEntries > 0 && sample.preferredOrdinal == 0 && sample.unknownFronts == 0) ||
+		(!sample.processObservable && (sample.connectionsObservable || sample.routeState != "unobservable")) ||
 		sample.connectionsUnknown > sample.connectionsTotal ||
 		sample.connectionsPreferred > sample.connectionsTotal-sample.connectionsUnknown ||
 		sample.connectionsDistinctFront > sample.expectedFronts ||
@@ -473,9 +569,14 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 
 	findings := make([]finding, 0, len(ordered)*2+1)
 	preferred := map[int]int{}
+	desiredPreferences := map[int]bool{}
 	completePreferences := true
 	allDesiredPreferences := true
+	allPlacementObservable := true
 	for _, result := range ordered {
+		if result.target.desiredOrdinal > 0 {
+			desiredPreferences[result.target.desiredOrdinal] = true
+		}
 		if result.err != nil {
 			findings = append(findings, cannotObserveFinding(result.target.target, result.err))
 			completePreferences = false
@@ -493,16 +594,23 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if result.sample.preferredOrdinal == 0 {
 			allDesiredPreferences = false
 		}
-		if result.sample.preferredOrdinal != result.target.desiredOrdinal {
+		if !mimirPublisherAliasMatches(result.target.desiredOrdinal, result.sample) || result.sample.routeState == "different" {
 			allDesiredPreferences = false
+		}
+		if result.sample.routeState == "unobservable" {
+			allPlacementObservable = false
 		}
 		findings = append(findings, evaluateMimirPublisher(result.target.target, result.target.desiredOrdinal, result.sample)...)
 	}
 
-	expectedDistinct := min(len(ordered), len(fronts))
+	expectedDistinct := len(desiredPreferences)
 	if !completePreferences {
 		findings = append(findings, cannotObserveFinding(
 			"publisher-fleet", fmt.Errorf("publisher preference coverage is incomplete"),
+		))
+	} else if allDesiredPreferences && len(preferred) == expectedDistinct && !allPlacementObservable {
+		findings = append(findings, cannotObserveFinding(
+			"publisher-fleet", fmt.Errorf("publisher placement runtime evidence is incomplete"),
 		))
 	} else if allDesiredPreferences && len(preferred) == expectedDistinct {
 		findings = append(findings, healthyFinding(
@@ -512,35 +620,42 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		findings = append(findings, finding{
 			probeId: "observability/mimir-publishers", tier: tierWarn,
 			class: "mimir-publisher-placement-drift", target: "publisher-fleet", sustain: 1,
-			symptom:   "High-volume Mimir publishers do not follow their explicit distinct preferred fronts",
-			mechanism: "Resolver order selects the first reachable address for a persistent Fluent Bit remote-write connection. A shared first entry concentrates independent publishers on one distributor token bucket; low traffic can hide that prerequisite from rate-based balance checks.",
+			symptom:   "High-volume Mimir publishers do not follow their explicit preferred fronts",
+			mechanism: "The live alias membership, first position, or running route inputs differ from the owning placement policy. Unintentionally shared first entries can concentrate independent publishers on one distributor token bucket; low traffic can hide that prerequisite from rate-based balance checks.",
 			baseline:  fmt.Sprintf("%d observable publisher(s) follow their Xops-owned preference and use %d distinct front ordinal(s).", len(ordered), expectedDistinct),
 			observed:  fmt.Sprintf("publishers=%d observable_preference_groups=%d expected_distinct=%d", len(ordered), len(preferred), expectedDistinct),
 			evidence:  "Only aggregate publisher counts and active-front ordinals leave the hosts; hostnames, addresses, paths, and raw policy files are omitted.",
 			context:   "This is desired-versus-live routing drift, not proof of current ingestion loss. It is a recurrence prerequisite that remains actionable even when §11.20b is temporarily green under low load.",
-			action:    "Converge the owning database and Redis publisher playbooks so each publisher has the exact active front set with a distinct first entry, then reconnect the persistent shipper generation. Do not raise Mimir limits or restart Mimir.",
-			verify:    "Every publisher reports the exact active set and its Xops-owned distinct preference; an observable active Fluent Bit process owns live connections following that preference. Then require two balanced §11.20b samples and both §11.20a admission counters flat for two hours.",
+			action:    "Converge the owning database and Redis publisher playbooks so each publisher has the exact active front set and its explicit desired first entry (distinct only where the inventory requires it), then reconnect the persistent shipper generation after authorization. Do not raise Mimir limits or restart Mimir.",
+			verify:    "Every publisher reports the exact active set, its explicit Xops-owned preference, and observable matching running route inputs; an observable active Fluent Bit process owns live connections following that preference. Then require two balanced §11.20b samples and both §11.20a admission counters flat for two hours.",
 			playbook:  "SIGNALS.md §11.20c, §11.20b, and §11.20a",
 		})
 	}
 	return findings, nil
 }
 
-func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPublisherSample) []finding {
-	observed := fmt.Sprintf(
-		"expected_fronts=%d alias_entries=%d recognized_fronts=%d missing_fronts=%d unknown_fronts=%d duplicate_fronts=%d preferred_ordinal=%d desired_preferred_ordinal=%d fluent_bit_active=%t process_observable=%t connections_observable=%t connections_total=%d connections_unknown=%d connections_preferred=%d connections_distinct_fronts=%d",
-		sample.expectedFronts, sample.aliasEntries, sample.recognizedFronts,
-		sample.missingFronts, sample.unknownFronts, sample.duplicateFronts,
-		sample.preferredOrdinal, desiredOrdinal, sample.fluentBitActive, sample.processObservable, sample.connectionsObservable,
-		sample.connectionsTotal, sample.connectionsUnknown, sample.connectionsPreferred,
-		sample.connectionsDistinctFront,
-	)
-	exactPlacement := sample.aliasEntries == sample.expectedFronts &&
+// Alias policy is independently observable even before live traffic exists.
+func mimirPublisherAliasMatches(desiredOrdinal int, sample mimirPublisherSample) bool {
+	return sample.aliasEntries == sample.expectedFronts &&
 		sample.recognizedFronts == sample.expectedFronts && sample.missingFronts == 0 &&
 		sample.unknownFronts == 0 && sample.duplicateFronts == 0 &&
 		sample.preferredOrdinal == desiredOrdinal
+}
+
+func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPublisherSample) []finding {
+	observed := fmt.Sprintf(
+		"expected_fronts=%d alias_entries=%d recognized_fronts=%d missing_fronts=%d unknown_fronts=%d duplicate_fronts=%d preferred_ordinal=%d desired_preferred_ordinal=%d fluent_bit_active=%t process_observable=%t route_state=%s connections_observable=%t connections_total=%d connections_unknown=%d connections_preferred=%d connections_distinct_fronts=%d",
+		sample.expectedFronts, sample.aliasEntries, sample.recognizedFronts,
+		sample.missingFronts, sample.unknownFronts, sample.duplicateFronts,
+		sample.preferredOrdinal, desiredOrdinal, sample.fluentBitActive, sample.processObservable, sample.routeState, sample.connectionsObservable,
+		sample.connectionsTotal, sample.connectionsUnknown, sample.connectionsPreferred,
+		sample.connectionsDistinctFront,
+	)
+	exactPlacement := mimirPublisherAliasMatches(desiredOrdinal, sample)
 	findings := make([]finding, 0, 2)
-	if exactPlacement {
+	if exactPlacement && sample.routeState == "unobservable" {
+		findings = append(findings, cannotObserveFinding(target, fmt.Errorf("publisher's running route inputs are unobservable")))
+	} else if exactPlacement && sample.routeState == "expected" {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-publishers", tierWarn, "mimir-publisher-placement-drift", target,
 		))
@@ -549,18 +664,18 @@ func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPubli
 			probeId: "observability/mimir-publishers", tier: tierWarn,
 			class: "mimir-publisher-placement-drift", target: target, sustain: 1,
 			symptom:   "A high-volume Mimir publisher has not converged to its active-front routing policy",
-			mechanism: "The privacy-reduced live alias set or first position differs from the active-front membership and explicit Xops-owned host preference. Persistent connections can retain a previous resolver choice even after the file is corrected.",
-			baseline:  "The alias contains every active front exactly once and no other address; its first entry matches this publisher's explicit Xops preference.",
+			mechanism: "The privacy-reduced live alias set or first position differs from the active-front membership and explicit Xops-owned host preference, or the running process uses a different route input. Persistent connections can retain a previous resolver choice even after the file is corrected.",
+			baseline:  "The alias contains every active front exactly once and no other address; its first entry matches this publisher's explicit Xops preference and the running process uses that alias on the expected port.",
 			observed:  observed,
 			evidence:  "The on-host reducer returns counts, booleans, and active-front ordinals only; it never returns hostnames, addresses, paths, unit arguments, or raw files.",
 			context:   "This drift can exist without a current overload, so a green rate-balance sample cannot clear it.",
-			action:    "Run the owning publisher playbook after reviewing its active-front set and distinct preference, then reconnect only the affected shipper after authorization. Do not learn desired state from the live file.",
+			action:    "Run the owning publisher playbook after reviewing its active-front set and explicit desired preference, then reconnect only the affected shipper after authorization. Do not learn desired state from the live file.",
 			verify:    "The same publisher reports exact membership and its desired preferred ordinal; an observable active Fluent Bit process owns live connections to that preferred ordinal.",
 			playbook:  "SIGNALS.md §11.20c",
 		})
 	}
 
-	if !sample.fluentBitActive || !sample.processObservable || !sample.connectionsObservable || sample.connectionsTotal == 0 {
+	if !sample.fluentBitActive || !sample.processObservable || sample.routeState != "expected" || !sample.connectionsObservable || sample.connectionsTotal == 0 {
 		findings = append(findings, cannotObserveFinding(
 			target+"/connections", fmt.Errorf("active publisher socket ownership or live connection is unobservable"),
 		))

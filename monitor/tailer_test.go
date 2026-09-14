@@ -621,24 +621,155 @@ func TestMimirStructuredRejectionsRetainOnlyFixedBatchClasses(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			tailer := newLogTailer("grafana", nil)
-			tailer.classify(test.line)
-			finding := findingByClass(t, tailer.drainWindow(), test.class)
-			if finding.healthy || finding.frame != test.frame {
-				t.Fatalf("structured rejection was not classified: %+v", finding)
-			}
-			if finding.evidence == "" || !strings.Contains(finding.evidence, "metric_families=") ||
-				!strings.Contains(finding.evidence, "family_classes=") {
-				t.Fatalf("bounded rejected-batch evidence missing: %+v", finding)
-			}
-		})
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify(test.line)
+		finding := findingByClass(t, tailer.drainWindow(), test.class)
+		if finding.healthy || finding.frame != test.frame {
+			t.Fatalf("%s: structured rejection was not classified: %+v", test.name, finding)
+		}
+		if finding.evidence == "" || !strings.Contains(finding.evidence, "metric_families=") ||
+			!strings.Contains(finding.evidence, "family_classes=") {
+			t.Fatalf("%s: bounded rejected-batch evidence missing: %+v", test.name, finding)
+		}
 	}
+}
 
-	malformed := newLogTailer("grafana", nil)
-	malformed.classify("Stats push rejected status=400 reason=series-limit job=private-fixture metric_families=1 time_series=1 family_classes=private-fixture:1 family_classes_truncated=false")
-	if finding := findingByClass(t, malformed.drainWindow(), "mimir-series-limit"); !finding.healthy {
-		t.Fatalf("unbounded producer fields entered fixed rejection class: %+v", finding)
+func TestMimirGenericRejectionMarkdownDoesNotExcludeUnprovenTypedLimits(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected status=400 reason=other-client job=api metric_families=1 time_series=1 family_classes=go:1 family_classes_truncated=false")
+	finding := findingByClass(t, tailer.drainWindow(), "mimir-push-rejected")
+	if finding.healthy || finding.tier != tierWarn {
+		t.Fatalf("generic upstream rejection lost affirmative batch loss: %+v", finding)
+	}
+	markdown := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log errors", finding).Markdown()
+	for _, required := range []string{
+		"unclassified upstream rejection", "without a proven typed limit", "not evidence that either limit was absent",
+		"Unknown, unreadable, or oversized", "direct admission counters remain the loss authority",
+	} {
+		if !strings.Contains(markdown, required) {
+			t.Errorf("generic rejection Markdown lacks conservative attribution %q", required)
+		}
+	}
+	if strings.Contains(markdown, "non-series, non-rate") {
+		t.Fatal("generic rejection Markdown affirmatively excluded an unproven limit")
+	}
+}
+
+func TestMimirStructuredRejectionsFailClosedOnImpossibleOrMalformedTuples(t *testing.T) {
+	const valid = "Stats push rejected status=400 reason=series-limit job=api metric_families=2 time_series=3 family_classes=go:1,process:1 family_classes_truncated=false"
+	for _, test := range []struct {
+		name string
+		line string
+	}{
+		{name: "series on server status", line: strings.Replace(valid, "status=400", "status=503", 1)},
+		{name: "rate on client status", line: strings.Replace(valid, "reason=series-limit", "reason=rate-limit", 1)},
+		{name: "server on client status", line: strings.Replace(valid, "reason=series-limit", "reason=server", 1)},
+		{name: "client on server status", line: strings.Replace(strings.Replace(valid, "status=400", "status=503", 1), "reason=series-limit", "reason=other-client", 1)},
+		{name: "unknown status", line: strings.Replace(valid, "status=400", "status=999", 1)},
+		{name: "zero families", line: strings.Replace(valid, "metric_families=2", "metric_families=0", 1)},
+		{name: "zero series", line: strings.Replace(valid, "time_series=3", "time_series=0", 1)},
+		{name: "overflow", line: strings.Replace(valid, "time_series=3", "time_series=9999999999999999999", 1)},
+		{name: "body bound", line: strings.Replace(valid, "time_series=3", "time_series=8388609", 1)},
+		{name: "missing summary", line: strings.Replace(valid, "go:1,process:1", "none", 1)},
+		{name: "duplicate classes", line: strings.Replace(valid, "go:1,process:1", "go:1,go:1", 1)},
+		{name: "unsorted classes", line: strings.Replace(valid, "go:1,process:1", "process:1,go:1", 1)},
+		{name: "zero class count", line: strings.Replace(valid, "go:1,process:1", "go:0,process:2", 1)},
+		{name: "summary mismatch", line: strings.Replace(valid, "go:1,process:1", "go:1,process:2", 1)},
+		{name: "impossible truncation", line: strings.Replace(valid, "truncated=false", "truncated=true", 1)},
+		{name: "raw job", line: strings.Replace(valid, "job=api", "job=private-fixture", 1)},
+		{name: "raw family", line: strings.Replace(valid, "go:1,process:1", "private-fixture:2", 1)},
+		{name: "unknown reason", line: strings.Replace(valid, "reason=series-limit", "reason=private-fixture", 1)},
+		{name: "missing field", line: strings.Replace(valid, "time_series=3 ", "", 1)},
+		{name: "raw suffix", line: valid + " private-fixture=192.0.2.9"},
+		{name: "missing value", line: "Stats push rejected status="},
+	} {
+		if _, ok := parseMimirRejectedLog(test.line); ok {
+			t.Fatalf("%s: impossible rejection event parsed", test.name)
+		}
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify("[private-fixture.example.test][grafana] " + test.line)
+		findings := tailer.drainWindow()
+		unknown := findingByClass(t, findings, "mimir-rejection-unobservable")
+		if unknown.healthy || unknown.tier != tierWarn || unknown.frame != "rejection-schema" {
+			t.Fatalf("%s: malformed schema lost fixed visibility: %+v", test.name, unknown)
+		}
+		for _, finding := range findings {
+			if finding.class == "mimir-series-limit" || finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected" {
+				t.Fatalf("%s: malformed schema attributed or resolved typed loss: %+v", test.name, finding)
+			}
+		}
+		markdown := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log errors", unknown).Markdown()
+		for _, secret := range []string{"private-fixture", "192.0.2.9"} {
+			if strings.Contains(markdown, secret) {
+				t.Fatalf("%s: malformed rejection retained private payload", test.name)
+			}
+		}
+		for _, required := range []string{"visibility loss", "withholds healthy", "artifact schemas", "ten minutes"} {
+			if !strings.Contains(markdown, required) {
+				t.Errorf("%s: visibility alert lacks %q", test.name, required)
+			}
+		}
+	}
+}
+
+func TestMimirMalformedSchemaWithholdsRecoveryButRetainsConcreteLoss(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected status=400 reason=series-limit job=api metric_families=1 time_series=1 family_classes=process:1 family_classes_truncated=false")
+	tailer.classify("Stats push rejected status=429 reason=private-fixture")
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "mimir-series-limit"); finding.healthy {
+		t.Fatal("a malformed sibling suppressed affirmative series loss")
+	}
+	for _, finding := range findings {
+		if finding.healthy && (finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected") {
+			t.Fatal("unknown schema resolved an unobservable typed sibling")
+		}
+	}
+	clean := tailer.drainWindow()
+	for _, class := range []string{"mimir-series-limit", "mimir-ingestion-rate-limit", "mimir-push-rejected", "mimir-rejection-unobservable"} {
+		if next := findingByClass(t, clean, class); !next.healthy {
+			t.Fatalf("a subsequent complete clean window cannot resolve %s", class)
+		}
+	}
+}
+
+func TestMimirLegacyRejectionCannotInheritReasonFromEchoedCallerLabel(t *testing.T) {
+	for _, line := range []string{
+		`Stats push rejected (400): invalid sample series={note="per-user series limit", address="192.0.2.9", private="synthetic-private-value"}`,
+		`Stats push rejected (503): per-user series limit unavailable private="synthetic-private-value"`,
+	} {
+		tailer := newLogTailer("grafana", nil)
+		tailer.classify(line)
+		findings := tailer.drainWindow()
+		visibility := findingByClass(t, findings, "mimir-rejection-unobservable")
+		if visibility.healthy || strings.Contains(visibility.evidence, "synthetic-private-value") || strings.Contains(visibility.evidence, "192.0.2.9") {
+			t.Fatal("unsupported legacy rejection lost fixed visibility/privacy")
+		}
+		for _, finding := range findings {
+			if finding.class == "mimir-series-limit" || finding.class == "mimir-ingestion-rate-limit" || finding.class == "mimir-push-rejected" {
+				t.Fatal("echoed caller phrase attributed or resolved typed Mimir loss")
+			}
+		}
+	}
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify("Stats push rejected (400): failed pushing to ingester ingester.example.test: user=synthetic-tenant: per-user series limit of 7 exceeded (err-mimir-max-series-per-user)")
+	if finding := findingByClass(t, tailer.drainWindow(), "mimir-series-limit"); finding.healthy || finding.frame != "tenant-series-admission" {
+		t.Fatal("source-reviewed legacy series prefix no longer preserves rollout evidence")
+	}
+}
+
+func TestMimirRejectionTailCancellationHasNoFabricatedEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tailer := newLogTailer("grafana", nil)
+	tailer.stream = func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) { return nil, nil, ctx.Err() }
+	if err := tailer.tailOnce(ctx); err != context.Canceled {
+		t.Fatalf("tail cancellation=%v", err)
+	}
+	for _, finding := range tailer.drainWindow() {
+		if strings.HasPrefix(finding.class, "mimir-") && !finding.healthy {
+			t.Fatalf("cancellation manufactured rejection evidence: %+v", finding)
+		}
 	}
 }
 

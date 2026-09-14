@@ -83,6 +83,9 @@ type logCanonicalCorrelation struct {
 type logClass struct {
 	name string
 	re   *regexp.Regexp
+	// match adds semantic validation after the cheap shape selector. A fixed
+	// structured event must be valid before it can claim a typed mechanism.
+	match func(string) bool
 	// sample optionally preserves a class-specific discriminator that generic
 	// left truncation would hide. It receives an already-redacted line and must
 	// return a bounded human-readable sample.
@@ -217,35 +220,100 @@ var (
 		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
 			`failed for (?:network|client) [^:\r\n]+: Done[[:space:]]*$`,
 	)
-	mimirRejectedFamilyClasses = `(?:none|(?:backup|fluent-bit|go|node|other|postgres|process|redis|redis-command-latency|subtensor|warp):[0-9]{1,19}(?:,(?:backup|fluent-bit|go|node|other|postgres|process|redis|redis-command-latency|subtensor|warp):[0-9]{1,19}){0,15})`
-	mimirRejectedJobClass      = `(?:alt|api|app|config-updater|connect|gossip|grafana|lb|mcp|operator-proxy|proxy|taskworker|web|other)`
-	mimirSeriesRejectedRe      = regexp.MustCompile(
-		`Stats push rejected status=[45][0-9]{2} reason=series-limit job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
-	)
-	mimirRateRejectedRe = regexp.MustCompile(
-		`Stats push rejected status=[45][0-9]{2} reason=rate-limit job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
-	)
-	mimirOtherRejectedRe = regexp.MustCompile(
-		`Stats push rejected status=[45][0-9]{2} reason=(?:other-client|server) job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
-	)
-	mimirLegacySeriesRejectedRe = regexp.MustCompile(`Stats push rejected \(400\):[^\r\n]*\bper-user series limit\b`)
+	mimirStructuredRejectedRe   = regexp.MustCompile(`Stats push rejected status=`)
+	mimirAnyRejectedRe          = regexp.MustCompile(`Stats push rejected (?:status=|\()`)
+	mimirRejectedSchemaRe       = regexp.MustCompile(`Stats push rejected status=([0-9]{3}) reason=([a-z-]+) job=([a-z-]+) metric_families=([0-9]{1,19}) time_series=([0-9]{1,19}) family_classes=([a-z0-9,:-]+) family_classes_truncated=(true|false)[[:space:]]*$`)
+	mimirLegacySeriesRejectedRe = regexp.MustCompile(`Stats push rejected \(400\): (?:failed pushing to ingester [^[:space:]]+: )?(?:user=[^[:space:]:]+: )?per-user series limit\b`)
 )
 
-func mimirRejectedLogSample(line string) string {
-	for _, pattern := range []*regexp.Regexp{mimirSeriesRejectedRe, mimirRateRejectedRe, mimirOtherRejectedRe} {
-		if sample := pattern.FindString(line); sample != "" {
-			return strings.TrimSpace(sample)
+type mimirRejectedLogEvent struct {
+	reason string
+	job    string
+	sample string
+}
+
+// The current producer has eleven fixed family classes (below its sixteen
+// class cap), so truncation cannot be true. The request body bounds counts;
+// no positive batch can have zero series or an empty family summary.
+func parseMimirRejectedLog(line string) (mimirRejectedLogEvent, bool) {
+	match := mimirRejectedSchemaRe.FindStringSubmatch(line)
+	if len(match) != 8 || len(match[0]) > 1024 {
+		return mimirRejectedLogEvent{}, false
+	}
+	status, _ := strconv.Atoi(match[1])
+	switch match[2] {
+	case "series-limit":
+		if status != 400 {
+			return mimirRejectedLogEvent{}, false
 		}
+	case "rate-limit":
+		if status != 429 {
+			return mimirRejectedLogEvent{}, false
+		}
+	case "other-client":
+		if status < 400 || 500 <= status {
+			return mimirRejectedLogEvent{}, false
+		}
+	case "server":
+		if status < 500 || 600 <= status {
+			return mimirRejectedLogEvent{}, false
+		}
+	default:
+		return mimirRejectedLogEvent{}, false
+	}
+	switch match[3] {
+	case "alt", "api", "app", "config-updater", "connect", "gossip", "grafana", "lb", "mcp", "operator-proxy", "proxy", "taskworker", "web", "other":
+	default:
+		return mimirRejectedLogEvent{}, false
+	}
+	const maxRejectedBatchCount = 8 * 1024 * 1024
+	families, familiesError := strconv.ParseUint(match[4], 10, 64)
+	series, seriesError := strconv.ParseUint(match[5], 10, 64)
+	if familiesError != nil || seriesError != nil || families == 0 || series == 0 ||
+		maxRejectedBatchCount < families || maxRejectedBatchCount < series || match[7] != "false" {
+		return mimirRejectedLogEvent{}, false
+	}
+	classCounts := strings.Split(match[6], ",")
+	if len(classCounts) > 11 {
+		return mimirRejectedLogEvent{}, false
+	}
+	previous := ""
+	var total uint64
+	for _, classCount := range classCounts {
+		class, countText, found := strings.Cut(classCount, ":")
+		if !found || class <= previous {
+			return mimirRejectedLogEvent{}, false
+		}
+		switch class {
+		case "backup", "fluent-bit", "go", "node", "other", "postgres", "process", "redis", "redis-command-latency", "subtensor", "warp":
+		default:
+			return mimirRejectedLogEvent{}, false
+		}
+		count, err := strconv.ParseUint(countText, 10, 64)
+		if err != nil || count == 0 || maxRejectedBatchCount < count {
+			return mimirRejectedLogEvent{}, false
+		}
+		total += count
+		previous = class
+	}
+	if total != families {
+		return mimirRejectedLogEvent{}, false
+	}
+	return mimirRejectedLogEvent{
+		reason: match[2], job: match[3], sample: strings.TrimSpace(match[0]),
+	}, true
+}
+
+func mimirRejectedLogSample(line string) string {
+	if event, ok := parseMimirRejectedLog(line); ok {
+		return event.sample
 	}
 	return "Stats push rejected (400): per-user series limit (series details omitted)"
 }
 
 func mimirRejectedLogGroup(line string) string {
-	for _, pattern := range []*regexp.Regexp{mimirSeriesRejectedRe, mimirRateRejectedRe, mimirOtherRejectedRe} {
-		match := pattern.FindStringSubmatch(line)
-		if len(match) == 2 {
-			return "job=" + match[1]
-		}
+	if event, ok := parseMimirRejectedLog(line); ok {
+		return "job=" + event.job
 	}
 	return "tenant-series-admission"
 }
@@ -331,7 +399,14 @@ var logClasses = []logClass{
 	// legacy body matcher during rollout, but never retain that body's contents.
 	// Order matters: all three fixed rejection classes precede generic network
 	// and error-shaped classifiers.
-	{name: "mimir-series-limit", re: regexp.MustCompile(`(?:` + mimirSeriesRejectedRe.String() + `|` + mimirLegacySeriesRejectedRe.String() + `)`),
+	{name: "mimir-series-limit", re: regexp.MustCompile(`Stats push rejected (?:status=|\(400\):)`),
+		match: func(line string) bool {
+			if mimirStructuredRejectedRe.MatchString(line) {
+				event, ok := parseMimirRejectedLog(line)
+				return ok && event.reason == "series-limit"
+			}
+			return mimirLegacySeriesRejectedRe.MatchString(line)
+		},
 		sample:        mimirRejectedLogSample,
 		groupBy:       mimirRejectedLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, §8.11, and §11.20",
@@ -341,7 +416,11 @@ var logClasses = []logClass{
 		action:    "Use the structured rejected-batch job and family-class counts to bound candidate sources, then compare exact running artifacts, process cohorts, direct discard deltas, memory-series creation/removal, and immutable service/config identity. Remove only a proven unnecessary source, preserve random instance identity, and measure remaining headroom rather than restarting Mimir or raising its limit. Legacy unstructured events cannot attribute a producer and require deployment of the privacy-safe Grafana telemetry before source attribution.",
 		verify:    "After authorized rollout and prerequisite completion, every relevant block converges to a proven artifact, rejected candidates start no metrics pusher, and no unchanged-target readiness failure recurs for 20 minutes. Require zero new per-user-series admission discards, healthy direct metric freshness, and series removal restoring measured headroom through a full two-hour recent-head observation window. Two fresh direct Mimir reads corroborate ingestion; historical continuity gaps remain independently governed by §11.20.",
 	},
-	{name: "mimir-ingestion-rate-limit", re: mimirRateRejectedRe,
+	{name: "mimir-ingestion-rate-limit", re: mimirStructuredRejectedRe,
+		match: func(line string) bool {
+			event, ok := parseMimirRejectedLog(line)
+			return ok && event.reason == "rate-limit"
+		},
 		sample:        mimirRejectedLogSample,
 		groupBy:       mimirRejectedLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §11.20a",
@@ -351,15 +430,36 @@ var logClasses = []logClass{
 		action:    "Run §11.20a and §11.20b. First distinguish publisher-placement skew from aggregate overload using exact child counters and publisher convergence. Reduce only measured unnecessary cadence or families; do not restart Mimir or raise capacity automatically.",
 		verify:    "Require converged publisher placement, two balanced one-minute samples, then zero new exact rate_limited increments with fresh required metrics for the full two-hour quiet window.",
 	},
-	{name: "mimir-push-rejected", re: mimirOtherRejectedRe,
+	{name: "mimir-push-rejected", re: mimirStructuredRejectedRe,
+		match: func(line string) bool {
+			event, ok := parseMimirRejectedLog(line)
+			return ok && (event.reason == "other-client" || event.reason == "server")
+		},
 		sample:        mimirRejectedLogSample,
 		groupBy:       mimirRejectedLogGroup,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5, §4, and §11.20a",
-		meaning:   "the Grafana front received a non-series, non-rate Mimir rejection for a remote-write batch",
+		meaning:   "the Grafana front received an unclassified upstream rejection for a remote-write batch without a proven typed limit",
 		mechanism: "The fixed reason distinguishes an upstream/server rejection from another client-side rejection, while deliberately discarding the raw response body because it may contain private labels.",
-		context:   "This is affirmative batch loss but not a series- or rate-limit diagnosis. The bounded job and family classes select the owning investigation without exposing grouping labels or arbitrary metric names.",
+		context:   "This is affirmative batch loss without a proven series- or rate-limit diagnosis, not evidence that either limit was absent. Unknown, unreadable, or oversized response bodies retain this generic class; direct admission counters remain the loss authority. The bounded job and family classes select the owning investigation without exposing grouping labels or arbitrary metric names.",
 		action:    "Inspect the exact Grafana/Mimir status and fixed reason alongside direct child health and the submitting job's current artifact. Reproduce with a synthetic payload if needed; never restore raw response-body logging.",
 		verify:    "The direct child and submitting job are healthy, a controlled valid push returns success, and no fixed rejection event recurs for ten minutes.",
+	},
+	{name: "mimir-rejection-unobservable", re: mimirAnyRejectedRe,
+		match: func(line string) bool {
+			if !mimirStructuredRejectedRe.MatchString(line) {
+				return !mimirLegacySeriesRejectedRe.MatchString(line)
+			}
+			_, ok := parseMimirRejectedLog(line)
+			return !ok
+		},
+		sample:        func(string) string { return "Stats push rejected: fixed schema invalid (payload omitted)" },
+		groupBy:       func(string) string { return "rejection-schema" },
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "a recognized Mimir rejection event could not be observed through the fixed semantic schema",
+		mechanism: "The structured status/reason tuple, bounded positive batch counts, or sorted fixed family summary is inconsistent with the producer contract, or an unstructured legacy event lacks the supported fixed series-limit prefix. No raw fields are retained and no series, ingestion-rate, or server mechanism is inferred.",
+		context:   "This is visibility loss, not a capacity diagnosis. This window withholds healthy findings for typed rejection identities so malformed evidence cannot resolve an existing loss incident.",
+		action:    "Compare the exact emitting Grafana and monitor artifact schemas; repair the owning producer or parser and promote a current monitor. Do not infer capacity from arbitrary response text or restore raw rejection-body logging.",
+		verify:    "Current structured events parse correctly and no malformed rejection event recurs for ten minutes. Independently require the direct counter and recovery windows for any typed loss incident.",
 	},
 	// The fixed sample and frame deliberately omit the local endpoint. The
 	// emitting Grafana parent already names the owning service and generation;
@@ -1763,7 +1863,7 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 	}
 
 	for _, c := range logClasses {
-		if c.re.MatchString(line) {
+		if c.re.MatchString(line) && (c.match == nil || c.match(line)) {
 			if deduplicate && self.standingReplayLocked(line, now) {
 				return
 			}
@@ -2045,7 +2145,10 @@ func (self *logTailer) drainWindow() []finding {
 				playbook:  c.playbook,
 			})
 		}
-		if !broken {
+		unknownMimirRejection := self.classCounts["mimir-rejection-unobservable\x00rejection-schema"] > 0
+		withholdHealthy := unknownMimirRejection && (c.name == "mimir-series-limit" ||
+			c.name == "mimir-ingestion-rate-limit" || c.name == "mimir-push-rejected")
+		if !broken && !withholdHealthy {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}
 

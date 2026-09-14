@@ -141,35 +141,26 @@ func TestLogShipperDetectsRedisLatencyHistogramRuntimePolicy(t *testing.T) {
 		{
 			name: "exporter inactive",
 			overrides: map[string]string{
-				"redis_exporter_state": "inactive",
+				"redis_exporter_state": "inactive", "redis_latency_histogram_policy": "unobservable",
 			},
 			want: "redis_exporter_state=inactive",
 		},
-		{
-			name: "unit arguments unavailable",
-			overrides: map[string]string{
-				"redis_exporter_state": "unobservable", "redis_latency_histogram_policy": "unobservable",
-			},
-			want: "redis_latency_histogram_policy=unobservable",
-		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
-				return logShipperFixture(test.overrides), nil
-			}}
-			settings := syntheticSettings(source)
-			settings.Hosts = []HostSettings{{Name: "cache.invalid", Roles: []string{"redis-cluster"}}}
-			alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			alert := requireAlertClass(t, alerts, "redis-latency-histogram-policy-drift")
-			if !strings.Contains(alert.Markdown(), test.want) ||
-				!strings.Contains(alert.Markdown(), "redis_commands_processed_total") {
-				t.Fatalf("runtime-policy alert incomplete:\n%s", alert.Markdown())
-			}
-		})
+		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+			return logShipperFixture(test.overrides), nil
+		}}
+		settings := syntheticSettings(source)
+		settings.Hosts = []HostSettings{{Name: "cache.example.test", Roles: []string{"redis-cluster"}}}
+		alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "redis-latency-histogram-policy-drift")
+		if !strings.Contains(alert.Markdown(), test.want) ||
+			!strings.Contains(alert.Markdown(), "redis_commands_processed_total") {
+			t.Fatalf("%s: runtime-policy alert incomplete:\n%s", test.name, alert.Markdown())
+		}
 	}
 
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
@@ -178,7 +169,7 @@ func TestLogShipperDetectsRedisLatencyHistogramRuntimePolicy(t *testing.T) {
 		}), nil
 	}}
 	settings := syntheticSettings(source)
-	settings.Hosts = []HostSettings{{Name: "service.invalid", Roles: []string{"services"}}}
+	settings.Hosts = []HostSettings{{Name: "service.example.test", Roles: []string{"services"}}}
 	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
@@ -190,10 +181,167 @@ func TestLogShipperDetectsRedisLatencyHistogramRuntimePolicy(t *testing.T) {
 	}
 }
 
+func TestLogShipperUnknownRedisPolicyCannotAttributeOrResolveDrift(t *testing.T) {
+	for _, overrides := range []map[string]string{
+		{"redis_exporter_state": "unobservable", "redis_latency_histogram_policy": "unobservable"},
+		{"redis_exporter_state": "active", "redis_latency_histogram_policy": "unobservable"},
+	} {
+		sample, err := parseLogShipperSample(logShipperFixture(overrides))
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings := evaluateLogShipper("cache.example.test", sample, true)
+		visibility := findingByClass(t, findings, "cannot-observe")
+		if visibility.healthy || visibility.target != "cache.example.test/redis-latency-histogram-policy" {
+			t.Fatalf("unknown policy lost visibility boundary: %+v", visibility)
+		}
+		for _, finding := range findings {
+			if finding.class == "redis-latency-histogram-policy-drift" {
+				t.Fatalf("unknown policy attributed or resolved drift: %+v", finding)
+			}
+		}
+	}
+}
+
+func TestLogShipperRedisPolicyReducerUsesExactNulArgvAndGoBoolSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name                  string
+		args                  []string
+		environment           string
+		environmentObservable bool
+		want                  string
+	}{
+		{name: "bare true", args: []string{"--exclude-latency-histogram-metrics"}, want: "excluded"},
+		{name: "explicit true", args: []string{"--exclude-latency-histogram-metrics=true"}, want: "excluded"},
+		{name: "single dash true", args: []string{"-exclude-latency-histogram-metrics=1"}, want: "excluded"},
+		{name: "explicit false", args: []string{"--exclude-latency-histogram-metrics=false"}, want: "enabled"},
+		{name: "repeat last false", args: []string{"--exclude-latency-histogram-metrics", "--exclude-latency-histogram-metrics=0"}, want: "enabled"},
+		{name: "repeat last true", args: []string{"--exclude-latency-histogram-metrics=false", "--exclude-latency-histogram-metrics=True"}, want: "excluded"},
+		{name: "invalid bool", args: []string{"--exclude-latency-histogram-metrics=maybe"}, want: "unobservable"},
+		{name: "flag suffix", args: []string{"--exclude-latency-histogram-metrics-suffix"}, want: "unobservable"},
+		{name: "embedded flag in value", args: []string{"--redis.addr=redis://fixture.example.test:6379/--exclude-latency-histogram-metrics"}, environmentObservable: true, want: "enabled"},
+		{name: "embedded newline in value", args: []string{"--redis.addr=fixture\n--exclude-latency-histogram-metrics"}, environmentObservable: true, want: "enabled"},
+		{name: "separate string value", args: []string{"--redis.addr", "--exclude-latency-histogram-metrics"}, environmentObservable: true, want: "enabled"},
+		{name: "after end marker", args: []string{"--", "--exclude-latency-histogram-metrics"}, environmentObservable: true, want: "enabled"},
+		{name: "after positional", args: []string{"fixture", "--exclude-latency-histogram-metrics"}, environmentObservable: true, want: "enabled"},
+		{name: "ambiguous other bare flag", args: []string{"--other", "--exclude-latency-histogram-metrics"}, want: "unobservable"},
+		{name: "environment missing", want: "unobservable"},
+		{name: "default false", environmentObservable: true, want: "enabled"},
+		{name: "environment true", environment: "REDIS_EXPORTER_EXCLUDE_LATENCY_HISTOGRAM_METRICS=true\x00", environmentObservable: true, want: "excluded"},
+		{name: "environment false", environment: "REDIS_EXPORTER_EXCLUDE_LATENCY_HISTOGRAM_METRICS=false\x00", environmentObservable: true, want: "enabled"},
+		{name: "environment invalid defaults false", environment: "REDIS_EXPORTER_EXCLUDE_LATENCY_HISTOGRAM_METRICS=maybe\x00", environmentObservable: true, want: "enabled"},
+		{name: "argv overrides environment", args: []string{"--exclude-latency-histogram-metrics=false"}, environment: "REDIS_EXPORTER_EXCLUDE_LATENCY_HISTOGRAM_METRICS=true\x00", environmentObservable: true, want: "enabled"},
+		{name: "unrelated private environment", args: []string{"--exclude-latency-histogram-metrics"}, environment: "FIXTURE_SECRET=synthetic-private-value\x00", environmentObservable: true, want: "excluded"},
+	} {
+		dir := t.TempDir()
+		argvPath := filepath.Join(dir, "cmdline")
+		environmentPath := filepath.Join(dir, "environ")
+		args := append([]string{"redis_exporter"}, test.args...)
+		if err := os.WriteFile(argvPath, []byte(strings.Join(args, "\x00")+"\x00"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if test.environmentObservable {
+			if err := os.WriteFile(environmentPath, []byte(test.environment), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		command := exec.Command("sh", "-c", logShipperRedisPolicyReducer+`redis_histogram_policy "$1" "$2"`, "fixture", argvPath, environmentPath)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: reducer exit: %v", test.name, err)
+		}
+		if got := strings.TrimSpace(string(output)); got != test.want {
+			t.Errorf("%s: policy=%q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
+func TestLogShipperCommandObservesLiveArgvNotReloadedExecStart(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	procDir := filepath.Join(dir, "proc")
+	processDir := filepath.Join(procDir, "123")
+	for _, path := range []string{binDir, processDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCommand := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(binDir, "systemctl"), []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const systemctlFixture = `case "$*" in
+*"show fluent-bit.service"*) printf '%s\n' ActiveState=active SubState=running Result=success NRestarts=0 LimitNOFILE=65536 LimitNOFILESoft=65536 ExecMainStartTimestamp=fixture ;;
+*"show redis-exporter.service"*"--value"*) printf '%s\n' 123 ;;
+*"show redis-exporter.service"*) printf '%s\n' LoadState=loaded ActiveState=active SubState=running MainPID=123 'ExecStart=--exclude-latency-histogram-metrics=true synthetic-private-value' ;;
+*) exit 1 ;;
+esac
+`
+	writeCommand(systemctlFixture)
+	if err := os.WriteFile(filepath.Join(processDir, "stat"), []byte("123 (fixture) S "+strings.Repeat("0 ", 18)+"7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processDir, "comm"), []byte("redis_exporter\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeArgv := func(flag string) {
+		t.Helper()
+		argv := "redis_exporter\x00--redis.addr=redis://user:synthetic-private-value@cache.example.test:6379\x00" + flag + "\x00"
+		if err := os.WriteFile(filepath.Join(processDir, "cmdline"), []byte(argv), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	commandText := strings.Replace(logShipperCommand, "redis_process_root=/proc", "redis_process_root="+shellSingleQuote(procDir), 1)
+	run := func() logShipperSample {
+		t.Helper()
+		output, err := exec.Command("sh", "-c", commandText).CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture command: %v", err)
+		}
+		if strings.Contains(string(output), "synthetic-private-value") || strings.Contains(string(output), "cache.example.test") {
+			t.Fatal("raw live arguments escaped the host reducer")
+		}
+		sample, err := parseLogShipperSample(string(output))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sample
+	}
+	writeArgv("--exclude-latency-histogram-metrics=false")
+	if sample := run(); sample.redisExporterState != "active" || sample.redisLatencyHistogramPolicy != "enabled" {
+		t.Fatalf("desired unit definition hid the live false policy: %+v", sample)
+	}
+	writeArgv("--exclude-latency-histogram-metrics")
+	if sample := run(); sample.redisLatencyHistogramPolicy != "excluded" {
+		t.Fatalf("explicit live exclusion requires no readable environment: %+v", sample)
+	}
+	writeCommand(strings.Replace(systemctlFixture, "printf '%s\\n' 123", "printf '%s\\n' 124", 1))
+	if sample := run(); sample.redisExporterState != "unobservable" || sample.redisLatencyHistogramPolicy != "unobservable" {
+		t.Fatalf("process generation changed without observation failure: %+v", sample)
+	}
+}
+
+func TestLogShipperCanceledObservationReturnsContextWithoutAlerts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		cancel()
+		return "", ctx.Err()
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "shipper.example.test", Roles: []string{"redis-cluster"}}}
+	alerts, err := NewLogShipperSignal().Run(ctx, settings)
+	if err != context.Canceled || len(alerts) != 0 {
+		t.Fatalf("cancellation emitted fabricated alerts: error=%v alerts=%d", err, len(alerts))
+	}
+}
+
 func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T) {
 	for _, want := range []string{
 		"systemctl show fluent-bit.service", "LimitNOFILE", "LimitNOFILESoft", "NRestarts",
-		"systemctl show redis-exporter.service", "--exclude-latency-histogram-metrics",
+		"systemctl show redis-exporter.service", "exclude-latency-histogram-metrics", "MainPID", "redis_histogram_policy", "/stat", "/cmdline", "/environ",
 		"journalctl -b -n 400", "COREDUMP_COMM=fluent-bit", "COREDUMP_SIGNAL=11",
 		"ExecMainStartTimestamp", "-u fluent-bit.service", "--since", "--until",
 		"add_metric_histogram", "finish_duplicate_histogram_summary_sum_count",
@@ -203,7 +351,7 @@ func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T)
 			t.Errorf("command lacks %q", want)
 		}
 	}
-	for _, forbidden := range []string{"sudo", "docker", "coredumpctl"} {
+	for _, forbidden := range []string{"docker", "coredumpctl", `bounded_nul_bytes "$2" allow-sudo`, `bounded_nul_bytes "$1" allow-sudo`} {
 		if strings.Contains(logShipperCommand, forbidden) {
 			t.Errorf("command contains unrelated boundary %q", forbidden)
 		}
