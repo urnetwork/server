@@ -1,14 +1,18 @@
-{{define "headline"}}CONNECT A WALLET{{end}}
-{{define "why"}}Sent once per pay period while you have new earnings and no wallet
-connected.{{end}}
+{{define "headline"}}CONNECT A SOLANA WALLET{{end}}
+{{define "why"}}Sent once per pay period while you have new USDC earnings and no
+Solana wallet connected.{{end}}
 {{define "content"}}
 {{.AmountUsd}} USDC waiting
 
 You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no
-wallet on your account to send it to. Connect one and the payment is
-retried automatically.
+Solana wallet on your account to send it to. USDC is paid to a Solana
+wallet, not to a Bittensor wallet. Connect one and the payment is
+retried automatically at the next weekly payout.
 
-Connect a wallet: https://ur.io/app/account/wallets
+Connect a Solana wallet: https://ur.io/app/account/earnings?wallet=solana
+
+In the app: Account > Earnings > the "..." menu next to "Connect
+Bittensor wallet" > "Connect Solana wallet".
 
 This reminder is sent once per pay period while you have new earnings.
 The contracts behind this payment are deleted after 7 days to preserve

@@ -17,7 +17,7 @@ Ten templates. Each is three embedded files (`<name>.subject.txt`, `<name>.html`
 | auth_password_set | After a password change. | Your password was changed | UR. security@ur.io | UR wordmark JPG |
 | network_welcome | Network created, or verified after signup. | Welcome | UR. ur.io, docs.ur.io, brien@ur.io | Header JPG (177 KB), wordmark, animated GIF (4.9 MB) |
 | subscription_send_payment | Provider payout sent on-chain. | You received a payment! | UR. ur.io, docs.ur.io, Google Play, Solana dApp Store, bringyour.com/discord | Wordmark, animated GIF (2.6 MB) |
-| subscription_missing_wallet | Payout blocked, no wallet. Once per pay period with new earnings. | Action needed: Connect a wallet. | UR. ur.io/app, support@ur.io | Wordmark |
+| subscription_missing_wallet | Payout blocked, no Solana (or Polygon) payout wallet; a Bittensor wallet is never the payout wallet. Once per pay period with new earnings. | Action needed: Connect a wallet. | UR. ur.io/app, support@ur.io | Wordmark |
 | subscription_transfer_balance_code | Data pack bought with an email (Stripe). 26-char base32 code. | Your data code | BringYour. app.bringyour.com | BringYour wordmark JPG |
 | subscription_transfer_balance_company | Company shared data pack bought (Stripe). | Let's set up your shared data | BringYour. support@bringyour.com | BringYour wordmark JPG |
 | x402_receipt | Agent paid inline over x402 and supplied an email. | Your URnetwork receipt (trailing newline) | BringYour. app.bringyour.com | BringYour wordmark JPG |
@@ -164,7 +164,7 @@ Phase C. Tighten and keep watch (two to six weeks after cutover)
 | auth_password_set | Your URnetwork password was changed | If this wasn't you, contact security@ur.io right away. | Security | Password changed | none | Sent to the address on your URnetwork account whenever its password changes. |
 | network_welcome | Welcome to URnetwork | A note from the founder, and how to get connected. | Welcome | Welcome to URnetwork | Get connected, https://ur.io/install | You received this because a URnetwork network was created with this address. |
 | subscription_send_payment | You got paid: `{{.AmountUsd}}` USDC | Your provider earnings were sent to your wallet. | Payout sent | You got paid | View this payout, https://ur.io/app/account/payouts?id=`{{.PaymentId}}` | You received this because a payout was sent to the wallet on your URnetwork account. |
-| subscription_missing_wallet | Connect a wallet to receive `{{.AmountUsd}}` USDC | Your earnings are waiting. Connect a wallet and the payment retries automatically. | Action needed | Connect a wallet | Connect a wallet, https://ur.io/app/account/wallets | Sent once per pay period while you have new earnings and no wallet connected. |
+| subscription_missing_wallet | Connect a Solana wallet to receive `{{.AmountUsd}}` USDC | Your USDC earnings are waiting. Connect a Solana wallet and the payment is retried automatically. | Action needed | Connect a Solana wallet | Connect Solana wallet, https://ur.io/app/account/earnings?wallet=solana | Sent once per pay period while you have new USDC earnings and no Solana wallet connected. |
 | subscription_transfer_balance_code | Your `{{.Balance}}` URnetwork data code | Redeem this code on any network to add the data. | Data code | Your data code | Redeem code, https://ur.io/app/balance-codes#code=`{{.Secret}}` | You received this because a data pack was purchased with this address. |
 | x402_receipt | Receipt: `{{.Description}}` | Paid `{{.Price}}` `{{.Asset}}` automatically over x402. | Receipt | Receipt | See your balance, https://ur.io/app/account | You received this because this address was given with an x402 purchase. |
 
@@ -172,7 +172,7 @@ Every link in the drafts was checked against the ur.io route table and the stati
 
 - Reset password: `https://ur.io/?resetCode=…`. The header island on every static page mounts the auth provider and dialog, which opens the password-reset view from that query parameter.
 - View this payout: `https://ur.io/app/account/payouts?id=<payment id>`. The PayoutDetail screen reads `?id=` and shows that payment; `server.Id` prints the same string in templates and in the `/account/payments` JSON.
-- Connect a wallet: `https://ur.io/app/account/wallets`.
+- Connect Solana wallet: `https://ur.io/app/account/earnings?wallet=solana` (changed 2026-09-14: `/app/account/wallets` had become a redirect to the Bittensor-only Earnings screen, which offered no way to add the Solana wallet USDC payouts need). Earnings reads `?wallet=solana` and opens its Solana connect flow, and the legacy `/app/account/wallets` redirect adds the same parameter, so reminders already sent land there too. Ship that ur.io change first; until then the link opens Earnings, as the old one did.
 - Redeem code: `https://ur.io/app/balance-codes#code=<secret>`. The code travels in the URL fragment, which is never sent to the server or written to the static host's access log; the Balance codes screen prefills the field from it and then strips it from the address bar (added to `react/src/app/screens/BalanceCodes.jsx`).
 - See your balance: `https://ur.io/app/account`.
 - Learn about providing (payout email): `https://ur.io/docs/faq#can-i-earn-by-sharing-my-connection`.
@@ -376,31 +376,35 @@ URnetwork is provided by BringYour, Inc., a Network Operator for the UR protocol
 
 ### Missing wallet (`subscription_missing_wallet`)
 
-- Subject: Connect a wallet to receive 5.00 USDC
-- Preheader: Your earnings are waiting. Connect a wallet and the payment retries automatically.
+- Subject: Connect a Solana wallet to receive 5.00 USDC
+- Preheader: Your USDC earnings are waiting. Connect a Solana wallet and the payment is retried automatically.
 - Eyebrow: Action needed
-- SMS (86 chars): URnetwork: 5.00 USDC is waiting. Connect a wallet at https://ur.io/app/account/wallets
+- SMS (108 chars): URnetwork: 5.00 USDC is waiting. Connect a Solana wallet at https://ur.io/app/account/earnings?wallet=solana
 
 ```text
 URnetwork
 
-CONNECT A WALLET
+CONNECT A SOLANA WALLET
 
 5.00 USDC waiting
 
-You earned 5.00 USDC providing on URnetwork, but there's no wallet on
-your account to send it to. Connect one and the payment is retried
-automatically.
+You earned 5.00 USDC providing on URnetwork, but there's no
+Solana wallet on your account to send it to. USDC is paid to a Solana
+wallet, not to a Bittensor wallet. Connect one and the payment is
+retried automatically at the next weekly payout.
 
-Connect a wallet: https://ur.io/app/account/wallets
+Connect a Solana wallet: https://ur.io/app/account/earnings?wallet=solana
+
+In the app: Account > Earnings > the "..." menu next to "Connect
+Bittensor wallet" > "Connect Solana wallet".
 
 This reminder is sent once per pay period while you have new earnings.
 The contracts behind this payment are deleted after 7 days to preserve
 the anonymity of the network. If something looks wrong, contact
 support@ur.io.
 
-Sent once per pay period while you have new earnings and no wallet
-connected.
+Sent once per pay period while you have new USDC earnings and no
+Solana wallet connected.
 
 --
 © 2026 BringYour, Inc. · 2261 Market Street #5245, San Francisco, CA 94114, United States
@@ -628,6 +632,6 @@ auth_password_reset: Reset your URnetwork password: https://ur.io/?resetCode={{.
 auth_password_set: Your URnetwork password was changed. If this wasn't you, contact security@ur.io
 auth_verify: Your URnetwork verification code is {{.VerifyCode}}. It expires in 4 hours.
 network_welcome: Welcome to URnetwork! Get connected at https://ur.io/install
-subscription_missing_wallet: URnetwork: {{.AmountUsd}} USDC is waiting. Connect a wallet at https://ur.io/app/wallets
+subscription_missing_wallet: URnetwork: {{.AmountUsd}} USDC is waiting. Connect a Solana wallet at https://ur.io/app/account/earnings?wallet=solana
 subscription_send_payment: URnetwork: you got paid {{.AmountUsd}} USDC. Details at https://ur.io/app/payouts
 ```
