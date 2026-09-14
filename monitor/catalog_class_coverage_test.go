@@ -103,16 +103,27 @@ func collectFixedAlertClassLiterals(parsed ast.Node, source string, classes map[
 type fixedAlertClassScanner struct {
 	files              map[string]*ast.File
 	bindings           map[*ast.Object][]ast.Expr
+	returnSlotBindings map[*ast.Object][]fixedAlertClassReturnSlot
 	globalBindings     map[string][]ast.Expr
+	globalFunctions    map[string][]*ast.FuncDecl
 	helperInputIndexes map[string]map[int]bool
 	helperObjectInputs map[*ast.Object]map[int]bool
 	compositeTypes     map[*ast.CompositeLit]string
 	fileset            *token.FileSet
 }
 
+// Preserve the selected assignment slot; neighboring explanations are not
+// classes, and unresolved dispatch must not borrow an unrelated declaration.
+type fixedAlertClassReturnSlot struct {
+	call        *ast.CallExpr
+	resultIndex int
+	resultCount int
+}
+
 func newFixedAlertClassScanner(files map[string]*ast.File, filesets ...*token.FileSet) *fixedAlertClassScanner {
 	self := &fixedAlertClassScanner{
 		files: files, bindings: map[*ast.Object][]ast.Expr{}, globalBindings: map[string][]ast.Expr{},
+		returnSlotBindings: map[*ast.Object][]fixedAlertClassReturnSlot{}, globalFunctions: map[string][]*ast.FuncDecl{},
 		helperInputIndexes: map[string]map[int]bool{}, helperObjectInputs: map[*ast.Object]map[int]bool{}, compositeTypes: map[*ast.CompositeLit]string{},
 	}
 	if len(filesets) != 0 {
@@ -120,6 +131,9 @@ func newFixedAlertClassScanner(files map[string]*ast.File, filesets ...*token.Fi
 	}
 	for _, file := range files {
 		for _, declaration := range file.Decls {
+			if function, ok := declaration.(*ast.FuncDecl); ok && function.Recv == nil {
+				self.globalFunctions[function.Name.Name] = append(self.globalFunctions[function.Name.Name], function)
+			}
 			if general, ok := declaration.(*ast.GenDecl); ok {
 				for _, raw := range general.Specs {
 					if spec, ok := raw.(*ast.ValueSpec); ok && len(spec.Values) == len(spec.Names) {
@@ -144,6 +158,19 @@ func newFixedAlertClassScanner(files map[string]*ast.File, filesets ...*token.Fi
 						if name, ok := target.(*ast.Ident); ok && name.Obj != nil {
 							if value.Tok == token.ASSIGN || value.Tok == token.DEFINE {
 								self.bindings[name.Obj] = append(self.bindings[name.Obj], value.Rhs[index])
+							} else {
+								self.bindings[name.Obj] = append(self.bindings[name.Obj], nil)
+							}
+						}
+					}
+				} else if len(value.Lhs) > 1 && len(value.Rhs) == 1 {
+					call, directCall := value.Rhs[0].(*ast.CallExpr)
+					for index, target := range value.Lhs {
+						if name, ok := target.(*ast.Ident); ok && name.Obj != nil {
+							if directCall && (value.Tok == token.ASSIGN || value.Tok == token.DEFINE) {
+								self.returnSlotBindings[name.Obj] = append(self.returnSlotBindings[name.Obj], fixedAlertClassReturnSlot{
+									call: call, resultIndex: index, resultCount: len(value.Lhs),
+								})
 							} else {
 								self.bindings[name.Obj] = append(self.bindings[name.Obj], nil)
 							}
@@ -295,12 +322,13 @@ func (self *fixedAlertClassScanner) strings(expression ast.Expr, seen map[*ast.O
 		return self.strings(value.X, seen, depth+1)
 	case *ast.Ident:
 		bindings := self.bindings[value.Obj]
+		returnSlots := self.returnSlotBindings[value.Obj]
 		if value.Obj == nil {
 			bindings = self.globalBindings[value.Name]
 		} else if seen[value.Obj] {
 			return values, false
 		}
-		if len(bindings) == 0 {
+		if len(bindings) == 0 && len(returnSlots) == 0 {
 			return values, false
 		}
 		if value.Obj != nil {
@@ -310,6 +338,13 @@ func (self *fixedAlertClassScanner) strings(expression ast.Expr, seen map[*ast.O
 		complete := true
 		for _, binding := range bindings {
 			alternatives, known := self.strings(binding, seen, depth+1)
+			complete = complete && known
+			for alternative := range alternatives {
+				values[alternative] = true
+			}
+		}
+		for _, slot := range returnSlots {
+			alternatives, known := self.returnSlotStrings(slot, seen, depth+1)
 			complete = complete && known
 			for alternative := range alternatives {
 				values[alternative] = true
@@ -332,6 +367,75 @@ func (self *fixedAlertClassScanner) strings(expression ast.Expr, seen map[*ast.O
 		}
 	}
 	return values, false
+}
+
+// Resolve only explicit, named string result slots from an unambiguous direct
+// declaration. This is not receiver dispatch, argument substitution or a type
+// checker; unsupported returns and partially computed branches remain limits.
+func (self *fixedAlertClassScanner) returnSlotStrings(slot fixedAlertClassReturnSlot, seen map[*ast.Object]bool, depth int) (map[string]bool, bool) {
+	values := map[string]bool{}
+	name, direct := slot.call.Fun.(*ast.Ident)
+	if !direct || slot.call.Ellipsis.IsValid() || depth > 64 || slot.resultCount > 16 {
+		return values, false
+	}
+	functions := self.globalFunctions[name.Name]
+	if len(functions) != 1 {
+		return values, false
+	}
+	function := functions[0]
+	if name.Obj != nil && name.Obj.Decl != function {
+		return values, false
+	}
+	if function.Body == nil || function.Type.Results == nil {
+		return values, false
+	}
+	resultCount := 0
+	stringSlot := false
+	for _, field := range function.Type.Results.List {
+		if len(field.Names) == 0 {
+			return values, false
+		}
+		if resultCount <= slot.resultIndex && slot.resultIndex < resultCount+len(field.Names) {
+			kind, ok := field.Type.(*ast.Ident)
+			stringSlot = ok && kind.Name == "string"
+		}
+		resultCount += len(field.Names)
+	}
+	if resultCount != slot.resultCount || !stringSlot {
+		return values, false
+	}
+	returns := []ast.Expr{}
+	complete := true
+	deferredResult := false
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		if _, nested := node.(*ast.FuncLit); nested {
+			return false
+		}
+		if _, deferred := node.(*ast.DeferStmt); deferred {
+			deferredResult = true
+			return false
+		}
+		if statement, ok := node.(*ast.ReturnStmt); ok {
+			if len(statement.Results) != resultCount || len(returns) >= 64 {
+				complete = false
+			} else {
+				returns = append(returns, statement.Results[slot.resultIndex])
+			}
+			return false
+		}
+		return true
+	})
+	if len(returns) == 0 || deferredResult {
+		return values, false
+	}
+	for _, expression := range returns {
+		alternatives, known := self.strings(expression, seen, depth+1)
+		complete = complete && known
+		for alternative := range alternatives {
+			values[alternative] = true
+		}
+	}
+	return values, complete
 }
 
 func (self *fixedAlertClassScanner) collect(classes map[string][]string, limits *[]string) {
@@ -621,6 +725,198 @@ var arbitrary = []label{{name: "synthetic-label-not-alert"}}
 		if sources := classes[class]; len(sources) != 1 || sources[0] != "tailer.go" {
 			t.Fatalf("typed log class %q lost exact source attribution", class)
 		}
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotViolatedCatalog(t *testing.T) {
+	files := map[string]*ast.File{}
+	for source, code := range map[string]string{
+		"shared_checks.go": `package synthetic
+func classify(branch int) (class, mechanism, action string) {
+ if branch == 0 { return "synthetic-first-class", "not-a-class-mechanism", "not-a-class-action" }
+ if branch == 1 { return "synthetic-second-class", "not-a-class-mechanism", "not-a-class-action" }
+ return "synthetic-missing-class", "not-a-class-mechanism", "not-a-class-action"
+}
+`,
+		"signal_synthetic.go": `package synthetic
+func observe(branch int) finding {
+ class, mechanism, action := classify(branch)
+ return finding{class: class, context: mechanism, action: action}
+}
+`,
+	} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), source, code, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[source] = parsed
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(files).collect(classes, &limits)
+	if len(classes) != 3 || len(limits) != 0 {
+		t.Fatalf("return-slot producer escaped the inventory: fixed=%d unresolved=%d, want three exact classes", len(classes), len(limits))
+	}
+	catalog := "`synthetic-first-class`, `synthetic-second-class`"
+	missing := []string{}
+	for class, sources := range classes {
+		if len(sources) != 1 || sources[0] != "signal_synthetic.go" {
+			t.Fatalf("return-slot class %q lost its typed sink source: %v", class, sources)
+		}
+		if !catalogHasExactClass(catalog, class) {
+			missing = append(missing, class)
+		}
+	}
+	if len(missing) != 1 || missing[0] != "synthetic-missing-class" {
+		t.Fatalf("return-slot catalog omission was falsely certified: missing=%v", missing)
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotHealthyEmptyClass(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "shared_checks.go", `package synthetic
+func classify() (class string, mechanism string, broken bool) { return "", "healthy explanation is not a class", false }
+func observe() finding {
+ class, mechanism, broken := classify()
+ return finding{class: class, context: mechanism, violated: broken}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(map[string]*ast.File{"shared_checks.go": parsed}).collect(classes, &limits)
+	if len(classes) != 0 || len(limits) != 0 {
+		t.Fatalf("proved empty result became a class or unresolved producer: fixed=%d unresolved=%d", len(classes), len(limits))
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotUnknownRetainsFiniteBranch(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "shared_checks.go", `package synthetic
+func classify(dynamic string, known bool) (class, mechanism, action string) {
+ if known { return "synthetic-known-class", "not-a-class-mechanism", "not-a-class-action" }
+ return normalize(dynamic), "not-a-class-mechanism", "not-a-class-action"
+}
+func observe() finding {
+ class, mechanism, action := classify("synthetic-input-not-a-proved-class", false)
+ return finding{class: class, context: mechanism, action: action}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(map[string]*ast.File{"shared_checks.go": parsed}).collect(classes, &limits)
+	if len(classes) != 1 || len(classes["synthetic-known-class"]) != 1 || len(limits) != 1 {
+		t.Fatalf("partly computed return was falsely exact or lost its finite branch: classes=%v unresolved=%d", classes, len(limits))
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotShadowedAndUnsupportedCalls(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "shared_checks.go", `package synthetic
+func classify() (class, mechanism, action string) { return "synthetic-global-not-called-class", "", "" }
+func observe() finding {
+ classify := func() (class, mechanism, action string) { return "synthetic-shadow-unsupported-class", "", "" }
+ class, mechanism, action := classify()
+ return finding{class: class, context: mechanism, action: action}
+}
+func parameter(classify func() (string, string, string)) finding {
+ class, mechanism, action := classify()
+ return finding{class: class, context: mechanism, action: action}
+}
+func receiver(source classifier) finding {
+ class, mechanism, action := source.classify()
+ return finding{class: class, context: mechanism, action: action}
+}
+func wrongArity() finding {
+ class, mechanism := classify()
+ return finding{class: class, context: mechanism}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(map[string]*ast.File{"shared_checks.go": parsed}).collect(classes, &limits)
+	if len(classes) != 0 || len(limits) != 4 {
+		t.Fatalf("unsupported/shadowed result borrowed a global definition: classes=%v unresolved=%d", classes, len(limits))
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotIsolation(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "shared_checks.go", `package synthetic
+func classify() (mechanism, class, action string) {
+ nested := func() (mechanism, class, action string) { return "", "synthetic-nested-not-called-class", "" }
+ _ = nested
+ return "synthetic-mechanism-not-class", "synthetic-selected-class", "synthetic-action-not-class"
+}
+func observe() Alert {
+ mechanism, class, action := classify()
+ return Alert{Class: class, Context: mechanism, Action: action}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(map[string]*ast.File{"shared_checks.go": parsed}).collect(classes, &limits)
+	if len(classes) != 1 || len(classes["synthetic-selected-class"]) != 1 || len(limits) != 0 {
+		t.Fatalf("return-slot or nested-return isolation failed: classes=%v unresolved=%d", classes, len(limits))
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotUnknownDeferredResult(t *testing.T) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "shared_checks.go", `package synthetic
+func classify() (class, mechanism, action string) {
+ defer func() { class = normalize(class) }()
+ return "synthetic-pre-defer-not-proved-class", "", ""
+}
+func observe() finding {
+ class, mechanism, action := classify()
+ return finding{class: class, context: mechanism, action: action}
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(map[string]*ast.File{"shared_checks.go": parsed}).collect(classes, &limits)
+	if len(classes) != 0 || len(limits) != 1 {
+		t.Fatalf("named-result mutation was falsely resolved before deferred work: classes=%v unresolved=%d", classes, len(limits))
+	}
+}
+
+func TestFixedAlertClassScannerReturnSlotUnknownAmbiguousDeclaration(t *testing.T) {
+	files := map[string]*ast.File{}
+	for source, code := range map[string]string{
+		"shared_checks.go": `package synthetic
+func classify() (class, mechanism, action string) { return "synthetic-ambiguous-first-class", "", "" }
+`,
+		"other_checks.go": `package synthetic
+func classify() (class, mechanism, action string) { return "synthetic-ambiguous-second-class", "", "" }
+`,
+		"signal_synthetic.go": `package synthetic
+func observe() finding {
+ class, mechanism, action := classify()
+ return finding{class: class, context: mechanism, action: action}
+}
+`,
+	} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), source, code, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[source] = parsed
+	}
+	classes := map[string][]string{}
+	limits := []string{}
+	newFixedAlertClassScanner(files).collect(classes, &limits)
+	if len(classes) != 0 || len(limits) != 1 {
+		t.Fatalf("ambiguous declarations self-selected a class source: classes=%v unresolved=%d", classes, len(limits))
 	}
 }
 

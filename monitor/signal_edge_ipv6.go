@@ -2,7 +2,11 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"net/netip"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +65,9 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 	if len(tasks) == 0 {
 		return nil, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	observerRouteBefore := observeIPv6ObserverRoute(ctx, env.runner)
 
 	results := make(chan edgeIPv6Result, len(tasks))
@@ -84,6 +91,9 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 	}
 	wait.Wait()
 	close(results)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	ordered := make([]edgeIPv6Result, 0, len(tasks))
 	for result := range results {
@@ -103,6 +113,9 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 			observerRouteBefore,
 			observeIPv6ObserverRoute(ctx, env.runner),
 		)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	observerCommonMode := observerRoute.state == ipv6ObserverRouteAbsent &&
 		allImmediateConnectFailures
@@ -142,6 +155,10 @@ func (edgeIPv6Probe) check(ctx context.Context, env *probeEnv) ([]finding, error
 }
 
 func runEdgeIPv6Task(ctx context.Context, env *probeEnv, result edgeIPv6Result) edgeIPv6Result {
+	if err := ctx.Err(); err != nil {
+		result.httpErr = err
+		return result
+	}
 	configured := result.configured
 	hostname := strings.TrimSpace(configured.ProbeHostname)
 	if hostname == "" {
@@ -151,17 +168,28 @@ func runEdgeIPv6Task(ctx context.Context, env *probeEnv, result edgeIPv6Result) 
 	result.httpOutput = public.output
 	result.httpErr = public.err
 	result.http = public.values
+	if ctx.Err() != nil {
+		return result
+	}
 
 	identityCommand := edgeIPv6IdentityCommand(configured)
 	result.identityRaw, result.identityErr = env.runner.shell(ctx, result.host, identityCommand)
-	result.identity = parseKeyValueLines(result.identityRaw)
+	if ctx.Err() != nil {
+		return result
+	}
+	if result.identityErr == nil {
+		result.identity, result.identityErr = parseEdgeIPv6Identity(result.identityRaw)
+	}
 
-	if exactHTTPSHealthy(public) {
+	if edgeIPv6HTTPObservationError(result) != nil || exactHTTPSHealthy(public) {
 		return result
 	}
 	egressCommand := edgeIPv6EgressCommand(configured)
 	result.egressRaw, result.egressErr = env.runner.shell(ctx, result.host, egressCommand)
 	result.egress = parseKeyValueLines(result.egressRaw)
+	if ctx.Err() != nil {
+		return result
+	}
 	if edgeIPv6AdmissionCandidate(result) {
 		admissionOutput, err := env.runner.shell(
 			ctx,
@@ -181,11 +209,28 @@ func edgeIPv6IdentityCommand(configured EdgeIPv6InterfaceSettings) string {
 	address := shellSingleQuote(configured.Address)
 	unit := shellSingleQuote("warp-main-lb-" + configured.Interface + ".service")
 	return fmt.Sprintf(`# %s
+set -u
+for required in cat ip awk systemctl timeout; do
+  command -v "$required" >/dev/null 2>&1 || exit 20
+done
 interface_name=%s
 configured_address=%s
-operstate=$(cat /sys/class/net/"$interface_name"/operstate 2>/dev/null || true)
-configured_present=$(ip -6 -o addr show dev "$interface_name" scope global 2>/dev/null | awk -v want="$configured_address" '{split($4,a,"/"); if (a[1] == want) found=1} END {print found+0}')
-unit_active=$(systemctl is-active %s 2>/dev/null || true)
+operstate=$(timeout 5s cat /sys/class/net/"$interface_name"/operstate 2>/dev/null) || exit 21
+case "$operstate" in up|down|unknown|notpresent|lowerlayerdown|testing|dormant) ;; *) exit 22 ;; esac
+address_rows=$(timeout 5s ip -6 -o addr show dev "$interface_name" scope global 2>/dev/null) || exit 23
+configured_present=$(printf '%%s\n' "$address_rows" | awk -v want="$configured_address" '
+  NF {
+    if (NF < 6 || $1 !~ /^[0-9]+:$/ || $3 != "inet6" || split($4,a,"/") != 2 ||
+        a[1] !~ /^[0-9a-fA-F:]+$/ || a[2] !~ /^[0-9]+$/ || a[2]+0 > 128 || $5 != "scope" || $6 != "global") invalid=1
+    if (a[1] == want) found=1
+  }
+  END { if (invalid) exit 1; print found+0 }') || exit 24
+unit_active=$(timeout 5s systemctl is-active %s 2>/dev/null)
+unit_status=$?
+case "$unit_active:$unit_status" in
+  active:0|reloading:0|refreshing:0|inactive:3|failed:3|activating:3|deactivating:3|maintenance:3) ;;
+  *) exit 25 ;;
+esac
 printf 'operstate=%%s\nconfigured_present=%%s\nunit_active=%%s\n' "$operstate" "$configured_present" "$unit_active"`,
 		edgeIPv6IdentityMarker, interfaceName, address, unit)
 }
@@ -312,16 +357,131 @@ func parseEdgeIPv6Admission(output string) (map[string]string, error) {
 	return values, nil
 }
 
+// parseEdgeIPv6Identity accepts only the complete bounded identity reducer,
+// never defaulting a failed tool or malformed row to a missing address.
+func parseEdgeIPv6Identity(output string) (map[string]string, error) {
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("edge IPv6 identity observation is malformed")
+		}
+		if _, duplicate := values[parts[0]]; duplicate {
+			return nil, fmt.Errorf("edge IPv6 identity observation is malformed")
+		}
+		switch parts[0] {
+		case "operstate", "configured_present", "unit_active":
+			values[parts[0]] = parts[1]
+		default:
+			return nil, fmt.Errorf("edge IPv6 identity observation is malformed")
+		}
+	}
+	if !edgeIPv6IdentityObserved(edgeIPv6Result{identity: values}) {
+		return nil, fmt.Errorf("edge IPv6 identity observation is malformed")
+	}
+	return values, nil
+}
+
+// edgeIPv6IdentityObserved distinguishes the kernel's observed "unknown"
+// operstate from an unavailable observation; only the active/up baseline is
+// healthy, while complete known nonbaseline states remain actual drift.
+func edgeIPv6IdentityObserved(result edgeIPv6Result) bool {
+	if result.identityErr != nil || len(result.identity) != 3 {
+		return false
+	}
+	switch result.identity["operstate"] {
+	case "up", "down", "unknown", "notpresent", "lowerlayerdown", "testing", "dormant":
+	default:
+		return false
+	}
+	switch result.identity["unit_active"] {
+	case "active", "reloading", "refreshing", "inactive", "failed", "activating", "deactivating", "maintenance":
+	default:
+		return false
+	}
+	return result.identity["configured_present"] == "0" || result.identity["configured_present"] == "1"
+}
+
+// edgeIPv6HTTPObservationError validates Edge's actual six native write-out
+// fields and execution result. Diagnostics are never a substitute for a field,
+// and a valid failed curl execution remains an observed request failure.
+func edgeIPv6HTTPObservationError(result edgeIPv6Result) error {
+	values := map[string]string{}
+	for _, raw := range strings.Split(result.httpOutput, "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "monitor_") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("edge IPv6 HTTPS observation is malformed")
+		}
+		if _, duplicate := values[parts[0]]; duplicate {
+			return fmt.Errorf("edge IPv6 HTTPS observation is malformed")
+		}
+		switch parts[0] {
+		case "monitor_http_code", "monitor_exitcode", "monitor_remote_ip", "monitor_content_type", "monitor_size_download", "monitor_time_total":
+			values[parts[0]] = strings.TrimSpace(parts[1])
+		default:
+			return fmt.Errorf("edge IPv6 HTTPS observation is malformed")
+		}
+	}
+	if len(values) != 6 {
+		return fmt.Errorf("edge IPv6 HTTPS observation is incomplete")
+	}
+	for key, value := range values {
+		if result.http[key] != value {
+			return fmt.Errorf("edge IPv6 HTTPS observation is inconsistent")
+		}
+	}
+	http, httpErr := strconv.Atoi(values["monitor_http_code"])
+	exit, exitErr := strconv.Atoi(values["monitor_exitcode"])
+	total, totalErr := strconv.ParseFloat(values["monitor_time_total"], 64)
+	_, sizeErr := strconv.ParseUint(values["monitor_size_download"], 10, 64)
+	if httpErr != nil || fmt.Sprintf("%03d", http) != values["monitor_http_code"] || http != 0 && (http < 100 || 599 < http) ||
+		exitErr != nil || exit < 0 || 126 < exit || strconv.Itoa(exit) != values["monitor_exitcode"] ||
+		totalErr != nil || math.IsNaN(total) || math.IsInf(total, 0) || total < 0 || sizeErr != nil || exit == 0 && http == 0 ||
+		(exit == 7 || exit == 60) && http != 0 {
+		return fmt.Errorf("edge IPv6 HTTPS observation has invalid native values")
+	}
+	if peer := values["monitor_remote_ip"]; peer != "" {
+		expected, expectedErr := netip.ParseAddr(result.configured.Address)
+		actual, actualErr := netip.ParseAddr(peer)
+		if expectedErr != nil || actualErr != nil || actual != expected {
+			return fmt.Errorf("edge IPv6 HTTPS observation has an unexpected peer")
+		}
+	} else if http != 0 {
+		return fmt.Errorf("edge IPv6 HTTPS observation is missing its peer")
+	}
+	if exit == 0 {
+		if result.httpErr != nil {
+			return fmt.Errorf("edge IPv6 HTTPS execution is unobservable")
+		}
+	} else {
+		if result.httpErr == nil {
+			return fmt.Errorf("edge IPv6 HTTPS execution is inconsistent")
+		}
+		var process *exec.ExitError
+		if !errors.As(result.httpErr, &process) {
+			return fmt.Errorf("edge IPv6 HTTPS execution is unobservable")
+		}
+		if process.ExitCode() != exit {
+			return fmt.Errorf("edge IPv6 HTTPS execution is inconsistent")
+		}
+	}
+	return nil
+}
+
 func edgeIPv6AdmissionCandidate(result edgeIPv6Result) bool {
 	publicTotal, publicTotalErr := strconv.ParseFloat(result.http["monitor_time_total"], 64)
 	selfTotal, selfTotalErr := strconv.ParseFloat(result.egress["self_time_total"], 64)
-	return result.identityErr == nil && result.egressErr == nil &&
+	return edgeIPv6HTTPObservationError(result) == nil && edgeIPv6IdentityObserved(result) && result.egressErr == nil &&
 		result.http["monitor_exitcode"] == "7" && result.http["monitor_remote_ip"] == "" &&
-		publicTotalErr == nil && publicTotal < 1 &&
+		publicTotalErr == nil && !math.IsNaN(publicTotal) && !math.IsInf(publicTotal, 0) && publicTotal >= 0 && publicTotal < 1 &&
 		result.identity["configured_present"] == "1" && result.identity["operstate"] == "up" &&
 		result.identity["unit_active"] == "active" &&
 		result.egress["self_probe_status"] == "7" && result.egress["self_exitcode"] == "7" &&
-		result.egress["self_http_code"] == "000" && selfTotalErr == nil && selfTotal < 1 &&
+		result.egress["self_http_code"] == "000" && selfTotalErr == nil && !math.IsNaN(selfTotal) && !math.IsInf(selfTotal, 0) && selfTotal >= 0 && selfTotal < 1 &&
 		result.egress["route_status"] == "0" &&
 		result.egress["route_device"] == result.configured.Interface &&
 		result.egress["route_source"] == result.configured.Address &&
@@ -337,15 +497,17 @@ func edgeIPv6Findings(
 	target := result.host.name
 	frame := result.configured.Interface + "/" + result.configured.Address
 	findings := []finding{}
-	if result.identityErr != nil {
-		findings = append(findings, cannotObserveFinding(target+"/"+result.configured.Interface+"/identity", result.identityErr))
+	if !edgeIPv6IdentityObserved(result) {
+		visibility := cannotObserveFinding(target+"/"+result.configured.Interface+"/identity", fmt.Errorf("edge IPv6 identity observation is unavailable or malformed"))
+		visibility.playbook = "SIGNALS.md §18.1"
+		findings = append(findings, visibility)
 	} else if result.identity["configured_present"] != "1" ||
 		result.identity["operstate"] != "up" ||
 		result.identity["unit_active"] != "active" {
 		findings = append(findings, finding{
 			probeId: "lb/edge-ipv6", tier: tierPage,
 			class: "edge-ipv6-identity-drift", target: target, frame: frame, sustain: 1,
-			symptom:   fmt.Sprintf("%s %s does not own its active services.yml IPv6 address", target, result.configured.Interface),
+			symptom:   fmt.Sprintf("%s %s fails its active services.yml interface/address/controller baseline", target, result.configured.Interface),
 			mechanism: "Warpctl, the upstream ACL, and the public probe can target an address the host does not own when an interface or NIC-derived identity changes without every source of truth moving together.",
 			baseline:  "Every active services.yml LB IPv6 address appears exactly on its configured live interface, whose link and LB controller are active.",
 			observed:  fmt.Sprintf("configured=%s interface=%s operstate=%s configured_present=%s unit_active=%s", result.configured.Address, result.configured.Interface, result.identity["operstate"], result.identity["configured_present"], result.identity["unit_active"]),
@@ -356,6 +518,11 @@ func edgeIPv6Findings(
 		})
 	}
 
+	if err := edgeIPv6HTTPObservationError(result); err != nil {
+		visibility := cannotObserveFinding(target+"/"+result.configured.Interface+"/public-https", err)
+		visibility.playbook = "SIGNALS.md §18.1"
+		return append(findings, visibility)
+	}
 	if exactHTTPSHealthy(exactHTTPSResult{values: result.http, output: result.httpOutput, err: result.httpErr}) {
 		return findings
 	}
@@ -451,7 +618,7 @@ func edgeIPv6AllImmediateConnectFailures(results []edgeIPv6Result) bool {
 	}
 	for _, result := range results {
 		total, err := strconv.ParseFloat(result.http["monitor_time_total"], 64)
-		if err != nil || total >= 1 ||
+		if edgeIPv6HTTPObservationError(result) != nil || err != nil || math.IsNaN(total) || math.IsInf(total, 0) || total < 0 || total >= 1 ||
 			result.http["monitor_exitcode"] != "7" ||
 			result.http["monitor_remote_ip"] != "" {
 			return false
@@ -462,7 +629,7 @@ func edgeIPv6AllImmediateConnectFailures(results []edgeIPv6Result) bool {
 
 func edgeIPv6AnyPublicHealthy(results []edgeIPv6Result) bool {
 	for _, result := range results {
-		if exactHTTPSHealthy(exactHTTPSResult{
+		if edgeIPv6HTTPObservationError(result) == nil && exactHTTPSHealthy(exactHTTPSResult{
 			values: result.http,
 			output: result.httpOutput,
 			err:    result.httpErr,
@@ -482,7 +649,7 @@ func edgeIPv6ObserverRouteSummary(
 	sourceRouteExact := 0
 	sourceEgressExact := 0
 	for _, result := range results {
-		if result.identityErr == nil &&
+		if edgeIPv6IdentityObserved(result) &&
 			result.identity["configured_present"] == "1" &&
 			result.identity["operstate"] == "up" &&
 			result.identity["unit_active"] == "active" {
@@ -520,7 +687,7 @@ func edgeIPv6ObserverRouteSummary(
 
 func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action string) {
 	exitCode := result.http["monitor_exitcode"]
-	total, _ := strconv.ParseFloat(result.http["monitor_time_total"], 64)
+	total, totalErr := strconv.ParseFloat(result.http["monitor_time_total"], 64)
 	sourceMatches := result.egress["source_egress_status"] == "0" &&
 		result.egress["source_egress"] == result.configured.Address
 	selfProbeHealthy := result.egress["self_probe_status"] == "0" &&
@@ -531,7 +698,7 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 		(result.egress["route_device"] != result.configured.Interface ||
 			result.egress["route_source"] != result.configured.Address)
 
-	if exitCode == "28" || strings.Contains(strings.ToLower(result.httpOutput), "timed out") {
+	if result.http["monitor_http_code"] == "000" && (exitCode == "28" || strings.Contains(strings.ToLower(result.httpOutput), "timed out")) {
 		if policyRouteMismatch && selfProbeHealthy && result.identity["configured_present"] == "1" {
 			return "edge-ipv6-policy-route",
 				"The host owns and locally serves the configured address, but a source-specific IPv6 lookup selects a different device or source. A carrier or network-manager cycle removed the LB policy routes/rules while its controller remained active, so replies leave through the lower-metric management default and external TLS times out.",
@@ -546,7 +713,7 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 			"The pinned TCP/TLS path silently timed out, but the source-bound return-path proof was absent or disagreed. Routing, NDP, upstream filtering, or host ingress must be localized before changing service state.",
 			"Capture the pinned SYN at the host, inspect exact DNAT counters, and verify source-bound egress plus gateway reachability. Change only the first layer where packets disappear."
 	}
-	if exitCode == "7" && total < 1 {
+	if exitCode == "7" && totalErr == nil && !math.IsNaN(total) && !math.IsInf(total, 0) && total >= 0 && total < 1 {
 		listenerCount, listenerErr := strconv.Atoi(result.admission["lb_listener_count"])
 		mapHashErrors, mapHashErr := strconv.Atoi(result.admission["lb_map_hash_error_count"])
 		if edgeIPv6AdmissionCandidate(result) && result.admissionErr == nil &&
@@ -562,7 +729,7 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 			"Inspect ordered IPv4/IPv6 DNAT rules and live sockets. Remove only a fully proven dead target, and deploy the Warp duplicate-to-single socket reconciliation; do not change the IPv6 address or route to treat a reset."
 	}
 	return "edge-ipv6-http",
-		"The exact address connected but did not complete the expected api-v6 HTTP/1.1 200 response, so TLS/SNI, LB ownership, or application readiness is wrong even if the socket is open.",
+		"The exact-address request did not complete the expected api-v6 HTTP/1.1 200 response. The native outcome alone does not prove a completed connection or TLS handshake; inspect its status/error before attributing TLS/SNI, LB ownership, or application readiness.",
 		"Inspect the returned status/TLS error and the live LB generation for this interface, then repair that layer without allowing DNS to select a healthy sibling."
 }
 

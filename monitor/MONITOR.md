@@ -19,6 +19,14 @@ implements). Current open items and their corrections belong to the chained
 run ledger described in RUN-MAIN.md; the historical checklist is not live
 authorization to execute its operational or architectural proposals.
 
+The current CLI emits active Alerts, not ticket lifecycle events. It renders
+each eligible alert batch as Markdown or JSONL on stdout; stderr carries
+diagnostics. The private legacy ticket manager and console emitter remain in
+the package but are not wired into this CLI. Healthy findings are filtered
+before alert emission. The current CLI does not emit an all-probes heartbeat.
+Silence is not recovery. Confirm recovery from direct healthy observations and
+the applicable verification window, and record that evidence in the run ledger.
+
 ---
 
 ## 1. Principles
@@ -69,9 +77,10 @@ authorization to execute its operational or architectural proposals.
    control; it never treats a dashboard rendering or traffic aggregate as the
    signal.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
-   per SIGNALS.md §6. Rate is reported; volume is never severity. One ticket
-   per identity, updated in place, auto-resolved when the signal returns to
-   its healthy band for 5 minutes (§7).
+   per SIGNALS.md §6. Rate is reported; volume is never severity. The current
+   cadence gate deduplicates an identity within a batch, counts its consecutive
+   failing executions, and emits repeated eligible active Alerts. It does not
+   emit an in-place ticket update or an automatic resolution (§7).
 7. **Aggregate + individual, always both** (§6.3). Per-node redis probes,
    not just cluster_state; per-query-id pg breakdowns, not just counts.
 
@@ -161,16 +170,16 @@ while 5432 connects instantly" is itself a documented discriminator
            │ observations                      │ evidence
    ┌───────▼──────────────────────────────────▼────────────────┐
    │ evaluator: static bands + learned baselines, hysteresis   │
-   │ (N consecutive), auto-resolve (healthy 5 min)             │
+   │ (N consecutive executions, per-probe sustain)            │
    └───────────────────────────┬───────────────────────────────┘
                                │ findings
    ┌───────────────────────────▼───────────────────────────────┐
-   │ ticket manager: dedupe by identity, open/update/resolve   │
-   │ lifecycle, renders SIGNALS.md §6b shape                   │
+   │ cadence gate: identity dedupe + sustain                  │
+   │ active Alerts, renders SIGNALS.md §6b shape               │
    └───────────────────────────┬───────────────────────────────┘
                                │ emits
    ┌───────────────────────────▼───────────────────────────────┐
-   │ emitters: console (now) │ webhook (future) │ gh PR (future)│
+   │ CLI handler: Markdown or JSONL batches on stdout          │
    └───────────────────────────────────────────────────────────┘
    baseline store: local disk (history ring per metric) — independent
    of pg/redis so it works precisely when they don't
@@ -256,23 +265,30 @@ bands only. Nothing about baselines touches pg or redis.
 ### 3.4 Evaluator
 
 - **Hysteresis:** each threshold carries its sustain requirement from §7
-  ("for 2 min" = N consecutive failing ticks at the probe's cadence). No
-  single-tick pages.
+  ("for 2 min" = N consecutive failing executions at the probe's cadence).
+  `Sustain` defaults to one; classes configured for immediate paging remain
+  immediate. `PageSustain`, where specified, controls escalation separately.
 - **Shape awareness** where SIGNALS.md demands it: contract-rate cliff vs
   sag vs ramp (1.1) — a ramp during recovery suppresses re-alerts; open-set
   spot values during a drain don't re-page (2.6: alert on sustained rise).
-- **Auto-resolve:** healthy band held for 5 minutes → the ticket resolves
-  and the resolution is emitted (recovery confirmation is part of the loop,
-  §6.8).
-- **Flap control:** re-open within a cooldown reuses the ticket identity
-  with an incremented flap count rather than emitting a fresh page.
+- An identity absent from a completed alert batch loses its failing streak;
+  that is an internal sustain reset, not emitted evidence of target recovery.
+- **Legacy lifecycle only:** the private ticket manager has automatic
+  resolution. The current CLI does not invoke it. Neither path implements the
+  previously described reopen cooldown/flap counter. Require direct healthy
+  observations for §6.8 recovery confirmation.
 
-### 3.5 Tickets
+### 3.5 Legacy ticket model
+
+The following lifecycle and historical rendered example describe the private
+legacy ticket manager, not the current CLI's Alert output. Current structured
+Alerts and their Markdown rendering are described in §3.1; they carry action
+and verification details but no OPEN, UPDATE, or RESOLVE event kind.
 
 Identity: `(probe id, class, target, frame)` — e.g.
 `(logs/dial-timeout, dial-io-timeout, 192.168.51.193:6389, -)`. One open
-ticket per identity. Lifecycle events: OPEN, UPDATE (observed values moved
-materially or the battery finished), RESOLVE.
+ticket per identity. Lifecycle events: OPEN, UPDATE on subsequent broken
+findings, and RESOLVE after the legacy healthy-tick window.
 
 Rendered shape = SIGNALS.md §6b, with baseline made explicit:
 
@@ -306,25 +322,23 @@ downstream system's specialization.
 ### 3.6 Emitters and self-health
 
 ```go
-type Emitter interface {
-    Emit(ctx context.Context, event TicketEvent) error // OPEN|UPDATE|RESOLVE
-}
+type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
 ```
 
-- **console** (now): human-readable render to stdout + one-line JSON to
-  stderr (machine-parseable from day one, so the future consumers cost
-  nothing to add).
-- **webhook** (future): POST TicketEvent JSON to the diagnosing system's
-  intake, with a local spool for when it's down.
-- **github pr** (future): open a PR/issue per ticket for human-visible
-  handoff.
+The current CLI supplies this handler to `RunLoop`, skips empty batches, and
+writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
+output, not a second machine-readable ticket-event channel. The legacy console
+emitter's lifecycle JSON and the historical webhook/PR proposals are not
+current CLI capabilities; additional sinks remain deferred.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
 observe* (ssh unreachable / command timeout → a `monitor/visibility` ticket
 naming what is now unmonitored, because blindness during an incident is
-itself urgent). It also heartbeats (periodic "all probes ran" line) so a
-silent monitor is detectable.
+itself urgent). There is no current "all probes ran" output. A live process,
+growing stdout, or one healthy probe does not establish complete observation
+coverage. Retain the durable session, reconcile the expected standing tails,
+and verify every selected probe's full cadence as required by RUN-MAIN.md.
 
 ### 3.7 Log tailers — the always-on collectors
 
@@ -340,7 +354,7 @@ reconciliation every 45 seconds. Exact fingerprints make alert-relevant
 overlap idempotent; ordinary lines are not retained. Per
 minute, each tailer folds its counts into
 findings — (class, target ip:port, innermost frame) identity, rate, one
-sample line — through the same evaluator/ticket path as every other probe.
+sample line — through the same active-Alert path as every other probe.
 Unmatched error-shaped lines at rate are reported as class `novel` (new
 panic frames and unseen failure modes are exactly what a fixed taxonomy
 misses). Tailer self-health: a tailer that exits or goes silent while its
@@ -519,6 +533,9 @@ During an explicit per-host routing maintenance window, add
 host's exact public IPv6 targets from both edge IPv6 and Grafana ingress
 probes; every other signal and host continues. Unknown host names fail closed.
 
+The dated completion notes below are historical implementation records. Their
+legacy ticket/console behavior is not the current CLI wiring described in §3.
+
 1. **Skeleton + tier-0 — DONE (2026-07-17).** main loop + `--once`, sshExec
    connector (conn/), four tier-0 probes (contract rate 1.1, pg state split
    1.3, task canary + parked 1.2, redis cluster + per-node PING 1.4), static
@@ -536,8 +553,9 @@ probes; every other signal and host continues. Unknown host names fail closed.
    frame, bypassing the error-cell identifier redactor. The PostgreSQL
    transport now decodes psql CSV structurally and rejects malformed or
    truncated output instead of attributing a fragment.
-2. **Ticket lifecycle — DONE in phase 1** (identity/dedupe/hysteresis/
-   auto-resolve; JSON event line on stderr). Additional alerting channels
+2. **Legacy ticket lifecycle — implemented in phase 1**, but not used by the
+   current CLI (identity/dedupe/hysteresis/auto-resolve; legacy JSON event line
+   on stderr). Additional alerting channels
    (webhook, github pr, persistence/spool) deliberately DEFERRED — console
    only for now (user decision 2026-07-17).
 3. **Baselines — DONE (2026-07-17).** Local history store (baseline.go:
@@ -610,8 +628,10 @@ probes; every other signal and host continues. Unknown host names fail closed.
 
 Decided (2026-07-17):
 
-- **Ticket sink**: console emitter now (stdout render + JSON event line on
-  stderr); webhook and github-PR emitters later behind the same interface.
+- **Historical ticket sink**: the 2026-07-17 decision used a console emitter
+  with stdout rendering and lifecycle JSON on stderr. Current CLI output is
+  the selected active-Alert format on stdout (§3.6); webhook and github-PR
+  emitters remain deferred.
 - **Control-plane events** (§6.4): read from the source of truth on the
   edges — the warp logs via journalctl and docker container status
   (`docker ps` state/created-at, `docker events` window) over ssh. A

@@ -72,3 +72,23 @@ func TestRunMainRetainsWholeHostScopeSafety(t *testing.T) {
 		}
 	}
 }
+
+func TestMonitorDocumentationDistinguishesActiveAlertsFromLegacyEvents(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"MONITOR.md", "SIGNALS.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documentation := strings.Join(strings.Fields(string(data)), " ")
+		for _, required := range []string{
+			"The current CLI emits active Alerts, not ticket lifecycle events.",
+			"The current CLI does not emit an all-probes heartbeat.",
+			"Silence is not recovery.",
+		} {
+			if !strings.Contains(documentation, required) {
+				t.Errorf("%s does not distinguish the current output contract: missing %q", path, required)
+			}
+		}
+	}
+}

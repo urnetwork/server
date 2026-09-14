@@ -6406,7 +6406,7 @@ active-disconnected residuals by whether any lifetime connection row exists.
 It exports only aggregate lifecycle counts. IDs, credentials, endpoints, and
 descriptions remain in PostgreSQL.
 
-- `probe-child-retirement` (WARN for any residual; PAGE after two samples when
+- `probe-child-retirement` (WARN after two samples for any residual; PAGE after two samples when
   at least 20 residuals are at least 10% of 20 or more mature children):
   previously connected children remain active after their connection closes.
   This is the reached-channel teardown branch.
@@ -9217,9 +9217,13 @@ traceable; their owning numbered sections remain the full contracts.
 
 Every alert carries: identity (class+target+frame), rate, one sample, the
 matching playbook section (5.x), the ACTION line, and last control-plane
-event age. Alerts auto-resolve when the signal returns to its healthy band
-for 5 minutes, and emit the resolution (recovery confirmation is part of the
-loop, per 6.8).
+event age. The current CLI emits active Alerts, not ticket lifecycle events.
+Healthy findings are filtered before emission; the CLI does not emit the
+legacy ticket manager's five-healthy-tick resolution events. The current CLI
+does not emit an all-probes heartbeat. Silence is not recovery. Require direct
+healthy observations held for the applicable verification window, including
+the five-minute healthy-band check where specified, and record recovery
+confirmation in the run ledger (6.8).
 
 Historical ledger class aliases remain readable but must not be emitted by new
 probes:
@@ -12199,8 +12203,10 @@ A left-edge regression or a changed right edge starts new unclassified history.
 A gap that stays fixed on consecutive observations after its right edge is
 older than the current Mimir 3.1.1 `query_store_after=12h` default plus two
 evaluation steps becomes `mimir-ingestion-gap`. Healthy findings cover all
-three stable classes, so reclassification or complete recovery resolves the
-previous identity.
+three stable classes, so the current cadence gate resets their failing streaks
+when those classes are absent. The CLI does not emit a resolution event;
+reclassification is not complete recovery. Require the direct range control
+and record the applicable healthy verification window in the run ledger.
 
 On 2026-09-03, the newest global gap was `12:35Z` through `20:00Z`. Across
 repeated absolute-window reads its left edge advanced from `08:35Z` to
@@ -18664,6 +18670,75 @@ edge interface with an IPv6 address, pin `api-v6.<domain>` HTTP/1.1 HTTPS to tha
 exact address so DNS health selection cannot hide a failed interface. Healthy
 means HTTP 200; recovery requires three consecutive pinned 200 responses.
 
+**Observation integrity comes before path attribution.** The Edge probe must
+receive all six native curl write-out fields exactly once: HTTP code, exit
+code, remote IP, content type, downloaded size, and total time. Require ranged,
+compatible HTTP/exit/process results, a finite nonnegative duration and
+nonnegative integer size, and the exact configured IPv6 peer whenever a peer
+is reported. Process failure requires matching execution evidence, not an
+opaque error string that merely resembles an exit status. An empty content
+type or zero size on a genuine failure is valid;
+an absent, duplicate, malformed, inconsistent, or unexpected native field is
+not. A two-field `200/0` tuple is not a complete healthy observation. Missing
+curl and transport-only errors remain `cannot-observe`, without HTTP, timeout,
+reset, or observer-common-mode attribution. Complete genuine curl refusal,
+timeout, TLS, and non-200 results retain their existing failure classes; a
+nonzero curl exit is not itself an observation failure.
+
+The identity command must separately prove that the link-state read, address
+enumeration, and unit-state read completed. Do not mask a failed `ip` command
+with a successful `awk` default of address-absent, or suppress failed
+`cat`/`systemctl` execution into empty states. Successfully observed missing
+addresses, down links, and inactive controllers still emit identity drift;
+unavailable, interrupted, malformed, or incomplete identity work is unknown.
+Keep independently observed identity faults when only the public-request
+command fails. Invalid or absent durations cannot establish a sub-second
+refusal, LB admission candidate, or all-target observer failure.
+
+An authoritative parent cancellation returns `ctx.Err()` without manufacturing
+findings or starting later host work. Pre-cancelled execution makes no source
+calls. A per-command child deadline with a live parent instead retains the
+independent observations and adds the appropriate visibility warning.
+Synthetic tests exercise the generated identity command using reserved fake
+tools and test both lifecycle cases with explicit channel barriers, not sleeps.
+
+The automatic probe makes one pinned request per target per execution, at a
+five-minute cadence. These existing failure classes emit PAGE after two
+consecutive failing executions, with identity `(lb/edge-ipv6, class, host,
+interface/address)`; the three pinned 200 responses are a separate repair
+verification requirement, not three requests inside one probe execution:
+
+- `edge-ipv6-upstream-drop`: the external request times out (curl exit 28 or
+  timeout text) before any HTTP response (`000`), the configured address is present, host-local same-SNI HTTPS
+  returns 200, and successful bound-source egress reports that exact address.
+  This confines the observed failure to external ingress; it does not alone
+  prove a router ACL defect. Check the pinned SYN and exact host DNAT counters.
+  Only an unchanged counter plus the matching packet/permit evidence justifies
+  correcting an upstream permit destination. Compare active `services.yml`
+  with the live interface; preserve default-drop policy, ports, and actions.
+- `edge-ipv6-timeout`: the pinned TCP/TLS request times out before any HTTP
+  response (`000`), without the stronger
+  policy-route or upstream/self-probe discriminator. Localize routing, NDP,
+  upstream filtering, and host ingress using source-bound egress, gateway
+  reachability, pinned SYN capture, and exact counters. Do not infer a service
+  or router root cause from a timeout alone.
+- `edge-ipv6-http`: the exact request is unhealthy and does not match the
+  timeout or bounded immediate-refusal branches. This includes non-200 HTTP
+  and TLS/SNI failures, plus an incomplete response after HTTP headers were
+  received (including HTTP 200 followed by curl exit 28). Receiving an HTTP
+  response disproves initial external-ingress-drop attribution for that
+  request. It is not automatically an application fault. Verify
+  the request's native result fields and execution status before attributing
+  a layer, then correlate its status/TLS evidence with the current LB
+  generation. Empty, malformed, or unavailable-tool observations are unknown,
+  not proof of an HTTP-layer fault, and require observation-integrity review.
+
+For each class, compare independent host identity, same-SNI local HTTPS, exact
+source-route, and exact-source egress controls. After repairing only the proven
+layer, require three externally routed pinned IPv6 HTTP/1.1 200 responses and
+the repaired layer's healthy counters without changing target identity. A
+healthy sibling or DNS-selected address cannot clear this target's alert.
+
 Compare every target with the exact global IPv6 address on the configured live
 interface and the matching `warp-main-lb-<interface>.service`. Classify a
 missing active address as identity drift: reconcile active Vault, persistent
@@ -18717,8 +18792,10 @@ duplicate-to-single rolling transition, an old first rule can point at a
 listener that closed after the overlap scan while shadowing a later live rule.
 Remove only the proven dead target and deploy Warp's final socket-authoritative
 reconciliation on that transition. If the admission observation itself fails,
-emit `cannot-observe` alongside the reset-class fallback; never infer a config
-rejection from controller activity or an unbounded log search.
+emit `cannot-observe` and withhold reset classification when the other bounded
+admission-candidate predicates matched. Never infer a config rejection or a
+dead-first DNAT target from that unknown observation, controller activity, or
+an unbounded log search.
 
 Run the monitor-local route lookup before the exact probes and again after an
 all-target immediate failure. When either lookup proves no route and every
@@ -18963,9 +19040,11 @@ require an unrelated IPv6 prefix and every exact edge from a genuinely routed
 external observer for three consecutive five-minute samples. The scoped
 edge-ipv6 visibility identity stays distinct from the TLS identity because the
 signals run independently and a healthy tick from one must not resolve the
-other. With the ticket manager's five-healthy-tick resolution window, automatic
-ticket closure takes five successful signal cadences (25 minutes); the
-three-sample protocol check is the minimum functional recovery proof.
+other. The legacy ticket manager's five-healthy-tick window would take five
+successful signal cadences (25 minutes), but the current CLI does not emit
+automatic ticket closure. Record the direct healthy observations in the run
+ledger; the three-sample protocol check is the minimum functional recovery
+proof, not an inferred resolution from absent alerts.
 
 ### 18.2 Public TLS certificate expiry and alias coverage
 

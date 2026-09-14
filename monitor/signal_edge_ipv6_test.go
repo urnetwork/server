@@ -3,6 +3,9 @@ package monitor
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,13 +77,13 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 			case strings.Contains(joined, "["+addresses["healthy"]+"]"):
 				return edgeHTTPFixture("200", "0", addresses["healthy"], "0.080"), nil
 			case strings.Contains(joined, "["+addresses["reset"]+"]"):
-				return edgeHTTPFixture("000", "7", "", "0.041"), errors.New("exit status 7")
+				return edgeHTTPFixture("000", "7", "", "0.041"), edgeCommandExitError(7)
 			case strings.Contains(joined, "["+addresses["drop"]+"]"):
-				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.002"), errors.New("exit status 28")
+				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.002"), edgeCommandExitError(28)
 			case strings.Contains(joined, "["+addresses["policy"]+"]"):
-				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.003"), errors.New("exit status 28")
+				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.003"), edgeCommandExitError(28)
 			case strings.Contains(joined, "["+addresses["drift"]+"]"):
-				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.001"), errors.New("exit status 28")
+				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.001"), edgeCommandExitError(28)
 			default:
 				return "", errors.New("unexpected edge address")
 			}
@@ -183,10 +186,10 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 				return edgeHTTPFixture("200", "0", addresses["healthy"], "0.080000"), nil
 			case strings.Contains(joined, "["+addresses["rejected"]+"]"):
 				return "curl: (7) Failed to connect to api-v6.example port 443 after 73 ms: Couldn't connect to server\n" +
-					edgeHTTPFixture("000", "7", "", "0.073000"), errors.New("exit status 7")
+					edgeHTTPFixture("000", "7", "", "0.073000"), edgeCommandExitError(7)
 			case strings.Contains(joined, "["+addresses["dead_first"]+"]"):
 				return "curl: (7) Failed to connect to api-v6.example port 443 after 37 ms: Couldn't connect to server\n" +
-					edgeHTTPFixture("000", "7", "", "0.037000"), errors.New("exit status 7")
+					edgeHTTPFixture("000", "7", "", "0.037000"), edgeCommandExitError(7)
 			default:
 				return "", errors.New("unexpected synthetic edge address")
 			}
@@ -290,11 +293,15 @@ func TestEdgeIPv6SignalSyntheticUnknownLBAdmissionDoesNotBecomeReset(t *testing.
 			ProbeHostname: "api-v6.example",
 		},
 		http: map[string]string{
-			"monitor_http_code":  "000",
-			"monitor_exitcode":   "7",
-			"monitor_remote_ip":  "",
-			"monitor_time_total": "0.050000",
+			"monitor_http_code":     "000",
+			"monitor_exitcode":      "7",
+			"monitor_remote_ip":     "",
+			"monitor_time_total":    "0.050000",
+			"monitor_content_type":  "",
+			"monitor_size_download": "0",
 		},
+		httpOutput: edgeHTTPFixture("000", "7", "", "0.050000"),
+		httpErr:    edgeCommandExitError(7),
 		identity: map[string]string{
 			"configured_present": "1",
 			"operstate":          "up",
@@ -346,7 +353,7 @@ func TestEdgeIPv6SignalSyntheticObserverNoRouteDoesNotPageEveryEdge(t *testing.T
 				return "", errors.New("unexpected local command")
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
-				edgeHTTPFixture("000", "7", "", "0.000106"), errors.New("exit status 7")
+				edgeHTTPFixture("000", "7", "", "0.000106"), edgeCommandExitError(7)
 		},
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			switch {
@@ -433,7 +440,7 @@ func TestEdgeIPv6SignalSyntheticObserverRoutePreservesRealReset(t *testing.T) {
 				return "route to: 2001:db8:ffff::1\ninterface: synthetic0\n", nil
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
-				edgeHTTPFixture("000", "7", "", "0.000072"), errors.New("exit status 7")
+				edgeHTTPFixture("000", "7", "", "0.000072"), edgeCommandExitError(7)
 		},
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			if strings.Contains(command, edgeIPv6IdentityMarker) {
@@ -469,7 +476,7 @@ func TestEdgeIPv6SignalSyntheticUnobservableRouteStaysPerTargetUnknown(t *testin
 				return "synthetic private route diagnostic", errors.New("synthetic route command failure")
 			}
 			return "curl: (7) Failed to connect to api-v6.example port 443 after 0 ms: Couldn't connect to server\n" +
-				edgeHTTPFixture("000", "7", "", "0.000081"), errors.New("exit status 7")
+				edgeHTTPFixture("000", "7", "", "0.000081"), edgeCommandExitError(7)
 		},
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			if strings.Contains(command, edgeIPv6IdentityMarker) {
@@ -512,7 +519,7 @@ func TestEdgeIPv6SignalSyntheticUnobservableRouteStaysPerTargetUnknown(t *testin
 func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 	base := edgeIPv6Result{
 		configured: EdgeIPv6InterfaceSettings{Interface: "public0", Address: "2001:db8::1"},
-		http:       map[string]string{"monitor_exitcode": "28", "monitor_time_total": "3.001"},
+		http:       map[string]string{"monitor_http_code": "000", "monitor_exitcode": "28", "monitor_time_total": "3.001"},
 		httpOutput: "curl: (28) Timeout was reached",
 		identity:   map[string]string{"configured_present": "1"},
 		egress: map[string]string{
@@ -550,18 +557,31 @@ func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 			result.http["monitor_time_total"] = "0.080"
 			result.http["monitor_http_code"] = "503"
 		}},
+		{name: "HTTP200 partial response timeout", want: "edge-ipv6-http", edit: func(result *edgeIPv6Result) {
+			result.http["monitor_http_code"] = "200"
+		}},
+		{name: "non200 partial response timeout with route mismatch", want: "edge-ipv6-http", edit: func(result *edgeIPv6Result) {
+			result.http["monitor_http_code"] = "503"
+			result.egress["route_device"] = "management0"
+			result.egress["route_source"] = "2001:db8:ffff::1"
+		}},
+		{name: "non200 partial response timeout without source proof", want: "edge-ipv6-http", edit: func(result *edgeIPv6Result) {
+			result.http["monitor_http_code"] = "503"
+			result.egress["self_http_code"] = "000"
+		}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			result := base
-			result.http = cloneStringMap(base.http)
-			result.egress = cloneStringMap(base.egress)
-			test.edit(&result)
-			class, _, _ := classifyEdgeIPv6Failure(result)
-			if class != test.want {
-				t.Fatalf("class = %q, want %q", class, test.want)
-			}
-		})
+		result := base
+		result.http = cloneStringMap(base.http)
+		result.egress = cloneStringMap(base.egress)
+		test.edit(&result)
+		class, mechanism, _ := classifyEdgeIPv6Failure(result)
+		if class != test.want {
+			t.Errorf("%s: class = %q, want %q", test.name, class, test.want)
+		}
+		if result.http["monitor_http_code"] != "000" && (strings.Contains(mechanism, "external ingress") || strings.Contains(mechanism, "silently timed out") || strings.Contains(mechanism, "policy routes/rules")) {
+			t.Errorf("%s: observed HTTP response was attributed to initial TCP/TLS or ingress failure", test.name)
+		}
 	}
 }
 
@@ -577,5 +597,313 @@ func edgeHTTPFixture(code, exitCode, remoteIP, total string) string {
 	return "monitor_http_code=" + code + "\n" +
 		"monitor_exitcode=" + exitCode + "\n" +
 		"monitor_remote_ip=" + remoteIP + "\n" +
+		"monitor_content_type=\n" +
+		"monitor_size_download=0\n" +
 		"monitor_time_total=" + total + "\n"
+}
+
+func TestEdgeIPv6SignalInvalidNativeObservationsRemainUnknown(t *testing.T) {
+	valid := edgeHTTPFixture("200", "0", "2001:db8::41", "0.080")
+	refusal := edgeHTTPFixture("000", "7", "", "0.041")
+	cases := []struct {
+		name   string
+		output string
+		err    error
+	}{
+		{name: "missing curl", err: &exec.Error{Name: "curl", Err: exec.ErrNotFound}},
+		{name: "empty success"},
+		{name: "transport observation error", err: errors.New("synthetic private transport detail")},
+		{name: "two-key forged healthy", output: "monitor_http_code=200\nmonitor_exitcode=0\n"},
+		{name: "missing field", output: strings.Replace(valid, "monitor_remote_ip=2001:db8::41\n", "", 1)},
+		{name: "duplicate field", output: valid + "monitor_exitcode=0\n"},
+		{name: "extra native field", output: valid + "monitor_unrecognized=synthetic-private-value\n"},
+		{name: "malformed field", output: strings.Replace(valid, "monitor_time_total=0.080", "monitor_time_total", 1)},
+		{name: "wrong remote peer", output: strings.Replace(valid, "2001:db8::41", "2001:db8::42", 1)},
+		{name: "missing connected peer", output: strings.Replace(valid, "2001:db8::41", "", 1)},
+		{name: "invalid status range", output: strings.Replace(valid, "monitor_http_code=200", "monitor_http_code=999", 1)},
+		{name: "invalid exit", output: strings.Replace(valid, "monitor_exitcode=0", "monitor_exitcode=invalid", 1)},
+		{name: "inconsistent zero status", output: strings.Replace(valid, "monitor_http_code=200", "monitor_http_code=000", 1)},
+		{name: "inconsistent process error", output: valid, err: errors.New("synthetic private transport detail")},
+		{name: "refusal missing process error", output: refusal},
+		{name: "signed HTTP code", output: strings.Replace(refusal, "monitor_http_code=000", "monitor_http_code=-00", 1), err: edgeCommandExitError(7)},
+		{name: "plus-signed HTTP zero", output: strings.Replace(refusal, "monitor_http_code=000", "monitor_http_code=+00", 1), err: edgeCommandExitError(7)},
+		{name: "mismatched process status", output: refusal, err: edgeCommandExitError(28)},
+		{name: "complete metadata with transport error", output: refusal, err: errors.New("synthetic private transport detail")},
+		{name: "forged exit-status transport error", output: refusal, err: errors.New("exit status 7")},
+		{name: "HTTP200 incompatible refusal", output: edgeHTTPFixture("200", "7", "2001:db8::41", "0.041"), err: edgeCommandExitError(7)},
+		{name: "HTTP503 incompatible refusal", output: edgeHTTPFixture("503", "7", "2001:db8::41", "0.041"), err: edgeCommandExitError(7)},
+		{name: "HTTP200 incompatible TLS failure", output: edgeHTTPFixture("200", "60", "2001:db8::41", "0.080"), err: edgeCommandExitError(60)},
+		{name: "HTTP503 incompatible TLS failure", output: edgeHTTPFixture("503", "60", "2001:db8::41", "0.080"), err: edgeCommandExitError(60)},
+		{name: "NaN duration", output: strings.Replace(valid, "monitor_time_total=0.080", "monitor_time_total=NaN", 1)},
+		{name: "infinite duration", output: strings.Replace(valid, "monitor_time_total=0.080", "monitor_time_total=+Inf", 1)},
+		{name: "negative duration", output: strings.Replace(valid, "monitor_time_total=0.080", "monitor_time_total=-0.080", 1)},
+		{name: "NaN size", output: strings.Replace(valid, "monitor_size_download=0", "monitor_size_download=NaN", 1)},
+		{name: "negative size", output: strings.Replace(valid, "monitor_size_download=0", "monitor_size_download=-1", 1)},
+	}
+	for _, test := range cases {
+		settings := edgeObservationSettings(test.output, test.err, "operstate=up\nconfigured_present=1\nunit_active=active\n", nil)
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if len(alerts) != 1 || alerts[0].Class != "cannot-observe" || alerts[0].Severity != SeverityWarn {
+			t.Errorf("%s: incomplete native observation produced %d alerts instead of one visibility warning", test.name, len(alerts))
+			continue
+		}
+		if alerts[0].SignalNumber != "18.1" || alerts[0].SignalKey != "edge-ipv6" || !strings.Contains(alerts[0].Markdown(), "SIGNALS.md §18.1") {
+			t.Errorf("%s: native observation warning lost owning signal/playbook", test.name)
+		}
+		requireAlertOmits(t, alerts[0], "synthetic-private-value", "synthetic private transport detail")
+	}
+}
+
+func TestEdgeIPv6SignalCompleteNativeResultsPreserveFailures(t *testing.T) {
+	cases := []struct {
+		name     string
+		http     string
+		exit     int
+		peer     string
+		duration string
+		want     string
+	}{
+		{name: "healthy", http: "200", peer: "2001:db8::41", duration: "0.080"},
+		{name: "equivalent expanded IPv6 peer", http: "200", peer: "2001:0db8:0000:0000:0000:0000:0000:0041", duration: "0.080"},
+		{name: "real refusal", http: "000", exit: 7, duration: "0.041", want: "edge-ipv6-reset"},
+		{name: "real timeout", http: "000", exit: 28, duration: "3.001", want: "edge-ipv6-upstream-drop"},
+		{name: "HTTP200 partial response timeout", http: "200", exit: 28, peer: "2001:db8::41", duration: "3.001", want: "edge-ipv6-http"},
+		{name: "HTTP503 partial response timeout", http: "503", exit: 28, peer: "2001:db8::41", duration: "3.001", want: "edge-ipv6-http"},
+		{name: "real TLS failure", http: "000", exit: 60, peer: "2001:db8::41", duration: "0.080", want: "edge-ipv6-http"},
+		{name: "observed HTTP non200", http: "503", peer: "2001:db8::41", duration: "0.080", want: "edge-ipv6-http"},
+	}
+	for _, test := range cases {
+		settings := edgeObservationSettings(edgeHTTPFixture(test.http, strconv.Itoa(test.exit), test.peer, test.duration), edgeCommandExitError(test.exit), "operstate=up\nconfigured_present=1\nunit_active=active\n", nil)
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if test.want == "" {
+			if len(alerts) != 0 {
+				t.Errorf("%s: complete healthy edge emitted %d alerts", test.name, len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 || alerts[0].Class != test.want || alerts[0].Severity != SeverityPage || alerts[0].Sustain != 2 {
+			t.Errorf("%s: genuine native failure lost its existing class/severity", test.name)
+			continue
+		}
+		if test.http != "000" && (strings.Contains(alerts[0].Mechanism, "external ingress") || strings.Contains(alerts[0].Mechanism, "silently timed out") || strings.Contains(alerts[0].Mechanism, "policy routes/rules")) {
+			t.Errorf("%s: observed HTTP response was attributed to initial TCP/TLS or ingress failure", test.name)
+		}
+		if test.http == "000" && test.want == "edge-ipv6-http" && strings.Contains(alerts[0].Mechanism, "exact address connected") {
+			t.Errorf("%s: request failure falsely proves a connection", test.name)
+		}
+	}
+}
+
+func TestEdgeIPv6IdentityGeneratedCommandDistinguishesObservationFailure(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	awk, err := exec.LookPath("awk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		want string
+	}{
+		{name: "healthy"},
+		{name: "address-absent", want: "edge-ipv6-identity-drift"},
+		{name: "link-down", want: "edge-ipv6-identity-drift"},
+		{name: "unit-inactive", want: "edge-ipv6-identity-drift"},
+		{name: "cat-missing", want: "cannot-observe"},
+		{name: "ip-missing", want: "cannot-observe"},
+		{name: "systemctl-missing", want: "cannot-observe"},
+		{name: "cat-interrupted", want: "cannot-observe"},
+		{name: "ip-interrupted", want: "cannot-observe"},
+		{name: "systemctl-interrupted", want: "cannot-observe"},
+		{name: "malformed-ip", want: "cannot-observe"},
+		{name: "malformed-state", want: "cannot-observe"},
+	}
+	for _, test := range cases {
+		prefix := "scenario=" + shellSingleQuote(test.name) + `
+cat() {
+ case "$scenario" in cat-interrupted) return 143;; link-down) printf 'down\n';; malformed-state) printf 'invalid-state\n';; *) printf 'up\n';; esac
+}
+ip() {
+ case "$scenario" in
+  ip-interrupted) return 143;;
+  address-absent) return 0;;
+  malformed-ip) printf 'synthetic invalid row\n';;
+  *) printf '2: synthetic-if-a inet6 2001:db8::41/64 scope global\n';;
+ esac
+}
+systemctl() {
+ case "$scenario" in systemctl-interrupted) return 143;; unit-inactive) printf 'inactive\n'; return 3;; *) printf 'active\n';; esac
+}
+timeout() { shift; "$@"; }
+` + "awk() { " + shellSingleQuote(awk) + " \"$@\"; }\n" + `
+case "$scenario" in cat-missing) unset -f cat;; ip-missing) unset -f ip;; systemctl-missing) unset -f systemctl;; esac
+`
+		configured := EdgeIPv6InterfaceSettings{Interface: "synthetic-if-a", Address: "2001:db8::41", ProbeHostname: "api-v6.example.test"}
+		command := exec.Command(bash, "-c", prefix+edgeIPv6IdentityCommand(configured))
+		command.Env = append(os.Environ(), "PATH="+t.TempDir())
+		output, commandErr := command.CombinedOutput()
+		settings := edgeObservationSettings(edgeHTTPFixture("200", "0", configured.Address, "0.080"), nil, string(output), commandErr)
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if test.want == "" {
+			if len(alerts) != 0 {
+				t.Errorf("%s: observed healthy identity produced %d alerts", test.name, len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 || alerts[0].Class != test.want {
+			t.Errorf("%s: actual identity command converted observation failure into the wrong finding", test.name)
+		}
+	}
+}
+
+func TestEdgeIPv6InvalidDurationCannotDefineCommonMode(t *testing.T) {
+	for _, duration := range []string{"NaN", "+Inf", "-Inf", "-0.1", "", "invalid"} {
+		output := edgeHTTPFixture("000", "7", "", duration)
+		result := edgeIPv6Result{
+			host: &host{name: "synthetic-edge.example.test"}, configured: EdgeIPv6InterfaceSettings{Interface: "synthetic-if-a", Address: "2001:db8::41"},
+			http: parseKeyValueLines(output), httpOutput: output, httpErr: edgeCommandExitError(7),
+			identity: map[string]string{"operstate": "up", "configured_present": "1", "unit_active": "active"},
+			egress: map[string]string{
+				"self_probe_status": "7", "self_exitcode": "7", "self_http_code": "000", "self_time_total": duration,
+				"route_status": "0", "route_device": "synthetic-if-a", "route_source": "2001:db8::41", "source_egress_status": "0", "source_egress": "2001:db8::41",
+			},
+		}
+		if edgeIPv6AllImmediateConnectFailures([]edgeIPv6Result{result}) || edgeIPv6AdmissionCandidate(result) {
+			t.Errorf("%q: unobserved/invalid duration defined common mode or admission cause", duration)
+		}
+		findings := edgeIPv6Findings(result, false, false)
+		if len(findings) != 1 || findings[0].class != "cannot-observe" || findings[0].healthy {
+			t.Errorf("%q: invalid duration produced outage/health instead of visibility", duration)
+		}
+	}
+}
+
+func TestEdgeIPv6InvalidSelfDurationCannotProveAdmission(t *testing.T) {
+	output := edgeHTTPFixture("000", "7", "", "0.041")
+	result := edgeIPv6Result{
+		http: parseKeyValueLines(output), httpOutput: output, httpErr: edgeCommandExitError(7),
+		configured: EdgeIPv6InterfaceSettings{Interface: "synthetic-if-a", Address: "2001:db8::41"},
+		identity:   map[string]string{"operstate": "up", "configured_present": "1", "unit_active": "active"},
+		egress: map[string]string{
+			"self_probe_status": "7", "self_exitcode": "7", "self_http_code": "000", "self_time_total": "0.041",
+			"route_status": "0", "route_device": "synthetic-if-a", "route_source": "2001:db8::41", "source_egress_status": "0", "source_egress": "2001:db8::41",
+		},
+	}
+	if !edgeIPv6AdmissionCandidate(result) {
+		t.Fatal("complete valid refusal lost its admission-candidate control")
+	}
+	for _, duration := range []string{"NaN", "+Inf", "-Inf", "-0.1", "", "invalid"} {
+		result.egress["self_time_total"] = duration
+		if edgeIPv6AdmissionCandidate(result) {
+			t.Errorf("%q: unobserved self duration proved admission causality", duration)
+		}
+	}
+}
+
+func TestEdgeIPv6SignalPreCanceledContextMakesNoSourceCalls(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int32
+	source := &syntheticSource{
+		localFn: func(string, ...string) (string, error) { calls.Add(1); return "", ctx.Err() },
+		hostFn:  func(HostSettings, string) (string, error) { calls.Add(1); return "", ctx.Err() },
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "synthetic-edge.example.test", EdgeIPv6: []EdgeIPv6InterfaceSettings{{Interface: "synthetic-if-a", Address: "2001:db8::41", ProbeHostname: "api-v6.example.test"}}}}
+	alerts, err := NewEdgeIPv6Signal().Run(ctx, settings)
+	if !errors.Is(err, context.Canceled) || len(alerts) != 0 || calls.Load() != 0 {
+		t.Fatalf("parent cancellation manufactured findings or source work: canceled=%t alerts=%d calls=%d", errors.Is(err, context.Canceled), len(alerts), calls.Load())
+	}
+}
+
+func TestEdgeIPv6SignalInFlightCancellationCannotFabricateFindings(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var hostCalls atomic.Int32
+	source := &syntheticSource{
+		localFn: func(name string, _ ...string) (string, error) {
+			if name == "/sbin/route" {
+				return "interface: synthetic0\n", nil
+			}
+			close(started)
+			<-release
+			return "", ctx.Err()
+		},
+		hostFn: func(HostSettings, string) (string, error) { hostCalls.Add(1); return "", ctx.Err() },
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "synthetic-edge.example.test", EdgeIPv6: []EdgeIPv6InterfaceSettings{{Interface: "synthetic-if-a", Address: "2001:db8::41", ProbeHostname: "api-v6.example.test"}}}}
+	type signalResult struct {
+		alerts Alerts
+		err    error
+	}
+	result := make(chan signalResult, 1)
+	go func() {
+		alerts, err := NewEdgeIPv6Signal().Run(ctx, settings)
+		result <- signalResult{alerts: alerts, err: err}
+	}()
+	<-started
+	cancel()
+	close(release)
+	observed := <-result
+	if !errors.Is(observed.err, context.Canceled) || len(observed.alerts) != 0 || hostCalls.Load() != 0 {
+		t.Fatalf("in-flight parent cancellation fabricated findings/work: canceled=%t alerts=%d host_calls=%d", errors.Is(observed.err, context.Canceled), len(observed.alerts), hostCalls.Load())
+	}
+}
+
+func TestEdgeIPv6SignalChildDeadlinePreservesIndependentIdentity(t *testing.T) {
+	settings := edgeObservationSettings("", context.DeadlineExceeded, "operstate=up\nconfigured_present=0\nunit_active=active\n", nil)
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal("child timeout replaced the live parent's result")
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("child timeout lost independent evidence or fabricated an HTTP outage: alerts=%d", len(alerts))
+	}
+	requireAlertClass(t, alerts, "edge-ipv6-identity-drift")
+	requireAlertClass(t, alerts, "cannot-observe")
+}
+
+// edgeObservationSettings isolates every transport behind fixed synthetic
+// results while retaining the normal Signal adapter and public observation.
+func edgeObservationSettings(output string, commandErr error, identity string, identityErr error) SignalSettings {
+	source := &syntheticSource{
+		localFn: func(name string, _ ...string) (string, error) {
+			if name == "/sbin/route" {
+				return "interface: synthetic0\n", nil
+			}
+			return output, commandErr
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, edgeIPv6IdentityMarker) {
+				return identity, identityErr
+			}
+			return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\nself_time_total=0.080\nroute_device=synthetic-if-a\nroute_source=2001:db8::41\nroute_status=0\nsource_egress=2001:db8::41\nsource_egress_status=0\n", nil
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "synthetic-edge.example.test", EdgeIPv6: []EdgeIPv6InterfaceSettings{{Interface: "synthetic-if-a", Address: "2001:db8::41", ProbeHostname: "api-v6.example.test"}}}}
+	return settings
+}
+
+// edgeCommandExitError carries the real local process exit semantics without
+// launching curl or contacting any configured endpoint.
+func edgeCommandExitError(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return exec.Command("/bin/sh", "-c", "exit "+strconv.Itoa(code)).Run()
 }
