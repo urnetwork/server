@@ -61,6 +61,24 @@
       }
     }
   },
+  "significance": {
+    "method": "one-sided-welch-t",
+    "alpha": 0.05,
+    "replicate_count": 1,
+    "baseline_mean_raw_score": 100,
+    "candidate_mean_raw_score": 99,
+    "baseline_sample_variance": null,
+    "candidate_sample_variance": null,
+    "observed_improvement_percent": 1,
+    "takeover_margin_percent": 1,
+    "minimum_significant_improvement_percent": null,
+    "required_improvement_percent": null,
+    "one_sided_p_value": null,
+    "statistically_significant": false,
+    "next_epoch_minimum_improvement_percent": null,
+    "recommended_next_epoch_takeover_margin_percent": null,
+    "recommended_next_epoch_takeover_margin_supported": false
+  },
   "diagnostics": {
     "round_id": "boundary-fixture",
     "replicate_count": 1,
@@ -90,7 +108,7 @@
     "replicates": [
       {
         "evaluation_id": "",
-        "raw_score": 0,
+        "raw_score": 99,
         "success_rate": 0,
         "request_count": 0,
         "received_bytes": 0,
