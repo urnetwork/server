@@ -348,7 +348,7 @@ func (self *hostScopeRunner) reduceFindings(settings SignalSettings, findings []
 				}
 			}
 		}
-		if excludedTarget || blockedCount != 0 && !allowedTarget && observed.probeId != "monitor/visibility" {
+		if excludedTarget || blockedCount != 0 && !allowedTarget && (observed.probeId != "monitor/visibility" || observed.healthy) {
 			continue
 		}
 		result = append(result, observed)
@@ -386,13 +386,17 @@ func hostScopeOnlyError(err error) bool {
 // Operational partial coverage never pages because the pause persists.
 // Policy values, commands, and endpoint identities stay out of Alert fields.
 func hostScopeCoverageFinding(settings SignalSettings, blockedCount int) finding {
+	excludedHostNames := map[string]bool{}
+	for _, name := range settings.ExcludedHosts {
+		excludedHostNames[name] = true
+	}
 	return finding{
 		probeId: "monitor/host-scope", tier: tierWarn,
 		class: "monitor-host-scope-partial", target: "monitor-host-scope", sustain: 1,
 		symptom:   "Some inventory-target host observations are intentionally excluded by this monitor's immutable policy.",
 		mechanism: "Desired inventory remains complete, but excluded named-host and exact inventory-owned transport operations are denied before their source is contacted. Their direct state is unknown, not failed workload or missing placement.",
 		baseline:  "Required inventory-target observations are enabled, or every explicit operational pause has an owner and re-enable condition.",
-		observed:  fmt.Sprintf("configured_hosts=%d excluded_hosts=%d blocked_hosts=%d desired_topology_unchanged=true service_stream_scope=whole-environment", len(settings.Hosts), len(settings.ExcludedHosts), blockedCount),
+		observed:  fmt.Sprintf("configured_hosts=%d excluded_hosts=%d blocked_hosts=%d desired_topology_unchanged=true service_stream_scope=whole-environment", len(settings.Hosts), len(excludedHostNames), blockedCount),
 		evidence:  "Only coverage counts and fixed status are retained; selector values, endpoints, commands, resource contents, credentials, and value-derived fingerprints are not rendered.",
 		context:   "Permitted per-host evidence and whole-environment service streams remain available. Excluded-target recovery and mixed/global placement, capacity, or fleet-health conclusions requiring a denied input are withheld.",
 		action:    "Record the operator reason, owner, UTC start, and re-enable condition in the run ledger. Preserve complete topology and expected denominators; do not remove a selector merely to quiet this operational warning.",

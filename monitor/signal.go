@@ -50,10 +50,10 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 		ctx = context.WithValue(ctx, hostScopeContextKey{}, scoped)
 	}
 	findings, err := s.probe.check(ctx, env)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
 	if scoped, ok := env.runner.(*hostScopeRunner); ok {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if hostScopeOnlyError(err) {
 			err = nil
 		}

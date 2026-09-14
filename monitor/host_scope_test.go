@@ -112,6 +112,25 @@ func TestExcludeHostsDeduplicatesWithoutMutatingSettings(t *testing.T) {
 	}
 }
 
+// Manually constructed reusable settings may contain repeated exact policy
+// names; visibility reports unique hosts without mutating that caller input.
+func TestHostScopeDirectSettingsDeduplicatesCoverageWithoutMutation(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.Hosts = []HostSettings{{Name: "excluded.example.test"}}
+	settings.ExcludedHosts = []string{"excluded.example.test", "excluded.example.test"}
+	before := append([]string(nil), settings.ExcludedHosts...)
+	alerts, err := NewSettingsFreshnessSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 1 || alerts[0].Class != "monitor-host-scope-partial" {
+		t.Fatalf("manual repeated policy was not observed: alerts=%d err=%v", len(alerts), err)
+	}
+	if !strings.Contains(alerts[0].Observed, "configured_hosts=1 excluded_hosts=1 blocked_hosts=0") {
+		t.Fatal("repeated selectors overstated the excluded-host count")
+	}
+	if !reflect.DeepEqual(settings.ExcludedHosts, before) {
+		t.Fatal("coverage reporting mutated manual settings")
+	}
+}
+
 // Exercise every host-bearing seam through the actual environment wrapper;
 // numeric family variants and curl overrides must not invoke the source.
 func TestHostScopeBlocksAllInventoryTargetSeams(t *testing.T) {
@@ -244,6 +263,59 @@ func TestHostScopeSharedEndpointIsUnknownNotPermitted(t *testing.T) {
 	}
 }
 
+// A per-host proxy advertisement is owned inventory, but the Subtensor
+// reference RPC is external observational input, not a local node endpoint.
+func TestHostScopePreservesExternalReferenceEndpoints(t *testing.T) {
+	calls := 0
+	settings := syntheticSettings(&syntheticSource{
+		localFn: func(string, ...string) (string, error) { calls++; return "synthetic", nil },
+		tcpFn:   func(string, string, []byte, int) ([]byte, error) { calls++; return nil, nil },
+		hostFn:  func(HostSettings, string) (string, error) { calls++; return "synthetic", nil },
+	})
+	settings.Hosts = []HostSettings{{
+		Name: "excluded.example.test", LANAddress: "192.0.2.1",
+		Proxy:     &ProxyHostSettings{PublicHostname: "proxy.example.test"},
+		Subtensor: &SubtensorHostSettings{PublicRPCURL: "https://reference.example.test/rpc"},
+	}}
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := newProbeEnv(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), hostScopeContextKey{}, env.runner.(*hostScopeRunner))
+	if _, err := env.runner.local(ctx, "curl", "https://reference.example.test/rpc"); err != nil {
+		t.Fatal("external reference was denied as host-owned")
+	}
+	if _, err := env.runner.tcpExchange(ctx, "tcp", "reference.example.test:443", nil, 0); err != nil {
+		t.Fatal("external reference transport was denied as host-owned")
+	}
+	client := &hostScopeGrafanaClient{doFn: func(*http.Request) (*http.Response, error) {
+		calls++
+		return grafanaFixtureResponse(http.StatusOK, "synthetic"), nil
+	}}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://reference.example.test/rpc", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := doScopedGrafanaRequest(client, request)
+	if err != nil {
+		t.Fatal("external reference HTTP was denied as host-owned")
+	}
+	_ = response.Body.Close()
+	if calls != 3 {
+		t.Fatalf("external reference control did not contact the synthetic seams: %d", calls)
+	}
+	if _, err := env.runner.local(ctx, "curl", "--proxy", "proxy.example.test:8080", "https://reference.example.test/rpc"); !hostScopeOnlyError(err) || calls != 3 {
+		t.Fatal("per-host proxy advertisement escaped host scope")
+	}
+	if _, err := env.runner.shell(ctx, env.cfg.hosts[0], "synthetic-local-node-query"); !hostScopeOnlyError(err) || calls != 3 {
+		t.Fatal("external reference control bypassed the named local-node policy")
+	}
+}
+
 // Synthetic probe control forces incomplete global findings, rather than
 // relying on one current parser's incidental error/healthy behavior.
 type hostScopeSyntheticProbe struct {
@@ -277,17 +349,19 @@ func TestHostScopeReducerWithholdsIncompleteFleetConclusions(t *testing.T) {
 		{probeId: "synthetic/placement", class: "synthetic-placement", target: "fleet"},
 		{probeId: "synthetic/capacity", class: "synthetic-capacity", target: "fleet"},
 		healthyFinding("synthetic/health", tierWarn, "synthetic-fleet-health", "fleet"),
+		healthyFinding("monitor/visibility", tierWarn, "synthetic-fleet-visibility-health", "fleet"),
+		{probeId: "monitor/visibility", class: "synthetic-fleet-unobservable", target: "fleet"},
 		{probeId: "synthetic/issue", class: "synthetic-owned-issue", target: "allowed.example.test/process"},
 		healthyFinding("synthetic/health", tierWarn, "synthetic-owned-health", "allowed.example.test:443"),
 		{probeId: "synthetic/issue", class: "synthetic-excluded-issue", target: "excluded.example.test/process"},
 		healthyFinding("synthetic/health", tierWarn, "synthetic-excluded-health", "excluded.example.test:443"),
 	}
 	reduced := env.runner.(*hostScopeRunner).reduceFindings(settings, observed)
-	if len(reduced) != 3 {
-		t.Fatalf("scope reducer produced %d findings, want two permitted and partial coverage", len(reduced))
+	if len(reduced) != 4 {
+		t.Fatalf("scope reducer produced %d findings, want two permitted, unknown visibility, and partial coverage", len(reduced))
 	}
 	for _, finding := range reduced {
-		if finding.class != "synthetic-owned-issue" && finding.class != "synthetic-owned-health" && finding.class != "monitor-host-scope-partial" {
+		if finding.class != "synthetic-owned-issue" && finding.class != "synthetic-owned-health" && finding.class != "synthetic-fleet-unobservable" && finding.class != "monitor-host-scope-partial" {
 			t.Fatalf("incomplete/excluded finding escaped: %s", finding.class)
 		}
 	}
@@ -646,6 +720,37 @@ func TestHostScopeOwnedGrafanaClientPreservesAllowedRedirectsAndBound(t *testing
 	}
 }
 
+// Cancellation is lifecycle, not intentional observation exclusion. The
+// redirect callback must not record a new denied host after parent shutdown.
+func TestHostScopeOwnedRedirectCancellationDoesNotRecordDenial(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.Hosts = []HostSettings{{Name: "excluded.example.test", LANAddress: "192.0.2.1"}}
+	settings, err := ExcludeHosts(settings, "excluded.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := newProbeEnv(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped := env.runner.(*hostScopeRunner)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), hostScopeContextKey{}, scoped))
+	cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://192.0.2.1/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkGrafanaObservationRedirect(request, nil); !errors.Is(err, context.Canceled) || hostScopeOnlyError(err) {
+		t.Fatalf("canceled redirect became scope denial: %v", err)
+	}
+	scoped.stateLock.Lock()
+	blocked := len(scoped.blockedHostNames)
+	scoped.stateLock.Unlock()
+	if blocked != 0 {
+		t.Fatal("canceled redirect recorded excluded observation")
+	}
+}
+
 // Curl accepts scheme-less numeric URLs and proxy endpoints. These supported
 // forms must not escape an inventory-target policy before the local seam.
 func TestHostScopeCurlNumericArgumentForms(t *testing.T) {
@@ -679,6 +784,46 @@ func TestHostScopeCurlNumericArgumentForms(t *testing.T) {
 	}
 	if _, err := env.runner.local(context.Background(), "curl", "--proxy", "192.0.2.2:8080", "198.51.100.2/status"); err != nil || calls != 1 {
 		t.Fatalf("permitted numeric curl endpoint changed: calls=%d err=%v", calls, err)
+	}
+}
+
+// An opt-in transport policy must not alter existing no-policy local readers.
+// Cancellation can intentionally skip a delayed phase while retaining the
+// completed immediate evaluation, as the PG and coverage controls require.
+func TestHostScopePreservesNoPolicyCanceledLocalEvaluation(t *testing.T) {
+	evaluations := 0
+	probe := hostScopeSyntheticProbe{checkFn: func(ctx context.Context, env *probeEnv) ([]finding, error) {
+		evaluations++
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatal("local control did not receive the canceled context")
+		}
+		if _, scoped := env.runner.(*hostScopeRunner); scoped {
+			t.Fatal("no-policy local control acquired a host-scope runner")
+		}
+		return []finding{{probeId: "synthetic/local", tier: tierWarn, class: "synthetic-local-unavailable", target: "synthetic-local"}}, nil
+	}}
+	adapter := &signalAdapter{number: "1.6", key: "synthetic-local", name: "Synthetic local reader", probe: probe}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	alerts, err := adapter.Run(ctx, syntheticSettings(&syntheticSource{}))
+	if err != nil || evaluations != 1 || len(alerts) != 1 || alerts[0].Class != "synthetic-local-unavailable" {
+		t.Fatalf("no-policy local result was discarded: evaluations=%d alerts=%d err=%v", evaluations, len(alerts), err)
+	}
+}
+
+// Without the opt-in policy, preserve the probe's own error authority rather
+// than replacing a completed probe error with its parent cancellation state.
+func TestHostScopePreservesNoPolicyProbeErrorOnCanceledContext(t *testing.T) {
+	syntheticError := errors.New("synthetic-local-evaluation-error")
+	probe := hostScopeSyntheticProbe{checkFn: func(context.Context, *probeEnv) ([]finding, error) {
+		return nil, syntheticError
+	}}
+	adapter := &signalAdapter{number: "1.6", key: "synthetic-local", name: "Synthetic local reader", probe: probe}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	alerts, err := adapter.Run(ctx, syntheticSettings(&syntheticSource{}))
+	if !errors.Is(err, syntheticError) || len(alerts) != 0 {
+		t.Fatalf("no-policy probe error authority changed: alerts=%d err=%v", len(alerts), err)
 	}
 }
 

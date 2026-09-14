@@ -1999,6 +1999,10 @@ observation lost coverage. Their cross-cutting `monitor-host-scope-partial`
 class and `monitor/host-scope` ID link here; the settings-freshness probe also
 emits the process-wide policy warning under §1.6.
 
+Scope ownership comes from inventory-owned destinations, not external chain
+reference RPCs. Owned Grafana clients also guard redirected requests; injected
+clients are guarded at the submitted-request boundary without being mutated.
+
 Record the pause's operator reason, owner, start time, and re-enable condition
 in the run ledger. Restore coverage only after that condition is met and a
 current-settings validation plus controlled promotion succeeds. Neither a
