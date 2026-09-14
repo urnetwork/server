@@ -14,6 +14,7 @@ import (
 
 const (
 	proxyTransportFreshness              = 90 * time.Second
+	proxyTransportMimirEndpoint          = "http://127.0.0.1:3100/prometheus/api/v1/query"
 	proxyTransportSourceSuffix           = "__source_timestamp"
 	proxyTransportPerDeviceCount         = 16
 	proxyTransportMinimumBudgetPerDevice = float64(3 * 1024 * 1024)
@@ -127,6 +128,55 @@ func proxyTransportQuery(environment string) string {
 // Selects the newest process before checking scrape coherence and private
 // budget invariants; sampled preemptions require separate causal verification.
 func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	expectedHosts := []string{}
+	for _, target := range env.cfg.hosts {
+		if target.proxy != nil {
+			expectedHosts = append(expectedHosts, target.name)
+		}
+	}
+	sort.Strings(expectedHosts)
+	if env.cfg.proxyPathExpectedHosts > 0 && len(expectedHosts) != env.cfg.proxyPathExpectedHosts {
+		return []finding{{
+			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
+			class: "proxy-transport-unobservable", target: "proxy-fleet", frame: "active-inventory", sustain: 1,
+			symptom:   "The monitor host inventory does not contain every active Proxy placement",
+			mechanism: "The active services.yml placement count is authoritative, but fewer or additional monitor hosts are armed for Proxy telemetry. Building a denominator from that incomplete join could hide an entirely missing Proxy host behind healthy siblings.",
+			baseline:  "The services.yml Proxy placement count exactly matches the monitor hosts carrying derived Proxy settings.",
+			observed:  fmt.Sprintf("expected_proxy_hosts=%d armed_proxy_hosts=%d", env.cfg.proxyPathExpectedHosts, len(expectedHosts)),
+			evidence:  "Expected count and armed host settings are derived independently from the same active services.yml version before any Mimir identity is considered.",
+			context:   "This is an inventory visibility failure, not zero carrier pressure and not evidence that any missing Proxy process is healthy.",
+			action:    "Restore every active Proxy placement to the monitor host inventory and reload settings. Do not infer fleet health from the observable subset.",
+			verify:    "The authoritative and armed Proxy host counts match, then every expected host/block pair has one newest complete scrape for two cadences.",
+			playbook:  "SIGNALS.md §14.6",
+		}}, nil
+	}
+	if len(expectedHosts) == 0 {
+		return []finding{healthyFinding("runtime/proxy-transport-budget", tierWarn, "proxy-transport-admission-pending", "proxy-fleet")}, nil
+	}
+	expectedBlocks := append([]string(nil), env.cfg.logServiceBlocks["proxy"]...)
+	sort.Strings(expectedBlocks)
+	if len(expectedBlocks) == 0 {
+		return []finding{{
+			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
+			class: "proxy-transport-unobservable", target: "proxy-fleet", frame: "active-inventory", sustain: 1,
+			symptom:   "Active Proxy hosts have no authoritative service-block denominator for carrier telemetry",
+			mechanism: "The carrier query can evaluate only observed series. Without the active services.yml Proxy block set, a missing process could be mistaken for an empty healthy fleet.",
+			baseline:  "The active inventory supplies at least one Proxy block for every configured Proxy host.",
+			observed:  fmt.Sprintf("expected_proxy_hosts=%d expected_proxy_blocks=0", len(expectedHosts)),
+			evidence:  "Expected hosts come from active Proxy placements; expected blocks come from the same active services.yml version used by standing service coverage.",
+			context:   "This is an inventory visibility failure, not zero carrier pressure and not evidence that a Proxy process is healthy.",
+			action:    "Restore the active Proxy block inventory in services.yml and reload the monitor settings. Do not infer health from whatever Mimir series happen to remain.",
+			verify:    "A fresh settings generation enumerates every expected Proxy host/block pair and each pair has one newest complete scrape for two cadences.",
+			playbook:  "SIGNALS.md §14.6",
+		}}, nil
+	}
+	expectedSlots := map[string]string{}
+	for _, host := range expectedHosts {
+		for _, block := range expectedBlocks {
+			expectedSlots[host+"\x00"+block] = host + "/" + block
+		}
+	}
+
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("proxy transport: no services host in inventory for the loopback Mimir query")
@@ -139,7 +189,7 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		metricHosts,
 		nil,
 		"curl -fsS --max-time 15 --data-urlencode "+shellSingleQuote("query="+query)+" "+
-			shellSingleQuote("http://127.0.0.1:3100/prometheus/api/v1/query"),
+			shellSingleQuote(proxyTransportMimirEndpoint),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("proxy transport: query Mimir through service gateways: %w", err)
@@ -198,13 +248,27 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		}
 	}
 
-	current, err := newestProxyTransportProcesses(processes)
+	expectedProcesses := map[string]*proxyTransportMetrics{}
+	for key, process := range processes {
+		if _, ok := expectedSlots[process.host+"\x00"+process.block]; ok {
+			expectedProcesses[key] = process
+		}
+	}
+	current, err := newestProxyTransportProcesses(expectedProcesses)
 	if err != nil {
 		return nil, err
 	}
-	if len(current) == 0 {
-		return nil, fmt.Errorf("proxy transport: Mimir returned no actual-scrape-fresh proxy process samples")
+	observedSlots := map[string]bool{}
+	for _, process := range current {
+		observedSlots[process.host+"\x00"+process.block] = true
 	}
+	missingExpected := []string{}
+	for slot, label := range expectedSlots {
+		if !observedSlots[slot] {
+			missingExpected = append(missingExpected, label)
+		}
+	}
+	sort.Strings(missingExpected)
 	sort.Slice(current, func(i, j int) bool {
 		return proxyTransportLabel(current[i]) < proxyTransportLabel(current[j])
 	})
@@ -255,18 +319,18 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 
 	findings := []finding{}
-	if len(missing) > 0 {
+	if len(missingExpected) > 0 || len(missing) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
 			class: "proxy-transport-unobservable", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
-			symptom:   fmt.Sprintf("%d of %d newest fresh proxy identities lack the complete carrier-budget metric set", len(missing), len(current)),
-			mechanism: "The process itself is scrape-fresh, but one or more identity-free carrier gauges or counters are absent on that exact generation. Missing pending, slot-full, or same-device preemption telemetry is unknown admission state; it must not be interpreted as zero pressure or as proof that the connect#211 loop is absent.",
-			baseline:  "Every newest actual-scrape-fresh Proxy identity exports CPU, device count, target bytes, carrier byte/count budget and use, pending H1 count/bytes, slot-full pending-device count, the process-monotonic H3-preemption counter, and its same-device slot-full subset.",
-			observed:  fmt.Sprintf("current_proxy_identities=%d missing_identities=%d missing=%s metrics_gateway=%s", len(current), len(missing), strings.Join(missing, ";"), metricHost.name),
-			evidence:  fmt.Sprintf("Each family is source-timestamp filtered to at most %.0f seconds old before exact host/block/instance selection; process start chooses the newest generation.", proxyTransportFreshness.Seconds()),
+			symptom:   fmt.Sprintf("%d of %d expected Proxy host/block identities are absent or lack the complete carrier-budget metric set", len(missingExpected)+len(missing), len(expectedSlots)),
+			mechanism: "An expected active host/block has no fresh process series, or its newest process lacks one or more identity-free carrier gauges or counters. Missing process, pending, slot-full, or same-device preemption telemetry is unknown admission state; it must not be interpreted as zero pressure or as proof that the connect#211 loop is absent.",
+			baseline:  "Every active services.yml Proxy host/block pair has one newest actual-scrape-fresh process exporting CPU, device count, target bytes, carrier byte/count budget and use, pending H1 count/bytes, slot-full pending-device count, the process-monotonic H3-preemption counter, and its same-device slot-full subset.",
+			observed:  fmt.Sprintf("expected_proxy_identities=%d current_proxy_identities=%d absent_identities=%d absent=%s incomplete_identities=%d incomplete=%s metrics_gateway=%s", len(expectedSlots), len(current), len(missingExpected), strings.Join(missingExpected, ","), len(missing), strings.Join(missing, ";"), metricHost.name),
+			evidence:  fmt.Sprintf("The denominator is the active Proxy host/block cross-product. Each observed family is source-timestamp filtered to at most %.0f seconds old before exact host/block/instance selection; process start chooses the newest generation.", proxyTransportFreshness.Seconds()),
 			context:   "This is an observability/deployment gap, not carrier starvation and not host-memory exhaustion. §14.7 remains the hardware and host reserve owner.",
-			action:    "Deploy the identity-free Proxy carrier telemetry through the ordinary host-serialized rollout. Preserve the current process and inspect its bounded logs while the metrics are unavailable; do not restart or enlarge a budget to manufacture a green sample.",
-			verify:    "Every newest Proxy identity exports the complete metric set on two consecutive coherent scrapes, including a rateable H3-preemption counter after the two-minute range warms.",
+			action:    "For an absent expected identity, restore its intended deployment and scrape path; for an incomplete identity, deploy the identity-free Proxy carrier telemetry through the ordinary host-serialized rollout. Preserve current processes and bounded logs while metrics are unavailable; do not restart or enlarge a budget to manufacture a green sample.",
+			verify:    "Every expected Proxy host/block pair has one newest process exporting the complete metric set on two consecutive coherent scrapes, including a rateable H3-preemption counter after the two-minute range warms.",
 			playbook:  "SIGNALS.md §14.6",
 		})
 	}

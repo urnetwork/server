@@ -157,7 +157,7 @@ type monitorConfig struct {
 	websiteDomain          string              // canonical managed product website, when present
 	managerHostname        string              // configured manager alias, when exposed
 	logServices            []string            // active services.yml service inventory
-	logServiceBlocks       map[string][]string // active per-service block inventory
+	logServiceBlocks       map[string][]string // active blocks and expected-process denominators
 	proxyPathExpectedHosts int                 // active services.yml proxy placements
 	verificationEnabled    bool
 	stConfigStatus         STConfigurationStatus

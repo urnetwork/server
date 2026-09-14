@@ -348,10 +348,10 @@ type SignalSettings struct {
 	// standing log streams without querying the remote artifact registry.
 	// Alternate callers may leave it empty to use warpctl discovery.
 	LogServices []string
-	// LogServiceBlocks is the active services.yml block inventory used only
-	// when a service-wide Loki overlap reaches the bounded result cap. The
-	// tailer then repeats the same absolute window per block, preserving late
-	// ingestion coverage without raising the backend-wide query limit.
+	// LogServiceBlocks is the active services.yml block inventory. Probes use
+	// it for exact expected-process denominators, and a service-wide Loki
+	// overlap uses it for bounded per-block continuation when the result cap is
+	// reached.
 	LogServiceBlocks map[string][]string
 	// ProxyPathExpectedHosts is the active services.yml proxy-host count. It
 	// lets §14.5 distinguish an environment with no proxy service from a

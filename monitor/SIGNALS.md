@@ -9066,6 +9066,9 @@ Tier-1 (warn):
 | proxy-transport-budget-isolation | Mimir | §14.6 newest Proxy process aggregate DeviceLocal target, carrier byte budget, and carrier count | same-scrape mismatch from D private target-derived budgets and D*16 slots for 2 probes |
 | proxy-transport-admission-pending | Mimir | §14.6 pending H1 count/bytes plus slot-full DeviceLocal count | any pending H1 for 2 one-minute probes; correlate window readiness before changing capacity |
 | proxy-transport-preemption-churn | Mimir | §14.6 slot-full pending DeviceLocals plus two-minute H3-preemption and process-CPU rates | >= 0.1 preemptions/s and >= 0.5 CPU cores for 2 probes; software correctness, not hardware capacity |
+| proxy-transport-unobservable | active `services.yml` + Mimir | §14.6 expected Proxy host/block cross-product and complete newest-process family set | any expected identity absent or incomplete; immediate unknown, never healthy zero |
+| proxy-transport-snapshot-unobservable | Mimir | §14.6 producer timestamps for every required family on the newest Proxy process | any mixed-source scrape timestamp; immediate unknown, never compare cross-field invariants |
+| proxy-transport-metrics-invalid | Mimir | §14.6 same-scrape count, byte, pending, and live-device invariants | any impossible aggregate for 2 one-minute probes; diagnose exporter/accounting before capacity |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
@@ -15509,10 +15512,15 @@ sustained, compare `transports_used` with `transports_max` and verify both the
 24 MiB config and the per-device SDK build before blaming the provider fleet.
 
 The `proxy-transport` probe performs that identity-free aggregate check on the
-newest actual-scrape-fresh process generation. The exporter captures all device
-memory gauges and preemption counters together before emitting a scrape. The
-probe requires matching source timestamps, validates the per-device `16`-slot
-and target-derived byte scaling, and
+newest actual-scrape-fresh process generation. Its authoritative denominator is
+the cross-product of active Proxy host placements and active Proxy blocks from
+the same `services.yml` version. The derived monitor-host count must first match
+the authoritative placement count. An expected host/block with no fresh series
+is `proxy-transport-unobservable`, even when a sibling is complete and healthy;
+observed Mimir identities can never define their own denominator. The exporter
+captures all device memory gauges and preemption counters together before
+emitting a scrape. The probe requires matching source timestamps, validates the
+per-device `16`-slot and target-derived byte scaling, and
 separates:
 
 - `proxy-transport-budget-isolation`: the deployed aggregate does not scale as
@@ -15530,9 +15538,9 @@ separates:
   reacquired and repeated the loop. The deterministic 16-slot boundary is
   `urnetwork/connect#211` / Connect test commit `ab74d62`.
 - `proxy-transport-unobservable`, `proxy-transport-snapshot-unobservable`, and
-  `proxy-transport-metrics-invalid`: missing families, mixed remote-write
-  scrapes, and impossible aggregate accounting remain unknown rather than
-  green.
+  `proxy-transport-metrics-invalid`: absent expected host/block identities,
+  missing families, mixed remote-write scrapes, and impossible aggregate
+  accounting remain unknown rather than green.
 
 The churn class calls for software/transition diagnosis. Its sampled evidence
 does not establish a software bug or the hardware-backed active-client ceiling

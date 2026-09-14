@@ -4,6 +4,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -171,6 +172,57 @@ func TestProxyTransportSignalSyntheticMissingTelemetryIsUnknown(t *testing.T) {
 	}
 }
 
+// Refuses to infer fleet health from a healthy sibling when an expected block
+// has no fresh process series at all.
+func TestProxyTransportSignalSyntheticMissingExpectedBlockIsUnknown(t *testing.T) {
+	now := time.Date(2026, 9, 13, 18, 4, 30, 0, time.UTC)
+	process := healthyProxyTransportFixture(now)
+
+	alerts := runProxyTransportFixture(
+		t,
+		now,
+		proxyTransportFixtureJson(t, process),
+		"lane-a",
+		"lane-b",
+	)
+	alert := requireAlertClass(t, alerts, "proxy-transport-unobservable")
+	for _, want := range []string{
+		"1 of 2 expected Proxy host/block identities",
+		"expected_proxy_identities=2",
+		"absent_identities=1",
+		"proxy-node.invalid/lane-b",
+		"must not be interpreted as zero pressure",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("missing-identity alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+// Refuses to build the expected-process denominator from a partial monitor
+// host join when active services.yml has another Proxy placement.
+func TestProxyTransportSignalSyntheticMissingExpectedHostIsUnknown(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	configureProxyTransportFixture(&settings, []string{"lane-a"})
+	settings.ProxyPathExpectedHosts = 2
+
+	alerts, err := NewProxyTransportSignal().Run(t.Context(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "proxy-transport-unobservable")
+	for _, want := range []string{
+		"does not contain every active Proxy placement",
+		"expected_proxy_hosts=2",
+		"armed_proxy_hosts=1",
+		"hide an entirely missing Proxy host",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("missing-host alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
 // Classifies mixed producer timestamps before comparing budget equations.
 func TestProxyTransportSignalSyntheticMixedScrapeIsUnknown(t *testing.T) {
 	now := time.Date(2026, 9, 13, 18, 5, 0, 0, time.UTC)
@@ -245,7 +297,7 @@ func TestProxyTransportSignalQuotesApostropheEnvironment(t *testing.T) {
 		want := []string{
 			"-fsS", "--max-time", "15", "--data-urlencode",
 			"query=" + proxyTransportQuery(environment),
-			"http://127.0.0.1:3100/prometheus/api/v1/query",
+			proxyTransportMimirEndpoint,
 		}
 		if !slices.Equal(got, want) {
 			return "", fmt.Errorf("query arguments = %q, want %q", got, want)
@@ -255,6 +307,7 @@ func TestProxyTransportSignalQuotesApostropheEnvironment(t *testing.T) {
 	settings := syntheticSettings(source)
 	settings.Environment = environment
 	settings.Now = func() time.Time { return now }
+	configureProxyTransportFixture(&settings, []string{"lane-a"})
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.example", Roles: []string{"services"}})
 	alerts, err := NewProxyTransportSignal().Run(t.Context(), settings)
 	if err != nil {
@@ -262,6 +315,21 @@ func TestProxyTransportSignalQuotesApostropheEnvironment(t *testing.T) {
 	}
 	if len(alerts) != 0 {
 		t.Fatalf("healthy quoted environment alerted: %+v", alerts)
+	}
+}
+
+// Propagates cancellation instead of translating an interrupted Mimir query
+// into a healthy or provider-pressure observation.
+func TestProxyTransportSignalSyntheticCancellation(t *testing.T) {
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return "", context.Canceled
+	}}
+	settings := syntheticSettings(source)
+	configureProxyTransportFixture(&settings, []string{"lane-a"})
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.invalid", Roles: []string{"services"}})
+	_, err := NewProxyTransportSignal().Run(t.Context(), settings)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v, want context.Canceled", err)
 	}
 }
 
@@ -293,7 +361,7 @@ func healthyProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
 }
 
 // Supplies the generated query with a synthetic metrics gateway response.
-func runProxyTransportFixture(t testing.TB, now time.Time, payload string) Alerts {
+func runProxyTransportFixture(t testing.TB, now time.Time, payload string, expectedBlocks ...string) Alerts {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "metrics.invalid" ||
@@ -310,12 +378,30 @@ func runProxyTransportFixture(t testing.TB, now time.Time, payload string) Alert
 	settings := syntheticSettings(source)
 	settings.Environment = "synthetic"
 	settings.Now = func() time.Time { return now }
+	if len(expectedBlocks) == 0 {
+		expectedBlocks = []string{"lane-a"}
+	}
+	configureProxyTransportFixture(&settings, expectedBlocks)
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics.invalid", Roles: []string{"services"}})
 	alerts, err := NewProxyTransportSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return alerts
+}
+
+// Arms the exact active Proxy host/block denominator without embedding any
+// production identity in synthetic tests.
+func configureProxyTransportFixture(settings *SignalSettings, expectedBlocks []string) {
+	settings.LogServices = []string{"proxy"}
+	settings.LogServiceBlocks = map[string][]string{
+		"proxy": append([]string(nil), expectedBlocks...),
+	}
+	settings.ProxyPathExpectedHosts = 1
+	settings.Hosts = append(settings.Hosts, HostSettings{
+		Name:  "proxy-node.invalid",
+		Proxy: &ProxyHostSettings{},
+	})
 }
 
 // Encodes independent values and producer timestamps as an instant vector.
