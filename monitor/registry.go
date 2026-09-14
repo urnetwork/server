@@ -105,6 +105,7 @@ func NewSignals() []Signal {
 		NewProxyPathSignal(),
 		NewProxyMemorySignal(),
 		NewProxyPoolSignal(),
+		NewProxyTransportSignal(),
 		NewProxyRuntimeSignal(),
 		NewProxyCacheSignal(),
 		NewKeyPublicationSignal(),

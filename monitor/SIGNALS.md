@@ -213,7 +213,7 @@ active missing capability and must not be read as green.
 | 14.2 | Shared contract | `proxy-runtime`, `proxy-memory`, `rollout-guard`, `log-errors` |
 | 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
 | 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
-| 14.6 | Shared contract | `log-errors`, `proxy-pool`, `proxy-runtime` |
+| 14.6 | Probe | `proxy-transport` plus `log-errors`, `proxy-pool`, `proxy-runtime` controls |
 | 15.2 | Shared contract | `key-publication`, `log-errors` |
 | 15.3 | Shared contract | `key-publication`, `log-errors` |
 | 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
@@ -4571,7 +4571,7 @@ schedule a duplicate task, or restart clients to manufacture recovery.
 
 This is a **software root cause**, not a hardware-capacity alert. Proxy memory
 and active-client ceilings remain the separate hardware/operations boundary in
-§16.8 and §16.9.
+§14.7.
 
 Implementation convention: SIGNALS.md §2.15 (`reliability-drift`) maps to
 `signal_reliability_drift.go` and `signal_reliability_drift_test.go`.
@@ -4642,7 +4642,7 @@ consecutive probes with zero mature orphans, a later location-reliability pass
 that removes former orphan supply, the §2.9 provider-eligibility completion
 marker, and recovery in open-set size, destination diversity, and child churn.
 This fix needs no hardware. It does not change the separate proxy active-client
-ceiling or the hardware/operations capacity guidance in §16.8 and §16.9.
+ceiling or the hardware/operations capacity guidance in §14.7.
 
 Implementation convention: SIGNALS.md §2.16 (`connection-orphans`) maps to
 `signal_connection_orphans.go` and
@@ -9063,6 +9063,9 @@ Tier-1 (warn):
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
 | netescrow-mirror-write | standing logs | `[netescrow]mirror write failed after` | any warns; never blindly replay the non-idempotent mutation |
+| proxy-transport-budget-isolation | Mimir | §14.6 newest Proxy process aggregate DeviceLocal target, carrier byte budget, and carrier count | same-scrape mismatch from D private target-derived budgets and D*16 slots for 2 probes |
+| proxy-transport-admission-pending | Mimir | §14.6 pending H1 count/bytes plus slot-full DeviceLocal count | any pending H1 for 2 one-minute probes; correlate window readiness before changing capacity |
+| proxy-transport-preemption-churn | Mimir | §14.6 slot-full pending DeviceLocals plus two-minute H3-preemption and process-CPU rates | >= 0.1 preemptions/s and >= 0.5 CPU cores for 2 probes; software correctness, not hardware capacity |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
@@ -15186,6 +15189,7 @@ router permit destinations with the live interface during every address or
 NIC migration. Edge-5 remains operator-declared offline and excluded.
 
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
+Probe: `proxy-transport`
 
 **False post-deploy verification against a stale proxy artifact:** do not use
 an operator rollout statement, an `Up` container, or the configured desired
@@ -15478,6 +15482,21 @@ identity-free metrics:
   signature. A short nonzero value can be normal during an overlapping
   replacement; sustained pending H1 together with a locally full budget and an
   unsatisfied window is not.
+- `urnetwork_proxy_platform_transport_slot_full_pending_h1_devices`: how many
+  private DeviceLocal budgets have a waiting H1 while all sixteen carrier slots
+  are occupied. It supplies the local-full discriminator that aggregate
+  `used/max` values cannot retain without exporting customer identity.
+- `urnetwork_proxy_platform_transport_h3_preemptions_total`: a
+  process-monotonic counter assembled from private DeviceLocal lifetime
+  counters. `urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total`
+  is the sampled subset whose increment and slot-full pending state came from
+  the same DeviceLocal observation. Its two-minute rate distinguishes a stable
+  pending capacity condition from repeated H1/H3 yield-and-reacquire churn
+  without cross-joining two unrelated hosted devices. A device created and
+  removed entirely between samples can make this subset undercount; a positive
+  rate remains affirmative. The first observation of a new or reset device is
+  excluded from the subset because its historical preemptions cannot be joined
+  safely to the current slot-full state.
 - `urnetwork_proxy_device_memory_tracked_used_bytes` is live budget-accounted
   use, not RSS; allocator/runtime and bounded NAT endpoint memory remain outside
   that tracked sum.
@@ -15487,6 +15506,34 @@ retry logs. If pending remains zero while the window repeatedly enumerates and
 evaluates candidates, investigate provider reachability/auth. If pending is
 sustained, compare `transports_used` with `transports_max` and verify both the
 24 MiB config and the per-device SDK build before blaming the provider fleet.
+
+The `proxy-transport` probe performs that identity-free aggregate check on the
+newest actual-scrape-fresh process generation. It requires one coherent source
+scrape, validates the per-device `16`-slot and target-derived byte scaling, and
+separates:
+
+- `proxy-transport-budget-isolation`: the deployed aggregate does not scale as
+  independently owned per-device budgets. This is software correctness, not a
+  hardware-capacity diagnosis.
+- `proxy-transport-admission-pending`: H1 admission stays pending for two
+  one-minute probes, but a preemption loop is not proved. Correlate window
+  readiness and transport policy before changing a cap.
+- `proxy-transport-preemption-churn`: slot-full pending devices coexist for two
+  probes with at least 0.1 H3 preemptions/second and 0.5 process CPU cores.
+  Before Connect `f10a173`, an H1 with both byte and slot deficits could
+  preempt a slotless Auto-H3 that could resolve only the bytes; H3 immediately
+  reacquired and repeated the loop. The deterministic 16-slot boundary is
+  `urnetwork/connect#211` / Connect test commit `ab74d62`.
+- `proxy-transport-unobservable`, `proxy-transport-snapshot-unobservable`, and
+  `proxy-transport-metrics-invalid`: missing families, mixed remote-write
+  scrapes, and impossible aggregate accounting remain unknown rather than
+  green.
+
+The churn class is a software bug. Do not classify it as the hardware-backed
+active-client ceiling in §14.7 or prescribe more proxy hosts. Conversely, a
+corrected build with isolated budgets and no preemption churn can still reach
+the separately configured fleet client ceiling; only §14.7's measured host
+reserve and capacity contract can justify an operational/hardware response.
 
 **Hosted-device recreation loop:** repeated
 `[pd][<same-proxy-id>]window identity restore` lines without a proxy deploy are
