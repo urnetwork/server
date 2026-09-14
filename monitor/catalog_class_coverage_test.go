@@ -111,7 +111,7 @@ func collectFixedAlertClassLiterals(parsed ast.Node, source string, classes map[
 			return true
 		}
 		name, ok := field.Key.(*ast.Ident)
-		if !ok || name.Name != "class" {
+		if !ok || (name.Name != "class" && name.Name != "Class") {
 			return true
 		}
 		literal, ok := field.Value.(*ast.BasicLit)
