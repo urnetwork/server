@@ -737,7 +737,7 @@ func NewProxyDevice(
 	// The manager creates one ProxyDevice per client and closes it on disconnect.
 	// Each Tun owns a private gVisor stack that Close() destroys, so a disconnecting
 	// client fully reclaims its connections' endpoints. TCP buffers come from these
-	// settings (up to 1MB per connection).
+	// settings (auto-tuned up to 4MiB per direction per connection).
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
 
@@ -746,7 +746,8 @@ func NewProxyDevice(
 	// backlogged. There is one stack PER CLIENT here and one endpoint per
 	// connection/flow, so a buffer is multiplied by clients x endpoints.
 	//
-	// TCP keeps the full default (1MiB max per direction). tcp throughput is bounded
+	// TCP keeps the full default (4MiB max per direction, 1MiB default; connect
+	// cd87ea5 raised the max from 1MiB on 2026-08-04). tcp throughput is bounded
 	// by window/RTT, so capping the window directly caps a single connection's
 	// speed: at 128kib it would be ~10 Mbps on a 100ms path, ~21 Mbps on 50ms. That
 	// is a user-visible performance cost, and it is not worth the memory. A
