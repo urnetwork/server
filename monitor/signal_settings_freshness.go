@@ -32,7 +32,7 @@ func (s *settingsFreshnessSignal) Run(ctx context.Context, settings SignalSettin
 	}
 	scopeAlerts := Alerts{}
 	if len(settings.ExcludedHosts) != 0 {
-		scopeAlerts = append(scopeAlerts, hostScopeCoverageAlert(settings, hostScopeCoverageFinding(settings, 0)))
+		scopeAlerts = append(scopeAlerts, alertFromFinding(settings, s.Number(), s.Key(), s.Name(), hostScopeCoverageFinding(settings, 0)))
 	}
 	if settings.SettingsGenerationCheck == nil {
 		// Manually assembled and embedded SignalSettings predate this optional

@@ -590,8 +590,8 @@ func TestHostScopeAdapterRetainsDeniedGrafanaRedirectCoverage(t *testing.T) {
 	}
 	requireAlertClass(t, alerts, "monitor-host-scope-partial")
 	for _, alert := range alerts {
-		if alert.Class == "monitor-host-scope-partial" && (alert.SignalNumber != "1.6" || alert.SignalKey != "settings-freshness" || alert.PageSustain != 0) {
-			t.Fatal("coverage lost its canonical operational identity")
+		if alert.Class == "monitor-host-scope-partial" && (alert.SignalNumber != "11.15" || alert.SignalKey != "grafana-datasources" || alert.PageSustain != 0) {
+			t.Fatal("coverage lost its originating probe or operational severity")
 		}
 		requireAlertOmits(t, alert, "192.0.2.1", "front.example.test", "synthetic-secret-query", "synthetic-admin-credential")
 	}

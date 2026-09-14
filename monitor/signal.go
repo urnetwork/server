@@ -67,10 +67,6 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 		if finding.healthy || (s.accept != nil && finding.class != "monitor-host-scope-partial" && !s.accept(finding)) {
 			continue
 		}
-		if finding.class == "monitor-host-scope-partial" {
-			alerts = append(alerts, hostScopeCoverageAlert(settings, finding))
-			continue
-		}
 		alerts = append(alerts, alertFromFinding(settings, s.number, s.key, s.name, finding))
 	}
 	return alerts, nil

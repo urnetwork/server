@@ -96,9 +96,6 @@ func newHostScopeRunner(transport probeRunner, cfg *monitorConfig, names []strin
 		if configured.proxy != nil {
 			endpoints = append(endpoints, configured.proxy.PublicHostname)
 		}
-		if configured.subtensor != nil {
-			endpoints = append(endpoints, configured.subtensor.PublicRPCURL)
-		}
 		for _, endpoint := range endpoints {
 			if normalized := normalizeHostScopeEndpoint(endpoint); normalized != "" {
 				self.endpointHostNames[normalized] = append(self.endpointHostNames[normalized], configured.name)
@@ -402,10 +399,4 @@ func hostScopeCoverageFinding(settings SignalSettings, blockedCount int) finding
 		verify:    "After the re-enable condition is met, validate current settings with the same CLI overrides and promote a newly built watcher. Require concrete restored-target observations; partial coverage or non-emission cannot establish full-fleet recovery.",
 		playbook:  "SIGNALS.md §1.6 and RUN-MAIN.md whole-host pause and Safe watcher promotion",
 	}
-}
-
-// One fixed §1.6 operational identity covers every denied-input path, rather
-// than opening a different host-scope ticket for each originating probe.
-func hostScopeCoverageAlert(settings SignalSettings, observed finding) Alert {
-	return alertFromFinding(settings, "1.6", "settings-freshness", "Monitor inventory-target host observation scope", observed)
 }
