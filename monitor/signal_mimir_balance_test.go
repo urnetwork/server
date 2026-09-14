@@ -252,9 +252,10 @@ func TestMimirBalanceParserFailsClosedOnCounterReset(t *testing.T) {
 		runMimirBalanceSynthetic(t, signal, stateDir, start.Add(time.Minute), frames),
 		"cannot-observe",
 	)
-	if !strings.Contains(alert.Markdown(), "monotonic distributor counter decreased") {
+	if !strings.Contains(alert.Markdown(), "error_class="+observationErrorClassCounterReset) {
 		t.Fatalf("counter reset cause was lost: %s", alert.Markdown())
 	}
+	requireAlertOmits(t, alert, "monotonic distributor counter decreased")
 }
 
 func TestMimirBalanceScriptReducesMetricsAndSocketPeers(t *testing.T) {

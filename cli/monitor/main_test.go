@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -10,6 +11,64 @@ import (
 
 	servermonitor "github.com/urnetwork/server/monitor"
 )
+
+func TestEffectiveSettingsGenerationReappliesCLIOverridesAndExclusions(t *testing.T) {
+	current := servermonitor.SignalSettings{
+		Environment:  "synthetic",
+		PublicDomain: "service.example.test",
+		AddressMode:  servermonitor.AddressModeOverlay,
+		SSHKeyPaths:  []string{"testdata/default-key"},
+		Hosts: []servermonitor.HostSettings{{
+			Name:     "edge-a.example.test",
+			EdgeIPv6: []servermonitor.EdgeIPv6InterfaceSettings{{Interface: "public-a"}},
+		}},
+	}
+	load := func() (servermonitor.SignalSettings, error) { return current, nil }
+	opts := monitorOptions{
+		mode:                  string(servermonitor.AddressModeLAN),
+		keys:                  stringFlags{"testdata/key-one", "testdata/key-two"},
+		excludedEdgeIPv6Hosts: stringFlags{"edge-a.example.test"},
+	}
+	loadEffective := func() (servermonitor.SignalSettings, error) {
+		settings, err := load()
+		if err != nil {
+			return servermonitor.SignalSettings{}, err
+		}
+		return applyMonitorSettingsOptions(settings, opts)
+	}
+	startup, err := loadEffective()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := servermonitor.NewSettingsGenerationCheck(loadEffective)
+	startup.SettingsGenerationCheck = check
+
+	matched, err := check(context.Background(), startup)
+	if err != nil || !matched {
+		t.Fatalf("unchanged settings with CLI overrides matched=%t err=%v", matched, err)
+	}
+	if startup.AddressMode != servermonitor.AddressModeLAN ||
+		!reflect.DeepEqual(startup.SSHKeyPaths, []string{"testdata/key-one", "testdata/key-two"}) ||
+		len(startup.Hosts[0].EdgeIPv6) != 0 {
+		t.Fatalf("CLI overrides not applied exactly: %+v", startup)
+	}
+
+	current.PublicDomain = "changed.example.test"
+	matched, err = check(context.Background(), startup)
+	if err != nil || matched {
+		t.Fatalf("underlying generation change matched=%t err=%v", matched, err)
+	}
+}
+
+func TestEffectiveSettingsGenerationRejectsUnknownExcludedHost(t *testing.T) {
+	_, err := applyMonitorSettingsOptions(
+		servermonitor.SignalSettings{Hosts: []servermonitor.HostSettings{{Name: "edge-a.example.test"}}},
+		monitorOptions{excludedEdgeIPv6Hosts: stringFlags{"edge-b.example.test"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "is not configured") {
+		t.Fatalf("unknown exclusion error = %v", err)
+	}
+}
 
 func TestRunListsSignalsWithoutLoadingSettings(t *testing.T) {
 	loadCalls := 0

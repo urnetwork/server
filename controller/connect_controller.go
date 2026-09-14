@@ -75,9 +75,9 @@ var missingOriginDetailsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "missing_origin_details_total",
-		Help:      "Missing companion-origin failures partitioned by bounded request resolution and endpoint lifecycle classes",
+		Help:      "Missing companion-origin failures partitioned by bounded server-derived source owner, sender lane, request resolution, and endpoint lifecycle classes",
 	},
-	[]string{"request_companion", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+	[]string{"request_companion", "sender_role", "source_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
 var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
@@ -244,6 +244,8 @@ func recordContractFailureResolved(
 	if cause == "missing_companion_origin" {
 		missingOriginDetailsCounter.WithLabelValues(
 			companionLabel,
+			contractSenderRoleLabel(resolution.senderRole),
+			contractSourceOwnerLabel(resolution.sourceOwner),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),

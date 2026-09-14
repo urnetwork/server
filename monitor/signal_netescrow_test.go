@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -106,6 +107,28 @@ func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 	if strings.Contains(alert.Markdown(), "Roll out the balance_id index and the page-local additive reconciler") {
 		t.Fatalf("overrun alert retained a stale unconditional rollout diagnosis: %s", alert.Markdown())
 	}
+}
+
+func TestNetEscrowSignalStatementProfileFailureDoesNotRenderDatabaseError(t *testing.T) {
+	hostile := "provider supplied task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa address=192.0.2.47 pointer=0xdeadbeef goroutine synthetic.Stack"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return nil, errors.New("decode failure: " + hostile)
+			}
+			return []Row{{"completed", "181", "30"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	if !strings.Contains(alert.Evidence, "PostgreSQL statement attribution was unavailable; error_class="+observationErrorClassInvalidResponse) {
+		t.Fatalf("statement-profile evidence lost its fixed database error class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, "provider supplied", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "192.0.2.47", "0xdeadbeef", "synthetic.Stack")
 }
 
 func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
@@ -357,6 +380,7 @@ func TestNetEscrowSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testi
 	taskID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	privateErrorID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	shortFailureTaskID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	hostileSuffix := "provider supplied address=192.0.2.45 pointer=0xdeadbeef goroutine synthetic.Stack"
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM pg_stat_statements") {
@@ -389,7 +413,7 @@ func TestNetEscrowSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testi
 					t.Fatalf("NetEscrow lifecycle query lost %q: %s", want, joined)
 				}
 			}
-			return "[synthetic-edge-a][taskworker][g1][cid:failed-attempt][I][2026-09-12T23:29:18.058109Z][task.go:1930][" + taskID + "]eval error(123.33s) (reschedule) synthetic/module/taskworker/work.ReconcileNetEscrow({}) = Timeout [" + privateErrorID + "]\n" +
+			return "[synthetic-edge-a][taskworker][g1][cid:failed-attempt][I][2026-09-12T23:29:18.058109Z][task.go:1930][" + taskID + "]eval error(123.33s) (reschedule) synthetic/module/taskworker/work.ReconcileNetEscrow({}) = wrapped evaluator {message=canceling statement due to statement timeout (SQLSTATE 57014) task=" + privateErrorID + " " + hostileSuffix + "}\n" +
 				"[synthetic-edge-b][taskworker][g2][cid:retry-attempt][I][2026-09-12T23:29:42.058109Z][task.go:1938][" + taskID + "]eval active(12.75s) synthetic/module/taskworker/work.ReconcileNetEscrow({})\n" +
 				"[synthetic-edge-c][taskworker][g1][cid:short-failure][I][2026-09-12T23:30:00.058109Z][task.go:1930][" + shortFailureTaskID + "]eval error(30.00s) (reschedule) synthetic/module/taskworker/work.ReconcileNetEscrow({}) = synthetic short failure", nil
 		},
@@ -405,7 +429,7 @@ func TestNetEscrowSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testi
 		"lookback_s=2700",
 		"lifecycle_log_source=warpctl",
 		"failed_attempt_correlated=true",
-		`failed_error="Timeout [<task-id>]"`,
+		`failed_error_class="postgres-statement-timeout"`,
 		"failed_at=2026-09-12T23:29:18.058109Z",
 		"failed_host=synthetic-edge-a",
 		"failed_generation=g1",
@@ -425,7 +449,19 @@ func TestNetEscrowSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testi
 			t.Fatalf("rescheduled timeout alert lost %q:\n%s", want, alert.Markdown())
 		}
 	}
-	requireAlertOmits(t, alert, taskID, privateErrorID, shortFailureTaskID, "synthetic short failure")
+	requireAlertOmits(t, alert, taskID, privateErrorID, shortFailureTaskID, "synthetic short failure", "192.0.2.45", "0xdeadbeef", "provider supplied", "synthetic.Stack", "SQLSTATE 57014")
+
+	firstIdentity := alert.Identity()
+	hostileSuffix = "different arbitrary provider text address=2001:db8::45 stack=synthetic.Other"
+	alerts, err = NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	if second.Identity() != firstIdentity {
+		t.Fatalf("raw evaluator error changed alert identity: %q != %q", second.Identity(), firstIdentity)
+	}
+	requireAlertOmits(t, second, "different arbitrary provider text", "2001:db8::45", "synthetic.Other")
 }
 
 func TestNetEscrowSignalExactCompletedRetryDoesNotEraseFailure(t *testing.T) {

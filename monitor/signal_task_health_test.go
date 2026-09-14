@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -73,4 +74,23 @@ func TestTaskHealthSignalAttributesExportStatsToKnownOverruns(t *testing.T) {
 			t.Fatalf("ExportStats attribution lost %q:\n%s", want, markdown)
 		}
 	}
+}
+
+func TestTaskHealthSignalExportStatsOverlapFailureDoesNotRenderDatabaseError(t *testing.T) {
+	hostile := "provider supplied task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa address=192.0.2.48 pointer=0xdeadbeef goroutine synthetic.Stack"
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "WITH latest_export AS") {
+			return nil, errors.New("decode failure: " + hostile)
+		}
+		return []Row{{"ExportStats", "187.0", "87.6", "1"}}, nil
+	}}
+	alerts, err := NewTaskHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-duration-regression")
+	if !strings.Contains(alert.Context, "ExportStats overlap attribution failed; error_class="+observationErrorClassInvalidResponse) {
+		t.Fatalf("ExportStats overlap evidence lost its fixed error class:\n%s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, "provider supplied", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "192.0.2.48", "0xdeadbeef", "synthetic.Stack")
 }

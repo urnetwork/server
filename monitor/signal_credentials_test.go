@@ -3,12 +3,39 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	server "github.com/urnetwork/server"
 )
+
+func TestCredentialsCatalogNamesEveryLiteralClassAndSummaryBoundary(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 8.7 Required credential")
+	end := strings.Index(catalog, "### 8.8 Source attribution")
+	if start < 0 || end <= start {
+		t.Fatal("credential catalog section boundaries are missing")
+	}
+	section := catalog[start:end]
+	for _, class := range []string{
+		"credential-resource-missing",
+		"credential-resource-malformed",
+		"credential-fields-missing",
+	} {
+		if !strings.Contains(section, "`"+class+"`") {
+			t.Errorf("SIGNALS.md §8.7 omits emitted class %q", class)
+		}
+		if !strings.Contains(catalog, "| "+class) && !strings.Contains(catalog, "/ "+class) {
+			t.Errorf("Tier summary omits emitted class %q", class)
+		}
+	}
+}
 
 func TestCredentialsSignalPagesOnRequiredMissingFieldsWithoutValues(t *testing.T) {
 	secretMarker := "synthetic-secret-must-not-render"

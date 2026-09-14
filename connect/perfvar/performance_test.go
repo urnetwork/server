@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,7 +151,23 @@ func combineRepeatedPerfvarLink(profile linkProfile, count int) linkProfile {
 // endpoint orientation is translated only at construction.
 func perfvarCalibrationProfile(scenario perfvarScenario) networkProfile {
 	profile := scenario.Profile
-	if scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy {
+	if fullTunRouteIsMixed(scenario.Route) && scenario.DeviceAccessProfile != nil {
+		// A mixed route is calibrated against its relay path: the exchange
+		// carrier is the throughput the direct lane must never pull below.
+		access := *scenario.DeviceAccessProfile
+		profile = access
+		profile.Forward = combinedExchangeLink(
+			access.Forward,
+			scenario.ProviderAccessProfile.Reverse,
+		)
+		profile.Reverse = combinedExchangeLink(
+			scenario.ProviderAccessProfile.Forward,
+			access.Reverse,
+		)
+		profile.SourceNote += "; mixed route calibrated on its exchange access and provider access segments"
+		return profile
+	}
+	if fullTunRouteForcesP2p(scenario.Route) {
 		if hopCount, ok := perfvarTopologyP2pHopCount(scenario.Topology); ok && 1 < hopCount {
 			profile.Forward = combineRepeatedPerfvarLink(profile.Forward, hopCount)
 			profile.Reverse = combineRepeatedPerfvarLink(profile.Reverse, hopCount)
@@ -1119,9 +1137,23 @@ func subtractP2pStats(
 			before.FastReceiveQueueDropCount,
 		FastReceiveQueueDropByteCount: after.FastReceiveQueueDropByteCount -
 			before.FastReceiveQueueDropByteCount,
-		FastFallbackCount: after.FastFallbackCount - before.FastFallbackCount,
-		FastDropCount:     after.FastDropCount - before.FastDropCount,
+		FastFallbackCount:           after.FastFallbackCount - before.FastFallbackCount,
+		FastDropCount:               after.FastDropCount - before.FastDropCount,
+		FastSendFragmentHistogram:   subtractP2pFragmentHistogram(before, after),
+		FastReassemblyEvictionCount: after.FastReassemblyEvictionCount - before.FastReassemblyEvictionCount,
 	}
+}
+
+// The histogram array type is owned by Connect; subtract bucket by bucket
+// without naming its length.
+func subtractP2pFragmentHistogram(
+	before clientconnect.P2pDataPlaneStatsSnapshot,
+	after clientconnect.P2pDataPlaneStatsSnapshot,
+) (result [len(clientconnect.P2pDataPlaneStatsSnapshot{}.FastSendFragmentHistogram)]uint64) {
+	for bucket := range result {
+		result[bucket] = after.FastSendFragmentHistogram[bucket] - before.FastSendFragmentHistogram[bucket]
+	}
+	return result
 }
 
 func subtractPlatformTransportReceiveStats(
@@ -1169,6 +1201,26 @@ type perfvarClientReceiveBoundary struct {
 	directAffinity clientconnect.DirectCarrierAffinityStats
 }
 
+// perfvarClientReceiveBoundaryEqual compares two boundaries field by field.
+// The receive snapshot carries per-transport ACK route maps, so the struct is
+// no longer comparable with ==; the generation pointer must still match.
+func perfvarClientReceiveBoundaryEqual(
+	before perfvarClientReceiveBoundary,
+	after perfvarClientReceiveBoundary,
+) bool {
+	// UnreliableCarrierLastAckAge is a clock read, not a counter: two quiet
+	// samples differ by the time between them, so it is excluded from the
+	// stability comparison and reported only as a lifetime value.
+	beforeRecovery := before.sendRecovery
+	afterRecovery := after.sendRecovery
+	beforeRecovery.UnreliableCarrierLastAckAge = 0
+	afterRecovery.UnreliableCarrierLastAckAge = 0
+	return before.client == after.client &&
+		reflect.DeepEqual(before.stats, after.stats) &&
+		reflect.DeepEqual(beforeRecovery, afterRecovery) &&
+		before.directAffinity == after.directAffinity
+}
+
 type perfvarDirectCarrierAffinityCounters struct {
 	PreferredH1WriteCount     uint64 `json:"preferred_h1_write_count"`
 	PreferredH3WriteCount     uint64 `json:"preferred_h3_write_count"`
@@ -1204,16 +1256,56 @@ type perfvarReceiveHandoffCounters struct {
 	PackHandoffDropCount     uint64 `json:"pack_handoff_drop_count"`
 	PackHandoffDropByteCount uint64 `json:"pack_handoff_drop_byte_count"`
 	AckHandoffDropCount      uint64 `json:"ack_handoff_drop_count"`
+	// ReceiveQueueDropCount is FLIGHTGATEFIX §34.2's drop: the receive queue
+	// held its whole budget and the arrival sat above everything in it, so
+	// nothing could be evicted to fit and the arrival was dropped
+	// unacknowledged. It is the discriminator between the receiver deadlock
+	// that reproduces in process and the lane rule's own proof-chain wedge
+	// (§33.9), so it is read by name and reads zero on arms that predate it.
+	ReceiveQueueDropCount     uint64 `json:"receive_queue_drop_count"`
+	ReceiveQueueDropByteCount uint64 `json:"receive_queue_drop_byte_count"`
+	// ACK route writes by the carrier the ACK worker actually used, with the
+	// accumulated route-write wait and the timeouts (FLIGHTGATEFIX M2).
+	AckRouteWriteCountByTransport   map[clientconnect.TransportType]uint64        `json:"ack_route_write_count_by_transport,omitempty"`
+	AckRouteWriteWaitByTransport    map[clientconnect.TransportType]time.Duration `json:"ack_route_write_wait_by_transport_nanoseconds,omitempty"`
+	AckRouteWriteTimeoutByTransport map[clientconnect.TransportType]uint64        `json:"ack_route_write_timeout_by_transport,omitempty"`
+}
+
+// perfvarSubtractTransportCounts returns end minus start per transport,
+// keeping every transport that appears in either map.
+func perfvarSubtractTransportCounts[T uint64 | time.Duration](
+	start map[clientconnect.TransportType]T,
+	end map[clientconnect.TransportType]T,
+) map[clientconnect.TransportType]T {
+	if len(start) == 0 && len(end) == 0 {
+		return nil
+	}
+	result := make(map[clientconnect.TransportType]T, len(end))
+	for transportType, value := range end {
+		result[transportType] = value - start[transportType]
+	}
+	for transportType, value := range start {
+		if _, ok := end[transportType]; !ok {
+			result[transportType] = -value
+		}
+	}
+	return result
 }
 
 type perfvarReceiveHandoffObservation struct {
-	Available                bool                          `json:"available"`
-	GenerationChanged        bool                          `json:"generation_changed"`
-	StartLifetime            perfvarReceiveHandoffCounters `json:"start_lifetime"`
-	EndLifetime              perfvarReceiveHandoffCounters `json:"end_lifetime"`
-	PackHandoffDropCount     uint64                        `json:"pack_handoff_drop_count"`
-	PackHandoffDropByteCount uint64                        `json:"pack_handoff_drop_byte_count"`
-	AckHandoffDropCount      uint64                        `json:"ack_handoff_drop_count"`
+	Available                 bool                          `json:"available"`
+	GenerationChanged         bool                          `json:"generation_changed"`
+	StartLifetime             perfvarReceiveHandoffCounters `json:"start_lifetime"`
+	EndLifetime               perfvarReceiveHandoffCounters `json:"end_lifetime"`
+	PackHandoffDropCount      uint64                        `json:"pack_handoff_drop_count"`
+	PackHandoffDropByteCount  uint64                        `json:"pack_handoff_drop_byte_count"`
+	AckHandoffDropCount       uint64                        `json:"ack_handoff_drop_count"`
+	ReceiveQueueDropCount     uint64                        `json:"receive_queue_drop_count"`
+	ReceiveQueueDropByteCount uint64                        `json:"receive_queue_drop_byte_count"`
+	// Interval deltas of the per-carrier ACK route writes.
+	AckRouteWriteCountByTransport   map[clientconnect.TransportType]uint64        `json:"ack_route_write_count_by_transport,omitempty"`
+	AckRouteWriteWaitByTransport    map[clientconnect.TransportType]time.Duration `json:"ack_route_write_wait_by_transport_nanoseconds,omitempty"`
+	AckRouteWriteTimeoutByTransport map[clientconnect.TransportType]uint64        `json:"ack_route_write_timeout_by_transport,omitempty"`
 }
 
 // Lifetime recovery counters include maxima so a generation replacement can
@@ -1245,6 +1337,23 @@ type perfvarSendRecoveryCounters struct {
 	UnreliableFlightMaximumLimitByteCount uint64        `json:"unreliable_flight_maximum_limit_byte_count"`
 	UnreliableFlightMaximumMessageCount   uint64        `json:"unreliable_flight_maximum_message_count"`
 	UnreliableFlightMaximumMessageLimit   uint64        `json:"unreliable_flight_maximum_message_limit"`
+	// FLIGHTGATEFIX attribution counters: waits on a full unreliable flight
+	// while a reliable route had channel capacity, gap recoveries acknowledged
+	// before their resend was written, RTO resends inside one scaled RTT of
+	// cumulative progress, and the age of the newest unreliable-carried ACK.
+	UnreliableFlightBlockedWithReliableCapacity uint64        `json:"unreliable_flight_blocked_with_reliable_capacity"`
+	UnreliableFlightGapReorderSuspected         uint64        `json:"unreliable_flight_gap_reorder_suspected"`
+	TimeoutResendWithRecentCumulativeProgress   uint64        `json:"timeout_resend_with_recent_cumulative_progress"`
+	UnreliableCarrierLastAckAge                 time.Duration `json:"unreliable_carrier_last_ack_age_nanoseconds"`
+	// TimeoutResendDeferCount exists only on revisions that carry the
+	// deferred retransmit; it is read by name so every arm builds.
+	TimeoutResendDeferCount uint64 `json:"timeout_resend_defer_count"`
+	// The relay-stall exports: the longest interval a sequence went without
+	// its cumulative acknowledgement advancing, and the round trip the resend
+	// timer actually read. Read by name; zero on revisions without them.
+	CumulativeAckGapMaxDuration time.Duration `json:"cumulative_ack_gap_max_nanoseconds"`
+	ResendTimerRttMaxDuration   time.Duration `json:"resend_timer_rtt_max_nanoseconds"`
+	ResendTimerRttMinDuration   time.Duration `json:"resend_timer_rtt_min_nanoseconds"`
 }
 
 type perfvarSendRecoveryObservation struct {
@@ -1271,6 +1380,11 @@ type perfvarSendRecoveryObservation struct {
 	UnreliableFlightGapCount            uint64                      `json:"unreliable_flight_gap_count"`
 	UnreliableFlightTimeoutCount        uint64                      `json:"unreliable_flight_timeout_count"`
 	UnreliableFlightReductionCount      uint64                      `json:"unreliable_flight_reduction_count"`
+	// Interval deltas of the FLIGHTGATEFIX attribution counters.
+	UnreliableFlightBlockedWithReliableCapacity uint64 `json:"unreliable_flight_blocked_with_reliable_capacity"`
+	UnreliableFlightGapReorderSuspected         uint64 `json:"unreliable_flight_gap_reorder_suspected"`
+	TimeoutResendWithRecentCumulativeProgress   uint64 `json:"timeout_resend_with_recent_cumulative_progress"`
+	TimeoutResendDeferCount                     uint64 `json:"timeout_resend_defer_count"`
 }
 
 // A carrier boundary snapshots every route-specific counter at one instant so
@@ -1602,9 +1716,14 @@ func subtractPerfvarClientReceive(
 ) perfvarReceiveHandoffObservation {
 	counters := func(snapshot clientconnect.ClientReceiveStatsSnapshot) perfvarReceiveHandoffCounters {
 		return perfvarReceiveHandoffCounters{
-			PackHandoffDropCount:     snapshot.PackHandoffDropCount,
-			PackHandoffDropByteCount: snapshot.PackHandoffDropByteCount,
-			AckHandoffDropCount:      snapshot.AckHandoffDropCount,
+			PackHandoffDropCount:            snapshot.PackHandoffDropCount,
+			PackHandoffDropByteCount:        snapshot.PackHandoffDropByteCount,
+			AckHandoffDropCount:             snapshot.AckHandoffDropCount,
+			ReceiveQueueDropCount:           perfvarUint64Field(&snapshot, "ReceiveQueueDropCount"),
+			ReceiveQueueDropByteCount:       perfvarUint64Field(&snapshot, "ReceiveQueueDropByteCount"),
+			AckRouteWriteCountByTransport:   snapshot.AckRouteWriteCountByTransport,
+			AckRouteWriteWaitByTransport:    snapshot.AckRouteWriteWaitByTransport,
+			AckRouteWriteTimeoutByTransport: snapshot.AckRouteWriteTimeoutByTransport,
 		}
 	}
 	observation := perfvarReceiveHandoffObservation{
@@ -1622,6 +1741,22 @@ func subtractPerfvarClientReceive(
 		before.stats.PackHandoffDropByteCount
 	observation.AckHandoffDropCount = after.stats.AckHandoffDropCount -
 		before.stats.AckHandoffDropCount
+	observation.ReceiveQueueDropCount = perfvarUint64Field(&after.stats, "ReceiveQueueDropCount") -
+		perfvarUint64Field(&before.stats, "ReceiveQueueDropCount")
+	observation.ReceiveQueueDropByteCount = perfvarUint64Field(&after.stats, "ReceiveQueueDropByteCount") -
+		perfvarUint64Field(&before.stats, "ReceiveQueueDropByteCount")
+	observation.AckRouteWriteCountByTransport = perfvarSubtractTransportCounts(
+		before.stats.AckRouteWriteCountByTransport,
+		after.stats.AckRouteWriteCountByTransport,
+	)
+	observation.AckRouteWriteWaitByTransport = perfvarSubtractTransportCounts(
+		before.stats.AckRouteWriteWaitByTransport,
+		after.stats.AckRouteWriteWaitByTransport,
+	)
+	observation.AckRouteWriteTimeoutByTransport = perfvarSubtractTransportCounts(
+		before.stats.AckRouteWriteTimeoutByTransport,
+		after.stats.AckRouteWriteTimeoutByTransport,
+	)
 	return observation
 }
 
@@ -1629,31 +1764,67 @@ func perfvarSendRecoveryCountersFor(
 	snapshot clientconnect.ClientSendRecoveryStatsSnapshot,
 ) perfvarSendRecoveryCounters {
 	return perfvarSendRecoveryCounters{
-		TimeoutResendWriteCount:               snapshot.TimeoutResendWriteCount,
-		CarrierChangeWriteCount:               snapshot.CarrierChangeWriteCount,
-		SelectiveGapWriteCount:                snapshot.SelectiveGapWriteCount,
-		AckTailProbeWriteCount:                snapshot.AckTailProbeWriteCount,
-		CumulativeProbeWriteCount:             snapshot.CumulativeProbeWriteCount,
-		RecoveryWriteErrorCount:               snapshot.RecoveryWriteErrorCount,
-		MissingContractWriteCount:             snapshot.MissingContractWriteCount,
-		MissingContractRequestCount:           snapshot.MissingContractRequestCount,
-		CompactRecoveryAckCount:               snapshot.CompactRecoveryAckCount,
-		CompactRecoveryContractCount:          snapshot.CompactRecoveryContractCount,
-		UnreliableFlowIsolationBypassCount:    snapshot.UnreliableFlowIsolationBypassCount,
-		UnreliableNoAckAdmissionBypassCount:   snapshot.UnreliableNoAckAdmissionBypassCount,
-		UnreliableFlowReserveSelectionCount:   snapshot.UnreliableFlowReserveSelectionCount,
-		UnreliableFlowReserveUseCount:         snapshot.UnreliableFlowReserveUseCount,
-		UnreliableFlightWaitCount:             snapshot.UnreliableFlightWaitCount,
-		UnreliableFlightWaitDuration:          snapshot.UnreliableFlightWaitDuration,
-		UnreliableFlightMaximumWaitDuration:   snapshot.UnreliableFlightMaximumWaitDuration,
-		UnreliableFlightGapCount:              snapshot.UnreliableFlightGapCount,
-		UnreliableFlightTimeoutCount:          snapshot.UnreliableFlightTimeoutCount,
-		UnreliableFlightReductionCount:        snapshot.UnreliableFlightReductionCount,
-		UnreliableFlightMaximumByteCount:      snapshot.UnreliableFlightMaximumByteCount,
-		UnreliableFlightMaximumLimitByteCount: snapshot.UnreliableFlightMaximumLimitByteCount,
-		UnreliableFlightMaximumMessageCount:   snapshot.UnreliableFlightMaximumMessageCount,
-		UnreliableFlightMaximumMessageLimit:   snapshot.UnreliableFlightMaximumMessageLimit,
+		TimeoutResendWriteCount:                     snapshot.TimeoutResendWriteCount,
+		CarrierChangeWriteCount:                     snapshot.CarrierChangeWriteCount,
+		SelectiveGapWriteCount:                      snapshot.SelectiveGapWriteCount,
+		AckTailProbeWriteCount:                      snapshot.AckTailProbeWriteCount,
+		CumulativeProbeWriteCount:                   snapshot.CumulativeProbeWriteCount,
+		RecoveryWriteErrorCount:                     snapshot.RecoveryWriteErrorCount,
+		MissingContractWriteCount:                   snapshot.MissingContractWriteCount,
+		MissingContractRequestCount:                 snapshot.MissingContractRequestCount,
+		CompactRecoveryAckCount:                     snapshot.CompactRecoveryAckCount,
+		CompactRecoveryContractCount:                snapshot.CompactRecoveryContractCount,
+		UnreliableFlowIsolationBypassCount:          snapshot.UnreliableFlowIsolationBypassCount,
+		UnreliableNoAckAdmissionBypassCount:         snapshot.UnreliableNoAckAdmissionBypassCount,
+		UnreliableFlowReserveSelectionCount:         snapshot.UnreliableFlowReserveSelectionCount,
+		UnreliableFlowReserveUseCount:               snapshot.UnreliableFlowReserveUseCount,
+		UnreliableFlightWaitCount:                   snapshot.UnreliableFlightWaitCount,
+		UnreliableFlightWaitDuration:                snapshot.UnreliableFlightWaitDuration,
+		UnreliableFlightMaximumWaitDuration:         snapshot.UnreliableFlightMaximumWaitDuration,
+		UnreliableFlightGapCount:                    snapshot.UnreliableFlightGapCount,
+		UnreliableFlightTimeoutCount:                snapshot.UnreliableFlightTimeoutCount,
+		UnreliableFlightReductionCount:              snapshot.UnreliableFlightReductionCount,
+		UnreliableFlightMaximumByteCount:            snapshot.UnreliableFlightMaximumByteCount,
+		UnreliableFlightMaximumLimitByteCount:       snapshot.UnreliableFlightMaximumLimitByteCount,
+		UnreliableFlightMaximumMessageCount:         snapshot.UnreliableFlightMaximumMessageCount,
+		UnreliableFlightMaximumMessageLimit:         snapshot.UnreliableFlightMaximumMessageLimit,
+		UnreliableFlightBlockedWithReliableCapacity: snapshot.UnreliableFlightBlockedWithReliableCapacity,
+		UnreliableFlightGapReorderSuspected:         snapshot.UnreliableFlightGapReorderSuspected,
+		TimeoutResendWithRecentCumulativeProgress:   snapshot.TimeoutResendWithRecentCumulativeProgress,
+		UnreliableCarrierLastAckAge:                 snapshot.UnreliableCarrierLastAckAge,
+		TimeoutResendDeferCount:                     perfvarUint64Field(&snapshot, "TimeoutResendDeferCount"),
+		CumulativeAckGapMaxDuration:                 time.Duration(perfvarInt64Field(&snapshot, "CumulativeAckGapMaxDuration")),
+		ResendTimerRttMaxDuration:                   time.Duration(perfvarInt64Field(&snapshot, "ResendTimerRttMaxDuration")),
+		ResendTimerRttMinDuration:                   time.Duration(perfvarInt64Field(&snapshot, "ResendTimerRttMinDuration")),
 	}
+}
+
+// perfvarInt64Field reads one named int64 field (a Duration counts), or zero
+// when this Connect revision has no such field.
+func perfvarInt64Field(target any, name string) int64 {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return 0
+	}
+	field := value.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Int64 {
+		return 0
+	}
+	return field.Int()
+}
+
+// perfvarUint64Field reads one named uint64 field, or zero when this Connect
+// revision has no such field.
+func perfvarUint64Field(target any, name string) uint64 {
+	value := reflect.ValueOf(target)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return 0
+	}
+	field := value.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Uint64 {
+		return 0
+	}
+	return field.Uint()
 }
 
 func subtractPerfvarClientSendRecovery(
@@ -1690,6 +1861,14 @@ func subtractPerfvarClientSendRecovery(
 	observation.UnreliableFlightGapCount = end.UnreliableFlightGapCount - start.UnreliableFlightGapCount
 	observation.UnreliableFlightTimeoutCount = end.UnreliableFlightTimeoutCount - start.UnreliableFlightTimeoutCount
 	observation.UnreliableFlightReductionCount = end.UnreliableFlightReductionCount - start.UnreliableFlightReductionCount
+	observation.UnreliableFlightBlockedWithReliableCapacity = end.UnreliableFlightBlockedWithReliableCapacity -
+		start.UnreliableFlightBlockedWithReliableCapacity
+	observation.UnreliableFlightGapReorderSuspected = end.UnreliableFlightGapReorderSuspected -
+		start.UnreliableFlightGapReorderSuspected
+	observation.TimeoutResendWithRecentCumulativeProgress = end.TimeoutResendWithRecentCumulativeProgress -
+		start.TimeoutResendWithRecentCumulativeProgress
+	observation.TimeoutResendDeferCount = observation.EndLifetime.TimeoutResendDeferCount -
+		observation.StartLifetime.TimeoutResendDeferCount
 	return observation
 }
 
@@ -2119,8 +2298,8 @@ func perfvarCarrierBaselinePassStable(
 		}
 	}
 	if before.packFailures != after.packFailures ||
-		before.deviceReceive != after.deviceReceive ||
-		before.providerReceive != after.providerReceive ||
+		!perfvarClientReceiveBoundaryEqual(before.deviceReceive, after.deviceReceive) ||
+		!perfvarClientReceiveBoundaryEqual(before.providerReceive, after.providerReceive) ||
 		before.devicePlatformReceive != after.devicePlatformReceive ||
 		before.providerPlatformReceive != after.providerPlatformReceive ||
 		before.deviceH3Datagrams != after.deviceH3Datagrams ||
@@ -2149,7 +2328,7 @@ func perfvarCarrierBaselinePassStable(
 		}
 	}
 	for clientIndex, start := range before.streamP2PReceive {
-		if start != after.streamP2PReceive[clientIndex] {
+		if !perfvarClientReceiveBoundaryEqual(start, after.streamP2PReceive[clientIndex]) {
 			return false
 		}
 	}
@@ -2430,10 +2609,10 @@ func perfvarCarrierSnapshotInstability(
 			after.packFailures,
 		)
 	}
-	if before.deviceReceive != after.deviceReceive {
+	if !perfvarClientReceiveBoundaryEqual(before.deviceReceive, after.deviceReceive) {
 		return "device receive/recovery stats or Client generation changed"
 	}
-	if before.providerReceive != after.providerReceive {
+	if !perfvarClientReceiveBoundaryEqual(before.providerReceive, after.providerReceive) {
 		return "provider receive/recovery stats or Client generation changed"
 	}
 	if before.devicePlatformReceive != after.devicePlatformReceive {
@@ -2575,7 +2754,7 @@ func perfvarCarrierSnapshotInstability(
 		}
 	}
 	for clientIndex, start := range before.streamP2PReceive {
-		if start != after.streamP2PReceive[clientIndex] {
+		if !perfvarClientReceiveBoundaryEqual(start, after.streamP2PReceive[clientIndex]) {
 			return fmt.Sprintf("stream P2P client %d receive/recovery stats changed", clientIndex)
 		}
 	}
@@ -3051,8 +3230,7 @@ func verifyPerfvarTopologyCarrier(
 		return fmt.Errorf("%s useful byte count=%d, expected positive workload", scenario.Topology, usefulByteCount)
 	}
 	hopCount, isP2pTopology := perfvarTopologyP2pHopCount(scenario.Topology)
-	if isP2pTopology && hopCount == 1 &&
-		(scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy) {
+	if isP2pTopology && hopCount == 1 && fullTunRouteHasP2p(scenario.Route) {
 		requireReverseProtocol := scenario.Workload != perfvarWorkloadUDP
 		dataPacketCount := carrier.P2PNetwork.ReversePacketCount
 		dataWireByteCount := carrier.P2PNetwork.ReverseWireByteCount
@@ -3211,7 +3389,7 @@ func verifyPerfvarOneHopP2pLane(
 		stats.FastReceiveQueueDropByteCount != 0 {
 		return fmt.Errorf("one-hop P2P %s had data-plane failures: %+v", endpointName, stats)
 	}
-	if route == fullTunRouteP2pFast {
+	if fullTunRouteUsesFastP2pLane(route) {
 		if (requireSend && (stats.FastSendMessageCount == 0 || stats.FastSendByteCount == 0)) ||
 			(requireReceive && (stats.FastReceiveMessageCount == 0 || stats.FastReceiveByteCount == 0)) ||
 			stats.LegacySendMessageCount != 0 || stats.LegacySendByteCount != 0 ||
@@ -3381,8 +3559,7 @@ func measurePerfvarRun(
 		environment = splitEnvironment.fullTunRouteView()
 		closeEnvironment = splitEnvironment.close
 	} else {
-		enableNetworkPeers := (executionScenario.Route == fullTunRouteP2pFast ||
-			executionScenario.Route == fullTunRouteP2pLegacy) && p2pHopCount == 1
+		enableNetworkPeers := fullTunRouteHasP2p(executionScenario.Route) && p2pHopCount == 1
 		environment = newRouteEnvironmentWithNetworkPeers(
 			ctx,
 			t,
@@ -3390,12 +3567,18 @@ func measurePerfvarRun(
 			enableNetworkPeers,
 		)
 		environment.deviceAccessProfile = executionScenario.Profile
+		if executionScenario.DeviceAccessProfile != nil {
+			// A mixed route conditions the direct P2P link with the scenario
+			// profile and the exchange access path with its own profile.
+			environment.deviceAccessProfile = *executionScenario.DeviceAccessProfile
+		}
 		environment.providerAccessProfile = executionScenario.ProviderAccessProfile
 		closeEnvironment = environment.close
 	}
 	resources := perfvarTunResources(executionScenario.Resource)
 	resources.ApplicationMtu = executionScenario.ApplicationMtu
 	resources.LogicalDataLaneCount = executionScenario.LogicalDataLaneCount
+	resources.Features = executionScenario.Features
 	path, setupErr := tryNewFullTunPathWithTopology(
 		ctx,
 		t,
@@ -3446,8 +3629,10 @@ func measurePerfvarRun(
 		return record, nil
 	}
 	workloadStart := time.Now()
+	progressSampler := startPerfvarProgressSampler(path, workloadStart)
 	tunneled, err := measurePerfvarFullTun(ctx, path, executionScenario)
 	workloadDuration := time.Since(workloadStart)
+	progress, memory := progressSampler.stop()
 	if err == nil {
 		err = path.waitForPostWorkloadBoundary(ctx)
 	}
@@ -3463,6 +3648,8 @@ func measurePerfvarRun(
 		record.Tunneled = tunneled
 		record.Tunneled.Duration = workloadDuration
 		record.Carrier = carrier
+		record.Progress = progress
+		record.Memory = memory
 		record.RouteSetupDuration = routeSetupDuration
 		record.FailureStage = "workload"
 		record.FailureReason = err.Error()
@@ -3490,6 +3677,8 @@ func measurePerfvarRun(
 	record := baseRecord()
 	record.Tunneled = tunneled
 	record.Carrier = carrier
+	record.Progress = progress
+	record.Memory = memory
 	record.RouteSetupDuration = routeSetupDuration
 	record.Correct = verificationErr == nil
 	record.GoroutinesAfter = runtime.NumGoroutine()
@@ -3515,6 +3704,95 @@ func measurePerfvarRun(
 		record.WireEfficiency = float64(tunneled.UsefulByteCount) / float64(carrier.WireByteCount)
 	}
 	return record, nil
+}
+
+// perfvarProgressSampler reads the path's delivered payload counter on a
+// fixed interval for the duration of one measured workload.
+type perfvarProgressSampler struct {
+	stopOnce sync.Once
+	stopChan chan struct{}
+	done     chan perfvarSamplerResult
+}
+
+type perfvarSamplerResult struct {
+	progress []perfvarProgressSample
+	memory   []uint64
+	heapMax  uint64
+	sysMax   uint64
+}
+
+// perfvarMemorySampleEvery is how many progress ticks pass between runtime
+// memory reads; a MemStats read briefly stops the world, so it is taken
+// once a second rather than on every 250 ms progress tick.
+const perfvarMemorySampleEvery = 4
+
+func startPerfvarProgressSampler(path *fullTunPath, start time.Time) *perfvarProgressSampler {
+	sampler := &perfvarProgressSampler{
+		stopChan: make(chan struct{}),
+		done:     make(chan perfvarSamplerResult, 1),
+	}
+	path.workloadProgressBytes.Store(0)
+	go func() {
+		ticker := time.NewTicker(perfvarProgressSampleInterval)
+		defer ticker.Stop()
+		result := perfvarSamplerResult{
+			progress: []perfvarProgressSample{{Offset: 0, ByteCount: 0}},
+		}
+		sampleMemory := func() {
+			var memory runtime.MemStats
+			runtime.ReadMemStats(&memory)
+			result.memory = append(result.memory, memory.HeapInuse+memory.StackInuse)
+			result.heapMax = max(result.heapMax, memory.HeapInuse)
+			result.sysMax = max(result.sysMax, memory.Sys)
+		}
+		sampleMemory()
+		tick := 0
+		for {
+			select {
+			case <-sampler.stopChan:
+				result.progress = append(result.progress, perfvarProgressSample{
+					Offset:    time.Since(start),
+					ByteCount: path.workloadProgressBytes.Load(),
+				})
+				sampleMemory()
+				sampler.done <- result
+				return
+			case now := <-ticker.C:
+				result.progress = append(result.progress, perfvarProgressSample{
+					Offset:    now.Sub(start),
+					ByteCount: path.workloadProgressBytes.Load(),
+				})
+				tick += 1
+				if tick%perfvarMemorySampleEvery == 0 {
+					sampleMemory()
+				}
+			}
+		}
+	}()
+	return sampler
+}
+
+// stop ends sampling and returns the derived window and memory observations.
+// It is safe to call more than once; later calls return empty observations.
+func (self *perfvarProgressSampler) stop() (perfvarProgressObservation, perfvarMemoryObservation) {
+	var result perfvarSamplerResult
+	stopped := false
+	self.stopOnce.Do(func() {
+		close(self.stopChan)
+		result = <-self.done
+		stopped = true
+	})
+	if !stopped {
+		return perfvarProgressObservation{FirstDeadWindowOffset: -1}, perfvarMemoryObservation{}
+	}
+	memory := perfvarMemoryObservationFor(result.memory, result.heapMax, result.sysMax)
+	taken, returned, _ := clientconnect.MessagePoolCounts()
+	memory.PoolOutstandingEnd = int64(taken) - int64(returned)
+	for _, stats := range clientconnect.GetMessagePoolClassStats() {
+		memory.PoolRetainedCountEnd += stats.Retained
+		memory.PoolCapacityEnd += stats.Capacity
+	}
+	return perfvarProgressObservationFor(result.progress), memory
 }
 
 // Bulk impaired scenarios retain enough time for calibration and route work.
@@ -4084,11 +4362,13 @@ func perfvarMeasurementOrder(scenarios []perfvarScenario, runIndex int) ([]int, 
 		comparisonKeys[scenarioIndex] = comparisonPrefix(scenario) + "/" + trace.IdentityHash
 	}
 	routeRanks := map[fullTunRoute]int{
-		fullTunRouteExchangeAuto: 0,
-		fullTunRouteExchangeH1:   1,
-		fullTunRouteExchangeH3:   2,
-		fullTunRouteP2pFast:      3,
-		fullTunRouteP2pLegacy:    4,
+		fullTunRouteExchangeAuto:        0,
+		fullTunRouteExchangeH1:          1,
+		fullTunRouteExchangeH3:          2,
+		fullTunRouteP2pFast:             3,
+		fullTunRouteP2pLegacy:           4,
+		fullTunRouteP2pFastExchangeH1:   5,
+		fullTunRouteP2pLegacyExchangeH1: 6,
 	}
 	slices.SortFunc(indices, func(leftIndex int, rightIndex int) int {
 		left := scenarios[leftIndex]

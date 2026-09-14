@@ -466,6 +466,72 @@ The current authoritative route restrictions are:
 | Direction asymmetry | P2P for a directional claim; applying it to both exchange access links creates the same end-to-end bottleneck in both directions |
 | Outer MTU | Static `mtu-*` profiles lower the inner MTU and are correctness-gated on H3 and fast P2P; `mtu-blackhole-1280` deliberately retains the clean inner MTU to test missing dynamic path-MTU adaptation |
 | Dynamic cell edge | One-hop TCP/TCP-warmed, no extender; all four routes and direct calibration |
+| Mixed direct-lane profiles and schedules | The two mixed routes for the pinned-provider campaign; the static direct-lane profiles also resolve on every other route as ordinary focused profiles |
+
+### Mixed P2P and exchange routes
+
+`p2p-fast+exchange-h1` and `p2p-legacy+exchange-h1` reproduce the
+pinned-provider condition of connect/FLIGHTGATEFIX.md: the one-hop P2P carrier
+is promoted exactly as the forced P2P routes promote it, but the platform
+payload route is never suppressed. Both writers keep two active routes and the
+weighted selector stripes one ordered sequence across the direct lane and the
+exchange H1 route. The P2P data plane is pinned to the named lane. Route
+verification requires the requested P2P lane to have carried payload in both
+directions and no fast-path fallback; platform payload is expected, not a
+violation.
+
+A mixed scenario has two independently conditioned paths:
+
+- the scenario profile conditions the direct P2P link alone;
+- `device_access_profile` (serialized and hashed) conditions the device's
+  exchange access path: the fixed `mixed-relay-access` profile, a clean
+  200 ms round trip against the 20 ms direct lane, rate-bounded to
+  20 Mbit/s only for the two schedule profiles below;
+- provider access stays `clean-lan`.
+
+Direct calibration runs on the relay path (device access plus provider
+access), so `tunneled_underlay_efficiency` compares the striped tunnel with the
+carrier it must never fall below. The default payload is 8 MiB (2 MiB per
+flow for `tcp-parallel`), 48 MiB for the schedule profiles, so a collapsed
+transfer reaches its directional deadline inside the run timeout and is
+recorded as a workload failure with its progress windows.
+
+Direct-lane profiles (usable on any route; on a mixed route they touch only
+the direct link):
+
+| Profile | Direct lane | Relay access |
+|---|---|---|
+| `mixed-direct-loss-100bp` | 20 ms RTT, 1% independent loss | clean, 200 ms |
+| `mixed-direct-loss-300bp` | 20 ms RTT, 3% independent loss | clean, 200 ms |
+| `mixed-direct-burst-loss` | 20 ms RTT, two-state burst loss | clean, 200 ms |
+| `mixed-direct-blackhole-3s-9s` | 20 Mbit/s, 20 ms; at 3 s the data plane is blackholed with STUN exempt so ICE consent survives; restored at 9 s | 20 Mbit/s, 200 ms |
+| `mixed-relay-queue-inflation-3s` | 20 Mbit/s, 20 ms, clean | 20 Mbit/s, 200 ms; at 3 s the access queue inflates from 100 ms to 2 s |
+
+Live events carry an optional scope: `p2p_only` changes the direct P2P link
+alone and `access_only` the device access path alone; unscoped events keep the
+historical meaning. In direct calibration of a mixed route a direct-only event
+replays the unchanged relay profile so the schedule still records every
+boundary. `blackhole_except_stun` on a link profile requires `blackhole` and
+is meaningful only on P2P links, whose packets carry the modeled 28-byte outer
+header before the UDP payload.
+
+Every run also samples the test process's Go runtime once a second while the
+tunneled workload runs: heap plus stack in use (p95 and maximum), heap in use
+and `Sys` maxima, the samples above the 24 MiB MEMSTEADY ceiling, and the
+message-pool retained, capacity and outstanding counts at the end. Under
+`CONNECT_PERFVAR_RESOURCE=mobile-surrogate` these are the campaign's memory
+guardrails: a candidate whose heap+stack p95 rises above the control, or with
+any sample above 24 MiB where the control had none, is a REGRESSION for that
+item even when its throughput improved. The physical Android MEMSTEADY block
+remains the device-side gate.
+
+Every measured TCP payload workload samples delivered application bytes
+(client reads on download, server reads on upload) every 250 ms. The run
+record carries the samples and 5 s throughput windows; a window under
+5 Mbit/s is a dead window, the report's collapse signature. Aggregates carry
+the dead-window count, the number of runs with a dead window, the window
+count, and the worst window. Runs that fail at their deadline keep their
+windows.
 
 ## Workloads
 
@@ -646,7 +712,7 @@ Available controls are comma-separated sets unless stated otherwise:
 
 ```text
 CONNECT_PERFVAR_MEASURE=1
-CONNECT_PERFVAR_ROUTE=p2p-fast|p2p-legacy|exchange-h1|exchange-h3|exchange-auto
+CONNECT_PERFVAR_ROUTE=p2p-fast|p2p-legacy|exchange-h1|exchange-h3|exchange-auto|p2p-fast+exchange-h1|p2p-legacy+exchange-h1
 CONNECT_PERFVAR_PROFILE=<one or more exact profile names>
 CONNECT_PERFVAR_WORKLOAD=tcp|tcp-warmed|tcp-parallel|quic|udp|latency-under-load|web
 CONNECT_PERFVAR_DIRECTION=upload|download
@@ -658,11 +724,20 @@ CONNECT_PERFVAR_SEED=<decimal integer>
 CONNECT_PERFVAR_RUN_COUNT=<positive decimal integer>
 CONNECT_PERFVAR_BYTE_COUNT=<positive decimal byte count>
 CONNECT_PERFVAR_LOGICAL_LANES=0|1|4|8
+CONNECT_PERFVAR_FEATURE=defer-timeout-resend|fast-path-size-aware
 ```
 
 Defaults are all four routes, `clean-lan`, `tcp`, both directions, `one-hop`, no
-extenders, default resources, seed `20260810`, five fresh repetitions, and a
-32 MiB payload subject to the profile-specific reductions described above.
+extenders, default resources, no features, seed `20260810`, five fresh
+repetitions, and a 32 MiB payload subject to the profile-specific reductions
+described above. `CONNECT_PERFVAR_FEATURE` selects production settings that
+ship off by default and are under measurement (connect/FLIGHTGATEFIX.md §13.5
+and §13.6): `defer-timeout-resend` sets
+`SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress` and
+`fast-path-size-aware` sets
+`P2pTransportSettings.FastPathSizeAwareAdmission` on both endpoint Clients. An
+empty selection leaves every existing scenario identity unchanged; a non-empty
+one is part of the identity and of the profile hash.
 Logical Transfer data lanes default to `0` (disabled). A nonzero selection is
 applied to both full-TUN endpoints but not to direct underlay calibration, and
 is recorded in the scenario identity. Use `1` to isolate the cost of sequence
@@ -1022,6 +1097,8 @@ server/connect/perfvar/
   scenario_test.go              filters, metadata, schema, and aggregation
   performance_test.go           opt-in measured matrix
   h3_full_tun_lowbar_test.go     focused H3 lane and same-profile H1 controls
+  flight_gate_mixed_test.go     mixed-route, direct-lane profile, scoped event, and window tests
+  flightgate/                   pinned-provider campaign driver and readout (Go, shell entry)
   simulator_test.go             deterministic simulator validation
   race_enabled_test.go          race-build result marker
   race_disabled_test.go         ordinary-build result marker

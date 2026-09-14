@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +199,9 @@ func TestCircleAdmissionSignalTreatsMixedObservableRolloutAsUnknown(t *testing.T
 		"absence is unknown",
 		"must never be rendered as zero admitted submissions",
 		"same executable that emits one identifier-free marker",
+		"marker-capable commit 928abfca",
+		"fail-closed baseline 66525afc can expose all five activity families",
+		"predate 928abfca",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("mixed-rollout alert lacks %q:\n%s", want, alert.Markdown())
@@ -257,7 +261,10 @@ func TestCircleAdmissionSignalTreatsMissingSamplesAsAmbiguous(t *testing.T) {
 		"Only §8.12 source and immutable artifact evidence can prove",
 		"at most three transfer submits",
 		"commit 14928f69",
-		"commit 66525afc",
+		"Commit 66525afc",
+		"commit 928abfca",
+		"66525afc is only the fail-closed activity/error baseline",
+		"does not prove the capability gauge or exact pre-POST marker",
 		"mutable version string",
 		"SIGNALS.md §2.14",
 	} {
@@ -270,6 +277,44 @@ func TestCircleAdmissionSignalTreatsMissingSamplesAsAmbiguous(t *testing.T) {
 	}
 	if strings.Contains(alert.Markdown(), "b8718420") || strings.Contains(alert.Markdown(), "eb7e79b6") {
 		t.Fatalf("missing-sample alert retained former non-ancestor deployment guidance:\n%s", alert.Markdown())
+	}
+}
+
+func TestCircleAdmissionCatalogDoesNotTreatFailClosedArtifactAsMarkerCapable(t *testing.T) {
+	if circleAdmissionFailClosedBaselineCommit != "66525afc" || circleAdmissionMarkerBaselineCommit != "928abfca" {
+		t.Fatalf(
+			"Circle admission ancestry boundaries = fail-closed %q marker %q",
+			circleAdmissionFailClosedBaselineCommit,
+			circleAdmissionMarkerBaselineCommit,
+		)
+	}
+	catalog, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(catalog)
+	start := strings.Index(text, "### 2.14 Circle transfer admission")
+	if start < 0 {
+		t.Fatal("SIGNALS.md §2.14 boundary is missing")
+	}
+	end := strings.Index(text[start:], "### 2.15 ")
+	if end < 0 {
+		t.Fatal("SIGNALS.md §2.15 boundary is missing")
+	}
+	section := text[start : start+end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
+	for _, want := range []string{
+		"`66525afc` is the fail-closed activity/error baseline",
+		"does **not** prove the capability gauge or exact pre-POST marker",
+		"`928abfca` is the surviving current-main marker-capable baseline",
+		"`1b9cacba` contains `66525afc` but predates `928abfca`",
+	} {
+		if !strings.Contains(normalizedSection, want) {
+			t.Fatalf("SIGNALS.md §2.14 lacks %q", want)
+		}
+	}
+	if strings.Contains(section, "66525afc` also converts the Redis wrapper's\npre-command connection panic into the same error/counter/log path; use that\ndescendant as the minimum observable deployment baseline") {
+		t.Fatal("SIGNALS.md §2.14 still treats the fail-closed-only ancestry as marker-capable")
 	}
 }
 

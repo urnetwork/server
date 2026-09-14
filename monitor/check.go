@@ -37,6 +37,8 @@ type probeRunner interface {
 	local(ctx context.Context, name string, args ...string) (string, error)
 	tcpExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error)
 	tlsCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
+	dnsAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
+	dnsRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
 	warpctl(ctx context.Context, args ...string) (string, error)
 	warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error)
 }
@@ -101,13 +103,14 @@ func healthyFinding(probeId, tier, class, target string) finding {
 // one layer of a composite probe is unreachable. Returning an error from the
 // whole probe would discard concrete findings already collected elsewhere.
 func cannotObserveFinding(target string, err error) finding {
+	errorClass := classifyObservationError(err)
 	return finding{
 		probeId: "monitor/visibility", tier: tierWarn,
 		class: "cannot-observe", target: target, sustain: 2,
-		symptom:   "The monitor could not complete an observation for " + target + ": " + err.Error(),
+		symptom:   "The monitor could not complete an observation for " + target + " (error_class=" + errorClass + ")",
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",
-		observed:  err.Error(),
+		observed:  "error_class=" + errorClass,
 		action:    "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident.",
 		verify:    "The same target returns a concrete healthy or broken observation on the next run.",
 		playbook:  "MONITOR.md §3.6",

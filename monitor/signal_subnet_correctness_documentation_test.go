@@ -1,5 +1,6 @@
 // Subnet catalog checks retain the required detection contract while its
-// observers are implemented separately. They do not simulate on-chain probes.
+// family observers are implemented separately. They do not simulate on-chain
+// probes or let the coverage sentinel certify economic correctness.
 package monitor
 
 import (
@@ -136,18 +137,21 @@ func TestSubnetCorrectnessDocumentationRetainsEvidenceAndRecoveryRules(t *testin
 	}
 }
 
-// A runbook addition cannot silently advertise unregistered automated probes.
+// The registered sentinel must expose the missing family observers without
+// advertising them as implemented automated probes.
 func TestSubnetCorrectnessDocumentationLabelsUnimplementedCoverage(t *testing.T) {
 	t.Parallel()
 	section := subnetCorrectnessDocumentation(t)
-	if len(catalogProbePattern.FindAllStringSubmatch(section, -1)) != 0 {
-		t.Fatal("prospective subnet catalog declares an implemented Probe")
+	matches := catalogProbePattern.FindAllStringSubmatch(section, -1)
+	if len(matches) != 1 || matches[0][1] != "subnet-coverage" {
+		t.Fatalf("subnet catalog probes = %v, want only subnet-coverage", matches)
 	}
 	compact := strings.Join(strings.Fields(section), " ")
 	for _, required := range []string{
-		"required monitoring specification; new subnet probes are not implemented or registered by this documentation change",
-		"reserved alert classes, not `Probe:` declarations or metric names",
-		"explicit coverage gap, never a green result from an absent metric",
+		"the registered `subnet-coverage` sentinel makes missing coverage visible",
+		"nine subnet correctness families are not implemented or qualified",
+		"explicit alert, never a green result from an absent metric",
+		"deliberately cannot certify any economic invariant",
 		"proposed helper or authored test is not a deployed signal",
 		"This documentation has coverage regression tests, **not** an implemented or qualified subnet probe battery",
 	} {

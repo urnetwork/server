@@ -122,6 +122,10 @@ type ProxyDeviceManager struct {
 	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
 	// observed during the whole process lifetime.
 	lockCache *proxyLockCache
+
+	// platformPreemptions converts per-DeviceLocal lifetime counters into one
+	// process-monotonic, identity-free metric for carrier churn diagnosis.
+	platformPreemptions proxyPlatformPreemptionTracker
 }
 
 // proxyLockCacheTtl bounds how long a stale ip lock can be enforced after the proxy

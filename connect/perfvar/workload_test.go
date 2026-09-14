@@ -175,6 +175,9 @@ type tunResourceProfile struct {
 	// LogicalDataLaneCount configures both endpoint Client generators in the
 	// full-TUN fixture. It does not affect direct underlay calibration.
 	LogicalDataLaneCount int
+	// Features are the opt-in production settings the scenario enables on
+	// both endpoint Clients. Empty keeps the production defaults.
+	Features []string
 }
 
 // Optional seams expose exact TCP admission and latency-worker lifecycle

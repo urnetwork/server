@@ -36,8 +36,10 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 			"crisp.example.com":    {"grafana", "proxy"},
 			"edge-1.example.com":   {"api", "connect"},
 		}, Services: map[string]servicesServiceYaml{
+			"alt":        {Blocks: []map[string]int{{"alpha": 100}}},
 			"taskworker": {Blocks: []map[string]int{{"g2": 25}, {"g1": 74}, {"g1": 1}}},
 			"api":        {Blocks: []map[string]int{{"g1": 99}, {"beta": 1}}},
+			"gossip":     {Blocks: []map[string]int{{"gamma": 100}}},
 			"grafana":    {Blocks: []map[string]int{{"g1": 100}}},
 			"lb":         {Blocks: []map[string]int{{"edge": 100}}},
 		}},
@@ -49,7 +51,10 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"api", "grafana", "taskworker"}
+	// Active services remain log sources even when they are unexposed or have
+	// no status route. In particular, Alt and Gossip must not disappear from
+	// the standing-tail inventory merely because Warpctl cannot sample them.
+	want := []string{"alt", "api", "gossip", "grafana", "taskworker"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("active log services = %#v, want %#v", got, want)
 	}
@@ -59,7 +64,9 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantBlocks := map[string][]string{
+		"alt":        {"alpha"},
 		"api":        {"beta", "g1"},
+		"gossip":     {"gamma"},
 		"grafana":    {"g1"},
 		"taskworker": {"g1", "g2"},
 	}

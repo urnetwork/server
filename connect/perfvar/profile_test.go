@@ -63,9 +63,12 @@ type linkProfile struct {
 	OuterMtu             int               `json:"outer_mtu"`
 	OversizeMode         oversizeMode      `json:"oversize_mode"`
 	Blackhole            bool              `json:"blackhole"`
-	ProcessingDelay      time.Duration     `json:"processing_delay_nanoseconds"`
-	AllowQueueDrops      bool              `json:"allow_queue_drops"`
-	AllowMtuDrops        bool              `json:"allow_mtu_drops"`
+	// BlackholeExceptStun keeps STUN messages flowing through a blackhole so
+	// ICE consent survives while the data plane is dead (P2P links only).
+	BlackholeExceptStun bool          `json:"blackhole_except_stun,omitempty"`
+	ProcessingDelay     time.Duration `json:"processing_delay_nanoseconds"`
+	AllowQueueDrops     bool          `json:"allow_queue_drops"`
+	AllowMtuDrops       bool          `json:"allow_mtu_drops"`
 }
 
 // A complete bidirectional scenario definition with a replay seed.
@@ -87,6 +90,11 @@ type profileEvent struct {
 	Reverse             *linkProfile  `json:"reverse,omitempty"`
 	Rebind              bool          `json:"rebind,omitempty"`
 	Kick                bool          `json:"kick,omitempty"`
+	// P2pOnly applies the event to the direct P2P link alone and AccessOnly
+	// to the device access path alone. Both unset keeps the historical
+	// meaning: the device access path and the direct P2P link change together.
+	P2pOnly    bool `json:"p2p_only,omitempty"`
+	AccessOnly bool `json:"access_only,omitempty"`
 }
 
 // The queue target is expressed directly as a bounded bandwidth-delay product.
@@ -580,6 +588,9 @@ func allNetworkProfiles(seed int64) map[string]networkProfile {
 			reverse.AllowQueueDrops = true
 		})
 	}
+	for name, profile := range mixedRouteNetworkProfiles(seed) {
+		profiles[name] = profile
+	}
 	profiles["direction-asymmetric"] = focusedNetworkProfile(
 		"direction-asymmetric",
 		seed,
@@ -591,6 +602,122 @@ func allNetworkProfiles(seed int64) map[string]networkProfile {
 		},
 	)
 	return profiles
+}
+
+// Mixed-route profile names. The direct profiles condition the P2P link of a
+// mixed route (or the whole link of any other route); the relay side of a
+// mixed route is derived by mixedRelayAccessProfileFor.
+const (
+	mixedDirectLoss100bpName        = "mixed-direct-loss-100bp"
+	mixedDirectLoss300bpName        = "mixed-direct-loss-300bp"
+	mixedDirectBurstLossName        = "mixed-direct-burst-loss"
+	mixedDirectBlackhole3s9sName    = "mixed-direct-blackhole-3s-9s"
+	mixedRelayQueueInflation3sName  = "mixed-relay-queue-inflation-3s"
+	mixedDirectRoundTrip            = 20 * time.Millisecond
+	mixedRelayRoundTrip             = 200 * time.Millisecond
+	mixedScheduleRateBitsPerSecond  = int64(20_000_000)
+	mixedRelayQueueInflatedDuration = 2 * time.Second
+)
+
+// mixedRouteNetworkProfiles are the direct-lane profiles of the pinned-provider
+// collapse campaign (connect/FLIGHTGATEFIX.md §6.2): a 20 ms direct path with
+// independent 1 % and 3 % loss, a two-state burst, a data-plane blackhole that
+// keeps ICE consent, and a clean direct path paired with a relay queue that
+// inflates mid-transfer. Rates stay at the clean control except on the two
+// schedule profiles, which are rate-bounded so the transfer is still running
+// when the last event fires.
+func mixedRouteNetworkProfiles(seed int64) map[string]networkProfile {
+	direct := func(name string, note string, mutate func(*linkProfile, *linkProfile)) networkProfile {
+		profile := focusedNetworkProfile(name, seed, func(forward *linkProfile, reverse *linkProfile) {
+			forward.BaseDelay = mixedDirectRoundTrip / 2
+			reverse.BaseDelay = mixedDirectRoundTrip / 2
+			mutate(forward, reverse)
+		})
+		profile.SourceNote = note
+		return profile
+	}
+	independentLoss := func(probability float64) func(*linkProfile, *linkProfile) {
+		return func(forward *linkProfile, reverse *linkProfile) {
+			for _, link := range []*linkProfile{forward, reverse} {
+				link.LossModel = lossModelIndependent
+				link.LossProbability = probability
+			}
+		}
+	}
+	rateBounded := func(forward *linkProfile, reverse *linkProfile) {
+		for _, link := range []*linkProfile{forward, reverse} {
+			mixedRateBoundLink(link, mixedScheduleRateBitsPerSecond, 100*time.Millisecond)
+		}
+	}
+	return map[string]networkProfile{
+		mixedDirectLoss100bpName: direct(
+			mixedDirectLoss100bpName,
+			"synthetic 20 ms direct lane with 1% independent loss; relay path clean; not a field-network claim",
+			independentLoss(0.01),
+		),
+		mixedDirectLoss300bpName: direct(
+			mixedDirectLoss300bpName,
+			"synthetic 20 ms direct lane with 3% independent loss; relay path clean; not a field-network claim",
+			independentLoss(0.03),
+		),
+		mixedDirectBurstLossName: direct(
+			mixedDirectBurstLossName,
+			"synthetic 20 ms direct lane with two-state burst loss; relay path clean; not a field-network claim",
+			func(forward *linkProfile, reverse *linkProfile) {
+				for _, link := range []*linkProfile{forward, reverse} {
+					link.LossModel = lossModelBurst
+					link.LossProbability = 0
+					link.BurstLoss = &burstLossProfile{
+						GoodToBadProbability: 0.01,
+						BadToGoodProbability: 0.35,
+						GoodLossProbability:  0.002,
+						BadLossProbability:   0.65,
+					}
+				}
+			},
+		),
+		mixedDirectBlackhole3s9sName: direct(
+			mixedDirectBlackhole3s9sName,
+			"synthetic 20 Mbit/s 20 ms direct lane whose data plane dies at 3 s keeping ICE consent and returns at 9 s; relay 20 Mbit/s",
+			rateBounded,
+		),
+		mixedRelayQueueInflation3sName: direct(
+			mixedRelayQueueInflation3sName,
+			"synthetic clean 20 Mbit/s 20 ms direct lane; the 20 Mbit/s relay access queue inflates to two seconds at 3 s",
+			rateBounded,
+		),
+	}
+}
+
+// mixedRateBoundLink turns a clean non-limiting link into a rate-bounded one
+// with a bounded queue: one outer packet of burst credit, a queue of the
+// given duration at the rate, and queue drops allowed, as the cell-edge
+// profiles do.
+func mixedRateBoundLink(link *linkProfile, rateBitsPerSecond int64, queueDuration time.Duration) {
+	link.RateBitsPerSecond = rateBitsPerSecond
+	link.BurstByteCount = link.OuterMtu
+	link.QueueByteCount = bandwidthDelayQueue(rateBitsPerSecond, queueDuration)
+	link.QueuePacketCount = max(8, (link.QueueByteCount+link.OuterMtu-1)/link.OuterMtu)
+	link.AllowQueueDrops = true
+}
+
+// mixedRelayAccessProfileFor is the device's exchange access path on a mixed
+// route: clean, 200 ms round trip against the 20 ms direct lane, and
+// rate-bounded to the schedule rate for the two schedule profiles so the
+// direct lane cannot finish the transfer before its last event.
+func mixedRelayAccessProfileFor(directProfileName string, seed int64) networkProfile {
+	relay := focusedNetworkProfile("mixed-relay-access", seed, func(forward *linkProfile, reverse *linkProfile) {
+		forward.BaseDelay = mixedRelayRoundTrip / 2
+		reverse.BaseDelay = mixedRelayRoundTrip / 2
+		switch directProfileName {
+		case mixedDirectBlackhole3s9sName, mixedRelayQueueInflation3sName:
+			for _, link := range []*linkProfile{forward, reverse} {
+				mixedRateBoundLink(link, mixedScheduleRateBitsPerSecond, 100*time.Millisecond)
+			}
+		}
+	})
+	relay.SourceNote = "synthetic mixed-route relay access: clean 200 ms round trip; not a field-network claim"
+	return relay
 }
 
 // Each jitter variation retains the focused clean control in every other field.
@@ -791,6 +918,9 @@ func (self networkProfile) validate() error {
 		case oversizeModeDrop, oversizeModeError:
 		default:
 			return fmt.Errorf("%s has unknown oversized-packet mode %q", direction, profile.OversizeMode)
+		}
+		if profile.BlackholeExceptStun && !profile.Blackhole {
+			return fmt.Errorf("%s exempts STUN from a blackhole that is not active", direction)
 		}
 		return nil
 	}

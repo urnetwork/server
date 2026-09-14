@@ -124,6 +124,33 @@ func profileScheduleForName(name string, seed int64) *profileSchedule {
 				event("outage-recovery", 1750*time.Millisecond, moderate),
 			},
 		}
+	case mixedDirectBlackhole3s9sName:
+		direct := mixedRouteNetworkProfiles(seed)[mixedDirectBlackhole3s9sName]
+		dead := direct
+		for _, link := range []*linkProfile{&dead.Forward, &dead.Reverse} {
+			link.Blackhole = true
+			link.BlackholeExceptStun = true
+		}
+		deadEvent := event("direct-data-plane-blackhole", 3*time.Second, dead)
+		deadEvent.P2pOnly = true
+		restoreEvent := event("direct-data-plane-restore", 9*time.Second, direct)
+		restoreEvent.P2pOnly = true
+		return &profileSchedule{
+			Name:   name,
+			Events: []profileEvent{deadEvent, restoreEvent},
+		}
+	case mixedRelayQueueInflation3sName:
+		relay := mixedRelayAccessProfileFor(name, seed)
+		inflated := relay
+		for _, link := range []*linkProfile{&inflated.Forward, &inflated.Reverse} {
+			mixedRateBoundLink(link, link.RateBitsPerSecond, mixedRelayQueueInflatedDuration)
+		}
+		inflateEvent := event("relay-queue-inflation", 3*time.Second, inflated)
+		inflateEvent.AccessOnly = true
+		return &profileSchedule{
+			Name:   name,
+			Events: []profileEvent{inflateEvent},
+		}
 	case cellEdgeMtuReductionRecoverName:
 		reduced := moderate
 		reduced.Forward = profileDirectionWithOuterMtu(reduced.Forward, 1280)
@@ -171,6 +198,9 @@ func (self profileSchedule) validate() error {
 		if event.Forward == nil || event.Reverse == nil {
 			return fmt.Errorf("profile schedule %q event %q is missing a direction", self.Name, event.Name)
 		}
+		if event.P2pOnly && event.AccessOnly {
+			return fmt.Errorf("profile schedule %q event %q is scoped to both P2P and access", self.Name, event.Name)
+		}
 		profile := networkProfile{
 			Name:     event.Name,
 			InnerMtu: 576,
@@ -198,6 +228,14 @@ func perfvarScheduleMinimumPayloadByteCount(scenario perfvarScenario) int64 {
 		return forward
 	}
 	current := profileForDirection(scenario.Profile.Forward, scenario.Profile.Reverse)
+	// A mixed route also carries payload on its relay path; both capacities
+	// must be exhausted before the last event or the direct calibration and
+	// the tunneled transfer could finish early.
+	relayRateBitsPerSecond := int64(0)
+	if fullTunRouteIsMixed(scenario.Route) && scenario.DeviceAccessProfile != nil {
+		relay := profileForDirection(scenario.DeviceAccessProfile.Forward, scenario.DeviceAccessProfile.Reverse)
+		relayRateBitsPerSecond = relay.RateBitsPerSecond
+	}
 	previousAfter := time.Duration(0)
 	maximumBytes := int64(current.BurstByteCount)
 	for _, event := range scenario.ProfileSchedule.Events {
@@ -206,7 +244,11 @@ func perfvarScheduleMinimumPayloadByteCount(scenario perfvarScenario) int64 {
 			maximumBytes += current.RateBitsPerSecond * phaseDuration.Nanoseconds() /
 				(8 * int64(time.Second))
 		}
-		current = profileForDirection(*event.Forward, *event.Reverse)
+		maximumBytes += relayRateBitsPerSecond * phaseDuration.Nanoseconds() /
+			(8 * int64(time.Second))
+		if !event.AccessOnly {
+			current = profileForDirection(*event.Forward, *event.Reverse)
+		}
 		maximumBytes += int64(current.BurstByteCount)
 		previousAfter = event.After
 	}
@@ -235,6 +277,24 @@ func validatePerfvarProfileScheduleScenario(scenario perfvarScenario) error {
 			"PERFVAR profile schedule %q requires one-hop topology with no extender",
 			scenario.ProfileSchedule.Name,
 		)
+	}
+	for _, event := range scenario.ProfileSchedule.Events {
+		if event.P2pOnly && !fullTunRouteHasP2p(scenario.Route) {
+			return fmt.Errorf(
+				"PERFVAR profile schedule %q event %q is direct-only but route %s has no direct P2P link",
+				scenario.ProfileSchedule.Name,
+				event.Name,
+				scenario.Route,
+			)
+		}
+		if event.AccessOnly && !fullTunRouteHasExchangePath(scenario.Route) {
+			return fmt.Errorf(
+				"PERFVAR profile schedule %q event %q is access-only but route %s has no exchange access path",
+				scenario.ProfileSchedule.Name,
+				event.Name,
+				scenario.Route,
+			)
+		}
 	}
 	minimumPayloadByteCount := perfvarScheduleMinimumPayloadByteCount(scenario)
 	if scenario.PayloadByteCount < minimumPayloadByteCount {
@@ -283,11 +343,27 @@ func perfvarCalibrationProfileEvent(
 	if event.Forward == nil || event.Reverse == nil {
 		return profileEvent{}, fmt.Errorf("calibration profile event %q is missing a direction", event.Name)
 	}
-	if scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy {
+	if fullTunRouteForcesP2p(scenario.Route) {
 		return event, nil
 	}
 	if scenario.Topology == perfvarTopologySplitExchange {
 		return profileEvent{}, errors.New("live profile schedules do not support split exchange")
+	}
+	if fullTunRouteIsMixed(scenario.Route) {
+		// The mixed calibration path is the relay. A direct-only event leaves it
+		// unchanged and is replayed as a no-op boundary so the schedule still
+		// records every event; an access-only event conditions the relay.
+		calibration := perfvarCalibrationProfile(scenario)
+		if event.P2pOnly {
+			forward := calibration.Forward
+			reverse := calibration.Reverse
+			event.Forward = &forward
+			event.Reverse = &reverse
+			return event, nil
+		}
+		if scenario.DeviceAccessProfile == nil {
+			return profileEvent{}, errors.New("mixed route schedule has no device access profile")
+		}
 	}
 	forward := combinedExchangeLink(*event.Forward, scenario.ProviderAccessProfile.Reverse)
 	reverse := combinedExchangeLink(scenario.ProviderAccessProfile.Forward, *event.Reverse)
@@ -308,19 +384,29 @@ func applyFullTunProfileEvent(
 	if path.deviceCarrierNode == "" {
 		return nil, errors.New("full-TUN profile event has no device carrier node")
 	}
-	updates, err := path.environment.network.updateNodeProfiles(
-		ctx,
-		path.deviceCarrierNode,
-		event.Name,
-		scheduledTime,
-		event.Forward,
-		event.Reverse,
-	)
-	if err != nil {
-		return updates, err
+	var updates []networkProfileUpdateResult
+	if !event.P2pOnly {
+		accessUpdates, err := path.environment.network.updateNodeProfiles(
+			ctx,
+			path.deviceCarrierNode,
+			event.Name,
+			scheduledTime,
+			event.Forward,
+			event.Reverse,
+		)
+		updates = append(updates, accessUpdates...)
+		if err != nil {
+			return updates, err
+		}
 	}
 	if path.streamP2pNetwork != nil {
 		return updates, errors.New("live profile schedules do not support multihop P2P")
+	}
+	if event.P2pOnly && path.p2pNetwork == nil {
+		return updates, errors.New("direct-only profile event on a route without a direct P2P link")
+	}
+	if event.AccessOnly {
+		return updates, nil
 	}
 	if path.p2pNetwork != nil {
 		if event.Forward == nil || event.Reverse == nil {

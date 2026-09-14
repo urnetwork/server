@@ -17,6 +17,11 @@ const (
 	circleAdmissionRange           = "5m"
 	circleAdmissionSamplesSuffix   = ":range-samples"
 	circleAdmissionMeanWaitSeconds = 5.0
+	// 66525afc completes fail-closed Redis error accounting but predates the
+	// capability gauge and exact pre-POST marker. 928abfca is the surviving
+	// current-main ancestry boundary for that complete observation contract.
+	circleAdmissionFailClosedBaselineCommit = "66525afc"
+	circleAdmissionMarkerBaselineCommit     = "928abfca"
 )
 
 // Signal circle-admission implements SIGNALS.md §2.14. It verifies that every
@@ -310,11 +315,11 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		mechanism := "No accepted sample for one or more Circle metric families is queryable in the five-minute range. Mimir cannot distinguish an absent collector from stats delivery or admission loss from this observation alone."
 		evidence := "Fresh count_over_time establishes accepted sample presence independently from five-minute increase availability. Only §8.12 source and immutable artifact evidence can prove whether the running process registered the collector."
-		action := "Prove the affected block's source and immutable image digest with §8.12. If the artifact contains current-main commit 66525afc, restore Taskworker stats delivery and Mimir admission; only an artifact proven to predate that baseline justifies a Taskworker deployment. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys."
+		action := "Prove the affected block's source and immutable image digest with §8.12. If the artifact contains current-main marker-capable commit " + circleAdmissionMarkerBaselineCommit + ", restore Taskworker stats delivery and Mimir admission; only an artifact proven to predate that marker baseline justifies a Taskworker deployment. Commit " + circleAdmissionFailClosedBaselineCommit + " is only the fail-closed activity/error baseline and does not prove the capability gauge or exact pre-POST marker. Do not infer source from a mutable version string, bypass the gate, accelerate payout tasks, or rotate payment idempotency keys."
 		if observableMissing {
 			mechanism = "At least one newest Taskworker has no accepted admission-observable capability sample. The bounded pre-POST marker can be absent because of a mixed rollout, a missing current collector, or telemetry loss; its absence is unknown and must never be rendered as zero admitted submissions."
 			evidence = "The capability gauge is fixed at one by the same executable that emits one identifier-free marker immediately after Redis admission and before the processor POST. Newest-process selection prevents an old draining generation from supplying a replacement's missing capability."
-			action = "Use §8.12 to distinguish a Taskworker artifact that lacks the admission-observable capability from one whose metric delivery was lost. Deploy the current observable artifact only to a proven old block; otherwise restore stats delivery. Keep payout-wallet-insufficient and processor 429 visibility active, and do not infer zero admissions, bypass the gate, accelerate tasks, or rotate payment idempotency keys."
+			action = "Use §8.12 to distinguish a Taskworker artifact that lacks current-main marker-capable commit " + circleAdmissionMarkerBaselineCommit + " from one whose metric delivery was lost. An artifact containing only fail-closed baseline " + circleAdmissionFailClosedBaselineCommit + " can expose all five activity families while still lacking the capability gauge and exact pre-POST marker. Deploy the current observable artifact only to a block proven to predate " + circleAdmissionMarkerBaselineCommit + "; otherwise restore stats delivery. Keep payout-wallet-insufficient and processor 429 visibility active, and do not infer zero admissions, bypass the gate, accelerate tasks, or rotate payment idempotency keys."
 		} else if len(rangeGaps) > 0 && len(noSamples) == 0 {
 			mechanism = "The Circle collectors are registered, but at least one newest process has fewer than two accepted samples in the five-minute range, so PromQL cannot calculate its increase. A new generation can cause this briefly; on an established generation, correlated gaps across all five families point to telemetry admission or delivery loss, not missing gate code."
 			action = "Restore enough Taskworker stats delivery and Mimir admission for two consecutive accepted samples on every current process, then rerun the five-minute delta. Do not deploy the Taskworker merely because increase() had insufficient range samples, and do not weaken or bypass the Circle gate."
@@ -333,9 +338,9 @@ func (circleAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			baseline:  "Every newest fresh taskworker exports the admission-observable capability plus admissions, deferrals, fail-closed errors, and admission-wait count/sum; counter families have two consecutive scrapes.",
 			observed:  strings.Join(observations, " "),
 			evidence:  evidence,
-			context:   "Circle documents a default five POST requests/second for Wallets API endpoints. Current-main server commit 14928f69 atomically admits at most three transfer submits in a Redis-time rolling second; descendant 66525afc also converts the Redis wrapper's panic path into the measured fail-closed error. This leaves two requests/second of headroom and preserves the existing payment idempotency key.",
+			context:   "Circle documents a default five POST requests/second for Wallets API endpoints. Current-main server commit 14928f69 atomically admits at most three transfer submits in a Redis-time rolling second; descendant " + circleAdmissionFailClosedBaselineCommit + " converts the Redis wrapper's panic path into the measured fail-closed activity/error path. Later current-main commit " + circleAdmissionMarkerBaselineCommit + " adds the capability gauge and exact Redis-time pre-POST marker. This leaves two requests/second of headroom and preserves the existing payment idempotency key.",
 			action:    action,
-			verify:    "§8.12 proves source/digest identity convergence and every newest Taskworker exposes the admission-observable capability and all five admission activity families; then exact pre-POST markers stay below four admitted submissions/second and no processor 429 occurs for a full 90-minute retry window.",
+			verify:    "§8.12 proves source/digest identity convergence on marker-capable commit " + circleAdmissionMarkerBaselineCommit + " or a descendant and every newest Taskworker exposes the admission-observable capability and all five admission activity families; then exact pre-POST markers stay below four admitted submissions/second and no processor 429 occurs for a full 90-minute retry window.",
 			playbook:  "SIGNALS.md §2.14, §1.2, §5.7, and §8.12",
 		})
 	}

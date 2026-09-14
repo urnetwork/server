@@ -154,6 +154,91 @@ maps to `server/monitor/signal_short_key.go` and
 `signal_short_key_test.go`; the Go file keeps a comment linking back to this
 section number. Use the same convention for every new automated entry.
 
+Numbered headings without their own `Probe:` line are cross-referenced here so
+they cannot be mistaken for silently missing standalone probes. “Runbook” means
+the heading interprets findings produced by the named probes; it does not claim
+an additional detector. “Shared contract” means the named probes directly own
+the executable checks described by the heading. “Coverage gap” remains an
+active missing capability and must not be read as green.
+
+<!-- numbered-coverage-start -->
+| Section | Kind | Executable boundary |
+|---|---|---|
+| 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
+| 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
+| 5.3 | Runbook | `redis-cluster`, `log-errors` |
+| 5.4 | Runbook | `redis-memory`, `redis-buffers`, `redis-process`, `log-errors` |
+| 5.5 | Runbook | `redis-buffers`, `redis-connections`, `redis-keyevents`, `log-errors` |
+| 5.6 | Runbook | `pg-state`, `pg-capacity`, `pool-retention`, `wait-events` |
+| 5.7 | Runbook | `task-canaries`, `task-health`, `stuck-leases`, `task-convergence`, `log-errors` |
+| 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
+| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
+| 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
+| 8.1 | Runbook | `provenance`, `rollout-guard` |
+| 8.1a | Shared contract | `proxy-path`, `provenance` |
+| 8.2 | Shared contract | `rollout-guard`, `provenance`, `reboot-collision` |
+| 8.3 | Runbook | `contract-rate`, `task-canaries`, `connection-rate` plus the owning service probe |
+| 8.4 | Runbook | `provenance`, `rollout-guard`; a deploy annotation is not an alert |
+| 8.5 | Shared contract | `reboot-collision`, `rollout-guard`, `hostpower` |
+| 8.6 | Shared contract | `provenance`, `rollout-guard`, `connection-rate`, `log-errors` |
+| 10.1 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `key-publication` |
+| 10.2 | Shared contract | `rollout-guard`, `log-errors`, `connection-rate` |
+| 10.3 | Shared contract | `reliability-drift`, `selection-freshness`, `connection-rate` |
+| 10.4 | Runbook | Access recipe for focused `rollout-guard`, `provenance`, and `log-errors` checks |
+| 11.1 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `log-shipper` |
+| 11.2 | Shared contract | `grafana-node`, `provenance`, `rollout-guard` |
+| 11.3 | Runbook | `grafana-node`, `log-errors` |
+| 11.4 | Runbook | `log-errors`, `grafana-node` |
+| 11.5 | Shared contract | `grafana-node`, `mimir-balance`, `mimir-index` |
+| 11.6 | Shared contract | `mimir-index`, `grafana-node`, `backup-archives` |
+| 11.7 | Runbook | `rollout-guard`, `log-errors` |
+| 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
+| 11.7c | Runbook | `rollout-guard`, `provenance` |
+| 11.8 | Shared contract | `provenance`, `grafana-node` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
+| 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
+| 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
+| 11.13 | Runbook | `grafana-node`, `log-errors`, `loki-tailers` |
+| 11.16 | Shared contract | `grafana-ingress` |
+| 12.1 | Shared contract | `log-errors` owns the taskworker drain outcome class |
+| 12.2 | Shared contract | `task-convergence`, `rollout-guard`, `log-errors` |
+| 13.1 | Shared contract | `log-errors` owns the cut-connection line; `provenance` and `rollout-guard` own generation context |
+| 13.2 | Runbook | API drain metrics are diagnostic context for `log-errors`, `provenance`, and `rollout-guard` |
+| 13.3 | Runbook | `log-errors`, `contract-rate`, `connection-rate`, `rollout-guard` |
+| 13.4 | Shared contract | `rollout-guard`, `provenance`, `log-errors` |
+| 13.5 | Runbook | `log-errors`; deterministic API and acceptance tests own the wire contract |
+| 13.6 | Runbook | `log-errors`; platform acceptance suites own the client-side contract |
+| 14.1 | Shared contract | `proxy-path`, `proxy-runtime`, `rollout-guard`, `provenance` |
+| 14.2 | Shared contract | `proxy-runtime`, `proxy-memory`, `rollout-guard`, `log-errors` |
+| 14.3 | Shared contract | `proxy-path`, `proxy-pool`, `proxy-runtime`, `log-errors` |
+| 14.4 | Shared contract | `proxy-cache`, `proxy-runtime`, `log-errors` |
+| 14.6 | Probe | `proxy-transport` plus `log-errors`, `proxy-pool`, `proxy-runtime` controls |
+| 15.2 | Shared contract | `key-publication`, `log-errors` |
+| 15.3 | Shared contract | `key-publication`, `log-errors` |
+| 16.1 | Shared contract | `key-publication`, `provenance`, `rollout-guard` |
+| 16.2 | Shared contract | `key-publication`, `log-errors` |
+| 16.3 | Shared contract | `key-publication`, `log-errors` |
+| 16.4 | Shared contract | `edge-ipv6`, `key-publication`, `proxy-path` |
+| 16.5 | Runbook | `edge-ipv6`, `key-publication`, `log-errors` |
+| 16.6 | Shared contract | `edge-ipv6`, `key-publication`, `log-errors` |
+| 16.7 | Runbook | `rollout-guard`, `provenance`, `key-publication`, `log-errors` |
+| 16.8 | Runbook | `edge-ipv6`, `key-publication`, `rollout-guard`, `provenance`, `log-errors` |
+| 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
+| 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
+| 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
+| 22.1 | Coverage gap | `subnet-coverage` reports missing finalized chain, deployment, policy, and governance readers |
+| 22.2 | Coverage gap | `subnet-coverage` reports missing pool, validator, fleet, and commitment readers |
+| 22.3 | Coverage gap | `subnet-coverage` reports missing deposit, conviction, and reserve replay |
+| 22.4 | Coverage gap | `subnet-coverage` reports missing validation-path, attempt, and quality replay |
+| 22.5 | Coverage gap | `subnet-coverage` reports missing candidate-census, head, promotion, and tier replay |
+| 22.6 | Coverage gap | `subnet-coverage` reports missing weight-lifecycle, consensus, and dividend replay |
+| 22.7 | Coverage gap | `subnet-coverage` reports missing capture, root, claim, carry, and conservation replay |
+| 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
+| 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
+| 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+<!-- numbered-coverage-end -->
+
 Cadence mode starts each probe immediately, but admits at most four concurrent
 probe executions. Most probes reach the production boundary through SSH; an
 unbounded 29-probe startup wave caused a real SSH connection rejection on
@@ -353,7 +438,9 @@ WHERE function_name LIKE '%UpdateClient%'
   10`, hiding the independently failed `UpdateClientScores` row and its Redis
   `:6402` write timeout. The probe now groups the complete failing set by task
   function and emits one alert identity per family, carrying family/parked/live
-  counts and one representative error. Never cap raw rows before this grouping.
+  counts and one representative fixed error class. Raw task errors remain
+  private inputs to classification and never enter Alert Markdown. Never cap
+  raw rows before this grouping.
 - GOTCHA — one task family can still contain several causes. On 2026-08-30,
   `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
   connection-cleanup deadlines from §2.10 retention, five
@@ -361,13 +448,13 @@ WHERE function_name LIKE '%UpdateClient%'
   highest-error representative belonged to the wallet class and made a
   single-cause explanation falsely describe the other 16 rows. The probe now
   computes a complete bounded cause breakdown before it selects a
-  representative error. When more than one class exists, the family alert says
-  it is mixed and builds its action and verification from only the classes
-  present in that snapshot; stale guidance for an absent class is itself an
-  alerting defect. A sample is evidence, not permission to apply its diagnosis
-  to every row. Keep invalid-destination separate from generic processor 400s
-  because only that typed, definitive pre-chain result is safe to unpin
-  (§5.7).
+  representative fixed error class. When more than one class exists, the
+  family alert says it is mixed and builds its action and verification from
+  only the classes present in that snapshot; stale guidance for an absent
+  class is itself an alerting defect. A sample is evidence, not permission to
+  apply its diagnosis to every row. Keep invalid-destination separate from
+  generic processor 400s because only that typed, definitive pre-chain result
+  is safe to unpin (§5.7).
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -666,7 +753,11 @@ WHERE function_name LIKE '%UpdateClient%'
   source-second log join remains the provider-outcome control.
   Follow-up current-main commit `66525afc` converts the server Redis wrapper's
   connection panic path into that same measured fail-closed error, so it is the
-  minimum deployable source for complete §2.14 telemetry.
+  fail-closed activity/error baseline. It predates the capability gauge and
+  exact pre-POST marker and therefore is not the complete §2.14 observation
+  baseline. Surviving current-main commit `928abfca` adds that capability and
+  marker contract; use it as the minimum source when §2.14 marker visibility is
+  part of the recovery gate.
 
   The first remediation added a fail-closed Warp release gate, but operator
   policy later established that intentional local checkout state must remain
@@ -903,6 +994,8 @@ and `abfd976b` hashes from before main was rewritten.
 ### 1.3b PgBouncer idle-backend retention
 Probe: `pool-retention`
 
+Alert class: `pgbouncer-idle-retention`.
+
 This is the reserve-shape companion to §1.3a. Read it through direct 5432 and
 count loopback client backends by state; do not assume that every loopback
 backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
@@ -1121,6 +1214,23 @@ the shape, omit the whole Warp identity prefix from the sample, and redact
 UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
+
+The following machine classifier names share the playbooks already specified
+below and in §4; retaining their exact identifiers makes implementation and
+ledger crosswalks deterministic:
+
+- `connection-refused`, `clusterdown`, and `redis-loading` distinguish a TCP
+  refusal, Redis slot-coverage loss, and Redis load/failover state. The text
+  alone does not identify the restart or rollout cause.
+- `missing-origin-contract` is the metric-only raw log classifier feeding the
+  independently bounded §2.17 missing-origin analysis.
+- `circle-transfer-admitted` is non-alerting admission evidence for §2.14;
+  `circle-transfer-admission-failed` is its fail-closed error class.
+- `signal-send-not-admitted`, `signal-send-encryption-not-ready`,
+  `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
+  reason-specific successors to the legacy sender class in §14.6. They keep
+  admission, encryption readiness, lifecycle closure, and unknown errors
+  causally separate.
 
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
@@ -1831,6 +1941,57 @@ that image. The same fleet still emitted eight canonical
 the TTL fix: it proves that one newer Connect image is still required for the
 separate post-Hijack recovery fix. Re-deploying `1033803620` cannot clear that
 class.
+
+### 1.6 Monitor settings generation freshness
+Probe: `settings-freshness`
+
+A continuous watcher captures one complete `SignalSettings` value at process
+start. That snapshot deliberately couples host inventory, disabled-host
+policy, desired-state expectations, credentials, and standing log-tail
+ownership. Reloading only one field in place would create a mixed generation,
+so settings changes use the controlled watcher-promotion procedure rather than
+a partial hot reload.
+
+Every minute, load the current effective Config and Vault inputs again and
+compare the resulting complete settings value with the startup snapshot only
+in memory. Ignore process-only test/runtime seams (`Now`, synthetic `Source`,
+runtime limiters, and the checker itself). Never render, hash, log, serialize,
+or persist either settings value, any credential, or a content-derived
+fingerprint. Production `LoadSignalSettings` always arms this local-only check;
+manually assembled library settings may omit it for compatibility.
+
+- `settings-generation-stale` warns on the first unequal comparison and pages
+  after five consecutive one-minute cadences. From that point every
+  configuration-derived target or expectation belongs to the startup
+  generation and is not evidence about current desired state.
+- `settings-generation-unobservable` has the same warning/page bands when the
+  fresh loader fails. It retains only a fixed observation-error class; a parse
+  error, resource path, resource value, and source fingerprint never enter the
+  Alert.
+- Context cancellation is watcher lifecycle, not settings loss, and returns
+  `context.Canceled` without an Alert.
+
+ACTION: preserve the old watcher while a fresh immutable candidate loads the
+complete intended settings, then use the §Safe watcher promotion overlap. If a
+host was newly disabled, stop using the stale watcher for host contact as soon
+as the candidate is proven. Do not suppress the finding, trust old green
+results, or hot-reload only one inventory/credential/tailer boundary.
+
+VERIFY: the candidate owns every expected tail and probe, its startup settings
+match a fresh load, the old watcher and children have exited, and both settings
+classes remain absent through two one-minute cadences.
+
+The 2026-09-13 Main points-readiness follow-up supplied the defining negative
+control. The authoritative watcher predated a later Vault change and therefore
+could not observe that generation. A current-source/current-Vault one-shot
+nevertheless reproduced the same explicit ST-disabled state, so staleness did
+not cause that points finding. It still proved that a future material settings
+change could otherwise remain invisible indefinitely. This signal makes that
+observation boundary explicit without attributing the changed resource or
+exposing its contents.
+
+Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
+`signal_settings_freshness.go` and `signal_settings_freshness_test.go`.
 
 ---
 
@@ -4189,11 +4350,15 @@ atomically acquires one fresh current slot and bucket before the caller can
 return. A waiter retains the payment's durable Circle idempotency key, and a
 Redis/context error returns before HTTP rather than guessing that an ambiguous
 financial submit is safe.
-Current-main descendant `66525afc` also converts the Redis wrapper's
-pre-command connection panic into the same error/counter/log path; use that
-descendant as the minimum observable deployment baseline. Stable patch IDs
-prove it is patch-identical to the former `b8718420` hash after main was
-rewritten.
+Current-main descendant `66525afc` converts the Redis wrapper's pre-command
+connection panic into the same error/counter/log path. `66525afc` is the
+fail-closed activity/error baseline, but it does **not** prove the capability gauge or exact
+pre-POST marker. Stable patch IDs prove it is patch-identical to the former
+`b8718420` hash after main was rewritten. Later commit `928abfca` is the
+surviving current-main marker-capable baseline: it registers the fixed gauge and
+emits one Redis-time marker synchronously before each admitted POST. Its
+patch-identical predecessors were rewritten and are not current ancestry, so
+deployment guidance uses `928abfca`.
 
 The Taskworker exports these process metrics:
 
@@ -4241,10 +4406,12 @@ that the process lacks the registered gate collector.
   fresh capability/activity sample or has fewer than two accepted activity
   samples for a five-minute increase. A missing capability can mean mixed
   rollout, missing collection, or telemetry loss; admission-marker absence is
-  therefore unknown and must never be rendered as zero. Deploy a clean current
-  Taskworker only for a genuinely absent capability proven by §8.12
-  source/digest provenance; otherwise restore stats delivery/Mimir admission
-  and do not prescribe an application deployment.
+  therefore unknown and must never be rendered as zero. An artifact containing
+  `66525afc` can expose every activity family while still lacking the gauge and
+  marker. Deploy a clean Taskworker containing `928abfca` only for a genuinely
+  pre-marker artifact proven by §8.12 source/digest provenance; otherwise
+  restore stats delivery/Mimir admission and do not prescribe an application
+  deployment.
 - WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
   exact window with taskworker drain state, Redis liveness/latency, and the
   privacy-safe admission failure line. Never bypass the gate or manually replay
@@ -4255,7 +4422,7 @@ that the process lacks the registered gate collector.
   **operations/finance** boundary: fund or pause that wallet because software
   cannot create liquidity. For legitimate sustained payout growth, obtain the
   account's authoritative Circle quota before changing code or thresholds.
-- VERIFY: §8.12 proves every newest Taskworker runs the marker-capable artifact;
+- VERIFY: §8.12 proves every newest Taskworker runs `928abfca` or a descendant;
   the capability and all five activity families are present, counter families
   have two scrapes, admission errors and Circle 429s stay zero, exact pre-POST
   markers stay below four/second, and payment idempotency keys remain stable for
@@ -4266,8 +4433,9 @@ newest fresh Taskworker processes ran version
 `2026.9.1-outerwerld+1034926970` from one clean source revision
 `fe3fa8eea625a3935ec7fe6569ee83b8a2578143` and immutable image digest. Git
 ancestry proves that revision contains typed-reset `b8af229f`, proportional
-jitter `70b0d269`, and the complete `66525afc` admission baseline. The
-dedicated probe found all five activity collectors healthy. Across the full
+jitter `70b0d269`, and the complete `66525afc` fail-closed activity/error
+baseline. The dedicated probe then required only the five activity collectors;
+that historical control predates the capability/marker requirement. Across the full
 90-minute control, 1,244 exact task-evaluator wallet-insufficient responses
 occupied 1,037 source seconds, peaked at exactly three attempts in one second,
 and produced zero admission-failed lines and zero Circle 429s. That is positive
@@ -4276,6 +4444,21 @@ ceiling, but those post-POST timestamps are not direct admission evidence.
 Continued wallet-insufficient or invalid-destination rows after this boundary
 are the separate finance and account-configuration actions in §1.2; do not
 prescribe another Taskworker deployment for them.
+
+The 2026-09-13 Main control exposed the ancestry distinction directly. All
+eight newest Taskworker identities had accepted samples for all five activity
+families but lacked only `urnetwork_circle_transfer_admission_observable_info`
+across sustained minute cadences. Their uniform runtime generation was
+established well before `928abfca`; the corresponding historical source tag
+`1b9cacba` contains `66525afc` but predates `928abfca` and has neither the gauge
+nor the `observable=v1` marker. The running executable reported a modified
+source identity, so the tag is a source-content negative control rather than a
+substitute for §8.12 runtime provenance. Six independent service-gateway reads
+agreed that every visible established process had the activity families and no
+capability sample. This selects an unpromoted marker-capable Taskworker artifact
+as the primary cause, not two-sample warmup or the known Mimir publisher-front
+skew. A separate transient whole-family gap remains owned by §11.20a and does
+not explain the fleet-wide, capability-only absence.
 
 Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
 `signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
@@ -4388,7 +4571,7 @@ schedule a duplicate task, or restart clients to manufacture recovery.
 
 This is a **software root cause**, not a hardware-capacity alert. Proxy memory
 and active-client ceilings remain the separate hardware/operations boundary in
-§16.8 and §16.9.
+§14.7.
 
 Implementation convention: SIGNALS.md §2.15 (`reliability-drift`) maps to
 `signal_reliability_drift.go` and `signal_reliability_drift_test.go`.
@@ -4459,7 +4642,7 @@ consecutive probes with zero mature orphans, a later location-reliability pass
 that removes former orphan supply, the §2.9 provider-eligibility completion
 marker, and recovery in open-set size, destination diversity, and child churn.
 This fix needs no hardware. It does not change the separate proxy active-client
-ceiling or the hardware/operations capacity guidance in §16.8 and §16.9.
+ceiling or the hardware/operations capacity guidance in §14.7.
 
 Implementation convention: SIGNALS.md §2.16 (`connection-orphans`) maps to
 `signal_connection_orphans.go` and
@@ -4476,10 +4659,11 @@ is the lossless API-side boundary for a contract request that entered companion
 settlement but could not find a usable reverse origin after the bounded
 server-side race wait. Server `c8dfe570` also added
 `urnetwork_connect_missing_origin_details_total`, whose labels are the bounded
-request-time resolution, relationship, and source/destination lifecycle
-snapshot already read by `CreateContract`; it performs no identifier-bearing
-diagnostic query. The probe requests the aggregate and detail cohorts in one
-Mimir evaluation, only for requests whose original wire bit was false:
+sender role plus server-derived source owner, request-time resolution,
+relationship, and source/destination lifecycle snapshot already read by
+`CreateContract`; it performs no identifier-bearing diagnostic query. The
+probe requests the aggregate and detail cohorts in one Mimir evaluation, only
+for requests whose original wire bit was false:
 
 ```promql
 label_replace(
@@ -4490,7 +4674,7 @@ label_replace(
 )
 or
 label_replace(
-  sum by (resolution,relationship,source_lifecycle,destination_lifecycle) (
+  sum by (sender_role,source_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (
     rate(urnetwork_connect_missing_origin_details_total{
       env="main",request_companion="false"
     }[5m])
@@ -4499,15 +4683,20 @@ label_replace(
 )
 ```
 
-The detail cardinality is fixed by code, not request data. `resolution` is one
-of `requested_companion`, `stream_fallback`, `network_normalized`,
-`relationship`, `rejected`, or `unknown`; `relationship` is `network`,
-`friends_family`, `public`, or `unknown`; and each lifecycle is `missing`,
-`active_top`, `inactive_top`, `active_derived`, `inactive_derived`, `control`,
-or `unknown`. Mimir sums away API process/instance labels before the monitor
-sees the response. No customer, client, network, device, contract, or
-destination identity enters the cohort; the standard bounded monitor gateway
-name remains operational context.
+The detail cardinality is fixed by code, not request data. `sender_role` is
+`client`, `server`, `absent`, or `unknown`; it describes the additive wire
+sequence lane, not an application. `source_owner` is derived by the API from
+the authenticated source network and durable egress-prober singleton in the
+same PostgreSQL snapshot as lifecycle: `egress_prober`, `other`, or `unknown`.
+It is never accepted from a request. `resolution` is one of
+`requested_companion`, `stream_fallback`, `network_normalized`, `relationship`,
+`rejected`, or `unknown`; `relationship` is `network`, `friends_family`,
+`public`, or `unknown`; and each lifecycle is `missing`, `active_top`,
+`inactive_top`, `active_derived`, `inactive_derived`, `control`, or `unknown`.
+Mimir sums away API process/instance labels before the monitor sees the
+response. No customer, client, network, device, contract, or destination
+identity enters the cohort; the standard bounded monitor gateway name remains
+operational context.
 
 - HEALTHY: the `companion=false` partition stays at or below 500/min for two
   complete five-minute windows. A six-hour control on 2026-09-02 held mostly
@@ -4538,8 +4727,13 @@ using the cohorts:
   vocabulary, no duplicate, one common aggregate evaluation timestamp, and a
   nonnegative finite rate. Its sum must reconcile with the aggregate within the
   larger of 1/min or 2%; that narrow allowance covers a scrape landing between
-  the two adjacent counter increments. Only in this state may the alert export
-  the dominant joint resolution/relationship/lifecycle cohort and its rate.
+  the two adjacent counter increments. The old five-label schema may coexist
+  during a rolling range; the monitor retains both missing attribution labels
+  as the synthetic fixed class `unattributed`, never folds that rate into
+  `other`, and rejects a half-upgraded or producer-emitted `unattributed`
+  schema. Only in this state may the alert export the dominant joint sender/
+  source-owner/resolution/relationship/lifecycle cohort and its rate. A
+  reconciled `unattributed` cohort is rate-complete but not ownership evidence.
 - `detail_status=partial`: structurally valid cohorts sum materially below the
   aggregate. This is a mixed API rollout or incomplete ingestion window; do not
   assign the incident from the visible subset.
@@ -4561,12 +4755,17 @@ but treat that as a control rather than proof about every failing request. Then
 compare the onset with score publications, service rollout/drain boundaries,
 connection churn, successful contract creation, and the client-window lifetime.
 Windows selected before a repaired publication must age out naturally. For a
-complete detail snapshot, use its joint source lifecycle, destination
-lifecycle, relationship, and resolution cohort to distinguish selection from
-return traffic without raw client pairs. An absent, partial, or ambiguous
-snapshot is an observation boundary and must not be used as causal proof. Do
-not log identifiers, edit Redis blobs, weaken provider gates, restart clients,
-or increase the companion wait merely to hide the rate.
+complete detail snapshot, use its joint sender role, server-derived source
+owner, source lifecycle, destination lifecycle, relationship, and resolution
+cohort to distinguish the internal prober from other selection/return traffic
+without raw client pairs. `source_owner=egress_prober` selects only the
+server-owned singleton for direct correlation. `source_owner=other` excludes
+that singleton but does not identify a product, application, device, or
+artifact. A complete older-schema cohort is retained as `unattributed`, never
+folded into `other`. An absent, partial, ambiguous, or ownership-unattributed
+snapshot must not be used as causal proof. Do not log identifiers, edit Redis
+blobs, weaken provider gates, restart clients, or increase the companion wait
+merely to hide the rate.
 
 2026-09-02 production evidence showed why this must be a first-class monitor
 signal rather than only a dashboard rule. After the eligibility export, the
@@ -4644,8 +4843,10 @@ single channel transition, and bounds runtime discovery exclusions.
 Provider-return source owners additionally require `55daddb`, which closes the
 exact shared source gate before later UDP, TCP, ICMP, queued, or live-flow work
 can return it. While the path remains unattributed, require both fixes. Neither
-this signal's lifecycle/relationship cohorts nor `companion=false` identify a
-product, application, or artifact.
+this signal's sender role, lifecycle/relationship cohorts, nor
+`companion=false` identify a product, application, device, or artifact.
+`source_owner=egress_prober` identifies only the server-owned singleton;
+`source_owner=other` excludes that singleton but supplies no narrower identity.
 
 The 2026-09-03 current control demonstrates the rollout distinction. The
 coarse `companion=false` rate was 1,738.899/min through a healthy Mimir gateway,
@@ -4660,19 +4861,37 @@ already become inactive. This confirms the existing API deployment boundary;
 it does not justify inferring the missing-failure cohort before complete detail
 is observable.
 
-Verification requires the API fix first and independently proven adoption of
-the applicable Connect ancestry: `ec34ce1` for selected/discovery windows,
-`55daddb` for provider-return source owners, or both while the path remains
-unattributed. Only then does a maximum client-window lifetime become a useful
-observation interval. A still-installed older client can reconnect and create
-another legacy window indefinitely, so elapsed time alone is not artifact
-convergence. After API convergence, successful contracts to already-inactive
-destinations must fall to zero and the missing-origin rate must return to its
-calibrated band. After Connect rollout, a synthetic or observed Reliability
-result must remove only its emitting exit and refill that window;
-InsufficientBalance and every non-Reliability result must leave window health
-unchanged. Do not substitute a longer contract timeout, provider-capacity
-hardware, or manual cache deletion for either invariant.
+The 2026-09-13 recurrence selected a different current shape: roughly nine
+tenths of the complete bounded detail rate was Stream fallback for a Public
+relationship from an active top-level source to an active derived destination.
+That differs from the 2026-09-02 already-inactive-derived stale-route failure
+and must not inherit its cause. Across 141 aligned one-minute samples, the
+missing-origin rate had only 0.154 zero-lag correlation with bounded egress
+blackhole checks; the strongest correlation across plus or minus ten minutes
+was only 0.269. Similar absolute rates therefore did not prove that the egress
+prober owned this cohort. The API already held a bounded sender role and
+server-derived source owner at the failure boundary but the five-label metric
+discarded both. The seven-label producer and consumer correction closes that
+diagnostic gap; it is an observability fix, not a repair for the still-unknown
+missing-origin mechanism. Deploy it to every API instance, wait one complete
+five-minute range, and require zero `unattributed` rate before selecting the
+internal-prober or other-source branch.
+
+Verification requires every API instance to export the seven-label detail
+family, one complete five-minute range with zero ownership-unattributed rate,
+and independently proven adoption of the applicable Connect ancestry:
+`ec34ce1` for selected/discovery windows, `55daddb` for provider-return source
+owners, or both while the path remains unattributed. Only then does a maximum
+client-window lifetime become a useful observation interval. A still-installed
+older client can reconnect and create another legacy window indefinitely, so
+elapsed time alone is not artifact convergence. After API convergence,
+successful contracts to already-inactive destinations must fall to zero and
+the missing-origin rate must return to its calibrated band. After Connect
+rollout, a synthetic or observed Reliability result must remove only its
+emitting exit and refill that window; InsufficientBalance and every
+non-Reliability result must leave window health unchanged. Do not substitute a
+longer contract timeout, provider-capacity hardware, or manual cache deletion
+for either invariant.
 
 This is a software/provider-lifecycle or bounded operational-aging alert, not a
 hardware-capacity alert. More Proxy hosts can raise the active-client ceiling
@@ -4680,14 +4899,18 @@ but cannot repair an unbootstrappable selected destination.
 
 Implementation convention: SIGNALS.md §2.17 (`missing-origin`) maps to
 `signal_missing_origin.go` and `signal_missing_origin_test.go`. Synthetic tests
-cover the pre-detail-rollout high-rate frame, complete bounded cohorts, partial
-mixed-rollout coverage, duplicate/skewed/unknown/extra-label ambiguity,
-identifier redaction, the exact healthy boundary, absent and duplicate
-aggregate visibility, stale samples, invalid rates, query scoping, and detailed
-Markdown rendering without identifiers.
+cover the pre-detail-rollout high-rate frame, complete bounded sender/owner
+cohorts, old-schema attribution retained only as `unattributed`, half-upgraded
+schema rejection, partial mixed-rollout coverage, duplicate/skewed/unknown/
+extra-label ambiguity, identifier redaction, the exact healthy boundary,
+absent and duplicate aggregate visibility, stale samples, invalid rates, query
+scoping, and detailed Markdown rendering without identifiers.
 
 ### 2.18 Stale contract destination rejection — dead routes must not authorize
 Probe: `stale-destination`
+
+Alert class: `stale-destination-rate` for a complete, above-band aggregate;
+the visibility classes below remain separate identities.
 
 The API-side active-lifecycle guard exports the bounded counter cause
 `urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
@@ -5575,6 +5798,14 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
   `entitlement_repaired` repair in the last 24 hours, grouped only by
   store/action.
 
+`payment-reconciliation-watermark-stale` warns when one store's last
+successful watermark is more than three hours old and pages when it is more
+than six hours old or absent. Same-window `skipped_store` and `error` events
+own the immediate discriminator: restore that store's credential or adapter
+path while preserving the overlap lookback, and never force the watermark
+forward. Close only after two natural hourly runs complete without a skip or
+error and leave the watermark inside three hours.
+
 `payment-reconciliation-store-skipped` is PAGE immediately. Missing credentials
 are not a healthy local-environment convenience on Main: they disable that
 store's ability to recover a lost renewal, revocation, or refund. Run §8.7 to
@@ -6016,11 +6247,20 @@ endpoints, contracts, and failure text never leave PostgreSQL.
 
 Closure requires an explicit security/availability decision:
 
-1. **Secure containment:** quarantine claimed/proven legacy receivers until
-   they upgrade, then prove §2.8/§2.9 retain adequate healthy provider capacity.
-2. **Temporary compatibility:** postpone standard signing and converge both API
-   and Connect signer paths. This restores legacy receivers but deliberately
-   retains the weak key-only legacy MAC; an API-only rollout is inconsistent.
+1. **Secure containment:** upgrade legacy-only receivers or quarantine the
+   behaviorally proven cohort through a separately approved eligibility
+   control, then prove §2.8/§2.9 retain adequate healthy provider capacity.
+   A current failed blackhole verdict is a hard selection exclusion only until
+   its three-hour lifetime expires; it deliberately fails open after that and
+   is therefore not a durable quarantine. Never permanently exclude a provider
+   from its self-reported description alone.
+2. **Temporary compatibility:** postpone standard signing and uniformly build
+   every API and Connect signer from one reviewed shared Connect policy source.
+   Rebuild and safely promote the monitor from that same policy source because
+   this probe embeds its cutover boundary. This restores legacy receivers but
+   deliberately retains the weak key-only legacy MAC; it is explicit,
+   time-bounded risk acceptance with a named sunset, not final closure. An
+   API-only or Connect-only rollout is inconsistent.
 3. **Durable protocol treatment:** explicit per-client HMAC capability
    negotiation and removal of the time-only assumption. This changes protocol
    architecture and requires operator approval rather than an incident agent
@@ -6029,9 +6269,12 @@ Closure requires an explicit security/availability decision:
 Do not move the cutoff, quarantine supply, or choose weaker signing solely to
 clear a monitor alert. Do not lengthen egress timeouts: legacy rejection occurs
 before forwarding, and longer waits further reduce §2.19 coverage. For any
-chosen path, complete one whole-fleet blackhole refresh within the verdict
-lifetime, keep the compatible control healthy for two cadences, and require
-settled destination bytes—not contract creation alone—as the end-to-end gate.
+chosen path, complete one whole-fleet blackhole refresh within the three-hour
+verdict lifetime, keep the compatible control healthy for two cadences, and
+require settled destination bytes—not contract creation alone—as the
+end-to-end gate. A temporary compatibility availability gate does not close the
+protocol boundary; retain its explicit upgrade-and-sunset obligation until
+standard signing is safely restored.
 
 The 2026-09-09 main incident established the causal boundary. The configured
 cutover was `2026-09-01T00:00:00Z`. A privacy-bounded current census found
@@ -6069,25 +6312,35 @@ population/age bounds, privacy, and detailed Markdown.
 Probe: `probe-cleanup`
 
 Every provider-egress attempt derives a short-lived API client from the durable
-`prober_identity` singleton. Closing the bounded tunnel must retire that child;
-otherwise active rows accumulate until the much later idle reaper and inflate
-the database's apparent active-client population. This probe identifies the
-cohort by both the singleton network and parent client, limits reads to six
-hours, applies a ten-minute close grace, and exports only aggregate lifecycle
-counts. IDs, credentials, endpoints, and descriptions remain in PostgreSQL.
+`prober_identity` singleton. Closing or discarding the bounded tunnel attempt
+must retire that child; otherwise active rows accumulate until the much later
+idle reaper and inflate the database's apparent active-client population. This
+probe identifies the cohort by both the singleton network and parent client,
+limits reads to six hours, applies a ten-minute close grace, and splits mature
+active-disconnected residuals by whether any lifetime connection row exists.
+It exports only aggregate lifecycle counts. IDs, credentials, endpoints, and
+descriptions remain in PostgreSQL.
 
 - `probe-child-retirement` (WARN for any residual; PAGE after two samples when
-  at least 20 residuals are at least 10% of 20 or more mature children): mature
-  children remain active without a connected session. Active connected rows
-  are retained as the in-flight control; §2.19 and §2.23 must independently
-  bound probe execution and advancement rather than treating this signal as a
-  generic stuck-task detector.
+  at least 20 residuals are at least 10% of 20 or more mature children):
+  previously connected children remain active after their connection closes.
+  This is the reached-channel teardown branch.
+- `probe-unused-args-retirement` (same WARN/PAGE thresholds): children that
+  never produced a connection row remain active. This is the direct
+  client-argument cleanup branch for unused, late, expired, or failed
+  arguments, before generated-channel ownership begins.
 - `probe-child-retirement-identity` (WARN after two samples): the singleton
   authority is absent or incomplete. Repair §2.23 bootstrap; never infer the
   parent from descriptive text.
 - `probe-child-retirement-integrity` (WARN after two samples): a recent child
   is inactive without `deactivate_time`. The active flag and timestamp must be
   written together. Find the exact writer before any historical backfill.
+
+Active connected rows are retained as the in-flight control. §2.19 and §2.23
+must independently bound probe execution and advancement rather than treating
+either retirement class as a generic stuck-task detector. The two retirement
+branches can alert independently and must not be recombined when choosing a
+code path or declaring recovery.
 
 A privacy-bounded 2026-09-10 Main sample found 64,556 children created in six
 hours. Of 63,174 past the grace, 5,872 were inactive, 14 remained connected,
@@ -6100,7 +6353,9 @@ successor of historical `d3b49d9`) and Operator Proxy `35b0bc7` correct new
 teardown, but an immutable Taskworker artifact must prove both exact sibling
 inputs because Server's local module replacements make its outer VCS stamp
 insufficient evidence. Do not require the superseded Connect hash to be an
-ancestor of a post-rebase build.
+ancestor of a post-rebase build. That sample predates the lifetime-connection
+split and therefore records only the historical combined residual; it must not
+be assigned retroactively to either current branch.
 
 A later 2026-09-10 running-artifact discriminator found all eight fresh
 Taskworker slots on one generation with no fresh predecessor overlap. The exact
@@ -6115,21 +6370,48 @@ past the ten-minute grace, and finally a complete six-hour window plus grace.
 This paragraph records historical evidence and does not make that artifact's
 version standing deployment guidance.
 
-Do not bulk-delete or deactivate production children to clear this alert. The
-software fix prevents new leakage; historical active stock needs a separately
+A bounded 2026-09-13 post-rollout discriminator then found all eight current
+Taskworker slots on one artifact whose extracted executable contained both
+previous corrections. Connected-client teardown was clean. Across five
+post-rollout age buckets from ten minutes through six hours, every mature
+active-disconnected residual had zero lifetime connection rows; the
+`probe-child-retirement` branch was therefore zero and the remaining fault was
+exclusively `probe-unused-args-retirement`. Source review found the matching
+ordering gap: live direct `RemoveClientArgs` cleanup was launched
+asynchronously without admission to the generator retirement lifecycle, so
+`ApiMultiClientGenerator.CloseAndWait` could cancel and close the API before
+that remove completed. A separate bounded API-route control observed canceled
+remove-client requests while successful controls continued. Together these
+controls distinguish the current pre-channel lifecycle fault from the already
+corrected channel teardown, legacy stock, provider capacity, and ordinary
+probe inactivity.
+
+The correction is to admit live direct argument removal to the same bounded
+retirement lifecycle and make `CloseAndWait` join it before API cancellation.
+It must preserve generation-safe `RemoveIfCurrent`, intentional identity-store
+preservation during shutdown, and bounded best effort for calls that arrive
+after close.
+A deterministic regression blocks the remove-client response, starts
+`CloseAndWait`, proves shutdown remains joined until release, and requires one
+successful removal. Adjacent stale-generation and shutdown-store controls must
+remain green.
+
+Do not bulk-delete or deactivate production children to clear either alert.
+Software fixes prevent new leakage; historical active stock needs a separately
 reviewed, bounded reaper or operational cleanup. Begin an explicit post-rollout
-cohort only after every Taskworker contains both fixes, wait through the
-ten-minute grace, and require creation/deactivation balance. The rolling signal
-cannot become independently clean until rollout end plus six hours and the
-grace. This is a **software lifecycle/data-integrity** class, not a Proxy
-hardware-capacity remedy and not an explanation for the independent §2.24 HMAC
-failure.
+cohort only after every affected Taskworker contains the applicable fix, wait
+through the ten-minute grace, and require creation/deactivation balance for
+each branch. The rolling signal cannot become independently clean until
+rollout end plus six hours and the grace. These are **software
+lifecycle/data-integrity** classes, not a Proxy hardware-capacity remedy and
+not an explanation for the independent §2.24 HMAC failure.
 
 Implementation convention: SIGNALS.md §2.25 (`probe-cleanup`) maps to
 `signal_probe_cleanup.go` and `signal_probe_cleanup_test.go`. Synthetic tests
 cover a production-shaped severe leak, exact warning/page thresholds, a
-connected control, missing singleton authority, missing deactivation time,
-contradictory aggregates, bounded private SQL, and detailed Markdown.
+connected control, independent never-connected and ever-connected branches,
+missing singleton authority, missing deactivation time, contradictory totals
+and branch partitions, bounded private SQL, and detailed Markdown.
 
 ### 2.26 Device-backed share of new networks (source-neutral quality guard)
 Probe: `signup-quality`
@@ -7005,9 +7287,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[onboarding]connect.day write failed ... inconsistent types deduced for parameter $3 (SQLSTATE 42P08)` (`onboarding-connect-day-write`) | The Connect session was already committed and remains usable, but the separate `RecordConnectDay` transaction was rejected before it wrote analytics. The same untyped parameter was used as INSERT output and a varchar comparison. Recovery deliberately forgets the process-local cache entry, so the next connection retries and amplifies the defect. The 2026-09-10 persistence manifest's outer identity said Taskworker, but every selected private record and the focused snapshot named Connect; a bounded current discriminator found the exact source/SQLSTATE intersection throughout sampled Connect generations and zero matching Taskworker lines. All sampled Connect endpoints ran `2026.9.10+1042581110`, containing first-bad server commit `821f8131`. | Deploy Connect from a server checkout whose real statement explicitly casts every reused UUID, varchar, and timestamp parameter. Do not restart Taskworker, replay raw connections, or fabricate missing historical events; backfill is a separate product/data-policy decision. The fixed alert sample omits the client identifier. Verify the PostgreSQL test records exactly one `connect.day` event per network per UTC day, every Connect block runs the corrected artifact, and neither this class nor its former `novel` shape recurs for ten minutes after ingestion delay while connections continue. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `66525afc` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
+| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean marker-capable `928abfca` Taskworker only where §8.12/§2.14 proves it absent; `66525afc` alone has the fail-closed activity/error path but not the capability gauge or exact pre-POST marker. Another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
 | `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
-| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
+| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
@@ -7248,8 +7530,9 @@ limit:
   typed reset, not evidence that the reset code is missing. At that point it
   did not weaken the separate requirement to deploy `70b0d269` for retry
   dispersion; the later current-main `66525afc` baseline contains that jitter,
-  the fleet admission gate, and complete fail-closed telemetry required by the
-  post-jitter control.
+  the fleet admission gate, and complete fail-closed activity/error telemetry
+  required by that historical post-jitter control. It does not contain the
+  later capability gauge or exact pre-POST marker from `928abfca`.
 
   An independent artifact/runtime control at the UTC day boundary removed the
   remaining provenance assumption. The published OCI/SLSA build provenance for
@@ -7263,9 +7546,10 @@ limit:
   the still-invalid selected wallet, while the hour-locked cadence separately
   proves the old jitter. The incident therefore required both correcting the
   wallet through the supported account API and deploying retry dispersion;
-  current software convergence uses `66525afc`, which includes the independently
-  required fleet admission gate and its failure telemetry. Neither software
-  fix can invent or authorize valid payout-wallet data.
+  current software convergence for the gate and fail-closed activity/error path
+  used `66525afc`; complete marker observability now requires `928abfca` or a
+  descendant. Neither software fix can invent or authorize valid payout-wallet
+  data.
 
   The 2026-09-02 control then proved that baseline live on all eight newest
   Taskworker processes at source `fe3fa8ee`. The same 90-minute interval had
@@ -8551,6 +8835,18 @@ no new large-drift or negative-counter evidence; reopen underlying-cause work
 only on a correlated recurrence, rather than inferring it from the timeout
 class alone.
 
+The bounded 2026-09-13 lifecycle recheck exposed a privacy defect in that
+retention path: a failed attempt's complete evaluator error JSON and stack were
+copied into `failed_error` after only task-id replacement. That text can also
+carry dependency-controlled messages, addresses, and opaque identifiers. The
+monitor now classifies task errors in memory into a fixed allowlist (including
+the proved PostgreSQL statement-timeout class) and renders only
+`failed_error_class` or `precursor_failed_error_class`; unknown shapes become
+`unclassified`. Generic observation failures and the task-error battery use the
+same fixed-output boundary. Raw text remains available only transiently for
+existing internal guidance selection. Lifecycle phase, exact-attempt
+correlation, and alert identity are unchanged.
+
 A separate contained recurrence on 2026-09-13 comprised ten distinct
 settlement releases on five balances in two bursts of four and six. All ten
 reported `clamped_to=0`; API, Proxy, and Connect emitted none, and no checked
@@ -8689,10 +8985,14 @@ Tier-0 (page):
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
+| probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
+| dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
+| hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
 
 Tier-1 (warn):
 | id | source | check | threshold |
 |---|---|---|---|
+| settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | task-parked | pg | all `error_count>0` rows grouped by task family before reporting; payload separates parked, live-retrying, and total rows | any family (never limit raw rows first) |
 | task-overdue | pg+task logs | one worst row/task family with live claim; due age over `min(2*p95,max(4*p50,20m))`, then matching `eval active` confirms actual elapsed time | any (median cap prevents repeated long failures from polluting p95; exact task/executor identity retained) |
 | task-duration-regression | pg | run duration vs 7-day p95 per function | > 2× |
@@ -8721,6 +9021,7 @@ Tier-1 (warn):
 | stats-landmine | pg | fewer than three valid/ready exact isolated pair/payer structural index shapes, or `transfer_contract.open` statistics target is not the bounded value 300; legacy n_distinct/reltuples remain evidence while the structural repair is incomplete | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
+| probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature active-disconnected egress-prober children with or without lifetime connection history | any residual in either independent branch for 2 probes |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs + Grafana `/api/ds/query` | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | grafana-datasource-query | Grafana `/api/ds/query` | 11.15 authenticated `warp-mimir` or `warp-loki` control does not return a successful result after plugin loading | 2 consecutive probes |
@@ -8745,11 +9046,14 @@ Tier-1 (warn):
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; marker-ready score attribution additionally requires the complete fixed phase family | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled `missing_origin_details_total` causal cohorts | > 500/min for 5 min; `companion=true` is not covered and missing detail never means zero |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source-owner, resolution, relationship, and lifecycle cohorts | > 500/min for 5 min; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
+| credential-resource-missing / credential-resource-malformed / credential-fields-missing | effective Vault readiness | §8.7 secret-free typed resource/field inventory | required integration: immediate PAGE; present incomplete optional integration: immediate WARN; wholly absent optional integration: no-op |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
+| dns-authoritative-unobservable / dns-recursive-unobservable / dns-recursive-answer-family | native DNS | §18.3 complete authority visibility plus exact recursive A/AAAA sets and NOERROR/NODATA absences | observation failure for 2 probes; recursive drift for 2 probes, page after 3 |
+| hostpower-policy-not-loaded / hostpower-policy-runtime-unobservable | host | §21.2 installed policy compared with fixed-enum live login1 actions and CanSuspend | effective deny-all config with divergent non-destructive live actions and non-affirmative CanSuspend for 2 probes; required runtime state unknown for 2 probes |
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every source-known durable identity and published schema artifact | page when any identity differs or any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
@@ -8759,7 +9063,11 @@ Tier-1 (warn):
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
 | netescrow-mirror-write | standing logs | `[netescrow]mirror write failed after` | any warns; never blindly replay the non-idempotent mutation |
+| proxy-transport-budget-isolation | Mimir | §14.6 newest Proxy process aggregate DeviceLocal target, carrier byte budget, and carrier count | same-scrape mismatch from D private target-derived budgets and D*16 slots for 2 probes |
+| proxy-transport-admission-pending | Mimir | §14.6 pending H1 count/bytes plus slot-full DeviceLocal count | any pending H1 for 2 one-minute probes; correlate window readiness before changing capacity |
+| proxy-transport-preemption-churn | Mimir | §14.6 slot-full pending DeviceLocals plus two-minute H3-preemption and process-CPU rates | >= 0.1 preemptions/s and >= 0.5 CPU cores for 2 probes; software correctness, not hardware capacity |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
+| proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
 
@@ -8768,6 +9076,21 @@ matching playbook section (5.x), the ACTION line, and last control-plane
 event age. Alerts auto-resolve when the signal returns to its healthy band
 for 5 minutes, and emit the resolution (recovery confirmation is part of the
 loop, per 6.8).
+
+Historical ledger class aliases remain readable but must not be emitted by new
+probes:
+
+- `mimir-ingestion-rate-limited` was an early ledger spelling of the current
+  `mimir-ingestion-rate-limit` class.
+- `backup-archive-integrity-unverified` predates the split between
+  `backup-archive-integrity-unobservable` (the current verification could not
+  run) and `backup-archive-integrity-legacy-unverified` (a retained archive has
+  no qualifying historical integrity evidence). Historical context decides
+  which successor applies; the old name is never rewritten in the ledger.
+- `known-open Mimir rate admission with distributor skew` is a historical
+  causal-boundary description, not an alert class. Its constituent current
+  classes are `mimir-ingestion-rate-limit` and the appropriate
+  `mimir-distributor-*` finding from §11.20b.
 
 Identity discipline (learned 2026-07-18): the identity's `target` must be
 the STABLE thing the healthy signal is emitted for (the service, the host),
@@ -9363,6 +9686,15 @@ returned 500 while `/hello` remained 200.
   process without either gating the route or deploying the enabled resource
   reproduces the failure.
 
+The proactive probe emits three literal classes. `credential-resource-missing`
+means a required resource is absent; `credential-resource-malformed` means its
+typed YAML/JSON cannot be inspected; and `credential-fields-missing` means the
+resource parses but one or more named required fields are blank. Required
+instances PAGE immediately. Present-but-incomplete optional integrations WARN;
+a wholly absent optional integration remains the documented no-op. These
+classes are independent of the `required-vault-resource` log class, which
+observes a dependent runtime path reaching a missing lazy resource.
+
 Implementation convention: SIGNALS.md §8.7 (`credentials`) maps to
 `signal_credentials.go` and `signal_credentials_test.go`. Synthetic tests cover
 required missing, malformed, and incomplete resources; optional absent versus
@@ -9573,6 +9905,18 @@ This is the version-to-artifact contract checked by the probe:
 | 654 | required `network_points_leaderboard_snapshot.epoch_metrics_available` |
 | 655 | privacy-safe `onboarding_email_tracker_daily` distinct-network aggregates |
 | 656 | online `network_onboarding_email_sent_at` tracker source index |
+| 657 | exact valid/ready `provider_egress_health_measured_at_client_id` deadline index |
+| 658 | required `network_client_connection.ip_version` with its legacy-family default |
+| 659 | required `network_client_connection.ip_family_intent` with its legacy-family default |
+| 660 | required `network_client_location_reliability.ipv4_proven` with its false default |
+| 661 | required `network_client_location_reliability.ipv6_proven` with its false default |
+| 662 | `network_extender` directory table with its complete column shape, primary key, and unique identity key |
+| 663 | `network_extender_address` family table, composite primary key, and valid/ready publish-order index |
+| 664 | `network_extender_publish` queue table, primary key, and valid/ready drain-order index |
+| 665 | nullable, no-default `network_client_connection.extender_id` |
+| 666 | valid/ready `network_client_connection_client_id_connected_extender_id` lookup index |
+| 667 | `contract_extender` participant table and `(contract_id, extender_id, party)` primary key |
+| 668 | required, empty-default `network_extender_address.dns_ports` |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -9604,6 +9948,18 @@ message, address, or session identifier. The recurring tracker task relies on
 the `(sent_at, network_id, step)` index to refresh its rolling window without
 ranking the lifetime send table. A recorded head at either version is not
 coherent unless the corresponding table or valid/ready index is present.
+
+Versions 662–668 append the Extender directory, its independently drained
+signed-record queue, connection attribution, and immutable contract-party
+snapshot. The directory identity is the unique public key, while address rows
+are keyed by identity and IP family. The two queue/read-path indexes are
+operative schema: a same-name invalid, unfinished, partial, or differently
+ordered index does not satisfy the contract. The final `dns_ports` column is
+non-null with an empty default so addresses written before DNS-carrier probing
+remain distinguishable from a missing migration without rewriting history.
+Code that activates, publishes, attributes, or pays Extenders must remain
+behind version 668 and all seven artifact checks; never hand-create one table
+or column after advancing the numeric head.
 
 The first live exact-identity probe exposed a separate detector-only failure:
 it selected `migration_index::text` and ordered by the unqualified
@@ -10173,17 +10529,24 @@ Classify this exact split as a release-runner failure, not slow convergence or
 a missing artifact. Preserve the first rejected command and exit status; do
 not trust the success message after it or advance another wave. The corrected
 `build/all/deploy-rollout.zsh` uses one checked deploy wrapper, omits
-`--only-older` only for config-updater, LB, and Proxy, retains it for the
-observable services, and propagates every deploy and rollout-sample failure
-before a success message or subsequent command. Recovery does not require
-rebuilding an already-proven target artifact: rerun those three services
-without `--only-older`, retain staged percentages, and independently require
-DynamoDB intent plus exact running-version convergence before acceptance.
+`--only-older` for config-updater, LB, transparent Proxy, statusless Gossip,
+and unexposed Alt, retains it for the observable services, and propagates every
+deploy and rollout-sample failure before a success message or subsequent
+command. Gossip, Alt, and Proxy run once at 100%; putting an unsampleable
+service in every cumulative wave would reselect and restart already-deployed
+blocks because `--only-older` cannot remove them. LB retains its explicit
+multi-block percentage ramp, while config-updater remains a one-time pre-wave
+rollout. Recovery does not require rebuilding an already-proven target
+artifact: rerun a rejected service under its current rollout class and
+independently require DynamoDB intent plus exact running-version convergence
+before acceptance.
 The deterministic Build contracts are
 `TestRolloutUsesOnlyOlderOnlyForSampleableServicesAcrossEveryWave`,
 `TestRolloutDeployFailureStopsImmediately`,
 `TestRolloutStatusSampleFailureStopsBeforeNextWave`, and
-`TestRunUsesCanonicalRolloutContract`.
+`TestRunUsesCanonicalRolloutContract`. The Alt and Gossip container entrypoints
+are additionally pinned by `TestRunBuildsAltAndGossipContainersBeforeRollout`,
+`TestAltContainerBuildContract`, and `TestGossipContainerBuildContract`.
 
 The 2026-09-01 production discriminator joined all three boundaries. Running
 Taskworker image digest
@@ -13146,6 +13509,10 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   (ReadTimeout 15s + WriteTimeout 30s), so a nonzero means a handler is
   wedged past its write deadline or the timeouts were misconfigured.
   Log line: `[http]drain deadline after <dur>: N connection(s) cut`.
+  The `log-errors` probe classifies an exact nonzero outcome as
+  `http-drain-cut` (PAGE at the first line); it retains only the bounded
+  duration and count, while service, generation, and rollout context stay in
+  their structured owners.
 
 ### 13.2 Drain-window observability
 - `urnetwork_http_server_draining` 1 during the drain sequence;
@@ -13987,6 +14354,22 @@ Use a layered regression and recovery contract:
   pauses, and path restoration. Measure end-to-end progress, not just a resize
   timer: abandoning a contextless generator call does not cancel that work.
   Later DNS/TCP qualification is distinct from initial `ProviderStateAdded`.
+  Treat an already-owned resolver as part of the transport contract. The plain
+  `http://` and `ws://` dialers must enter `ConnectSettings.DialContext` even
+  when no explicit `DialContextSettings` callback is installed; otherwise the
+  standard HTTP transport or Gorilla falls back to its process-default resolver
+  and bypasses the configured resolver, address-family policy, proxy, and
+  address race. The `https://` and `wss://` paths already enter the same
+  settings boundary through their TLS dialers. An explicit dial callback
+  remains authoritative over the resolver. This source defect can surface as
+  an existing `window-stall` or terminal window failure when the process DNS
+  path cannot resolve a provider carrier, but those identity-free logs do not
+  prove resolver bypass by themselves. Preserve deterministic IPv4/IPv6
+  `http://`, `https://`, `ws://`, and `wss://` controls using a synthetic
+  resolver, plus plain HTTP and WS controls proving that an explicitly
+  injected dial callback wins without a resolver call. The canonical
+  platform-transport standby test must exercise this same owned-resolver
+  boundary rather than a public hostname.
 - **Routing and visibility:** a VPN-active indicator is not forwarding proof.
   Validate both DNS protocols and ordinary traffic with the UI closed, and
   ensure every advertised resolver has an owner in the effective mode. Record
@@ -14327,6 +14710,23 @@ boundary is `TestContainerNamePrefixFilterSeparatesG1FromG10` in
 ### 14.5 Public proxy protocol and return-path proof
 Probe: `proxy-path`
 
+The active `services.yml` topology is authoritative for proxy placement,
+public host/interface families, and the stable routing-table allocation
+reconstructed across retained versions. A declared proxy service with zero
+placed hosts means zero intended targets; it must not resurrect a stale
+duplicate monitor target. The legacy `monitor.yml` proxy block is used only
+when the active topology has no proxy service at all. The probe compares the
+derived placement count with its armed host count so a failed inventory join
+cannot silently no-op.
+
+Current allocation discovery is also a visibility boundary. A nonzero
+container-runtime enumeration or inspection command is `cannot-observe` with
+`error_class=observation-access-denied` and `allocation_count=unknown`, never
+`allocations=0`. Repair requires a reviewed, narrowly scoped read-only helper
+or equivalent inventory surface. Adding the monitor identity to the Docker
+group (effectively root) or running the complete monitor as root is not an
+acceptable shortcut. This is an operational access prerequisite; it is not
+evidence that the public Proxy path is down.
 
 Proxy health has five layers; none substitutes for the next:
 
@@ -14335,6 +14735,10 @@ Proxy health has five layers; none substitutes for the next:
    the allocation across a rollout: crisp g1 moved status `12688 -> 12689`
    and SOCKS `12718 -> 12719` while this audit was running. A stale direct
    probe produces a false failure.
+   If allocations exist but no generation is 2xx-ready, emit
+   `proxy-allocation-unready`; do not skip the block or mislabel the untested
+   public path. A draining unready sibling is tolerated only while the same
+   stable block still has a ready generation.
 2. **Full public TCP handshake:** SYN, SYN-ACK, and final ACK must all cross the
    public interface. `nc -z`/a listening socket is weaker than a packet-level
    proof and says nothing about DNAT or the return route.
@@ -14785,6 +15189,7 @@ router permit destinations with the live interface during every address or
 NIC migration. Edge-5 remains operator-declared offline and excluded.
 
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
+Probe: `proxy-transport`
 
 **False post-deploy verification against a stale proxy artifact:** do not use
 an operator rollout statement, an `Up` container, or the configured desired
@@ -15077,6 +15482,21 @@ identity-free metrics:
   signature. A short nonzero value can be normal during an overlapping
   replacement; sustained pending H1 together with a locally full budget and an
   unsatisfied window is not.
+- `urnetwork_proxy_platform_transport_slot_full_pending_h1_devices`: how many
+  private DeviceLocal budgets have a waiting H1 while all sixteen carrier slots
+  are occupied. It supplies the local-full discriminator that aggregate
+  `used/max` values cannot retain without exporting customer identity.
+- `urnetwork_proxy_platform_transport_h3_preemptions_total`: a
+  process-monotonic counter assembled from private DeviceLocal lifetime
+  counters. `urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total`
+  is the sampled subset whose increment and slot-full pending state came from
+  the same DeviceLocal observation. Its two-minute rate distinguishes a stable
+  pending capacity condition from repeated H1/H3 yield-and-reacquire churn
+  without cross-joining two unrelated hosted devices. A device created and
+  removed entirely between samples can make this subset undercount; a positive
+  rate remains affirmative. The first observation of a new or reset device is
+  excluded from the subset because its historical preemptions cannot be joined
+  safely to the current slot-full state.
 - `urnetwork_proxy_device_memory_tracked_used_bytes` is live budget-accounted
   use, not RSS; allocator/runtime and bounded NAT endpoint memory remain outside
   that tracked sum.
@@ -15086,6 +15506,34 @@ retry logs. If pending remains zero while the window repeatedly enumerates and
 evaluates candidates, investigate provider reachability/auth. If pending is
 sustained, compare `transports_used` with `transports_max` and verify both the
 24 MiB config and the per-device SDK build before blaming the provider fleet.
+
+The `proxy-transport` probe performs that identity-free aggregate check on the
+newest actual-scrape-fresh process generation. It requires one coherent source
+scrape, validates the per-device `16`-slot and target-derived byte scaling, and
+separates:
+
+- `proxy-transport-budget-isolation`: the deployed aggregate does not scale as
+  independently owned per-device budgets. This is software correctness, not a
+  hardware-capacity diagnosis.
+- `proxy-transport-admission-pending`: H1 admission stays pending for two
+  one-minute probes, but a preemption loop is not proved. Correlate window
+  readiness and transport policy before changing a cap.
+- `proxy-transport-preemption-churn`: slot-full pending devices coexist for two
+  probes with at least 0.1 H3 preemptions/second and 0.5 process CPU cores.
+  Before Connect `f10a173`, an H1 with both byte and slot deficits could
+  preempt a slotless Auto-H3 that could resolve only the bytes; H3 immediately
+  reacquired and repeated the loop. The deterministic 16-slot boundary is
+  `urnetwork/connect#211` / Connect test commit `ab74d62`.
+- `proxy-transport-unobservable`, `proxy-transport-snapshot-unobservable`, and
+  `proxy-transport-metrics-invalid`: missing families, mixed remote-write
+  scrapes, and impossible aggregate accounting remain unknown rather than
+  green.
+
+The churn class is a software bug. Do not classify it as the hardware-backed
+active-client ceiling in §14.7 or prescribe more proxy hosts. Conversely, a
+corrected build with isolated budgets and no preemption churn can still reach
+the separately configured fleet client ceiling; only §14.7's measured host
+reserve and capacity contract can justify an operational/hardware response.
 
 **Hosted-device recreation loop:** repeated
 `[pd][<same-proxy-id>]window identity restore` lines without a proxy deploy are
@@ -18240,6 +18688,70 @@ before declaring recovery. Do not bypass client verification, change DNS,
 restart unrelated services, or turn certificate validation into a new
 build-admission architecture.
 
+### 18.3 Authoritative DNS aliases and recursive address families
+
+Probe: `dns-aliases`
+
+This probe is armed only by an explicit optional `dns_aliases` block in
+`monitor.yml`. The block contains `managed_domains`, `expected_a`, and
+`expected_aaaa`; those values are the operator-owned desired state and must
+never be inferred from current DNS or from public LB topology. An absent block
+gracefully noops. A present but incomplete, malformed, duplicate, or
+wrong-family value emits PAGE `dns-alias-config-invalid` on the first cadence
+so a broken observation contract cannot look green.
+
+For each configured domain and the active environment name, check these exact
+aliases:
+
+- `alt` and `<env>-alt` require the configured A and AAAA sets;
+- `alt-v4` and `<env>-alt-v4` require the configured A set and an empty AAAA
+  set; and
+- `alt-v6` and `<env>-alt-v6` require an empty A set and the configured AAAA
+  set.
+
+Discover every authoritative nameserver for each managed domain, then send a
+bounded native DNS wire query directly to every authority with recursion
+disabled. Healthy requires an authoritative `NOERROR` response and an exact
+direct RRset on every authority. A CNAME never satisfies the direct A/AAAA
+contract. An intentionally absent family must be `NOERROR` with no answer;
+`NXDOMAIN` is not equivalent. Any concrete disagreement emits PAGE
+`dns-authoritative-rrset` immediately. Evidence contains only record type and
+aggregate expected, missing, unexpected, CNAME, response-code, and authority
+counts; it never renders answer addresses, nameserver identities, or raw
+resolver errors.
+
+Nameserver discovery failure, complete transport failure, malformed DNS, or a
+partial authority sample emits WARN `dns-authoritative-unobservable` after two
+five-minute cadences and keeps exact RRset health unknown. The platform
+recursive resolver is checked independently for the exact configured A/AAAA
+sets and forbidden-family behavior. An observation failure emits WARN
+`dns-recursive-unobservable` after two cadences. When all authorities are exact
+but the recursive view returns a stale same-family value, omits a required
+value or family, returns a forbidden family, or returns `NXDOMAIN` rather than
+`NOERROR`/NODATA, emit WARN
+`dns-recursive-answer-family` after two cadences and promote it to PAGE after
+three. Suppress this downstream drift class while authoritative state is
+broken or unknown; do not duplicate the upstream cause or close a prior
+recursive ticket from an unknown sample.
+
+The 2026-09-13 defining incident exposed both halves of this blind spot: an
+authoritative alias RRset had diverged from operator intent while a recursive
+view could retain a stale address in the correct family. Existing exact-edge
+and TLS probes pin configured interfaces and therefore did not enumerate the
+alias DNS contract; a presence-only recursive check would also have accepted
+the stale same-family answer. The correction is this explicit desired-state
+probe and exact recursive comparison. It does not itself change Route 53 or
+turn an observed answer into desired state.
+
+Repair only the proven hostname/family in the authoritative DNS source, or the
+proven recursive cache/policy path when every authority is already exact.
+Preserve the intentional single-stack aliases and do not change unrelated
+records, LB addresses, services, or certificates. Recovery requires every
+authority and recursive answer to agree exactly for three
+consecutive five-minute samples, including `NOERROR`/NODATA for each forbidden
+family. DNS record repair is an operator/authoritative-provider action; a
+server deployment alone cannot correct an incorrect RRset.
+
 ## 19. Web platform association metadata
 
 ### 19.1 Android App Links and Apple association files
@@ -18728,18 +19240,28 @@ control, and dependent host probes rather than from one successful ping.
 Probe: `hostpower`
 
 Scope every enabled host with role `backup` or `stationary`. Every five minutes,
-the probe reads the effective layered `systemd/sleep.conf` and
-`systemd/logind.conf`, the locked GNOME power values, and at most 128 matching
-kernel suspend entry/exit records from the current boot and last 30 days. It
-also calls one root-owned Xops helper whose only output is a bounded topology
-class and media-health class. Raw journal text, interface/block names, sysfs
-paths, MACs, serials, stable disk identifiers, SMART output, and addresses never
-leave the host.
+the probe reads the layered `systemd/sleep.conf` and `systemd/logind.conf`, the
+locked GNOME power values, fixed-enum live login1 idle/lid actions and
+`CanSuspend`, and at most 128 matching kernel suspend entry/exit records from
+the current boot and last 30 days. A systemd release without the optional
+external-power-specific lid property is classified explicitly as
+`unsupported`. A supported property with an empty action is classified as
+`fallback`; both states delegate to the required base lid action. Missing or
+malformed required runtime state is UNKNOWN. It also calls one root-owned Xops
+helper whose only output is a bounded topology class and media-health class.
+Raw D-Bus and journal text, users, sessions, process identifiers,
+interface/block names, sysfs paths, MACs, serials, stable disk identifiers,
+SMART output, and addresses never leave the host.
 
-HEALTHY requires all systemd suspend/hibernate paths denied, logind idle/lid
-actions ignored, locked GNOME AC/battery idle and lid actions set to `nothing`,
-and no current-boot kernel suspend entry. On a backup host, the archive device
-and active management uplink must resolve to a concrete ancestry class. A
+HEALTHY requires all configured systemd suspend/hibernate paths denied,
+configured and live logind idle/lid actions ignored, locked GNOME AC/battery
+idle and lid actions set to `nothing`, the unprivileged login1 `CanSuspend`
+caller result non-affirmative (`no` or not-applicable), and no current-boot
+kernel suspend entry. A non-affirmative caller result is only a same-sample
+consistency control: the effective deny-all `sleep.conf`, which systemd
+reparses when testing and executing a sleep operation, is the actual global
+blocking layer. On a backup host, the archive device and active management
+uplink must resolve to a concrete ancestry class. A
 `shared-removable` result is a warning even when both devices currently work:
 one Thunderbolt/USB dock, cable, bus, or power failure can remove the recovery
 path and archive storage together. This is an operational/hardware class, not a
@@ -18748,6 +19270,25 @@ tested independently powered management path.
 
 `hostpower-suspend-policy-unsafe` pages immediately because a stationary
 server must stay observable on its battery/UPS during an AC or dock failure.
+Safe installed configuration with divergent non-destructive live lid/idle
+actions and a non-affirmative `CanSuspend` caller result emits sustained WARN
+`hostpower-policy-not-loaded`: the effective deny-all sleep policy is active,
+but the
+independent running login-manager defense has not converged. An available live
+suspend capability remains PAGE even when another property is unknown or the
+files look safe. A temporarily inhibited capability is still available when
+the inhibitor is removed and therefore remains PAGE. A live `poweroff`,
+`reboot`, `soft-reboot`, `halt`, `kexec`, or `factory-reset` action also
+remains PAGE when `CanSuspend` is non-affirmative because that caller result
+does not govern those destructive actions. Missing, malformed, or unreadable
+required live state emits sustained WARN
+`hostpower-policy-runtime-unobservable`; configuration files alone must never
+turn that state green. Do not restart logind ad hoc or trigger suspend as a
+test. Reconcile the running generation through an authorized maintenance
+procedure using the reviewed Xops conditional logind reload, then require two
+safe live samples. The Xops change must be deployed separately; monitor source
+alone does not reconcile a running host.
+
 `hostpower-suspend-observed` warns on a short paired current-boot transition and
 pages when an entry is unmatched or a paired suspend lasts at least five
 minutes. The history remains evidence until reboot; fixing policy does not
@@ -18785,18 +19326,30 @@ most 128 already bounded records by their numeric timestamp on-host before
 pairing; it reports the one 18h56m59s interval without exporting journal text
 or adding a production query. Record arrival order is not suspend chronology.
 
+A bounded 2026-09-13 follow-up proved why configuration and runtime must remain
+separate observations. The no-suspend files had landed after the retained
+incident, but the still-running login manager predated them and exposed a stale
+lid action while the effective deny-all sleep policy already rejected systemd
+sleep operations. The unprivileged `CanSuspend` result was non-affirmative but
+does not independently prove that block. That state is not a new suspend and
+is not fully healthy: it is the bounded `hostpower-policy-not-loaded`
+convergence class above. The retained suspend finding remains independent and
+continues until the boot journal changes.
+
 ---
 
 ## 22. Subnet continuous correctness — SUBNET1
 
-Status (2026-09-06): **required monitoring specification; new subnet probes are
-not implemented or registered by this documentation change**. Existing §17
+Status (2026-09-13): **required monitoring specification; the registered
+`subnet-coverage` sentinel makes missing coverage visible, but the nine subnet
+correctness families are not implemented or qualified**. Existing §17
 `subtensor` / `subtensor-convergence` probes observe infrastructure, not scoring
-or settlement correctness. The `subnet-*` identifiers below are reserved alert
-classes, not `Probe:` declarations or metric names. Implement each family with
-its source adapter, deterministic tests and registry entry before claiming
-automated coverage. Until then, a deployed subnet requiring that family has an
-explicit coverage gap, never a green result from an absent metric.
+or settlement correctness. The `subnet-*` identifiers below, other than the
+sentinel's `subnet-monitor-coverage`, remain reserved alert classes rather than
+metric names. Implement each family with its source adapter, deterministic
+tests and registry entry before claiming automated coverage. Until then, a
+deployed subnet requiring that family has an explicit alert, never a green
+result from an absent metric.
 
 Sources of requirements: sibling `sn/WHITEPAPER.md` version 1.0, `sn/VALIDATOR.md`,
 `sn/protocol`, `sn/validator`, `sn/evm/src`, and the real server `/verify` and
@@ -18805,6 +19358,16 @@ integration; a proposed helper or authored test is not a deployed signal.
 These requirements apply after testnet validation as well as during it.
 
 ### 22.0 Observation contract, clocks, and severity
+Probe: `subnet-coverage`
+
+The coverage sentinel reads only the authoritative privacy-safe desired-state
+classification. When the subnet is explicitly disabled, the economic battery
+is correctly **not deployed**. For enabled, invalid, unavailable, or ambiguous
+state, it emits `subnet-monitor-coverage` with the nine missing reader families
+and their source prerequisites. It deliberately cannot certify any economic
+invariant. Retire this warning only as the real typed family readers below are
+registered and independently qualified; §17 node health and log silence are
+not substitutes.
 
 Observe the complete configured operator and validator census, all live native
 UIDs and eligible head candidates, every due operator/epoch, and every finalized

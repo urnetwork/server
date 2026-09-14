@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -59,18 +60,61 @@ func TestPaymentReconciliationFindsPerStoreSkipErrorAndStaleWatermark(t *testing
 	if errorAlert.Target != "google" || errorAlert.Severity != SeverityPage {
 		t.Fatalf("unexpected store-error alert: %+v", errorAlert)
 	}
-	watermarks := 0
+	watermarks := map[string]Alert{}
 	for _, alert := range alerts {
 		if alert.Class == "payment-reconciliation-watermark-stale" {
-			watermarks++
+			watermarks[alert.Target] = alert
 		}
 	}
-	if watermarks != 2 {
-		t.Fatalf("stale watermark alerts = %d, want 2: %+v", watermarks, alerts)
+	if len(watermarks) != 2 {
+		t.Fatalf("stale watermark alerts = %d, want 2: %+v", len(watermarks), alerts)
+	}
+	missingWatermark := watermarks["apple"]
+	if missingWatermark.Severity != SeverityPage {
+		t.Fatalf("missing watermark severity = %q, want page: %+v", missingWatermark.Severity, missingWatermark)
+	}
+	staleWatermark := watermarks["google"]
+	if staleWatermark.Severity != SeverityWarn {
+		t.Fatalf("four-hour watermark severity = %q, want warn: %+v", staleWatermark.Severity, staleWatermark)
+	}
+	for _, expected := range []string{
+		"payment-reconciliation-watermark-stale",
+		"never force the watermark forward",
+		"zero skip/error events through two hourly runs",
+	} {
+		if !strings.Contains(missingWatermark.Markdown(), expected) {
+			t.Fatalf("watermark alert omits %q:\n%s", expected, missingWatermark.Markdown())
+		}
 	}
 	for _, secret := range []string{"synthetic-provider-token", "synthetic-transaction-id", "synthetic-account-id"} {
 		requireAlertOmits(t, skipped, secret)
 		requireAlertOmits(t, errorAlert, secret)
+		requireAlertOmits(t, missingWatermark, secret)
+	}
+}
+
+func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 2.21 Payment reconciliation liveness and repair audit")
+	end := strings.Index(catalog, "### 2.22 Durable payment and entitlement failures")
+	if start < 0 || end <= start {
+		t.Fatal("payment reconciliation catalog section boundaries are missing")
+	}
+	section := strings.Join(strings.Fields(catalog[start:end]), " ")
+	for _, expected := range []string{
+		"`payment-reconciliation-watermark-stale`",
+		"more than three hours old",
+		"more than six hours old or absent",
+		"never force the watermark forward",
+		"two natural hourly runs",
+	} {
+		if !strings.Contains(section, expected) {
+			t.Errorf("SIGNALS.md §2.21 omits %q", expected)
+		}
 	}
 }
 

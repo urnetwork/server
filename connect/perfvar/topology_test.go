@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -36,6 +37,13 @@ const (
 	fullTunRouteExchangeAuto fullTunRoute = "exchange-auto"
 	fullTunRouteP2pLegacy    fullTunRoute = "p2p-legacy"
 	fullTunRouteP2pFast      fullTunRoute = "p2p-fast"
+	// Mixed routes keep the exchange H1 payload route active next to a
+	// promoted one-hop P2P route, the production shape of a pinned provider
+	// whose direct lane joins the relay (connect/FLIGHTGATEFIX.md §6.2).
+	// The weighted writer stripes one ordered sequence across both carriers;
+	// nothing is suppressed and nothing is forced.
+	fullTunRouteP2pFastExchangeH1   fullTunRoute = "p2p-fast+exchange-h1"
+	fullTunRouteP2pLegacyExchangeH1 fullTunRoute = "p2p-legacy+exchange-h1"
 
 	fullTunProbePayloadByteCount = 16 * 1024
 )
@@ -46,6 +54,59 @@ func fullTunRouteIsExchange(route fullTunRoute) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// fullTunRouteIsMixed reports a route that carries payload on both the
+// exchange H1 route and a promoted P2P route at the same time.
+func fullTunRouteIsMixed(route fullTunRoute) bool {
+	switch route {
+	case fullTunRouteP2pFastExchangeH1, fullTunRouteP2pLegacyExchangeH1:
+		return true
+	default:
+		return false
+	}
+}
+
+// fullTunRouteHasP2p reports a route that builds and promotes a P2P carrier,
+// whether or not the platform payload route is suppressed afterwards.
+func fullTunRouteHasP2p(route fullTunRoute) bool {
+	switch route {
+	case fullTunRouteP2pFast, fullTunRouteP2pLegacy:
+		return true
+	default:
+		return fullTunRouteIsMixed(route)
+	}
+}
+
+// fullTunRouteForcesP2p reports a route whose platform payload route is
+// suppressed so the measured writer has exactly one P2P payload route.
+func fullTunRouteForcesP2p(route fullTunRoute) bool {
+	return route == fullTunRouteP2pFast || route == fullTunRouteP2pLegacy
+}
+
+// fullTunRouteHasExchangePath reports a route whose payload can traverse the
+// device access, edge, and provider access links.
+func fullTunRouteHasExchangePath(route fullTunRoute) bool {
+	return fullTunRouteIsExchange(route) || fullTunRouteIsMixed(route)
+}
+
+// fullTunRouteUsesFastP2pLane reports a route whose P2P carrier is pinned to
+// the native RTP/SRTP lane; the remaining P2P routes pin the legacy SCTP lane.
+func fullTunRouteUsesFastP2pLane(route fullTunRoute) bool {
+	return route == fullTunRouteP2pFast || route == fullTunRouteP2pFastExchangeH1
+}
+
+// allFullTunRoutes lists every accepted route name in filter order.
+func allFullTunRoutes() []fullTunRoute {
+	return []fullTunRoute{
+		fullTunRouteP2pFast,
+		fullTunRouteP2pLegacy,
+		fullTunRouteExchangeH1,
+		fullTunRouteExchangeH3,
+		fullTunRouteExchangeAuto,
+		fullTunRouteP2pFastExchangeH1,
+		fullTunRouteP2pLegacyExchangeH1,
 	}
 }
 
@@ -103,6 +164,11 @@ type fullTunPath struct {
 
 	bridgeWaitGroup sync.WaitGroup
 	bridgeStarted   bool
+
+	// workloadProgressBytes counts application payload bytes delivered by the
+	// measured TCP workloads (client reads on download, server reads on
+	// upload) so a run can be sampled into throughput windows.
+	workloadProgressBytes atomic.Int64
 
 	measurementLock                   sync.Mutex
 	preparedCarrierStart              *perfvarCarrierBoundary
@@ -1028,6 +1094,20 @@ func (self *platformRouteManagerLockProbeTransport) MatchesSend(
 	return self.Transport.MatchesSend(destination)
 }
 
+// TransportType forwards the wrapped carrier's type. The route manager
+// classifies a transport only through this optional method; without it every
+// route that carries the send-route controllers labelled its platform route
+// "unknown" in packet stats and ACK route maps (found 2026-09-11 on the mixed
+// routes, where the exchange lane read as unknown and h1 as zero).
+func (self *platformDataSendTransport) TransportType() clientconnect.TransportType {
+	if typed, ok := self.Transport.(interface {
+		TransportType() clientconnect.TransportType
+	}); ok {
+		return typed.TransportType()
+	}
+	return clientconnect.TransportTypeUnknown
+}
+
 // Once forced, the provider destination fails closed across P2P disconnects;
 // unrelated destinations and the zero-id control destination remain available.
 func (self *platformDataSendTransport) MatchesSend(destination clientconnect.TransferPath) bool {
@@ -1721,6 +1801,13 @@ func (self *platformSendRouteController) setDisabled(disabled bool) {
 		kind:     platformSendRouteEventDisabled,
 		disabled: disabled,
 	})
+}
+
+// isDisabled reports whether the platform payload route is suppressed.
+func (self *platformSendRouteController) isDisabled() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.disabled
 }
 
 // Joins all callback events admitted before the fence.
@@ -3032,6 +3119,33 @@ func (self *fixedMultiHopApiGenerator) NextDestinations(
 	}, nil
 }
 
+// The production window prefers this optional interface. Inheriting the API
+// implementation would replace the explicit stream with its direct exit spec.
+func (self *fixedMultiHopApiGenerator) NextDestinationsWithIpFamily(
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	ipFamily clientconnect.IpFamilyFilter,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	if !ipFamily.Matches(clientconnect.IpFamilyLegacy) {
+		return map[clientconnect.MultiHopId]clientconnect.DestinationStats{}, nil
+	}
+	return self.NextDestinations(count, excludeDestinations, rankMode)
+}
+
+// Context-aware callers use the same fixed path without entering API discovery.
+func (self *fixedMultiHopApiGenerator) NextDestinationsContext(
+	ctx context.Context,
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return self.NextDestinations(count, excludeDestinations, rankMode)
+}
+
 // One explicit path uses the same single quality window as a fixed provider.
 func (self *fixedMultiHopApiGenerator) FixedDestinationSize() (int, bool) {
 	return 1, true
@@ -3184,12 +3298,13 @@ func TestFullTunPlatformSettingsUseIndependentEndpointBudgets(t *testing.T) {
 }
 
 // Client settings select exactly one production P2P data plane when requested.
-func fullTunClientSettings(
+func fullTunClientSettingsWithFeatures(
 	route fullTunRoute,
 	stats *clientconnect.P2pDataPlaneStats,
 	noAckSends *noAckSendTracker,
 	packSends *sendPackLifecycleTracker,
 	logicalDataLaneCount int,
+	features []string,
 ) *clientconnect.ClientSettings {
 	settings := clientconnect.DefaultClientSettings()
 	settings.SendBufferSettings.LogicalDataLaneCount = logicalDataLaneCount
@@ -3273,9 +3388,9 @@ func fullTunClientSettings(
 	p2pSettings := settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
 	p2pSettings.DataPlaneStats = stats
 	switch route {
-	case fullTunRouteP2pFast:
+	case fullTunRouteP2pFast, fullTunRouteP2pFastExchangeH1:
 		p2pSettings.DataPlaneMode = clientconnect.P2pDataPlaneModeFastOnly
-	case fullTunRouteP2pLegacy:
+	case fullTunRouteP2pLegacy, fullTunRouteP2pLegacyExchangeH1:
 		p2pSettings.DataPlaneMode = clientconnect.P2pDataPlaneModeLegacyOnly
 	case fullTunRouteExchangeH1, fullTunRouteExchangeH3, fullTunRouteExchangeAuto:
 		// A zero-byte admission budget deterministically refuses every WebRTC
@@ -3284,7 +3399,84 @@ func fullTunClientSettings(
 		// when server network-peer announcements are disabled.
 		settings.WebRtcSettings.MemoryBudget = clientconnect.NewTransferMemoryBudget(0)
 	}
+	for _, feature := range features {
+		// The harness builds against several Connect revisions in one
+		// campaign, and a setting that ships off by default exists only from
+		// the commit that introduced it. Set it by name, and fail the run
+		// loudly when an arm cannot honor a requested feature rather than
+		// silently measuring the default.
+		var target any
+		var field string
+		value := true
+		switch feature {
+		case perfvarFeatureDeferTimeoutResend, perfvarFeatureNoDeferTimeoutResend:
+			target, field = settings.SendBufferSettings, "DeferTimeoutResendWhileCumulativeProgress"
+			value = feature == perfvarFeatureDeferTimeoutResend
+		case perfvarFeatureFastPathSizeAware, perfvarFeatureNoFastPathSizeAware:
+			target, field = p2pSettings, "FastPathSizeAwareAdmission"
+			value = feature == perfvarFeatureFastPathSizeAware
+		case perfvarFeatureLaneRule, perfvarFeatureNoLaneRule:
+			target, field = settings.SendBufferSettings, "ReliableLaneProvenRecovery"
+			value = feature == perfvarFeatureLaneRule
+		default:
+			panic(fmt.Sprintf("unknown PERFVAR feature %q", feature))
+		}
+		if err := setPerfvarBoolField(target, field, value); err != nil {
+			panic(fmt.Sprintf("PERFVAR feature %q: %v", feature, err))
+		}
+	}
 	return settings
+}
+
+// perfvarBoolField reads one named bool field from a settings pointer;
+// the second result is false when this Connect revision has no such field.
+func perfvarBoolField(target any, name string) (bool, bool) {
+	settings := reflect.ValueOf(target)
+	if settings.Kind() != reflect.Pointer || settings.IsNil() {
+		return false, false
+	}
+	field := settings.Elem().FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Bool {
+		return false, false
+	}
+	return field.Bool(), true
+}
+
+// setPerfvarBoolField sets one named bool field on a settings pointer. A
+// missing field means this Connect revision predates the setting.
+func setPerfvarBoolField(target any, name string, value bool) error {
+	settings := reflect.ValueOf(target)
+	if settings.Kind() != reflect.Pointer || settings.IsNil() {
+		return fmt.Errorf("settings target for %s is not a non-nil pointer", name)
+	}
+	field := settings.Elem().FieldByName(name)
+	if !field.IsValid() {
+		return fmt.Errorf("this Connect revision has no %s", name)
+	}
+	if field.Kind() != reflect.Bool || !field.CanSet() {
+		return fmt.Errorf("%s is not a settable bool", name)
+	}
+	field.SetBool(value)
+	return nil
+}
+
+// One settings constructor keeps every existing caller on the production
+// defaults while the measured campaigns opt features in explicitly.
+func fullTunClientSettings(
+	route fullTunRoute,
+	stats *clientconnect.P2pDataPlaneStats,
+	noAckSends *noAckSendTracker,
+	packSends *sendPackLifecycleTracker,
+	logicalDataLaneCount int,
+) *clientconnect.ClientSettings {
+	return fullTunClientSettingsWithFeatures(
+		route,
+		stats,
+		noAckSends,
+		packSends,
+		logicalDataLaneCount,
+		nil,
+	)
 }
 
 // Retains production reliability normally while keeping race instrumentation
@@ -3580,7 +3772,7 @@ func tryNewFullTunPathWithTopologyHooks(
 	providerApiUrl := fmt.Sprintf("http://%s:%d", environment.providerEdgeAddress, environment.providerApiPort)
 	providerPlatformUrl := fmt.Sprintf("wss://%s:%d", environment.providerEdgeAddress, environment.providerH1Port)
 
-	isP2p := route == fullTunRouteP2pFast || route == fullTunRouteP2pLegacy
+	isP2p := fullTunRouteHasP2p(route)
 	platformMode := clientconnect.TransportModeH1
 	switch route {
 	case fullTunRouteExchangeH3:
@@ -3639,12 +3831,13 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageSourceTrackers); err != nil {
 		return nil, err
 	}
-	providerSettings := fullTunClientSettings(
+	providerSettings := fullTunClientSettingsWithFeatures(
 		route,
 		providerStats,
 		providerNoAckSends,
 		providerPackSends,
 		resources.LogicalDataLaneCount,
+		resources.Features,
 	)
 	if hooks != nil && hooks.configureProviderClientSettings != nil {
 		hooks.configureProviderClientSettings(providerSettings)
@@ -3802,12 +3995,13 @@ func tryNewFullTunPathWithTopologyHooks(
 	deviceStats := &clientconnect.P2pDataPlaneStats{}
 	deviceRouteStateTrace := newP2pRouteStateTrace()
 	clientSettingsGenerator := func() *clientconnect.ClientSettings {
-		settings := fullTunClientSettings(
+		settings := fullTunClientSettingsWithFeatures(
 			route,
 			deviceStats,
 			deviceNoAckSends,
 			devicePackSends,
 			resources.LogicalDataLaneCount,
+			resources.Features,
 		)
 		if deviceSendRoutes != nil {
 			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.RouteStateObserver =
@@ -4022,7 +4216,14 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	if isP2p {
 		var primeErr error
-		if streamP2p == nil {
+		if fullTunRouteIsMixed(route) {
+			primeErr = primeFullTunMixed(
+				ctx,
+				path,
+				clientconnect.Id(providerClientId),
+				observedTransports,
+			)
+		} else if streamP2p == nil {
 			primeErr = primeFullTunP2p(
 				ctx,
 				path,
@@ -4433,6 +4634,96 @@ func primeFullTunP2p(
 	// source-to-carrier generation before construction publishes RouteReady.
 	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
 		return fmt.Errorf("join forced one-hop P2P probe tail: %w", err)
+	}
+	return nil
+}
+
+// A mixed route promotes the one-hop P2P carrier exactly as the forced route
+// does, then leaves both the exchange H1 route and the P2P route active on
+// both writers. The probe after promotion must show the requested P2P lane
+// carrying traffic while the platform route count stays at two: this is the
+// pinned-provider striping condition, not a forced single-carrier route.
+func primeFullTunMixed(
+	ctx context.Context,
+	path *fullTunPath,
+	providerClientId clientconnect.Id,
+	observedTransports *platformTransportOwner,
+) error {
+	if err := probeFullTunPath(ctx, path); err != nil {
+		return err
+	}
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join exchange discovery probe tail: %w", err)
+	}
+	observedCtx, observedCancel := context.WithTimeout(ctx, 90*time.Second)
+	observedClient, observedErr := waitForCurrentGeneratedDeviceClient(
+		observedCtx,
+		path,
+		observedTransports,
+	)
+	observedCancel()
+	if observedErr != nil {
+		return fmt.Errorf("current generated platform client was not observed: %w", observedErr)
+	}
+	writer := observedClient.RouteManager().OpenMultiRouteWriter(
+		clientconnect.DestinationId(providerClientId),
+	)
+	defer observedClient.RouteManager().CloseMultiRouteWriter(writer)
+	deviceRouteStateObserver := clientconnect.TestingObserveMultiRouteWriterRouteState(writer)
+	defer deviceRouteStateObserver.Close()
+	path.providerSendRoutes.setDestinationId(observedClient.ClientId())
+	providerWriter := path.providerClient.RouteManager().OpenMultiRouteWriter(
+		clientconnect.DestinationId(observedClient.ClientId()),
+	)
+	defer path.providerClient.RouteManager().CloseMultiRouteWriter(providerWriter)
+	providerRouteStateObserver := clientconnect.TestingObserveMultiRouteWriterRouteState(providerWriter)
+	defer providerRouteStateObserver.Close()
+	if err := waitForRouteCount(ctx, deviceRouteStateObserver, 2); err != nil {
+		return fmt.Errorf("wait for device promotion: %w", err)
+	}
+	if err := waitForRouteCount(ctx, providerRouteStateObserver, 2); err != nil {
+		return fmt.Errorf("wait for provider promotion: %w", err)
+	}
+	observedClient.ContractManager().AddNoContractPeer(providerClientId)
+	path.providerClient.ContractManager().AddNoContractPeer(observedClient.ClientId())
+	deviceStatsBefore := path.deviceStats.Snapshot()
+	providerStatsBefore := path.providerStats.Snapshot()
+	if err := probeFullTunPath(ctx, path); err != nil {
+		return fmt.Errorf("probe mixed one-hop P2P route: %w", err)
+	}
+	deviceDelta := subtractP2pStats(deviceStatsBefore, path.deviceStats.Snapshot())
+	providerDelta := subtractP2pStats(providerStatsBefore, path.providerStats.Snapshot())
+	// The weighted writer prefers the P2P route, so the probe must have used
+	// the requested lane; the exchange route may or may not have carried a
+	// frame, which is exactly the condition under measurement.
+	if fullTunRouteUsesFastP2pLane(path.route) {
+		if deviceDelta.FastSendMessageCount == 0 || providerDelta.FastSendMessageCount == 0 ||
+			deviceDelta.LegacySendMessageCount != 0 || providerDelta.LegacySendMessageCount != 0 {
+			return fmt.Errorf(
+				"mixed fast P2P probe used wrong lane: device=%+v provider=%+v",
+				deviceDelta,
+				providerDelta,
+			)
+		}
+	} else if deviceDelta.LegacySendMessageCount == 0 || providerDelta.LegacySendMessageCount == 0 ||
+		deviceDelta.FastSendMessageCount != 0 || providerDelta.FastSendMessageCount != 0 {
+		return fmt.Errorf(
+			"mixed legacy P2P probe used wrong lane: device=%+v provider=%+v",
+			deviceDelta,
+			providerDelta,
+		)
+	}
+	deviceRoutes := deviceRouteStateObserver.Snapshot()
+	providerRoutes := providerRouteStateObserver.Snapshot()
+	if deviceRoutes.ActiveRouteCount != 2 || providerRoutes.ActiveRouteCount != 2 {
+		return fmt.Errorf(
+			"mixed route lost a carrier after the probe: device=%+v provider=%+v",
+			deviceRoutes,
+			providerRoutes,
+		)
+	}
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join mixed one-hop P2P probe tail: %w", err)
 	}
 	return nil
 }
@@ -5337,11 +5628,27 @@ func writeFullTunAll(connection net.Conn, payload []byte) error {
 }
 
 // The effective application-direction rate is the slowest physical segment.
+// fullTunWorkloadProgressWriter counts delivered payload bytes into the path.
+type fullTunWorkloadProgressWriter struct {
+	path *fullTunPath
+}
+
+func (self fullTunWorkloadProgressWriter) Write(payload []byte) (int, error) {
+	self.path.workloadProgressBytes.Add(int64(len(payload)))
+	return len(payload), nil
+}
+
+// workloadProgressWriter is the payload-progress sink shared by every
+// measured TCP flow on this path.
+func (self *fullTunPath) workloadProgressWriter() io.Writer {
+	return fullTunWorkloadProgressWriter{path: self}
+}
+
 // Scenario profile directions remain device upload/download across every
 // topology even where a link-oriented fixture places the device on the right.
 func fullTunEffectiveRateBitsPerSecond(path *fullTunPath, upload bool) int64 {
 	rates := []int64{}
-	if fullTunRouteIsExchange(path.route) {
+	if fullTunRouteHasExchangePath(path.route) {
 		if upload {
 			rates = append(
 				rates,
@@ -6464,7 +6771,11 @@ func measureFullTunUploadWithWarmupAndStartHook(
 				}
 			}
 			hash := sha256.New()
-			readByteCount, readErr := io.CopyN(hash, connection, byteCount)
+			readByteCount, readErr := io.CopyN(
+				io.MultiWriter(hash, path.workloadProgressWriter()),
+				connection,
+				byteCount,
+			)
 			if readErr != nil {
 				return readErr
 			}
@@ -6855,7 +7166,11 @@ func measureFullTunDownloadWithWarmupAndStartHook(
 	startTime := time.Now()
 	close(startMeasured)
 	actualHash := sha256.New()
-	readByteCount, err := io.CopyN(actualHash, connection, byteCount)
+	readByteCount, err := io.CopyN(
+		io.MultiWriter(actualHash, path.workloadProgressWriter()),
+		connection,
+		byteCount,
+	)
 	if err != nil {
 		return workloadResult{}, fmt.Errorf("download read %d/%d bytes: %w", readByteCount, byteCount, err)
 	}
@@ -6899,6 +7214,26 @@ func (self *fullTunPath) verifyRoute() error {
 	}
 	if provider.FastFallbackCount != 0 || device.FastFallbackCount != 0 {
 		return fmt.Errorf("full-TUN P2P fallback provider=%+v device=%+v", provider, device)
+	}
+	if fullTunRouteIsMixed(self.route) {
+		// Both carriers stay eligible: the P2P lane must have carried payload
+		// on the requested lane in both directions, and the platform route is
+		// deliberately not suppressed, so it is not a violation to have used it.
+		if fullTunRouteUsesFastP2pLane(self.route) &&
+			(device.FastSendMessageCount == 0 || device.FastReceiveMessageCount == 0 ||
+				device.LegacySendMessageCount != 0 || provider.LegacySendMessageCount != 0) {
+			return fmt.Errorf("full-TUN mixed fast route counters provider=%+v device=%+v", provider, device)
+		}
+		if !fullTunRouteUsesFastP2pLane(self.route) &&
+			(device.LegacySendMessageCount == 0 || device.LegacyReceiveMessageCount == 0 ||
+				device.FastSendMessageCount != 0 || provider.FastSendMessageCount != 0) {
+			return fmt.Errorf("full-TUN mixed legacy route counters provider=%+v device=%+v", provider, device)
+		}
+		if self.deviceSendRoutes != nil && self.deviceSendRoutes.isDisabled() ||
+			self.providerSendRoutes != nil && self.providerSendRoutes.isDisabled() {
+			return errors.New("full-TUN mixed route suppressed its platform payload route")
+		}
+		return nil
 	}
 	if self.deviceClient == nil || self.deviceClient.Load() == nil ||
 		self.deviceSendRoutes == nil || self.providerSendRoutes == nil {

@@ -55,7 +55,6 @@ func StartActivityFlusher(
 	}
 	proxyHost := server.RequireHost()
 	block := server.RequireBlock()
-	devicesLiveGauge.Set(float64(proxyDeviceManager.DeviceCount()))
 	updateProxyDeviceMemoryGauges(proxyDeviceManager.DeviceMemoryUsage())
 
 	go server.HandleError(func() {
@@ -66,7 +65,6 @@ func StartActivityFlusher(
 			case <-time.After(settings.ActivityFlushTimeout):
 			}
 
-			devicesLiveGauge.Set(float64(proxyDeviceManager.DeviceCount()))
 			updateProxyDeviceMemoryGauges(proxyDeviceManager.DeviceMemoryUsage())
 
 			// activity within one flush interval plus margin: every device

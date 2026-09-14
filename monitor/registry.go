@@ -49,6 +49,7 @@ func NewSignals() []Signal {
 		NewRedisClusterSignal(),
 		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),
+		NewSettingsFreshnessSignal(),
 		NewActiveQueriesSignal(),
 		NewWaitEventsSignal(),
 		NewReindexDebrisSignal(),
@@ -104,6 +105,7 @@ func NewSignals() []Signal {
 		NewProxyPathSignal(),
 		NewProxyMemorySignal(),
 		NewProxyPoolSignal(),
+		NewProxyTransportSignal(),
 		NewProxyRuntimeSignal(),
 		NewProxyCacheSignal(),
 		NewKeyPublicationSignal(),
@@ -112,6 +114,7 @@ func NewSignals() []Signal {
 		NewPointsReadinessSignal(),
 		NewEdgeIPv6Signal(),
 		NewTLSExpirySignal(),
+		NewDNSAliasesSignal(),
 		NewGrafanaDatasourcesSignal(),
 		NewGrafanaIngressSignal(),
 		NewGrafanaNodeSignal(),
@@ -129,6 +132,7 @@ func NewSignals() []Signal {
 		NewAppleCrashesSignal(),
 		NewVPNSessionsSignal(),
 		NewHostpowerSignal(),
+		NewSubnetCoverageSignal(),
 	}
 }
 
@@ -240,7 +244,6 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 	if errors.As(err, &providerFailure) {
 		return providerFailureAlert(settings, signal, err, providerFailure.monitorVisibilityClass())
 	}
-	errorText := redactTaskErrorIdentifiers(err.Error())
 	if target, ok := sshAdmissionResetTarget(err); ok {
 		return Alert{
 			SignalNumber: signal.Number(),
@@ -256,13 +259,14 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 			Symptom:      fmt.Sprintf("SSH admission to %s was reset while running signal %s (%s)", target, signal.Number(), signal.ID()),
 			Mechanism:    "The SSH connection closed during key exchange, before the remote observation command could run. On this fleet the same signature occurred when slow public pre-auth clients occupied OpenSSH's global MaxStartups pool and concurrent monitor probes supplied the trip connection. An sshd reload/restart or a network reset can look similar; the host journal is the discriminator.",
 			Baseline:     "Every monitor SSH command authenticates without an sshd MaxStartups throttle, key-exchange reset, or connection close.",
-			Observed:     errorText,
+			Observed:     "error_class=ssh-admission-reset",
 			Context:      fmt.Sprintf("failed_signal=%s failed_probe=%s; this is observation-path failure, not evidence that the probed database or service rejected the command", signal.Key(), signal.ID()),
 			Action:       "On the target, read the ssh/sshd journal across this timestamp and inspect the listener's current startup count plus [accepted]/[net] children. If it reports beginning MaxStartups/past MaxStartups, keep the monitor's shared per-host command cap and deploy the shared xops SSH pre-auth hardening; restrict public SSH where operational access permits. Do not blame PostgreSQL or merely raise MaxStartups. If the journal instead shows an sshd lifecycle or host network event, repair that event.",
 			Verify:       "The target journal records no new MaxStartups throttle or key-exchange drop through monitor startup and at least two recurring cadences, and the failed signal returns a concrete observation.",
 			Playbook:     "SIGNALS.md monitor SSH-admission note and MONITOR.md §4",
 		}
 	}
+	errorClass := classifyObservationError(err)
 	return Alert{
 		SignalNumber: signal.Number(),
 		SignalKey:    signal.Key(),
@@ -274,10 +278,10 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 		Environment:  settings.Environment,
 		ObservedAt:   settings.Now(),
 		Sustain:      2,
-		Symptom:      fmt.Sprintf("Signal %s (%s) could not run: %s", signal.Number(), signal.ID(), errorText),
+		Symptom:      fmt.Sprintf("Signal %s (%s) could not run (error_class=%s)", signal.Number(), signal.ID(), errorClass),
 		Mechanism:    "The monitor could not reach or parse a source of truth, so the associated production condition is currently unknown.",
 		Baseline:     "Every registered signal completes within its command timeout.",
-		Observed:     errorText,
+		Observed:     "error_class=" + errorClass,
 		Action:       "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident.",
 		Verify:       "The signal completes and reports either no alert or a concrete target alert.",
 		Playbook:     "SIGNALS.md §1.4 and MONITOR.md §3.6",

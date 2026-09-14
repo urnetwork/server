@@ -6,17 +6,10 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
-
-var taskErrorIDPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b`)
-
-func redactTaskErrorIdentifiers(value string) string {
-	return taskErrorIDPattern.ReplaceAllString(value, "<task-id>")
-}
 
 const reliabilitySQLPhaseCaseFormat = `CASE
 	WHEN %[1]s ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
@@ -371,9 +364,10 @@ func isReliabilityFullAnchorPhase(phase string) bool {
 
 func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDiagnostic, diagnosticErr error) {
 	if diagnosticErr != nil {
+		errorClass := classifyObservationError(diagnosticErr)
 		alert.mechanism = "Task duration alone cannot distinguish a full reliability re-anchor from its rolling enter, leave, or cleanup checkpoints. The bounded PostgreSQL phase diagnostic was unavailable, so the former repeating-full-anchor mechanism is not established by this alert."
-		alert.context += " Restore the read-only reliability phase observation and inspect the active taskworker artifact before assigning a code or deployment cause. Diagnostic error: " + redactTaskErrorIdentifiers(diagnosticErr.Error())
-		alert.observed += " reliability_diagnostic=unavailable"
+		alert.context += " Restore the read-only reliability phase observation and inspect the active taskworker artifact before assigning a code or deployment cause. The diagnostic error is reduced to a fixed class before rendering."
+		alert.observed += " reliability_diagnostic=unavailable diagnostic_error_class=" + errorClass
 		alert.action = "Restore the bounded read-only phase diagnostic, then classify the active SQL and running-window markers before changing the task. Do not redeploy the already-present cadence fix, raise MaxTime, cancel PostgreSQL work, or restart a database or taskworker based only on elapsed duration."
 		alert.verify = "The diagnostic returns a concrete phase and marker/index state, the exact cause receives its own repair boundary, and later UpdateReliabilities attempts return below their historical duration band."
 		return
@@ -477,6 +471,9 @@ const taskFailureSummarySQL = `
 		       left(coalesce(reschedule_error,''),160) AS last_error,
 		       run_max_time_seconds,
 		       CASE
+		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%statement timeout%'
+		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 57014%'
+		           THEN 'postgres-statement-timeout'
 		         WHEN split_part(function_name,'.',3) = 'CloseExpiredContracts'
 		           AND coalesce(reschedule_error,'') ~* '^force close contract [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} at index [0-9]+: Contract already closed with outcome settled: [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}->[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 		           THEN 'concurrent-settled'
@@ -492,22 +489,26 @@ const taskFailureSummarySQL = `
 		           THEN 'idle-transaction-timeout'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%failed to deallocate cached statement(s): conn closed%'
 		           THEN 'connection-cleanup-deadline'
-		         WHEN coalesce(reschedule_error,'') LIKE '%429 Too Many Requests%'
+		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%429 too many requests%'
 		           THEN 'processor-rate-limit'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%invalid destination address%'
 		           THEN 'processor-invalid-destination'
-		         WHEN coalesce(reschedule_error,'') LIKE '%400 Bad Request%'
+		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%400 bad request%'
 		           THEN 'processor-bad-request'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42703%'
 		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42p01%'
 		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42883%'
 		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42704%'
 		           THEN 'schema-object-missing'
-		         WHEN trim(coalesce(reschedule_error,'')) = 'Timeout'
+		         WHEN trim(coalesce(reschedule_error,'')) ~* '^timeout([[:space:]]+\[[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\])?$'
 		           THEN 'deadline-timeout'
+		         WHEN lower(trim(coalesce(reschedule_error,''))) LIKE 'drained:%'
+		           THEN 'drained'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%context canceled%'
 		           OR lower(coalesce(reschedule_error,'')) LIKE '%interrupted: done%'
 		           THEN 'context-canceled'
+		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%target not found%'
+		           THEN 'target-not-found'
 		         ELSE 'other'
 		       END AS error_class
 		FROM pending_task
@@ -586,7 +587,7 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
 	add("processor-rate-limit",
-		"do not accelerate processor-rate-limit rows; verify current-main server commit 66525afc in every active taskworker artifact and deploy its shared Redis-time Circle transfer admission only to blocks that lack it; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
+		"do not accelerate processor-rate-limit rows; verify current-main marker-capable server commit "+circleAdmissionMarkerBaselineCommit+" in every active taskworker artifact and deploy it only to blocks that lack it; "+circleAdmissionFailClosedBaselineCommit+" alone proves fail-closed activity/error telemetry but not the capability gauge or exact pre-POST marker; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
 		"every active taskworker exposes the §2.14 admission-observable capability and all five activity families, admission errors and processor-rate-limit remain zero, and exact pre-POST admission markers stay below four per second for a full 90-minute retry window")
 	add("deadline-timeout",
 		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",
@@ -814,7 +815,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if elapsedSource == "eval-active" {
 			alertContext += " The authoritative taskworker heartbeat confirms execution time; run_at remains the scheduler due time."
 		} else if activeLogErr != nil {
-			alertContext += " Taskworker heartbeat lookup failed, so elapsed_s falls back to run_at chronology: " + activeLogErr.Error()
+			alertContext += " Taskworker heartbeat lookup failed, so elapsed_s falls back to run_at chronology; error_class=" + classifyObservationError(activeLogErr) + "."
 		} else if taskID != "" {
 			alertContext += " No matching recent taskworker heartbeat was found, so elapsed_s falls back to run_at chronology; validate actual execution time before intervening."
 		}
@@ -909,8 +910,9 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	for _, r := range failRows {
 		task := r.str(0)
 		familyCount, parkedCount, freshClaimCount := atoiRow(r, 1), atoiRow(r, 2), atoiRow(r, 3)
-		lastError, maxTimeSeconds := redactTaskErrorIdentifiers(r.str(6)), r.str(7)
+		lastError, maxTimeSeconds := r.str(6), r.str(7)
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
+		lastErrorClass := representativeTaskErrorClass(task, lastError, causeClassCount, causeSummary)
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
 		closeExpiredAlreadySettled := task == "CloseExpiredContracts" &&
@@ -946,11 +948,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		if mixedCauses {
 			alertMechanism = fmt.Sprintf("This task family contains %d distinct error classes. Its representative row is selected by error count for bounded evidence and cannot describe every failing row; use the complete cause breakdown instead of attributing the whole family to that sample.", causeClassCount)
-			alertContext += " The cause breakdown is computed across every failing row in this function before selecting the representative error."
+			alertContext += " The cause breakdown is computed across every failing row in this function before selecting the representative fixed error class."
 			if task == "AdvancePayment" {
 				alertAction, alertVerify, alertPlaybook = advancePaymentMixedGuidance(causeSummary)
 			} else {
-				alertAction = "Investigate and remediate each listed cause class independently; do not apply the representative error's action to the entire mixed family or delete task rows to hide it."
+				alertAction = "Investigate and remediate each listed cause class independently; do not apply the private representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 			}
 		} else if closeExpiredAlreadySettled {
@@ -967,7 +969,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertPlaybook = "SIGNALS.md §5.7"
 		} else if schemaObjectMissing {
 			alertMechanism = "The running task references a PostgreSQL schema object that does not exist in its connected database. During a rollout this normally means schema-dependent code activated before its append-only migration and artifact check; if the successful migration head already claims that version, the database instead has migration-schema drift."
-			alertContext += " SQLSTATE 42703, 42P01, 42883, and 42704 identify undefined columns, tables, functions, and objects respectively; the exact object in the representative error must be mapped to the versioned artifact table in §8.9."
+			alertContext += " SQLSTATE 42703, 42P01, 42883, and 42704 identify undefined columns, tables, functions, and objects respectively; map the exact object from private task evidence to the versioned artifact table in §8.9."
 			alertAction = "Compare the running binary's required MigrationCount, the successful migration_audit head, and the versioned artifact in §8.9. If the database is behind, reject the rollout as incomplete and run the migration phase from the exact service commit before dependent services; if the head is current, repair migration-schema-drift. Do not create the object by hand or delete the task row."
 			alertVerify = "The migration head reaches the binary-required version, every versioned artifact probe passes, and this same task family succeeds and clears its reschedule error without manual row deletion."
 			alertPlaybook = "SIGNALS.md §8.9"
@@ -1029,7 +1031,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			mechanism: alertMechanism,
 			baseline:  "reschedule_error_count 0 for all recurring tasks (1.2)",
 			observed:  observed,
-			evidence:  "representative error from this task family:\n  " + lastError,
+			evidence:  "representative_error_class=" + lastErrorClass,
 			context:   alertContext,
 			action:    alertAction,
 			verify:    alertVerify,
@@ -1073,20 +1075,22 @@ func taskOverdueThresholdSeconds(p50Seconds, p95Seconds int, haveHistory bool) (
 	return max(taskOverdueMinimumSeconds, p95Threshold), "p95"
 }
 
-// taskErrorBattery collects the reschedule error text of every failing task —
-// the class + target in the text names the failure mode and the sick node.
+// taskErrorBattery collects a fixed error class for every failing task family.
+// Raw reschedule text can contain task ids, addresses, dependency payloads, or
+// stacks and must not cross the Alert Markdown boundary.
 func taskErrorBattery(ctx context.Context, env *probeEnv) string {
 	rows, err := env.runner.pg(ctx, taskFailureSummarySQL)
 	if err != nil {
-		return "task error battery failed: " + err.Error()
+		return "task_error_battery=unavailable error_class=" + classifyObservationError(err)
 	}
 	if len(rows) == 0 {
-		return "no tasks with reschedule errors (canary dead but no task-level error text — check redis directly)"
+		return "no tasks with reschedule errors (canary dead but no task-level error class — check redis directly)"
 	}
-	lines := []string{"failing recurring tasks (the error text names the failure mode + sick node):"}
+	lines := []string{"failing recurring tasks (raw errors withheld; fixed classes follow):"}
 	for _, r := range rows {
-		lines = append(lines, fmt.Sprintf("  %s rows=%s parked=%s active=%s max_errors=%s :: %s",
-			r.str(0), r.str(1), r.str(2), r.str(3), r.str(4), redactTaskErrorIdentifiers(r.str(6))))
+		errorClass := representativeTaskErrorClass(r.str(0), r.str(6), atoiRow(r, 8), r.str(9))
+		lines = append(lines, fmt.Sprintf("  %s rows=%s parked=%s active=%s max_errors=%s error_class=%s",
+			r.str(0), r.str(1), r.str(2), r.str(3), r.str(4), errorClass))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1142,7 +1146,7 @@ func taskCanaryLifecycleBattery(ctx context.Context, env *probeEnv) string {
 		ORDER BY 1, 2;
 	`)
 	if err != nil {
-		return "canary lifecycle battery failed: " + err.Error()
+		return "canary_lifecycle_battery=unavailable error_class=" + classifyObservationError(err)
 	}
 	lines := []string{"bounded canary lifecycle and current companion state:"}
 	for _, row := range rows {
@@ -1224,7 +1228,7 @@ func (self taskDurationProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		} else if task == "ExportStats" {
 			overlapEvidence, knownOwner, overlapErr := exportStatsOverlapEvidence(ctx, env)
 			if overlapErr != nil {
-				overlapEvidence = "ExportStats overlap attribution failed: " + overlapErr.Error()
+				overlapEvidence = "ExportStats overlap attribution failed; error_class=" + classifyObservationError(overlapErr)
 			}
 			if knownOwner {
 				mechanism = "ExportStats runs four read-heavy 90-day aggregates against ReplicaDb, which currently resolves to the primary. Its latest flagged interval overlapped already-proven CloseExpiredContracts and/or ReconcileNetEscrow overruns, making shared primary load the leading owner of this completed outlier rather than a new export execution defect. Temporal overlap is attribution evidence, not proof that one specific query blocked another."

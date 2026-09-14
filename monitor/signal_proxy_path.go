@@ -27,10 +27,12 @@ func (proxyPublicPathProbe) cadence() time.Duration { return 5 * time.Minute }
 
 func (proxyPublicPathProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	findings := []finding{}
+	armedHosts := 0
 	for _, target := range env.cfg.hosts {
 		if target.proxy == nil {
 			continue
 		}
+		armedHosts++
 		families, err := normalizedAddressFamilies(target.proxy.AddressFamilies)
 		if err != nil {
 			findings = append(findings, cannotObserveFinding(target.name+"/proxy-families", err))
@@ -40,7 +42,7 @@ func (proxyPublicPathProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if target.proxy.PublicHostname != "" {
 			allocations, allocationErr := discoverProxyAllocations(ctx, env, target)
 			if allocationErr != nil {
-				findings = append(findings, cannotObserveFinding(target.name+"/proxy-allocations", allocationErr))
+				findings = append(findings, proxyAllocationCannotObserveFinding(target.name, allocationErr))
 			} else {
 				findings = append(findings, evaluateProxyHandshakes(ctx, env, target, families, allocations)...)
 			}
@@ -62,7 +64,30 @@ func (proxyPublicPathProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			findings = append(findings, *upgradeFinding)
 		}
 	}
+	if env.cfg.proxyPathExpectedHosts > 0 && armedHosts != env.cfg.proxyPathExpectedHosts {
+		findings = append(findings, cannotObserveFinding(
+			"proxy-path/inventory",
+			fmt.Errorf("active proxy hosts=%d armed proxy hosts=%d", env.cfg.proxyPathExpectedHosts, armedHosts),
+		))
+	}
 	return findings, nil
+}
+
+func proxyAllocationCannotObserveFinding(host string, err error) finding {
+	target := host + "/proxy-allocations"
+	finding := cannotObserveFinding(target, err)
+	if classifyObservationError(err) != "observation-access-denied" {
+		return finding
+	}
+	finding.mechanism = "The monitor reached the proxy host, but its execution identity was denied while enumerating the current container-runtime allocation. The monitor therefore cannot distinguish an absent allocation from a healthy allocation it is not permitted to inspect; treating the empty output as allocations=0 would be a false service diagnosis."
+	finding.baseline = "Every configured proxy host exposes a narrowly scoped, read-only inventory of current proxy container names, WARP_PORTS mappings, and internal readiness to the monitor identity."
+	finding.observed = "error_class=observation-access-denied allocation_count=unknown"
+	finding.evidence = "The container-runtime command returned nonzero before any allocation rows were parsed; raw command output and runtime details are intentionally omitted."
+	finding.context = "This is an operational observation-access prerequisite, not proof that the Proxy service or its public path is down. Membership in the Docker group is effectively root access and is not an acceptable casual monitoring workaround."
+	finding.action = "Provide the monitor execution identity a reviewed least-privilege, read-only helper or equivalent inventory surface for only the required proxy allocation fields. Do not add the identity to the Docker group, run the entire monitor as root, or infer zero allocations while access is denied."
+	finding.verify = "Run proxy-path twice and require a concrete current allocation on every configured proxy host, internal readiness for each allocation, all configured public family/protocol handshakes, and no cannot-observe or inventory-coverage finding."
+	finding.playbook = "SIGNALS.md §14.5 and MONITOR.md §3.6"
+	return finding
 }
 
 type proxyAllocation struct {
@@ -76,12 +101,22 @@ const proxyAllocationMarker = "monitor-signal-14.5-allocations"
 
 func discoverProxyAllocations(ctx context.Context, env *probeEnv, target *host) ([]proxyAllocation, error) {
 	out, err := env.runner.shell(ctx, target, `# `+proxyAllocationMarker+`
-docker ps --format '{{.Names}}' | while IFS= read -r name; do
+names=$(docker ps --format '{{.Names}}')
+docker_status=$?
+if [ "$docker_status" -ne 0 ]; then
+  exit "$docker_status"
+fi
+for name in $names; do
   case "$name" in
     *-proxy-*) ;;
     *) continue ;;
   esac
-  ports=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | sed -n 's/^WARP_PORTS=//p' | head -1)
+  environment=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null)
+  inspect_status=$?
+  if [ "$inspect_status" -ne 0 ]; then
+    exit "$inspect_status"
+  fi
+  ports=$(printf '%s\n' "$environment" | sed -n 's/^WARP_PORTS=//p' | head -1)
   [ -n "$ports" ] || continue
   status_port=$(printf '%s\n' "$ports" | tr ',' '\n' | awk -F: '$1 == 80 {print $2; exit}')
   if [ -n "$status_port" ]; then
@@ -162,6 +197,55 @@ func evaluateProxyHandshakes(ctx context.Context, env *probeEnv, target *host, f
 		}}
 	}
 
+	type blockReadiness struct {
+		total    int
+		ready    int
+		statuses map[string]int
+	}
+	readinessByBlock := map[string]*blockReadiness{}
+	for _, allocation := range allocations {
+		state := readinessByBlock[allocation.block]
+		if state == nil {
+			state = &blockReadiness{statuses: map[string]int{}}
+			readinessByBlock[allocation.block] = state
+		}
+		state.total++
+		if allocation.internalStatus >= 200 && allocation.internalStatus < 300 {
+			state.ready++
+		}
+		state.statuses[proxyInternalReadinessClass(allocation.internalStatus)]++
+	}
+	blocks := make([]string, 0, len(readinessByBlock))
+	for block := range readinessByBlock {
+		blocks = append(blocks, block)
+	}
+	sort.Strings(blocks)
+	findings := []finding{}
+	for _, block := range blocks {
+		state := readinessByBlock[block]
+		if state.ready > 0 {
+			continue
+		}
+		statusClasses := make([]string, 0, len(state.statuses))
+		for statusClass, count := range state.statuses {
+			statusClasses = append(statusClasses, fmt.Sprintf("%s:%d", statusClass, count))
+		}
+		sort.Strings(statusClasses)
+		findings = append(findings, finding{
+			probeId: "proxy/public-path", tier: tierWarn,
+			class: "proxy-allocation-unready", target: target.name, frame: block, sustain: 2,
+			symptom:   fmt.Sprintf("proxy block %s has running allocations but none has a successful internal readiness response", block),
+			mechanism: "Allocation discovery succeeded, but every running generation for this stable block returned a missing, failed, or non-2xx internal /status result. Public handshake testing requires a ready process and is intentionally not attempted against these allocations; omitting a separate readiness finding would turn an unready block into false green.",
+			baseline:  "Every placed proxy block has at least one current running allocation whose mapped service-port 80 returns HTTP 2xx; a draining sibling may be unready only while another generation remains ready.",
+			observed:  fmt.Sprintf("allocations=%d ready_allocations=0 status_classes=%s", state.total, strings.Join(statusClasses, ",")),
+			evidence:  "Readiness results are reduced to bounded HTTP status classes; response bodies, container identifiers, and runtime output are not retained.",
+			context:   "This proves an internal allocation-readiness failure, not a public DNAT, protocol, return-route, or authenticated-egress failure. Check rollout and process health before interpreting the skipped public layer.",
+			action:    "Inspect the stable block's current and draining generations, internal status listener, startup logs, dependencies, and rollout state. Repair the readiness cause or complete/revert the failed rollout; do not change public DNS, DNAT, or policy routing from this finding alone.",
+			verify:    "Two consecutive proxy-path probes discover at least one 2xx-ready current allocation for the block, then complete every configured public address-family and protocol handshake without proxy-allocation-unready or proxy-public-handshake findings.",
+			playbook:  "SIGNALS.md §14.5",
+		})
+	}
+
 	tasks := []proxyHandshakeTask{}
 	for _, allocation := range allocations {
 		// The §14.5 discriminator is specifically internal readiness green while
@@ -221,7 +305,6 @@ func evaluateProxyHandshakes(ctx context.Context, env *probeEnv, target *host, f
 	}
 	sort.Strings(identities)
 
-	findings := []finding{}
 	for _, identity := range identities {
 		problems := problemsByIdentity[identity]
 		findings = append(findings, finding{
@@ -238,6 +321,13 @@ func evaluateProxyHandshakes(ctx context.Context, env *probeEnv, target *host, f
 		})
 	}
 	return findings
+}
+
+func proxyInternalReadinessClass(status int) string {
+	if status <= 0 {
+		return "unavailable"
+	}
+	return fmt.Sprintf("http-%d", status)
 }
 
 var proxyAuthResponse = regexp.MustCompile(`(^|[^0-9])(401|407)([^0-9]|$)`)
@@ -300,7 +390,7 @@ const proxyRouteMarker = "monitor-signal-14.5-policy-route"
 func evaluateProxyRouteState(ctx context.Context, env *probeEnv, target *host, families []string) (*finding, error) {
 	unit := target.proxy.LoadBalancerUnit
 	if unit == "" {
-		unit = "warp-main-lb-" + target.proxy.PublicInterface + ".service"
+		unit = "warp-" + env.cfg.env + "-lb-" + target.proxy.PublicInterface + ".service"
 	}
 	table := target.proxy.RoutingTable
 	command := fmt.Sprintf(`# %s

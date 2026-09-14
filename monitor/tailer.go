@@ -150,6 +150,9 @@ var txRollbackMaskRe = regexp.MustCompile(
 // change can publish that compatibility transition while the failed latch is
 // still set. Retain both shapes and keep them out of the generic novel detector.
 var (
+	httpDrainCutRe = regexp.MustCompile(
+		`\[http\]drain deadline after ((?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))+): ([1-9][0-9]{0,18}) connection\(s\) cut[[:space:]]*$`,
+	)
 	windowStallNonterminalRe  = regexp.MustCompile(`\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=0(?:[[:space:]]|$)`)
 	windowFailedEventRe       = regexp.MustCompile(`\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+(?:[[:space:]]|$)`)
 	windowTerminalRe          = regexp.MustCompile(`(?:\[rel\][[:space:]]+event=window_stall[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+failed=1|\[rel\][[:space:]]+event=window_failed[[:space:]]+window=[a-z-]+[[:space:]]+reason=[a-z-]+[[:space:]]+after=[0-9]+)(?:[[:space:]]|$)`)
@@ -159,6 +162,21 @@ var (
 		`\[multi\](?:window enumerate error timeout|create client args error)[[:space:]]*=[[:space:]]*generator call canceled[[:space:]]*$`,
 	)
 )
+
+// Keep only the fixed drain outcome. The surrounding Warp identity can carry
+// a host, generation, and container id; those are already represented by the
+// tailer's stable service target and must not enter the alert sample.
+func httpDrainCutLogSample(line string) string {
+	match := httpDrainCutRe.FindStringSubmatch(line)
+	if len(match) != 3 {
+		return "[http]drain deadline: connection(s) cut (malformed values omitted)"
+	}
+	return fmt.Sprintf(
+		"[http]drain deadline after %s: %s connection(s) cut",
+		match[1],
+		match[2],
+	)
+}
 
 var circleTransferAdmissionObservedRe = regexp.MustCompile(
 	`\[circlec\]\[transfer-admission\] admitted observable=v1 redis_second=([0-9]{1,19}) sequence=[0-9]{1,20} deferrals=[0-9]{1,20} wait_ms=[0-9]{1,20}[[:space:]]*$`,
@@ -586,7 +604,7 @@ var logClasses = []logClass{
 		mechanism: "The payment processor rejected a submit because the configured source wallet lacks enough token balance. Each affected AdvancePayment row remains pending and retries on the task system's consecutive-error backoff with a one-hour nominal cap. Current task code disperses saturated retries across 30–90 minutes with a one-hour mean; older code used only two seconds of jitter and preserved outage-created waves. N parked rows still produce roughly N canonical task attempts per hour on average, but one attempt normally emits both a Circle-client diagnostic and a task-evaluator line.",
 		context:   "This is primarily an operational liquidity boundary, not an API or PostgreSQL defect. The displayed line rate measures diagnostic amplification; wallet_insufficient_events is the exact-replay-deduplicated logical-attempt count and still is not the number of unique payouts. Proportional capped jitter contains synchronized processor bursts but cannot create wallet liquidity; accelerating retries only increases noise and load. A software release cannot fund the custodial wallet, and deleting task rows would discard owed payouts.",
 		action:    "Finance/ops must fund the exact network/token payout wallet identified in protected source logs, or pause payouts using the supported operational control until it is funded. Do not delete or manually replay pending_task rows, rotate payment idempotency keys, or loosen the retry cap.",
-		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main server commit 66525afc includes proportional retry jitter, the shared Circle transfer gate, and complete fail-closed telemetry; deploy it only to blocks that lack the runtime capabilities. Then use §2.14 to prove complete admission-observable and activity metrics, zero fail-closed errors, fewer than four exact pre-POST admission markers/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
+		verify:    "First use §8.12 to verify every taskworker block's source/digest identity. An artifact from an intentional local checkout containing current-main marker-capable server commit " + circleAdmissionMarkerBaselineCommit + " includes proportional retry jitter, the shared Circle transfer gate, the fail-closed activity/error path, the capability gauge, and the exact pre-POST marker; deploy it only to blocks that lack those runtime capabilities. The earlier " + circleAdmissionFailClosedBaselineCommit + " baseline alone does not provide the gauge or marker. Then use §2.14 to prove complete admission-observable and activity metrics, zero fail-closed errors, fewer than four exact pre-POST admission markers/second, and zero processor 429s for a full 90-minute retry window. After funding or an intentional pause/resume, allow the same window plus ingestion delay for AdvancePayment wallet-insufficient rows and this log rate to converge to zero without manual row changes or duplicate Circle transfers.",
 		redactIDs: true,
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
@@ -624,8 +642,8 @@ var logClasses = []logClass{
 		meaning:   "Circle refused a payment API request because the shared processor identity crossed a short-window request limit",
 		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. Historical pre-jitter cohorts repeatedly placed five or six distinct wallet-insufficient attempts in one second with a 429. The decisive post-jitter recurrence at 07:12:48Z placed five wallet rejections and a sixth 429 in one source second; four of those five rejections were on exact executables already proven to contain proportional jitter. Independent random retry times reduce average synchronization but cannot enforce the processor's hard boundary.",
 		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. Circle documents a default five POST requests/second for Wallets API endpoints, matching the observed sixth-request boundary without proving a private account override. The monitor joins exact-replay-deduplicated evaluator records by normalized source second and retains wallet cohort counts across its bounded reconciliation/drain boundary. This is not a general Circle outage diagnosis. The durable cause breakdown stores only each row's latest error, so its rate-limit count can fall while a different row receives a new 429.",
-		action:    "Do not manually retry, delete, or pull payment tasks forward. Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main server commit 66525afc only to blocks that lack its fleet-wide Redis-time transfer gate and fail-closed telemetry. If every block contains it, inspect §2.14 fail-closed errors and admission pressure plus all other Circle request sources before changing the conservative three-per-second ceiling.",
-		verify:    "Every newest Taskworker contains current-main server commit 66525afc and exports the §2.14 admission-observable capability plus all five activity families; admission errors and processor-rate-limit events stay zero, exact pre-POST admission markers stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
+		action:    "Do not manually retry, delete, or pull payment tasks forward. Use §8.12 to verify every taskworker's source/digest identity and deploy an artifact from an intentional local checkout containing current-main marker-capable server commit " + circleAdmissionMarkerBaselineCommit + " only to blocks that lack its fleet-wide Redis-time transfer gate and complete observation contract. The earlier " + circleAdmissionFailClosedBaselineCommit + " baseline can expose the activity/error collectors without the capability gauge or exact marker. If every block contains " + circleAdmissionMarkerBaselineCommit + ", inspect §2.14 fail-closed errors and admission pressure plus all other Circle request sources before changing the conservative three-per-second ceiling.",
+		verify:    "Every newest Taskworker contains current-main marker-capable server commit " + circleAdmissionMarkerBaselineCommit + " and exports the §2.14 admission-observable capability plus all five activity families; admission errors and processor-rate-limit events stay zero, exact pre-POST admission markers stay below four/second for a full 90-minute retry window, and retries preserve their original idempotency keys. Any remaining 429 must be correlated with all Circle request sources and the account's authoritative quota rather than inferred from a minute rate.",
 		redactIDs: true},
 	// A durable transfer balance can intentionally span decades, but its Redis
 	// escrow counter is a derived, reconciled mirror. The old creation path
@@ -646,6 +664,18 @@ var logClasses = []logClass{
 	{name: "redis-ttl-suspect", re: regexp.MustCompile(`\[redis\]\[ttl\]`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,
 		meaning: "a redis write carried a ttl beyond its family limit or a raw time.Duration arg — inspect the named command/key to distinguish a unit conversion from an unbounded durable deadline"},
+	// Shared HTTP drain outcome (§13.1). A zero cut count is deliberately not
+	// matched: the page contract is specifically a nonzero hard cut, while the
+	// clean completion line and gauges provide ordinary drain observability.
+	{name: "http-drain-cut", re: httpDrainCutRe,
+		sample:        httpDrainCutLogSample,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §13.1",
+		meaning:   "the shared HTTP drain exhausted its shutdown deadline with one or more connections still open and hard-cut those connections at process exit",
+		mechanism: "After the keepalive-retirement grace, http.Server.Shutdown waits only for the configured bounded shutdown timeout. A nonzero remainder means a handler or connection outlived that ceiling, or the service's request and drain timeouts violate the documented ordering; process exit then closes the remaining transport instead of completing it cleanly.",
+		context:   "The dying process flushes the nonzero drain-cut gauge, but its replacement can overwrite the same series with zero on the next metrics push, so this exact log outcome is durable incident evidence. The count is open connections, not necessarily distinct requests or confirmed duplicate executions. A sent-but-unanswered non-idempotent request can nevertheless be retried by an upstream and must be treated as an ambiguous execution outcome.",
+		action:    "Identify the emitting service, host, and generation, then correlate its drain duration, in-flight count, request route, handler stack, dependency waits, and configured read/write/shutdown timeouts. Repair the handler or timeout-ordering cause. Do not merely lengthen the drain ceiling, restart the same artifact, or assume every cut request was safely replayed.",
+		verify:    "Through two controlled drain cadences, every retiring process logs a clean drain, max_over_time(urnetwork_http_server_drain_cut_connections[15m]) remains zero, no http-drain-cut line recurs, and route outcomes show no unresolved or ambiguously replayed non-idempotent request.",
+	},
 	// taskworker drain outcome (§12.1): the drain phases log exactly one
 	// outcome line; "finished cleanly" / "finished after cancel" are healthy
 	// and not classified — only "gave up" means a ctx-ignoring task rode to

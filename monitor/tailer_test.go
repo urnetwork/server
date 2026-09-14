@@ -1658,6 +1658,47 @@ func TestLogTailerRendersServiceTargetAndEndpointFrame(t *testing.T) {
 	}
 }
 
+func TestHTTPDrainCutIsDetailedPageAndOmitsWarpIdentity(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.classify("[synthetic-edge][api][synthetic-generation][cid:synthetic-container]" +
+		"[I][2026-09-13T07:30:00Z][http]drain deadline after 1m10.25s: 2 connection(s) cut")
+
+	finding := findingByClass(t, tailer.drainWindow(), "http-drain-cut")
+	if finding.healthy || finding.tier != tierPage || finding.sustain != 1 {
+		t.Fatalf("drain-cut finding = %+v, want immediate page", finding)
+	}
+	markdown := alertFromFinding(
+		syntheticSettings(nil),
+		"1.5",
+		"log-errors",
+		"Log error-class rates",
+		finding,
+	).Markdown()
+	for _, want := range []string{
+		"1m10.25s: 2 connection(s) cut",
+		"hard-cut those connections",
+		"ambiguous execution outcome",
+		"Repair the handler or timeout-ordering cause",
+		"max_over_time(urnetwork_http_server_drain_cut_connections[15m]) remains zero",
+		"SIGNALS.md §13.1",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("drain-cut alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, omitted := range []string{"synthetic-edge", "synthetic-generation", "synthetic-container"} {
+		if strings.Contains(markdown, omitted) {
+			t.Fatalf("drain-cut alert retained Warp identity %q:\n%s", omitted, markdown)
+		}
+	}
+
+	zero := newLogTailer("api", nil)
+	zero.classify("[http]drain deadline after 1m10s: 0 connection(s) cut")
+	if zeroFinding := findingByClass(t, zero.drainWindow(), "http-drain-cut"); !zeroFinding.healthy {
+		t.Fatalf("zero connection drain became a hard-cut alert: %+v", zeroFinding)
+	}
+}
+
 // the §3.7 tailer self-health thresholds: silent-too-long and restarting-hot
 // raise monitor/visibility findings; a live, stable tailer reports healthy.
 func TestTailerHealthFindings(t *testing.T) {
