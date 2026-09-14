@@ -637,6 +637,10 @@ func syntheticMigrationIndexAdmitted(t *testing.T, query string, contract synthe
 	}
 	block, _, ok := strings.Cut(normalized[position:], " ),")
 	if !ok {
+		// The final artifact closes the select list without a trailing comma.
+		block, _, ok = strings.Cut(normalized[position:], " ) FROM version;")
+	}
+	if !ok {
 		t.Fatalf("index %s has an unterminated query contract", contract.name)
 	}
 	exact := "AND definition = '" + expected + "' AND predicate_definition IS NULL AND indisvalid AND indisready"
@@ -666,6 +670,7 @@ func TestMigrationsSignalRejectsLookalikePlainOrderedIndexes(t *testing.T) {
 		{version: 664, table: "network_extender_publish", name: "network_extender_publish_published_time_create_time", keys: "(published_time, create_time)"},
 		{version: 663, table: "network_extender_address", name: "network_extender_address_active_last_publish_time", keys: "(active, last_publish_time)"},
 		{version: 666, table: "network_client_connection", name: "network_client_connection_client_id_connected_extender_id", keys: "(client_id, connected, extender_id)"},
+		{version: 674, table: "contract_extender", name: "contract_extender_create_time_contract_id", keys: "(create_time, contract_id)"},
 		{version: 614, table: "st_epoch", name: "st_epoch_status", keys: "(deployment_key, status, epoch)", grouped: true},
 		{version: 614, table: "st_publish", name: "st_publish_epoch_kind", keys: "(deployment_key, epoch, kind, create_time)", grouped: true},
 		{version: 614, table: "st_event", name: "st_event_kind_block", keys: "(deployment_key, kind, block_number, log_index)", grouped: true},
