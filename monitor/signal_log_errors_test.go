@@ -1442,3 +1442,73 @@ func TestLogErrorsSignalGroupsRequiredVaultFailuresByRouteAndGeneration(t *testi
 		}
 	}
 }
+
+// Keep causal caveats in the owning section, not an unrelated catalog mention.
+func TestLogErrorsWindowObservationNegativeControlsDocumented(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	sectionStart := strings.Index(catalog, "\n### 14.6 ")
+	if sectionStart < 0 {
+		t.Fatal("catalog is missing the owning section 14.6")
+	}
+	section := catalog[sectionStart:]
+	sectionEnd := strings.Index(section, "\n### 14.7 ")
+	if sectionEnd < 0 {
+		t.Fatal("catalog is missing the section 14.7 boundary")
+	}
+	section = section[:sectionEnd]
+	paragraphFor := func(anchor string) string {
+		anchorIndex := strings.Index(section, anchor)
+		if anchorIndex < 0 {
+			return ""
+		}
+		paragraphStart := strings.LastIndex(section[:anchorIndex], "\n\n")
+		if paragraphStart < 0 {
+			paragraphStart = 0
+		} else {
+			paragraphStart += len("\n\n")
+		}
+		paragraphEnd := len(section)
+		if nextParagraph := strings.Index(section[anchorIndex:], "\n\n"); nextParagraph >= 0 {
+			paragraphEnd = anchorIndex + nextParagraph
+		}
+		paragraph := strings.ReplaceAll(section[paragraphStart:paragraphEnd], "`", "")
+		return strings.Join(strings.Fields(paragraph), " ")
+	}
+	checks := []struct {
+		name    string
+		anchor  string
+		clauses []string
+	}{
+		{
+			name:    "session settings are not evaluation outcomes",
+			anchor:  "event=session",
+			clauses: []string{"settings", "configuration evidence", "not evaluation outcomes"},
+		},
+		{
+			name:    "generic timeout does not establish authentication or lifecycle cause",
+			anchor:  "Timeout.",
+			clauses: []string{"not proof of credential rejection", "request deadline", "caller/strategy cancellation"},
+		},
+		{
+			name:    "window events retain task attribution limits",
+			anchor:  "identity-free lines",
+			clauses: []string{"cannot be joined one-to-one to those tasks", "do not identify customer sessions"},
+		},
+	}
+	for _, check := range checks {
+		paragraph := paragraphFor(check.anchor)
+		missingClauses := []string{}
+		for _, clause := range check.clauses {
+			if !strings.Contains(paragraph, clause) {
+				missingClauses = append(missingClauses, clause)
+			}
+		}
+		if len(missingClauses) > 0 {
+			t.Errorf("section 14.6 %s is missing %q", check.name, missingClauses)
+		}
+	}
+}

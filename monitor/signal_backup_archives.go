@@ -92,7 +92,9 @@ reduce_github_failure_journal() {
 
 		class_count=0
 		class=""
-		if (message ~ /archive write clearance|archive write-clearance|archive mount is not present and read-write|archive mount wait values must|refusing to use \/ as the archive mount|archive mount did not become present and read-write|archive mount identity is not cleared and read-write|archive path is outside|mirror work path must be on the archive drive|configured archive mount|clearance marker|clearance probation|stable archive .*identity|mounted archive does not match/) {class="clearance-mount"; class_count++}
+		# Only explicit rejection/unavailable contracts identify this error stage;
+		# clearance recording, valid status, and probation progress are context.
+		if (message ~ /archive write[- ]clearance (denied|cannot be observed)(:|[[:space:]]|$)|archive write[- ]clearance helper is unavailable(:|[[:space:]]|$)|archive mount is not present and read-write|archive mount wait values must|refusing to use \/ as the archive mount|archive mount did not become present and read-write|archive mount identity is not cleared and read-write|archive path is outside|mirror work path must be on the archive drive|mounted archive does not match/) {class="clearance-mount"; class_count++}
 		if (message ~ /api rate limit|secondary rate limit|github api|returned error: (403|429)|http[^0-9]*(403|429)|curl:|failed to discover every .* repository|github returned no repositories|github organization repositories response|unsafe github repository|unexpected github repository/) {class="api-rate"; class_count++}
 		if (message ~ /connection reset|broken pipe|unexpected disconnect|early eof|remote end hung up|could not read from remote repository|unable to access|ssh: connect|connection timed out|network is unreachable|no route to host|connection refused|could not resolve hostname|repository not found|failed to (update|mirror) .*; preserving the previous .* code archive|failed to fetch git lfs objects .*; preserving the previous .* code archive|git (mirror update|mirror clone|lfs fetch).*failed|refusing unexpected (clone attempt|repository cache) path|cached repository is not a bare mirror|failed to install cached mirror/) {class="git-transfer"; class_count++}
 		if (message ~ /new code archive failed its xz\/tar integrity check|failed to create .*\.tar\.xz|(^|[^[:alnum:]_])xz:|(^|[^[:alnum:]_])tar:|sha256sum:/) {class="compression-integrity"; class_count++}
@@ -1918,7 +1920,7 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 	}
 
 	mechanism := "The GitHub archive oneshot is not executing and its effective systemd state does not record a successful exit. Fresh scrape timestamps and a still-young previous tarball can therefore hide a failed writer until the five-day archive-age objective is breached."
-	action := "Keep the single-writer boundary. Preserve completed archives and failed-invocation state, repair only the first proven boundary, and obtain operator authorization before one catch-up invocation."
+	action := "Keep the single-writer boundary. Preserve completed archives and failed-invocation state. Establish the owning fatal command and generation before selecting an invasive repair, and obtain operator authorization before one catch-up invocation."
 	switch writer.githubFailure.journalStatus {
 	case "complete":
 		switch writer.githubFailure.firstBoundary {
@@ -1929,8 +1931,8 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			mechanism += " The exact failed invocation's first recognized boundary is a read-only filesystem result. Present mount options are later state and cannot clear the historical writer failure."
 			action += " Resolve the archive filesystem and stable-device clearance boundary without a live read-write remount of an aborted filesystem, then revalidate the exact archive root before any retry."
 		case "clearance-mount":
-			mechanism += " The exact failed invocation first crossed the archive clearance, mount, stable-identity, or root-placement interlock."
-			action += " Repair the privacy-reduced clearance/mount contract and prove the expected root is on that mounted filesystem; never create a lookalike directory beneath a missing mount."
+			mechanism += " The bounded exact-invocation journal's first observed explicit clearance/mount error records a rejection or unavailable interlock observation. This stage does not prove which command caused the unsuccessful terminal exit."
+			action += " Confirm that this error belongs to the fatal command and remained unresolved at the terminal boundary. Only then repair the clearance/mount contract and prove the expected root is on that mounted filesystem; never create a lookalike directory beneath a missing mount. Do not repeat physical or offline filesystem repair merely from an earlier classified message or retained historical volume page."
 		case "auth":
 			mechanism += " The exact failed invocation first exposed a GitHub SSH or API authentication boundary."
 			action += " Validate the installed backup identity and token-file contract through bounded provider checks without copying credential values into logs or alerts."
@@ -1975,7 +1977,7 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			target,
 		),
 		mechanism: mechanism,
-		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0. For an unsuccessful terminal invocation, at most 512 exact InvocationID journal lines are reduced on-host to one closed first-boundary class plus line counts.",
+		baseline:  "A running GitHub archive may be active, activating, reloading, or deactivating. Otherwise github-backup-archive.service is inactive with Result=success and ExecMainStatus=0. For an unsuccessful terminal invocation, at most 512 exact InvocationID journal lines are reduced on-host to one closed first-recognized stage plus line counts; that classification is not fatal-command ownership.",
 		observed: fmt.Sprintf(
 			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d invocation_id_present=%t exec_start_monotonic=%d %s current_mount_state=%s current_clearance_state=%s current_root_observation=%s",
 			writer.unitState,
@@ -1991,7 +1993,7 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 			writer.archiveRootObservation,
 		),
 		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, InvocationID presence, and monotonic start time are read directly from the effective GitHub archive unit. On that host only, a validated raw InvocationID and unit filter select at most 513 journal messages, where the final record is an overflow sentinel; the reducer returns only a completeness state, first closed boundary, and per-class counts. The invocation identifier, raw messages, repository and path names, endpoints, command arguments, and credentials never leave the host.",
-		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. Current archive mount, clearance, and root results are separate point-in-time controls and cannot erase a historical exact-invocation result. Clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
+		context:  "This is a writer execution failure, independent of archive freshness and timer scheduling. Current archive mount, clearance, and root results are separate point-in-time controls and cannot erase a historical exact-invocation result. Closed journal stages and line counts do not establish fatal subprocess, executed-script, or archive-generation ownership. Clearing systemd's failed marker or finding an older valid tarball does not create a new recovery point.",
 		action:   action,
 		verify:   "A subsequent authorized invocation has a new nonzero InvocationID and post-repair start boundary, runs as the sole writer, exits with Result=success and ExecMainStatus=0, validates both code tarballs and manifests, and publishes both new generations on two direct Mimir reads. The timer must independently pass its future-schedule gate.",
 		playbook: "SIGNALS.md §11.22",

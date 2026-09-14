@@ -12933,7 +12933,7 @@ enter an on-host closed classifier: 512 are the diagnostic bound and the 513th
 is an overflow sentinel. Ordinary journal read access is tried before the sudo
 fallback, so a working direct path does not generate a denied privileged-access
 record on every failed-writer probe. The command returns only `complete`,
-`ambiguous`, or `unobservable`, the first uniquely recognized boundary, total
+`ambiguous`, or `unobservable`, the first uniquely recognized journal stage, total
 line count, and per-class counts for storage EIO, storage read-only,
 clearance/mount, authentication, API/rate, Git transfer, capacity,
 compression/integrity, atomic publication, and unclassified text. A healthy or
@@ -12943,9 +12943,16 @@ journal messages, repository and path names, endpoints, and credentials never
 leave the backup host. Explicit missing, malformed, or empty GitHub credential
 files and HTTP 401 are authentication even though their messages also name the
 API or `curl`; stable storage-metrics helper, directory, and writer-wrapper
-failures are atomic-publication boundaries. A nonfatal mount-wait message is
-unclassified and cannot outrank the later terminal boundary;
-for `github-backup-archive.timer` it reads active state, durable unit-file
+failures are atomic-publication boundaries. Clearance/mount recognition requires
+an explicit rejection, unavailable observation, or mount/root error contract;
+positive clearance recording, valid status, marker, identity, and probation
+progress are unclassified context, as is a nonfatal mount-wait message. Such
+context cannot outrank a later observed explicit error stage. Journal-stage
+classification and line counts are not fatal-command or archive-generation
+ownership; the generic API-context classifier remains a separate attribution
+limit, not an API root-cause proof.
+
+For `github-backup-archive.timer` it reads active state, durable unit-file
 state, and its next realtime trigger. The effective
 `remote-backup-archive.service` contributes the equivalent execution identity,
 restart policy, restart delay, and its four non-secret PostgreSQL/Redis source
@@ -13186,11 +13193,15 @@ BROKEN:
 - `backup-archive-writer-failed` is immediate when the GitHub oneshot is not in
   an execution transition and its terminal ActiveState, Result, or
   ExecMainStatus is unsuccessful. It is independent of the five-day age gate:
-  a valid prior tarball can remain fresh while every future code recovery point
-  is already broken. The alert joins the terminal state to the privacy-reduced
-  exact-invocation journal result above. `complete` identifies the first closed
-  class even when earlier informational or otherwise unclassified lines exist;
-  its per-class counts preserve that distinction without exposing text.
+  a valid prior tarball can remain fresh while the latest attempt to produce a
+  new code recovery point has failed. The alert joins the terminal state to the
+  privacy-reduced exact-invocation journal result above. `complete` identifies
+  the first closed journal stage even when earlier informational or otherwise
+  unclassified lines exist; a reported clearance/mount stage is the bounded
+  journal's first observed explicit clearance/mount error stage, not positive
+  status/progress evidence. Its per-class counts preserve that distinction
+  without exposing text, but neither
+  those counts nor the first recognized stage prove the fatal command.
   `ambiguous` means the invocation crossed the 512-line bound, so the retained
   tail cannot prove the first boundary, or that the earliest classifiable line
   matched multiple closed classes. Classifier order never chooses between
@@ -13202,8 +13213,11 @@ BROKEN:
   labeled point-in-time controls; a later read-write mount or valid clearance
   cannot erase a storage EIO or read-only result from the failed invocation.
   Clearing systemd's failed marker is not repair. Preserve the single-writer
-  rule, repair the first proven boundary, and obtain operator authorization
-  before one catch-up run.
+  rule and completed artifacts. Before an invasive repair, identify the owning
+  fatal command and generation and prove that the reported error stage remained
+  unresolved at termination; do not repeat hardware or offline filesystem
+  repair merely from an earlier classified message or retained historical volume
+  page. Obtain operator authorization before one catch-up run.
 - `backup-archive-git-transfer-retry-disabled` is immediate when the effective
   GitHub writer does not configure exactly four transfer attempts with a
   30-second delay. Every repository must succeed before its organization's
@@ -15774,6 +15788,19 @@ timeout, terminal safety expiry, rebuild/window cancellation, and delayed
 callbacks with exactly one terminal owner. Rebuild every Connect-bearing
 artifact to remove the clipped shape; mixed generations can continue emitting
 it until convergence.
+
+`event=session` settings banners are configuration evidence, not evaluation
+outcomes. A fixed `Timeout.` is not proof of credential rejection: current Source
+can return it when a request deadline or caller/strategy cancellation ends
+parallel connection evaluation; that text does not distinguish those causes.
+Initial-evaluation timeout logs print a derived-local `ClientId`, not the provider
+`Destination`; transport, contract, or encryption work can consume the budget
+before ping sending returns. Keep indexed Loki timestamps separate from native
+log clocks. A shared CID does not uniquely identify a window, task, or evaluation
+epoch; matching timing is not ownership. Absent adjacent markers in a bounded or
+filtered capture do not exonerate other causes, prove complete tracing, or
+establish recovery. Require the executed artifact and owning window/task/epoch
+before transferring current Source semantics.
 
 The material `21:43:59Z` Main control on 2026-09-12 contained two unique
 authoritative `window_failed` records 34 milliseconds apart on one Taskworker

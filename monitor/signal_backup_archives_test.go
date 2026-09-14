@@ -1394,6 +1394,8 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 		{name: "storage EIO", journal: "synthetic writer: Input/output error", boundary: "storage-eio"},
 		{name: "storage read only", journal: "synthetic writer: Read-only file system", boundary: "storage-read-only"},
 		{name: "clearance mount", journal: "archive write clearance denied: synthetic fixture", boundary: "clearance-mount"},
+		{name: "clearance observation unavailable", journal: "archive write clearance cannot be observed: synthetic fixture", boundary: "clearance-mount"},
+		{name: "clearance helper unavailable", journal: "archive write-clearance helper is unavailable", boundary: "clearance-mount"},
 		{name: "storage metrics clearance", journal: "archive mount identity is not cleared and read-write: mount=/synthetic/mount path=/synthetic/archive", boundary: "clearance-mount"},
 		{name: "authentication", journal: "Permission denied (publickey).", boundary: "auth"},
 		{name: "missing SSH key", journal: "missing GitHub backup ssh key: /synthetic/fixture-key", boundary: "auth"},
@@ -1427,6 +1429,129 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 			if !strings.Contains(output, want) {
 				t.Fatalf("%s: writer observation missing %q:\n%s", testCase.name, want, output)
 			}
+		}
+		if testCase.boundary != "clearance-mount" {
+			continue
+		}
+		writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+		if err != nil {
+			t.Fatalf("%s: parse actual synthetic writer command: %v", testCase.name, err)
+		}
+		alert := alertFromFinding(SignalSettings{
+			Environment: "synthetic",
+			Now: func() time.Time {
+				return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+			},
+		}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+		if alert.Severity != SeverityPage || alert.Sustain != 1 ||
+			!strings.Contains(alert.Mechanism, "first observed explicit clearance/mount error") ||
+			!strings.Contains(alert.Mechanism, "does not prove which command") ||
+			!strings.Contains(alert.Action, "Establish the owning fatal command and generation") ||
+			!strings.Contains(alert.Action, "remained unresolved at the terminal boundary") {
+			t.Errorf("%s: explicit clearance error lost urgency or fatal-command qualification", testCase.name)
+		}
+	}
+}
+
+// Positive clearance evidence must not replace the later explicit error stage.
+func TestBackupArchivesWriterCommandPositiveClearancePreservesCompressionFailure(t *testing.T) {
+	const positiveClearance = "archive write clearance is valid; continuing"
+	const privateSyntheticArchive = "privacy-marker.example/synthetic.tar.xz"
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		positiveClearance+"\n"+
+			"new code archive failed its xz/tar integrity check: "+privateSyntheticArchive,
+	)
+	writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+	if err != nil {
+		t.Fatalf("parse actual synthetic writer command: %v", err)
+	}
+	alert := alertFromFinding(SignalSettings{
+		Environment: "synthetic",
+		Now: func() time.Time {
+			return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+		},
+	}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+	if alert.Class != "backup-archive-writer-failed" ||
+		alert.Severity != SeverityPage || alert.Sustain != 1 {
+		t.Fatalf("explicit compression failure lost writer page/1: %s/%s/%d", alert.Class, alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"unit_state=failed",
+		"exit_status=1",
+		"failure_journal_status=complete",
+		"first_failure_boundary=compression-integrity",
+		"failure_journal_lines=2",
+		"compression_integrity_lines=1",
+		"clearance_mount_lines=0",
+	} {
+		if !strings.Contains(alert.Observed, want) {
+			t.Errorf("positive-clearance compression observation missing %q: %s", want, alert.Observed)
+		}
+	}
+	if !strings.Contains(alert.Mechanism, "archive compression") ||
+		!strings.Contains(alert.Action, "compression/integrity stage") {
+		t.Error("positive clearance replaced the explicit compression mechanism/action")
+	}
+	if strings.Contains(alert.Mechanism, "first crossed the archive clearance") ||
+		strings.Contains(alert.Action, "Repair the privacy-reduced clearance/mount contract") {
+		t.Error("positive clearance produced an unsupported interlock claim or repair")
+	}
+	for _, forbidden := range []string{positiveClearance, privateSyntheticArchive} {
+		if strings.Contains(output, forbidden) || strings.Contains(alert.Markdown(), forbidden) {
+			t.Errorf("raw synthetic journal content leaked: %q", forbidden)
+		}
+	}
+}
+
+// A failed unit with only positive status evidence retains an unknown cause.
+func TestBackupArchivesWriterCommandPositiveOnlyClearanceKeepsFailureCauseUnknown(t *testing.T) {
+	for _, positiveClearance := range []string{
+		"archive write clearance is valid; continuing",
+		"archive write clearance valid",
+		"archive write clearance recorded; complete the synthetic fault-free probation before starting a writer",
+		"archive write-clearance helper is available; clearance marker present; stable archive synthetic identity verified; clearance probation complete",
+	} {
+		output := runSyntheticBackupArchiveWriterCommand(t, "failed", "exit-code", 1, positiveClearance)
+		writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+		if err != nil {
+			t.Fatalf("parse actual synthetic writer command: %v", err)
+		}
+		alert := alertFromFinding(SignalSettings{
+			Environment: "synthetic",
+			Now: func() time.Time {
+				return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+			},
+		}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+		if alert.Class != "backup-archive-writer-failed" ||
+			alert.Severity != SeverityPage || alert.Sustain != 1 {
+			t.Fatalf("positive-only journal erased the unsuccessful writer page/1: %s/%s/%d", alert.Class, alert.Severity, alert.Sustain)
+		}
+		for _, want := range []string{
+			"unit_state=failed",
+			"exit_status=1",
+			"failure_journal_status=complete",
+			"first_failure_boundary=unclassified",
+			"failure_journal_lines=1",
+			"clearance_mount_lines=0",
+			"unclassified_lines=1",
+		} {
+			if !strings.Contains(alert.Observed, want) {
+				t.Errorf("positive-only clearance observation missing %q: %s", want, alert.Observed)
+			}
+		}
+		if !strings.Contains(alert.Mechanism, "cause remains unclassified") {
+			t.Error("positive-only clearance did not retain the unknown writer failure cause")
+		}
+		if strings.Contains(alert.Mechanism, "first crossed the archive clearance") ||
+			strings.Contains(alert.Action, "Repair the privacy-reduced clearance/mount contract") {
+			t.Error("positive-only clearance produced an unsupported interlock claim or repair")
+		}
+		if strings.Contains(output, positiveClearance) || strings.Contains(alert.Markdown(), positiveClearance) {
+			t.Error("positive-only raw synthetic journal content leaked")
 		}
 	}
 }
