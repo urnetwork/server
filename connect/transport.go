@@ -462,6 +462,12 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
 		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
+
+		// Both windows keep quic-go's behavior until a deployment sets them:
+		// 512 KiB initial and 6 MiB maximum per stream, with no bound at all on
+		// the sum across connections.
+		H3MaxStreamReceiveWindow:          0,
+		H3MaxTotalConnectionReceiveWindow: 0,
 	}
 }
 
@@ -487,8 +493,22 @@ type ConnectHandlerSettings struct {
 	H3DatagramStats             *connect.H3DatagramStats
 	// H3QuicPacketStats enables opt-in packet/frame diagnostics without
 	// retaining qlog events or payloads. Nil keeps tracing disabled.
-	H3QuicPacketStats         *connect.H3QuicPacketStats
-	ConnectionAnnounceTimeout time.Duration
+	H3QuicPacketStats *connect.H3QuicPacketStats
+	// H3MaxStreamReceiveWindow is the largest stream-level receive window one
+	// connection may be auto-tuned up to. A stream cannot carry more than its
+	// receive window over the round trip, so quic-go's 6 MiB default stops a
+	// 200 ms client upload or provider hop near 31 MB/s whatever the path can
+	// actually carry. Zero keeps quic-go's defaults.
+	H3MaxStreamReceiveWindow uint64
+	// H3MaxTotalConnectionReceiveWindow bounds the connection-level window
+	// growth this listener may grant across all of its live connections. A
+	// receive window is credit, so raising the per-connection maximum costs the
+	// senders rather than this server; what this server holds is the credit a
+	// relayed connection has not consumed yet, and this is the only bound on
+	// the sum of it. Zero grants every increase, which is what quic-go does
+	// with no callback at all.
+	H3MaxTotalConnectionReceiveWindow uint64
+	ConnectionAnnounceTimeout         time.Duration
 	// per-connection latency/speed test schedule.
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
@@ -556,9 +576,78 @@ func finishConnectionAnnounce(announce *ConnectionAnnounce) {
 	announce.CloseAndWait()
 }
 
+// connectQuicWindowBudget bounds the connection-level receive window growth one
+// listener grants across all of its live connections.
+//
+// quic-go hands each connection its initial window directly and routes every
+// later increase through AllowConnectionWindowIncrease, so counting what the
+// callback admits bounds all of the growth above that per-connection baseline.
+// A nil budget is the inert default: no callback is installed and quic-go
+// grants every increase, as it does today.
+type connectQuicWindowBudget struct {
+	maximum uint64
+
+	lock    sync.Mutex
+	granted map[*quic.Conn]uint64
+	total   uint64
+}
+
+// Returns nil when no aggregate is configured.
+func newConnectQuicWindowBudget(maximum uint64) *connectQuicWindowBudget {
+	if maximum == 0 {
+		return nil
+	}
+	return &connectQuicWindowBudget{
+		maximum: maximum,
+		granted: map[*quic.Conn]uint64{},
+	}
+}
+
+// Admits one attempted window increase, charging it to the connection that
+// asked. Refusing costs the connection nothing but the increase: quic-go keeps
+// the window it already has.
+func (self *connectQuicWindowBudget) grant(conn *quic.Conn, delta uint64) bool {
+	if self == nil {
+		return true
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if self.maximum-self.total < delta {
+		return false
+	}
+	self.total += delta
+	self.granted[conn] += delta
+	return true
+}
+
+// Returns everything one connection was granted. The caller runs this after the
+// connection is closed, so no further increase can be charged to it.
+func (self *connectQuicWindowBudget) release(conn *quic.Conn) {
+	if self == nil {
+		return
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	self.total -= self.granted[conn]
+	delete(self.granted, conn)
+}
+
+// The growth currently granted across all live connections.
+func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
+	if self == nil {
+		return 0
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	return self.total
+}
+
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
-func newConnectQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
+func newConnectQuicConfig(
+	settings *ConnectHandlerSettings,
+	budget *connectQuicWindowBudget,
+) *quic.Config {
 	config := &quic.Config{
 		HandshakeIdleTimeout: settings.QuicConnectTimeout + settings.QuicHandshakeTimeout,
 		MaxIdleTimeout:       settings.MaxPingTimeout * 4,
@@ -569,6 +658,21 @@ func newConnectQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
 		Allow0RTT:         true,
 		InitialPacketSize: connect.H3InitialPacketByteCount,
 		EnableDatagrams:   settings.EnableH3Datagrams,
+	}
+	// One stream carries the connection, so the stream window is what bounds
+	// its rate, and the connection window has to stay above it or it becomes
+	// the binding limit instead. quic-go's own ratio between the two is 3/2.
+	//
+	// The initial windows are deliberately left alone. A new connection is not
+	// handed the maximum; it earns the way up through auto-tuning only while it
+	// keeps consuming, which is what keeps the cost of a high ceiling off the
+	// connections that never use it.
+	if 0 < settings.H3MaxStreamReceiveWindow {
+		config.MaxStreamReceiveWindow = settings.H3MaxStreamReceiveWindow
+		config.MaxConnectionReceiveWindow = settings.H3MaxStreamReceiveWindow * 3 / 2
+	}
+	if budget != nil {
+		config.AllowConnectionWindowIncrease = budget.grant
 	}
 	if settings.H3QuicPacketStats != nil {
 		config.Tracer = settings.H3QuicPacketStats.Tracer
@@ -589,6 +693,9 @@ type ConnectHandler struct {
 	dnsPacketConn              net.PacketConn
 	packetEndpoints            []connectPacketEndpoint
 	h3DatagramReassemblyBudget *connect.H3DatagramReassemblyBudget
+	// One aggregate stands behind every front that terminates QUIC for this
+	// handler, including an external listener using NewQuicConfig.
+	quicWindowBudget *connectQuicWindowBudget
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
@@ -788,6 +895,9 @@ func newConnectHandlerWithPacketConns(
 		listenerStates:        listenerStates,
 		h3DatagramReassemblyBudget: connect.NewH3DatagramReassemblyBudget(
 			h3DatagramSettings.ProcessReassemblyByteCount,
+		),
+		quicWindowBudget: newConnectQuicWindowBudget(
+			settings.H3MaxTotalConnectionReceiveWindow,
 		),
 		activeCount: activeCount,
 		activeZero:  activeZero,
@@ -1617,7 +1727,7 @@ func (self *ConnectHandler) listenQuic(
 
 	defer handleCancel()
 
-	quicConfig := newConnectQuicConfig(self.settings)
+	quicConfig := newConnectQuicConfig(self.settings, self.quicWindowBudget)
 
 	// type clientConfig struct {
 	// 	tlsConfig *tls.Config
@@ -1698,6 +1808,10 @@ func (self *ConnectHandler) listenQuic(
 // started worker for it, and HandleQuicConn takes one for an external
 // dispatch.
 func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string) {
+	// Declared before the close so it runs after it: releasing the connection's
+	// granted window while it could still attempt an increase would leave that
+	// increase charged to the aggregate with nothing left to release it.
+	defer self.quicWindowBudget.release(conn)
 	defer conn.CloseWithError(0, "")
 
 	err := self.connectQuic(conn)
@@ -1730,10 +1844,11 @@ func (self *ConnectHandler) TransportTls() *server.TransportTls {
 	return self.transportTls
 }
 
-// NewQuicConfig returns the server half of the H3 configuration. An external
-// listener for the same handler must not build a second, drifting one.
-func NewQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
-	return newConnectQuicConfig(settings)
+// NewQuicConfig returns the server half of the H3 configuration, including this
+// handler's shared receive window aggregate. An external listener for the same
+// handler must not build a second, drifting one.
+func (self *ConnectHandler) NewQuicConfig() *quic.Config {
+	return newConnectQuicConfig(self.settings, self.quicWindowBudget)
 }
 
 // Reads one pooled H3 authentication frame and lends its exact wire bytes to

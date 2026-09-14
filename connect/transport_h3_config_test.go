@@ -62,7 +62,7 @@ func TestConnectH3TransferCarrierEnablesBoundedAckReserve(t *testing.T) {
 // application DATAGRAM writer.
 func TestConnectQuicConfigEnablesPathMtuDiscovery(t *testing.T) {
 	settings := DefaultConnectHandlerSettings()
-	config := newConnectQuicConfig(settings)
+	config := newConnectQuicConfig(settings, nil)
 	if config.DisablePathMTUDiscovery {
 		t.Fatal("server H3 path MTU discovery is disabled")
 	}
@@ -87,11 +87,11 @@ func TestConnectQuicConfigEnablesPathMtuDiscovery(t *testing.T) {
 		t.Fatal("server H3 packet tracing enabled without an explicit collector")
 	}
 	settings.H3QuicPacketStats = &clientconnect.H3QuicPacketStats{}
-	if newConnectQuicConfig(settings).Tracer == nil {
+	if newConnectQuicConfig(settings, nil).Tracer == nil {
 		t.Fatal("server H3 packet stats did not enable the QUIC tracer")
 	}
 	settings.EnableH3Datagrams = false
-	if newConnectQuicConfig(settings).EnableDatagrams {
+	if newConnectQuicConfig(settings, nil).EnableDatagrams {
 		t.Fatal("H3 DATAGRAM rollout setting did not disable QUIC advertisement")
 	}
 }

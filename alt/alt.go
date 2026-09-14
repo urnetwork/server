@@ -159,7 +159,7 @@ func NewAlt(
 		// its own settings; one instance keeps one certificate cache and one
 		// allowed-host policy behind both fronts
 		transportTls:   connectHandler.TransportTls(),
-		quicConfig:     connectserver.NewQuicConfig(&settings.ExchangeSettings.ConnectHandlerSettings),
+		quicConfig:     connectHandler.NewQuicConfig(),
 		connectHandler: connectHandler,
 		apiServer: &http3.Server{
 			Handler: NewLimitedHandler(apiHandler, limits),
