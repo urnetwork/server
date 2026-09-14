@@ -70,19 +70,20 @@ func sign(key []byte, body string) []byte {
 	return mac.Sum(nil)
 }
 
-// ParseToken verifies a token against each key in turn and checks its expiry.
+// Verifies a canonical base64url token against each key and checks its expiry.
 // ErrTokenExpired carries the parsed claims alongside, so a landing page can
 // still route an expired link without attributing it.
 func ParseToken(keys [][]byte, token string, now time.Time) (*TokenClaims, error) {
 	token = strings.TrimSpace(token)
-	if token == "" || MaxTokenLength < len(token) {
+	// Strict decoding rejects unused bits, but still ignores embedded newlines.
+	if token == "" || MaxTokenLength < len(token) || strings.ContainsAny(token, "\r\n") {
 		return nil, ErrTokenInvalid
 	}
 	body, signature, ok := strings.Cut(token, ".")
 	if !ok || body == "" || signature == "" {
 		return nil, ErrTokenInvalid
 	}
-	signatureBytes, err := base64.RawURLEncoding.DecodeString(signature)
+	signatureBytes, err := base64.RawURLEncoding.Strict().DecodeString(signature)
 	if err != nil {
 		return nil, ErrTokenInvalid
 	}
@@ -96,7 +97,7 @@ func ParseToken(keys [][]byte, token string, now time.Time) (*TokenClaims, error
 	if !verified {
 		return nil, ErrTokenInvalid
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(body)
+	payload, err := base64.RawURLEncoding.Strict().DecodeString(body)
 	if err != nil {
 		return nil, ErrTokenInvalid
 	}
