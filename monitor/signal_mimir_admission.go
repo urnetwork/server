@@ -953,8 +953,8 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 			assessment.admissionRejects,
 		),
 		evidence: "Each host identifies Mimir through its loopback build-info response, reduces the exact process metrics and allowlisted local/global series-limit fields locally, and returns only fixed numeric fields. Rendered configuration, metric labels, tenant values, and journal lines never leave the host.",
-		context:  "Publisher starts, readiness rejects, and admission-rejection log matches are aggregate same-window context only. Equality can support a rejected-candidate amplification hypothesis after exact artifact and rollout correlation; inequality cannot name a different cause, and none of the journal counts changes this direct admission classification. A process replacement or counter decrease starts a new baseline and cannot clear this incident.",
-		action:   "Stop treating retries or a limit increase as recovery. Compare exact running Server and Warp artifacts, migration readiness, publisher starts, and exporter cardinality. If rejected candidates publish, deploy the established post-admission metrics fix through the ordinary authorized rollout. Otherwise reduce the first proven unnecessary metric family or correct the genuine cardinality source. Preserve process instance identity and do not restart Mimir merely to reset its head.",
+		context:  "Publisher starts, readiness rejects, and admission-rejection log matches are aggregate same-window context only. Equality can support a rejected-candidate amplification hypothesis after exact artifact and rollout correlation; inequality cannot name a different cause. Accepted per-service or family aggregates cannot select rejected candidate series because those candidates never entered the accepted set. A current fixed-schema rejection event can bound candidate job/family classes for one mixed batch, but it cannot prove that one family independently crossed the shared limit. A process replacement or counter decrease starts a new baseline and cannot clear this incident.",
+		action:   "Stop treating retries or a limit increase as recovery. Compare exact running Server and Warp artifacts, migration readiness, publisher starts, exporter cardinality, and any privacy-safe rejected-batch job/family classes. If rejected candidates publish, deploy the established post-admission metrics fix through the ordinary authorized rollout. Otherwise reduce only a proven unnecessary source; do not infer it from accepted cardinality alone. Preserve process instance identity and do not restart Mimir merely to reset its head.",
 		verify: fmt.Sprintf(
 			"Require complete exact-child observations with no counter reset or generation gap, zero new per-user-series discard increments, two fresh independent application-metric reads, and measured headroom for the next rollout through %s. Historical continuity remains independently governed by §11.20.",
 			mimirAdmissionQuietWindow,
@@ -1010,8 +1010,8 @@ func mimirAdmissionRateLimitFinding(assessment mimirAdmissionAssessment) finding
 			assessment.readinessRejects,
 		),
 		evidence: "Each host identifies Mimir through its loopback build-info response and reduces the exact process counter plus ingestion-rate and burst settings locally. Only fixed numeric fields leave the host; rendered configuration, tenant values, metric labels, and request bodies do not.",
-		context:  "The configured rate and burst explain the admission policy but do not attribute load. Publisher/readiness aggregates likewise cannot identify the rejected writer. The Redis command-latency histogram is one proven unnecessary high-volume input and a candidate load reduction, not proof that Redis is the only producer or that excluding it closes this counter.",
-		action:   "Pause additional metrics-publisher rollouts, preserve the exact child generations, and compare bounded per-service and metric-family series/cadence aggregates with the shared gateway push path. Remove or reduce only a proven unnecessary sample source; justify any capacity change from measured steady and rollout load. Do not retry rejected payloads blindly, restart Mimir to erase counters, or raise the ingestion limit before attribution and resource checks.",
+		context:  "The configured rate and burst explain the admission policy but do not attribute load. Publisher/readiness aggregates and accepted per-service/family rates cannot identify a rejected writer or candidate because rejected samples never entered those aggregates. A current fixed-schema rejection event bounds candidate job/family classes for one mixed batch without proving unique request loss or one culpable family. The Redis command-latency histogram is one proven unnecessary high-volume input and a candidate load reduction, not proof that Redis is the only producer or that excluding it closes this counter.",
+		action:   "Pause additional metrics-publisher rollouts, preserve the exact child generations, and first run §11.20c and §11.20b to separate missed publisher convergence from true aggregate load. Use privacy-safe rejected-batch classes plus exact source cadence to prove any removable input; accepted aggregates are context only. Remove or reduce only a proven unnecessary sample source and justify any capacity change from measured steady and rollout load. Do not retry rejected payloads blindly, restart Mimir to erase counters, or raise the ingestion limit before attribution and resource checks.",
 		verify: fmt.Sprintf(
 			"Require complete exact-child observations with stable generations and limits, zero new rate-limited discard increments, fresh required application metrics, and the independent per-user-series counter remaining observable through the complete %s quiet window.",
 			mimirAdmissionQuietWindow,
@@ -1461,7 +1461,7 @@ publisher_starts=0
 readiness_rejects=0
 admission_rejects=0
 if [ -n "$journal_identifiers" ] && command -v journalctl >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-  set -- journalctl --no-pager --quiet -o cat --since '2 minutes ago' -n 2000 --grep='\[stats\]publishing|\[(api|connect|taskworker)\]not ready|Stats push rejected \(400\):.*per-user series limit'
+  set -- journalctl --no-pager --quiet -o cat --since '2 minutes ago' -n 2000 --grep='\[stats\]publishing|\[(api|connect|taskworker)\]not ready|Stats push rejected (status=[45][0-9][0-9] reason=series-limit|\(400\):.*per-user series limit)'
   for identifier in $journal_identifiers; do
     set -- "$@" "SYSLOG_IDENTIFIER=$identifier"
   done
@@ -1472,7 +1472,7 @@ if [ -n "$journal_identifiers" ] && command -v journalctl >/dev/null 2>&1 && com
       journal_complete=1
       publisher_starts=$(printf '%s\n' "$journal_output" | awk '/\[stats\]publishing/ {count++} END {print count+0}')
       readiness_rejects=$(printf '%s\n' "$journal_output" | awk '/\[(api|connect|taskworker)\]not ready/ {count++} END {print count+0}')
-      admission_rejects=$(printf '%s\n' "$journal_output" | awk 'index($0, "Stats push rejected (400):") && index($0, "per-user series limit") {count++} END {print count+0}')
+      admission_rejects=$(printf '%s\n' "$journal_output" | awk '(index($0, "Stats push rejected status=") && index($0, " reason=series-limit ")) || (index($0, "Stats push rejected (400):") && index($0, "per-user series limit")) {count++} END {print count+0}')
       ;;
   esac
 fi

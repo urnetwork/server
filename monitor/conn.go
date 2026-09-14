@@ -183,6 +183,7 @@ type monitorConfig struct {
 	expectedSourceIPv4 string
 	expectedSourceIPv6 string
 	dnsAliases         DNSAliasSettings
+	mimirPublishers    MimirPublisherSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

@@ -138,6 +138,11 @@ count and global rate, while reducing front socket peers to local/remote counts
 on-host. It distinguishes aggregate capacity from persistent connection skew,
 which can exhaust one child's divided token bucket while the fleet remains
 comfortably below its global budget.
+The convergence follow-up adds §11.20c (`mimir-publishers`): it compares each
+high-volume remote publisher's privacy-reduced live alias membership,
+preferred-front ordinal, shipper generation, and established port-3100
+connections with the active Grafana-front topology. This catches stale/common
+placement even when low traffic makes the rate-based balance signal green.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -7233,9 +7238,11 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
-| `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window; the gateway's body can embed private series labels, so only a fixed sample/frame is retained. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Split rejected-candidate churn from a steady cardinality increase with process-generation changes, readiness/publisher aggregates, and bounded metric-family counts; no one context field selects the cause. Pause further service rollouts, preserve distinct instance labels, and do not restart Mimir or raise its limit to manufacture headroom. After removing the proven source of avoidable series, require observed series removal, enough per-ingester headroom for the complete next-generation overlap, zero new discards, and fresh source metrics through the complete two-hour quiet window. Historical gaps stay under §11.20. |
-| `cortex_discarded_samples_total{reason="rate_limited"}` (`mimir-ingestion-rate-limit`) | Mimir's per-tenant sample token bucket rejected ingestion. The exact child-counter increase proves lost samples independently of series-cardinality headroom, but replicated child counters are not unique request counts and do not identify the producer. | Run `mimir-admission` (§11.20a), preserve exact child generations, and attribute load with bounded per-service/family cadence and series counts before changing capacity. Remove or reduce only a proven unnecessary sample source. A rate/burst increase may require an operational capacity decision and resource validation; do not raise it, restart Mimir, or blindly retry rejected payloads as an automatic software fix. Require zero new rate-limited increments and fresh required metrics for the complete two-hour quiet window. |
+| `Stats push rejected status=... reason=series-limit ...` or legacy `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window. Current fronts discard the raw response and emit only a fixed job class, family-class counts, total families, and total time series; legacy bodies can embed private labels and are reduced to a generic sample. A mixed rejected batch identifies candidate contributors, not a family that independently crossed the shared limit. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Use a current structured batch to bound candidate sources, but treat accepted per-service/family aggregates as context only because rejected candidates never enter them. Preserve distinct instance labels; do not restart Mimir or raise its limit to manufacture headroom. After removing a proven avoidable source, require observed series removal, enough per-ingester headroom for the next complete overlap, zero new discards, and fresh source metrics through the complete two-hour quiet window. Historical gaps stay under §11.20. |
+| `Stats push rejected status=... reason=rate-limit ...` or `cortex_discarded_samples_total{reason="rate_limited"}` (`mimir-ingestion-rate-limit`) | Mimir's per-tenant sample token bucket rejected ingestion. The exact child-counter increase proves lost samples independently of series-cardinality headroom, but replicated child counters are not unique request counts. A structured rejected batch supplies bounded candidate job/family classes without proving unique loss or one culpable family. | Run `mimir-admission` (§11.20a), preserve exact child generations, then use `mimir-balance` and `mimir-publishers` to distinguish placement skew from aggregate load. Remove or reduce only a proven unnecessary sample source. A rate/burst increase may require an operational capacity decision and resource validation; do not raise it, restart Mimir, or blindly retry rejected payloads automatically. Require zero new rate-limited increments and fresh required metrics for the complete two-hour quiet window. |
+| `Stats push rejected status=... reason=other-client|server ...` (`mimir-push-rejected`) | The Grafana front lost a batch to a non-series, non-rate Mimir rejection. The fixed enum preserves the owner boundary while the raw upstream response is discarded because it can contain arbitrary private labels. | Use the fixed job/family classes only to select the owning investigation. Check the exact child and submitting artifact, reproduce with a synthetic valid push, and never restore raw response-body logging. Require direct health, a successful controlled push, and ten quiet minutes. |
 | `mimir-distributor-skew` | The fleet attempted rate is below the tenant's global budget, but one or more distributors exceed the independently enforced local share (`global rate / healthy distributors`). Persistent remote-write connections selected one address from a multi-address hosts entry and concentrated load; spare capacity on sibling token buckets cannot be borrowed. | Run `mimir-balance` (§11.20b). Give each remote publisher a distinct preferred enabled front while retaining all enabled fronts as failover, and remove only measured unnecessary families. This is a software/configuration routing fault while aggregate load remains below budget; do not add hardware or raise the global limit to mask it. Verify balanced child rates and connections for two samples, then zero exact rate-limit increments and fresh required metrics for the full §11.20a quiet window. |
+| `mimir-publisher-placement-drift` or `mimir-publisher-connection-drift` | A high-volume publisher's live alias set/order, shipper generation, or established connection has not converged to the active-front placement prerequisite. This can remain broken with no current traffic and therefore cannot be cleared by a temporarily green balance rate. | Run `mimir-publishers` (§11.20c), then the owning database/Redis Xops playbook after authorization. Require the exact active set, distinct preferred ordinals, post-policy shipper generations, and live connections following those preferences before the §11.20b and §11.20a closure windows begin. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
@@ -7251,7 +7258,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125` in its `warp-main-*` unit) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. A replaced executable or Docker version drift is only transition evidence: compatible releases can keep creating containers normally. | The monitor reads bounded daemon-identifier and Warp-supervisor suffixes; its startup-version context is optional after the one-hour buffer ages out. PAGE on an observed containerd split, native TTRPC rejection, or concrete `Start container failed`. Use Xops' privileged maintenance probe for definitive client/server comparison during package transitions and recovery. Recover only with explicit one-host-at-a-time authorization and require a replacement container at `Up`; never reboot merely because a package changed. See §8.5a. |
 | `invalid mount config for type "bind": bind source path does not exist` with `configVersion=<valid-semver>.tmp` and exit 125 (`container-runtime-staging-bind-source`) | The complete bounded host window has a nonzero exact three-way count equality: Warp start exit-125, `.tmp` config deploy-failure, and Docker bind-source-missing aggregates reconcile. That production signature came from config-updater copying into its reserved `.tmp` directory while pre-`f1503d6` Warpctl admitted the suffix as semver build metadata and ranked staging above the completed version. The aggregate records are not per-event joins, so any mixed counts retain generic `container-runtime-incompatible`. | Stop further config publication to affected units and deploy a Warpctl artifact containing `f1503d6`, which excludes only the exact `<valid-semver>.tmp` staging namespace before ordinary semver ranking. Do not recreate the vanished path, restart Docker, or reboot for this defect. Exercise a later publication and require the completed version selected, terminal deploy success on every enabled host, and zero `.tmp` exit-125 selections or bind-source-missing failures for ten minutes. See §8.5a. |
 | `journal-buffer-config`, `journal-buffer-short`, or `journal-buffer-unavailable` | The effective edge journal policy drifted from the one-hour/100 GiB/1024-file contract, measured history no longer reaches the near-hour boundary, or journald is down. This affects local recovery evidence and may interrupt Fluent Bit input, but it does not prove Loki data loss. | Apply the reviewed journald drop-in without rebooting, measure bounded producer volume if the boundary stays short, and correlate §11.14. Require two boundary observations plus fresh Loki data. See §8.5b. |
-| `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, or `log-shipper-prometheus-histogram-decoder-crash` | The host Fluent Bit unit is stopped, its soft/hard fd budget regressed below 65,536, systemd has restarted it for an unclassified reason, or its bounded current-generation restart window contains the exact cmetrics duplicate-histogram decoder stack. The stack does not name an offending scrape source. On a Redis-cluster host the optional command latency histogram is the strongest bounded candidate, not an identity proved by the stack. | Repair the first bounded cause and restart only the shipper after authorization. For the exact Redis-host candidate, exclude only the optional latency histogram at redis_exporter and retain commandstats; do not force a major Fluent Bit upgrade or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh data in every configured output, and ten minutes without another restart; require a fresh labeled Loki record only where a managed Warp log source exists. See §11.14. |
+| `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, `log-shipper-prometheus-histogram-decoder-crash`, or `redis-latency-histogram-policy-drift` | The host Fluent Bit unit is stopped, its fd budget regressed, systemd restarted it, its bounded generation contains the exact cmetrics decoder stack, or a Redis host's live exporter is not active with the optional command-latency histogram excluded. The direct policy class detects the unsafe input before a later decoder crash; the crash stack alone still does not identify its scrape source. | Repair the first bounded cause and restart only the owning unit after authorization. On Redis, converge the exporter with only `--exclude-latency-histogram-metrics`, retain commandstats, and independently require fresh `redis_commands_processed_total`, `redis_commands_duration_seconds_total`, and `redis_up`. Do not force a major Fluent Bit upgrade or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh outputs, and ten stable minutes. See §11.14. |
 | `tailer-stale-arrival` | The standing Loki WebSocket delivered one or more exact-replay-deduplicated records whose valid source timestamp was older than the monitor's two-minute live overlap. Those records are observation-path history, not current product errors, and their contents are not retained. A missing/malformed or future wrapper timestamp is not assigned this class because staleness is unproved. | Inspect Warpctl/Loki cursor behavior and the bounded source-time reconciliation for that selector. Do not act on the historical product line as if it occurred in the arrival minute. Require two complete reconciliations, current-source controls, and zero stale arrivals for ten minutes. See §1.5. |
 | `[warpctl][loki-tail-pre-cursor-entries] service=<service> count=<n>` (`loki-tail-pre-cursor-entries`) | Loki returned late or replayed records older than Warpctl's requested live-tail cursor. Warpctl suppressed the historical contents and retained only the bounded service/count summary, so this is observation-path evidence rather than a current product failure. | Reconcile the named selector by source time and inspect Loki ingestion latency and reconnects. Preserve both cursor and monitor source-time guards; do not replay the suppressed contents or restart the named product service. Require two complete reconciliations, current-source controls, and zero summaries for ten minutes. See §1.5. |
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
@@ -9018,6 +9025,7 @@ Tier-1 (warn):
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
 | journal-buffer-config / journal-buffer-short | host | §8.5b effective policy plus a bounded near-hour entry | any policy drift for 2 probes; no 50-to-55-minute record after 70 minutes uptime for 2 probes |
 | log-shipper-fd-budget / log-shipper-churn | host | §11.14 Fluent Bit soft/hard fd limits and automatic restart count | either limit < 65,536 or NRestarts > 0 for 2 probes |
+| redis-latency-histogram-policy-drift | Redis host runtime | §11.14 reduced redis-exporter active state and exact optional-histogram exclusion | exporter inactive/unobservable or exclusion absent; immediate |
 | stats-landmine | pg | fewer than three valid/ready exact isolated pair/payer structural index shapes, or `transfer_contract.open` statistics target is not the bounded value 300; legacy n_distinct/reltuples remain evidence while the structural repair is incomplete | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
@@ -9036,6 +9044,8 @@ Tier-1 (warn):
 | mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, a strictly advancing left edge on the same fixed-right-edge gap is temporary store visibility even when discovery is batched, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
 | mimir-ingestion-rate-limit | exact child Mimir metrics | §11.20a per-process sample-rate admission counter plus effective rate/burst context | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then its independent 2h complete comparable quiet hold |
+| mimir-push-rejected | structured Grafana rejection event | §11.20a fixed non-series/non-rate rejection reason plus bounded job/family classes | any; raw upstream body is never retained |
+| mimir-publisher-placement-drift / mimir-publisher-connection-drift | high-volume publisher hosts | §11.20c exact active-front membership, distinct preferred ordinal, process-policy ordering, and reduced port-3100 destinations | any membership/order/generation drift or unknown/no-preferred live destination; immediate |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
@@ -9073,6 +9083,33 @@ Tier-1 (warn):
 | proxy-allocation-unready | host | 14.5 current allocation and internal `/status` | a placed block has running allocations but no 2xx-ready generation for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
+
+### Fixed emitted-class crosswalk
+
+Every fixed class literal emitted by a production `signal_*.go` probe or the
+standing tailer must occur verbatim in this catalog. This index makes the few
+secondary classes that are not convenient summary-table headings mechanically
+traceable; their owning numbered sections remain the full contracts.
+
+| Class | Owner | Exact meaning and closure boundary |
+|---|---|---|
+| `persistent-active-query` | §2.1 `active-queries` | One normalized active query remains in successive samples; close only after the query disappears and the owning workload is healthy. |
+| `container-runtime-refresh-pending` | §8.5a `container-runtime` | Installed container-runtime files changed after the current daemon generation without a proven start failure; converge and prove a replacement container starts before clearing. |
+| `edge-ipv6-identity-drift` | §18.1 `edge-ipv6` | The configured public IPv6 identity does not exactly match the live interface identity; require exact interface/address and pinned family probes. |
+| `family-growth` | §3.3 `key-families` | A bounded Redis key family grew outside its learned band; identify the owning lifecycle and require stable/declining counts before cleanup. |
+| `loki-tail-accounting-invalid` | §11.19 `loki-tailers` | Exact Loki active-tail or active-stream gauges are missing, non-finite, negative, or internally inconsistent; restore complete exact-process accounting. |
+| `loki-tail-child-missing` | §11.19 `loki-tailers` | An expected active Loki child cannot be identified; require every expected child and both accounting gauges. |
+| `mimir-child-missing` | §11.18 `mimir-index` | An expected active Mimir child is absent from the exact-process index view; require the complete active child set. |
+| `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
+| `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
+| `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
+| `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
+| `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |
+| `redis-kernel-oom` | §3.4 `redis-process` | The current boot records a kernel OOM involving Redis; preserve the event, repair the memory/capacity cause, and require a fault-free observation window. |
+| `reliability-classification-drift` | §2.15 `reliability-drift` | Stored provider reliability classifications disagree with the authoritative running-sum inputs; reconcile and require exact agreement. |
+| `reliability-pipeline-degraded` | §3.7 `reliability-pipeline` | Redis latency/load makes the reliability pipeline miss its bounded service band; restore each node and prove fresh pipeline completions. |
+| `subtensor-gateway` | §17.1 `subtensor` | A configured Subtensor RPC gateway fails its exact listener/protocol contract; require the correct LAN/tunnel gateway response. This class is excluded from Main-only monitor runs by policy. |
+| `wait-event-cluster` | §2.2 `wait-events` | Active PostgreSQL backends cluster on one wait-event family; remove the owning blocker and require the cluster to dissipate. |
 
 Every alert carries: identity (class+target+frame), rate, one sample, the
 matching playbook section (5.x), the ACTION line, and last control-plane
@@ -11421,10 +11458,19 @@ generation contains all three exact decoder frames. Both the structured-core
 and unit-journal selectors carry that same window and remain bounded to 400
 rows. This prevents an unrelated older boot crash from being attributed to the
 current restart; if the generation timestamp cannot be resolved, the reason
-remains other or unobservable.
-The host-side reducer returns only schema version, unit state, restart count,
-fd limits, a sanitized package version, and a bounded restart-reason enum; raw
-journal or core text never leaves the host. A VPN-only host is outside this
+remains other or unobservable. On a Redis-cluster host, the same reducer reads
+the live `redis-exporter.service` state and reduces its effective `ExecStart`
+to the fixed `excluded`, `enabled`, `unobservable`, or `not-applicable` enum.
+`redis-latency-histogram-policy-drift` WARNs immediately unless that exporter
+is active and the optional latency histogram is excluded. Non-Redis hosts do
+not arm this branch. Required commandstats and `redis_up` freshness remain an
+independent §3.1a control; an exclusion flag alone never proves useful metrics
+are arriving.
+
+The host-side reducer returns only schema version, unit states, restart count,
+fd limits, a sanitized package version, and bounded restart/policy enums; raw
+unit arguments, journal text, core text, metric data, and paths never leave the
+host. A VPN-only host is outside this
 signal. These are process and startup-capacity signals, not an end-to-end
 delivery claim: closure additionally requires fresh per-host metrics through
 Mimir and fresh data in every configured output. Require a fresh labeled Warp
@@ -12148,18 +12194,26 @@ state failure, and a failed save cannot erase an earlier admission incident or
 manufacture two hours of quiet.
 
 The same bounded host command counts publisher starts, readiness rejections,
-and exact admission-rejection log matches over its short journal window, but
-returns only those aggregate counts. They are context, never the detection
-source: equality can support rejected-candidate amplification only after exact
-artifact and rollout correlation, while inequality cannot select a different
-cause. Publisher/readiness counts therefore neither open nor clear the direct
-counter page. Memory-series headroom and created/removed deltas likewise guide
-series-capacity diagnosis without replacing the affirmative admission counter.
-The effective ingestion rate and burst sizes explain the rate policy but do not
-attribute load. Use bounded per-service and metric-family cadence/series
-reductions to find the producer before removing a sample source or proposing a
-capacity change. Raising a rate or burst ceiling can require hardware and
-operational capacity validation and is not an automatic software repair.
+and exact legacy or structured series-admission rejection matches over its
+short journal window, but returns only those aggregate counts. They are
+context, never the detection source: equality can support rejected-candidate
+amplification only after exact artifact and rollout correlation, while
+inequality cannot select a different cause. Current Grafana fronts separately
+emit a fixed rejected-batch event containing only reason, allowlisted job,
+allowlisted family-class counts, total families, and total time series. The raw
+Mimir body is discarded because it may contain arbitrary tenant labels. A
+mixed rejected batch identifies candidate contributors only; it does not prove
+that one family independently crossed the shared limit. Accepted per-service
+or per-family series/rate aggregates cannot identify rejected candidates,
+because those candidates never entered the accepted data. Publisher/readiness
+counts and accepted aggregates therefore neither open nor clear the direct
+counter page. Memory-series headroom and created/removed deltas guide capacity
+diagnosis without replacing the affirmative admission counter. Use the fixed
+batch classes plus exact artifact/cadence evidence before removing a source or
+proposing capacity. The effective ingestion rate and burst sizes explain the
+rate policy but do not attribute load. Raising a rate or burst ceiling can
+require hardware and operational capacity validation and is not an automatic
+software repair.
 
 On 2026-09-10, the just-converged Grafana replacement exposed this monitor
 boundary on all six enabled services hosts. A separate host-local reduction
@@ -12265,14 +12319,60 @@ admission incident.
 
 The software/configuration correction is deterministic publisher placement:
 each remote telemetry host receives a different preferred enabled Grafana LAN
-front first in its `main-grafana.local` block, with every other enabled front
-retained afterward for resolver-level failover. Do not include a disabled host
-as a failover target. Reconnect publishers only through their approved Xops
-playbooks; do not restart Mimir or raise its limit to erase the symptom. Verify
-two consecutive complete `mimir-balance` samples with every child below its
-effective share and without connection concentration. Closure then requires
-the separate §11.20a exact rate-limit counter to remain flat, all required
-application metrics to remain fresh, and the complete two-hour quiet window.
+front first in its environment-private Grafana alias, with every other enabled
+front retained afterward for resolver-level failover. Do not include a disabled
+host as a failover target. §11.20c must first distinguish a missed Xops rollout,
+a stale/common live alias order, and a shipper generation that retained its old
+connection. Reconnect publishers only through their approved Xops playbooks;
+do not restart Mimir or raise its limit to erase the symptom. Verify two
+consecutive complete `mimir-balance` samples with every child below its effective
+share and without connection concentration. Closure then requires the separate
+§11.20a exact rate-limit counter to remain flat, all required application
+metrics to remain fresh, and the complete two-hour quiet window.
+
+### 11.20c Mimir publisher desired-versus-live convergence
+
+Probe: `mimir-publishers`
+
+Run this WARN-tier probe every five minutes when the active inventory contains
+a PostgreSQL-primary or Redis-cluster publisher. An environment with neither
+role noops. The active `services.yml` topology remains the desired source for
+Grafana-front membership; the probe never learns its baseline from live
+`/etc/hosts`. Every active front must have one unique valid LAN address or the
+inventory observation fails closed.
+
+On each high-volume publisher, one read-only reducer compares the complete
+environment-private Grafana alias with that active address set. It emits only
+entry, recognized, missing, unknown, and duplicate counts plus the ordinal of
+the first entry. It also emits fixed Fluent Bit state, whether that process
+started after the current hosts policy, and aggregate established port-3100
+connection counts split into preferred, unknown, and distinct active-front
+ordinals. Hostnames, addresses, peer rows, files, paths, process arguments, and
+raw policy contents never leave the publisher. Missing commands, malformed or
+inconsistent counts, invalid inventory, or any publisher observation failure
+is unknown rather than healthy.
+
+Emit `mimir-publisher-placement-drift` immediately when a publisher lacks the
+exact active set, carries an extra/duplicate entry, has no recognized first
+entry, is inactive, or predates the current hosts policy. Emit the same class
+on stable target `publisher-fleet` when the observable publishers do not use as
+many distinct preferred ordinals as the smaller of publisher and front counts.
+This fleet branch is the deterministic low-load regression: two publishers
+sharing one first entry remain broken even with zero current connections and a
+green §11.20b rate sample. Emit `mimir-publisher-connection-drift` when a live
+connection targets outside the active set or current connections exist but
+none uses that publisher's configured preference. Additional active failover
+connections are context, not automatically a fault.
+
+The smallest correction is convergence of the already reviewed owning Xops
+database and Redis playbooks, followed by reconnecting only the affected
+publisher generation after authorization. This signal does not authorize that
+production mutation, a Mimir restart, or a limit increase. Close only when
+every publisher reports exact active membership, distinct preferred ordinals,
+post-policy active generations, and live destinations consistent with those
+preferences. Then require two balanced §11.20b samples and independent zero
+increments with fresh required metrics throughout both §11.20a two-hour quiet
+windows.
 
 ### 11.21 Mimir shutdown durability configuration
 

@@ -14,11 +14,13 @@ func logShipperFixture(overrides map[string]string) string {
 	keys := []string{
 		"observation_schema", "active_state", "sub_state", "result", "restarts",
 		"nofile_hard", "nofile_soft", "fluent_bit_version", "restart_reason",
+		"redis_exporter_state", "redis_latency_histogram_policy",
 	}
 	values := map[string]string{
-		"observation_schema": "2", "active_state": "active", "sub_state": "running",
+		"observation_schema": "3", "active_state": "active", "sub_state": "running",
 		"result": "success", "restarts": "0", "nofile_hard": "65536", "nofile_soft": "65536",
 		"fluent_bit_version": "4.2.1", "restart_reason": logShipperRestartNone,
+		"redis_exporter_state": "active", "redis_latency_histogram_policy": "excluded",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -123,9 +125,75 @@ func TestLogShipperSignalSyntheticMalformedIsVisibility(t *testing.T) {
 	}
 }
 
+func TestLogShipperDetectsRedisLatencyHistogramRuntimePolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		want      string
+	}{
+		{
+			name: "optional histogram enabled",
+			overrides: map[string]string{
+				"redis_latency_histogram_policy": "enabled",
+			},
+			want: "redis_latency_histogram_policy=enabled",
+		},
+		{
+			name: "exporter inactive",
+			overrides: map[string]string{
+				"redis_exporter_state": "inactive",
+			},
+			want: "redis_exporter_state=inactive",
+		},
+		{
+			name: "unit arguments unavailable",
+			overrides: map[string]string{
+				"redis_exporter_state": "unobservable", "redis_latency_histogram_policy": "unobservable",
+			},
+			want: "redis_latency_histogram_policy=unobservable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+				return logShipperFixture(test.overrides), nil
+			}}
+			settings := syntheticSettings(source)
+			settings.Hosts = []HostSettings{{Name: "cache.invalid", Roles: []string{"redis-cluster"}}}
+			alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alert := requireAlertClass(t, alerts, "redis-latency-histogram-policy-drift")
+			if !strings.Contains(alert.Markdown(), test.want) ||
+				!strings.Contains(alert.Markdown(), "redis_commands_processed_total") {
+				t.Fatalf("runtime-policy alert incomplete:\n%s", alert.Markdown())
+			}
+		})
+	}
+
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return logShipperFixture(map[string]string{
+			"redis_exporter_state": "not-applicable", "redis_latency_histogram_policy": "not-applicable",
+		}), nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "service.invalid", Roles: []string{"services"}}}
+	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "redis-latency-histogram-policy-drift" {
+			t.Fatalf("non-Redis host armed Redis exporter policy: %+v", alert)
+		}
+	}
+}
+
 func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T) {
 	for _, want := range []string{
 		"systemctl show fluent-bit.service", "LimitNOFILE", "LimitNOFILESoft", "NRestarts",
+		"systemctl show redis-exporter.service", "--exclude-latency-histogram-metrics",
 		"journalctl -b -n 400", "COREDUMP_COMM=fluent-bit", "COREDUMP_SIGNAL=11",
 		"ExecMainStartTimestamp", "-u fluent-bit.service", "--since", "--until",
 		"add_metric_histogram", "finish_duplicate_histogram_summary_sum_count",

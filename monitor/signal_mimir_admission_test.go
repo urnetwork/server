@@ -1360,6 +1360,7 @@ func TestMimirAdmissionCatalogRequiresCardinalityAndCompactionClosure(t *testing
 		t.Fatal("SIGNALS.md lacks the bounded 2026-09-11 series-limit diagnosis")
 	}
 	section := catalog[start:end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
 	for _, required := range []string{
 		"stable Redis series changed by four",
 		"readiness-rejection aggregates stayed zero",
@@ -1378,7 +1379,7 @@ func TestMimirAdmissionCatalogRequiresCardinalityAndCompactionClosure(t *testing
 		"urnetwork_mcp_call_duration_seconds",
 		"urnetwork_mcp_fetch_wait_duration_seconds",
 	} {
-		if !strings.Contains(section, required) {
+		if !strings.Contains(normalizedSection, required) {
 			t.Errorf("series-limit closure guidance omits %q", required)
 		}
 	}
@@ -1396,6 +1397,7 @@ func TestMimirAdmissionCatalogRequiresIndependentRateAdmissionClosure(t *testing
 		t.Fatal("SIGNALS.md lacks the bounded Mimir admission catalog")
 	}
 	section := catalog[start:end]
+	normalizedSection := strings.Join(strings.Fields(section), " ")
 	for _, required := range []string{
 		"rate_limited",
 		"mimir-ingestion-rate-limit",
@@ -1407,7 +1409,7 @@ func TestMimirAdmissionCatalogRequiresIndependentRateAdmissionClosure(t *testing
 		"operational capacity validation",
 		"complete two-hour windows",
 	} {
-		if !strings.Contains(section, required) {
+		if !strings.Contains(normalizedSection, required) {
 			t.Errorf("rate-admission closure guidance omits %q", required)
 		}
 	}
@@ -1662,7 +1664,7 @@ esac
 printf '%s\n' \
   '[stats]publishing generated-publisher-a' \
   '[api]not ready generated-candidate-a' \
-  'Stats push rejected (400): per-user series limit; source=generated-source-a'
+  'Stats push rejected status=400 reason=series-limit job=api metric_families=2 time_series=3 family_classes=go:1,process:1 family_classes_truncated=false'
 `)
 	writeSyntheticExecutable("timeout", `#!/bin/sh
 shift

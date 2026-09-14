@@ -124,6 +124,12 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_client_connection_client_id_connected_extender_id", requiredVersion: 666, rowColumn: 77},
 	{name: "contract_extender table and primary key", requiredVersion: 667, rowColumn: 78},
 	{name: "network_extender_address.dns_ports", requiredVersion: 668, rowColumn: 79},
+	{name: "network_extender.location_id", requiredVersion: 669, rowColumn: 80},
+	{name: "network_extender.city_location_id", requiredVersion: 670, rowColumn: 81},
+	{name: "network_extender.region_location_id", requiredVersion: 671, rowColumn: 82},
+	{name: "network_extender.country_location_id", requiredVersion: 672, rowColumn: 83},
+	{name: "contract_extender.create_time", requiredVersion: 673, rowColumn: 84},
+	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -975,6 +981,49 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 quote_literal('') || '::character varying',
 		                 quote_literal('') || '::text'
 		             )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'city_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'region_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender'
+		             AND column_name = 'country_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'contract_extender'
+		             AND column_name = 'create_time'
+		             AND data_type = 'timestamp without time zone' AND is_nullable = 'NO'
+		             AND column_default = 'now()'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'contract_extender'
+		             AND index_name = 'contract_extender_create_time_contract_id'
+		             AND definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       )
 		FROM version;
 	`)

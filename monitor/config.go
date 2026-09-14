@@ -292,10 +292,11 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 			ExpectedIPv4: y.SourceAttribution.ExpectedIPv4,
 			ExpectedIPv6: y.SourceAttribution.ExpectedIPv6,
 		},
-		DNSAliases:     dnsAliasSettingsFromMonitorYaml(y),
-		GooglePlay:     loadGooglePlayReportingSettings(),
-		AppleReporting: loadAppleReportingSettings(),
-		Credentials:    loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
+		DNSAliases:      dnsAliasSettingsFromMonitorYaml(y),
+		MimirPublishers: loadMimirPublisherSettings(server.WarpHome(), env),
+		GooglePlay:      loadGooglePlayReportingSettings(),
+		AppleReporting:  loadAppleReportingSettings(),
+		Credentials:     loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()

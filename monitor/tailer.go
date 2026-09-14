@@ -217,7 +217,38 @@ var (
 		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
 			`failed for (?:network|client) [^:\r\n]+: Done[[:space:]]*$`,
 	)
+	mimirRejectedFamilyClasses = `(?:none|(?:backup|fluent-bit|go|node|other|postgres|process|redis|redis-command-latency|subtensor|warp):[0-9]{1,19}(?:,(?:backup|fluent-bit|go|node|other|postgres|process|redis|redis-command-latency|subtensor|warp):[0-9]{1,19}){0,15})`
+	mimirRejectedJobClass      = `(?:alt|api|app|config-updater|connect|gossip|grafana|lb|mcp|operator-proxy|proxy|taskworker|web|other)`
+	mimirSeriesRejectedRe      = regexp.MustCompile(
+		`Stats push rejected status=[45][0-9]{2} reason=series-limit job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
+	)
+	mimirRateRejectedRe = regexp.MustCompile(
+		`Stats push rejected status=[45][0-9]{2} reason=rate-limit job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
+	)
+	mimirOtherRejectedRe = regexp.MustCompile(
+		`Stats push rejected status=[45][0-9]{2} reason=(?:other-client|server) job=(` + mimirRejectedJobClass + `) metric_families=[0-9]{1,19} time_series=[0-9]{1,19} family_classes=` + mimirRejectedFamilyClasses + ` family_classes_truncated=(?:true|false)[[:space:]]*$`,
+	)
+	mimirLegacySeriesRejectedRe = regexp.MustCompile(`Stats push rejected \(400\):[^\r\n]*\bper-user series limit\b`)
 )
+
+func mimirRejectedLogSample(line string) string {
+	for _, pattern := range []*regexp.Regexp{mimirSeriesRejectedRe, mimirRateRejectedRe, mimirOtherRejectedRe} {
+		if sample := pattern.FindString(line); sample != "" {
+			return strings.TrimSpace(sample)
+		}
+	}
+	return "Stats push rejected (400): per-user series limit (series details omitted)"
+}
+
+func mimirRejectedLogGroup(line string) string {
+	for _, pattern := range []*regexp.Regexp{mimirSeriesRejectedRe, mimirRateRejectedRe, mimirOtherRejectedRe} {
+		match := pattern.FindStringSubmatch(line)
+		if len(match) == 2 {
+			return "job=" + match[1]
+		}
+	}
+	return "tenant-series-admission"
+}
 
 func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
 	return regexp.MustCompile(
@@ -296,20 +327,39 @@ func windowGeneratorCanceledLogSample(line string) string {
 
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
-	// A Mimir rejection body can contain arbitrary series labels, including
-	// addresses and error-shaped values. Match before generic network classes
-	// and retain neither a raw sample nor a frame extracted from those labels.
-	{name: "mimir-series-limit", re: regexp.MustCompile(`Stats push rejected \(400\):[^\r\n]*\bper-user series limit\b`),
-		sample: func(string) string {
-			return "Stats push rejected (400): per-user series limit (series details omitted)"
-		},
-		groupBy:       func(string) string { return "tenant-series-admission" },
+	// Current Grafana fronts emit only a fixed rejected-batch schema. Keep the
+	// legacy body matcher during rollout, but never retain that body's contents.
+	// Order matters: all three fixed rejection classes precede generic network
+	// and error-shaped classifiers.
+	{name: "mimir-series-limit", re: regexp.MustCompile(`(?:` + mimirSeriesRejectedRe.String() + `|` + mimirLegacySeriesRejectedRe.String() + `)`),
+		sample:        mimirRejectedLogSample,
+		groupBy:       mimirRejectedLogGroup,
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, §8.11, and §11.20",
 		meaning:   "Mimir rejected series admission in a remote-write request because the tenant's in-memory series budget was exhausted",
 		mechanism: "Every admitted process needs a distinct instance label so overlapping counters remain independent. A readiness-rejected API, Connect, or Taskworker candidate previously started its metrics pusher anyway; repeated attempts of one incompatible service/config pair therefore created new cohorts without a traffic cutover. Those cohorts remain in the Mimir head until removal. Separately, Warpctl returned success after an unmet rollout status timeout, allowing the existing rollout script to advance later waves. Large steady exporter families also consume the same finite budget.",
-		context:   "This is affirmative ingestion rejection at the emitting Grafana gateway, not a Grafana rendering defect or proof that the latest release initiated the incident. The 2026-09-05 first limit observation at 04:21Z predates the desired release observed at 04:31-04:35Z. Later, 19 readiness-rejected candidates matched 19 metrics-pusher initializations across six lanes in 20 minutes, proving retry amplification. Six Mimir children exposed 75000 local and 150000 global limits; roughly 82000-90000 active unique series leave less than two full active cohorts of headroom.",
-		action:    "Compare the exact running artifacts before deploying the Warp failed-target retry/status-timeout fix and the Server readiness-gated metrics fix. Install the corrected Warpctl on the build workstation and managed hosts, then restart resident workers only with operator authorization. Apply the exact candidate's prerequisite migrations before service activation; the historical rejected release required head 630 while PostgreSQL was at 627. Preserve random instance identity. Xops commit 30d14ce trims unused node-exporter collectors and removes a known floor of roughly 13340 systemd-state series; measure remaining headroom rather than raising the Mimir limit blindly. Check direct per-user-series discard deltas, memory-series creation/removal, live process cohorts, and immutable service/config identity without retaining raw series labels.",
+		context:   "This is affirmative ingestion rejection at the emitting Grafana gateway, not a Grafana rendering defect or proof that the latest release initiated the incident. A current structured event identifies the submitting job and bounded family classes as candidate contributors to one rejected mixed batch; it does not prove that any one family independently crossed the shared limit. Accepted per-service or family aggregates are context only because rejected candidate series never enter those aggregates.",
+		action:    "Use the structured rejected-batch job and family-class counts to bound candidate sources, then compare exact running artifacts, process cohorts, direct discard deltas, memory-series creation/removal, and immutable service/config identity. Remove only a proven unnecessary source, preserve random instance identity, and measure remaining headroom rather than restarting Mimir or raising its limit. Legacy unstructured events cannot attribute a producer and require deployment of the privacy-safe Grafana telemetry before source attribution.",
 		verify:    "After authorized rollout and prerequisite completion, every relevant block converges to a proven artifact, rejected candidates start no metrics pusher, and no unchanged-target readiness failure recurs for 20 minutes. Require zero new per-user-series admission discards, healthy direct metric freshness, and series removal restoring measured headroom through a full two-hour recent-head observation window. Two fresh direct Mimir reads corroborate ingestion; historical continuity gaps remain independently governed by §11.20.",
+	},
+	{name: "mimir-ingestion-rate-limit", re: mimirRateRejectedRe,
+		sample:        mimirRejectedLogSample,
+		groupBy:       mimirRejectedLogGroup,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §11.20a",
+		meaning:   "Mimir rejected a fixed-schema remote-write batch because a sample-rate token bucket was exhausted",
+		mechanism: "Mimir distributors enforce independent local shares of the configured tenant rate. Persistent publisher placement can overload one child even when the fleet aggregate remains below the global rate, while true aggregate overload can exhaust every child.",
+		context:   "The structured job and family-class counts identify candidate contributors in the rejected batch, not unique lost requests or an independently culpable family. The exact child rate_limited counters remain the loss authority.",
+		action:    "Run §11.20a and §11.20b. First distinguish publisher-placement skew from aggregate overload using exact child counters and publisher convergence. Reduce only measured unnecessary cadence or families; do not restart Mimir or raise capacity automatically.",
+		verify:    "Require converged publisher placement, two balanced one-minute samples, then zero new exact rate_limited increments with fresh required metrics for the full two-hour quiet window.",
+	},
+	{name: "mimir-push-rejected", re: mimirOtherRejectedRe,
+		sample:        mimirRejectedLogSample,
+		groupBy:       mimirRejectedLogGroup,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5, §4, and §11.20a",
+		meaning:   "the Grafana front received a non-series, non-rate Mimir rejection for a remote-write batch",
+		mechanism: "The fixed reason distinguishes an upstream/server rejection from another client-side rejection, while deliberately discarding the raw response body because it may contain private labels.",
+		context:   "This is affirmative batch loss but not a series- or rate-limit diagnosis. The bounded job and family classes select the owning investigation without exposing grouping labels or arbitrary metric names.",
+		action:    "Inspect the exact Grafana/Mimir status and fixed reason alongside direct child health and the submitting job's current artifact. Reproduce with a synthetic payload if needed; never restore raw response-body logging.",
+		verify:    "The direct child and submitting job are healthy, a controlled valid push returns success, and no fixed rejection event recurs for ten minutes.",
 	},
 	// The fixed sample and frame deliberately omit the local endpoint. The
 	// emitting Grafana parent already names the owning service and generation;

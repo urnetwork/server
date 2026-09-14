@@ -216,6 +216,13 @@ type DNSAliasSettings struct {
 	ExpectedAAAA   []string
 }
 
+// Publisher preferences come from the owning Xops inventory, not live hosts.
+// Values are compared in memory and never rendered into alerts.
+type MimirPublisherSettings struct {
+	PreferredFronts map[string]string
+	LoadState       string
+}
+
 // Row is one machine-readable PostgreSQL result row.
 type Row []string
 
@@ -386,6 +393,7 @@ type SignalSettings struct {
 	Credentials       []CredentialRequirement
 	SourceAttribution SourceAttributionSettings
 	DNSAliases        DNSAliasSettings
+	MimirPublishers   MimirPublisherSettings
 	StateDir          string
 	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
@@ -571,6 +579,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		expectedSourceIPv4:     settings.SourceAttribution.ExpectedIPv4,
 		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
 		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
+		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
 		stateDir:               settings.StateDir,
 		sshConnectTimeout:      settings.SSHConnectTimeout,
 		commandTimeout:         settings.CommandTimeout,
@@ -608,6 +617,17 @@ func cloneDNSAliasSettings(settings DNSAliasSettings) DNSAliasSettings {
 	settings.ManagedDomains = append([]string(nil), settings.ManagedDomains...)
 	settings.ExpectedA = append([]string(nil), settings.ExpectedA...)
 	settings.ExpectedAAAA = append([]string(nil), settings.ExpectedAAAA...)
+	return settings
+}
+
+func cloneMimirPublisherSettings(settings MimirPublisherSettings) MimirPublisherSettings {
+	if settings.PreferredFronts != nil {
+		fronts := make(map[string]string, len(settings.PreferredFronts))
+		for publisher, front := range settings.PreferredFronts {
+			fronts[publisher] = front
+		}
+		settings.PreferredFronts = fronts
+	}
 	return settings
 }
 

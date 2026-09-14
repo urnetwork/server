@@ -503,8 +503,8 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 
 func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
 	head := server.MigrationCount()
-	if head < 668 {
-		t.Fatalf("test requires extender migrations through version 668, got head %d", head)
+	if head < 674 {
+		t.Fatalf("test requires extender migrations through version 674, got head %d", head)
 	}
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
@@ -528,6 +528,13 @@ func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
 			"definition = 'PRIMARY KEY (contract_id, extender_id, party)'",
 			"table_name = 'network_extender_address' AND column_name = 'dns_ports' AND data_type = 'character varying' AND is_nullable = 'NO'",
 			"quote_literal('') || '::character varying'",
+			"table_name = 'network_extender' AND column_name = 'location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'city_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'region_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'network_extender' AND column_name = 'country_location_id' AND data_type = 'uuid' AND is_nullable = 'YES' AND column_default IS NULL",
+			"table_name = 'contract_extender' AND column_name = 'create_time' AND data_type = 'timestamp without time zone' AND is_nullable = 'NO' AND column_default = 'now()'",
+			"index_name = 'contract_extender_create_time_contract_id'",
+			"definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'",
 		} {
 			if !strings.Contains(normalized, want) {
 				t.Fatalf("extender migration query lost %q:\n%s", want, query)

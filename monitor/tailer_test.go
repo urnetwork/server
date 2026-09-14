@@ -594,6 +594,54 @@ func TestMimirSeriesLimitStandingWindowHasStablePrivateFrameAndHealthyControl(t 
 	}
 }
 
+func TestMimirStructuredRejectionsRetainOnlyFixedBatchClasses(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		class string
+		frame string
+	}{
+		{
+			name:  "series",
+			line:  "Stats push rejected status=400 reason=series-limit job=proxy metric_families=3 time_series=41 family_classes=process:1,redis:2 family_classes_truncated=false",
+			class: "mimir-series-limit",
+			frame: "job=proxy",
+		},
+		{
+			name:  "rate",
+			line:  "Stats push rejected status=429 reason=rate-limit job=taskworker metric_families=2 time_series=19 family_classes=go:1,process:1 family_classes_truncated=false",
+			class: "mimir-ingestion-rate-limit",
+			frame: "job=taskworker",
+		},
+		{
+			name:  "other",
+			line:  "Stats push rejected status=503 reason=server job=other metric_families=1 time_series=1 family_classes=other:1 family_classes_truncated=false",
+			class: "mimir-push-rejected",
+			frame: "job=other",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tailer := newLogTailer("grafana", nil)
+			tailer.classify(test.line)
+			finding := findingByClass(t, tailer.drainWindow(), test.class)
+			if finding.healthy || finding.frame != test.frame {
+				t.Fatalf("structured rejection was not classified: %+v", finding)
+			}
+			if finding.evidence == "" || !strings.Contains(finding.evidence, "metric_families=") ||
+				!strings.Contains(finding.evidence, "family_classes=") {
+				t.Fatalf("bounded rejected-batch evidence missing: %+v", finding)
+			}
+		})
+	}
+
+	malformed := newLogTailer("grafana", nil)
+	malformed.classify("Stats push rejected status=400 reason=series-limit job=private-fixture metric_families=1 time_series=1 family_classes=private-fixture:1 family_classes_truncated=false")
+	if finding := findingByClass(t, malformed.drainWindow(), "mimir-series-limit"); !finding.healthy {
+		t.Fatalf("unbounded producer fields entered fixed rejection class: %+v", finding)
+	}
+}
+
 func TestStandingTailAttributesStaleSourceTimeWithoutReplayingProductFailure(t *testing.T) {
 	fixedNow := time.Date(2026, 9, 11, 22, 30, 0, 0, time.UTC)
 	tailer := newLogTailer("grafana", nil)

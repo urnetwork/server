@@ -124,6 +124,7 @@ func NewSignals() []Signal {
 		NewMimirContinuitySignal(),
 		NewMimirAdmissionSignal(),
 		NewMimirBalanceSignal(),
+		NewMimirPublishersSignal(),
 		NewMimirShutdownSignal(),
 		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),

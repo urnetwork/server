@@ -70,8 +70,39 @@ if [ "$restarts" -gt 0 ]; then
     restart_reason=prometheus-histogram-decoder-crash
   fi
 fi
+redis_exporter_state=not-applicable
+redis_latency_histogram_policy=not-applicable
+redis_properties=$(systemctl show redis-exporter.service \
+  -p LoadState -p ActiveState -p SubState -p ExecStart \
+  --no-pager 2>/dev/null) || redis_properties=''
+read_redis_property() {
+  printf '%s\n' "$redis_properties" | awk -F= -v key="$1" '$1 == key {print substr($0, index($0, "=")+1); found=1} END {exit !found}'
+}
+redis_load_state=$(read_redis_property LoadState 2>/dev/null || true)
+if [ -n "$redis_load_state" ] && [ "$redis_load_state" != not-found ]; then
+  redis_active_state=$(read_redis_property ActiveState 2>/dev/null || true)
+  redis_sub_state=$(read_redis_property SubState 2>/dev/null || true)
+  if [ "$redis_active_state" = active ] && [ "$redis_sub_state" = running ]; then
+    redis_exporter_state=active
+  elif [ -n "$redis_active_state" ] && [ -n "$redis_sub_state" ]; then
+    redis_exporter_state=inactive
+  else
+    redis_exporter_state=unobservable
+  fi
+  redis_exec_start=$(read_redis_property ExecStart 2>/dev/null || true)
+  if [ -z "$redis_exec_start" ]; then
+    redis_latency_histogram_policy=unobservable
+  elif printf '%s\n' "$redis_exec_start" | grep -Fq -- '--exclude-latency-histogram-metrics'; then
+    redis_latency_histogram_policy=excluded
+  else
+    redis_latency_histogram_policy=enabled
+  fi
+elif [ -z "$redis_load_state" ] && [ -n "$redis_properties" ]; then
+  redis_exporter_state=unobservable
+  redis_latency_histogram_policy=unobservable
+fi
 printf '%s\n' \
-  'observation_schema=2' \
+  'observation_schema=3' \
   "active_state=$(read_property ActiveState)" \
   "sub_state=$(read_property SubState)" \
   "result=$(read_property Result)" \
@@ -79,7 +110,9 @@ printf '%s\n' \
   "nofile_hard=$(read_property LimitNOFILE)" \
   "nofile_soft=$(read_property LimitNOFILESoft)" \
   "fluent_bit_version=$fluent_bit_version" \
-  "restart_reason=$restart_reason"
+  "restart_reason=$restart_reason" \
+  "redis_exporter_state=$redis_exporter_state" \
+  "redis_latency_histogram_policy=$redis_latency_histogram_policy"
 `
 
 const (
@@ -91,14 +124,16 @@ const (
 var logShipperVersionRe = regexp.MustCompile(`^(?:unknown|[0-9A-Za-z.+:~_-]{1,64})$`)
 
 type logShipperSample struct {
-	activeState   string
-	subState      string
-	result        string
-	restarts      int
-	nofileHard    uint64
-	nofileSoft    uint64
-	version       string
-	restartReason string
+	activeState                 string
+	subState                    string
+	result                      string
+	restarts                    int
+	nofileHard                  uint64
+	nofileSoft                  uint64
+	version                     string
+	restartReason               string
+	redisExporterState          string
+	redisLatencyHistogramPolicy string
 }
 
 type logShipperResult struct {
@@ -175,6 +210,7 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 	required := []string{
 		"observation_schema", "active_state", "sub_state", "result", "restarts",
 		"nofile_hard", "nofile_soft", "fluent_bit_version", "restart_reason",
+		"redis_exporter_state", "redis_latency_histogram_policy",
 	}
 	allowed := map[string]bool{}
 	for _, key := range required {
@@ -200,7 +236,7 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 			return logShipperSample{}, fmt.Errorf("log shipper: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "2" {
+	if values["observation_schema"] != "3" {
 		return logShipperSample{}, fmt.Errorf("log shipper: unsupported observation schema")
 	}
 	restarts, err := strconv.Atoi(values["restarts"])
@@ -230,10 +266,27 @@ func parseLogShipperSample(raw string) (logShipperSample, error) {
 	if (restarts == 0) != (restartReason == logShipperRestartNone) {
 		return logShipperSample{}, fmt.Errorf("log shipper: restart reason does not match restart count")
 	}
+	redisExporterState := values["redis_exporter_state"]
+	switch redisExporterState {
+	case "not-applicable", "active", "inactive", "unobservable":
+	default:
+		return logShipperSample{}, fmt.Errorf("log shipper: invalid Redis exporter state")
+	}
+	redisLatencyHistogramPolicy := values["redis_latency_histogram_policy"]
+	switch redisLatencyHistogramPolicy {
+	case "not-applicable", "excluded", "enabled", "unobservable":
+	default:
+		return logShipperSample{}, fmt.Errorf("log shipper: invalid Redis latency histogram policy")
+	}
+	if (redisExporterState == "not-applicable") != (redisLatencyHistogramPolicy == "not-applicable") {
+		return logShipperSample{}, fmt.Errorf("log shipper: inconsistent Redis exporter applicability")
+	}
 	return logShipperSample{
 		activeState: values["active_state"], subState: values["sub_state"],
 		result: values["result"], restarts: restarts, nofileHard: hard, nofileSoft: soft,
 		version: values["fluent_bit_version"], restartReason: restartReason,
+		redisExporterState:          redisExporterState,
+		redisLatencyHistogramPolicy: redisLatencyHistogramPolicy,
 	}, nil
 }
 
@@ -321,6 +374,33 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 		})
 	} else {
 		findings = append(findings, healthyFinding("observability/log-shipper", tierWarn, "log-shipper-churn", target))
+	}
+
+	if redisClusterHost {
+		redisObserved := fmt.Sprintf(
+			"redis_exporter_state=%s redis_latency_histogram_policy=%s",
+			sample.redisExporterState,
+			sample.redisLatencyHistogramPolicy,
+		)
+		if sample.redisExporterState == "active" && sample.redisLatencyHistogramPolicy == "excluded" {
+			findings = append(findings, healthyFinding(
+				"observability/log-shipper", tierWarn, "redis-latency-histogram-policy-drift", target,
+			))
+		} else {
+			findings = append(findings, finding{
+				probeId: "observability/log-shipper", tier: tierWarn,
+				class: "redis-latency-histogram-policy-drift", target: target, sustain: 1,
+				symptom:   fmt.Sprintf("%s can still feed the unsafe optional Redis latency histogram into Fluent Bit", target),
+				mechanism: "The live Redis exporter unit is inactive, unobservable, or does not carry the narrow exclusion for redis_commands_latencies_usec. That optional command-dependent histogram can crash the Fluent Bit Prometheus decoder before the later restart evidence appears.",
+				baseline:  "redis-exporter.service is active/running and its effective ExecStart excludes only the optional latency histogram.",
+				observed:  redisObserved,
+				evidence:  "The host reducer emits only fixed state and policy enums; unit arguments, paths, credentials, and raw metric data are omitted.",
+				context:   "This is a direct unsafe-input policy finding. The independent Redis rates signal must still prove that required commandstats and exporter-health metrics are fresh.",
+				action:    "Converge the reviewed Redis exporter unit with --exclude-latency-histogram-metrics while retaining commandstats. Do not disable the whole exporter, raise Mimir limits, or attribute an unrelated decoder crash without the exact stack.",
+				verify:    "The live unit reports active/excluded, redis_commands_processed_total and redis_commands_duration_seconds_total are fresh, and Fluent Bit remains stable with fresh outputs for ten minutes.",
+				playbook:  "SIGNALS.md §11.14 and §3.1a",
+			})
+		}
 	}
 	return findings
 }

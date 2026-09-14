@@ -37,6 +37,8 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
 		{"Mimir series admission", "Stats push rejected (400): per-user series limit of 75000 exceeded", "mimir-series-limit"},
+		{"Mimir structured rate admission", "Stats push rejected status=429 reason=rate-limit job=api metric_families=2 time_series=3 family_classes=go:1,process:1 family_classes_truncated=false", "mimir-ingestion-rate-limit"},
+		{"Mimir structured other rejection", "Stats push rejected status=503 reason=server job=other metric_families=1 time_series=1 family_classes=other:1 family_classes_truncated=false", "mimir-push-rejected"},
 		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`, "loki-tail-backend-eof"},
 		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
 		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-entries"},
@@ -457,8 +459,8 @@ func TestLogErrorsSignalMimirSeriesLimitIsSpecificAndSanitized(t *testing.T) {
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"tenant-series-admission", "series details omitted", "per-user-series admission discards",
-		"predates the desired release", "19 readiness-rejected candidates", "Preserve random instance identity",
-		"630", "627", "30d14ce", "two-hour",
+		"candidate contributors", "Accepted per-service", "Legacy unstructured events",
+		"preserve random instance identity", "two-hour",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Errorf("Mimir admission alert omitted %q", want)
