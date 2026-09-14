@@ -681,8 +681,8 @@ func testEnvTeardownBound() time.Duration {
 }
 
 func DefaultTestEnv() *TestEnv {
-	// Release gates must expose the first assertion or panic; development and
-	// explicit retry-policy meta-tests retain their existing retry behavior.
+	// Release gates must expose the first assertion or panic; development
+	// tests retain their existing retry defaults.
 	rerunCount := 4
 	switch os.Getenv("WARP_TEST_ENV_FAIL_FAST") {
 	case "", "0":
@@ -781,10 +781,15 @@ func (self *TestEnv) runWithSetup(
 		t.Fatalf("local integration test preflight: %v", err)
 	}
 	n := self.RerunCount + 1
+	failFast := os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1"
+	if failFast {
+		// Explicit fixture counts cannot bypass the protocol's attempt limit.
+		n = 1
+	}
 	for i := 0; i < n; i += 1 {
 		// Each attempt runs against a retryTB wrapper, so a failed assertion is
 		// recorded locally instead of failing the real *testing.T (see retryTB).
-		tb := &retryTB{TB: t, propagateLateFailure: os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1"}
+		tb := &retryTB{TB: t, propagateLateFailure: failFast}
 		var panicValue any
 		var panicStack []byte
 		attemptReturned := false
@@ -841,7 +846,7 @@ func (self *TestEnv) runWithSetup(
 				case <-teardownDone:
 				case <-time.After(teardownBound):
 					glog.Errorf("[test_env]teardown blocked >%s (attempt goroutines still holding env resources); abandoning teardown so the failure can report\n", teardownBound)
-					if os.Getenv("WARP_TEST_ENV_FAIL_FAST") == "1" {
+					if failFast {
 						tb.Errorf("release test environment abandoned teardown after %s", teardownBound)
 					}
 				}

@@ -48,8 +48,50 @@ func runRetryTestEnv(t *testing.T, testEnv *TestEnv, callback func(testing.TB)) 
 	)
 }
 
-// Strict release defaults never change an explicitly selected retry policy.
+// Retry-policy fixtures must consume their synthetic attempt records before
+// a suite's clean-output audit sees them.
+func TestRunRetryPolicyFixturesCaptureFailures(t *testing.T) {
+	testNames := []string{
+		"TestDefaultTestEnvReleaseFailFastConfiguration",
+		"TestRunRetriesUntilPass",
+		"TestRunFailsAfterExhaustion",
+		"TestRunReportsPanicOriginAfterExhaustion",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^("+strings.Join(testNames, "|")+")$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), "WARP_TEST_ENV_FAIL_FAST=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("retry-policy fixtures failed: %v\n%s", err, out)
+	}
+	output := string(out)
+	for _, testName := range testNames {
+		if !strings.Contains(output, "--- PASS: "+testName) {
+			t.Fatalf("retry-policy fixture did not finish: %s", testName)
+		}
+	}
+	if strings.Contains(output, "[flaky]test failed iteration[") {
+		t.Fatal("retry-policy fixtures leaked synthetic failed-attempt output")
+	}
+}
+
+// Development defaults retain retries, with synthetic policy failures captured
+// inside a child that explicitly selects development mode.
 func TestDefaultTestEnvReleaseFailFastConfiguration(t *testing.T) {
+	if os.Getenv("URNETWORK_RETRY_CONFIGURATION_CHILD") == "1" {
+		var attempts atomic.Int32
+		runRetryTestEnv(t, retryTestEnv(1), func(tb testing.TB) {
+			if attempts.Add(1) == 1 {
+				tb.Error("explicit retry-policy fixture failure")
+			}
+		})
+		if attempts.Load() != 2 {
+			t.Fatalf("development retry policy changed: attempts=%d", attempts.Load())
+		}
+		return
+	}
+
 	for _, value := range []string{"", "0", "1"} {
 		t.Setenv("WARP_TEST_ENV_FAIL_FAST", value)
 		testEnv := DefaultTestEnv()
@@ -61,14 +103,24 @@ func TestDefaultTestEnvReleaseFailFastConfiguration(t *testing.T) {
 			t.Fatalf("fail-fast setting %q changed default environment: %+v", value, testEnv)
 		}
 	}
-	var attempts atomic.Int32
-	runRetryTestEnv(t, retryTestEnv(1), func(tb testing.TB) {
-		if attempts.Add(1) == 1 {
-			tb.Error("explicit retry-policy fixture failure")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDefaultTestEnvReleaseFailFastConfiguration$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), "URNETWORK_RETRY_CONFIGURATION_CHILD=1", "WARP_TEST_ENV_FAIL_FAST=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("development retry-policy child failed: %v\n%s", err, out)
+	}
+	output := string(out)
+	for _, signature := range []string{
+		"explicit retry-policy fixture failure",
+		"[flaky]test failed iteration[1/2] (assertion failure, see test log)",
+		"[flaky]test passed iteration[2/2]",
+		"--- PASS: TestDefaultTestEnvReleaseFailFastConfiguration",
+	} {
+		if count := strings.Count(output, signature); count != 1 {
+			t.Fatalf("development retry-policy signature %q count = %d; want 1", signature, count)
 		}
-	})
-	if attempts.Load() != 2 {
-		t.Fatalf("strict defaults changed explicit retry policy: attempts=%d", attempts.Load())
 	}
 }
 
@@ -88,12 +140,17 @@ func TestDefaultTestEnvReleaseFailFastRejectsMalformedSetting(t *testing.T) {
 }
 
 // A would-pass-on-retry assertion, fatal or panic must exit unsuccessfully on
-// its first attempt. Subprocesses keep those intended failures isolated.
+// its first attempt, including explicit counts that bypass DefaultTestEnv.
+// Subprocesses keep those intended failures isolated.
 func TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure(t *testing.T) {
 	if mode := os.Getenv("URNETWORK_RELEASE_FAIL_FAST_CHILD"); mode != "" {
 		var attempts atomic.Int32
 		testEnv := DefaultTestEnv()
 		testEnv.RerunTimeout = 0
+		if strings.HasPrefix(mode, "explicit-") {
+			testEnv.RerunCount = 1
+			mode = strings.TrimPrefix(mode, "explicit-")
+		}
 		runRetryTestEnv(t, testEnv, func(tb testing.TB) {
 			attempt := attempts.Add(1)
 			fmt.Printf("release fail-fast attempt=%d\n", attempt)
@@ -114,7 +171,7 @@ func TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure(t *testing.T) {
 		return
 	}
 	t.Setenv("WARP_TEST_ENV_FAIL_FAST", "1")
-	for _, mode := range []string{"assertion", "fatal", "panic"} {
+	for _, mode := range []string{"assertion", "fatal", "panic", "explicit-assertion", "explicit-fatal", "explicit-panic"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDefaultTestEnvReleaseFailFastRejectsRecoveredFailure$", "-test.v")
 		cmd.Env = append(os.Environ(), "URNETWORK_RELEASE_FAIL_FAST_CHILD="+mode)
@@ -660,7 +717,7 @@ func TestLoadTestRedisLeaseConfigurationReportsMissingFixture(t *testing.T) {
 func TestRunRetriesUntilPass(t *testing.T) {
 	if os.Getenv("URNETWORK_RERUN_SUCCESS_CHILD") != "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRunRetriesUntilPass$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "URNETWORK_RERUN_SUCCESS_CHILD=1")
+		cmd.Env = append(os.Environ(), "URNETWORK_RERUN_SUCCESS_CHILD=1", "WARP_TEST_ENV_FAIL_FAST=0")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("retry child did not recover on its fourth attempt: %v\n%s", err, out)
@@ -723,7 +780,7 @@ func TestRunFailsAfterExhaustion(t *testing.T) {
 	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRunFailsAfterExhaustion$", "-test.v")
-	cmd.Env = append(os.Environ(), "URNETWORK_RERUN_EXHAUSTION_CHILD=1")
+	cmd.Env = append(os.Environ(), "URNETWORK_RERUN_EXHAUSTION_CHILD=1", "WARP_TEST_ENV_FAIL_FAST=0")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected the child test to fail after exhausting reruns, but it passed:\n%s", out)
