@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-09-04
-launch_state: local_validation_complete_evaluator_rebuild_and_external_actions_pending
+status_date: 2026-09-14
+launch_state: corrected_evaluator_installed_api_config_rollout_and_live_score_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -70,27 +70,37 @@ evaluation_source:
 
 evaluator_release:
   source_epoch: 0
-  server_source_commit: 8f4cde37b382ab735e40f9471dca4d051b1f326d
-  evaluator_image_id: null
+  server_source_commit: 759b7462ef4dbe849d7bfbcc7a73e8b5c573c340
+  evaluator_image_id: sha256:4b7e46e2243d26b915e83a85d3c2b4b7679d5038bc0c53197ce274cec137209b
   local_image_load:
-    status: rebuild_required_after_source_lock_expansion
+    status: installed_and_full_docker_smoke_passed
     runtime: docker
-    immutable_reference: null
-    convenience_tag: null
-    verified_at: null
-  simulator_sha256: null
+    immutable_reference: sha256:4b7e46e2243d26b915e83a85d3c2b4b7679d5038bc0c53197ce274cec137209b
+    convenience_tag: urnetwork/sim-latency-evaluator-base:significance-contract-759b7462
+    verified_at: 2026-09-14T18:27:24Z
+  simulator_sha256: fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f
+  main_api_config_rollout: pending
+  accepted_live_staging_score: pending
+  smoke_log_sha256: 6f2652772933ae516f0e63b3b08a80a458d7c3de063b610c16c203a3026f7079
+  retained_input_replay:
+    official: false
+    status: complete_significance_and_shared_model_validation_passed
+    baseline_replicates: 9
+    candidate_replicates: 9
+    elapsed_seconds: 5
+    score_sha256: 73523f0c42f711bf42a44088d03cccd6bb76b0dc24fc571949f3d420f81adb83
   superseded_release:
-    evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
-    simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
-    reason: incomplete_four_repository_source_lock
+    evaluator_image_id: sha256:6c68b85355e87e381f266b65f5c98581f232682cec2ac77c73c5ea6f151e2d5c
+    simulator_sha256: 05c2a721c652fd1f066eae26270361ce6127d266f6e5dc0c10a0caffe9fb0319
+    reason: scorer_omitted_required_significance_record
 
 release_record:
   control_plane_branch: main
   control_plane_commits_are_scoring_inputs: false
   exact_runtime_image_digest_persisted_per_evaluation: true
-  openapi_sha256: ca2c4bd849292b1a5d91215b924aff4a95a18061100b37f58a2d4df91577320e
-  recorded_by: local_finalization
-  recorded_at: 2026-09-04T21:03:03Z
+  openapi_sha256: aaaaf82658ee7a15256cfd4759f35ffbe8af7f09093468b488d146d8b1cb6a87
+  recorded_by: local_staging_repair
+  recorded_at: 2026-09-14T18:44:02Z
 
 validation:
   completed_at: 2026-08-29T04:37:06Z
@@ -192,7 +202,7 @@ checklist:
     status: complete
     evidence: server/controller/competition_controller.go
   - id: epoch_zero_evaluator_image
-    status: rebuild_required_after_source_lock_expansion
+    status: local_install_and_docker_smoke_complete_api_config_rollout_and_live_score_pending
     evidence: config/main/sim-latency.yml and server/connect/sim-latency/evaluator/container/build-base.sh
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required

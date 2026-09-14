@@ -204,20 +204,31 @@ type CompetitionScoreAcceptedResult struct {
 }
 
 type CompetitionScoreJobResult struct {
-	JobId                server.Id               `json:"job_id"`
-	RoundId              server.Id               `json:"round_id"`
-	Staging              bool                    `json:"staging"`
-	PatchSha256          string                  `json:"patch_sha256"`
-	State                string                  `json:"state"`
-	SubmittedAt          time.Time               `json:"submitted_at"`
-	StartedAt            *time.Time              `json:"started_at,omitempty"`
-	CompletedAt          *time.Time              `json:"completed_at,omitempty"`
-	CacheKey             string                  `json:"cache_key"`
-	EvaluatorImageDigest string                  `json:"evaluator_image_digest"`
-	ApiImageDigest       string                  `json:"api_image_digest"`
-	WorkerImageDigest    string                  `json:"worker_image_digest,omitempty"`
-	Score                *CompetitionScoreResult `json:"score,omitempty"`
-	EvalError            *CompetitionError       `json:"eval_error,omitempty"`
+	JobId                server.Id                     `json:"job_id"`
+	RoundId              server.Id                     `json:"round_id"`
+	Staging              bool                          `json:"staging"`
+	PatchSha256          string                        `json:"patch_sha256"`
+	State                string                        `json:"state"`
+	EvaluationStatus     string                        `json:"evaluation_status"`
+	EvaluationFailure    *CompetitionEvaluationFailure `json:"evaluation_failure,omitempty"`
+	SubmittedAt          time.Time                     `json:"submitted_at"`
+	StartedAt            *time.Time                    `json:"started_at,omitempty"`
+	CompletedAt          *time.Time                    `json:"completed_at,omitempty"`
+	CacheKey             string                        `json:"cache_key"`
+	EvaluatorImageDigest string                        `json:"evaluator_image_digest"`
+	ApiImageDigest       string                        `json:"api_image_digest"`
+	WorkerImageDigest    string                        `json:"worker_image_digest,omitempty"`
+	Score                *CompetitionScoreResult       `json:"score,omitempty"`
+	EvalError            *CompetitionError             `json:"eval_error,omitempty"`
+}
+
+// CompetitionEvaluationFailure is the message-free public summary of a
+// reviewed terminal error code. Retriable is always false because the job has
+// already left the retry queue.
+type CompetitionEvaluationFailure struct {
+	Kind      string `json:"kind"`
+	Code      string `json:"code"`
+	Retriable bool   `json:"retriable"`
 }
 
 type CompetitionScoreResult struct {

@@ -80,8 +80,14 @@ they can remove the final LF. The byte-level rules and a safe `jq --rawfile`
 example are in `launch/ONBOARDING.md`.
 
 Results remain embargoed while admission is open and while any accepted job is
-queued or running. Polling reports terminal work as outcome-neutral `completed`
-until finalization commits. Staging then publishes outcomes through polling and
+queued or running. The legacy polling `state` reports terminal work as
+outcome-neutral `completed` until finalization commits. The additive
+`evaluation_status` distinguishes running work from terminal failure without
+revealing scores; `evaluation_failure` may expose a reviewed code and kind,
+never a raw message, and terminal failures have `retriable: false`. Unknown
+failure codes remain private. These fields require the updated API rollout;
+clients must tolerate their absence while older instances drain.
+Staging then publishes full outcomes through polling and
 the explicit staging-inclusive leaderboard; the default view remains production
 only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private

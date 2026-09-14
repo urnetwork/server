@@ -1266,6 +1266,51 @@ func TestStagingEvaluationAlwaysUsesBaselineSourceEpoch(t *testing.T) {
 	}
 }
 
+func TestScoreJobPollingProjectsQueuedRunningAndRetryState(t *testing.T) {
+	now := time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-time.Minute)
+	cases := []struct {
+		name      string
+		state     string
+		startedAt *time.Time
+	}{
+		{name: "queued", state: "queued"},
+		{name: "running", state: "running", startedAt: &startedAt},
+		{name: "queued retry", state: "queued", startedAt: &startedAt},
+	}
+	for _, c := range cases {
+		job := &queuedJob{ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), State: c.state,
+			StartedAt: c.startedAt,
+		}}
+		view := scoreJobView(job, &Principal{Role: "submitter"}, now)
+		if view.State != c.state || view.EvaluationStatus != c.state ||
+			view.EvaluationFailure != nil || view.Score != nil || view.EvalError != nil {
+			t.Errorf("%s polling view = %#v", c.name, view)
+		}
+	}
+}
+
+func TestCompetitionNullableOutcomeJsonTreatsSqlAndJsonNullAsAbsent(t *testing.T) {
+	for _, encoded := range [][]byte{nil, []byte("null"), []byte(" \nnull\t")} {
+		score, err := decodeNullableJson[ScoreResult](encoded)
+		if err != nil || score != nil {
+			t.Errorf("nullable score %q = %#v, %v", encoded, score, err)
+		}
+		evalError, err := decodeNullableJson[CompetitionError](encoded)
+		if err != nil || evalError != nil {
+			t.Errorf("nullable error %q = %#v, %v", encoded, evalError, err)
+		}
+	}
+	if encoded := nullableJson((*ScoreResult)(nil)); encoded != nil {
+		t.Fatalf("typed nil score encoded as %#v, want SQL NULL", encoded)
+	}
+	decoded, err := decodeNullableJson[ScoreResult]([]byte(`{"score_schema":1,"placeable":false,"gates":{},"significance":null}`))
+	if err != nil || decoded == nil || decoded.ScoreSchema != ScoreSchema {
+		t.Fatalf("present score = %#v, %v", decoded, err)
+	}
+}
+
 func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
 	settings := validSettings()
 	raw, normalized := 10.0, 112.0
@@ -1287,25 +1332,78 @@ func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
 	submitter := &Principal{Id: "apex", Role: "submitter"}
 	result, status, evalError := service.GetScore(context.Background(), job.JobId, submitter)
 	if evalError != nil || status != 200 || result.State != "completed" ||
+		result.EvaluationStatus != "completed" || result.EvaluationFailure != nil ||
 		result.Score != nil || result.EvalError != nil {
 		t.Fatalf("embargoed result = %#v, %d, %#v", result, status, evalError)
 	}
 	operator := &Principal{Id: "ops", Role: "operator"}
 	result, status, evalError = service.GetScore(context.Background(), job.JobId, operator)
-	if evalError != nil || status != 200 || result.State != "succeeded" || result.Score == nil {
+	if evalError != nil || status != 200 || result.State != "succeeded" ||
+		result.EvaluationStatus != "completed" || result.EvaluationFailure != nil || result.Score == nil {
 		t.Fatalf("operator result = %#v, %d, %#v", result, status, evalError)
 	}
 	job.State = "failed"
 	job.Score = nil
-	job.EvalError = submissionError("candidate_build_failed", "candidate did not build")
+	storedError := &CompetitionError{
+		Kind: "infrastructure", Code: "evaluation_time_budget_exhausted",
+		Message: "sensitive evaluator path and readiness detail", Retriable: true,
+		Readiness: &ReadinessResult{Ready: false, Checks: map[string]bool{"private_gate": false}},
+	}
+	job.EvalError = storedError
 	result, _, _ = service.GetScore(context.Background(), job.JobId, submitter)
-	if result.State != "completed" || result.EvalError != nil {
+	if result.State != "completed" || result.EvaluationStatus != "failed" ||
+		result.EvaluationFailure == nil ||
+		result.EvaluationFailure.Kind != "infrastructure" ||
+		result.EvaluationFailure.Code != "evaluation_time_budget_exhausted" ||
+		result.EvaluationFailure.Retriable || result.Score != nil || result.EvalError != nil {
 		t.Fatalf("embargoed failure = %#v", result)
 	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := map[string]any{}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"score", "eval_error", "gates", "diagnostics", "readiness", "message"} {
+		if _, ok := wire[forbidden]; ok {
+			t.Errorf("embargoed failure contains %q: %s", forbidden, encoded)
+		}
+	}
+	failureWire, ok := wire["evaluation_failure"].(map[string]any)
+	if !ok || len(failureWire) != 3 || failureWire["kind"] != "infrastructure" ||
+		failureWire["code"] != "evaluation_time_budget_exhausted" || failureWire["retriable"] != false {
+		t.Fatalf("embargoed failure summary = %#v, want exact kind/code/retriable tuple", failureWire)
+	}
+	if bytes.Contains(encoded, []byte("sensitive evaluator")) || !storedError.Retriable {
+		t.Fatalf("poll response leaked or mutated stored evidence: %s, stored=%#v", encoded, storedError)
+	}
+
+	result, status, evalError = service.GetScore(context.Background(), job.JobId, operator)
+	if evalError != nil || status != http.StatusOK || result.State != "failed" ||
+		result.EvaluationStatus != "failed" || result.EvaluationFailure == nil ||
+		result.EvalError == nil || result.EvalError.Message != storedError.Message ||
+		result.EvalError.Readiness == nil || result.EvalError.Retriable || !storedError.Retriable {
+		t.Fatalf("operator failure = %#v, %d, %#v, stored=%#v", result, status, evalError, storedError)
+	}
+
 	job.Round.FinalizedAt = &completedAt
 	result, status, evalError = service.GetScore(context.Background(), job.JobId, submitter)
-	if evalError != nil || status != 200 || result.State != "failed" || result.EvalError == nil {
+	if evalError != nil || status != 200 || result.State != "failed" ||
+		result.EvaluationStatus != "failed" || result.EvaluationFailure == nil ||
+		result.EvalError == nil || result.EvalError.Retriable || !storedError.Retriable {
 		t.Fatalf("published failure = %#v, %d, %#v", result, status, evalError)
+	}
+
+	job.Round.FinalizedAt = nil
+	job.EvalError = &CompetitionError{
+		Kind: "infrastructure", Code: "private_dynamic_code_with_secret",
+		Message: "another sensitive evaluator message", Retriable: false,
+	}
+	result, _, _ = service.GetScore(context.Background(), job.JobId, submitter)
+	if result.EvaluationStatus != "failed" || result.EvaluationFailure != nil || result.EvalError != nil {
+		t.Fatalf("unreviewed failure code escaped embargo = %#v", result)
 	}
 }
 
@@ -1325,6 +1423,7 @@ func TestStagingDiscardReasonIsVisibleWithoutDisclosingOtherErrors(t *testing.T)
 	submitter := &Principal{Id: "apex-stage", Role: "submitter"}
 	result, status, evalError := service.GetScore(context.Background(), job.JobId, submitter)
 	if evalError != nil || status != http.StatusOK || result.State != "canceled" ||
+		result.EvaluationStatus != "canceled" || result.EvaluationFailure != nil ||
 		result.EvalError == nil || result.EvalError.Code != "staging_discarded" {
 		t.Fatalf("staging discard view = %#v, %d, %#v", result, status, evalError)
 	}
@@ -1334,6 +1433,7 @@ func TestStagingDiscardReasonIsVisibleWithoutDisclosingOtherErrors(t *testing.T)
 	)
 	result, status, evalError = service.GetScore(context.Background(), job.JobId, submitter)
 	if evalError != nil || status != http.StatusOK || result.State != "canceled" ||
+		result.EvaluationStatus != "canceled" || result.EvaluationFailure != nil ||
 		result.EvalError == nil || result.EvalError.Code != "staging_superseded" {
 		t.Fatalf("staging supersede view = %#v, %d, %#v", result, status, evalError)
 	}
@@ -1356,11 +1456,14 @@ func TestCanceledStagingRoundPublishesCleanupInsteadOfMeasuredOutcome(t *testing
 		Round: roundRecord{RoundResult: RoundResult{Staging: true}, Canceled: true},
 	}
 	view := scoreJobView(job, &Principal{Role: "submitter"}, server.NowUtc())
-	if view.State != "canceled" || view.Score != nil || view.EvalError == nil || view.EvalError.Code != "staging_discarded" {
+	if view.State != "canceled" || view.EvaluationStatus != "canceled" ||
+		view.EvaluationFailure != nil || view.Score != nil || view.EvalError == nil ||
+		view.EvalError.Code != "staging_discarded" {
 		t.Fatalf("canceled staging view = %#v", view)
 	}
 	operatorView := scoreJobView(job, &Principal{Role: "operator"}, server.NowUtc())
-	if operatorView.State != "succeeded" || operatorView.Score == nil || operatorView.EvalError != nil {
+	if operatorView.State != "succeeded" || operatorView.EvaluationStatus != "completed" ||
+		operatorView.EvaluationFailure != nil || operatorView.Score == nil || operatorView.EvalError != nil {
 		t.Fatalf("operator staging evidence view = %#v", operatorView)
 	}
 }
@@ -1386,6 +1489,97 @@ func TestThreeHourEvaluationDeadlineBoundsInfrastructureRetries(t *testing.T) {
 			t.Errorf("retry at completed=%s attempts=%d: got %t, want %t", c.completedAt, c.attempts, retry, c.wantRetry)
 		}
 	}
+}
+
+func TestPostgresStoreTerminalFailureClearsRetryAndStoresSqlNullScore(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-terminal-retry-normalization"
+		settings.MaxInfrastructureAttempts = 1
+		now := server.NowUtc().Truncate(time.Second)
+		store := PostgresStore{now: func() time.Time { return now }}
+		fifoListKey, fifoMemberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, fifoListKey, fifoMemberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), fifoListKey, fifoMemberKey).Err()
+			})
+		})
+
+		round, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour), RevealAt: now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("terminal-retry-normalization"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		job, _, err := store.Enqueue(ctx, settings, round.RoundId, patch, "synthetic-submitter", testApiImageDigest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.Claim(ctx, settings, "synthetic-worker", testWorkerImageDigest())
+		if err != nil || claimed == nil || claimed.JobId != job.JobId {
+			t.Fatalf("claim = %#v, %v", claimed, err)
+		}
+		storedInputError := infrastructureError("evaluator_exit", "synthetic terminal worker detail")
+		retry, err := store.Complete(ctx, settings, "synthetic-worker", job.JobId, EvaluationOutcome{
+			Error: storedInputError,
+		})
+		if err != nil || retry || !storedInputError.Retriable {
+			t.Fatalf("terminal complete = retry %t, err %v, input %#v", retry, err, storedInputError)
+		}
+
+		var state string
+		var scoreIsSqlNull bool
+		var storedRetriable bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `
+				SELECT state, score_json IS NULL,
+				       (eval_error_json->>'retriable')::boolean
+				FROM competition_job WHERE job_id = $1
+			`, job.JobId).Scan(&state, &scoreIsSqlNull, &storedRetriable))
+		})
+		if state != "failed" || !scoreIsSqlNull || storedRetriable {
+			t.Fatalf("terminal row = state %q, score SQL NULL %t, retriable %t", state, scoreIsSqlNull, storedRetriable)
+		}
+		stored, err := store.GetJob(ctx, settings, job.JobId, &Principal{Role: "operator"})
+		if err != nil || stored.Score != nil || stored.EvalError == nil || stored.EvalError.Retriable {
+			t.Fatalf("terminal read = %#v, %v", stored, err)
+		}
+
+		legacyJobId := server.NewId()
+		legacyCacheDigest := sha256.Sum256([]byte("synthetic-json-null-terminal"))
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `
+				INSERT INTO competition_job (
+					job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
+					submitted_at, available_at, started_at, completed_at,
+					score_json, eval_error_json, artifact_retain_until,
+					api_image_digest, worker_image_digest
+				)
+				SELECT $1, round_id, patch_bytes, patch_sha256, $2, 'failed',
+				       submitted_at, available_at, started_at, $3,
+				       'null'::jsonb, $4::jsonb, artifact_retain_until,
+				       api_image_digest, worker_image_digest
+				FROM competition_job WHERE job_id = $5
+			`, legacyJobId, hex.EncodeToString(legacyCacheDigest[:]), now,
+				`{"kind":"infrastructure","code":"evaluation_time_budget_exhausted","message":"synthetic historical error","retriable":true}`,
+				job.JobId))
+		})
+		legacy, err := store.GetJob(ctx, settings, legacyJobId, &Principal{Role: "operator"})
+		if err != nil || legacy.Score != nil || legacy.EvalError == nil ||
+			legacy.EvalError.Code != "evaluation_time_budget_exhausted" || !legacy.EvalError.Retriable {
+			t.Fatalf("historical JSON-null terminal read = %#v, %v", legacy, err)
+		}
+	})
 }
 
 func TestWorkerDoesNotLaunchExpiredSubmission(t *testing.T) {
@@ -3647,11 +3841,12 @@ func TestApexAdapterConformance(t *testing.T) {
 				JobId:       jobId,
 				RoundId:     roundId,
 				PatchSha256: patchDigests[patchIndex],
-				State:       "completed",
+				State:       "completed", EvaluationStatus: "completed",
 			}
 			if patchIndex == 0 && leakEmbargoedScore {
 				leakEmbargoedScore = false
 				job.State = "running"
+				job.EvaluationStatus = "running"
 				job.Score = &ScoreResult{ScoreSchema: ScoreSchema}
 			}
 			writeJson(http.StatusOK, job)
@@ -4019,7 +4214,7 @@ func TestApexAdapterUsesFeeFreeStagingRound(t *testing.T) {
 			}
 			encode(ScoreJobResult{
 				JobId: jobId, RoundId: roundId, Staging: true,
-				PatchSha256: patchSha256, State: "canceled",
+				PatchSha256: patchSha256, State: "canceled", EvaluationStatus: "canceled",
 				EvalError: submissionError(
 					"staging_discarded",
 					"staging submission was discarded when epoch one was committed",
@@ -4093,7 +4288,7 @@ func TestApexAdapterPollsCompletedStagingAdmissionUntilPublished(t *testing.T) {
 	}
 	record, err := store.RecordPoll("staging-published", ScoreJobResult{
 		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
-		Staging: true, State: "completed",
+		Staging: true, State: "completed", EvaluationStatus: "completed",
 	}, now.Add(time.Minute))
 	if err != nil || record.Published || record.Score != nil || record.EvalError != nil {
 		t.Fatalf("embargoed staging poll = %#v, %v", record, err)
@@ -4109,7 +4304,7 @@ func TestApexAdapterPollsCompletedStagingAdmissionUntilPublished(t *testing.T) {
 	}
 	record, err = store.RecordPoll("staging-published", ScoreJobResult{
 		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
-		Staging: true, State: "succeeded", Score: score,
+		Staging: true, State: "succeeded", EvaluationStatus: "completed", Score: score,
 	}, now.Add(2*time.Minute))
 	if err != nil || !record.Published || record.Score == nil || record.EvalError != nil {
 		t.Fatalf("published staging poll = %#v, %v", record, err)
@@ -4132,14 +4327,298 @@ func TestApexAdapterPollsCompletedStagingAdmissionUntilPublished(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
+	failureSummary := &EvaluationFailure{
+		Kind: "submission", Code: "candidate_build_failed", Retriable: false,
+	}
 	record, err = store.RecordPoll("staging-published-failure", ScoreJobResult{
 		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
-		Staging: true, State: "failed",
-		EvalError: submissionError("candidate_build_failed", "synthetic candidate failure"),
+		Staging: true, State: "completed", EvaluationStatus: "failed",
+		EvaluationFailure: failureSummary,
+	}, now.Add(time.Minute))
+	if err != nil || record.Published || record.Score != nil || record.EvalError != nil ||
+		record.EvaluationStatus != "failed" || record.EvaluationFailure == nil ||
+		record.EvaluationFailure.Code != "candidate_build_failed" {
+		t.Fatalf("embargoed staging failure signal = %#v, %v", record, err)
+	}
+	record, err = store.RecordAdmission("staging-published-failure", ScoreAcceptedResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "completed", StatusUrl: "/competition/score/" + failureJobId.String(),
+	}, now.Add(70*time.Second))
+	if err != nil || record.EvaluationStatus != "failed" || record.EvaluationFailure == nil {
+		t.Fatalf("duplicate admission erased terminal projection = %#v, %v", record, err)
+	}
+	record, err = store.RecordPoll("staging-published-failure", ScoreJobResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "completed",
+	}, now.Add(80*time.Second))
+	if err != nil || record.EvaluationStatus != "failed" || record.EvaluationFailure == nil || record.Published {
+		t.Fatalf("legacy completed poll erased terminal projection = %#v, %v", record, err)
+	}
+	reopened, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := reopened.Get("staging-published-failure")
+	if err != nil || persisted.Published || persisted.EvaluationStatus != "failed" ||
+		persisted.EvaluationFailure == nil || persisted.EvaluationFailure.Code != "candidate_build_failed" ||
+		persisted.Score != nil || persisted.EvalError != nil {
+		t.Fatalf("persisted embargoed failure signal = %#v, %v", persisted, err)
+	}
+	if _, err := reopened.RecordPoll("staging-published-failure", ScoreJobResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "running", EvaluationStatus: "running",
+	}, now.Add(90*time.Second)); err == nil || !strings.Contains(err.Error(), "terminal evaluation failure") {
+		t.Fatalf("terminal failure regression error = %v", err)
+	}
+	record, err = store.RecordPoll("staging-published-failure", ScoreJobResult{
+		JobId: failureJobId, RoundId: roundId, PatchSha256: failureCanonicalPatchSha256,
+		Staging: true, State: "failed", EvaluationStatus: "failed",
+		EvaluationFailure: failureSummary,
+		EvalError:         submissionError("candidate_build_failed", "synthetic candidate failure"),
 	}, now.Add(2*time.Minute))
 	if err != nil || !record.Published || record.Score != nil || record.EvalError == nil ||
 		record.EvalError.Code != "candidate_build_failed" {
 		t.Fatalf("published staging failure = %#v, %v", record, err)
+	}
+
+	canceledJobId := server.NewId()
+	if _, err := store.BeginSubmission("staging-canceled-after-failure", strings.Repeat("3", 64), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordRound("staging-canceled-after-failure", roundId, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAdmission("staging-canceled-after-failure", ScoreAcceptedResult{
+		JobId: canceledJobId, RoundId: roundId, PatchSha256: strings.Repeat("4", 64),
+		Staging: true, State: "queued", StatusUrl: "/competition/score/" + canceledJobId.String(),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordPoll("staging-canceled-after-failure", ScoreJobResult{
+		JobId: canceledJobId, RoundId: roundId, PatchSha256: strings.Repeat("4", 64),
+		Staging: true, State: "completed", EvaluationStatus: "failed",
+		EvaluationFailure: failureSummary,
+	}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.RecordPoll("staging-canceled-after-failure", ScoreJobResult{
+		JobId: canceledJobId, RoundId: roundId, PatchSha256: strings.Repeat("4", 64),
+		Staging: true, State: "canceled", EvaluationStatus: "canceled",
+		EvalError: submissionError("staging_superseded", "synthetic staging replacement"),
+	}, now.Add(2*time.Minute))
+	if err != nil || record.State != "canceled" || record.EvaluationStatus != "canceled" ||
+		record.EvaluationFailure != nil || record.Published || record.Score != nil || record.EvalError != nil {
+		t.Fatalf("staging cancellation after terminal failure = %#v, %v", record, err)
+	}
+}
+
+func TestApexAdapterAcceptsLegacyPollingStateWithoutInventingFailure(t *testing.T) {
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 14, 13, 0, 0, 0, time.UTC)
+	roundId := server.NewId()
+	jobId := server.NewId()
+	inputPatchSha256 := strings.Repeat("c", 64)
+	canonicalPatchSha256 := strings.Repeat("d", 64)
+	if _, err := store.BeginSubmission("legacy-poll", inputPatchSha256, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordRound("legacy-poll", roundId, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAdmission("legacy-poll", ScoreAcceptedResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "queued", StatusUrl: "/competition/score/" + jobId.String(),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.RecordPoll("legacy-poll", ScoreJobResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "running",
+	}, now.Add(time.Minute))
+	if err != nil || record.EvaluationStatus != "running" || record.EvaluationFailure != nil || record.Published {
+		t.Fatalf("legacy running poll = %#v, %v", record, err)
+	}
+	record, err = store.RecordPoll("legacy-poll", ScoreJobResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "completed",
+	}, now.Add(2*time.Minute))
+	if err != nil || record.State != "completed" || record.EvaluationStatus != "" ||
+		record.EvaluationFailure != nil || record.Published {
+		t.Fatalf("legacy completed poll = %#v, %v", record, err)
+	}
+	reopened, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = reopened.Get("legacy-poll")
+	if err != nil || record.EvaluationStatus != "" || record.EvaluationFailure != nil {
+		t.Fatalf("persisted legacy completed poll invented an outcome = %#v, %v", record, err)
+	}
+}
+
+func TestApexAdapterLoadsLegacyTerminalErrorWithoutRewritingEvidence(t *testing.T) {
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 14, 14, 0, 0, 0, time.UTC)
+	legacyState := apexAdapterState{
+		Schema: apexAdapterStateSchema, NextSequence: 1,
+		Records: []ApexAdapterRecord{{
+			Sequence: 1, SubmissionId: "legacy-terminal", InputPatchSha256: strings.Repeat("e", 64),
+			RoundId: server.NewId(), JobId: server.NewId(), CanonicalPatchSha256: strings.Repeat("f", 64),
+			StatusUrl: "/competition/score/legacy-terminal", Staging: true, FeeUsd: 0,
+			State: "failed", Published: true,
+			EvalError: &CompetitionError{
+				Kind: "infrastructure", Code: "evaluation_time_budget_exhausted",
+				Message: "synthetic historical detail", Retriable: true,
+			},
+			SubmittedAt: now, UpdatedAt: now,
+		}},
+	}
+	encoded, err := json.MarshalIndent(legacyState, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	statePath := filepath.Join(storeDirectory, "adapter-state.json")
+	if err := os.WriteFile(statePath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatalf("load legacy adapter state: %v", err)
+	}
+	record, err := store.Get("legacy-terminal")
+	if err != nil || record.EvaluationStatus != "failed" || record.EvaluationFailure == nil ||
+		record.EvaluationFailure.Code != "evaluation_time_budget_exhausted" ||
+		record.EvalError == nil || record.EvalError.Retriable {
+		t.Fatalf("legacy terminal compatibility view = %#v, %v", record, err)
+	}
+	retained, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(retained, encoded) || !bytes.Contains(retained, []byte(`"retriable": true`)) ||
+		bytes.Contains(retained, []byte("evaluation_status")) {
+		t.Fatalf("legacy durable evidence was rewritten: %s", retained)
+	}
+}
+
+func TestApexAdapterRejectsContradictoryEvaluationSignals(t *testing.T) {
+	storeDirectory := t.TempDir()
+	if err := os.Chmod(storeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewApexAdapterFileStore(storeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 14, 15, 0, 0, 0, time.UTC)
+	roundId := server.NewId()
+	jobId := server.NewId()
+	inputPatchSha256 := strings.Repeat("1", 64)
+	canonicalPatchSha256 := strings.Repeat("2", 64)
+	if _, err := store.BeginSubmission("contradictory-poll", inputPatchSha256, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordRound("contradictory-poll", roundId, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordAdmission("contradictory-poll", ScoreAcceptedResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256,
+		Staging: true, State: "queued", StatusUrl: "/competition/score/" + jobId.String(),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	failure := &EvaluationFailure{
+		Kind: "infrastructure", Code: "evaluation_time_budget_exhausted", Retriable: false,
+	}
+	cases := []ScoreJobResult{
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "running", EvaluationStatus: "failed", EvaluationFailure: failure,
+		},
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "completed", EvaluationStatus: "completed", EvaluationFailure: failure,
+		},
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "completed", EvaluationStatus: "failed",
+			EvaluationFailure: &EvaluationFailure{
+				Kind: "infrastructure", Code: "evaluation_time_budget_exhausted", Retriable: true,
+			},
+		},
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "failed", EvaluationStatus: "failed", EvaluationFailure: failure,
+			EvalError: &CompetitionError{
+				Kind: "infrastructure", Code: "evaluation_time_budget_exhausted",
+				Message: "terminal errors cannot request retry", Retriable: true,
+			},
+		},
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "completed", EvaluationStatus: "failed", EvaluationFailure: failure,
+			Score: &ScoreResult{ScoreSchema: ScoreSchema},
+		},
+		{
+			JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+			State: "canceled", EvaluationStatus: "canceled",
+			EvalError: &CompetitionError{
+				Kind: "submission", Code: "staging_discarded", Retriable: false,
+			},
+		},
+	}
+	for i, job := range cases {
+		if _, err := store.RecordPoll("contradictory-poll", job, now.Add(time.Duration(i+1)*time.Minute)); err == nil {
+			t.Errorf("contradictory poll %d was accepted: %#v", i, job)
+		}
+	}
+	record, err := store.Get("contradictory-poll")
+	if err != nil || record.State != "queued" || record.EvaluationStatus != "queued" ||
+		record.EvaluationFailure != nil || record.Published || record.Score != nil || record.EvalError != nil {
+		t.Fatalf("rejected polls mutated durable state = %#v, %v", record, err)
+	}
+	if _, err := store.RecordPoll("contradictory-poll", ScoreJobResult{
+		JobId: jobId, RoundId: roundId, PatchSha256: canonicalPatchSha256, Staging: true,
+		State: "completed", EvaluationStatus: "failed", EvaluationFailure: failure,
+	}, now.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	rawScore, normalizedScore := 100.0, 100.0
+	finalizedAt := now.Add(11 * time.Minute)
+	contradictoryLeaderboard := SeasonLeaderboardResult{Epochs: []LeaderboardResult{{
+		RoundId: roundId, Staging: true, Status: "finalized", FinalizedAt: finalizedAt,
+		Entries: []LeaderboardEntry{{
+			JobId: jobId, PatchSha256: canonicalPatchSha256, HonestyReview: "not_reviewed",
+			Score: ScoreResult{
+				ScoreSchema: ScoreSchema, RawScore: &rawScore, NormalizedScore: &normalizedScore,
+				Gates: map[string]Gate{}, Significance: testScoreSignificance(false),
+			},
+		}},
+	}}}
+	if err := store.ReconcileLeaderboard(contradictoryLeaderboard, finalizedAt); err == nil ||
+		!strings.Contains(err.Error(), "contradicts") {
+		t.Fatalf("failure-to-score reconciliation error = %v", err)
+	}
+	if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{{
+		RoundId: roundId, Staging: true, Status: "finalized", FinalizedAt: finalizedAt,
+	}}}, finalizedAt); err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Get("contradictory-poll")
+	if err != nil || record.Published || record.EvaluationStatus != "failed" ||
+		record.EvaluationFailure == nil || record.Score != nil || record.EvalError != nil {
+		t.Fatalf("failure signal became published during reconciliation = %#v, %v", record, err)
 	}
 }
 

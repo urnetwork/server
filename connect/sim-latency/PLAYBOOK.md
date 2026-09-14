@@ -1,9 +1,10 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-09-03
+Status date: 2026-09-14
 
 Evaluator/baseline qualification: **measured-product qualification complete;
-replacement epoch-0 evaluator image pending after source-lock expansion**
+corrected epoch-0 scorer image installed and smoke-tested; API/config rollout
+and accepted live score pending**
 
 Launch-control validation: **complete locally; release deployment and external actions pending**
 
@@ -41,9 +42,9 @@ Read these first:
 | Public patch-authoring tag | `apex-season-1` at `eb697281cbe0a19a27d7771fe69fb24c2c3dab8c` |
 | Evaluator source | Epoch ledger `config/main/sim-latency.yml` is the sole authority for branch, epoch commits, and the significant-improvement percentage |
 | Control plane | API and worker follow `main`; their commits are not scoring inputs. Every job persists the exact API and worker runtime image digests. |
-| Evaluator image | The prior four-repository epoch-0 image is superseded. Rebuild from source commit `8f4cde37b382ab735e40f9471dca4d051b1f326d` and record the new immutable digest before launch. |
+| Evaluator image | Source commit `759b7462ef4dbe849d7bfbcc7a73e8b5c573c340`; locally installed image `sha256:4b7e46e2243d26b915e83a85d3c2b4b7679d5038bc0c53197ce274cec137209b`. Full Docker smoke passed on 2026-09-14. Main API/config rollout and accepted live score remain pending. |
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
-| Simulator / scorer | Replacement epoch-0 image binary digest pending the required eight-repository rebuild. |
+| Simulator / scorer | `fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f`; includes the required significance record. Measured product code is unchanged by the scorer repair. |
 | Workload | 1,800 providers; 200 clients; 80 arrivals/min; quality window 2; 4 exchange hosts; 4 shards |
 | Measurement | 180 seconds; impairment on; median of `R=9` |
 | Takeover rule | Epoch 1 starts at `candidate <= same-round baseline * 0.839`; every epoch also requires G1–G6 and one-sided Welch `p <= 0.05`. The source ledger supplies later percentages. |
@@ -257,15 +258,23 @@ curl -fsS "$COMPETITION_API_BASE/healthz" | \
   jq -e '.status == "alive"'
 curl -fsS "$COMPETITION_API_BASE/info" | \
   jq -e '.enabled == true and
-         .base_sha == "8f4cde37b382ab735e40f9471dca4d051b1f326d" and
+         .base_sha == "759b7462ef4dbe849d7bfbcc7a73e8b5c573c340" and
+         .evaluator_image_digest == "sha256:4b7e46e2243d26b915e83a85d3c2b4b7679d5038bc0c53197ce274cec137209b" and
          .evaluation_policy.provider_count == 1800 and
          .evaluation_policy.replicates == 9 and
          .evaluation_policy.takeover_margin == 0.161'
 ```
 
-The literal base and 0.161 checks above apply to the first competition round.
-For every later round, derive both expected values from its selected source
-epoch in `config/main/sim-latency.yml`; do not copy epoch 0 values forward.
+The literal source/image and 0.161 checks above apply to source epoch 0.
+For every later round, derive the source and margin from its selected source
+epoch in `config/main/sim-latency.yml` and the image from the corresponding
+verified release; do not copy epoch 0 values forward.
+
+Do not create the next staging epoch while `/info` still advertises the
+superseded image. Epoch 3 completed its first measurement pass, but the old
+scorer omitted significance and triggered a retry that exhausted the total
+budget. The repaired image and strict contract validation are mandatory;
+finalized historical jobs must not be rewritten as scores from the new image.
 
 On first boot, the worker must heartbeat before round generation. An
 authenticated `/readyz` remains 503 until the host has an authenticated
@@ -389,8 +398,12 @@ URLs, miner Dockerfiles, or miner-built images:
 `POST /competition/score` returns HTTP 202 with a job id and status URL.
 `GET /competition/score/{jobId}` polls it. One canonical patch per round maps
 to one cache identity even when multiple principals submit it. Before
-post-review epoch finalization, submitter responses expose only processing state: terminal jobs
-appear as outcome-neutral `completed`, with score and failure results omitted.
+post-review epoch finalization, legacy `state` reports terminal work as
+outcome-neutral `completed`. The additive `evaluation_status` distinguishes
+`queued`, `running`, `completed`, `failed`, and `canceled`; a reviewed terminal
+code may appear in message-free `evaluation_failure`. Terminal failures are not
+retriable. Scores, significance, gates, rankings, and full error messages remain
+embargoed. The new signal requires the updated main API rollout.
 
 Operate with these expectations:
 
@@ -691,9 +704,11 @@ Still to add or approve before a public competition starts:
   six-epoch weekly cadence and post-review finalization reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
-- [ ] rebuild and qualify the epoch-0 evaluator image from the complete
-  eight-repository source lock at server commit
-  `8f4cde37b382ab735e40f9471dca4d051b1f326d`;
+- [ ] roll out the corrected epoch-0 image pin and polling contract in the
+  main API/configuration, then verify an accepted live staging score and
+  finalized leaderboard entry. The complete eight-repository image at server
+  commit `759b7462ef4dbe849d7bfbcc7a73e8b5c573c340` is installed locally and
+  its full Docker smoke passed on 2026-09-14;
   main API/worker releases remain on `main`, and every job API response persists
   and exposes its frozen evaluator plus exact API/worker runtime image digests;
 - [ ] live MinIO `/readyz` proof, backup-replication record, and capacity check;

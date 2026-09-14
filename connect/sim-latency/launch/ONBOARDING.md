@@ -63,9 +63,26 @@ The adapter sends it as `Authorization: Bearer TOKEN`.
 4. Poll the exact status URL. Preserve identity across HTTP 429 and retriable
    5xx responses; use bounded exponential backoff and never resubmit under a
    new identity to bypass FIFO order or the fee boundary.
-5. Before finalization, non-operator responses expose state only. A finalized
-   staging epoch publishes each outcome at its status URL and in the opt-in
-   staging leaderboard. After production review finalizes an epoch, read its
+5. Read `evaluation_status` as the evaluator lifecycle: `queued`, `running`,
+   `completed`, `failed`, or `canceled`. `completed` says only that evaluation
+   produced a private score; it reveals no value, placeability, gate,
+   significance, or diagnostic. `failed` is terminal. Its optional
+   `evaluation_failure` contains only a reviewed `kind`, `code`, and
+   `retriable:false`; an unknown code produces no summary. It never contains
+   the raw message or readiness detail. Keep using the legacy `state` field for
+   compatibility: before publication both successful and failed evaluation
+   retain `state: completed`.
+6. During a rolling API update, a response may lack `evaluation_status`.
+   Derive `queued`, `running`, and `canceled` from the same legacy state, but
+   treat legacy `completed` as outcome-neutral and continue the normal epoch
+   reconciliation path. An actual HTTP 429 or typed retriable 5xx response is
+   still a transport/service retry; a polled `evaluation_status: failed` is
+   not.
+7. Before finalization, non-operator responses continue to omit `score` and
+   full `eval_error`. A finalized staging epoch publishes each outcome at its
+   status URL and in the opt-in staging leaderboard. Published historical
+   terminal errors are returned with `retriable:false` without rewriting their
+   retained evidence. After production review finalizes an epoch, read its
    default public leaderboard, reveal, and authenticated workload.
 
 The authoritative schema is

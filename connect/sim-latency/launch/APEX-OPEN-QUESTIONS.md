@@ -25,9 +25,12 @@ still needed to activate the competition through Apex.
   explicitly fee-free and use the real evaluator against frozen source epoch
   zero without creating winners or production leaderboard rows. Finalized
   staging epochs are exposed only by the explicit staging-inclusive view.
-- Scores, ranks, and evaluation errors remain embargoed through epoch close,
-  complete backlog drain, and manual honesty review. Only the atomically
-  finalized leaderboard is public.
+- Scores, ranks, and full evaluation errors remain embargoed through epoch
+  close, complete backlog drain, and manual honesty review. An additive
+  mid-epoch polling signal distinguishes execution failure from running work
+  and may include a message-free, reviewed failure code; the updated API must
+  be deployed before clients rely on it. Only the atomically finalized
+  leaderboard is public.
 - UR's epoch-specific improvement margin and one-sided Welch significance test
   replace the ordinary one-percent Apex solo takeover rule. Epoch 1 starts at a
   16.1% margin; every evaluation records its variance and significance result.

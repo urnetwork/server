@@ -3342,8 +3342,103 @@ func scoreJobStateView(state string, published bool, principal *Principal) strin
 	return state
 }
 
+// Projects the evaluator lifecycle without revealing whether a completed
+// score passed any gate. A successful stored outcome is therefore completed,
+// while a terminal error remains distinguishable as failed.
+func scoreJobEvaluationStatus(state string) string {
+	switch state {
+	case "queued", "running", "failed", "canceled", "completed":
+		return state
+	case "succeeded":
+		return "completed"
+	default:
+		return ""
+	}
+}
+
+// Copies only controller-reviewed code identifiers into the pre-publication
+// signal. Unknown evaluator codes remain private because even a code string
+// is not assumed safe merely because it passed structural validation.
+func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *EvaluationFailure {
+	if status != "failed" || evalError == nil {
+		return nil
+	}
+	known := false
+	switch evalError.Kind + "\x00" + evalError.Code {
+	case "submission\x00candidate_build_failed",
+		"submission\x00incomplete_run",
+		"submission\x00outside_epoch_window",
+		"submission\x00resource_violation",
+		"submission\x00run_process_failed",
+		"submission\x00run_unstable",
+		"infrastructure\x00accounting_window_mismatch",
+		"infrastructure\x00artifact_archive_failed",
+		"infrastructure\x00artifact_archive_unavailable",
+		"infrastructure\x00artifact_authentication_failed",
+		"infrastructure\x00artifact_create_failed",
+		"infrastructure\x00artifact_manifest_failed",
+		"infrastructure\x00artifact_path_mismatch",
+		"infrastructure\x00artifact_read_failed",
+		"infrastructure\x00artifact_schema_mismatch",
+		"infrastructure\x00artifact_seal_failed",
+		"infrastructure\x00artifact_too_large",
+		"infrastructure\x00baseline_gate_failed",
+		"infrastructure\x00containment_gate_failed",
+		"infrastructure\x00duplicate_replicate",
+		"infrastructure\x00empty_measured_window",
+		"infrastructure\x00empty_results_csv",
+		"infrastructure\x00evaluation_id_mismatch",
+		"infrastructure\x00evaluation_time_budget_exhausted",
+		"infrastructure\x00evaluator_exit",
+		"infrastructure\x00evaluator_identity_mismatch",
+		"infrastructure\x00evaluator_process_failed",
+		"infrastructure\x00evaluator_result_invalid",
+		"infrastructure\x00evaluator_result_missing",
+		"infrastructure\x00incomplete_run_manifest",
+		"infrastructure\x00invalid_accounting",
+		"infrastructure\x00invalid_baseline",
+		"infrastructure\x00invalid_final_marker",
+		"infrastructure\x00invalid_measure_window",
+		"infrastructure\x00invalid_resource_report",
+		"infrastructure\x00invalid_results_csv",
+		"infrastructure\x00local_configuration_mismatch",
+		"infrastructure\x00malformed_artifact",
+		"infrastructure\x00malformed_samples",
+		"infrastructure\x00manifest_csv_mismatch",
+		"infrastructure\x00missing_evaluation_id",
+		"infrastructure\x00missing_results_csv",
+		"infrastructure\x00missing_run_manifest",
+		"infrastructure\x00missing_samples",
+		"infrastructure\x00resource_window_mismatch",
+		"infrastructure\x00results_identity_mismatch",
+		"infrastructure\x00round_policy_mismatch",
+		"infrastructure\x00round_seed_unavailable",
+		"infrastructure\x00round_workload_unavailable",
+		"infrastructure\x00run_flags_mismatch",
+		"infrastructure\x00sample_identity_mismatch",
+		"infrastructure\x00score_result_invalid",
+		"infrastructure\x00scorer_failure",
+		"infrastructure\x00scorer_version_mismatch",
+		"infrastructure\x00source_epoch_invalid",
+		"infrastructure\x00timeout_mismatch",
+		"infrastructure\x00workload_mismatch":
+		known = true
+	}
+	if !known {
+		return nil
+	}
+	return &EvaluationFailure{Kind: evalError.Kind, Code: evalError.Code, Retriable: false}
+}
+
 func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobResult {
 	result := job.ScoreJobResult
+	result.EvaluationStatus = scoreJobEvaluationStatus(result.State)
+	result.EvaluationFailure = scoreJobEvaluationFailure(result.EvaluationStatus, result.EvalError)
+	if result.EvaluationStatus == "failed" && result.EvalError != nil {
+		evalError := *result.EvalError
+		evalError.Retriable = false
+		result.EvalError = &evalError
+	}
 	if principal.Role != "operator" && job.Round.Staging && job.Round.Canceled {
 		if !isStagingDiscardedJob(result) {
 			result.State = "canceled"
@@ -3353,6 +3448,8 @@ func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobR
 			)
 		}
 		result.Score = nil
+		result.EvaluationStatus = "canceled"
+		result.EvaluationFailure = nil
 		return result
 	}
 	if principal.Role != "operator" && !roundPublished(&job.Round, now) {
@@ -4631,17 +4728,13 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 		return nil, err
 	}
 	setRoundStatus(&job.Round, now)
-	if len(scoreJson) != 0 {
-		job.Score = &ScoreResult{}
-		if err := json.Unmarshal(scoreJson, job.Score); err != nil {
-			return nil, fmt.Errorf("decode stored score: %w", err)
-		}
+	job.Score, err = decodeNullableJson[ScoreResult](scoreJson)
+	if err != nil {
+		return nil, fmt.Errorf("decode stored score: %w", err)
 	}
-	if len(errorJson) != 0 {
-		job.EvalError = &CompetitionError{}
-		if err := json.Unmarshal(errorJson, job.EvalError); err != nil {
-			return nil, fmt.Errorf("decode stored evaluation error: %w", err)
-		}
+	job.EvalError, err = decodeNullableJson[CompetitionError](errorJson)
+	if err != nil {
+		return nil, fmt.Errorf("decode stored evaluation error: %w", err)
 	}
 	if !includePatch {
 		job.Patch = nil
@@ -4956,7 +5049,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					"submission exhausted its total evaluation time budget",
 				)
 			}
-			scoreJson, errorJson, manifestJson := nullableJson(outcome.Score), nullableJson(outcome.Error), []byte(outcome.ArtifactManifest)
+			manifestJson := []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
 			if len(manifestJson) != 0 {
 				if !json.Valid(manifestJson) {
@@ -4982,6 +5075,12 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					"api_image_digest":         apiImageDigest, "worker_image_digest": workerImageDigest,
 				})
 			} else {
+				if outcome.Error != nil && outcome.Error.Retriable {
+					terminalError := *outcome.Error
+					terminalError.Retriable = false
+					outcome.Error = &terminalError
+				}
+				scoreJson, errorJson := nullableJson(outcome.Score), nullableJson(outcome.Error)
 				terminal := "failed"
 				if outcome.Score != nil && outcome.Error == nil {
 					terminal = "succeeded"
@@ -5061,13 +5160,29 @@ func appendEvent(ctx context.Context, tx server.PgTx, jobId server.Id, at time.T
 	`, jobId, at, eventType, actor, string(bytes), hex.EncodeToString(h[:])))
 }
 
-func nullableJson(value any) any {
+// Encodes a present value for a nullable PostgreSQL JSON column. A typed nil
+// pointer must become SQL NULL rather than the distinct JSON null value.
+func nullableJson[T any](value *T) any {
 	if value == nil {
 		return nil
 	}
 	bytes, err := json.Marshal(value)
 	server.Raise(err)
 	return string(bytes)
+}
+
+// Decodes both SQL NULL (a nil byte slice from pgx) and historical JSON null
+// as an absent pointer. Decoding through **T lets encoding/json preserve that
+// distinction instead of leaving a preallocated zero-value result behind.
+func decodeNullableJson[T any](encoded []byte) (*T, error) {
+	if len(encoded) == 0 {
+		return nil, nil
+	}
+	var value *T
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func nullableBytes(value []byte) any {
@@ -5127,6 +5242,8 @@ type ScoreArgs = model.CompetitionScoreArgs
 type ScoreAcceptedResult = model.CompetitionScoreAcceptedResult
 
 type ScoreJobResult = model.CompetitionScoreJobResult
+
+type EvaluationFailure = model.CompetitionEvaluationFailure
 
 type ScoreResult = model.CompetitionScoreResult
 
@@ -5721,24 +5838,26 @@ var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 // staging records are explicitly fee-free. Public outcome fields are populated
 // only after the API publishes a finalized round.
 type ApexAdapterRecord struct {
-	Sequence             uint64            `json:"sequence"`
-	SubmissionId         string            `json:"submission_id"`
-	InputPatchSha256     string            `json:"input_patch_sha256"`
-	RoundId              server.Id         `json:"round_id,omitempty"`
-	JobId                server.Id         `json:"job_id,omitempty"`
-	CanonicalPatchSha256 string            `json:"canonical_patch_sha256,omitempty"`
-	StatusUrl            string            `json:"status_url,omitempty"`
-	Staging              bool              `json:"staging"`
-	FeeUsd               int               `json:"fee_usd"`
-	FeeReceipt           string            `json:"fee_receipt,omitempty"`
-	State                string            `json:"state"`
-	Published            bool              `json:"published"`
-	Winner               bool              `json:"winner,omitempty"`
-	HonestyReview        string            `json:"honesty_review,omitempty"`
-	Score                *ScoreResult      `json:"score,omitempty"`
-	EvalError            *CompetitionError `json:"eval_error,omitempty"`
-	SubmittedAt          time.Time         `json:"submitted_at"`
-	UpdatedAt            time.Time         `json:"updated_at"`
+	Sequence             uint64             `json:"sequence"`
+	SubmissionId         string             `json:"submission_id"`
+	InputPatchSha256     string             `json:"input_patch_sha256"`
+	RoundId              server.Id          `json:"round_id,omitempty"`
+	JobId                server.Id          `json:"job_id,omitempty"`
+	CanonicalPatchSha256 string             `json:"canonical_patch_sha256,omitempty"`
+	StatusUrl            string             `json:"status_url,omitempty"`
+	Staging              bool               `json:"staging"`
+	FeeUsd               int                `json:"fee_usd"`
+	FeeReceipt           string             `json:"fee_receipt,omitempty"`
+	State                string             `json:"state"`
+	EvaluationStatus     string             `json:"evaluation_status,omitempty"`
+	EvaluationFailure    *EvaluationFailure `json:"evaluation_failure,omitempty"`
+	Published            bool               `json:"published"`
+	Winner               bool               `json:"winner,omitempty"`
+	HonestyReview        string             `json:"honesty_review,omitempty"`
+	Score                *ScoreResult       `json:"score,omitempty"`
+	EvalError            *CompetitionError  `json:"eval_error,omitempty"`
+	SubmittedAt          time.Time          `json:"submitted_at"`
+	UpdatedAt            time.Time          `json:"updated_at"`
 }
 
 type apexAdapterState struct {
@@ -5815,6 +5934,7 @@ func (self *ApexAdapterFileStore) BeginSubmission(submissionId string, patchSha2
 	if err != nil {
 		return nil, err
 	}
+	result = apexAdapterRecordView(result)
 	return &result, nil
 }
 
@@ -5875,6 +5995,9 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 	if accepted.JobId == (server.Id{}) || accepted.RoundId == (server.Id{}) || !sha256Pattern.MatchString(accepted.PatchSha256) || accepted.StatusUrl == "" {
 		return nil, errors.New("competition API returned a malformed admission identity")
 	}
+	if accepted.State != "queued" && accepted.State != "running" && accepted.State != "completed" {
+		return nil, errors.New("competition API returned an invalid admission state")
+	}
 	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
 		if !record.Staging && record.FeeReceipt == "" {
 			return errors.New("competition admission cannot precede fee collection")
@@ -5885,7 +6008,8 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 		if record.RoundId != (server.Id{}) && record.RoundId != accepted.RoundId {
 			return errors.New("competition API admitted the submission to a different round")
 		}
-		if record.JobId != (server.Id{}) && (record.JobId != accepted.JobId || record.RoundId != accepted.RoundId ||
+		alreadyAdmitted := record.JobId != (server.Id{})
+		if alreadyAdmitted && (record.JobId != accepted.JobId || record.RoundId != accepted.RoundId ||
 			record.CanonicalPatchSha256 != accepted.PatchSha256 || record.StatusUrl != accepted.StatusUrl) {
 			return errors.New("competition API changed an immutable admission identity")
 		}
@@ -5893,10 +6017,117 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 		record.RoundId = accepted.RoundId
 		record.CanonicalPatchSha256 = accepted.PatchSha256
 		record.StatusUrl = accepted.StatusUrl
-		record.State = accepted.State
+		if !alreadyAdmitted {
+			record.State = accepted.State
+			// Admission predates the additive polling status. In particular,
+			// cache-hit state completed is outcome-neutral until the job endpoint
+			// supplies evaluation_status or a published outcome.
+			if accepted.State == "completed" {
+				record.EvaluationStatus = ""
+			} else {
+				record.EvaluationStatus = scoreJobEvaluationStatus(accepted.State)
+			}
+			record.EvaluationFailure = nil
+		}
 		record.UpdatedAt = now.UTC()
 		return nil
 	})
+}
+
+// Checks the legacy public state and the outcome-neutral lifecycle projection
+// together. Completed is deliberately ambiguous only on the legacy field: the
+// additive status may distinguish a terminal failure from completed scoring.
+func scoreJobEvaluationStatusMatchesState(state string, status string) bool {
+	switch state {
+	case "queued":
+		return status == "queued"
+	case "running":
+		return status == "running"
+	case "completed":
+		return status == "completed" || status == "failed"
+	case "succeeded":
+		return status == "completed"
+	case "failed":
+		return status == "failed"
+	case "canceled":
+		return status == "canceled"
+	default:
+		return false
+	}
+}
+
+// Rejects a poll that combines mutually exclusive lifecycle, score, and error
+// evidence. A sanitized failure summary is terminal metadata, not publication
+// of the embargoed evaluator result.
+func validateScoreJobPoll(job ScoreJobResult) error {
+	if !scoreJobEvaluationStatusMatchesState(job.State, job.EvaluationStatus) {
+		return errors.New("competition poll returned contradictory evaluation state")
+	}
+	if job.EvaluationFailure != nil {
+		expected := scoreJobEvaluationFailure(job.EvaluationStatus, &CompetitionError{
+			Kind: job.EvaluationFailure.Kind,
+			Code: job.EvaluationFailure.Code,
+		})
+		if expected == nil || job.EvaluationFailure.Retriable ||
+			expected.Kind != job.EvaluationFailure.Kind || expected.Code != job.EvaluationFailure.Code {
+			return errors.New("competition poll returned an invalid evaluation failure summary")
+		}
+	}
+
+	stagingDiscard := isStagingDiscardedJob(job)
+	if job.Score != nil {
+		if job.State != "succeeded" || job.EvaluationStatus != "completed" ||
+			job.EvaluationFailure != nil || job.EvalError != nil || validateScore(job.Score) != nil {
+			return errors.New("competition poll returned an invalid published score")
+		}
+		return nil
+	}
+	if job.EvalError != nil {
+		if stagingDiscard {
+			if job.EvaluationStatus != "canceled" || job.EvaluationFailure != nil ||
+				validateEvaluationError(job.EvalError) != nil {
+				return errors.New("competition poll returned an invalid staging cancellation")
+			}
+			return nil
+		}
+		if job.State != "failed" || job.EvaluationStatus != "failed" ||
+			job.EvalError.Retriable || validateEvaluationError(job.EvalError) != nil {
+			return errors.New("competition poll returned an invalid published error")
+		}
+		expected := scoreJobEvaluationFailure(job.EvaluationStatus, job.EvalError)
+		if (expected == nil) != (job.EvaluationFailure == nil) ||
+			expected != nil && (expected.Kind != job.EvaluationFailure.Kind || expected.Code != job.EvaluationFailure.Code) {
+			return errors.New("competition poll returned inconsistent failure details")
+		}
+		return nil
+	}
+	if job.State == "succeeded" || job.State == "failed" || job.State == "canceled" {
+		return errors.New("competition poll returned a terminal state without its published outcome")
+	}
+	return nil
+}
+
+// Supplies the strictly limited projection available from a pre-upgrade API
+// response. Legacy completed stays outcome-neutral because it cannot prove
+// whether the hidden terminal result succeeded or failed.
+func normalizeLegacyScoreJobPoll(job *ScoreJobResult) error {
+	if job.EvaluationStatus != "" {
+		return nil
+	}
+	if job.EvaluationFailure != nil {
+		return errors.New("competition poll returned a failure summary without evaluation status")
+	}
+	job.EvaluationStatus = scoreJobEvaluationStatus(job.State)
+	if job.EvaluationStatus == "" {
+		return errors.New("competition poll returned an invalid legacy state")
+	}
+	if job.EvaluationStatus == "failed" && job.EvalError != nil {
+		evalError := *job.EvalError
+		evalError.Retriable = false
+		job.EvalError = &evalError
+		job.EvaluationFailure = scoreJobEvaluationFailure(job.EvaluationStatus, job.EvalError)
+	}
+	return nil
 }
 
 // RecordPoll records outcome-neutral state until publication. A finalized
@@ -5911,12 +6142,56 @@ func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobRe
 		if !record.Staging && (job.Score != nil || job.EvalError != nil && !stagingDiscard) {
 			return errors.New("competition poll disclosed an embargoed outcome")
 		}
+		legacyProjection := job.EvaluationStatus == ""
+		if err := normalizeLegacyScoreJobPoll(&job); err != nil {
+			return err
+		}
+		if err := validateScoreJobPoll(job); err != nil {
+			return err
+		}
+		legacyCompleted := legacyProjection && job.State == "completed" &&
+			job.EvaluationFailure == nil && job.Score == nil && job.EvalError == nil
+		if record.EvaluationStatus == "failed" {
+			if legacyCompleted {
+				record.UpdatedAt = now.UTC()
+				return nil
+			}
+			if stagingDiscard && job.EvaluationStatus == "canceled" {
+				record.State = job.State
+				record.EvaluationStatus = job.EvaluationStatus
+				record.EvaluationFailure = nil
+				record.UpdatedAt = now.UTC()
+				return nil
+			}
+			if job.EvaluationStatus != "failed" ||
+				(record.EvaluationFailure == nil) != (job.EvaluationFailure == nil) ||
+				record.EvaluationFailure != nil &&
+					(record.EvaluationFailure.Kind != job.EvaluationFailure.Kind ||
+						record.EvaluationFailure.Code != job.EvaluationFailure.Code) {
+				return errors.New("competition poll changed a terminal evaluation failure")
+			}
+		}
+		if record.EvaluationStatus == "canceled" && job.EvaluationStatus != "canceled" {
+			return errors.New("competition poll changed a canceled evaluation")
+		}
+		if legacyCompleted {
+			// A legacy completed response proves only that processing stopped. Do
+			// not erase a stronger status learned from a new server during a
+			// rolling deployment, or invent completed scoring when none is known.
+			if record.EvaluationStatus != "completed" && record.EvaluationStatus != "canceled" {
+				record.State = "completed"
+				record.EvaluationStatus = ""
+				record.EvaluationFailure = nil
+			}
+			record.UpdatedAt = now.UTC()
+			return nil
+		}
 		if record.Staging && !stagingDiscard && (job.Score != nil || job.EvalError != nil) {
 			if job.Score != nil {
 				if job.State != "succeeded" || job.EvalError != nil || validateScore(job.Score) != nil {
 					return errors.New("competition poll returned an invalid published staging score")
 				}
-			} else if job.State != "failed" || validateEvaluationError(job.EvalError) != nil {
+			} else if job.State != "failed" || job.EvalError.Retriable || validateEvaluationError(job.EvalError) != nil {
 				return errors.New("competition poll returned an invalid published staging error")
 			}
 			record.Score = job.Score
@@ -5926,6 +6201,8 @@ func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobRe
 			return errors.New("competition poll returned an invalid unpublished staging state")
 		}
 		record.State = job.State
+		record.EvaluationStatus = job.EvaluationStatus
+		record.EvaluationFailure = job.EvaluationFailure
 		record.UpdatedAt = now.UTC()
 		return nil
 	})
@@ -5971,8 +6248,13 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 				if entry.Score.ScoreSchema != ScoreSchema || entry.Score.Significance == nil {
 					return errors.New("leaderboard score is missing its statistical record")
 				}
+				if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
+					return errors.New("leaderboard score contradicts the terminal evaluation status")
+				}
 				score := entry.Score
 				record.Score = &score
+				record.EvaluationStatus = "completed"
+				record.EvaluationFailure = nil
 				record.Published = true
 				record.Winner = entry.Winner
 				record.HonestyReview = entry.HonestyReview
@@ -5991,7 +6273,7 @@ func (self *ApexAdapterFileStore) Get(submissionId string) (*ApexAdapterRecord, 
 	err := self.read(func(state *apexAdapterState) error {
 		for i := range state.Records {
 			if state.Records[i].SubmissionId == submissionId {
-				record := state.Records[i]
+				record := apexAdapterRecordView(state.Records[i])
 				result = &record
 				return nil
 			}
@@ -6011,6 +6293,7 @@ func (self *ApexAdapterFileStore) Pending() ([]ApexAdapterRecord, error) {
 				record.State == "canceled" || record.State == "invalid" {
 				continue
 			}
+			record = apexAdapterRecordView(record)
 			record.Score = nil
 			record.EvalError = nil
 			records = append(records, record)
@@ -6043,7 +6326,35 @@ func (self *ApexAdapterFileStore) changeRecord(
 	if err != nil {
 		return nil, err
 	}
+	result = apexAdapterRecordView(result)
 	return &result, nil
+}
+
+// Returns a compatibility view of a saved adapter record without mutating the
+// durable document. Old records lacked evaluation_status and may contain a
+// terminal infrastructure error whose historical retry flag was true.
+func apexAdapterRecordView(record ApexAdapterRecord) ApexAdapterRecord {
+	if record.EvaluationStatus == "" {
+		switch {
+		case record.Score != nil:
+			record.EvaluationStatus = "completed"
+		case record.EvalError != nil:
+			record.EvaluationStatus = "failed"
+		case record.State == "completed":
+			// A legacy completed poll carried no success/failure projection.
+		default:
+			record.EvaluationStatus = scoreJobEvaluationStatus(record.State)
+		}
+	}
+	if record.EvaluationStatus == "failed" && record.EvalError != nil {
+		evalError := *record.EvalError
+		evalError.Retriable = false
+		record.EvalError = &evalError
+		if record.EvaluationFailure == nil {
+			record.EvaluationFailure = scoreJobEvaluationFailure(record.EvaluationStatus, record.EvalError)
+		}
+	}
+	return record
 }
 
 func (self *ApexAdapterFileStore) read(read func(*apexAdapterState) error) error {
@@ -6160,6 +6471,25 @@ func validateApexAdapterState(state *apexAdapterState) error {
 				return errors.New("Apex adapter state contains an invalid job identity")
 			}
 			seenJobIds[record.JobId] = true
+		} else if record.EvaluationStatus != "" || record.EvaluationFailure != nil {
+			return errors.New("Apex adapter state contains evaluation state before admission")
+		}
+		if record.EvaluationStatus != "" {
+			if record.State != "published" && !scoreJobEvaluationStatusMatchesState(record.State, record.EvaluationStatus) {
+				return errors.New("Apex adapter state contains contradictory evaluation state")
+			}
+			if record.State == "published" && record.EvaluationStatus != "completed" {
+				return errors.New("Apex adapter state contains a contradictory published state")
+			}
+		}
+		if record.EvaluationFailure != nil {
+			expected := scoreJobEvaluationFailure(record.EvaluationStatus, &CompetitionError{
+				Kind: record.EvaluationFailure.Kind,
+				Code: record.EvaluationFailure.Code,
+			})
+			if expected == nil || record.EvaluationFailure.Retriable {
+				return errors.New("Apex adapter state contains an invalid evaluation failure summary")
+			}
 		}
 		if !record.Published && (record.Score != nil || record.EvalError != nil) {
 			return errors.New("Apex adapter state contains an unpublished outcome")
@@ -6167,8 +6497,21 @@ func validateApexAdapterState(state *apexAdapterState) error {
 		if record.Published && (record.Score == nil) == (record.EvalError == nil) {
 			return errors.New("Apex adapter published a submission without exactly one outcome")
 		}
-		if record.EvalError != nil && (!record.Staging || validateEvaluationError(record.EvalError) != nil) {
+		if record.Score != nil && record.EvaluationStatus != "" &&
+			(record.EvaluationStatus != "completed" || record.EvaluationFailure != nil) {
+			return errors.New("Apex adapter score contradicts its evaluation status")
+		}
+		if record.EvalError != nil && (!record.Staging ||
+			record.EvalError.Retriable && record.EvaluationStatus != "" ||
+			validateEvaluationError(record.EvalError) != nil) {
 			return errors.New("Apex adapter state contains an invalid staging evaluation error")
+		}
+		if record.EvalError != nil && record.EvaluationStatus != "" {
+			expected := scoreJobEvaluationFailure(record.EvaluationStatus, record.EvalError)
+			if record.EvaluationStatus != "failed" || (expected == nil) != (record.EvaluationFailure == nil) ||
+				expected != nil && (expected.Kind != record.EvaluationFailure.Kind || expected.Code != record.EvaluationFailure.Code) {
+				return errors.New("Apex adapter error contradicts its evaluation status")
+			}
 		}
 		seenSubmissionIds[record.SubmissionId] = true
 		lastSequence = record.Sequence

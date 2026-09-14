@@ -80,6 +80,17 @@ production-only; its `include_staging=true` view publishes the finalized
 staging epoch with `staging: true` and a null winner for adapter conformance.
 It creates no honesty-review, promotion, or production-winner state.
 
+For the polling proof, record both compatibility `state` and additive
+`evaluation_status`. Before publication, `state` remains `completed` for both
+terminal outcomes, while `evaluation_status` distinguishes `completed` scoring
+from terminal `failed` work. A failed response may add only the message-free
+reviewed `evaluation_failure` tuple (`kind`, `code`, `retriable:false`); score,
+gates, diagnostics, full `eval_error`, and readiness remain embargoed. Absence
+of that tuple for an unknown code is valid. A rolling-deployment response with
+no `evaluation_status` leaves legacy `completed` outcome-neutral. Neither the
+new failure signal nor staging cancellation publishes an epoch early; capture
+the finalized polling/leaderboard reconciliation separately.
+
 Staging still produces the candidate's authenticated same-round baseline and
 score bundle, but it does not require the separately promoted host rebaseline
 identity used as a production launch gate. Production retains that exact-round
