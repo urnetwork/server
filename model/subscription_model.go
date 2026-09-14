@@ -1425,6 +1425,17 @@ func SetContractStream(
 // each is distinct in itself, so several connections of one client through one
 // extender are one row.
 //
+// create_time is copied from the contract, not defaulted: the hourly counts of
+// connect/EXTENDER.md M3 bucket these rows by create_time and the contracts by
+// theirs, so the two must be the same instant to the microsecond. The contract
+// writes its own create_time from clock_timestamp(), which the column's
+// DEFAULT now() -- the transaction start -- would only approximate, and a
+// transaction that straddles an hour boundary would put the contract and its
+// parties in different buckets. The join is on the transfer_contract row this
+// same transaction inserted just above, so it is a primary key lookup that
+// always hits; a contract that somehow is not there gets no party rows rather
+// than a null create_time.
+//
 // $1 contract, $2 source client, $3 destination client, $4 source party,
 // $5 destination party.
 const contractExtenderInsertSql = `
@@ -1433,14 +1444,16 @@ const contractExtenderInsertSql = `
 		extender_id,
 		party,
 		client_id,
-		network_id
+		network_id,
+		create_time
 	)
 	SELECT
-		$1,
+		transfer_contract.contract_id,
 		endpoint.extender_id,
 		endpoint.party,
 		network_extender.client_id,
-		network_extender.network_id
+		network_extender.network_id,
+		transfer_contract.create_time
 	FROM (
 		SELECT DISTINCT extender_id, $4::varchar AS party
 		FROM network_client_connection
@@ -1461,6 +1474,8 @@ const contractExtenderInsertSql = `
 	INNER JOIN network_extender ON
 		network_extender.extender_id = endpoint.extender_id AND
 		network_extender.active
+	INNER JOIN transfer_contract ON
+		transfer_contract.contract_id = $1
 `
 
 func createTransferEscrowInTx(

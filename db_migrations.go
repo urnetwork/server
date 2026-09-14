@@ -7841,10 +7841,12 @@ var migrations = []any{
 	`),
 
 	// The creation time of a contract's extender parties
-	// (connect/EXTENDER.md M3). The rows are written in the transaction that
-	// creates the contract, so now() is the contract's own create_time, and the
-	// index makes the hourly count of contracts with an extender party a range
-	// scan of this small table rather than an existence probe per contract.
+	// (connect/EXTENDER.md M3). The insert copies the contract's own
+	// create_time into every party row (contractExtenderInsertSql), so the
+	// hourly counts bucket a contract and its parties at the same instant; the
+	// default covers a row inserted without a value. The index makes the
+	// hourly count of contracts with an extender party a range scan of this
+	// small table rather than an existence probe per contract.
 	newSqlMigration(`
 		ALTER TABLE contract_extender
 		ADD COLUMN create_time timestamp NOT NULL DEFAULT now()

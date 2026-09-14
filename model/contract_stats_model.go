@@ -271,8 +271,9 @@ func countContractRange(ctx context.Context, start time.Time, end time.Time) Con
 
 		// the extender party count is a range scan of the small table by its
 		// own create_time index, never a probe per contract. Every party row of
-		// one contract is written in the contract's own transaction, so they
-		// share its create_time and a contract never straddles two buckets
+		// one contract copies the contract's create_time at insert
+		// (contractExtenderInsertSql), so a contract never straddles two
+		// buckets
 		result, err = conn.Query(
 			ctx,
 			`

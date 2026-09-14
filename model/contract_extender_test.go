@@ -429,6 +429,145 @@ func TestCreateContractNoEscrowWritesTheExtenderParties(t *testing.T) {
 	})
 }
 
+// The party rows carry the contract's own create_time, to the microsecond.
+//
+// The hourly counts of connect/EXTENDER.md M3 bucket contracts by
+// transfer_contract.create_time and contracts-with-an-extender by
+// contract_extender.create_time. If the two ever disagreed across an hour
+// boundary the same contract would land in one bucket and its parties in
+// another, and the 24 hour numbers would drift apart. The contract writes its
+// create_time from clock_timestamp(), so the column's DEFAULT now() -- the
+// transaction start -- is not the same instant; the insert copies the
+// contract's value instead. Both creation paths write their own insert, so
+// both are proved here.
+func TestContractExtenderPartiesCarryTheContractCreateTime(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const transferByteCount = ByteCount(1024)
+
+		testContractExtender(
+			ctx,
+			"create-time",
+			server.NewId(),
+			server.NewId(),
+			"192.0.2.60",
+			"2001:db8:c::60",
+		)
+
+		assertPartyCreateTimes := func(name string, contractId server.Id, wantParties int) {
+			t.Helper()
+			contractCreateTime, partyCreateTimes := testContractCreateTimes(t, ctx, contractId)
+			if len(partyCreateTimes) != wantParties {
+				t.Fatalf("%s: party rows = %d, want %d", name, len(partyCreateTimes), wantParties)
+			}
+			for _, partyCreateTime := range partyCreateTimes {
+				if !partyCreateTime.Equal(contractCreateTime) {
+					t.Fatalf(
+						"%s: party create_time = %s, want the contract's %s exactly",
+						name,
+						partyCreateTime.Format(time.RFC3339Nano),
+						contractCreateTime.Format(time.RFC3339Nano),
+					)
+				}
+			}
+		}
+
+		// the escrow path, with a party on each side so the copy is proved for
+		// both branches of the insert
+		sourceNetworkId, sourceId, destinationNetworkId, destinationId := testContractEndpoints(ctx)
+		testConnectFrom(t, ctx, sourceId, "192.0.2.60")
+		testConnectFrom(t, ctx, destinationId, "2001:db8:c::60")
+		addContractPayoutTestBalance(ctx, sourceNetworkId, transferByteCount)
+
+		escrow, err := CreateTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			transferByteCount,
+		)
+		if err != nil {
+			t.Fatalf("create escrow: %v", err)
+		}
+		assertPartyCreateTimes("escrow", escrow.ContractId, 2)
+
+		// the no-escrow path, which is its own insert
+		sourceNetworkId, sourceId, destinationNetworkId, destinationId = testContractEndpoints(ctx)
+		testConnectFrom(t, ctx, destinationId, "192.0.2.60")
+
+		contractId, err := CreateContractNoEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			transferByteCount,
+		)
+		if err != nil {
+			t.Fatalf("create no-escrow contract: %v", err)
+		}
+		assertPartyCreateTimes("no escrow", contractId, 1)
+
+		// the copy is what the hour buckets read, so it is also the instant
+		// the extender count of that hour is taken at
+		contractCreateTime, partyCreateTimes := testContractCreateTimes(t, ctx, contractId)
+		if 0 < len(partyCreateTimes) &&
+			contractHourBucketStart(partyCreateTimes[0]) != contractHourBucketStart(contractCreateTime) {
+			t.Fatal("the party row buckets in a different hour from its contract")
+		}
+	})
+}
+
+// The contract's create_time and the create_time of each of its party rows.
+func testContractCreateTimes(
+	t testing.TB,
+	ctx context.Context,
+	contractId server.Id,
+) (time.Time, []time.Time) {
+	t.Helper()
+	var contractCreateTime time.Time
+	partyCreateTimes := []time.Time{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT create_time
+			FROM transfer_contract
+			WHERE contract_id = $1
+			`,
+			contractId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&contractCreateTime))
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT create_time
+			FROM contract_extender
+			WHERE contract_id = $1
+			ORDER BY extender_id, party
+			`,
+			contractId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var partyCreateTime time.Time
+				server.Raise(result.Scan(&partyCreateTime))
+				partyCreateTimes = append(partyCreateTimes, partyCreateTime)
+			}
+		})
+	})
+	if contractCreateTime.IsZero() {
+		t.Fatalf("contract %s has no create_time", contractId)
+	}
+	return contractCreateTime, partyCreateTimes
+}
+
 // A companion contract reverses the endpoints, so its own source and
 // destination parties are the reverse of the origin contract's.
 func TestCreateCompanionTransferEscrowWritesTheExtenderParties(t *testing.T) {

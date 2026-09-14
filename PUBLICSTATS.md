@@ -125,8 +125,8 @@ A bucket's contract and dispute counts are one range scan of
 `transfer_contract_create_time` with `count(*) FILTER (WHERE dispute)`; its
 extender count is a range scan of `contract_extender` by the
 `(create_time, contract_id)` index the extender work added, so it is never a
-probe per contract. Every party row of one contract is written in the
-contract's own transaction, so a contract never straddles two buckets.
+probe per contract. Every party row of one contract copies the contract's own
+`create_time` at insert, so a contract never straddles two buckets.
 
 The clock is a parameter (`model.CountContracts(ctx, now)`), so the window is
 placed by the caller and the tests never sleep.
