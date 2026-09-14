@@ -9144,7 +9144,7 @@ Tier-1 (warn):
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
-| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified, a strictly advancing left edge on the same fixed-right-edge gap is temporary store visibility even when discovery is batched, and a repeated fixed post-boundary gap is loss |
+| mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified; a strictly advancing left edge on the same fixed-right-edge gap proves historical query/store restoration, including batched discovery; retained restoration history must be distinguished from current movement or stationary observations, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
 | mimir-ingestion-rate-limit | exact child Mimir metrics | §11.20a per-process sample-rate admission counter plus effective rate/burst context | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then its independent 2h complete comparable quiet hold |
 | mimir-push-rejected | structured Grafana rejection event | §11.20a unclassified rejection without a proven typed limit plus bounded job/family classes | >=1/min; limit causes are not excluded; raw upstream body is never retained |
@@ -12199,6 +12199,18 @@ old timestamps became readable without producer backfill. Query/store
 discovery may expose several five-minute evaluations in one batch, so an
 individual step need not match elapsed wall clock. Approximately wall-clock
 movement across the series remains the stronger recent-store cutoff signature.
+After restoration has been proven, the recovery class retains that historical
+evidence during stationary observations before the store-age boundary. It does
+not promise that restoration is still progressing or that the residual gap
+will become readable. Each alert must separate the current comparison's
+availability, boundary advance, elapsed interval, and stationary-observation
+count from the historical anchor-to-last-advance movement and elapsed time.
+An unchanged comparison must not refresh that historical movement or elapsed
+time. Count moving, stationary, and unclassified comparisons across every gap
+in a grouped alert, not just its worst gap, and describe missing evaluations
+as still unavailable rather than currently being restored. Resumed movement
+updates both the current comparison and historical restoration evidence;
+stationary pre-boundary observations alone do not establish permanent loss.
 A left-edge regression or a changed right edge starts new unclassified history.
 A gap that stays fixed on consecutive observations after its right edge is
 older than the current Mimir 3.1.1 `query_store_after=12h` default plus two

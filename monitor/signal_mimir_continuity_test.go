@@ -71,7 +71,7 @@ func runMimirContinuitySyntheticAt(
 	t.Helper()
 	var observedCommand string
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "edge-0" {
+		if host.Name != "mimir-gateway.example.test" {
 			return "", fmt.Errorf("unexpected Mimir gateway %s", host.Name)
 		}
 		observedCommand = command
@@ -80,8 +80,8 @@ func runMimirContinuitySyntheticAt(
 	settings := syntheticSettings(source)
 	settings.Now = func() time.Time { return now }
 	settings.Hosts = []HostSettings{
-		{Name: "edge-0", Roles: []string{"services"}},
-		{Name: "pg-only", Roles: []string{"pg-primary"}},
+		{Name: "mimir-gateway.example.test", Roles: []string{"services"}},
+		{Name: "postgres-only.example.test", Roles: []string{"pg-primary"}},
 	}
 	alerts, err := signal.Run(context.Background(), settings)
 	return alerts, err, observedCommand
@@ -158,7 +158,7 @@ func TestMimirContinuitySignalClassifiesMovingLeftEdgePastDefaultBoundaryAsQuery
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"classification=query-store-recovering",
-		"observed boundary movement=30m0s over elapsed=30m0s",
+		"historical_restoration_movement=30m0s historical_restoration_elapsed=30m0s",
 		"right edge stayed fixed while its left edge advanced between observations",
 		"individual movement need not match wall clock",
 		"not permanent raw-sample loss",
@@ -204,7 +204,7 @@ func TestMimirContinuitySignalClassifiesBatchedVisibilityAdvanceAndOmitsPrivateL
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"classification=query-store-recovering",
-		"observed boundary movement=20m0s over elapsed=5m0s",
+		"historical_restoration_movement=20m0s historical_restoration_elapsed=5m0s",
 		"Query/store discovery can expose several steps in one batch",
 		"individual movement need not match wall clock",
 	} {
@@ -237,27 +237,25 @@ func TestMimirContinuityAnyLaterForwardMovementIsRecovery(t *testing.T) {
 		{name: "faster batch", elapsed: mimirContinuityStep, movement: 4 * mimirContinuityStep, wantMovement: 4 * mimirContinuityStep, wantElapsed: mimirContinuityStep},
 		{name: "slower discovery", elapsed: 4 * mimirContinuityStep, movement: mimirContinuityStep, wantMovement: mimirContinuityStep, wantElapsed: 4 * mimirContinuityStep},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			probe := &mimirContinuityProbe{}
-			first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
-			if first[0].classification != mimirContinuityUnclassified {
-				t.Fatalf("first observation = %s, want unclassified", first[0].classification)
-			}
-			second := probe.observeGaps(
-				baseNow.Add(test.elapsed),
-				[]mimirContinuityGap{gap(missingStart.Add(test.movement), missingEnd)},
+		probe := &mimirContinuityProbe{}
+		first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
+		if first[0].classification != mimirContinuityUnclassified {
+			t.Fatalf("%s: first observation = %s, want unclassified", test.name, first[0].classification)
+		}
+		second := probe.observeGaps(
+			baseNow.Add(test.elapsed),
+			[]mimirContinuityGap{gap(missingStart.Add(test.movement), missingEnd)},
+		)
+		if second[0].classification != mimirContinuityRecovering {
+			t.Fatalf("%s: later forward observation = %s, want recovering", test.name, second[0].classification)
+		}
+		if second[0].recoveryMovement != test.wantMovement || second[0].recoveryElapsed != test.wantElapsed {
+			t.Fatalf(
+				"%s: recovery movement/elapsed = %s/%s, want %s/%s",
+				test.name, second[0].recoveryMovement, second[0].recoveryElapsed,
+				test.wantMovement, test.wantElapsed,
 			)
-			if second[0].classification != mimirContinuityRecovering {
-				t.Fatalf("later forward observation = %s, want recovering", second[0].classification)
-			}
-			if second[0].recoveryMovement != test.wantMovement || second[0].recoveryElapsed != test.wantElapsed {
-				t.Fatalf(
-					"recovery movement/elapsed = %s/%s, want %s/%s",
-					second[0].recoveryMovement, second[0].recoveryElapsed,
-					test.wantMovement, test.wantElapsed,
-				)
-			}
-		})
+		}
 	}
 }
 
@@ -280,24 +278,22 @@ func TestMimirContinuityGapIdentityChangesResetRecovery(t *testing.T) {
 		{name: "left edge regression", third: gap(missingStart, missingEnd)},
 		{name: "new right edge", third: gap(missingStart.Add(2*mimirContinuityStep), missingEnd.Add(mimirContinuityStep))},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			probe := &mimirContinuityProbe{}
-			first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
-			if first[0].classification != mimirContinuityUnclassified {
-				t.Fatalf("first observation = %s, want unclassified", first[0].classification)
-			}
-			second := probe.observeGaps(
-				baseNow.Add(mimirContinuityStep),
-				[]mimirContinuityGap{gap(missingStart.Add(mimirContinuityStep), missingEnd)},
-			)
-			if second[0].classification != mimirContinuityRecovering {
-				t.Fatalf("second observation = %s, want recovering", second[0].classification)
-			}
-			third := probe.observeGaps(baseNow.Add(2*mimirContinuityStep), []mimirContinuityGap{test.third})
-			if third[0].classification != mimirContinuityUnclassified {
-				t.Fatalf("changed gap observation = %s, want unclassified", third[0].classification)
-			}
-		})
+		probe := &mimirContinuityProbe{}
+		first := probe.observeGaps(baseNow, []mimirContinuityGap{gap(missingStart, missingEnd)})
+		if first[0].classification != mimirContinuityUnclassified {
+			t.Fatalf("%s: first observation = %s, want unclassified", test.name, first[0].classification)
+		}
+		second := probe.observeGaps(
+			baseNow.Add(mimirContinuityStep),
+			[]mimirContinuityGap{gap(missingStart.Add(mimirContinuityStep), missingEnd)},
+		)
+		if second[0].classification != mimirContinuityRecovering {
+			t.Fatalf("%s: second observation = %s, want recovering", test.name, second[0].classification)
+		}
+		third := probe.observeGaps(baseNow.Add(2*mimirContinuityStep), []mimirContinuityGap{test.third})
+		if third[0].classification != mimirContinuityUnclassified {
+			t.Fatalf("%s: changed gap observation = %s, want unclassified", test.name, third[0].classification)
+		}
 	}
 }
 
@@ -462,5 +458,331 @@ func TestFindMimirContinuityGapsRejectsIrregularTimestamp(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "irregular evaluation timestamps") {
 		t.Fatalf("irregular timestamp error = %v", err)
+	}
+}
+
+// Repeated stationary comparisons must not refresh or present historical
+// restoration as movement during the current comparison.
+func TestMimirContinuityNarrationSeparatesCurrentAndHistoricalRestoration(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	firstNow := time.Date(2099, 4, 8, 12, 0, 0, 0, time.UTC)
+	firstStart := firstNow.Add(-4 * time.Hour)
+	missingEnd := firstNow.Add(-2 * time.Hour)
+	privateMarker := "synthetic-private-mimir-label-must-not-render"
+	run := func(now, missingStart time.Time) []Alert {
+		t.Helper()
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t, signal, now,
+			mimirContinuityTimes(
+				now.Add(-mimirContinuityWindow), now,
+				mimirContinuityOmitRange(missingStart, missingEnd),
+			),
+			map[string]string{"synthetic_private_label": privateMarker},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+
+	requireAlertClass(t, run(firstNow, firstStart), "mimir-continuity-gap-unclassified")
+	advancedStart := firstStart.Add(4 * mimirContinuityStep)
+	moving := requireAlertClass(t, run(firstNow.Add(mimirContinuityStep), advancedStart), "mimir-query-store-visibility-gap")
+	for index := 1; index <= 3; index++ {
+		now := firstNow.Add(time.Duration(index+1) * mimirContinuityStep)
+		alert := requireAlertClass(t, run(now, advancedStart), "mimir-query-store-visibility-gap")
+		if alert.SignalNumber != "11.20" || alert.SignalKey != "mimir-continuity" ||
+			alert.Severity != SeverityWarn || alert.Sustain != 1 {
+			t.Fatalf("stationary comparison changed the existing Alert contract: %+v", alert)
+		}
+		if strings.Contains(alert.Symptom, "progressively restoring") {
+			t.Fatalf("stationary comparison %d still claims progressive restoration: %s", index, alert.Symptom)
+		}
+		for _, want := range []string{
+			"current_moving_gaps=0 current_stationary_gaps=1 current_uncompared_gaps=0",
+			fmt.Sprintf("current_comparison=available current_boundary_movement=0s current_elapsed=5m0s stationary_observations=%d", index),
+			"historical_restoration_movement=20m0s historical_restoration_elapsed=5m0s",
+			"21 five-minute control evaluations remain unavailable",
+			"unchanged on the latest comparison",
+			"anchor observation to the last positive boundary advance",
+			"not permanent raw-sample loss",
+			"SIGNALS.md §11.20",
+		} {
+			if !strings.Contains(alert.Markdown(), want) {
+				t.Errorf("stationary comparison %d lacks %q: %s", index, want, alert.Markdown())
+			}
+		}
+		requireAlertOmits(t, alert, privateMarker)
+	}
+
+	for _, want := range []string{
+		"current_moving_gaps=1 current_stationary_gaps=0 current_uncompared_gaps=0",
+		"current_comparison=available current_boundary_movement=20m0s current_elapsed=5m0s stationary_observations=0",
+		"advanced on the latest comparison",
+	} {
+		if !strings.Contains(moving.Markdown(), want) {
+			t.Errorf("moving comparison lacks %q: %s", want, moving.Markdown())
+		}
+	}
+	resumed := requireAlertClass(
+		t, run(firstNow.Add(5*mimirContinuityStep), advancedStart.Add(mimirContinuityStep)),
+		"mimir-query-store-visibility-gap",
+	)
+	for _, want := range []string{
+		"current_moving_gaps=1 current_stationary_gaps=0 current_uncompared_gaps=0",
+		"current_comparison=available current_boundary_movement=5m0s current_elapsed=5m0s stationary_observations=0",
+		"historical_restoration_movement=25m0s historical_restoration_elapsed=25m0s",
+		"20 five-minute control evaluations remain unavailable",
+	} {
+		if !strings.Contains(resumed.Markdown(), want) {
+			t.Errorf("resumed comparison lacks %q: %s", want, resumed.Markdown())
+		}
+	}
+	requireAlertOmits(t, moving, privateMarker)
+	requireAlertOmits(t, resumed, privateMarker)
+}
+
+// Group narration must not apply the largest stationary gap's state to a
+// smaller gap that advanced during the same comparison.
+func TestMimirContinuityNarrationAggregatesMovingAndStationaryGaps(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	firstNow := time.Date(2099, 5, 8, 12, 0, 0, 0, time.UTC)
+	firstStart := firstNow.Add(-9 * time.Hour)
+	firstEnd := firstNow.Add(-6 * time.Hour)
+	secondStart := firstNow.Add(-4 * time.Hour)
+	secondEnd := firstNow.Add(-2 * time.Hour)
+	run := func(now, leftFirst, leftSecond time.Time) []Alert {
+		t.Helper()
+		omit := mimirContinuityOmitRange(leftFirst, firstEnd)
+		for timestamp := range mimirContinuityOmitRange(leftSecond, secondEnd) {
+			omit[timestamp] = true
+		}
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t, signal, now,
+			mimirContinuityTimes(now.Add(-mimirContinuityWindow), now, omit),
+			map[string]string{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+	requireAlertClass(t, run(firstNow, firstStart, secondStart), "mimir-continuity-gap-unclassified")
+	moving := requireAlertClass(
+		t, run(firstNow.Add(mimirContinuityStep), firstStart.Add(mimirContinuityStep), secondStart.Add(mimirContinuityStep)),
+		"mimir-query-store-visibility-gap",
+	)
+	mixed := requireAlertClass(
+		t, run(firstNow.Add(2*mimirContinuityStep), firstStart.Add(mimirContinuityStep), secondStart.Add(2*mimirContinuityStep)),
+		"mimir-query-store-visibility-gap",
+	)
+	for _, want := range []string{
+		"current_moving_gaps=1 current_stationary_gaps=1 current_uncompared_gaps=0",
+		"1 moving, 1 stationary, 0 uncompared gap(s)",
+		"59 five-minute control evaluations remain unavailable",
+		"current_comparison=available current_boundary_movement=0s current_elapsed=5m0s stationary_observations=1",
+		"current_comparison=available current_boundary_movement=5m0s current_elapsed=5m0s stationary_observations=0",
+		"historical_restoration_movement=5m0s historical_restoration_elapsed=5m0s",
+		"historical_restoration_movement=10m0s historical_restoration_elapsed=10m0s",
+	} {
+		if !strings.Contains(mixed.Markdown(), want) {
+			t.Errorf("mixed gap group lacks %q: %s", want, mixed.Markdown())
+		}
+	}
+	if !strings.Contains(moving.Markdown(), "current_moving_gaps=2 current_stationary_gaps=0 current_uncompared_gaps=0") {
+		t.Fatalf("all-moving group lost per-gap aggregation: %s", moving.Markdown())
+	}
+}
+
+// No previous comparable observation is different from an observed zero delta.
+func TestMimirContinuityNarrationReportsUnavailableFirstComparison(t *testing.T) {
+	now := time.Date(2099, 6, 8, 12, 0, 0, 0, time.UTC)
+	alerts, err, _ := runMimirContinuitySyntheticAt(
+		t, NewMimirContinuitySignal(), now,
+		mimirContinuityTimes(
+			now.Add(-mimirContinuityWindow), now,
+			mimirContinuityOmitRange(now.Add(-4*time.Hour), now.Add(-2*time.Hour)),
+		),
+		map[string]string{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "mimir-continuity-gap-unclassified")
+	for _, want := range []string{
+		"current_moving_gaps=0 current_stationary_gaps=0 current_uncompared_gaps=1",
+		"current_comparison=unavailable current_boundary_movement=unknown current_elapsed=unknown stationary_observations=0",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("first comparison lacks %q: %s", want, alert.Markdown())
+		}
+	}
+	requireAlertOmits(t, alert, "historical_restoration_movement=")
+}
+
+// An assessment without a comparator cannot self-define a moving or stationary
+// recovering group, even when historical restoration evidence is supplied.
+func TestMimirContinuityNarrationDoesNotInventAnUncomparedGroupDelta(t *testing.T) {
+	now := time.Date(2099, 7, 8, 12, 0, 0, 0, time.UTC)
+	gap := mimirContinuityGap{
+		previous: now.Add(-4 * time.Hour),
+		resumed:  now.Add(-2 * time.Hour),
+		missing:  23,
+	}
+	result := mimirContinuityGapFinding(
+		mimirContinuityRecovering,
+		[]mimirContinuityAssessment{{
+			gap: gap, classification: mimirContinuityRecovering,
+			recoveryMovement: 20 * time.Minute, recoveryElapsed: 5 * time.Minute,
+		}},
+		now.Add(-mimirContinuityWindow), now, "mimir-gateway.example.test",
+	)
+	for _, want := range []string{
+		"current_moving_gaps=0 current_stationary_gaps=0 current_uncompared_gaps=1",
+		"current_comparison=unavailable current_boundary_movement=unknown current_elapsed=unknown",
+		"0 moving, 0 stationary, 1 uncompared gap(s)",
+	} {
+		if !strings.Contains(result.observed+"\n"+result.evidence+"\n"+result.symptom, want) {
+			t.Errorf("uncompared group lacks %q: %+v", want, result)
+		}
+	}
+	if strings.Contains(result.symptom, "advanced on the latest comparison") ||
+		strings.Contains(result.symptom, "unchanged on the latest comparison") {
+		t.Fatalf("uncompared group fabricated a comparison: %s", result.symptom)
+	}
+}
+
+// Existing identity/time regression reset rules must discard both comparator
+// and historical restoration narration.
+func TestMimirContinuityNarrationResetsComparisonEvidenceWithHistory(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		nowShift   time.Duration
+		startShift time.Duration
+		endShift   time.Duration
+	}{
+		{name: "left edge regression", nowShift: 10 * time.Minute, startShift: 0, endShift: 0},
+		{name: "new right edge", nowShift: 10 * time.Minute, startShift: 20 * time.Minute, endShift: 5 * time.Minute},
+		{name: "same evaluation time", nowShift: 5 * time.Minute, startShift: 20 * time.Minute, endShift: 0},
+		{name: "evaluation time regression", nowShift: 0, startShift: 20 * time.Minute, endShift: 0},
+	} {
+		signal := NewMimirContinuitySignal()
+		firstNow := time.Date(2099, 8, 8, 12, 0, 0, 0, time.UTC)
+		firstStart := firstNow.Add(-4 * time.Hour)
+		firstEnd := firstNow.Add(-2 * time.Hour)
+		run := func(now, start, end time.Time) []Alert {
+			t.Helper()
+			alerts, err, _ := runMimirContinuitySyntheticAt(
+				t, signal, now,
+				mimirContinuityTimes(
+					now.Add(-mimirContinuityWindow), now,
+					mimirContinuityOmitRange(start, end),
+				),
+				map[string]string{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return alerts
+		}
+		requireAlertClass(t, run(firstNow, firstStart, firstEnd), "mimir-continuity-gap-unclassified")
+		requireAlertClass(t, run(firstNow.Add(mimirContinuityStep), firstStart.Add(4*mimirContinuityStep), firstEnd), "mimir-query-store-visibility-gap")
+		alert := requireAlertClass(
+			t, run(firstNow.Add(test.nowShift), firstStart.Add(test.startShift), firstEnd.Add(test.endShift)),
+			"mimir-continuity-gap-unclassified",
+		)
+		if !strings.Contains(alert.Markdown(), "current_comparison=unavailable current_boundary_movement=unknown current_elapsed=unknown stationary_observations=0") {
+			t.Errorf("%s retained an invalid comparator: %s", test.name, alert.Markdown())
+		}
+		requireAlertOmits(t, alert, "historical_restoration_movement=")
+	}
+}
+
+// Healthy local reduction must remove gap history without adding active Alerts
+// or turning a later new gap into a continuation of old restoration.
+func TestMimirContinuityNarrationHealthyHistoryReset(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	firstNow := time.Date(2099, 9, 8, 12, 0, 0, 0, time.UTC)
+	firstStart := firstNow.Add(-4 * time.Hour)
+	missingEnd := firstNow.Add(-2 * time.Hour)
+	run := func(now time.Time, omit map[time.Time]bool) []Alert {
+		t.Helper()
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t, signal, now,
+			mimirContinuityTimes(now.Add(-mimirContinuityWindow), now, omit),
+			map[string]string{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+	requireAlertClass(t, run(firstNow, mimirContinuityOmitRange(firstStart, missingEnd)), "mimir-continuity-gap-unclassified")
+	requireAlertClass(
+		t, run(firstNow.Add(mimirContinuityStep), mimirContinuityOmitRange(firstStart.Add(4*mimirContinuityStep), missingEnd)),
+		"mimir-query-store-visibility-gap",
+	)
+	if alerts := run(firstNow.Add(2*mimirContinuityStep), nil); len(alerts) != 0 {
+		t.Fatalf("healthy history emitted active Alerts: %+v", alerts)
+	}
+	alert := requireAlertClass(
+		t, run(firstNow.Add(3*mimirContinuityStep), mimirContinuityOmitRange(firstStart.Add(4*mimirContinuityStep), missingEnd)),
+		"mimir-continuity-gap-unclassified",
+	)
+	if !strings.Contains(alert.Markdown(), "current_comparison=unavailable") {
+		t.Fatalf("healthy reset retained the prior gap comparator: %s", alert.Markdown())
+	}
+	requireAlertOmits(t, alert, "historical_restoration_movement=")
+}
+
+// Pre-boundary stationary history still crosses into the existing fixed-loss
+// state; later forward movement retains the existing recovering transition.
+func TestMimirContinuityNarrationPreservesStoreBoundaryTransitions(t *testing.T) {
+	signal := NewMimirContinuitySignal()
+	probe := &mimirContinuityProbe{}
+	if probe.cadence() != 5*time.Minute || probe.tier() != tierWarn ||
+		mimirContinuityMissingSteps != 3 || mimirContinuityWindow != 7*24*time.Hour ||
+		mimirContinuityDefaultQueryStoreAfter+mimirContinuityStoreBoundarySlack != 12*time.Hour+10*time.Minute {
+		t.Fatal("existing continuity threshold, cadence, tier, or store boundary changed")
+	}
+	firstNow := time.Date(2099, 10, 8, 12, 0, 0, 0, time.UTC)
+	firstStart := firstNow.Add(-4 * time.Hour)
+	missingEnd := firstNow.Add(-2 * time.Hour)
+	run := func(now, start time.Time) []Alert {
+		t.Helper()
+		alerts, err, _ := runMimirContinuitySyntheticAt(
+			t, signal, now,
+			mimirContinuityTimes(
+				now.Add(-mimirContinuityWindow), now,
+				mimirContinuityOmitRange(start, missingEnd),
+			),
+			map[string]string{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+	requireAlertClass(t, run(firstNow, firstStart), "mimir-continuity-gap-unclassified")
+	advancedStart := firstStart.Add(4 * mimirContinuityStep)
+	requireAlertClass(t, run(firstNow.Add(mimirContinuityStep), advancedStart), "mimir-query-store-visibility-gap")
+	for index := 2; index <= 4; index++ {
+		requireAlertClass(
+			t, run(firstNow.Add(time.Duration(index)*mimirContinuityStep), advancedStart),
+			"mimir-query-store-visibility-gap",
+		)
+	}
+	boundary := missingEnd.Add(mimirContinuityDefaultQueryStoreAfter + mimirContinuityStoreBoundarySlack)
+	fixed := requireAlertClass(t, run(boundary, advancedStart), "mimir-ingestion-gap")
+	if !strings.Contains(fixed.Markdown(), "classification=fixed-loss") ||
+		!strings.Contains(fixed.Markdown(), "historical_restoration_movement=20m0s historical_restoration_elapsed=5m0s") {
+		t.Fatalf("boundary transition changed or refreshed historical restoration: %s", fixed.Markdown())
+	}
+	resumed := requireAlertClass(
+		t, run(boundary.Add(mimirContinuityStep), advancedStart.Add(mimirContinuityStep)),
+		"mimir-query-store-visibility-gap",
+	)
+	if !strings.Contains(resumed.Markdown(), "current_comparison=available current_boundary_movement=5m0s current_elapsed=5m0s stationary_observations=0") {
+		t.Fatalf("post-boundary forward movement changed existing recovery: %s", resumed.Markdown())
 	}
 }
