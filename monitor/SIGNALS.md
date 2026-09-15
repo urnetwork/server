@@ -7464,7 +7464,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125` in its `warp-main-*` unit) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. A replaced executable or Docker version drift is only transition evidence: compatible releases can keep creating containers normally. | The monitor reads bounded daemon-identifier and Warp-supervisor suffixes; its startup-version context is optional after the one-hour buffer ages out. PAGE on an observed containerd split, native TTRPC rejection, or concrete `Start container failed`. Use Xops' privileged maintenance probe for definitive client/server comparison during package transitions and recovery. Recover only with explicit one-host-at-a-time authorization and require a replacement container at `Up`; never reboot merely because a package changed. See §8.5a. |
 | `invalid mount config for type "bind": bind source path does not exist` with `configVersion=<valid-semver>.tmp` and exit 125 (`container-runtime-staging-bind-source`) | The complete bounded host window has a nonzero exact three-way count equality: Warp start exit-125, `.tmp` config deploy-failure, and Docker bind-source-missing aggregates reconcile. That production signature came from config-updater copying into its reserved `.tmp` directory while pre-`f1503d6` Warpctl admitted the suffix as semver build metadata and ranked staging above the completed version. The aggregate records are not per-event joins, so any mixed counts retain generic `container-runtime-incompatible`. | Stop further config publication to affected units and deploy a Warpctl artifact containing `f1503d6`, which excludes only the exact `<valid-semver>.tmp` staging namespace before ordinary semver ranking. Do not recreate the vanished path, restart Docker, or reboot for this defect. Exercise a later publication and require the completed version selected, terminal deploy success on every enabled host, and zero `.tmp` exit-125 selections or bind-source-missing failures for ten minutes. See §8.5a. |
 | `journal-buffer-config`, `journal-buffer-short`, or `journal-buffer-unavailable` | The effective edge journal policy drifted from the one-hour/100 GiB/1024-file contract, measured history no longer reaches the near-hour boundary, or journald is down. This affects local recovery evidence and may interrupt Fluent Bit input, but it does not prove Loki data loss. | Apply the reviewed journald drop-in without rebooting, measure bounded producer volume if the boundary stays short, and correlate §11.14. Require two boundary observations plus fresh Loki data. See §8.5b. |
-| `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, `log-shipper-prometheus-histogram-decoder-crash`, or `redis-latency-histogram-policy-drift` | The host Fluent Bit unit is stopped, its fd budget regressed, systemd restarted it, its bounded generation contains the exact cmetrics decoder stack, or a Redis host's live exporter is not active with the optional command-latency histogram excluded. The direct policy class detects the unsafe input before a later decoder crash; the crash stack alone still does not identify its scrape source. | Repair the first bounded cause and restart only the owning unit after authorization. On Redis, converge the exporter with only `--exclude-latency-histogram-metrics`, retain commandstats, and independently require fresh `redis_commands_processed_total`, `redis_commands_duration_seconds_total`, and `redis_up`. Do not force a major Fluent Bit upgrade or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh outputs, and ten stable minutes. See §11.14. |
+| `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, `log-shipper-prometheus-histogram-decoder-crash`, `log-shipper-journal-read-loss`, or `redis-latency-histogram-policy-drift` | The host Fluent Bit unit is stopped, its fd budget regressed, systemd restarted it, its bounded generation contains the exact cmetrics decoder stack, its live systemd input reports losing unread journal records, or a Redis host's live exporter is not active with the optional command-latency histogram excluded. A live unit and zero restarts do not disprove journal-reader loss. The direct policy class detects the unsafe histogram input before a later decoder crash; the crash stack alone still does not identify its scrape source. | Repair the first bounded cause and restart only the owning unit after authorization. For journal-reader loss, correlate rotation, delayed source timestamps, and storage health before acting; online `journalctl --verify` is not durable-corruption proof. On Redis, converge the exporter with only `--exclude-latency-histogram-metrics`, retain commandstats, and independently require fresh `redis_commands_processed_total`, `redis_commands_duration_seconds_total`, and `redis_up`. Do not delete journals, seek to their retained head, force a major Fluent Bit upgrade, or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh outputs, and ten stable minutes. See §11.14. |
 | `tailer-stale-arrival` | The standing Loki WebSocket delivered one or more exact-replay-deduplicated records whose valid source timestamp was older than the monitor's two-minute live overlap. Those records are observation-path history, not current product errors, and their contents are not retained. A missing/malformed or future wrapper timestamp is not assigned this class because staleness is unproved. | Inspect Warpctl/Loki cursor behavior and the bounded source-time reconciliation for that selector. Do not act on the historical product line as if it occurred in the arrival minute. Require two complete reconciliations, current-source controls, and zero stale arrivals for ten minutes. See §1.5. |
 | `[warpctl][loki-tail-pre-cursor-entries] service=<service> count=<n>` (`loki-tail-pre-cursor-entries`) | Loki returned late or replayed records older than Warpctl's requested live-tail cursor. Warpctl suppressed the historical contents and retained only the bounded service/count summary, so this is observation-path evidence rather than a current product failure. | Reconcile the named selector by source time and inspect Loki ingestion latency and reconnects. Preserve both cursor and monitor source-time guards; do not replay the suppressed contents or restart the named product service. Require two complete reconciliations, current-source controls, and zero summaries for ten minutes. See §1.5. |
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
@@ -9227,6 +9227,7 @@ Tier-0 (page):
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
+| log-shipper-journal-read-loss | host | §11.14 bounded Fluent Bit unit journal | any exact `sd_journal_next()` loss event in ten minutes; immediate | privacy-reduced total and errno-74 counts only; live unit state cannot clear it |
 | host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
@@ -11870,6 +11871,34 @@ Redis/MinIO host's configured Loki route does not itself manufacture one. A
 decoder crash on any non-Redis role remains source-unclassified until its
 configured scrape inputs and bucket schemas identify the producer.
 
+The 2026-09-15 edge-3 incident exposed a different live-process failure that
+unit state and restart counters cannot see. In a bounded two-hour read, that
+host's Fluent Bit unit emitted 66 exact
+`sd_journal_next() returned error -74` records; every record also stated that
+the journal was re-opened and unread logs were lost. The five other reachable
+edge hosts emitted zero. A content-free 75-second live-tail sample localized a
+concurrent replay of roughly one-hour-old Taskworker records to edge-3's two
+blocks. Fluent Bit remained active with zero restarts, while the host kernel
+journal contained zero storage-I/O, filesystem, or NVMe fault lines in 24
+hours. These facts establish journal-reader loss and retained-head replay, but
+do not by themselves establish durable disk corruption.
+
+Errno 74 is `EBADMSG`. systemd documents it as a corrupt or transiently
+inconsistent journal entry. Its upstream issue #27532 also establishes that
+`journalctl --verify` can falsely report corruption while an active file is
+being written, while issues #33277 and #36247 describe high-write
+`sd_journal_next()`/rotation failures in the same systemd 255 family. Fluent
+Bit 4.2.3's systemd input, and the current upstream implementation, handle any
+negative iterator result by seeking to the journal head and explicitly report
+that unread logs are lost. Therefore neither a passing nor failing online
+verification is sufficient closure. Preserve the generations, correlate the
+error instants with journal rotation and source-time delay, check kernel and
+media health, and verify closed files outside active writes before naming
+storage corruption. If those controls are clean, the OS journal-reader and
+rotation path owns the incident; reduce a proven log-amplifying producer and
+stage a supported OS correction. Do not delete the journal, restart Fluent Bit,
+or reboot merely to clear the evidence.
+
 The `log-shipper` probe reads the host unit directly on services, PostgreSQL,
 Redis/MinIO, backup, and Subtensor hosts. `log-shipper-down` PAGEs when the
 unit is not active/running; `log-shipper-fd-budget` WARNs when either the soft
@@ -11897,10 +11926,21 @@ not arm this branch. Required commandstats and `redis_up` freshness remain an
 independent §3.1a control; an exclusion flag alone never proves useful metrics
 are arriving.
 
+`log-shipper-journal-read-loss` PAGEs on the first exact iterator-loss record
+in a bounded ten-minute window. The reducer retains only total event count,
+errno-74 count, and a fixed state enum; journal records, paths, cursors, and
+workload identifiers never leave the host. More than 400 matching lines is an
+explicit truncated failure rather than a healthy sample. A failed or malformed
+journal query is visibility loss and cannot resolve an existing ticket. Close
+the class only after ten continuous minutes spanning ordinary journal rotation
+have zero iterator errors, the unit stays on one process, per-host metrics and
+current-source Loki controls stay fresh, two bounded overlap reconciliations
+complete, and neither stale-tail nor pre-cursor evidence recurs.
+
 The host-side reducer returns only schema version, unit states, restart count,
-fd limits, a sanitized package version, and bounded restart/policy enums; raw
-unit arguments, journal text, core text, metric data, and paths never leave the
-host. A VPN-only host is outside this
+fd limits, a sanitized package version, bounded restart/policy enums, and
+bounded journal-reader counts; raw unit arguments, journal text, core text,
+metric data, cursors, and paths never leave the host. A VPN-only host is outside this
 signal. These are process and startup-capacity signals, not an end-to-end
 delivery claim: closure additionally requires fresh per-host metrics through
 Mimir and fresh data in every configured output. Require a fresh labeled Warp

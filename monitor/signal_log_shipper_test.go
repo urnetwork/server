@@ -14,12 +14,14 @@ func logShipperFixture(overrides map[string]string) string {
 	keys := []string{
 		"observation_schema", "active_state", "sub_state", "result", "restarts",
 		"nofile_hard", "nofile_soft", "fluent_bit_version", "restart_reason",
+		"journal_reader_state", "journal_reader_errors_10m", "journal_reader_ebadmsg_errors_10m",
 		"redis_exporter_state", "redis_latency_histogram_policy",
 	}
 	values := map[string]string{
-		"observation_schema": "3", "active_state": "active", "sub_state": "running",
+		"observation_schema": "4", "active_state": "active", "sub_state": "running",
 		"result": "success", "restarts": "0", "nofile_hard": "65536", "nofile_soft": "65536",
 		"fluent_bit_version": "4.2.1", "restart_reason": logShipperRestartNone,
+		"journal_reader_state": "healthy", "journal_reader_errors_10m": "0", "journal_reader_ebadmsg_errors_10m": "0",
 		"redis_exporter_state": "active", "redis_latency_histogram_policy": "excluded",
 	}
 	for key, value := range overrides {
@@ -48,6 +50,9 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 		"decoder": logShipperFixture(map[string]string{
 			"restarts": "1", "restart_reason": logShipperRestartHistogramDecoder,
 		}),
+		"journal-loss": logShipperFixture(map[string]string{
+			"journal_reader_state": "ebadmsg", "journal_reader_errors_10m": "3", "journal_reader_ebadmsg_errors_10m": "3",
+		}),
 		"pg": logShipperFixture(nil), "redis": logShipperFixture(nil),
 		"backup": logShipperFixture(nil), "subtensor": logShipperFixture(nil),
 	}
@@ -69,6 +74,7 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 		{Name: "low-fd", Roles: []string{"services"}},
 		{Name: "churn", Roles: []string{"services"}},
 		{Name: "decoder", Roles: []string{"redis-cluster"}},
+		{Name: "journal-loss", Roles: []string{"services"}},
 		{Name: "pg", Roles: []string{"pg-primary"}},
 		{Name: "redis", Roles: []string{"redis-cluster", "minio"}},
 		{Name: "backup", Roles: []string{"backup"}},
@@ -79,8 +85,8 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 4 {
-		t.Fatalf("alerts=%d, want 4: %+v", len(alerts), alerts)
+	if len(alerts) != 5 {
+		t.Fatalf("alerts=%d, want 5: %+v", len(alerts), alerts)
 	}
 	byTarget := map[string]Alert{}
 	for _, alert := range alerts {
@@ -99,7 +105,12 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 		!strings.Contains(alert.Markdown(), "prometheus-histogram-decoder-crash") {
 		t.Fatalf("decoder alert=%+v", alert)
 	}
-	for _, target := range []string{"healthy", "down", "low-fd", "churn", "decoder", "pg", "redis", "backup", "subtensor"} {
+	if alert := byTarget["journal-loss"]; alert.Class != "log-shipper-journal-read-loss" ||
+		alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "journal_reader_ebadmsg_errors_10m=3") ||
+		!strings.Contains(alert.Markdown(), "seeking the head can also replay") {
+		t.Fatalf("journal reader alert=%+v", alert)
+	}
+	for _, target := range []string{"healthy", "down", "low-fd", "churn", "decoder", "journal-loss", "pg", "redis", "backup", "subtensor"} {
 		if seen[target] != 1 {
 			t.Errorf("host %s observations=%d, want 1", target, seen[target])
 		}
@@ -346,6 +357,8 @@ func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T)
 		"ExecMainStartTimestamp", "-u fluent-bit.service", "--since", "--until",
 		"add_metric_histogram", "finish_duplicate_histogram_summary_sum_count",
 		"parse_histogram_summary_name", "dpkg-query",
+		"sd_journal_next[(][)] returned error -[0-9]+", "journal_reader_errors_10m",
+		"journal_reader_ebadmsg_errors_10m", "-n 401", "10 minutes ago",
 	} {
 		if !strings.Contains(logShipperCommand, want) {
 			t.Errorf("command lacks %q", want)
@@ -359,6 +372,43 @@ func TestLogShipperCommandReadsBothFDLimitsAndBoundedCrashEvidence(t *testing.T)
 	window := `--since "$restart_since" --until "$restart_until"`
 	if count := strings.Count(logShipperCommand, window); count != 2 {
 		t.Errorf("generation window uses=%d, want one per journal selector", count)
+	}
+}
+
+func TestLogShipperCommandReducesJournalReadLossWithoutLeakingJournalText(t *testing.T) {
+	binDir := t.TempDir()
+	writeCommand := func(name string, body string) {
+		t.Helper()
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCommand("systemctl", `case "$*" in
+*"show fluent-bit.service"*) printf '%s\n' ActiveState=active SubState=running Result=success NRestarts=0 LimitNOFILE=65536 LimitNOFILESoft=65536 'ExecMainStartTimestamp=Mon 2024-01-01 00:00:00 UTC' ;;
+*"show redis-exporter.service"*) printf '%s\n' LoadState=not-found ActiveState=inactive SubState=dead MainPID=0 ;;
+*) exit 91 ;;
+esac
+`)
+	writeCommand("dpkg-query", "printf '%s' '4.2.3-fixture'\n")
+	writeCommand("journalctl", `printf '%s\n' \
+'[fixture] sd_journal_next() returned error -74; journal is re-opened, unread logs are lost; sd_journal_seek_head() returned 0 synthetic-private-value' \
+'[fixture] sd_journal_next() returned error -74; journal is re-opened, unread logs are lost; sd_journal_seek_head() returned 0 another-private-value'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output, err := exec.Command("sh", "-c", logShipperCommand).CombinedOutput()
+	if err != nil {
+		t.Fatalf("log shipper fixture: %v: %s", err, output)
+	}
+	if strings.Contains(string(output), "synthetic-private-value") || strings.Contains(string(output), "another-private-value") {
+		t.Fatalf("raw journal text escaped reducer: %q", output)
+	}
+	sample, err := parseLogShipperSample(string(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.journalReaderState != "ebadmsg" || sample.journalReaderErrors != 2 || sample.journalReaderEBADMSGErrors != 2 {
+		t.Fatalf("journal reader reduction=%+v", sample)
 	}
 }
 
@@ -478,6 +528,21 @@ func TestLogShipperSampleRejectsUnboundedOrInconsistentCrashMetadata(t *testing.
 		}),
 		"unsafe version": logShipperFixture(map[string]string{
 			"fluent_bit_version": "4.2.1 raw detail",
+		}),
+		"healthy with errors": logShipperFixture(map[string]string{
+			"journal_reader_errors_10m": "1",
+		}),
+		"ebadmsg without errors": logShipperFixture(map[string]string{
+			"journal_reader_state": "ebadmsg",
+		}),
+		"other with only ebadmsg": logShipperFixture(map[string]string{
+			"journal_reader_state": "other-error", "journal_reader_errors_10m": "1", "journal_reader_ebadmsg_errors_10m": "1",
+		}),
+		"truncated below cap": logShipperFixture(map[string]string{
+			"journal_reader_state": "truncated", "journal_reader_errors_10m": "400",
+		}),
+		"unobservable with counts": logShipperFixture(map[string]string{
+			"journal_reader_state": "unobservable", "journal_reader_errors_10m": "1",
 		}),
 	} {
 		t.Run(name, func(t *testing.T) {
