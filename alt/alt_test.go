@@ -651,42 +651,111 @@ func (self *altEnv) dialQuicWithoutServerName() (*quic.Conn, error) {
 	})
 }
 
-// How the server closed one connection, as the client can observe it.
+// How the server closed one connection, whether DialEarly returns the refusal
+// itself or the connection becomes ready first and AcceptStream observes it.
 //
 // RFC 9000 forbids an application CONNECTION_CLOSE in an Initial or Handshake
 // packet, so a refusal the client reads before it has processed the server's
 // handshake flight arrives as the transport APPLICATION_ERROR with alt's own
 // code substituted away. That is still alt refusing the connection; only the
 // code is lost. The second return says whether the code survived.
-func altCloseErrorCode(t testing.TB, conn *quic.Conn) (quic.ApplicationErrorCode, bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), testProgressTimeout)
-	defer cancel()
-	_, err := conn.AcceptStream(ctx)
+func altCloseErrorCode(conn *quic.Conn, dialErr error) (quic.ApplicationErrorCode, bool, error) {
+	err := dialErr
 	if err == nil {
-		t.Fatal("the connection was not closed")
+		if conn == nil {
+			return 0, false, errors.New("the dial returned neither a connection nor an error")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), testProgressTimeout)
+		defer cancel()
+		_, err = conn.AcceptStream(ctx)
+		if err == nil {
+			return 0, false, errors.New("the connection was not closed")
+		}
 	}
 	var applicationErr *quic.ApplicationError
-	if errors.As(err, &applicationErr) {
-		return applicationErr.ErrorCode, true
+	if errors.As(err, &applicationErr) && applicationErr.Remote {
+		return applicationErr.ErrorCode, true, nil
 	}
 	var transportErr *quic.TransportError
-	if errors.As(err, &transportErr) && transportErr.ErrorCode == quic.ApplicationErrorErrorCode {
-		return 0, false
+	if errors.As(err, &transportErr) && transportErr.Remote && transportErr.ErrorCode == quic.ApplicationErrorErrorCode {
+		return 0, false, nil
 	}
-	t.Fatalf("close err = %v (%T), want an application close", err, err)
-	return 0, false
+	return 0, false, fmt.Errorf("close err = %w (%T), want a remote application close", err, err)
 }
 
 // The application error code the server closed one connection with, which must
 // have survived.
-func altConnApplicationErrorCode(t testing.TB, conn *quic.Conn) quic.ApplicationErrorCode {
+func altConnApplicationErrorCode(t testing.TB, conn *quic.Conn, dialErr error) quic.ApplicationErrorCode {
 	t.Helper()
-	code, survived := altCloseErrorCode(t, conn)
+	code, survived, err := altCloseErrorCode(conn, dialErr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !survived {
 		t.Fatal("the connection was closed before the handshake, so no code survived")
 	}
 	return code
+}
+
+// A refusal can finish DialEarly before it returns a connection. Inject that
+// completed dial outcome so the regression cannot depend on packet timing.
+func TestAltCloseErrorCodeAcceptsARefusalDuringDial(t *testing.T) {
+	cases := []struct {
+		dialErr  error
+		code     quic.ApplicationErrorCode
+		survived bool
+	}{
+		{
+			dialErr: &quic.TransportError{
+				Remote:    true,
+				ErrorCode: quic.ApplicationErrorErrorCode,
+			},
+		},
+		{
+			dialErr: &quic.ApplicationError{
+				Remote:    true,
+				ErrorCode: ErrorCodeRateLimited,
+			},
+			code:     ErrorCodeRateLimited,
+			survived: true,
+		},
+		{
+			dialErr: fmt.Errorf("dial: %w", &quic.ApplicationError{
+				Remote:    true,
+				ErrorCode: ErrorCodeUnknownServerName,
+			}),
+			code:     ErrorCodeUnknownServerName,
+			survived: true,
+		},
+	}
+	for _, c := range cases {
+		code, survived, err := altCloseErrorCode(nil, c.dialErr)
+		if err != nil || code != c.code || survived != c.survived {
+			t.Errorf("dial refusal %v: code=%#x survived=%t err=%v, want code=%#x survived=%t", c.dialErr, code, survived, err, c.code, c.survived)
+		}
+	}
+}
+
+// Transport faults, timeouts, and local closes must remain failures when the
+// refusal tests accept a server close delivered through the dial result.
+func TestAltCloseErrorCodeRejectsOtherDialFailures(t *testing.T) {
+	for _, dialErr := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		&quic.HandshakeTimeoutError{},
+		errors.New("synthetic certificate verification failure"),
+		&quic.ApplicationError{Remote: false, ErrorCode: ErrorCodeRateLimited},
+		&quic.TransportError{Remote: false, ErrorCode: quic.ApplicationErrorErrorCode},
+		&quic.TransportError{Remote: true, ErrorCode: quic.ProtocolViolation},
+	} {
+		code, survived, err := altCloseErrorCode(nil, dialErr)
+		if !errors.Is(err, dialErr) || code != 0 || survived {
+			t.Errorf("dial failure %v: code=%#x survived=%t err=%v, want the original failure", dialErr, code, survived, err)
+		}
+	}
+	if _, _, err := altCloseErrorCode(nil, nil); err == nil {
+		t.Fatal("a dial with neither a connection nor an error was accepted")
+	}
 }
 
 // A name in neither list is closed with an application close before either
@@ -700,10 +769,11 @@ func TestAltRefusesAnUnknownServerNameWithAnApplicationClose(t *testing.T) {
 		defer env.Close()
 
 		conn, err := env.dialQuic(testUnknownHost, []string{http3.NextProtoH3})
+		code, survived, err := altCloseErrorCode(conn, err)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code, survived := altCloseErrorCode(t, conn); survived && code != ErrorCodeUnknownServerName {
+		if survived && code != ErrorCodeUnknownServerName {
 			t.Fatalf("unknown name error code = %#x, want %#x", code, ErrorCodeUnknownServerName)
 		}
 		if dispatch := env.nextDispatch(); dispatch.front != frontRefused || dispatch.serverName != testUnknownHost {
@@ -737,10 +807,7 @@ func TestAltRefusesAConnectionWithNoServerName(t *testing.T) {
 		defer env.Close()
 
 		conn, err := env.dialQuicWithoutServerName()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code := altConnApplicationErrorCode(t, conn); code != ErrorCodeUnknownServerName {
+		if code := altConnApplicationErrorCode(t, conn, err); code != ErrorCodeUnknownServerName {
 			t.Fatalf("empty name error code = %#x, want %#x", code, ErrorCodeUnknownServerName)
 		}
 		if dispatch := env.nextDispatch(); dispatch.front != frontRefused || dispatch.serverName != "" {
@@ -797,10 +864,11 @@ func TestAltRefusesAConnectConnectionOverTheConnectionCap(t *testing.T) {
 
 		// the connect transport offers no application protocol at all
 		refused, err := env.dialQuic(testConnectHost, nil)
+		code, survived, err := altCloseErrorCode(refused, err)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code, survived := altCloseErrorCode(t, refused); survived && code != ErrorCodeRateLimited {
+		if survived && code != ErrorCodeRateLimited {
 			t.Fatalf("over-cap error code = %#x, want %#x", code, ErrorCodeRateLimited)
 		}
 		if dispatch := env.nextDispatch(); dispatch.front != frontConnect {
@@ -819,7 +887,7 @@ func TestAltRefusesAConnectConnectionOverTheConnectionCap(t *testing.T) {
 		}
 		// an empty auth frame ends the handler, which closes with its own code
 		stream.Close()
-		if code := altConnApplicationErrorCode(t, admitted); code == ErrorCodeRateLimited {
+		if code := altConnApplicationErrorCode(t, admitted, nil); code == ErrorCodeRateLimited {
 			t.Fatal("an admitted connection was refused by the cap")
 		}
 		if dispatch := env.nextDispatch(); dispatch.front != frontConnect {
@@ -859,7 +927,7 @@ func TestAltAdmitsAnExcludedAddressOverTheConnectionCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		stream.Close()
-		if code := altConnApplicationErrorCode(t, conn); code == ErrorCodeRateLimited {
+		if code := altConnApplicationErrorCode(t, conn, nil); code == ErrorCodeRateLimited {
 			t.Fatal("an excluded address was refused by the cap")
 		}
 		if dispatch := env.nextDispatch(); dispatch.front != frontConnect {
