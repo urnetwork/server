@@ -14,14 +14,19 @@ func journalBufferFixture(overrides map[string]string) string {
 		"observation_schema", "journald_active", "journald_active_seconds", "storage",
 		"max_use", "max_file_size", "max_files", "max_file_sec", "max_retention",
 		"uptime_seconds", "coverage_checked", "coverage_present",
-		"boundary_entry_age_seconds", "coverage_target_seconds",
+		"boundary_entry_age_seconds", "coverage_target_seconds", "journal_file_scan_state",
+		"journal_files", "journal_bytes", "journal_archived_files_5m",
+		"journal_system_archived_files_5m", "journal_user_archived_files_5m",
 	}
 	values := map[string]string{
-		"observation_schema": "3", "journald_active": "active", "journald_active_seconds": "7200",
+		"observation_schema": "4", "journald_active": "active", "journald_active_seconds": "7200",
 		"storage": "persistent", "max_use": "100G", "max_file_size": "256M", "max_files": "1024",
 		"max_file_sec": "5min", "max_retention": "1hour", "uptime_seconds": "7200",
 		"coverage_checked": "1", "coverage_present": "1",
 		"boundary_entry_age_seconds": "3300", "coverage_target_seconds": "3000",
+		"journal_file_scan_state": "complete", "journal_files": "200", "journal_bytes": "10737418240",
+		"journal_archived_files_5m": "10", "journal_system_archived_files_5m": "7",
+		"journal_user_archived_files_5m": "3",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -106,8 +111,103 @@ func TestJournalBufferSignalSyntheticMalformedIsVisibility(t *testing.T) {
 	}
 }
 
+func TestJournalBufferSignalSyntheticFileHeadroomProblem(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{
+			name: "retained-file-count",
+			overrides: map[string]string{
+				"journal_files": "400",
+			},
+		},
+		{
+			name: "rotation-rate",
+			overrides: map[string]string{
+				"journal_files": "100", "journal_archived_files_5m": "30",
+				"journal_system_archived_files_5m": "22", "journal_user_archived_files_5m": "8",
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+				return journalBufferFixture(testCase.overrides), nil
+			}}
+			settings := syntheticSettings(source)
+			settings.Hosts = []HostSettings{{Name: "edge", Roles: []string{"services"}}}
+			alerts, err := NewJournalBufferSignal().Run(context.Background(), settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alert := requireAlertClass(t, alerts, "journal-buffer-file-headroom")
+			if alert.Severity != SeverityWarn ||
+				!strings.Contains(alert.Markdown(), "fourfold") ||
+				!strings.Contains(alert.Observed, "system_max_files=1024") ||
+				strings.Contains(alert.Markdown(), "system@") {
+				t.Fatalf("file-headroom alert=%+v", alert)
+			}
+		})
+	}
+}
+
+func TestJournalBufferFileHeadroomExactThreshold(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		files     string
+		wantAlert bool
+		wantPct   string
+	}{
+		{name: "exact-quarter-is-healthy", files: "256", wantPct: "current_file_capacity_pct=25.0"},
+		{name: "first-file-over-quarter-alerts", files: "257", wantAlert: true, wantPct: "current_file_capacity_pct=25.1"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			sample, err := parseJournalBufferSample(journalBufferFixture(map[string]string{
+				"journal_files": testCase.files,
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := evaluateJournalBuffer("edge", sample)
+			var headroom *finding
+			for i := range findings {
+				if findings[i].class == "journal-buffer-file-headroom" && !findings[i].healthy {
+					headroom = &findings[i]
+				}
+			}
+			if (headroom != nil) != testCase.wantAlert {
+				t.Fatalf("headroom alert present=%t, want %t: %+v", headroom != nil, testCase.wantAlert, findings)
+			}
+			if headroom != nil && !strings.Contains(headroom.observed, testCase.wantPct) {
+				t.Fatalf("observed=%q, want %q", headroom.observed, testCase.wantPct)
+			}
+		})
+	}
+}
+
+func TestJournalBufferSignalSyntheticFileScanUnavailableIsVisibility(t *testing.T) {
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return journalBufferFixture(map[string]string{
+			"journal_file_scan_state": "unavailable", "journal_files": "0", "journal_bytes": "0",
+			"journal_archived_files_5m": "0", "journal_system_archived_files_5m": "0",
+			"journal_user_archived_files_5m": "0",
+		}), nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "edge", Roles: []string{"services"}}}
+	alerts, err := NewJournalBufferSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "cannot-observe")
+	if alert.Target != "edge/journal-buffer-files" {
+		t.Fatalf("visibility target=%q", alert.Target)
+	}
+}
+
 func TestJournalBufferSampleRejectsPreviousSchema(t *testing.T) {
-	_, err := parseJournalBufferSample(journalBufferFixture(map[string]string{"observation_schema": "2"}))
+	_, err := parseJournalBufferSample(journalBufferFixture(map[string]string{"observation_schema": "3"}))
 	if err == nil || !strings.Contains(err.Error(), "unsupported observation schema") {
 		t.Fatalf("parse error=%v, want unsupported schema", err)
 	}
@@ -146,15 +246,59 @@ func TestJournalBufferCommandIsBoundedAndUsesEffectiveConfig(t *testing.T) {
 		"--output-fields=__REALTIME_TIMESTAMP -o json",
 		"ActiveEnterTimestampMonotonic",
 		"Storage", "SystemMaxUse", "SystemMaxFileSize", "SystemMaxFiles", "MaxFileSec", "MaxRetentionSec",
+		"find /var/log/journal -xdev -type f -name '*.journal'",
+		"journal_archived_files_5m", "journal_system_archived_files_5m", "journal_user_archived_files_5m",
 	} {
 		if !strings.Contains(journalBufferCommand, want) {
 			t.Errorf("command lacks %q", want)
 		}
 	}
-	for _, forbidden := range []string{"sudo", "--list-boots", "mktemp", ">/tmp", "> /tmp"} {
+	for _, forbidden := range []string{"sudo", "--list-boots", "mktemp", ">/tmp", "> /tmp", "cat /var/log/journal"} {
 		if strings.Contains(journalBufferCommand, forbidden) {
 			t.Errorf("command contains unsafe/unbounded boundary %q", forbidden)
 		}
+	}
+}
+
+func TestJournalBufferCommandReducesFileMetadataWithoutNames(t *testing.T) {
+	const fileRows = "1999999990.0 2048 system@aaaa-bbbb.journal\n" +
+		"1999999980.0 1024 user-1000@cccc-dddd.journal\n" +
+		"1999999970.0 512 system.journal\n"
+	output, err := runJournalBufferCommandWithClockAndFiles(t, "string", "string", "fixed", fileRows)
+	if err != nil {
+		t.Fatalf("file metadata reducer failed: %v\n%s", err, output)
+	}
+	sample, err := parseJournalBufferSample(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.journalFileScanState != "complete" || sample.journalFiles != 3 ||
+		sample.journalBytes != 1835008 || sample.journalArchivedFiles5m != 2 ||
+		sample.journalSystemArchives5m != 1 || sample.journalUserArchives5m != 1 {
+		t.Fatalf("file metadata sample=%+v", sample)
+	}
+	for _, private := range []string{"aaaa-bbbb", "cccc-dddd", "user-1000"} {
+		if strings.Contains(output, private) {
+			t.Fatalf("file metadata reducer leaked %q: %s", private, output)
+		}
+	}
+}
+
+func TestJournalBufferCommandMalformedFileMetadataIsVisibility(t *testing.T) {
+	const fileRows = "1999999990.0 2048 private-unexpected-name.journal\n"
+	output, err := runJournalBufferCommandWithClockAndFiles(t, "string", "string", "fixed", fileRows)
+	if err != nil {
+		t.Fatalf("malformed file metadata must preserve other journal observations: %v\n%s", err, output)
+	}
+	sample, err := parseJournalBufferSample(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.journalFileScanState != "unavailable" {
+		t.Fatalf("file scan state=%q, want unavailable", sample.journalFileScanState)
+	}
+	if strings.Contains(output, "private-unexpected-name") {
+		t.Fatalf("malformed file metadata leaked: %s", output)
 	}
 }
 
@@ -267,6 +411,10 @@ func runJournalBufferCommand(t *testing.T, latestMode, boundaryMode string) (str
 }
 
 func runJournalBufferCommandWithClock(t *testing.T, latestMode, boundaryMode, clockMode string) (string, error) {
+	return runJournalBufferCommandWithClockAndFiles(t, latestMode, boundaryMode, clockMode, "")
+}
+
+func runJournalBufferCommandWithClockAndFiles(t *testing.T, latestMode, boundaryMode, clockMode, fileRows string) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	writeExecutable := func(name, body string) {
@@ -306,6 +454,17 @@ exec /usr/bin/awk "$@"
 shift
 exec "$@"
 `)
+	journalRoot := filepath.Join(bin, "journal")
+	commandSource := journalBufferCommand
+	if fileRows != "" {
+		if err := os.Mkdir(journalRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable("find", `#!/bin/sh
+printf '%s' "$JOURNAL_FIND_OUTPUT"
+`)
+		commandSource = strings.ReplaceAll(commandSource, "/var/log/journal", journalRoot)
+	}
 	// The command and its fake journalctl child must share one clock. Sampling
 	// the real clock twice made a loaded test host manufacture a future latest
 	// record when process startup crossed more than one second. Cross mode makes
@@ -357,13 +516,14 @@ case "$mode" in
 esac
 `)
 
-	command := exec.Command("sh", "-c", journalBufferCommand)
+	command := exec.Command("sh", "-c", commandSource)
 	command.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"JOURNAL_LATEST_MODE="+latestMode,
 		"JOURNAL_BOUNDARY_MODE="+boundaryMode,
 		"JOURNAL_CLOCK_MODE="+clockMode,
 		"JOURNAL_CLOCK_STATE="+filepath.Join(bin, "query-seen"),
+		"JOURNAL_FIND_OUTPUT="+fileRows,
 	)
 	output, err := command.CombinedOutput()
 	return string(output), err

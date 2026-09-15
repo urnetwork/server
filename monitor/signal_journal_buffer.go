@@ -118,8 +118,65 @@ if [ "${uptime_seconds:-0}" -ge 4200 ] && [ "$journald_active_seconds" -ge 4200 
   fi
 fi
 
+# A byte ceiling does not provide the intended recovery headroom when journal
+# hash pressure rotates small files and SystemMaxFiles becomes the binding
+# limit. Reduce file metadata on-host; no file name or timestamp leaves it.
+journal_file_scan_state=unavailable
+journal_files=0
+journal_bytes=0
+journal_archived_files_5m=0
+journal_system_archived_files_5m=0
+journal_user_archived_files_5m=0
+if [ -d /var/log/journal ]; then
+  journal_file_now=$(date +%s) || exit 36
+  journal_file_reduction=$(
+    set -o pipefail
+    timeout 10 find /var/log/journal -xdev -type f -name '*.journal' \
+      -printf '%T@ %b %f\n' 2>/dev/null |
+      LC_ALL=C awk -v now="$journal_file_now" '
+        function fail(code) {failed=1; exit code}
+        NF != 3 {fail(43)}
+        {
+          mtime=$1
+          blocks=$2
+          name=$3
+          if (mtime !~ /^[0-9]+([.][0-9]+)?$/ || blocks !~ /^[0-9]+$/) fail(43)
+          if (name !~ /^system([@][0-9a-f-]+)?[.]journal$/ &&
+              name !~ /^user-[0-9]+([@][0-9a-f-]+)?[.]journal$/) fail(43)
+          files++
+          if (files > 4096) fail(42)
+          bytes += blocks * 512
+          age=now-mtime
+          if (age >= -2 && age <= 300 && name ~ /@/) {
+            archived++
+            if (name ~ /^system@/) system_archived++
+            else if (name ~ /^user-[0-9]+@/) user_archived++
+          }
+        }
+        END {
+          if (!failed) printf "%d %d %d %d %d\n", files+0, bytes+0,
+            archived+0, system_archived+0, user_archived+0
+        }
+      '
+  )
+  journal_file_status=$?
+  if [ "$journal_file_status" -eq 0 ]; then
+    set -- $journal_file_reduction
+    if [ "$#" -eq 5 ]; then
+      journal_files=$1
+      journal_bytes=$2
+      journal_archived_files_5m=$3
+      journal_system_archived_files_5m=$4
+      journal_user_archived_files_5m=$5
+      journal_file_scan_state=complete
+    fi
+  elif [ "$journal_file_status" -eq 42 ]; then
+    journal_file_scan_state=truncated
+  fi
+fi
+
 printf '%s\n' \
-  'observation_schema=3' \
+  'observation_schema=4' \
   "journald_active=${journald_active}" \
   "journald_active_seconds=${journald_active_seconds}" \
   "storage=${storage:--}" \
@@ -132,7 +189,13 @@ printf '%s\n' \
   "coverage_checked=${coverage_checked}" \
   "coverage_present=${coverage_present}" \
   "boundary_entry_age_seconds=${boundary_entry_age_seconds}" \
-  'coverage_target_seconds=3000'
+  'coverage_target_seconds=3000' \
+  "journal_file_scan_state=${journal_file_scan_state}" \
+  "journal_files=${journal_files}" \
+  "journal_bytes=${journal_bytes}" \
+  "journal_archived_files_5m=${journal_archived_files_5m}" \
+  "journal_system_archived_files_5m=${journal_system_archived_files_5m}" \
+  "journal_user_archived_files_5m=${journal_user_archived_files_5m}"
 `
 
 type journalBufferSample struct {
@@ -149,6 +212,12 @@ type journalBufferSample struct {
 	coveragePresent         bool
 	boundaryEntryAgeSeconds int
 	coverageTargetSeconds   int
+	journalFileScanState    string
+	journalFiles            int
+	journalBytes            uint64
+	journalArchivedFiles5m  int
+	journalSystemArchives5m int
+	journalUserArchives5m   int
 }
 
 type journalBufferResult struct {
@@ -213,7 +282,9 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		"observation_schema", "journald_active", "journald_active_seconds", "storage",
 		"max_use", "max_file_size", "max_files", "max_file_sec", "max_retention",
 		"uptime_seconds", "coverage_checked", "coverage_present",
-		"boundary_entry_age_seconds", "coverage_target_seconds",
+		"boundary_entry_age_seconds", "coverage_target_seconds", "journal_file_scan_state",
+		"journal_files", "journal_bytes", "journal_archived_files_5m",
+		"journal_system_archived_files_5m", "journal_user_archived_files_5m",
 	}
 	values := map[string]string{}
 	allowed := map[string]bool{}
@@ -239,7 +310,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 			return journalBufferSample{}, fmt.Errorf("journal buffer: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "3" {
+	if values["observation_schema"] != "4" {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: unsupported observation schema")
 	}
 
@@ -293,12 +364,50 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 	if checked && present != (boundaryEntryAge >= coverageTarget) {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent coverage result")
 	}
+	journalFileScanState := values["journal_file_scan_state"]
+	if journalFileScanState != "complete" && journalFileScanState != "unavailable" && journalFileScanState != "truncated" {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: invalid journal file scan state")
+	}
+	journalFiles, err := parseNonnegative("journal_files")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	journalBytes, err := strconv.ParseUint(values["journal_bytes"], 10, 64)
+	if err != nil {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: invalid journal_bytes")
+	}
+	journalArchivedFiles5m, err := parseNonnegative("journal_archived_files_5m")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	journalSystemArchives5m, err := parseNonnegative("journal_system_archived_files_5m")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	journalUserArchives5m, err := parseNonnegative("journal_user_archived_files_5m")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	if journalFileScanState != "complete" &&
+		(journalFiles != 0 || journalBytes != 0 || journalArchivedFiles5m != 0 ||
+			journalSystemArchives5m != 0 || journalUserArchives5m != 0) {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: incomplete journal file scan retained values")
+	}
+	if journalFileScanState == "complete" &&
+		(journalArchivedFiles5m > journalFiles ||
+			journalSystemArchives5m+journalUserArchives5m != journalArchivedFiles5m) {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent journal file counts")
+	}
 	return journalBufferSample{
 		journaldActive: values["journald_active"], journaldActiveSeconds: activeSeconds,
 		storage: values["storage"], maxUse: values["max_use"], maxFileSize: values["max_file_size"],
 		maxFiles: values["max_files"], maxFileSec: values["max_file_sec"], maxRetention: values["max_retention"],
 		uptimeSeconds: uptime, coverageChecked: checked, coveragePresent: present,
 		boundaryEntryAgeSeconds: boundaryEntryAge, coverageTargetSeconds: coverageTarget,
+		journalFileScanState: journalFileScanState, journalFiles: journalFiles,
+		journalBytes: journalBytes, journalArchivedFiles5m: journalArchivedFiles5m,
+		journalSystemArchives5m: journalSystemArchives5m,
+		journalUserArchives5m:   journalUserArchives5m,
 	}, nil
 }
 
@@ -344,6 +453,48 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 		})
 	} else {
 		findings = append(findings, healthyFinding("host/journal-buffer", tierWarn, "journal-buffer-config", target))
+	}
+
+	if sample.journalFileScanState != "complete" {
+		findings = append(findings, cannotObserveFinding(
+			target+"/journal-buffer-files", fmt.Errorf("journal file metadata scan %s", sample.journalFileScanState),
+		))
+	} else if maxFiles, err := strconv.Atoi(sample.maxFiles); err != nil || maxFiles <= 0 {
+		findings = append(findings, cannotObserveFinding(
+			target+"/journal-buffer-file-headroom", fmt.Errorf("effective SystemMaxFiles is not a positive integer"),
+		))
+	} else {
+		projectedArchives1h := sample.journalArchivedFiles5m * 12
+		currentPercent := float64(sample.journalFiles) * 100 / float64(maxFiles)
+		projectedPercent := float64(projectedArchives1h) * 100 / float64(maxFiles)
+		fileObserved := fmt.Sprintf(
+			"journal_files=%d system_max_files=%d current_file_capacity_pct=%.1f journal_bytes=%d journal_archived_files_5m=%d journal_system_archived_files_5m=%d journal_user_archived_files_5m=%d projected_archived_files_1h=%d projected_file_capacity_pct=%.1f",
+			sample.journalFiles, maxFiles, currentPercent, sample.journalBytes,
+			sample.journalArchivedFiles5m, sample.journalSystemArchives5m,
+			sample.journalUserArchives5m, projectedArchives1h, projectedPercent,
+		)
+		if sample.journalFiles*4 > maxFiles || projectedArchives1h*4 > maxFiles {
+			findings = append(findings, finding{
+				probeId: "host/journal-buffer", tier: tierWarn,
+				class: "journal-buffer-file-headroom", target: target, sustain: 2,
+				symptom: fmt.Sprintf(
+					"%s journal file count does not preserve the fourfold local recovery headroom",
+					target,
+				),
+				mechanism: "Journal files can rotate before SystemMaxFileSize when high-cardinality entries fill the file's data hash table. SystemMaxFiles then becomes the binding capacity limit even while the 100 GiB byte ceiling has ample space; rapid rotation also increases exposure to journal-reader invalidation races.",
+				baseline:  "Current retained files and the five-minute rotation rate projected over one hour each use at most 25% of SystemMaxFiles, preserving at least fourfold file-count headroom alongside the byte cap.",
+				observed:  fileObserved,
+				evidence:  "The host reducer returns only total allocated bytes, aggregate file counts, and system/user archive counts. Journal filenames, timestamps, entries, cursors, and workload identifiers never leave the host.",
+				context:   "This is a rotation and local-capacity precursor. It does not by itself prove Fluent Bit loss, durable journal corruption, disk failure, or which producer owns the churn; correlate §11.14 before assigning data loss.",
+				action:    "Measure a bounded privacy-reduced producer suffix and remove only proven log amplification. Preserve the one-hour/100 GiB contract; change SystemMaxFiles only after checking inode cost, directory scan cost, and the journal-reader behavior under the measured rotation rate. Do not delete journals, reboot, or restart the shipper to hide the count.",
+				verify:    "Two consecutive five-minute observations keep both current and projected one-hour file use at or below 25% of SystemMaxFiles, the 50-minute boundary remains readable, §11.14 has zero iterator loss for ten minutes spanning ordinary rotation, and current-source Loki data stays fresh.",
+				playbook:  "SIGNALS.md §8.5b and §11.14",
+			})
+		} else {
+			findings = append(findings, healthyFinding(
+				"host/journal-buffer", tierWarn, "journal-buffer-file-headroom", target,
+			))
+		}
 	}
 
 	if sample.coverageChecked && !sample.coveragePresent {
