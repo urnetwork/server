@@ -858,7 +858,11 @@ func (self *Settings) TokenNames() []string {
 
 const roundCommitmentDomain = "urnetwork-sim-latency-round-v1\x00"
 
-func createRoundSecret(settings *Settings, roundId server.Id) (nonce, ciphertext []byte, commitment string, err error) {
+func createRoundSecret(settings *Settings, round *roundRecord) (nonce, ciphertext []byte, commitment string, err error) {
+	aad, err := roundAad(settings, round)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	seed := make([]byte, 32)
 	if _, err = rand.Read(seed); err != nil {
 		return nil, nil, "", err
@@ -875,11 +879,10 @@ func createRoundSecret(settings *Settings, roundId server.Id) (nonce, ciphertext
 	if _, err = rand.Read(nonce); err != nil {
 		return nil, nil, "", err
 	}
-	aad := roundAAD(settings, roundId)
 	ciphertext = gcm.Seal(nil, nonce, seed, aad)
 	h := sha256.New()
 	h.Write([]byte(roundCommitmentDomain))
-	h.Write(roundId.Bytes())
+	h.Write(round.RoundId.Bytes())
 	h.Write(seed)
 	commitment = hex.EncodeToString(h.Sum(nil))
 	clear(seed)
@@ -887,6 +890,10 @@ func createRoundSecret(settings *Settings, roundId server.Id) (nonce, ciphertext
 }
 
 func revealRoundSecret(settings *Settings, round *roundRecord) (string, error) {
+	aad, err := roundAad(settings, round)
+	if err != nil {
+		return "", err
+	}
 	block, err := aes.NewCipher(settings.SeedKey)
 	if err != nil {
 		return "", err
@@ -898,7 +905,7 @@ func revealRoundSecret(settings *Settings, round *roundRecord) (string, error) {
 	if len(round.SeedNonce) != gcm.NonceSize() {
 		return "", fmt.Errorf("round nonce has invalid length")
 	}
-	seed, err := gcm.Open(nil, round.SeedNonce, round.SeedCiphertext, roundAAD(settings, round.RoundId))
+	seed, err := gcm.Open(nil, round.SeedNonce, round.SeedCiphertext, aad)
 	if err != nil {
 		return "", fmt.Errorf("decrypt round seed: %w", err)
 	}
@@ -916,8 +923,23 @@ func revealRoundSecret(settings *Settings, round *roundRecord) (string, error) {
 	return hex.EncodeToString(seed), nil
 }
 
-func roundAAD(settings *Settings, roundId server.Id) []byte {
-	return []byte(roundCommitmentDomain + settings.CompetitionId + "\x00" + roundId.String() + "\x00" + settings.BaseSha)
+// Reconstructs the original authenticated identity from the immutable round
+// rather than mutable process configuration. The current request must still
+// address the same competition as both persisted identities.
+func roundAad(settings *Settings, round *roundRecord) ([]byte, error) {
+	if settings == nil || round == nil || round.RoundId == (server.Id{}) {
+		return nil, errors.New("round identity is missing")
+	}
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil {
+		return nil, err
+	}
+	if settings.CompetitionId != round.CompetitionId || round.CompetitionId != policy.CompetitionId {
+		return nil, errors.New("round competition identity does not match its request and policy")
+	}
+	return []byte(
+		roundCommitmentDomain + policy.CompetitionId + "\x00" + round.RoundId.String() + "\x00" + policy.BaseSha,
+	), nil
 }
 
 const runtimeImageDigestEnvironment = "WARP_IMAGE_DIGEST"
@@ -3554,6 +3576,30 @@ type roundPolicySnapshot struct {
 	SeasonPolicy         SeasonPolicy     `json:"season_policy"`
 }
 
+// Decodes the complete schema-one snapshot before any of its identity fields
+// are trusted for authenticated encryption or evaluator provenance.
+func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, error) {
+	if len(stored) == 0 {
+		return nil, errors.New("round policy is empty")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(stored))
+	decoder.DisallowUnknownFields()
+	policy := &roundPolicySnapshot{}
+	if err := decoder.Decode(policy); err != nil {
+		return nil, fmt.Errorf("decode round policy: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("round policy has trailing content")
+	}
+	if policy.Schema != 1 || policy.CompetitionId == "" || 128 < len(policy.CompetitionId) ||
+		!gitShaPattern.MatchString(policy.BaseSha) ||
+		!imageDigestPattern.MatchString(policy.EvaluatorImageDigest) ||
+		policy.ScoreSchema != ScoreSchema || policy.ScorerVersion != ScorerVersion {
+		return nil, errors.New("round policy identity is invalid")
+	}
+	return policy, nil
+}
+
 func policySnapshot(settings *Settings) ([]byte, error) {
 	return json.Marshal(roundPolicySnapshot{
 		Schema:               1,
@@ -3571,15 +3617,9 @@ func policySnapshot(settings *Settings) ([]byte, error) {
 // Reads the evaluator identity frozen with a round rather than the current
 // process configuration, so historical job responses retain exact provenance.
 func evaluatorImageDigestFromPolicy(stored json.RawMessage) (string, error) {
-	var policy roundPolicySnapshot
-	if len(stored) == 0 {
-		return "", errors.New("round policy is empty")
-	}
-	if err := json.Unmarshal(stored, &policy); err != nil {
-		return "", fmt.Errorf("decode round policy: %w", err)
-	}
-	if !imageDigestPattern.MatchString(policy.EvaluatorImageDigest) {
-		return "", errors.New("round evaluator image digest is invalid")
+	policy, err := decodeRoundPolicySnapshot(stored)
+	if err != nil {
+		return "", err
 	}
 	return policy.EvaluatorImageDigest, nil
 }
@@ -3607,7 +3647,7 @@ func (self PostgresStore) prepareRound(
 		return nil, err
 	}
 	round.PolicyJson = policy
-	round.SeedNonce, round.SeedCiphertext, round.WorkloadCommitment, err = createRoundSecret(settings, round.RoundId)
+	round.SeedNonce, round.SeedCiphertext, round.WorkloadCommitment, err = createRoundSecret(settings, round)
 	if err != nil {
 		return nil, err
 	}

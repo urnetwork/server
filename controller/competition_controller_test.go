@@ -896,29 +896,164 @@ func TestPatchValidationAlwaysProtectsSimulatorTree(t *testing.T) {
 	}
 }
 
-func TestRoundCommitmentEncryptsAndReveals(t *testing.T) {
-	settings := validSettings()
-	roundId := server.NewId()
-	nonce, ciphertext, commitment, err := createRoundSecret(settings, roundId)
+// Builds one internally consistent synthetic round under its persisted policy.
+func sealedTestRound(t *testing.T, settings *Settings) (*roundRecord, string) {
+	t.Helper()
+	policy, err := policySnapshot(settings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ciphertext) <= 32 || strings.Contains(hex.EncodeToString(ciphertext), commitment) {
+	round := &roundRecord{
+		RoundResult:   RoundResult{RoundId: server.NewId()},
+		CompetitionId: settings.CompetitionId,
+		PolicyJson:    policy,
+	}
+	round.SeedNonce, round.SeedCiphertext, round.WorkloadCommitment, err = createRoundSecret(settings, round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := revealRoundSecret(settings, round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return round, seed
+}
+
+func TestRoundCommitmentEncryptsAndReveals(t *testing.T) {
+	settings := validSettings()
+	round, seed := sealedTestRound(t, settings)
+	aad, err := roundAad(settings, round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAad := []byte(
+		roundCommitmentDomain + settings.CompetitionId + "\x00" + round.RoundId.String() + "\x00" + settings.BaseSha,
+	)
+	if !bytes.Equal(aad, wantAad) {
+		t.Fatalf("round AAD = %x, want legacy bytes %x", aad, wantAad)
+	}
+	if len(round.SeedCiphertext) <= 32 ||
+		strings.Contains(hex.EncodeToString(round.SeedCiphertext), round.WorkloadCommitment) {
 		t.Fatal("round seed was not authenticated-encrypted")
 	}
-	round := &roundRecord{RoundResult: RoundResult{RoundId: roundId, WorkloadCommitment: commitment}, SeedNonce: nonce, SeedCiphertext: ciphertext}
-	seed, err := revealRoundSecret(settings, round)
-	if err != nil || len(seed) != 64 {
-		t.Fatalf("reveal = %q, %v", seed, err)
+	if len(seed) != 64 {
+		t.Fatalf("revealed seed length = %d", len(seed))
 	}
-	round.WorkloadCommitment = strings.Repeat("0", 64)
-	if _, err := revealRoundSecret(settings, round); err == nil {
-		t.Fatal("tampered commitment accepted")
+}
+
+func TestRoundCommitmentSurvivesConfiguredBaseChange(t *testing.T) {
+	settings := validSettings()
+	round, wantSeed := sealedTestRound(t, settings)
+	retainedNonce := append([]byte(nil), round.SeedNonce...)
+	retainedCiphertext := append([]byte(nil), round.SeedCiphertext...)
+	retainedCommitment := round.WorkloadCommitment
+	retainedPolicy := append(json.RawMessage(nil), round.PolicyJson...)
+
+	current := *settings
+	current.BaseSha = strings.Repeat("c", 40)
+	current.EvaluatorImageDigest = "sha256:" + strings.Repeat("d", 64)
+	seed, err := revealRoundSecret(&current, round)
+	if err != nil || seed != wantSeed {
+		t.Fatalf("historical reveal after configured base change = %q, %v", seed, err)
 	}
-	other := validSettings()
-	other.SeedKey = []byte("abcdef0123456789abcdef0123456789")
-	if _, err := revealRoundSecret(other, round); err == nil {
-		t.Fatal("wrong key accepted")
+	if !bytes.Equal(round.SeedNonce, retainedNonce) ||
+		!bytes.Equal(round.SeedCiphertext, retainedCiphertext) ||
+		round.WorkloadCommitment != retainedCommitment ||
+		!bytes.Equal(round.PolicyJson, retainedPolicy) {
+		t.Fatal("historical reveal mutated retained round evidence")
+	}
+	if storedPolicyMatches(&current, round.PolicyJson) {
+		t.Fatal("historical reveal relaxed the evaluator's exact policy gate")
+	}
+}
+
+func TestRoundViewRevealsHistoricalRoundAfterBaseChange(t *testing.T) {
+	settings := validSettings()
+	round, wantSeed := sealedTestRound(t, settings)
+	finalizedAt := server.NowUtc().Add(-time.Minute)
+	round.FinalizedAt = &finalizedAt
+	round.RevealAt = finalizedAt
+
+	current := *settings
+	current.BaseSha = strings.Repeat("c", 40)
+	service := &Service{settings: &current}
+	view, evalError := service.roundView(round)
+	if evalError != nil || view == nil || view.RevealedSeed == nil || *view.RevealedSeed != wantSeed ||
+		view.ProvidersUrl != "/competition/round/"+round.RoundId.String()+"/providers.yml" {
+		t.Fatalf("historical round view = %#v, %#v", view, evalError)
+	}
+}
+
+func TestRoundCommitmentRejectsIdentityAndPolicyTampering(t *testing.T) {
+	settings := validSettings()
+	round, _ := sealedTestRound(t, settings)
+	otherCompetitionId := "synthetic-other-competition"
+	cases := []struct {
+		name   string
+		tamper func(*Settings, *roundRecord)
+	}{
+		{name: "request competition", tamper: func(settings *Settings, _ *roundRecord) {
+			settings.CompetitionId = otherCompetitionId
+		}},
+		{name: "row competition", tamper: func(_ *Settings, round *roundRecord) {
+			round.CompetitionId = otherCompetitionId
+		}},
+		{name: "round id", tamper: func(_ *Settings, round *roundRecord) {
+			round.RoundId = server.NewId()
+		}},
+		{name: "policy competition", tamper: func(_ *Settings, round *roundRecord) {
+			var policy roundPolicySnapshot
+			if err := json.Unmarshal(round.PolicyJson, &policy); err != nil {
+				t.Fatal(err)
+			}
+			policy.CompetitionId = otherCompetitionId
+			encoded, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round.PolicyJson = encoded
+		}},
+		{name: "policy base", tamper: func(_ *Settings, round *roundRecord) {
+			var policy roundPolicySnapshot
+			if err := json.Unmarshal(round.PolicyJson, &policy); err != nil {
+				t.Fatal(err)
+			}
+			policy.BaseSha = strings.Repeat("b", 40)
+			encoded, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round.PolicyJson = encoded
+		}},
+		{name: "malformed policy", tamper: func(_ *Settings, round *roundRecord) {
+			round.PolicyJson = json.RawMessage(`{"schema":`)
+		}},
+		{name: "unknown policy field", tamper: func(_ *Settings, round *roundRecord) {
+			round.PolicyJson = append(append([]byte(nil), round.PolicyJson[:len(round.PolicyJson)-1]...), []byte(`,"unknown":true}`)...)
+		}},
+		{name: "wrong seed key", tamper: func(settings *Settings, _ *roundRecord) {
+			settings.SeedKey = []byte("abcdef0123456789abcdef0123456789")
+		}},
+		{name: "commitment", tamper: func(_ *Settings, round *roundRecord) {
+			round.WorkloadCommitment = strings.Repeat("0", 64)
+		}},
+		{name: "ciphertext", tamper: func(_ *Settings, round *roundRecord) {
+			round.SeedCiphertext[0] ^= 1
+		}},
+	}
+	for _, c := range cases {
+		settingsCopy := *settings
+		roundCopy := *round
+		roundCopy.PolicyJson = append(json.RawMessage(nil), round.PolicyJson...)
+		roundCopy.SeedNonce = append([]byte(nil), round.SeedNonce...)
+		roundCopy.SeedCiphertext = append([]byte(nil), round.SeedCiphertext...)
+		c.tamper(&settingsCopy, &roundCopy)
+		if _, err := revealRoundSecret(&settingsCopy, &roundCopy); err == nil {
+			t.Errorf("%s tampering was accepted", c.name)
+		}
+	}
+	if _, err := revealRoundSecret(settings, round); err != nil {
+		t.Fatalf("tamper cases mutated original round: %v", err)
 	}
 }
 
@@ -969,7 +1104,19 @@ func TestEvaluatorImageDigestFromPolicyRetainsHistoricalIdentity(t *testing.T) {
 }
 
 func TestEvaluatorImageDigestFromPolicyRejectsUnpinnedIdentity(t *testing.T) {
-	stored := json.RawMessage(`{"evaluator_image_digest":"evaluator:latest"}`)
+	stored, err := policySnapshot(validSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy roundPolicySnapshot
+	if err := json.Unmarshal(stored, &policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.EvaluatorImageDigest = "evaluator:latest"
+	stored, err = json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := evaluatorImageDigestFromPolicy(stored); err == nil {
 		t.Fatal("mutable evaluator image identity accepted from round policy")
 	}
