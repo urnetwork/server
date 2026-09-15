@@ -2628,34 +2628,38 @@
       "id": 41
     },
     {
-      "type": "heatmap",
-      "title": "health check latency",
-      "description": "Distribution of successful check latency. A band shifting up for every class at once is the tunnel path (prober or platform); one destination alone is that target.",
+      "type": "timeseries",
+      "title": "mean health check latency",
+      "description": "Fleet mean of successful check latency from cumulative sum/count samples. A shift for every class at once points to the tunnel path; one destination alone points to that target. Exact one-minute maxima are shown separately without classic histogram buckets.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "options": {
-        "calculate": false,
-        "yAxis": {
+      "fieldConfig": {
+        "defaults": {
           "unit": "s",
-          "axisPlacement": "left"
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
         },
-        "color": {
-          "mode": "scheme",
-          "scheme": "Oranges",
-          "steps": 64
-        },
-        "cellGap": 1,
+        "overrides": []
+      },
+      "options": {
         "legend": {
-          "show": true
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "yHistogram": false
-        },
-        "exemplars": {
-          "color": "rgba(255,0,255,0.7)"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2664,10 +2668,9 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (le) (rate(urnetwork_egress_probe_health_check_seconds_bucket{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval]))",
+          "expr": "sum(rate(urnetwork_egress_probe_health_check_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])) / clamp_min(sum(rate(urnetwork_egress_probe_health_check_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])), 1e-9)",
           "refId": "A",
-          "format": "heatmap",
-          "legendFormat": "{{le}}"
+          "legendFormat": "mean"
         }
       ],
       "gridPos": {
@@ -2680,8 +2683,8 @@
     },
     {
       "type": "timeseries",
-      "title": "latency p50 / p95 by class",
-      "description": "Median and tail latency per class.",
+      "title": "mean / latest one-minute max latency by class",
+      "description": "Aggregatable fleet mean and the exact maximum from each process's latest fresh one-minute interval. The maximum is joined to its observation timestamp so an idle destination cannot look current.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2719,18 +2722,18 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, class) (rate(urnetwork_egress_probe_health_check_seconds_bucket{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])))",
+          "expr": "sum by (class) (rate(urnetwork_egress_probe_health_check_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])) / clamp_min(sum by (class) (rate(urnetwork_egress_probe_health_check_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])), 1e-9)",
           "refId": "A",
-          "legendFormat": "p50 {{class}}"
+          "legendFormat": "mean {{class}}"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, class) (rate(urnetwork_egress_probe_health_check_seconds_bucket{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])))",
+          "expr": "max by (class) (urnetwork_egress_probe_health_check_interval_max_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"} and on (env, service, block, host, instance, destination, class) (urnetwork_egress_probe_health_check_interval_max_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"} >= time() - 120 and urnetwork_egress_probe_health_check_interval_max_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"} <= time() + 30))",
           "refId": "B",
-          "legendFormat": "p95 {{class}}"
+          "legendFormat": "one-minute max {{class}}"
         }
       ],
       "gridPos": {
@@ -2743,8 +2746,8 @@
     },
     {
       "type": "bargauge",
-      "title": "latency p95 by destination (range, slowest 20)",
-      "description": "Slowest destinations by p95 over the range.",
+      "title": "mean latency by destination (range, slowest 20)",
+      "description": "Slowest destinations by aggregatable mean over the selected range. Use the adjacent fresh maximum panel for exact tail events.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2797,7 +2800,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "topk(20, histogram_quantile(0.95, sum by (le, destination) (rate(urnetwork_egress_probe_health_check_seconds_bucket{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__range]))))",
+          "expr": "topk(20, sum by (destination) (increase(urnetwork_egress_probe_health_check_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__range])) / clamp_min(sum by (destination) (increase(urnetwork_egress_probe_health_check_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",class=~\"$class\",destination=~\"$destination\"}[$__range])), 1e-9))",
           "refId": "A",
           "legendFormat": "{{destination}}",
           "instant": true,

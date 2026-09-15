@@ -144,6 +144,11 @@ explicit Xops-owned preferred-front ordinal, running route inputs, and
 process-owned established port-3100 connections with the active Grafana-front
 topology. This catches stale/common
 placement even when low traffic makes the rate-based balance signal green.
+The cardinality follow-up adds §11.20d (`cardinality`): it counts only exact,
+source-reviewed metric families through a loopback Mimir gateway. It detects
+the Taskworker egress-health classic-histogram multiplier and Redis INFO
+latencystats series independently, without returning metric labels or treating
+either accepted family as sole attribution for a rejected batch.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -201,7 +206,7 @@ active missing capability and must not be read as green.
 | 11.7b | Runbook | `grafana-node`, `mimir-balance`, `log-errors` |
 | 11.7c | Runbook | `rollout-guard`, `provenance` |
 | 11.8 | Shared contract | `provenance`, `grafana-node` |
-| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
+| 11.9 | Runbook | `grafana-node`, `grafana-ingress`, `grafana-datasources`, `mimir-index`, `mimir-continuity`, `mimir-admission`, `mimir-balance`, `mimir-publishers`, `cardinality`, `mimir-shutdown`, `loki-tailers`, `log-shipper` |
 | 11.10 | Runbook | `log-errors`, `credentials`, `provenance` |
 | 11.11 | Shared contract | `grafana-datasources`, `grafana-node` |
 | 11.12 | Runbook | `grafana-node`, `hostpower`, `log-errors`; direct conntrack inspection remains incident evidence |
@@ -7417,6 +7422,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `mimir-rejection-unobservable` | A recognized structured rejection failed the fixed semantic schema (compatible status/reason, bounded positive counts, unique sorted fixed family classes, and exact family-count sum), or a recognized legacy rejection lacks the exact source-reviewed series-limit body prefix. An echoed sample label containing a limit phrase is not a capacity discriminator. WARN at one event/minute. Raw payloads are discarded; this is visibility loss, not a series, rate, or server capacity diagnosis. The same window withholds healthy findings for all three typed rejection identities so unknown evidence cannot close a prior loss incident. | Compare exact emitting Grafana/monitor artifact schemas and repair the owning producer or parser; never infer capacity from unknown response text. Verify current events are parseable and ten minutes free of unknown-schema events. Typed loss incidents separately require their direct-counter recovery windows. See §1.5/§4. |
 | `mimir-distributor-skew` | The fleet attempted rate is below the tenant's global budget, but one or more distributors exceed the independently enforced local share (`global rate / healthy distributors`). Persistent remote-write connections selected one address from a multi-address hosts entry and concentrated load; spare capacity on sibling token buckets cannot be borrowed. | Run `mimir-balance` (§11.20b). Give each remote publisher a distinct preferred enabled front while retaining all enabled fronts as failover, and remove only measured unnecessary families. This is a software/configuration routing fault while aggregate load remains below budget; do not add hardware or raise the global limit to mask it. Verify balanced child rates and connections for two samples, then zero exact rate-limit increments and fresh required metrics for the full §11.20a quiet window. |
 | `mimir-publisher-placement-drift` or `mimir-publisher-connection-drift` | A high-volume publisher's live alias set/order, running route inputs, or process-owned connection has not converged to the active-front placement prerequisite. This can remain broken with no current traffic and therefore cannot be cleared by a temporarily green balance rate. | Run `mimir-publishers` (§11.20c), then the owning database/Redis Xops playbook after authorization. Require the exact active set, each host's explicit desired preference, and observable process-owned connections following those preferences before the §11.20b and §11.20a closure windows begin. Missing ownership or zero connections is unknown, not recovery. |
+| `taskworker-histogram-cardinality` | The exact accepted `urnetwork_egress_probe_health_check_seconds_bucket` family is present. Every finite destination/class pair is multiplied by classic buckets and each overlapping random process instance, consuming shared Mimir recent-head capacity even though the dashboard needs only an aggregatable mean and a fresh exact interval maximum. | Run `cardinality` (§11.20d). Deploy the sum/count plus freshness-gated interval-maximum implementation and matching dashboard only through the §11.20a rollout-headroom gate. Preserve process identity and bounded dimensions; do not raise a limit, restart Mimir, or hide the panel. Require zero current bucket series, fresh replacement metrics, observed removals, and the complete §11.20a quiet/headroom window. |
+| `taskworker-latency-pair-mismatch` | The exact Taskworker egress-health `_sum` and `_count` families have unequal current series counts. The corrected producer and mean dashboard require paired series with identical labels; unequal counts prove an incomplete accepted family, mixed contract, or query-visible staleness. | Run `cardinality` (§11.20d), compare the deployed Taskworker contract, and reduce the exact label-set difference at the Mimir boundary without exporting labels. Count equality is necessary but not sufficient for label equality. Repair the producer/query contract; do not infer the missing side or restart Mimir. Require equal counts on two fresh reads and a current mean panel. |
+| `redis-latencystats-cardinality` | Redis INFO latencystats produces three percentile samples plus sum/count for every observed command on every node. The current dashboard uses commandstats calls and cumulative duration instead, so these exact accepted families consume shared recent-head capacity without an operational consumer. | Run `cardinality` (§11.20d). Apply `latency-tracking no` through the reviewed Redis playbook while retaining commandstats, the thresholded latency monitor, and slowlog. Require all nodes to report the policy, zero current latencystats series, fresh command panels, observed removals, and the complete §11.20a quiet/headroom window. This reduction does not by itself attribute or close a rejected batch. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
@@ -9250,6 +9258,9 @@ Tier-1 (warn):
 | mimir-push-rejected | structured Grafana rejection event | §11.20a unclassified rejection without a proven typed limit plus bounded job/family classes | >=1/min; limit causes are not excluded; raw upstream body is never retained |
 | mimir-rejection-unobservable | structured Grafana rejection parser | §1.5/§4 fixed semantic schema validity, with typed healthy-recovery withholding | >=1 malformed event/min; visibility only, no capacity attribution; ten-minute parseable quiet gate |
 | mimir-publisher-placement-drift / mimir-publisher-connection-drift | high-volume publisher hosts | §11.20c exact active-front membership, explicit Xops host preference, running route inputs, and stable process-owned port-3100 destinations | known membership/preference/route drift or observable outside-set/no-preferred connection; immediate; incomplete evidence or zero connections is unknown |
+| taskworker-histogram-cardinality | loopback Mimir query | §11.20d exact current count of `urnetwork_egress_probe_health_check_seconds_bucket` | any present series; immediate; accepted series are a removable multiplier, not sole rejected-batch attribution |
+| taskworker-latency-pair-mismatch | loopback Mimir query | §11.20d separate exact current `_sum` and `_count` counts | unequal counts; immediate visibility/correctness warning; equality is necessary but not sufficient for exact label pairing |
+| redis-latencystats-cardinality | loopback Mimir query | §11.20d combined exact current count of Redis percentile, sum, and count latencystats families | any present series; immediate; accepted series are a removable multiplier, not sole rejected-batch attribution |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
@@ -12413,6 +12424,64 @@ evidence: identify the running artifacts and verify the five `_bucket`
 families stop receiving samples while `_sum`, `_count`, and the paired maximum
 families remain fresh.
 
+The 2026-09-15 series-limit incident isolated another steady-growth branch.
+At 05:21:07Z one unchanged Mimir child began rejecting series and eventually
+reported 281,460 exact `per_user_series_limit` discard units while its
+memory-series count reached the 75,000 local ceiling. In a representative
+one-minute comparison, created series increased by 167, removed series stayed
+at zero, and no Mimir generation, readiness-rejected candidate, or publisher
+start changed. The incident began after the Redis automation pass and before
+the later MinIO-related Fluent Bit restart, excluding that restart as the
+initiator.
+
+A later complete 20-second control found two children at exactly 75,000 and a
+7,068-unit direct discard increase; the four below-limit children had zero
+same-window series-limit increase. By 06:32Z the one-minute probe reported two
+affected children, a 30,911-unit increase, 246 accepted creations, and still
+zero removals on stable generations. Query-visible application generation
+groups fell from 148 at 05:05Z to the steady 94 by 05:30Z, proving rollout
+cohorts in the recent head alongside the continuing accepted-series growth.
+
+A privacy-reduced instant query counted approximately 84,958 current global
+series. The Taskworker egress-health latency histogram contributed 8,161
+current bucket series and 14,816 distinct bucket series over the recent
+two-hour head, across eight current process instances. That histogram entered
+the Taskworker path on 2026-09-08/09 and all twenty current blocks ran artifact
+`2026.9.14+1046068620`; its destination/class population and replacement
+cohorts supply the observed continuing creation mechanism. Its accepted bucket
+population alone grew by 5,038 series from 05:10Z through 05:50Z while the
+visible application-generation population fell and then stabilized. This
+proves a continuing pressure contributor, not the exact family content of a
+rejected batch. The correction
+keeps the same finite labels and aggregatable cumulative `_sum`/`_count`,
+removes only classic buckets, and adds a paired exact one-minute maximum and
+observation timestamp for a freshness-gated tail view.
+
+The first source-built §11.20d production snapshot later returned 87,001 total
+current series, 8,800 exact egress-health buckets, and exactly 800 `_sum` plus
+800 `_count` series. The exact 11:1 bucket-to-pair ratio matches the configured
+classic histogram layout and independently validates the fixed PromQL
+partitions. The probe emitted both cardinality findings, kept the pair-mismatch
+class clear, and returned no source labels or samples.
+
+Redis INFO latencystats separately contributed 9,080 current series and the
+same 9,080-series count across the recent two-hour head. Current total Redis
+series had already fallen to approximately 22,608 from a prior 39,109 after
+the exporter stopped collecting optional latency histograms, so this steady
+family did not explain the continuing per-minute growth. It is nevertheless
+an avoidable shared-budget consumer: the Redis dashboard reads commandstats
+calls and cumulative duration, while the thresholded latency monitor and
+slowlog remain independent. Set `latency-tracking no` through the Redis
+configuration while preserving those three consumers.
+
+These counts prove accepted series and independently justify both bounded
+reductions; they do not establish that either family alone populated a
+particular rejected batch. §11.20a remains the loss authority. If optimized
+steady state plus one measured complete replacement cohort still cannot fit
+with reserve under each child's local headroom, the remaining remedy needs an
+explicit Mimir topology/capacity decision and may require more hardware; it
+cannot be completed solely by software metric trimming.
+
 During an active rejection incident, pause further service rollouts. Do not
 restart Mimir: a restart is not controlled series removal and introduces a new
 generation/reset and continuity boundary. Do not raise the local or global
@@ -12722,6 +12791,65 @@ ordinal, observable running route inputs, and process-owned live destinations
 consistent with those preferences. Then require two balanced §11.20b samples and independent zero
 increments with fresh required metrics throughout both §11.20a two-hour quiet
 windows.
+
+### 11.20d Avoidable metric cardinality
+
+Probe: `cardinality`
+
+Run this WARN-tier probe every five minutes through the first reachable
+enabled services gateway. The loopback Mimir instant query contains five
+fixed, source-reviewed partitions: all current environment series, exact
+Taskworker egress-health classic buckets, exact Taskworker egress-health
+sum series, exact Taskworker egress-health count series, and the combined exact
+Redis INFO latencystats percentile, sum, and count families. `label_replace`
+gives each aggregate a fixed monitor
+partition name. The parser requires one non-negative integral value for every
+partition and rejects missing, duplicate, unexpected, non-integral, or
+malformed results. Only the five counts and the serving configured host leave
+the query boundary; metric labels and samples are discarded. One failed
+gateway falls through to another. No reachable gateway or an invalid response
+is observation loss, never a healthy zero.
+
+Emit `taskworker-histogram-cardinality` whenever the exact
+`urnetwork_egress_probe_health_check_seconds_bucket` count is positive. The
+finite destination and class dimensions are legitimate, and the random
+process instance remains necessary for generation isolation. The defect is
+crossing both with every classic bucket while an old process cohort remains in
+Mimir's recent head. Replace that family with a no-quantile summary so its
+existing `_sum` and `_count` remain aggregatable. Retain tail visibility with
+`urnetwork_egress_probe_health_check_interval_max_seconds` paired to
+`urnetwork_egress_probe_health_check_interval_max_timestamp_seconds`; dashboard
+queries must reject maximums older than two minutes or more than 30 seconds in
+the future. Emit `taskworker-latency-pair-mismatch` when the two exact family
+counts differ. Equality is necessary but not sufficient to prove label-by-label
+pairing; a mismatch is a producer/query visibility fault and must not suppress
+either cardinality finding.
+
+Emit `redis-latencystats-cardinality` whenever any exact
+`redis_latency_percentiles_usec`, `_sum`, or `_count` series is present. The
+three families are generated from Redis `INFO latencystats`, independently of
+the redis-exporter optional histogram switch. Disable their source with
+`latency-tracking no` on every Redis node. Preserve INFO commandstats, the
+configured thresholded latency monitor, and slowlog; verify the operations/s
+and command-duration dashboard panels remain current. Do not disable the
+exporter or hide missing panels.
+
+The three findings and their healthy states are independent. A positive
+accepted family count identifies a measured removable multiplier, not the
+unique cause of an admission rejection. Apply either reduction only through
+its ordinary authorized Taskworker/Grafana or Redis rollout and the §11.20a
+per-child headroom gate. A rollout must stop on a new discard. Close each
+cardinality finding only after every owning artifact/config converges, its
+exact current series count is zero, required replacement metrics remain fresh,
+ordinary compaction increases removed-series counters, and §11.20a completes
+its comparable two-hour zero-discard/headroom window. The pair-mismatch finding
+additionally requires equal counts on two fresh reads and a current mean
+panel. Do not erase process identity, restart Mimir, raise a limit, or
+interpret recent-head retention as continued production by a retired artifact.
+
+Implementation convention: SIGNALS.md §11.20d (`cardinality`) maps to
+`server/monitor/signal_cardinality.go` and
+`server/monitor/signal_cardinality_test.go`.
 
 ### 11.21 Mimir shutdown durability configuration
 

@@ -157,6 +157,37 @@ func TestEgressProbeDashboardUsesPopulationAwareOutcomeClasses(t *testing.T) {
 		!strings.Contains(dashboard.Description, "§2.23") {
 		t.Fatal("egress dashboard does not disclose snapshot freshness and direct-database authority")
 	}
+
+	documentBytes, err := dashboardsFs.ReadFile("dashboards/egress-probes.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(documentBytes)
+	if strings.Contains(document, "urnetwork_egress_probe_health_check_seconds_bucket") {
+		t.Fatal("egress dashboard still consumes cardinality-multiplying health-check buckets")
+	}
+	for _, required := range []string{
+		"urnetwork_egress_probe_health_check_seconds_sum",
+		"urnetwork_egress_probe_health_check_seconds_count",
+		"urnetwork_egress_probe_health_check_interval_max_seconds",
+		"urnetwork_egress_probe_health_check_interval_max_timestamp_seconds",
+	} {
+		if !strings.Contains(document, required) {
+			t.Errorf("egress dashboard omits %s", required)
+		}
+	}
+	maximum := dashboardPanelById(dashboard, 43)
+	if maximum == nil || len(maximum.Targets) != 2 {
+		t.Fatal("egress fresh health-check maximum panel is missing")
+	}
+	for _, required := range []string{
+		"and on (env, service, block, host, instance, destination, class)",
+		"time() - 120", "time() + 30",
+	} {
+		if !strings.Contains(maximum.Targets[1].Expr, required) {
+			t.Errorf("egress health-check maximum omits %q: %s", required, maximum.Targets[1].Expr)
+		}
+	}
 }
 
 func TestCompetitionDashboardOperationalSignals(t *testing.T) {
@@ -1873,6 +1904,45 @@ func TestProxyMemoryDescriptorsRemainInMetricInventory(t *testing.T) {
 		if !slices.Contains(metrics, name) {
 			t.Errorf("custom collector descriptor %s is absent from the metric inventory", name)
 		}
+	}
+}
+
+func TestProxyDashboardCoversAggregateDeviceAdmissionBudget(t *testing.T) {
+	dashboard := readTestDashboard(t, "proxy.json")
+	documentBytes, err := dashboardsFs.ReadFile("dashboards/proxy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(documentBytes)
+	for _, metric := range []string{
+		"urnetwork_proxy_device_admission_refused_total",
+		"urnetwork_proxy_device_memory_budget_bytes",
+		"urnetwork_proxy_device_memory_budget_used_bytes",
+	} {
+		if !strings.Contains(document, metric) {
+			t.Errorf("proxy dashboard omits aggregate admission metric %s", metric)
+		}
+	}
+	refusals := dashboardPanelById(dashboard, 27)
+	if refusals == nil || len(refusals.Targets) != 1 ||
+		!strings.Contains(refusals.Targets[0].Expr, "rate(urnetwork_proxy_device_admission_refused_total") {
+		t.Fatal("proxy dashboard does not render device admission refusals as a reset-aware rate")
+	}
+	saturation := dashboardPanelById(dashboard, 28)
+	if saturation == nil || len(saturation.Targets) != 1 {
+		t.Fatal("proxy dashboard does not render per-process device admission saturation")
+	}
+	for _, required := range []string{
+		"max by (block, host, instance)",
+		"urnetwork_proxy_device_memory_budget_used_bytes",
+		"clamp_min(urnetwork_proxy_device_memory_budget_bytes",
+	} {
+		if !strings.Contains(saturation.Targets[0].Expr, required) {
+			t.Errorf("device admission saturation query omits %q: %s", required, saturation.Targets[0].Expr)
+		}
+	}
+	if !strings.Contains(saturation.Description, "must not be read as spare capacity") {
+		t.Fatal("device admission saturation panel does not preserve the missing-telemetry boundary")
 	}
 }
 

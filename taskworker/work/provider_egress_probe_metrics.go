@@ -46,6 +46,10 @@ const egressProbeUnknownCountry = "unknown"
 // fleet tables for the gauges.
 const egressProbeFleetRefreshInterval = time.Minute
 
+// egressProbeHealthLatencyInterval is the wall-clock bucket owned by the
+// paired maximum and timestamp. The sum/count summary remains cumulative.
+const egressProbeHealthLatencyInterval = time.Minute
+
 var egressProbeAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
@@ -95,13 +99,101 @@ var egressProbeHealthChecksByCountryTotal = prometheus.NewCounterVec(prometheus.
 	Help:      "Egress health checks by provider egress country, class and result (ok or fail)",
 }, []string{"country", "class", "result"})
 
-var egressProbeHealthCheckSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "urnetwork",
-	Subsystem: "egress_probe",
-	Name:      "health_check_seconds",
-	Help:      "Latency of successful egress health checks through the provider tunnel, by destination and class",
-	Buckets:   prometheus.ExponentialBuckets(0.05, 2, 10),
-}, []string{"destination", "class"})
+// egressProbeHealthLatencySample is the exact largest observation for one
+// destination/class in one wall-clock interval.
+type egressProbeHealthLatencySample struct {
+	bucket     int64
+	seconds    float64
+	observedAt time.Time
+}
+
+type egressProbeHealthLatencyKey struct {
+	destination string
+	class       string
+}
+
+// egressProbeHealthLatencyMetrics retains aggregate mean inputs plus a fresh
+// exact maximum without a classic histogram bucket multiplier. Destination is
+// a finite configured probe target, but crossing it with 11 histogram buckets
+// and every process generation previously occupied thousands of Mimir series.
+type egressProbeHealthLatencyMetrics struct {
+	duration      *prometheus.SummaryVec
+	maximumDesc   *prometheus.Desc
+	timestampDesc *prometheus.Desc
+	stateLock     sync.Mutex
+	maximums      map[egressProbeHealthLatencyKey]egressProbeHealthLatencySample
+	now           func() time.Time
+}
+
+func newEgressProbeHealthLatencyMetrics() *egressProbeHealthLatencyMetrics {
+	return &egressProbeHealthLatencyMetrics{
+		duration: prometheus.NewSummaryVec(prometheus.SummaryOpts{
+			Namespace:  "urnetwork",
+			Subsystem:  "egress_probe",
+			Name:       "health_check_seconds",
+			Help:       "Successful egress health-check latency by finite configured destination and class.",
+			Objectives: nil,
+		}, []string{"destination", "class"}),
+		maximumDesc: prometheus.NewDesc(
+			"urnetwork_egress_probe_health_check_interval_max_seconds",
+			"Maximum successful egress health-check latency in the latest one-minute interval with an observation.",
+			[]string{"destination", "class"}, nil,
+		),
+		timestampDesc: prometheus.NewDesc(
+			"urnetwork_egress_probe_health_check_interval_max_timestamp_seconds",
+			"Unix time of the observation backing the latest one-minute egress health-check maximum.",
+			[]string{"destination", "class"}, nil,
+		),
+		maximums: map[egressProbeHealthLatencyKey]egressProbeHealthLatencySample{},
+		now:      time.Now,
+	}
+}
+
+var egressProbeHealthCheckSeconds = newEgressProbeHealthLatencyMetrics()
+
+func (self *egressProbeHealthLatencyMetrics) Describe(descriptions chan<- *prometheus.Desc) {
+	self.duration.Describe(descriptions)
+	descriptions <- self.maximumDesc
+	descriptions <- self.timestampDesc
+}
+
+func (self *egressProbeHealthLatencyMetrics) Collect(metrics chan<- prometheus.Metric) {
+	self.duration.Collect(metrics)
+
+	self.stateLock.Lock()
+	maximums := make(map[egressProbeHealthLatencyKey]egressProbeHealthLatencySample, len(self.maximums))
+	for key, sample := range self.maximums {
+		maximums[key] = sample
+	}
+	self.stateLock.Unlock()
+
+	for key, sample := range maximums {
+		labels := []string{key.destination, key.class}
+		metrics <- prometheus.MustNewConstMetric(
+			self.maximumDesc, prometheus.GaugeValue, sample.seconds, labels...,
+		)
+		metrics <- prometheus.MustNewConstMetric(
+			self.timestampDesc, prometheus.GaugeValue,
+			float64(sample.observedAt.UnixNano())/float64(time.Second), labels...,
+		)
+	}
+}
+
+func (self *egressProbeHealthLatencyMetrics) observe(destination string, class string, seconds float64) {
+	self.duration.WithLabelValues(destination, class).Observe(seconds)
+	now := self.now()
+	bucket := now.UnixNano() / egressProbeHealthLatencyInterval.Nanoseconds()
+	key := egressProbeHealthLatencyKey{destination: destination, class: class}
+
+	self.stateLock.Lock()
+	current, ok := self.maximums[key]
+	if !ok || current.bucket != bucket || current.seconds < seconds {
+		self.maximums[key] = egressProbeHealthLatencySample{
+			bucket: bucket, seconds: seconds, observedAt: now,
+		}
+	}
+	self.stateLock.Unlock()
+}
 
 var egressProbeHealthResultsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
@@ -399,7 +491,7 @@ func (self *egressProbeMetricsReporter) SubmitEgressHealth(ctx context.Context, 
 			result := "fail"
 			if check.OK {
 				result = "ok"
-				egressProbeHealthCheckSeconds.WithLabelValues(check.Name, class).Observe(check.Latency.Seconds())
+				egressProbeHealthCheckSeconds.observe(check.Name, class, check.Latency.Seconds())
 			}
 			egressProbeHealthChecksTotal.WithLabelValues(check.Name, class, result).Inc()
 			egressProbeHealthChecksByCountryTotal.WithLabelValues(country, class, result).Inc()

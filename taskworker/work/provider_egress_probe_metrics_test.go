@@ -3,10 +3,13 @@ package work
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/operator-proxy/fleetprobe"
@@ -14,6 +17,56 @@ import (
 	"github.com/urnetwork/operator-proxy/ingest"
 	"github.com/urnetwork/operator-proxy/prober"
 )
+
+func TestEgressProbeHealthLatencyAvoidsBucketCardinalityAndKeepsFreshMaximum(t *testing.T) {
+	metrics := newEgressProbeHealthLatencyMetrics()
+	registry := prometheus.NewPedanticRegistry()
+	registry.MustRegister(metrics)
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	metrics.now = func() time.Time { return now }
+	metrics.observe("fixture-destination", "connectivity", 0.2)
+	metrics.observe("fixture-destination", "connectivity", 0.5)
+	now = now.Add(egressProbeHealthLatencyInterval + time.Second)
+	metrics.observe("fixture-destination", "connectivity", 0.1)
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*dto.MetricFamily{}
+	for _, family := range families {
+		byName[family.GetName()] = family
+		if family.GetName() == "urnetwork_egress_probe_health_check_seconds_bucket" {
+			t.Fatal("bounded destination/class latency unexpectedly exported classic histogram buckets")
+		}
+	}
+
+	duration := byName["urnetwork_egress_probe_health_check_seconds"]
+	if duration == nil || len(duration.Metric) != 1 || duration.Metric[0].Summary == nil {
+		t.Fatalf("sum/count latency family = %#v", duration)
+	}
+	if got := duration.Metric[0].Summary.GetSampleCount(); got != 3 {
+		t.Fatalf("latency count = %d, want 3", got)
+	}
+	if got := duration.Metric[0].Summary.GetSampleSum(); math.Abs(got-0.8) > 1e-12 {
+		t.Fatalf("latency sum = %v, want 0.8", got)
+	}
+	if got := len(duration.Metric[0].Summary.Quantile); got != 0 {
+		t.Fatalf("client-side quantiles = %d, want 0", got)
+	}
+
+	maximum := byName["urnetwork_egress_probe_health_check_interval_max_seconds"]
+	if maximum == nil || len(maximum.Metric) != 1 || maximum.Metric[0].Gauge == nil ||
+		maximum.Metric[0].Gauge.GetValue() != 0.1 {
+		t.Fatalf("next-interval maximum = %#v, want 0.1", maximum)
+	}
+	timestamp := byName["urnetwork_egress_probe_health_check_interval_max_timestamp_seconds"]
+	if timestamp == nil || len(timestamp.Metric) != 1 || timestamp.Metric[0].Gauge == nil ||
+		timestamp.Metric[0].Gauge.GetValue() != float64(now.Unix()) {
+		t.Fatalf("maximum timestamp = %#v, want %d", timestamp, now.Unix())
+	}
+}
 
 // fakeEgressProbeIngest records what reached the operator so the tests can
 // prove the reporter forwards every submission unchanged.
