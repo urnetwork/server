@@ -3972,7 +3972,10 @@ var migrations = []any{
 	// expire_time; auth_wallet_nonce had only its PK (nonce), so the reaper
 	// seq-scanned. The table is live-written by the no-auth AuthWalletNonceCreate
 	// route and had no reaper task wired at all, so it grew unboundedly -- now
-	// batched + scheduled, driven by this index.
+	// batched + scheduled, driven by this index. The nonces themselves are
+	// never consumed (the route is deprecated and inert; wallet replay is
+	// prevented by wallet_auth_challenge), so this reaper is the only thing
+	// bounding the table.
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS auth_wallet_nonce_expire_time
         ON auth_wallet_nonce (expire_time)
@@ -7854,5 +7857,19 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX contract_extender_create_time_contract_id
 		ON contract_extender (create_time, contract_id)
+	`),
+	// The wallet-challenge attempt limiter no longer counts per source port --
+	// a limit that a client could evade by reconnecting was no limit at all --
+	// so it now counts on (client_address_hash, attempt_time). The existing
+	// index leads with (client_address_hash, client_address_port, ...), which
+	// leaves attempt_time non-contiguous for that query and degrades it to a
+	// scan of every attempt ever recorded for the address. CONCURRENTLY
+	// because the limiter writes this table on every wallet-challenge request.
+	newOnlineSqlMigration(`
+		CREATE INDEX CONCURRENTLY wallet_auth_challenge_attempt_client_address_hash_attempt_time
+		ON wallet_auth_challenge_attempt (client_address_hash, attempt_time)
+	`, `
+		CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time
+		ON wallet_auth_challenge_attempt (client_address_hash, attempt_time)
 	`),
 }

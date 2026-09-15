@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -751,6 +753,21 @@ func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 		return errors.New("wallet auth only supports solana and bittensor")
 	}
 	walletAuth.Blockchain = parsedBlockchain.String()
+	// Validate the address before verifying, the way CreateWalletAuthChallenge
+	// and UseWalletAuthChallenge do. Without it a malformed address surfaces
+	// from the chain verifier as a signature problem, which points an
+	// integrator at the wrong half of the request.
+	validAddress := false
+	switch parsedBlockchain {
+	case SOL:
+		_, addrErr := solana.PublicKeyFromBase58(walletAuth.PublicKey)
+		validAddress = addrErr == nil
+	case TAO:
+		validAddress = IsValidBittensorAddress(walletAuth.PublicKey)
+	}
+	if !validAddress {
+		return errors.New("invalid wallet address")
+	}
 	isValid, err := VerifySignature(
 		walletAuth.Blockchain,
 		walletAuth.PublicKey,
@@ -758,7 +775,20 @@ func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 		walletAuth.Signature,
 	)
 	if err != nil {
-		return err
+		// A verifier error is always client input (an undecodable signature,
+		// or a key the curve rejects), never a server fault. Returning it
+		// verbatim reaches the router as an unprefixed error and becomes a
+		// 500 carrying the raw text; answer in the same shape as a signature
+		// that decoded and simply did not verify.
+		glog.Infof(
+			"Wallet signature verification failed: blockchain=%s err=%s",
+			walletAuth.Blockchain,
+			err.Error(),
+		)
+		if errors.Is(err, ErrWalletSignatureEncoding) {
+			return errors.New("invalid signature encoding")
+		}
+		return errors.New("invalid signature")
 	}
 	if !isValid {
 		return errors.New("invalid signature")
@@ -791,27 +821,65 @@ func addWalletAuthInTx(
 	// retryable, so on the ordinary (non-racing) "wallet already taken"
 	// path this would otherwise stall the request for up to a minute
 	// with no error ever reaching the client instead of failing fast.
+	//
+	// The wallet half of this deliberately does NOT filter on blockchain.
+	// UNIQUE (wallet_address, blockchain) is byte exact, so a row holding a
+	// non-canonical label -- the legacy lowercase 'solana' that
+	// MigrateNetworkUserChildAuths writes -- is invisible both to the
+	// constraint and to a `blockchain = 'SOL'` pre-check, which let the same
+	// wallet bind to a second account. A single address string belongs to one
+	// chain in practice (a 32 byte base58 Solana key and a 35/36 byte ss58
+	// Bittensor address cannot collide), so any row for this address that
+	// belongs to another user is a conflict regardless of its label.
+	//
+	// The user half enforces the one-wallet-per-user shape the table's
+	// PRIMARY KEY (user_id) already has: without it the upsert below would
+	// silently replace a user's bound wallet with a different one, discarding
+	// the only credential that could still sign them in.
+	//
+	// Note the interaction with RemoveAuth, which refuses to remove the last
+	// remaining auth method: a wallet-only account (created through wallet
+	// network-create, no email or password) can no longer swap wallets in one
+	// call, and must add a second sign-in method first. That is deliberate.
+	// The alternative -- permitting the replacement precisely when the wallet
+	// is the sole credential -- keeps the silent overwrite in the one case
+	// where getting it wrong loses the account permanently, so the error says
+	// what to do instead.
 	var conflictUserId *server.Id
+	var boundWalletAddress *string
 	result, queryErr := tx.Query(
 		ctx,
 		`
-				SELECT user_id FROM network_user_auth_wallet
-				WHERE wallet_address = $1 AND blockchain = $2
+				SELECT user_id, wallet_address FROM network_user_auth_wallet
+				WHERE wallet_address = $1 OR user_id = $2
 			`,
 		walletAuth.PublicKey,
-		walletAuth.Blockchain,
+		addWalletAuth.UserId,
 	)
 	if queryErr != nil {
 		err = queryErr
 		return
 	}
 	server.WithPgResult(result, queryErr, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&conflictUserId))
+		for result.Next() {
+			var rowUserId *server.Id
+			var rowWalletAddress *string
+			server.Raise(result.Scan(&rowUserId, &rowWalletAddress))
+			if rowUserId != nil && *rowUserId == addWalletAuth.UserId {
+				boundWalletAddress = rowWalletAddress
+				continue
+			}
+			if rowWalletAddress != nil && *rowWalletAddress == walletAuth.PublicKey {
+				conflictUserId = rowUserId
+			}
 		}
 	})
-	if conflictUserId != nil && *conflictUserId != addWalletAuth.UserId {
+	if conflictUserId != nil {
 		err = errors.New("This wallet is already linked to another account.")
+		return
+	}
+	if boundWalletAddress != nil && *boundWalletAddress != walletAuth.PublicKey {
+		err = errors.New("A different wallet is already linked to this account. Remove that wallet first; if it is your only sign-in method, add an email or phone before removing it.")
 		return
 	}
 
@@ -979,6 +1047,7 @@ func getWalletAuthsByAddress(
 					blockchain
 				FROM network_user_auth_wallet
 				WHERE wallet_address = $1
+				ORDER BY create_time, user_id
 			`,
 			walletAddress,
 		)
@@ -1001,6 +1070,35 @@ func getWalletAuthsByAddress(
 	})
 
 	return walletAuths, nil
+}
+
+// filterWalletAuthsByBlockchain keeps the bindings whose stored blockchain
+// resolves to the same chain as the presented one. Both sides go through
+// ParseBlockchain rather than a string compare, so a column value written
+// before canonicalization ('solana') resolves the same account as the
+// canonical 'SOL' a client presents -- a byte-exact or even case-insensitive
+// compare would stop resolving those accounts and silently present them as a
+// new signup. A row whose value does not parse at all is dropped rather than
+// matched by accident.
+func filterWalletAuthsByBlockchain(
+	walletAuths []NetworkUserWalletAuth,
+	blockchain string,
+) []NetworkUserWalletAuth {
+	if strings.TrimSpace(blockchain) == "" {
+		blockchain = SOL.String()
+	}
+	presented, err := ParseBlockchain(blockchain)
+	if err != nil {
+		return nil
+	}
+	matched := []NetworkUserWalletAuth{}
+	for _, walletAuth := range walletAuths {
+		stored, err := ParseBlockchain(walletAuth.Blockchain)
+		if err == nil && stored == presented {
+			matched = append(matched, walletAuth)
+		}
+	}
+	return matched
 }
 
 func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.Id, err error) {
@@ -1212,7 +1310,10 @@ func MigrateNetworkUserChildAuthsOriginal(
 						`,
 						networkUser.UserId,
 						networkUser.WalletAddress,
-						AuthTypeSolana,
+						// the blockchain column, not the auth type: writing
+						// AuthTypeSolana ("solana") here produced rows that the
+						// byte-exact 'SOL' uniqueness checks could not see
+						SOL.String(),
 					)
 
 					if err != nil {
@@ -1375,7 +1476,9 @@ func MigrateNetworkUserChildAuths(
 					`,
 					networkUser.UserId,
 					networkUser.WalletAddress,
-					AuthTypeSolana,
+					// the blockchain column, not the auth type -- see the same
+					// fix in MigrateNetworkUserChildAuthsOriginal
+					SOL.String(),
 				)
 
 				if err != nil {

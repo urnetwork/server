@@ -153,12 +153,17 @@ func VerifySeekerNftHolder(
 	)
 
 	if err != nil {
+		// A verifier error is client input -- a signature that is not base64,
+		// or not 64 bytes -- so answer it in the structured body like the
+		// !isValid case below. Returning it as a transport error made the
+		// router emit a 500 carrying the raw text instead.
+		glog.Infof("[wallet]seeker signature verification failed: %s\n", err.Error())
 		return &VerifySeekerNftHolderResult{
 			Success: false,
 			Error: &VerifySeekerNftHolderError{
-				Message: fmt.Sprintf("Error verifying signature %s", err.Error()),
+				Message: "Invalid signature",
 			},
-		}, err
+		}, nil
 	}
 	if !isValid {
 		return &VerifySeekerNftHolderResult{
