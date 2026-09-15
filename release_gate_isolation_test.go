@@ -128,16 +128,9 @@ func newReleaseGateServicesFixture(t *testing.T) *releaseGateServicesFixture {
 		t.Fatal(err)
 	}
 	self.helper = filepath.Join(server, "local", "release-gate-services.sh")
-	// Build the actual stdlib-only generator outside each bounded Docker
-	// ownership script; no authentication or resource result is doubled.
-	self.generator = filepath.Join(releaseGateCanonicalTempDir(t), "server-fixture")
-	buildCtx, buildCancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer buildCancel()
-	build := exec.CommandContext(buildCtx, "go", "build", "-o", self.generator, "./scripts/server-fixture")
-	build.Dir = filepath.Join(server, "..", "sn")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build exact private suite generator: %v\n%s", err, output)
-	}
+	// Process setup compiled the actual generator once. Each service owner
+	// still receives fresh resources from that executable, never a test double.
+	self.generator = releaseGateSuiteGenerator
 	if err := os.Symlink(server, filepath.Join(self.workspace, "server")); err != nil {
 		t.Fatal(err)
 	}

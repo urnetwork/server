@@ -48,6 +48,7 @@ func releaseGateSuiteAuthEnvironment(root, mode string) []string {
 // loaders in a fresh process; no test callback supplies a successful verdict.
 func runReleaseGateSuiteAuthChild(t *testing.T, mode string, mutate func(string)) {
 	t.Helper()
+	server.DisableReleaseGateSuiteCaseCompiler(t)
 	serverSource, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -65,9 +66,8 @@ func runReleaseGateSuiteAuthChild(t *testing.T, mode string, mutate func(string)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, "go", "run", "./scripts/server-fixture", "--suite", "--parent", parent, "--server", serverSource,
+	command := server.ReleaseGateSuiteFixtureCommand(ctx, "--suite", "--parent", parent, "--server", serverSource,
 		"--postgres-authority", "127.0.0.1:35431", "--redis-authority", "127.0.0.1:36371", "--path-only")
-	command.Dir = filepath.Join(serverSource, "..", "sn")
 	command.Env = releaseGateSuiteAuthEnvironment(parent, "")
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
