@@ -341,6 +341,82 @@ func TestNetEscrowCorrectionPreservesConcurrentMirrorWrite(t *testing.T) {
 	})
 }
 
+// A contract can commit after PostgreSQL fixes the reservation-page snapshot,
+// then publish its Redis mirror before reconciliation performs GET. The stale
+// zero snapshot and already-visible mirror are indistinguishable from ordinary
+// over-reservation, so correction removes the new reservation. Its later close
+// then exposes the exact shortfall through the atomic negative clamp.
+func TestNetEscrowCreationBeforeRedisGetCanProduceNegativeRelease(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		balanceId := server.NewId()
+		key := netEscrowKey(balanceId)
+		defer server.Redis(ctx, func(r server.RedisClient) { r.Del(ctx, key) })
+
+		const reserved ByteCount = 17
+		server.Redis(ctx, func(r server.RedisClient) {
+			// The page snapshot is already fixed at zero. This mirror is the
+			// post-commit reservation that becomes visible before Redis GET.
+			server.Raise(r.Set(ctx, key, reserved, time.Hour).Err())
+		})
+		drift := reconcileNetEscrowBatch(
+			ctx,
+			map[server.Id]ByteCount{balanceId: 0},
+			[]server.Id{balanceId},
+			true,
+		)
+		if drift[balanceId] != reserved {
+			t.Fatalf("creation-window drift = %d, want %d over-reserved", drift[balanceId], reserved)
+		}
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			if _, err := r.Get(ctx, key).Result(); !errors.Is(err, redis.Nil) {
+				t.Fatalf("creation mirror after stale correction error = %v, want missing", err)
+			}
+			value, err := applyNetEscrowRelease(ctx, r, key, reserved).Int64()
+			server.Raise(err)
+			if value != -int64(reserved) {
+				t.Fatalf("release after stale creation correction = %d, want %d", value, -reserved)
+			}
+			if _, err := r.Get(ctx, key).Result(); !errors.Is(err, redis.Nil) {
+				t.Fatalf("negative release clamp error = %v, want missing", err)
+			}
+		})
+	})
+}
+
+// The same pending=0, Redis=17 observation is also the quiescent state after a
+// real decrement was lost. Reconciliation must delete that leaked reservation.
+// This control documents why a directional skip cannot repair the creation
+// race without preserving genuine over-reservation.
+func TestNetEscrowZeroSnapshotRepairsQuiescentLostDecrement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		balanceId := server.NewId()
+		key := netEscrowKey(balanceId)
+		defer server.Redis(ctx, func(r server.RedisClient) { r.Del(ctx, key) })
+
+		const leakedReservation ByteCount = 17
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, key, leakedReservation, time.Hour).Err())
+		})
+		drift := reconcileNetEscrowBatch(
+			ctx,
+			map[server.Id]ByteCount{balanceId: 0},
+			[]server.Id{balanceId},
+			true,
+		)
+		if drift[balanceId] != leakedReservation {
+			t.Fatalf("quiescent drift = %d, want %d over-reserved", drift[balanceId], leakedReservation)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			if _, err := r.Get(ctx, key).Result(); !errors.Is(err, redis.Nil) {
+				t.Fatalf("quiescent leaked reservation error = %v, want missing", err)
+			}
+		})
+	})
+}
+
 // A PostgreSQL statement takes its snapshot before executing the reservation
 // page. If a live settlement commits and updates Redis while that page is
 // still running, reconcileNetEscrowBatch receives the old PostgreSQL total but

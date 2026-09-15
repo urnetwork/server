@@ -5922,7 +5922,9 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
 - zero `skipped_store` and `error` rows per store in the last three hours;
 - every safety-net-originated `credited`, `ended`, or
   `entitlement_repaired` repair in the last 24 hours, grouped only by
-  store/action.
+  store/action;
+- every non-dry-run `credit_unfulfillable` Stripe event in the last 24 hours,
+  reduced to distinct provider evidence, observation/run counts, and age.
 
 `payment-reconciliation-watermark-stale` warns when one store's last
 successful watermark is more than three hours old and pages when it is more
@@ -5963,6 +5965,43 @@ idempotency ledger to inspect. Confirm the provider remains terminal and the
 local entitlement ended, then require no repeat through two complete
 reconciliation windows. The query never returns run IDs, network IDs,
 transaction IDs, evidence, details, or credential values.
+
+`payment-reconciliation-credit-unfulfillable` is PAGE when at least one
+distinct provider evidence value identifies a paid Stripe invoice whose
+metadata destination was deleted before the ledger-gated credit obtained its
+lifecycle lock. That exact terminal condition writes `credit_unfulfillable`,
+not `error`: it consumes no `stripe_invoice` row, renewal, or balance and does
+not pin the Stripe watermark or suppress genuine provider, schema, transport,
+or database failures. Dry runs perform the same destination-existence check
+without mutation, but the monitor excludes their rows. Repeated hourly overlap
+may audit the same evidence again, so the alert counts distinct evidence while
+retaining total observations and distinct runs. Finance and operations must
+explicitly disposition each payment from the restricted audit trail. Never
+recreate or retarget a deleted network, credit another owner, insert a ledger
+row, consume the evidence, or force a watermark from this aggregate. A later
+watermark advance, repeat observation, or alert aging out is not disposition
+proof. The alert never returns evidence, run/network/account IDs, details, or
+credentials.
+
+Unlike a completed credit/end/metadata repair, this terminal event has no
+separate durable business row: its audit append is the only retained handle for
+the uncreditable payment. If that append fails, the controller increments the
+Stripe store/run error count, keeps the watermark fixed, and lets the ordinary
+overlap retry the invoice. A dry run reports the same append failure but never
+advances a watermark in any case. Successfully completed repair audit inserts
+remain best effort because their ledger/business writes are already durable and
+must not be replayed merely to recreate a secondary event.
+
+The bounded 2026-09-15 discriminator found three Stripe credit errors in three
+successive runs, all carrying the exact deleted-destination sentinel and the
+same one evidence value; HTTP status was absent. The generic `error` treatment
+had pinned the whole store watermark even though the provider listing worked
+and the lifecycle lock correctly refused the credit. This supports the narrow
+terminal classification above, not deletion recovery or reassignment. The
+deterministic real-run test requires two overlap passes to retain the audit,
+advance the natural watermark, and write no ledger/renewal/balance. Its dry-run
+control distinguishes a deleted destination from a live sibling and preserves
+all no-write and no-watermark semantics.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
@@ -6047,7 +6086,9 @@ to `signal_payment_reconciliation.go` and
 `signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy
 four-store run, a store skipped behind a healthy heartbeat, repeated provider
 errors, missing/stale watermarks, a dead singleton chain, safety-net repairs,
-strict aggregate validation, privacy boundaries, and detailed Markdown.
+deleted-destination terminal audits in real and dry-run paths, distinct-evidence
+aggregation, strict aggregate validation, privacy boundaries, and detailed
+Markdown.
 
 ### 2.22 Durable payment and entitlement failures
 Probe: `payment-failures`
@@ -8942,6 +8983,24 @@ until that durable protocol is deployed and a subsequent scheduled reconcile
 plus full natural close/expiry interval remain free of all three emitters'
 negative lines after ingestion delay.
 
+A bounded 2026-09-15 cohort pins the symmetric creation-side window. All 116
+distinct recently created contracts on three balances committed after the
+derived reconciliation-start upper bound and no later than its aggregate;
+all closed after that aggregate and no later than their negative-release line.
+The same bracket carried 37,692 force-close counter increments, while all 116
+negative rows were re-observed on the original two emitter generations. This
+strongly supports a page snapshot that omitted the creates followed by a Redis
+GET that saw their mirror posts; exact per-balance statement-snapshot, GET,
+correction, and post timestamps were not retained, so it is not an event-level
+join. The deterministic creation regression fixes the snapshot at zero, makes
+a 17-byte mirror visible before GET, observes reconciliation remove it, and
+then observes the release return -17 through the clamp. Its quiescent control
+uses the identical pending-zero/mirror-17 state for a genuinely lost decrement,
+where deletion is required; the existing post-GET INCR control separately
+proves additive correction preserves writes after GET. These controls document
+why a directional skip is unsafe and why closing the remaining gap still needs
+the durable fencing decision above, not a local reconcile-ordering patch.
+
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
 `{escrow_<id>}net`, with roughly 36,306 days remaining. PostgreSQL showed this
@@ -9247,6 +9306,7 @@ traceable; their owning numbered sections remain the full contracts.
 | `mimir-child-missing` | §11.18 `mimir-index` | An expected active Mimir child is absent from the exact-process index view; require the complete active child set. |
 | `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
 | `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
+| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
 | `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
 | `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |

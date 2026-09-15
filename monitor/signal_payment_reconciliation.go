@@ -73,6 +73,25 @@ GROUP BY event.store, event.action
 ORDER BY event.store, event.action
 `
 
+const paymentReconciliationUnfulfillableQuery = `
+/* monitor-signal-2.21-payment-reconciliation-unfulfillable */
+SELECT count(DISTINCT evidence)::bigint,
+       count(*)::bigint,
+       count(DISTINCT run_id)::bigint,
+       count(*) FILTER (
+           WHERE evidence IS NULL
+              OR btrim(evidence) = ''
+              OR (details::jsonb ->> 'reason') IS DISTINCT FROM 'destination_deleted'
+              OR (details::jsonb ->> 'leg') IS DISTINCT FROM 'credit'
+       )::bigint,
+       COALESCE(extract(epoch FROM now() - max(event_time))::bigint, -1)
+FROM payment_reconciliation_event
+WHERE store = 'stripe'
+  AND action = 'credit_unfulfillable'
+  AND NOT dry_run
+  AND event_time >= now() - interval '24 hours'
+`
+
 const (
 	paymentReconciliationHeartbeatMaximumAge = 150 * time.Minute
 	paymentReconciliationWatermarkWarnAge    = 3 * time.Hour
@@ -127,7 +146,20 @@ func (paymentReconciliationProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if err != nil {
 		return nil, err
 	}
-	return append(findings, repairFindings...), nil
+	findings = append(findings, repairFindings...)
+
+	unfulfillableRows, err := env.runner.pg(ctx, paymentReconciliationUnfulfillableQuery)
+	if err != nil {
+		return nil, err
+	}
+	unfulfillableFinding, err := paymentReconciliationUnfulfillableFinding(unfulfillableRows)
+	if err != nil {
+		return nil, err
+	}
+	if unfulfillableFinding != nil {
+		findings = append(findings, *unfulfillableFinding)
+	}
+	return findings, nil
 }
 
 func parsePaymentReconciliationStates(rows []pgRow) ([]paymentReconciliationStoreState, error) {
@@ -300,6 +332,44 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 		findings = append(findings, repair)
 	}
 	return findings, nil
+}
+
+func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
+	if len(rows) != 1 || len(rows[0]) != 5 {
+		return nil, fmt.Errorf("payment reconciliation unfulfillable returned %d rows with an invalid shape", len(rows))
+	}
+	values := make([]int64, 0, 5)
+	for column := 0; column < 5; column++ {
+		value, err := parseStrictInt64(rows[0].str(column))
+		if err != nil {
+			return nil, fmt.Errorf("payment reconciliation unfulfillable column %d: %w", column, err)
+		}
+		values = append(values, value)
+	}
+	distinctEvidence, observations, distinctRuns, invalid, latestAge := values[0], values[1], values[2], values[3], values[4]
+	if distinctEvidence < 0 || observations < 0 || distinctRuns < 0 || invalid < 0 {
+		return nil, fmt.Errorf("payment reconciliation unfulfillable returned a negative count")
+	}
+	if observations == 0 {
+		if distinctEvidence != 0 || distinctRuns != 0 || invalid != 0 || latestAge != -1 {
+			return nil, fmt.Errorf("payment reconciliation unfulfillable returned a contradictory empty aggregate")
+		}
+		return nil, nil
+	}
+	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid != 0 || latestAge < 0 {
+		return nil, fmt.Errorf("payment reconciliation unfulfillable returned an invalid nonempty aggregate")
+	}
+	return &finding{
+		probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
+		symptom:   fmt.Sprintf("Stripe reconciliation found %d paid invoice destination(s) that can no longer be credited", distinctEvidence),
+		mechanism: "Stripe listed a paid subscription invoice, but the network named by its subscription metadata had been deleted before the ledger-gated credit obtained its lifecycle lock. The controller refused the Stripe ledger, renewal, and balance writes; this terminal business exception is not a provider-listing failure and does not pin the store watermark.",
+		baseline:  "Zero non-dry-run credit_unfulfillable events. Every paid invoice either credits its original live destination exactly once or receives an explicit authorized finance/operations disposition.",
+		observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", distinctEvidence, observations, distinctRuns, latestAge),
+		evidence:  "The aggregate returns only distinct-evidence, observation, and run counts plus latest age. Provider evidence, run IDs, deleted network IDs, accounts, details, and credentials remain in the restricted audit store.",
+		action:    "Have authorized finance and operations staff disposition each exact provider payment from the restricted audit trail. Do not recreate or retarget the deleted network, credit another owner, insert a stripe_invoice row, consume the payment evidence, or force the Stripe watermark.",
+		verify:    "The provider payment has an explicit authorized disposition and no compensating credit was assigned to another network. A later watermark advance, repeated overlap audit, or alert aging out is not disposition proof.",
+		playbook:  "SIGNALS.md §2.21",
+	}, nil
 }
 
 func parseStrictInt64(value string) (int64, error) {

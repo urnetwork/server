@@ -16,10 +16,11 @@ import (
 )
 
 // The reconciliation audit actions. Every run writes at least a heartbeat;
-// every repair, skip, and per-object failure is its own row. A dry run
-// (bringyourctl payments reconcile --dry-run) records the would_ forms
-// instead of repairing: same evidence and details the real repair would
-// carry, tagged dry_run = true.
+// every repair, skip, terminal exception, and per-object failure is its own
+// row. A dry run (bringyourctl payments reconcile --dry-run) records the
+// would_ forms instead of repairing; non-mutating terminal observations keep
+// their action. Both carry the same bounded evidence/details as the real pass
+// and are tagged dry_run = true.
 const (
 	PaymentReconcileActionCredited               = "credited"
 	PaymentReconcileActionEnded                  = "ended"
@@ -30,6 +31,10 @@ const (
 	PaymentReconcileActionSkippedStore           = "skipped_store"
 	PaymentReconcileActionHeartbeat              = "heartbeat"
 	PaymentReconcileActionError                  = "error"
+	// Stripe listed a paid invoice whose destination was deleted before the
+	// ledger-gated credit. This is a durable operator-disposition event, not a
+	// provider/listing error and not a successful credit.
+	PaymentReconcileActionCreditUnfulfillable = "credit_unfulfillable"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the

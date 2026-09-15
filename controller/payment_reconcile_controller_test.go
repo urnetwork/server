@@ -810,6 +810,246 @@ func TestPaymentReconcileStripeCreditsMissedInvoice(t *testing.T) {
 	})
 }
 
+// A paid invoice can outlive the network named by its subscription metadata.
+// The lifecycle lock must still refuse every ledger/credit write, but this
+// terminal business exception must not masquerade as a Stripe adapter error
+// that pins the whole store watermark. The one-hour overlap may audit the same
+// evidence again; idempotency remains the absence of any credit-side write.
+func TestPaymentReconcileStripeDeletedDestinationIsDurableNotStoreError(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		stripeEnv := newStripeReconcileTestEnv(t)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "syntheticdeletedstripe", userId)
+		deletePaymentTestNetwork(t, ctx, networkId, userId)
+
+		invoiceId := "in_synthetic_deleted_destination_2099"
+		now := server.NowUtc()
+		stripeEnv.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
+		stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+			invoiceId, "sub_synthetic_deleted_destination_2099", networkId,
+			now.Add(-time.Hour), now.Add(17*24*time.Hour),
+			"active", false,
+		)
+
+		before := server.NowUtc()
+		first, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, first.Credited, 0)
+		connect.AssertEqual(t, first.Errors, 0)
+		firstEvents := model.GetPaymentReconciliationEvents(ctx, first.RunId)
+		connect.AssertEqual(t, countReconcileEvents(firstEvents, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 1)
+		connect.AssertEqual(t, countReconcileEvents(firstEvents, model.SubscriptionMarketStripe, model.PaymentReconcileActionError), 0)
+		connect.AssertEqual(t, countReconcileEvents(firstEvents, model.SubscriptionMarketStripe, model.PaymentReconcileActionCredited), 0)
+
+		var terminal *model.PaymentReconciliationEvent
+		for _, event := range firstEvents {
+			if event.Store == model.SubscriptionMarketStripe && event.Action == model.PaymentReconcileActionCreditUnfulfillable {
+				terminal = event
+			}
+		}
+		connect.AssertNotEqual(t, terminal, nil)
+		connect.AssertEqual(t, terminal.NetworkId, nil)
+		connect.AssertEqual(t, terminal.Evidence, invoiceId)
+		connect.AssertEqual(t, terminal.Details["reason"], "destination_deleted")
+		connect.AssertEqual(t, terminal.Details["leg"], "credit")
+
+		_, credited := model.GetStripeInvoiceNetworkId(ctx, invoiceId)
+		connect.AssertEqual(t, credited, false)
+		renewals, balances := paymentGuardWriteCounts(ctx, invoiceId)
+		connect.AssertEqual(t, renewals, 0)
+		connect.AssertEqual(t, balances, 0)
+		watermark, ok := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, watermark.Before(before), false)
+
+		second, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, second.Credited, 0)
+		connect.AssertEqual(t, second.Errors, 0)
+		secondEvents := model.GetPaymentReconciliationEvents(ctx, second.RunId)
+		connect.AssertEqual(t, countReconcileEvents(secondEvents, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 1)
+		_, credited = model.GetStripeInvoiceNetworkId(ctx, invoiceId)
+		connect.AssertEqual(t, credited, false)
+		renewals, balances = paymentGuardWriteCounts(ctx, invoiceId)
+		connect.AssertEqual(t, renewals, 0)
+		connect.AssertEqual(t, balances, 0)
+	})
+}
+
+// The terminal event is the only durable handle for an uncreditable paid
+// invoice. If that one insert fails, both dry-run and real passes report an
+// error; the real pass must retain its watermark so the normal overlap retries
+// the invoice. A later successful append may then advance naturally.
+func TestPaymentReconcileStripeDeletedDestinationAuditFailurePinsWatermark(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		stripeEnv := newStripeReconcileTestEnv(t)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "syntheticauditfailure", userId)
+		deletePaymentTestNetwork(t, ctx, networkId, userId)
+		invoiceId := "in_synthetic_audit_failure_2099"
+		now := server.NowUtc()
+		stripeEnv.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
+		stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+			invoiceId, "sub_synthetic_audit_failure_2099", networkId,
+			now.Add(-time.Hour), now.Add(17*24*time.Hour),
+			"active", false,
+		)
+
+		previousAdder := addPaymentReconciliationEvent
+		failTerminalAppend := true
+		addPaymentReconciliationEvent = func(ctx context.Context, event *model.PaymentReconciliationEvent) error {
+			if failTerminalAppend && event.Action == model.PaymentReconcileActionCreditUnfulfillable {
+				return errors.New("synthetic terminal audit append failure")
+			}
+			return model.AddPaymentReconciliationEvent(ctx, event)
+		}
+		t.Cleanup(func() { addPaymentReconciliationEvent = previousAdder })
+
+		dryRun, err := RunPaymentReconciliationWithOptions(
+			reconcileTestSession(t, ctx),
+			&PaymentReconcileRunOptions{DryRun: true},
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, dryRun.Errors, 1)
+		connect.AssertEqual(t, countReconcileEvents(model.GetPaymentReconciliationEvents(ctx, dryRun.RunId), model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 0)
+		_, watermarkSet := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarkSet, false)
+
+		failedReal, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, failedReal.Errors, 1)
+		connect.AssertEqual(t, countReconcileEvents(model.GetPaymentReconciliationEvents(ctx, failedReal.RunId), model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 0)
+		_, watermarkSet = model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarkSet, false)
+
+		failTerminalAppend = false
+		retried, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, retried.Errors, 0)
+		connect.AssertEqual(t, countReconcileEvents(model.GetPaymentReconciliationEvents(ctx, retried.RunId), model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 1)
+		_, watermarkSet = model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarkSet, true)
+		_, credited := model.GetStripeInvoiceNetworkId(ctx, invoiceId)
+		connect.AssertEqual(t, credited, false)
+	})
+}
+
+// A completed credit has its own durable ledger and business writes. Preserve
+// the existing best-effort audit contract: losing only that secondary event
+// must not report a store error or replay the successful credit window.
+func TestPaymentReconcileCompletedCreditAuditFailureRemainsBestEffort(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		stripeEnv := newStripeReconcileTestEnv(t)
+
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "syntheticcreditedaudit", server.NewId())
+		invoiceId := "in_synthetic_credited_audit_2099"
+		now := server.NowUtc()
+		stripeEnv.listInvoices = []map[string]any{{"id": invoiceId, "total": 1700}}
+		stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+			invoiceId, "sub_synthetic_credited_audit_2099", networkId,
+			now.Add(-time.Hour), now.Add(17*24*time.Hour),
+			"active", false,
+		)
+
+		previousAdder := addPaymentReconciliationEvent
+		addPaymentReconciliationEvent = func(ctx context.Context, event *model.PaymentReconciliationEvent) error {
+			if event.Action == model.PaymentReconcileActionCredited {
+				return errors.New("synthetic completed-credit audit append failure")
+			}
+			return model.AddPaymentReconciliationEvent(ctx, event)
+		}
+		t.Cleanup(func() { addPaymentReconciliationEvent = previousAdder })
+
+		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Credited, 1)
+		connect.AssertEqual(t, result.Errors, 0)
+		connect.AssertEqual(t, countReconcileEvents(model.GetPaymentReconciliationEvents(ctx, result.RunId), model.SubscriptionMarketStripe, model.PaymentReconcileActionCredited), 0)
+		_, watermarkSet := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarkSet, true)
+		_, credited := model.GetStripeInvoiceNetworkId(ctx, invoiceId)
+		connect.AssertEqual(t, credited, true)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
+	})
+}
+
+// Dry-run destination qualification must describe the same terminal refusal
+// as the real path while preserving an active sibling's ordinary would-credit
+// result. Neither observation may consume a ledger, entitlement, or watermark.
+func TestPaymentReconcileStripeDryRunQualifiesDeletedDestination(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		stripeEnv := newStripeReconcileTestEnv(t)
+
+		deletedNetworkId := server.NewId()
+		deletedUserId := server.NewId()
+		model.Testing_CreateNetwork(ctx, deletedNetworkId, "syntheticdrydeleted", deletedUserId)
+		deletePaymentTestNetwork(t, ctx, deletedNetworkId, deletedUserId)
+		activeNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, activeNetworkId, "syntheticdryactive", server.NewId())
+
+		deletedInvoiceId := "in_synthetic_dry_deleted_2099"
+		activeInvoiceId := "in_synthetic_dry_active_2099"
+		now := server.NowUtc()
+		stripeEnv.listInvoices = []map[string]any{
+			{"id": deletedInvoiceId, "total": 1700},
+			{"id": activeInvoiceId, "total": 1700},
+		}
+		stripeEnv.fullInvoices[deletedInvoiceId] = stripeTestFullInvoice(
+			deletedInvoiceId, "sub_synthetic_dry_deleted_2099", deletedNetworkId,
+			now.Add(-time.Hour), now.Add(17*24*time.Hour),
+			"active", false,
+		)
+		stripeEnv.fullInvoices[activeInvoiceId] = stripeTestFullInvoice(
+			activeInvoiceId, "sub_synthetic_dry_active_2099", activeNetworkId,
+			now.Add(-time.Hour), now.Add(17*24*time.Hour),
+			"active", false,
+		)
+
+		result, err := RunPaymentReconciliationWithOptions(
+			reconcileTestSession(t, ctx),
+			&PaymentReconcileRunOptions{DryRun: true},
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Credited, 1)
+		connect.AssertEqual(t, result.Errors, 0)
+		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionWouldCredit), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionError), 0)
+
+		for _, event := range events {
+			if event.Store != model.SubscriptionMarketStripe || event.Action != model.PaymentReconcileActionCreditUnfulfillable {
+				continue
+			}
+			connect.AssertEqual(t, event.DryRun, true)
+			connect.AssertEqual(t, event.NetworkId, nil)
+			connect.AssertEqual(t, event.Evidence, deletedInvoiceId)
+			connect.AssertEqual(t, event.Details["reason"], "destination_deleted")
+			connect.AssertEqual(t, event.Details["leg"], "credit")
+		}
+		_, deletedCredited := model.GetStripeInvoiceNetworkId(ctx, deletedInvoiceId)
+		_, activeCredited := model.GetStripeInvoiceNetworkId(ctx, activeInvoiceId)
+		connect.AssertEqual(t, deletedCredited, false)
+		connect.AssertEqual(t, activeCredited, false)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, activeNetworkId)), 0)
+		_, watermarkSet := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarkSet, false)
+	})
+}
+
 // TestPaymentReconcileStripeCreditRacesLateWebhook pins §8 principle 1: the
 // reconciler credits through the SAME gate the webhook uses, so a reconcile
 // racing a late invoice.paid delivery for the same invoice produces exactly
