@@ -111,6 +111,34 @@ type subtensorPeerDiagnostics struct {
 	Metrics            subtensorPeerMetrics        `json:"metrics"`
 }
 
+// UnmarshalJSON keeps an unsupported helper generation from poisoning the
+// independent unit, RPC, gateway, identity, and progress observations in the
+// same host response. Helper payloads are versioned because their nested wire
+// shapes differ: version 1 used integer log outcome counts, while version 2
+// uses bounded count/first/last objects. Retain only the version for an
+// unsupported generation; subtensorPeerDiagnosticsProblem then emits the
+// narrow peer-diagnostics visibility finding without interpreting its body.
+func (d *subtensorPeerDiagnostics) UnmarshalJSON(data []byte) error {
+	var header struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return fmt.Errorf("subtensor peer diagnostics header: %w", err)
+	}
+	if header.Version != subtensorPeerDiagnosticsVersion {
+		*d = subtensorPeerDiagnostics{Version: header.Version}
+		return nil
+	}
+
+	type wireDiagnostics subtensorPeerDiagnostics
+	var decoded wireDiagnostics
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return fmt.Errorf("subtensor peer diagnostics v%d: %w", header.Version, err)
+	}
+	*d = subtensorPeerDiagnostics(decoded)
+	return nil
+}
+
 type subtensorPeerLogDiagnostics struct {
 	Scope               string                             `json:"scope"`
 	EventTimeCorrelated bool                               `json:"event_time_correlated"`

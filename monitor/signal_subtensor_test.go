@@ -489,6 +489,97 @@ func TestSubtensorSignalKeepsOlderHelperAsCannotObserve(t *testing.T) {
 	requireAlertOmits(t, visibility, "installed helper predates")
 }
 
+func TestSubtensorSignalLegacyHelperDoesNotHideCoreNodeHealth(t *testing.T) {
+	encoded, err := json.Marshal(healthySubtensorObservation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	nodes, ok := document["nodes"].([]any)
+	if !ok || len(nodes) != 2 {
+		t.Fatalf("synthetic nodes=%T/%d", document["nodes"], len(nodes))
+	}
+	legacyDiagnostics := map[string]any{
+		"version": 1,
+		"log": map[string]any{
+			"outcomes": map[string]any{
+				"database_or_import_rejection":     2,
+				"chain_or_fork_rejection":          0,
+				"notification_negotiation_failure": 0,
+				"reconnect_or_dial_failure":        1,
+			},
+		},
+	}
+	for _, rawNode := range nodes {
+		node, ok := rawNode.(map[string]any)
+		if !ok {
+			t.Fatalf("synthetic node type=%T", rawNode)
+		}
+		node["peer_diagnostics"] = legacyDiagnostics
+	}
+	legacyEncoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := parseSubtensorObservation(string(legacyEncoded))
+	if err != nil {
+		t.Fatalf("legacy helper hid the complete host observation: %v", err)
+	}
+	for _, node := range parsed.Nodes {
+		if node.PeerDiagnostics == nil || node.PeerDiagnostics.Version != 1 {
+			t.Fatalf("legacy helper version was not retained for %s: %+v", node.Name, node.PeerDiagnostics)
+		}
+		if len(node.PeerDiagnostics.Log.Outcomes) != 0 {
+			t.Fatalf("legacy helper body was interpreted for %s: %+v", node.Name, node.PeerDiagnostics)
+		}
+	}
+
+	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		if host.Name != "chain.example.test" || !strings.Contains(command, subtensorMarker) {
+			return "", fmt.Errorf("unexpected synthetic Subtensor observation target")
+		}
+		return string(legacyEncoded), nil
+	}}
+	settings := subtensorSyntheticSettings(source)
+	alerts, err := NewSubtensorSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("legacy helper alerts=%d, want two narrow visibility findings: %+v", len(alerts), alerts)
+	}
+	wantTargets := map[string]bool{
+		"chain.example.test/archive/peer-diagnostics":   true,
+		"chain.example.test/lightnode/peer-diagnostics": true,
+	}
+	for _, alert := range alerts {
+		if alert.Class != "cannot-observe" || !wantTargets[alert.Target] ||
+			!strings.Contains(alert.Observed, "error_class="+observationErrorClassUnclassified) {
+			t.Fatalf("legacy helper widened or obscured its boundary: %+v", alert)
+		}
+		delete(wantTargets, alert.Target)
+		requireAlertOmits(t, alert, "database_or_import_rejection")
+	}
+	if len(wantTargets) != 0 {
+		t.Fatalf("legacy helper visibility targets missing: %+v", wantTargets)
+	}
+
+	// The compatibility boundary is version-gated. A malformed current helper
+	// must still fail closed instead of discarding evidence under a v2 label.
+	legacyDiagnostics["version"] = subtensorPeerDiagnosticsVersion
+	malformedCurrent, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseSubtensorObservation(string(malformedCurrent)); err == nil {
+		t.Fatal("malformed current helper was accepted as an unsupported generation")
+	}
+}
+
 func TestSubtensorSignalLocalizesLitep2pNotificationFailureAgainstArchive(t *testing.T) {
 	observation := healthySubtensorObservation()
 	archive := &observation.Nodes[0]

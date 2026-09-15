@@ -18662,7 +18662,13 @@ resolver and bootnode checks, as the same-host network, resource, and binary
 control. Do not use an unhealthy archive as that control. A server monitor
 running against helper version 1 must emit `cannot-observe` rather than decode
 absent timestamp classes as zero; install the reviewed Xops helper before using
-version 2 for production attribution. None of these observations authorizes a
+version 2 for production attribution. The version-1 outcome map contains bare
+integer counts rather than version 2's count/first/last objects. Decode only
+the version from an unsupported helper and discard its body: that mismatch
+must produce one narrow `peer-diagnostics` visibility finding per node while
+the independently typed unit, RPC, gateway, identity, peer-count, and head
+progress observations continue. A whole-host parse failure hides healthy core
+checks and is itself a monitor defect. None of these observations authorizes a
 restart, database reset, reserved-peer policy change, or deployment.
 
 A later 2026-09-10 control held the lightnode at zero peers from 18:48:00
@@ -18689,6 +18695,16 @@ owners and running a fresh source-built snapshot cleared `subtensor-identity`
 and `subtensor-runtime-ahead` without changing either node; the old watcher
 separately emitted `settings-generation-stale`. Those pages were configuration
 generation drift, not wrong-RPC or node-runtime failures.
+
+The same day, Snow still served restricted helper version 1 after the monitor
+had adopted version 2. Both units, both direct RPCs, both VPN-bound gateways,
+and their health endpoints remained observable, but the v1 integer outcome map
+failed unmarshalling into the v2 timestamped objects and collapsed the entire
+host into `observation-invalid-response`. The version-gated decoder above
+preserves those core checks and reports only the helper-generation boundary.
+Operational closure still requires the authorized canonical
+`xops/main/ansible/run-subtensor.sh` deployment and a subsequent version-2
+sample; compatibility parsing does not manufacture timestamp evidence.
 
 The fresh snapshot still emitted lightnode peer/progress findings. An 80-second
 read-only bracket retained both container start/image identities: archive and
