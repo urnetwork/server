@@ -81,9 +81,14 @@ production launch readiness. Staging uses authenticated prior containment
 qualification; the new image still needs the exact production rebaseline.
 Redis's alternate cluster ports currently refuse connections from sille, so
 the worker uses the existing authoritative PostgreSQL FIFO fallback. The
-database host heartbeat is fresh, but Grafana pushes fail because sille has no
-local ingestion listener on port 3100. Restore those host integrations before
-claiming complete monitoring/deployment readiness.
+database host heartbeat is fresh. At 15:06 UTC, a temporary loopback-only
+forwarder restored authenticated Grafana pushes through crisp
+(`172.28.208.58:3100`); the worker logged `push ok` without restarting.
+Fireside (`172.28.208.3:3100`) also accepts connections and requires
+authentication. The forwarder is a transient systemd service and does not
+survive reboot. Persistent host routing, multi-endpoint failover, and complete
+monitoring/deployment verification remain pending; the publisher currently
+supports only its local endpoint.
 
 The config rollover also exposed a historical seed-reveal bug: decryption used
 the current base commit instead of the round's immutable policy base. The

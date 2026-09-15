@@ -107,7 +107,14 @@ staging_deployment:
   production_round_created: false
   production_host_rebaseline: pending
   fifo_dispatch: authoritative_postgres_fallback_redis_cluster_ports_unreachable
-  grafana_ingestion: blocked_no_local_port_3100_listener
+  grafana_ingestion: authenticated_push_verified_via_temporary_crisp_forwarder
+  grafana_forwarder:
+    service: urnetwork-sim-latency-metrics-forward.service
+    local_listen: 127.0.0.1:3100
+    remote_endpoint: 172.28.208.58:3100
+    verified_push_at: 2026-09-15T15:06:32Z
+    persistent_across_reboot: false
+    multi_endpoint_support: pending_publisher_change
   historical_round_reveal_fix:
     server_commit: 45215c8f1cd3c3ef5855734042c513706a179b53
     tests: deterministic_unit_and_postgres_lifecycle_passed
