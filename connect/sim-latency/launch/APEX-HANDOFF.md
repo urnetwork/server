@@ -85,13 +85,22 @@ outcome-neutral `completed` until finalization commits. The additive
 `evaluation_status` distinguishes running work from terminal failure without
 revealing scores; `evaluation_failure` may expose a reviewed code and kind,
 never a raw message, and terminal failures have `retriable: false`. Unknown
-failure codes remain private. These fields require the updated API rollout;
-clients must tolerate their absence while older instances drain.
+failure codes remain private. These fields were verified on the live API on
+2026-09-15; clients should still tolerate their absence during rolling updates.
 Staging then publishes full outcomes through polling and
 the explicit staging-inclusive leaderboard; the default view remains production
 only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private
 review report.
+
+Staging epoch 4 is open, verified on 2026-09-15 at 14:56 UTC:
+`round_id=01a0a58b-9a3e-2e43-f612-0034ff7296ff`,
+`opens_at=2026-09-15T14:56:00Z`, `closes_at=2026-09-17T14:56:00Z`.
+The singleton evaluator is running, and this round freezes the corrected
+significance-capable evaluator. Macrocosmos can submit using its existing
+staging token. Accepted live scoring and finalized entries still need to be
+observed; this is not a claim that the downstream path has already passed.
+
 A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is normalized score
 descending, raw score ascending, submission time, then job id. Statistical

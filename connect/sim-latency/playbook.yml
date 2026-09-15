@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-09-14
-launch_state: corrected_evaluator_installed_api_config_rollout_and_live_score_pending
+status_date: 2026-09-15
+launch_state: staging_epoch_4_open_worker_running_accepted_live_score_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -79,7 +79,7 @@ evaluator_release:
     convenience_tag: urnetwork/sim-latency-evaluator-base:significance-contract-759b7462
     verified_at: 2026-09-14T18:27:24Z
   simulator_sha256: fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f
-  main_api_config_rollout: pending
+  main_api_config_rollout: live_pin_and_polling_contract_verified_2026_09_15
   accepted_live_staging_score: pending
   smoke_log_sha256: 6f2652772933ae516f0e63b3b08a80a458d7c3de063b610c16c203a3026f7079
   retained_input_replay:
@@ -93,6 +93,26 @@ evaluator_release:
     evaluator_image_id: sha256:6c68b85355e87e381f266b65f5c98581f232682cec2ac77c73c5ea6f151e2d5c
     simulator_sha256: 05c2a721c652fd1f066eae26270361ce6127d266f6e5dc0c10a0caffe9fb0319
     reason: scorer_omitted_required_significance_record
+
+staging_deployment:
+  verified_at: 2026-09-15T14:56:17Z
+  epoch: 4
+  round_id: 01a0a58b-9a3e-2e43-f612-0034ff7296ff
+  status: open
+  opens_at: 2026-09-15T14:56:00Z
+  closes_at: 2026-09-17T14:56:00Z
+  immutable_policy_matches_live_pin: true
+  worker_service: urnetwork-sim-latency-staging-epoch-4.service
+  worker_status: running_preflight_passed
+  production_round_created: false
+  production_host_rebaseline: pending
+  fifo_dispatch: authoritative_postgres_fallback_redis_cluster_ports_unreachable
+  grafana_ingestion: blocked_no_local_port_3100_listener
+  historical_round_reveal_fix:
+    server_commit: 45215c8f1cd3c3ef5855734042c513706a179b53
+    tests: deterministic_unit_and_postgres_lifecycle_passed
+    api_rollout: pending
+    blocks_current_staging_epoch: false
 
 release_record:
   control_plane_branch: main
@@ -202,8 +222,11 @@ checklist:
     status: complete
     evidence: server/controller/competition_controller.go
   - id: epoch_zero_evaluator_image
-    status: local_install_and_docker_smoke_complete_api_config_rollout_and_live_score_pending
+    status: local_install_smoke_and_live_pin_verified_accepted_score_and_production_rebaseline_pending
     evidence: config/main/sim-latency.yml and server/connect/sim-latency/evaluator/container/build-base.sh
+  - id: historical_round_seed_reveal
+    status: tested_and_pushed_api_rollout_pending
+    evidence: server_commit_45215c8f1cd3c3ef5855734042c513706a179b53
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
     deletion_owner: support@ur.xyz
