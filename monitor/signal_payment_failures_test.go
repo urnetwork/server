@@ -116,6 +116,43 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	}
 }
 
+func TestPaymentIdentityFallbackDoesNotBlameCurrentCheckoutWithoutProviderAge(t *testing.T) {
+	fallback, err := paymentFailureFinding("email_fallback", "stripe", 1, 1800, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := alertFromFinding(
+		syntheticSettings(&syntheticSource{}),
+		"2.22",
+		"payment-failures",
+		"Durable payment and entitlement failures",
+		fallback,
+	).Markdown()
+	for _, want := range []string{
+		"cannot distinguish a pre-metadata legacy subscription from a current checkout regression",
+		"A current invoice does not date the subscription",
+		"Server commit bb4d0676",
+		"provider object's creation time",
+		"verify the account mapping",
+		"email alone is not safe write authority",
+		"do not replay the invoice",
+		"do not infer a current deployment need",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("fallback alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, forbidden := range []string{
+		"deploy the API",
+		"the checkout producer omitted",
+		"automatically backfill",
+	} {
+		if strings.Contains(markdown, forbidden) {
+			t.Fatalf("fallback alert made unsupported attribution %q:\n%s", forbidden, markdown)
+		}
+	}
+}
+
 func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 	tests := []struct {
 		name string

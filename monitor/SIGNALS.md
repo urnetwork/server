@@ -6136,7 +6136,12 @@ establish:
   email or manually edit a balance.
 - `payment-identity-fallback` (WARN): a Stripe credit used the legacy customer
   email fallback because immutable network metadata was missing. The credit is
-  retained, but the checkout producer must be corrected.
+  retained. The database aggregate cannot tell whether the subscription
+  predates metadata stamping or a current checkout omitted it; compare the
+  provider object's creation time, subscription metadata, and checkout-session
+  reference with the deployed boundary for Server commit `bb4d0676`. A legacy
+  object may be backfilled only after authoritative payment/support evidence
+  verifies its account mapping. Email alone is not safe write authority.
 - `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
   fulfillment durably created a balance code, automatic redemption failed,
   and no email recovery channel exists. Preserve the code and provider ledger;
@@ -6165,6 +6170,20 @@ deletion. The single Solana row represented prepaid fixed-window history and
 was not a provider-cancellation failure; it is no longer emitted as
 `payment-renewal-orphan`. The controller's candidate query independently keeps
 all deleted owners outside provider calls and metadata repair.
+
+The 2026-09-15 Main identity-fallback warning was a legacy-object control, not
+a current checkout regression. A bounded read-only provider lookup found one
+active subscription created roughly 365 days earlier, with zero subscription
+metadata keys. Its sole checkout session was the same age and had no client
+reference. The corresponding database aggregate showed a current credited
+invoice ledger, an existing network, an active Pro entitlement, and two local
+Stripe renewal rows. This object predates `bb4d0676` by many months; redeploying
+the current API cannot add metadata to it. Provider/Support must verify the
+mapping from authoritative evidence before updating the subscription. The
+software closure remains that new checkouts stamp immutable metadata and that
+post-boundary objects never need the fallback. No provider object, account,
+email, invoice, or subscription identifier is retained in this catalog or the
+monitor alert.
 
 The deletion-path audit found an architecture-preserving correctness defect.
 `NetworkRemove` deleted the network before asking Stripe to cancel, while

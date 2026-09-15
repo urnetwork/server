@@ -192,9 +192,10 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.tier = tierWarn
 		common.class = "payment-identity-fallback"
 		common.symptom = fmt.Sprintf("%d Stripe credit(s) used the legacy customer-email identity fallback in 24 hours", count)
-		common.mechanism = "The payment was credited, but immutable network metadata was absent and the handler fell back to customer email. Email is mutable and non-unique across account lifecycle, so continued use is a correctness risk rather than a healthy payment path."
-		common.action = "Find why checkout omitted immutable network metadata and fix that producer. Preserve the credited idempotency ledger; do not replay the invoice or log the customer email."
-		common.verify = "New checkout objects carry immutable network metadata, invoice credits use it, and no email_fallback event appears for two full reconciliation windows."
+		common.mechanism = "The payment was credited, but immutable network metadata was absent and the handler fell back to customer email. Email is mutable and non-unique across account lifecycle, so continued use is a correctness risk. This aggregate alone cannot distinguish a pre-metadata legacy subscription from a current checkout regression."
+		common.context = "A current invoice does not date the subscription that produced it. Server commit bb4d0676 began stamping network_id on new Stripe subscriptions; only the provider object's creation time plus its subscription metadata and checkout-session reference can place this fallback before or after that rollout."
+		common.action = "Using authorized read-only provider tooling, compare the subscription and checkout-session creation time and metadata with Server commit bb4d0676's deployed boundary. For a legacy object with both immutable fields absent, verify the account mapping from authoritative payment/support evidence before backfilling subscription metadata; email alone is not safe write authority. For a post-boundary object, fix the checkout producer. Preserve the credited idempotency ledger; do not replay the invoice, do not infer a current deployment need from this aggregate, and do not log the customer email."
+		common.verify = "New checkout objects carry immutable network metadata and invoice credits use it; every legacy object has a verified metadata repair or documented provider/support disposition; and no email_fallback event appears for two full reconciliation windows."
 	default:
 		return finding{}, fmt.Errorf("payment failures returned an unknown kind")
 	}
