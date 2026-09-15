@@ -3972,7 +3972,10 @@ var migrations = []any{
 	// expire_time; auth_wallet_nonce had only its PK (nonce), so the reaper
 	// seq-scanned. The table is live-written by the no-auth AuthWalletNonceCreate
 	// route and had no reaper task wired at all, so it grew unboundedly -- now
-	// batched + scheduled, driven by this index.
+	// batched + scheduled, driven by this index. The nonces themselves are
+	// never consumed (the route is deprecated and inert; wallet replay is
+	// prevented by wallet_auth_challenge), so this reaper is the only thing
+	// bounding the table.
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS auth_wallet_nonce_expire_time
         ON auth_wallet_nonce (expire_time)

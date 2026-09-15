@@ -17,6 +17,11 @@ import (
 
 const (
 	WalletAuthChallengeLifetime = 5 * time.Minute
+	// The signed timestamp is the one the SERVER issued (UseWalletAuthChallenge
+	// requires it to equal the stored create_time exactly), so there is no
+	// client clock in this protocol and this skew cannot absorb one. It only
+	// pads the wall-clock sanity check either side of the challenge lifetime,
+	// which is the real gate.
 	WalletAuthChallengeSkewPast = 1 * time.Minute
 	// Allow a small future skew for legitimate clock drift, but not enough
 	// to hoard a challenge beyond its own expiry.
@@ -29,6 +34,24 @@ type WalletAuthChallengeArgs struct {
 	Blockchain    *string `json:"blockchain,omitempty"`
 }
 
+// WalletAuthChallengeResult carries everything a wallet needs to sign in.
+//
+// MessageTemplate is the complete signable payload, not a template with holes:
+// the challenge and the timestamp are already interpolated into it, and the
+// client must hand those exact bytes to the wallet and submit them back
+// unmodified as `wallet_message`. Challenge and Timestamp are the same two
+// values broken out, for clients that want to display or check them; a client
+// must never rebuild the message from them, because any difference in
+// spacing, line endings or ordering fails `400 invalid message format`.
+//
+// There is no scannable payload here, and deliberately so. A WalletConnect
+// pairing QR encodes a relay topic and a symmetric key -- it structurally
+// cannot carry an application payload, so the challenge and the timestamp
+// reach the wallet AFTER pairing, as the polkadot_signMessage (or Solana
+// signMessage) request the client builds from MessageTemplate. Putting a live
+// challenge value in a scannable URL would also publish it outside the TLS
+// session it was issued in. If a login QR is ever wanted, it must encode a
+// pairing or hand-off reference, never this payload.
 type WalletAuthChallengeResult struct {
 	Challenge       string                          `json:"challenge"`
 	Timestamp       int64                           `json:"timestamp"`
@@ -136,8 +159,14 @@ func CreateWalletAuthChallenge(
 	}
 }
 
-// FormatWalletAuthChallengeMessage must match the client-side construction
-// exactly. Any change here must be reflected in the dashboard hook.
+// FormatWalletAuthChallengeMessage builds the exact text the wallet signs:
+// three LF-separated lines carrying the challenge and the server timestamp.
+// The server returns the finished string as WalletAuthChallengeResult
+// .MessageTemplate, so a client never needs to build it -- but any client
+// that does (the dashboard hook, the apps' wallet sheets, the SDK) must match
+// this byte for byte, because parseWalletAuthChallengeMessage is its strict
+// inverse and rejects anything else with `400 invalid message format`.
+// Changing this format is a breaking wire change for every signer.
 func FormatWalletAuthChallengeMessage(challenge string, timestamp int64) string {
 	return fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: %d", challenge, timestamp)
 }
@@ -217,7 +246,16 @@ func UseWalletAuthChallenge(
 	now := server.NowUtc()
 	messageTime := time.Unix(timestamp, 0).UTC()
 
-	if messageTime.Before(now.Add(-WalletAuthChallengeSkewPast)) {
+	// Bound this by the advertised lifetime, not by the skew alone. The signed
+	// timestamp is always the issuance time (it must equal create_time exactly
+	// below), so comparing it against now - skew silently turned the
+	// 300 second challenge the api documents and returns as `expires_in` into
+	// a ~60 second one, and rejected here -- before signature verification and
+	// before the row is even read. A WalletConnect round trip to a phone
+	// routinely takes longer than that, which made the failure look like a
+	// signing problem. expire_time (checked once the row is loaded) is the
+	// real deadline; this stays a cheap pre-database sanity bound.
+	if messageTime.Before(now.Add(-(WalletAuthChallengeLifetime + WalletAuthChallengeSkewPast))) {
 		return &UseWalletAuthChallengeResult{
 			Valid: false,
 			Error: &WalletAuthChallengeResultError{Message: "400 challenge timestamp too old"},
@@ -232,7 +270,24 @@ func UseWalletAuthChallenge(
 
 	isValid, err := VerifySignature(blockchain, args.PublicKey, args.Message, args.Signature)
 	if err != nil {
-		return nil, err
+		// A verifier error means the client sent something undecodable, not
+		// that the server failed. Returning it here reached the router as an
+		// unprefixed error and became a 500 carrying the raw text, while the
+		// same malformed input on the Solana path answered a clean 401 --
+		// the asymmetry that makes a Bittensor client look server-broken.
+		glog.Infof(
+			"Wallet challenge signature verification failed: blockchain=%s err=%s",
+			blockchain,
+			err.Error(),
+		)
+		message := "401 invalid signature"
+		if errors.Is(err, ErrWalletSignatureEncoding) {
+			message = "400 invalid signature encoding"
+		}
+		return &UseWalletAuthChallengeResult{
+			Valid: false,
+			Error: &WalletAuthChallengeResultError{Message: message},
+		}, nil
 	}
 	if !isValid {
 		return &UseWalletAuthChallengeResult{
@@ -291,6 +346,10 @@ func UseWalletAuthChallenge(
 			return
 		}
 		// Then allow small clock skew relative to challenge creation time.
+		// Unreachable while the equality check above stands -- it already
+		// forced a sub-second delta, and these bounds are a minute wide.
+		// Kept as the backstop that would matter if that equality were ever
+		// relaxed to a tolerance.
 		if messageTime.Before(createTime.Add(-WalletAuthChallengeSkewPast)) ||
 			messageTime.After(createTime.Add(WalletAuthChallengeSkewFuture)) {
 			err = errors.New("challenge timestamp outside allowed skew")
