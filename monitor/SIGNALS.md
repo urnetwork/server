@@ -10952,6 +10952,22 @@ saturation or telemetry-denominator probe. Therefore the monitor could remain
 quiet while a different service made a host operationally unusable. This was a
 real coverage gap, not a failure of the existing service-specific thresholds.
 
+A later 2026-09-15 observation supplied the missing-telemetry bootstrap
+control. One enabled offsite VPN host returned no member of the required
+five-metric tuple. Its management address still accepted TCP/22, authenticated
+SSH with the inventory-owned identity, and matched the expected remote
+hostname, ruling out a host or overlay outage. Direct systemd and filesystem
+inspection instead found `fluent-bit.service` in `not-found` state, no Fluent
+Bit process or executable, and no `/etc/fluent-bit/fluent-bit.conf`. The host
+had never been a target of an Xops telemetry playbook. This is affirmative
+provisioning absence, not an exporter crash and not a Mimir query failure.
+`xops/main/ansible/run-vpn.sh` owns the telemetry-only correction; it installs
+the shared bounded node-exporter input and hardened Fluent Bit unit and sends
+to the authenticated TLS metrics ingress without changing OpenVPN, firewall,
+routing, or DNS state. Deployment remains an operator action. Verification
+requires the playbook and active-unit checks to pass, followed by two monitor
+cadences with the complete fresh tuple for that same inventory identity.
+
 This class does not choose remediation. A runaway process or overlapping
 retired generation is a software/lifecycle problem; a bounded legitimate
 workload at the designed ceiling needs operational load reduction or more
