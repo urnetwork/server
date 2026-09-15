@@ -17118,6 +17118,63 @@ maps to `signal_proxy_cache.go` and `signal_proxy_cache_test.go`; synthetic
 cases pin legacy-image blindness, invalid capacity, sustained near-capacity
 pressure, and newest-generation selection during rollout.
 
+### 14.7d Proxy aggregate device admission
+Probe: `proxy-device-admission`
+
+Each Proxy process exports the monotonic
+`urnetwork_proxy_device_admission_refused_total` counter and the contextual
+`urnetwork_proxy_device_memory_budget_bytes` and
+`urnetwork_proxy_device_memory_budget_used_bytes` gauges. The counter advances
+only when the atomic process-wide reservation cannot fit one complete new
+DeviceLocal memory target. The rejected device is not constructed and existing
+devices are not evicted. It counts attempts, not unique devices, customers,
+flows, or bytes, so retries may amplify a single demand boundary.
+
+Once per minute, issue one Mimir instant query pinned to one evaluation time.
+Join each family and its source timestamp with fresh
+`process_resident_memory_bytes` and `process_start_time_seconds` on exact
+`env`, `host`, `block`, and `instance`. The active services.yml Proxy
+host-by-block topology is the denominator. Keep all fresh process generations
+for refusal evidence while using the newest generation for current telemetry
+completeness. A current quiet generation is healthy only after its counter has
+one reset-free, source-time-bracketed ten-minute window; a younger generation
+with a positive counter is immediately observable from process start.
+
+PAGE `proxy-device-admission-refused` immediately with sustain 1 for any
+positive same-generation refusal delta. Budget utilization is context only and
+must never trigger the page. In particular, the default 8 GiB process budget
+holds 341 complete 24 MiB reservations (8,184 MiB), leaving 8 MiB and a ratio
+of 0.9990234375: the next reservation is refused below a ratio of 1. A later
+gauge decrease does not erase the counter delta, and a healthy newest process
+does not erase a refusal from a still-fresh overlap generation.
+
+WARN `proxy-device-admission-unobservable` immediately when an expected
+current host/block, process identity, required metric, source timestamp, or
+complete quiet-window bracket is absent or stale. Missing gauges do not hide
+an independently proved counter delta. WARN
+`proxy-device-admission-disabled` for the explicit coherent zero-budget state;
+zero means the aggregate admission gate is disabled, never spare capacity.
+WARN `proxy-device-admission-invalid` for resets, malformed counters, future or
+impossible process identity, or gauges whose used bytes exceed budget. Query,
+decode, or service-gateway failure remains the generic `cannot-observe` path.
+
+A refusal proves that one configured process ceiling rejected an attempt. It
+does not prove host or fleet physical-memory exhaustion, unique rejected users,
+or a hardware shortage. Preserve the process generation and interval, compare
+siblings, then apply §14.7's direct host RSS, MemAvailable, swap, OOM, UDP-loss,
+and rollout-reserve gates before changing placement, the process budget, RAM,
+or hosts. Do not restart away evidence, disable the budget, evict live devices,
+or raise the budget blindly. Recover only after every expected newest process
+is complete and stable, refusal counters remain flat for ten minutes, and
+§14.7 host reserve plus ordinary Proxy acceptance are healthy.
+
+SIGNALS.md §14.7d (`proxy-device-admission`) maps to
+`signal_proxy_device_admission.go` and
+`signal_proxy_device_admission_test.go`. Synthetic cases pin the below-one
+remainder boundary, overlap-generation retention, missing contextual gauges,
+disabled and invalid states, young-generation semantics, topology completeness,
+and cancellation propagation without embedding production identities.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1

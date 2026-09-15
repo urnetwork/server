@@ -1944,6 +1944,11 @@ func TestProxyDashboardCoversAggregateDeviceAdmissionBudget(t *testing.T) {
 	if !strings.Contains(saturation.Description, "must not be read as spare capacity") {
 		t.Fatal("device admission saturation panel does not preserve the missing-telemetry boundary")
 	}
+	for _, required := range []string{"positive refusal counter is authoritative", "can refuse admission below 1"} {
+		if !strings.Contains(saturation.Description, required) {
+			t.Errorf("device admission saturation panel omits the ratio boundary %q", required)
+		}
+	}
 }
 
 // Requires each application family to have an authenticated dashboard query.
