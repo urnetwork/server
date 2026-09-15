@@ -148,7 +148,10 @@ The cardinality follow-up adds §11.20d (`cardinality`): it counts only exact,
 source-reviewed metric families through a loopback Mimir gateway. It detects
 the Taskworker egress-health classic-histogram multiplier and Redis INFO
 latencystats series independently, without returning metric labels or treating
-either accepted family as sole attribution for a rejected batch.
+either accepted family as sole attribution for a rejected batch. The live
+source follow-up also reduces `CONFIG GET latency-tracking` across every
+configured Redis node to fixed counts, so an empty or stale Mimir result cannot
+falsely certify that the producer is disabled.
 The database follow-up adds §1.3a (`pg-capacity`) and a typed
 `pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
 generic panic amplification and records the validated legacy-reindex, WAL
@@ -7425,6 +7428,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `taskworker-histogram-cardinality` | The exact accepted `urnetwork_egress_probe_health_check_seconds_bucket` family is present. Every finite destination/class pair is multiplied by classic buckets and each overlapping random process instance, consuming shared Mimir recent-head capacity even though the dashboard needs only an aggregatable mean and a fresh exact interval maximum. | Run `cardinality` (§11.20d). Deploy the sum/count plus freshness-gated interval-maximum implementation and matching dashboard only through the §11.20a rollout-headroom gate. Preserve process identity and bounded dimensions; do not raise a limit, restart Mimir, or hide the panel. Require zero current bucket series, fresh replacement metrics, observed removals, and the complete §11.20a quiet/headroom window. |
 | `taskworker-latency-pair-mismatch` | The exact Taskworker egress-health `_sum` and `_count` families have unequal current series counts. The corrected producer and mean dashboard require paired series with identical labels; unequal counts prove an incomplete accepted family, mixed contract, or query-visible staleness. | Run `cardinality` (§11.20d), compare the deployed Taskworker contract, and reduce the exact label-set difference at the Mimir boundary without exporting labels. Count equality is necessary but not sufficient for label equality. Repair the producer/query contract; do not infer the missing side or restart Mimir. Require equal counts on two fresh reads and a current mean panel. |
 | `redis-latencystats-cardinality` | Redis INFO latencystats produces three percentile samples plus sum/count for every observed command on every node. The current dashboard uses commandstats calls and cumulative duration instead, so these exact accepted families consume shared recent-head capacity without an operational consumer. | Run `cardinality` (§11.20d). Apply `latency-tracking no` through the reviewed Redis playbook while retaining commandstats, the thresholded latency monitor, and slowlog. Require all nodes to report the policy, zero current latencystats series, fresh command panels, observed removals, and the complete §11.20a quiet/headroom window. This reduction does not by itself attribute or close a rejected batch. |
+| `redis-latencystats-source-drift` | At least one configured Redis process reports live `latency-tracking=yes`. The persistent template may already say `no`; `state: started` does not mutate the setting of an existing process, and that node can recreate the unused metric family on later commands. | Run `cardinality` (§11.20d), then the reviewed Redis convergence playbook that updates both the persistent file and each live process with idempotent `CONFIG SET`, without restarting Redis. Require every node to report `no` on two fresh runs; wait for ordinary staleness/compaction before judging the Mimir series count. |
+| `redis-latencystats-source-unobservable` | The bounded host-local reducer cannot return one exact `latency-tracking` state for every configured Redis node. A zero Mimir family count while this source census is incomplete is unknown, not proof of durable disablement. | Restore loopback `redis-cli CONFIG GET` reachability and the fixed reduction. Do not infer a missing value, restart Redis, or substitute query absence for source state. Require all configured nodes observed as `no` on two fresh runs. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
@@ -9203,6 +9208,8 @@ Tier-0 (page):
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
+| host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
+| service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
 | dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
@@ -9211,6 +9218,9 @@ Tier-1 (warn):
 | id | source | check | threshold |
 |---|---|---|---|
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
+| host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
+| service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
+| redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
 | task-parked | pg | all `error_count>0` rows grouped by task family before reporting; payload separates parked, live-retrying, and total rows | any family (never limit raw rows first) |
 | task-overdue | pg+task logs | one worst row/task family with live claim; due age over `min(2*p95,max(4*p50,20m))`, then matching `eval active` confirms actual elapsed time | any (median cap prevents repeated long failures from polluting p95; exact task/executor identity retained) |
 | task-duration-regression | pg | run duration vs 7-day p95 per function | > 2× |
@@ -9261,6 +9271,7 @@ Tier-1 (warn):
 | taskworker-histogram-cardinality | loopback Mimir query | §11.20d exact current count of `urnetwork_egress_probe_health_check_seconds_bucket` | any present series; immediate; accepted series are a removable multiplier, not sole rejected-batch attribution |
 | taskworker-latency-pair-mismatch | loopback Mimir query | §11.20d separate exact current `_sum` and `_count` counts | unequal counts; immediate visibility/correctness warning; equality is necessary but not sufficient for exact label pairing |
 | redis-latencystats-cardinality | loopback Mimir query | §11.20d combined exact current count of Redis percentile, sum, and count latencystats families | any present series; immediate; accepted series are a removable multiplier, not sole rejected-batch attribution |
+| redis-latencystats-source-drift / redis-latencystats-source-unobservable | redis-cluster host loopback reducer | §11.20d exact configured-node census of the live `latency-tracking` enum | any `yes`, or incomplete/malformed/unreachable census; immediate; Mimir series absence cannot replace source proof |
 | mimir-shutdown-flush-disabled / mimir-shutdown-child-missing / mimir-replacement-continuity-unverified / mimir-noncompacted-query-risk | host Mimir config | §11.21 exact-process shutdown/recent-store settings, remotely reduced to non-secret fields | false flush; child absent for 2 probes; positive store horizon whose replacement lifecycle is not independently proven; or zero raw-block horizon |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
@@ -10898,6 +10909,122 @@ coverage pins a parseable fleet, an accepted modified local builder with no
 guard strings, malformed identity, partial host observation loss,
 services-role scoping, and parsing of the actual executable-string shape.
 
+### 8.14 Host saturation and telemetry coverage
+
+Probe: `host-load`
+
+Every minute, query the node-exporter families through one bounded loopback
+Mimir gateway and join them to the complete enabled monitor-host inventory:
+
+- `node_load1`;
+- the distinct logical-CPU count derived from `node_cpu_seconds_total`;
+- five-minute non-idle/non-I/O-wait CPU execution and separate I/O-wait ratios
+  derived from the exact `idle` and `iowait` modes; and
+- `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes`.
+
+Only source samples whose raw exporter timestamp is no more than 90 seconds
+old qualify. The query filters each selector before aggregation; the evaluation
+timestamp attached to a computed `rate`, count, or ratio is not evidence that
+its source exporter is fresh. A configured host that has no complete fresh
+tuple emits `host-metrics-missing` after two observations and pages after
+three. An absent series is unknown host state, never a healthy zero. First
+check direct SSH, node exporter, and the remote-write path; if the host is also
+unreachable, treat that as the incident rather than suppressing the missing
+denominator. Disabled or explicitly observation-excluded hosts remain governed
+by the monitor's existing exact host-scope contract.
+
+`host-cpu-saturation` pages after two consecutive observations when five-minute
+CPU execution is at least 90% and `load1 / logical_cpus` is at least 1.25.
+`host-io-saturation` uses the same normalized-load bound with at least 20%
+five-minute I/O wait. These two classes are deliberately disjoint: high load
+with negligible I/O wait is runnable CPU pressure, not evidence of a disk
+fault. `host-memory-pressure` warns when MemAvailable is at most 10% for two
+observations and pages after five; MemAvailable prevents reclaimable filesystem
+cache from being counted as unavailable memory.
+
+The 2026-09-15 edge-3/edge-4 incident is the root-cause fixture for this
+control. Both 72-logical-CPU hosts had load1 between roughly 170 and 287,
+five-minute CPU execution above 92%, near-zero I/O wait, and more than half of RAM
+available. They were CPU-starved by managed-service work, not memory-exhausted
+or blocked on storage. The existing catalog had Taskworker-only CPU/allocation
+and Proxy-only runtime probes plus Grafana panels, but no generic enabled-host
+saturation or telemetry-denominator probe. Therefore the monitor could remain
+quiet while a different service made a host operationally unusable. This was a
+real coverage gap, not a failure of the existing service-specific thresholds.
+
+This class does not choose remediation. A runaway process or overlapping
+retired generation is a software/lifecycle problem; a bounded legitimate
+workload at the designed ceiling needs operational load reduction or more
+hardware. Preserve the discriminating service/process evidence before any
+mutation. Do not reboot a saturated host to erase the owner. Hard termination
+is permitted only for an old generation proven stuck after its replacement is
+ready, one block at a time, with service health verified between blocks.
+
+Implementation convention: SIGNALS.md §8.14 (`host-load`) maps to
+`signal_host_load.go` and `signal_host_load_test.go`. Synthetic tests reproduce
+CPU saturation, I/O saturation, low available memory, stale/missing and
+incomplete host telemetry, healthy hosts, alert identity, and Markdown detail.
+
+### 8.15 Per-service runtime runaway
+
+Probe: `service-load`
+
+Join fresh `process_resident_memory_bytes`, `go_memstats_heap_alloc_bytes`,
+`go_memstats_heap_objects`, `go_goroutines`, and
+`process_start_time_seconds` with five-minute rates for
+`process_cpu_seconds_total`, `go_memstats_alloc_bytes_total`, and
+`go_gc_duration_seconds_count` on the exact bounded
+`host/service/block/instance` tuple. Join the node logical-CPU count for a
+host-relative CPU floor. Reject malformed or unowned labels to the bounded
+`service-runtime-metrics-invalid` count; a fresh RSS-bearing process missing a
+raw identity/runtime member emits `service-runtime-metrics-incomplete`.
+Every raw gauge and counter selector is filtered by its source timestamp before
+the five-minute rate or CPU-count expression is accepted, using the same
+90-second freshness boundary as §8.14.
+
+Do **not** select only the newest start time. A current and draining generation
+of the same block both consume host capacity, and the old generation is often
+the incident amplifier. Report the number of fresh same-block generations in
+evidence without treating overlap alone as failure.
+
+`service-runtime-runaway` pages after two observations when any one fresh
+process has:
+
+- at least 16 GiB RSS plus any of: at least 6.25% of host CPUs (bounded to
+  1–4 cores), 250,000 goroutines, or 256 MiB/s allocation; or
+- an unconditional hard shape of at least 64 GiB RSS, 500,000 goroutines, or
+  1 GiB/s allocation.
+
+The 2026-09-15 production discriminator was Connect, not generic traffic or a
+host kernel fault. Busy production blocks retained approximately 16,000–30,000
+residents apiece and exposed about 34–65 GiB allocated heap, 37–97 GiB RSS,
+0.7–1.1 million goroutines, 6–14 CPU cores, and 0.4–2.0 GiB/s allocation.
+Source inspection found an explicit scale multiplier: every `Resident`
+eagerly creates one control worker plus 16 destination forward-shard workers
+and divides a 4,096-entry ingress allocation across those shards. Resident
+transports and inter-edge exchange connections add further buffered queues and
+workers. This makes scheduler, stack, queue, and GC cost grow linearly with a
+large resident population before those individual shards demonstrate work.
+
+The simultaneous config rollout added old/new Connect generations while the
+old processes drained. That overlap raised total CPU, but live drain gauges
+were falling by thousands of residents over five minutes, so they were not
+hung and were not hard-killed. A stuck drain is one whose bounded remaining
+count and owning process generation stop advancing while its replacement is
+ready; elapsed grace alone is insufficient. Fix the eager per-resident worker
+and buffer multiplier within Connect, retain destination ordering and bounded
+ownership, and add deterministic scale/lifecycle tests before deploying. Do
+not merely increase host limits. If the corrected bounded per-client cost later
+reaches legitimate capacity, add Connect hardware or reduce admission; that
+operational/hardware boundary cannot be fixed solely in software.
+
+Implementation convention: SIGNALS.md §8.15 (`service-load`) maps to
+`signal_service_load.go` and `signal_service_load_test.go`. Synthetic tests pin
+the incident-shaped RSS/heap/goroutine/CPU/allocation tuple, concurrent
+generations, unconditional hard ceilings, incomplete raw families, privacy-safe
+invalid-label reduction, stale-generation exclusion, healthy state, and
+detailed Markdown rendering.
+
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
 Signals for the redis keyspace-notification transport for peers + stream hops
@@ -12474,6 +12601,15 @@ calls and cumulative duration, while the thresholded latency monitor and
 slowlog remain independent. Set `latency-tracking no` through the Redis
 configuration while preserving those three consumers.
 
+The first persistent-config correction exposed a separate convergence gap:
+the Redis playbook rendered `latency-tracking no` but only required each
+systemd unit to be `started`. That does not alter the live setting of an
+already-running Redis process. The reviewed follow-up added an idempotent live
+`CONFIG SET latency-tracking no` with an exact postcondition, and the
+2026-09-15 main rollout verified all 32 nodes as `no` without restarting a
+Redis data process. The source-state signal below retains this distinction so
+ordinary Mimir staleness cannot be mistaken for live configuration drift.
+
 These counts prove accepted series and independently justify both bounded
 reductions; they do not establish that either family alone populated a
 particular rejected batch. §11.20a remains the loss authority. If optimized
@@ -12810,6 +12946,17 @@ the query boundary; metric labels and samples are discarded. One failed
 gateway falls through to another. No reachable gateway or an invalid response
 is observation loss, never a healthy zero.
 
+Independently, run one bounded command on the configured Redis-cluster host.
+For every configured local node port it performs a four-second loopback
+`CONFIG GET latency-tracking`, then returns only five fixed counts: expected,
+enabled, disabled, invalid, and unreachable. The parser requires an exact
+single-line result, a positive expected count equal to configuration, and a
+complete non-negative partition. Raw replies, ports, addresses, and error text
+never enter an alert. Emit `redis-latencystats-source-drift` for any live
+`yes`. Emit `redis-latencystats-source-unobservable` for a missing host/port,
+failed reducer, invalid reply, unreachable node, or incomplete census. These
+source findings do not suppress independently measured Mimir cardinality.
+
 Emit `taskworker-histogram-cardinality` whenever the exact
 `urnetwork_egress_probe_health_check_seconds_bucket` count is positive. The
 finite destination and class dimensions are legitimate, and the random
@@ -12832,9 +12979,12 @@ the redis-exporter optional histogram switch. Disable their source with
 `latency-tracking no` on every Redis node. Preserve INFO commandstats, the
 configured thresholded latency monitor, and slowlog; verify the operations/s
 and command-duration dashboard panels remain current. Do not disable the
-exporter or hide missing panels.
+exporter or hide missing panels. When every live source is already disabled,
+a positive query count is retained pre-convergence data: wait for Prometheus
+staleness and ordinary Mimir head compaction instead of rerunning the playbook
+or restarting Redis.
 
-The three findings and their healthy states are independent. A positive
+The five findings and their healthy states are independent. A positive
 accepted family count identifies a measured removable multiplier, not the
 unique cause of an admission rejection. Apply either reduction only through
 its ordinary authorized Taskworker/Grafana or Redis rollout and the §11.20a
@@ -12849,7 +12999,11 @@ interpret recent-head retention as continued production by a retired artifact.
 
 Implementation convention: SIGNALS.md §11.20d (`cardinality`) maps to
 `server/monitor/signal_cardinality.go` and
-`server/monitor/signal_cardinality_test.go`.
+`server/monitor/signal_cardinality_test.go`. Synthetic coverage pins both
+avoidable-family findings, paired replacement metrics, live-source drift,
+source observation loss without suppression of Mimir evidence, strict source
+reduction parsing, malformed Mimir responses, cancellation, and Markdown
+redaction.
 
 ### 11.21 Mimir shutdown durability configuration
 
@@ -18395,21 +18549,23 @@ the live container resolver path were outside the then-installed restricted
 helper contract.
 
 The restricted `subtensor-monitor` helper therefore has a versioned peer
-diagnostic contract. It returns only fixed aggregate current-process counters:
-block-announcement notification opens/closes, raw distinct connection
-opens/closes, sync successes and bounded failure classes, pending handshake
-and transport failures, plus counts of a 5,000-line current-generation tail
-classified as chain/fork rejection, database/import rejection, notification
-negotiation failure, or reconnect/dial failure. It also returns only a bounded
-status (`ok`, `failed`, `timeout`, `unconfigured`, or `unavailable`) for
-in-container DNS and the configured bootnode TCP handshake. It never returns
-raw logs, protocol or peer IDs, addresses, DNS answers, or error text. Metric
-and log counts are paired with the exact container start boundary and are not
-cross-generation rates. Log classifications use exact literals audited against
-the pinned node source and are mutually exclusive per line, ordered as
-database/import, chain/fork, notification, then reconnect. The tail is bounded
-by line count and current process, not by event time: its counts are not proof
-that a matching historical line caused the current peer-loss episode.
+diagnostic contract. Version 2 returns only fixed aggregate current-process
+counters: block-announcement notification opens/closes, raw distinct connection
+opens/closes, sync successes and bounded failure classes, and pending handshake
+and transport failures. Its Docker query is bounded to the exact process
+`StartedAt` through a captured UTC end, requests timestamps and at most 5,000
+lines, and rejects a payload over 4 MiB. Each mutually exclusive fixed log
+class returns only a count plus first/last UTC: chain/fork rejection,
+database/import rejection, notification negotiation failure, reconnect/dial
+failure, explicit `SyncingEngine` termination after its `NotificationService`
+ended, or litep2p user-protocol exit only when that line names the
+block-announcement protocol. It also returns only a bounded status (`ok`,
+`failed`, `timeout`, `unconfigured`, or `unavailable`) for in-container DNS and
+the configured bootnode TCP handshake. It never returns raw logs, protocol or
+peer IDs, addresses, DNS answers, or error text. All six classes, explicit UTC
+window bounds and valid count/timestamp pairs are mandatory; an older helper,
+malformed/missing timestamps, an out-of-window row, or an incomplete class set
+is `cannot-observe`. Exactly 5,000 rows means earlier process rows may be absent.
 
 `subtensor-peers` keeps its stable alert identity and selects its mechanism
 from those aggregates. `unconfigured` means the helper could not extract one
@@ -18420,18 +18576,19 @@ with failed bootnode TCP is a transport boundary. When both checks pass,
 lower-level distinct connections remain live, block-announcement opens equal
 closes, and notification/handshake/substream counters are present, current
 state localizes the boundary to litep2p notification negotiation or peerset
-reconnect handling. Database/import and chain/fork counts in the uncorrelated
-tail remain unresolved alternatives until a bounded timestamped observation
-ties them to the episode; they do not outrank those current-state
-discriminators. Treat an advancing, peer-connected full archive running the
-same image, with its own successful resolver and bootnode checks, as the
-same-host network, resource, and binary control. Do not use an unhealthy
-archive as that control. A server monitor running against the older helper must
-emit `cannot-observe` for the missing versioned diagnostic rather than decoding
-absent counters as zero; install the reviewed Xops helper before using the new
-discriminator for production attribution. None of these observations
-authorizes a restart, database reset, reserved-peer policy change, or
-deployment.
+reconnect handling. First/last UTC makes each log alternative comparable with
+the peer/head interval, but a matching timestamp is not by itself causal and a
+non-overlapping or line-limit-truncated aggregate remains unresolved. An
+explicit syncing-task or block-announcement protocol exit establishes the
+handle/task-exit prerequisite only at its recorded time; it does not prove that
+protocol unregistration restarts synchronization. Treat an advancing,
+peer-connected full archive running the same image, with its own successful
+resolver and bootnode checks, as the same-host network, resource, and binary
+control. Do not use an unhealthy archive as that control. A server monitor
+running against helper version 1 must emit `cannot-observe` rather than decode
+absent timestamp classes as zero; install the reviewed Xops helper before using
+version 2 for production attribution. None of these observations authorizes a
+restart, database reset, reserved-peer policy change, or deployment.
 
 A later 2026-09-10 control held the lightnode at zero peers from 18:48:00
 through 19:04:15 CDT. Its queued imports fell from 1,792 to zero while the head
@@ -18448,6 +18605,41 @@ version 1, so container DNS, configured-bootnode TCP, and current-process log
 classes remained unobservable. Until the reviewed Xops `eda3ff4` helper
 contract is present, preserve that attribution boundary and the recovered
 generation.
+
+On 2026-09-15, two different boundaries were observed. Xops had already moved
+the verified runtime pin from 455 to 458, while Vault, the monitor example and
+the running watcher still expected 455. Archive, lightnode and public RPC all
+coherently reported 458/transaction 1. Reconciling the two stale configuration
+owners and running a fresh source-built snapshot cleared `subtensor-identity`
+and `subtensor-runtime-ahead` without changing either node; the old watcher
+separately emitted `settings-generation-stale`. Those pages were configuration
+generation drift, not wrong-RPC or node-runtime failures.
+
+The fresh snapshot still emitted lightnode peer/progress findings. An 80-second
+read-only bracket retained both container start/image identities: archive and
+public best/finalized heads each advanced seven blocks while the lightnode
+advanced zero and stayed at zero peers. Both containers resolved and reached
+the configured bootnode. The archive retained three block-announcement streams
+and twelve new sync successes; the lightnode continued opening lower-level
+connections but had zero live block-announcement streams and zero new sync
+successes. Its bounded tail contained 233 database/import-class rows, unchanged
+across the bracket, but helper version 1 did not retain their timestamps. This
+proves a same-generation lightnode stall above DNS/TCP/raw connectivity and
+below synchronization-peer retention; it does not choose importer/database
+rejection versus notification/peerset handling.
+
+The deployed v448 lock uses litep2p 0.9.5. Upstream
+[litep2p PR 391](https://github.com/paritytech/litep2p/pull/391) added protocol
+unregistration after a user notification handle exits, but does not keep the
+handle alive or restart a terminated syncing task. The symptom in
+[polkadot-sdk issue 8474](https://github.com/paritytech/polkadot-sdk/issues/8474)
+came from a Cumulus minimal-relay collator dropping its notification service;
+the locked Rao SDK already contains that path's
+[PR 8514](https://github.com/paritytech/polkadot-sdk/pull/8514) keep-alive, and
+this standalone node's `SyncingEngine` owns its service for the run. Treat
+0.9.5 notification lifecycle as a pinned candidate only if version 2 records a
+same-episode task or block-announcement protocol exit; neither upstream report
+is presently the qualified cause.
 
 ### 17.3 2026-08-20 incident signature
 

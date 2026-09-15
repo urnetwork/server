@@ -11,7 +11,26 @@ import (
 	"time"
 )
 
-const subtensorMarker = "monitor-signal-17.1-subtensor"
+const (
+	subtensorMarker                           = "monitor-signal-17.1-subtensor"
+	subtensorPeerDiagnosticsVersion           = 2
+	subtensorPeerLogScope                     = "current-process-timestamped-tail"
+	subtensorPeerLogDatabaseOrImport          = "database_or_import_rejection"
+	subtensorPeerLogChainOrFork               = "chain_or_fork_rejection"
+	subtensorPeerLogSyncEngineTermination     = "sync_engine_termination"
+	subtensorPeerLogBlockAnnounceProtocolExit = "block_announce_protocol_exit"
+	subtensorPeerLogNotificationNegotiation   = "notification_negotiation_failure"
+	subtensorPeerLogReconnectOrDial           = "reconnect_or_dial_failure"
+)
+
+var subtensorPeerLogOutcomeNames = []string{
+	subtensorPeerLogDatabaseOrImport,
+	subtensorPeerLogChainOrFork,
+	subtensorPeerLogSyncEngineTermination,
+	subtensorPeerLogBlockAnnounceProtocolExit,
+	subtensorPeerLogNotificationNegotiation,
+	subtensorPeerLogReconnectOrDial,
+}
 
 // Signal subtensor implements SIGNALS.md §17.1. It compares each local node
 // and overlay gateway with the configured public reference chain. In
@@ -93,18 +112,19 @@ type subtensorPeerDiagnostics struct {
 }
 
 type subtensorPeerLogDiagnostics struct {
-	Scope               string                   `json:"scope"`
-	EventTimeCorrelated bool                     `json:"event_time_correlated"`
-	TailLimit           int64                    `json:"tail_limit"`
-	LinesScanned        int64                    `json:"lines_scanned"`
-	Outcomes            subtensorPeerLogOutcomes `json:"outcomes"`
+	Scope               string                             `json:"scope"`
+	EventTimeCorrelated bool                               `json:"event_time_correlated"`
+	WindowStartUTC      string                             `json:"window_start_utc"`
+	WindowEndUTC        string                             `json:"window_end_utc"`
+	TailLimit           int64                              `json:"tail_limit"`
+	LinesScanned        int64                              `json:"lines_scanned"`
+	Outcomes            map[string]subtensorPeerLogOutcome `json:"outcomes"`
 }
 
-type subtensorPeerLogOutcomes struct {
-	ChainOrForkRejection           int64 `json:"chain_or_fork_rejection"`
-	DatabaseOrImportRejection      int64 `json:"database_or_import_rejection"`
-	NotificationNegotiationFailure int64 `json:"notification_negotiation_failure"`
-	ReconnectOrDialFailure         int64 `json:"reconnect_or_dial_failure"`
+type subtensorPeerLogOutcome struct {
+	Count    int64  `json:"count"`
+	FirstUTC string `json:"first_utc"`
+	LastUTC  string `json:"last_utc"`
 }
 
 type subtensorPeerMetrics struct {
@@ -378,20 +398,50 @@ func subtensorPeerDiagnosticsProblem(diagnostics *subtensorPeerDiagnostics) erro
 	if diagnostics == nil {
 		return fmt.Errorf("versioned peer diagnostics are absent; the installed helper predates this observation contract")
 	}
-	if diagnostics.Version != 1 {
+	if diagnostics.Version != subtensorPeerDiagnosticsVersion {
 		return fmt.Errorf("unsupported peer diagnostics version=%d", diagnostics.Version)
 	}
-	if diagnostics.Log.Scope != "current-process-tail" || diagnostics.Log.EventTimeCorrelated || diagnostics.Log.TailLimit != 5000 || diagnostics.Log.LinesScanned < 0 || diagnostics.Log.LinesScanned > diagnostics.Log.TailLimit {
+	if diagnostics.Log.Scope != subtensorPeerLogScope || !diagnostics.Log.EventTimeCorrelated || diagnostics.Log.TailLimit != 5000 || diagnostics.Log.LinesScanned < 0 || diagnostics.Log.LinesScanned > diagnostics.Log.TailLimit {
 		return fmt.Errorf("peer log aggregate bounds are invalid")
 	}
-	for _, count := range []int64{
-		diagnostics.Log.Outcomes.ChainOrForkRejection,
-		diagnostics.Log.Outcomes.DatabaseOrImportRejection,
-		diagnostics.Log.Outcomes.NotificationNegotiationFailure,
-		diagnostics.Log.Outcomes.ReconnectOrDialFailure,
-	} {
-		if count < 0 {
-			return fmt.Errorf("peer log aggregate contains a negative count")
+	windowStart, err := subtensorPeerLogUTC("window start", diagnostics.Log.WindowStartUTC)
+	if err != nil {
+		return err
+	}
+	windowEnd, err := subtensorPeerLogUTC("window end", diagnostics.Log.WindowEndUTC)
+	if err != nil {
+		return err
+	}
+	if windowEnd.Before(windowStart) {
+		return fmt.Errorf("peer log aggregate window is reversed")
+	}
+	if len(diagnostics.Log.Outcomes) != len(subtensorPeerLogOutcomeNames) {
+		return fmt.Errorf("peer log aggregate classes are incomplete")
+	}
+	for _, name := range subtensorPeerLogOutcomeNames {
+		outcome, ok := diagnostics.Log.Outcomes[name]
+		if !ok {
+			return fmt.Errorf("peer log aggregate class %s is absent", name)
+		}
+		if outcome.Count < 0 {
+			return fmt.Errorf("peer log aggregate class %s contains a negative count", name)
+		}
+		if outcome.Count == 0 {
+			if outcome.FirstUTC != "" || outcome.LastUTC != "" {
+				return fmt.Errorf("peer log aggregate class %s has timestamps without observations", name)
+			}
+			continue
+		}
+		first, err := subtensorPeerLogUTC(name+" first", outcome.FirstUTC)
+		if err != nil {
+			return err
+		}
+		last, err := subtensorPeerLogUTC(name+" last", outcome.LastUTC)
+		if err != nil {
+			return err
+		}
+		if first.Before(windowStart) || last.After(windowEnd) || last.Before(first) {
+			return fmt.Errorf("peer log aggregate class %s is outside its window", name)
 		}
 	}
 	for _, observation := range []struct {
@@ -431,6 +481,17 @@ func subtensorPeerDiagnosticsProblem(diagnostics *subtensorPeerDiagnostics) erro
 	return nil
 }
 
+func subtensorPeerLogUTC(name, value string) (time.Time, error) {
+	if value == "" || !strings.HasSuffix(value, "Z") {
+		return time.Time{}, fmt.Errorf("peer log aggregate %s is not an explicit UTC timestamp", name)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("peer log aggregate %s is not a valid timestamp", name)
+	}
+	return parsed, nil
+}
+
 func subtensorPeerDiagnosticsUsable(diagnostics *subtensorPeerDiagnostics) bool {
 	return subtensorPeerDiagnosticsProblem(diagnostics) == nil
 }
@@ -440,6 +501,38 @@ func subtensorCounterRemainder(opened, closed int64) int64 {
 		return 0
 	}
 	return opened - closed
+}
+
+func subtensorPeerLogOutcomeAt(outcomes map[string]subtensorPeerLogOutcome, name string) subtensorPeerLogOutcome {
+	return outcomes[name]
+}
+
+func subtensorPeerLogEvidence(log subtensorPeerLogDiagnostics) string {
+	parts := []string{
+		fmt.Sprintf(
+			"log_scope=%s log_event_time_correlated=%t log_window_start=%s log_window_end=%s log_lines=%d",
+			log.Scope, log.EventTimeCorrelated, log.WindowStartUTC, log.WindowEndUTC, log.LinesScanned,
+		),
+	}
+	for _, name := range subtensorPeerLogOutcomeNames {
+		outcome := subtensorPeerLogOutcomeAt(log.Outcomes, name)
+		parts = append(parts, fmt.Sprintf(
+			"%s=%d %s_first=%s %s_last=%s",
+			name, outcome.Count,
+			name, firstNonempty(outcome.FirstUTC, "none"),
+			name, firstNonempty(outcome.LastUTC, "none"),
+		))
+	}
+	return strings.Join(parts, " ")
+}
+
+func subtensorPeerLogHasOutcome(outcomes map[string]subtensorPeerLogOutcome) bool {
+	for _, name := range subtensorPeerLogOutcomeNames {
+		if subtensorPeerLogOutcomeAt(outcomes, name).Count > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func subtensorPeerFindingDetails(node subtensorNodeObservation, archive subtensorArchivePeerControl) (string, string, string, string) {
@@ -457,14 +550,16 @@ func subtensorPeerFindingDetails(node subtensorNodeObservation, archive subtenso
 
 	metrics := diagnostics.Metrics
 	outcomes := diagnostics.Log.Outcomes
+	databaseOrImport := subtensorPeerLogOutcomeAt(outcomes, subtensorPeerLogDatabaseOrImport)
+	chainOrFork := subtensorPeerLogOutcomeAt(outcomes, subtensorPeerLogChainOrFork)
+	syncEngineTermination := subtensorPeerLogOutcomeAt(outcomes, subtensorPeerLogSyncEngineTermination)
+	blockAnnounceProtocolExit := subtensorPeerLogOutcomeAt(outcomes, subtensorPeerLogBlockAnnounceProtocolExit)
 	notificationLive := subtensorCounterRemainder(metrics.BlockAnnounceOpenedTotal, metrics.BlockAnnounceClosedTotal)
 	rawLive := subtensorCounterRemainder(metrics.RawDistinctOpenedTotal, metrics.RawDistinctClosedTotal)
 	evidenceParts = []string{fmt.Sprintf(
-		"peer_diagnostics=v%d dns=%s bootnode_tcp=%s log_scope=%s log_event_time_correlated=%t log_lines=%d chain_or_fork=%d database_or_import=%d notification_negotiation=%d reconnect_or_dial=%d block_announce_opened=%d block_announce_closed=%d block_announce_live=%d raw_distinct_opened=%d raw_distinct_closed=%d raw_distinct_live=%d sync_success=%d sync_closed=%d sync_negotiation_failure=%d sync_dial_failure=%d pending_handshake_failure=%d pending_transport_failure=%d",
+		"peer_diagnostics=v%d dns=%s bootnode_tcp=%s %s block_announce_opened=%d block_announce_closed=%d block_announce_live=%d raw_distinct_opened=%d raw_distinct_closed=%d raw_distinct_live=%d sync_success=%d sync_closed=%d sync_negotiation_failure=%d sync_dial_failure=%d pending_handshake_failure=%d pending_transport_failure=%d",
 		diagnostics.Version, diagnostics.ContainerDNSStatus, diagnostics.BootnodeTCPStatus,
-		diagnostics.Log.Scope, diagnostics.Log.EventTimeCorrelated, diagnostics.Log.LinesScanned,
-		outcomes.ChainOrForkRejection, outcomes.DatabaseOrImportRejection,
-		outcomes.NotificationNegotiationFailure, outcomes.ReconnectOrDialFailure,
+		subtensorPeerLogEvidence(diagnostics.Log),
 		metrics.BlockAnnounceOpenedTotal, metrics.BlockAnnounceClosedTotal, notificationLive,
 		metrics.RawDistinctOpenedTotal, metrics.RawDistinctClosedTotal, rawLive,
 		metrics.SyncRequestSuccessTotal, metrics.SyncRequestClosedTotal,
@@ -491,8 +586,8 @@ func subtensorPeerFindingDetails(node subtensorNodeObservation, archive subtenso
 		controlConclusion = " The advancing, peer-connected archive on the same host and image, with its own successful resolver and bootnode checks, is the healthy control; the fault is specific to this node generation or its peer protocol state."
 	}
 	tailCaveat := ""
-	if outcomes.DatabaseOrImportRejection > 0 || outcomes.ChainOrForkRejection > 0 || outcomes.NotificationNegotiationFailure > 0 || outcomes.ReconnectOrDialFailure > 0 {
-		tailCaveat = " The log counts come from a line-bounded current-process tail with no event-time correlation; they remain historical alternatives unless a separately bounded timestamped observation ties them to this peer-loss episode."
+	if subtensorPeerLogHasOutcome(outcomes) {
+		tailCaveat = " The log aggregates carry bounded first/last UTC timestamps from this process generation. Those timestamps permit comparison with the peer-loss interval, but a nonzero class remains an alternative until its interval and causal ordering match the episode."
 	}
 
 	switch {
@@ -510,20 +605,24 @@ func subtensorPeerFindingDetails(node subtensorNodeObservation, archive subtenso
 		verify = "The in-container bootnode TCP handshake returns ok, then peers remain above zero and the head advances across multiple samples."
 	case notificationLive == 0 && rawLive > 0 && (metrics.SyncRequestNegotiationFailureTotal > 0 || metrics.SyncRequestClosedTotal > 0 || metrics.PendingHandshakeFailureTotal > 0):
 		mechanism = "The container resolves and reaches the bootnode and retains lower-level peer connections, but has no live block-announcement notification stream. Current live connection/notification state plus process-generation handshake/substream counters localize the boundary above TCP discovery and below synchronization peer retention, at litep2p notification negotiation or peerset reconnect handling." + controlConclusion + tailCaveat
-		action = "Preserve the process and database generation. Compare bounded counter deltas with the archive and reproduce the pinned litep2p notification-open/close and peerset backoff path before testing an upstream-compatible fix or release update. If the uncorrelated log tail contains chain or database alternatives, obtain a timestamped bounded discriminator first; do not restart, reset, add arbitrary peers, or change NAT to manufacture recovery."
+		action = "Preserve the process and database generation. Compare bounded counter deltas and the timestamped SyncingEngine, block-announcement protocol-exit, chain, and database aggregates with the exact last progressing head and archive control before testing an upstream-compatible fix or release update; do not restart, reset, add arbitrary peers, or change NAT to manufacture recovery."
 		verify = "Without a reset, block-announcement opened minus closed stays positive, RPC peers remain above zero, sync substream-close/negotiation growth returns to the archive control band, and the head advances across the full observation window."
 	case notificationLive == 0 && (metrics.SyncRequestDialFailureTotal > 0 || metrics.PendingTransportFailureTotal > 0):
 		mechanism = "Container DNS and the direct bootnode TCP handshake succeed, but process-generation reconnect/dial counters accompany no live block-announcement notification stream. This supports a litep2p peer-selection/reconnect or post-connect transport boundary, not a listener or DNS fault." + controlConclusion + tailCaveat
 		action = "Preserve the generation and compare bounded dial, raw-connection, and block-announcement counter deltas with the archive control. Reproduce the pinned peerset retry path before changing bootnodes, reserved peers, or the node process."
 		verify = "A notification stream remains live, peers stay above zero, reconnect/dial failure growth returns to the archive control band, and the head advances without a reset."
-	case outcomes.DatabaseOrImportRejection > 0:
-		mechanism = "The line-bounded current-process tail contains a source-proven database/import rejection class, but it is not event-time correlated. It is an unresolved local chain-state alternative, not proof that the historical line caused this peer-loss episode." + controlConclusion
-		action = "Preserve the database and process generation. Obtain a bounded timestamped database/import discriminator and correlate it with the last accepted/finalized block before choosing repair; do not reset or replace the generation from this tail count alone."
-		verify = "A timestamped sample proves whether database/import rejection coincides with the incident; recovery still requires retained peers and advancing best/finalized heads against archive/public controls."
-	case outcomes.ChainOrForkRejection > 0:
-		mechanism = "The line-bounded current-process tail contains a source-proven chain/fork or block-announcement rejection class, but it is not event-time correlated. It is an unresolved handshake/state alternative, not proof that the historical line caused this peer-loss episode." + controlConclusion
-		action = "Preserve the generation and obtain a bounded timestamped rejection discriminator before changing its chain spec, database, or binary. Compare genesis and finalized ancestry with the archive and public reference."
-		verify = "A timestamped sample proves whether the rejection coincides with the incident; recovery still requires a retained block-announcement session, peers above zero, and advancing heads."
+	case syncEngineTermination.Count > 0 || blockAnnounceProtocolExit.Count > 0:
+		mechanism = "The timestamped current-process tail contains an explicit SyncingEngine/NotificationService termination or litep2p block-announcement user-protocol exit. This establishes the source-level task/handle-exit prerequisite at its recorded time, but it proves the current cause only when that time precedes the observed notification and head stall." + controlConclusion
+		action = "Preserve the process and database generation. Compare the recorded exit time with the last successful sync request, live block-announcement transition, and last advancing head. Reproduce the pinned handle-lifecycle path before selecting an upstream update; do not assume that protocol unregistration alone restarts a terminated SyncingEngine."
+		verify = "The timestamped exit precedes the same-generation peer/head stall in a deterministic reproduction, and the selected correction retains a live block-announcement stream plus advancing best/finalized heads without a reset."
+	case databaseOrImport.Count > 0:
+		mechanism = "The timestamped current-process tail contains a source-proven database/import rejection class. Its first/last times make the local chain-state alternative testable, but the aggregate alone does not prove that it caused this peer-loss episode." + controlConclusion
+		action = "Preserve the database and process generation. Compare the bounded rejection interval with the last accepted/finalized block before choosing repair; do not reset or replace the generation from this aggregate alone."
+		verify = "The bounded timestamps prove whether database/import rejection coincides with the incident; recovery still requires retained peers and advancing best/finalized heads against archive/public controls."
+	case chainOrFork.Count > 0:
+		mechanism = "The timestamped current-process tail contains a source-proven chain/fork or block-announcement rejection class. Its first/last times make the handshake/state alternative testable, but the aggregate alone does not prove that it caused this peer-loss episode." + controlConclusion
+		action = "Preserve the generation and compare the bounded rejection interval with the peer/head stall before changing its chain spec, database, or binary. Compare genesis and finalized ancestry with the archive and public reference."
+		verify = "The bounded timestamps prove whether the rejection coincides with the incident; recovery still requires a retained block-announcement session, peers above zero, and advancing heads."
 	default:
 		mechanism = "Container DNS and bootnode TCP are healthy, but the bounded aggregate outcomes do not yet distinguish chain-state rejection from notification negotiation or reconnect failure." + controlConclusion + tailCaveat
 		action = "Preserve the generation and collect another bounded helper sample while the zero-peer state remains active. Do not infer a DNS, NAT, database, or litep2p repair without a matching aggregate outcome."

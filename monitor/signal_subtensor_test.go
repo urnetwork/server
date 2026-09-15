@@ -510,10 +510,10 @@ func TestSubtensorSignalLocalizesLitep2pNotificationFailureAgainstArchive(t *tes
 	lightnode.PeerDiagnostics.Metrics.SyncRequestClosedTotal = 9_477
 	lightnode.PeerDiagnostics.Metrics.PendingHandshakeFailureTotal = 7
 	lightnode.PeerDiagnostics.Metrics.PendingTransportFailureTotal = 13
-	// Historical tail alternatives must not outrank affirmative current-state
-	// metrics because the line-bounded tail is not event-time correlated.
-	lightnode.PeerDiagnostics.Log.Outcomes.DatabaseOrImportRejection = 2
-	lightnode.PeerDiagnostics.Log.Outcomes.ChainOrForkRejection = 3
+	// Timestamped tail alternatives must not outrank affirmative current-state
+	// metrics until their interval and causal ordering match the peer loss.
+	lightnode.PeerDiagnostics.Log.Outcomes[subtensorPeerLogDatabaseOrImport] = syntheticSubtensorPeerLogOutcome(2)
+	lightnode.PeerDiagnostics.Log.Outcomes[subtensorPeerLogChainOrFork] = syntheticSubtensorPeerLogOutcome(3)
 
 	alerts, err := runSyntheticSubtensor(t, observation)
 	if err != nil {
@@ -540,9 +540,9 @@ func TestSubtensorSignalLocalizesLitep2pNotificationFailureAgainstArchive(t *tes
 	if !strings.Contains(peer.Action, "do not restart, reset") {
 		t.Fatalf("peer action lost preservation boundary: %s", peer.Action)
 	}
-	if !strings.Contains(peer.Mechanism, "no event-time correlation") ||
-		!strings.Contains(peer.Action, "timestamped bounded discriminator") {
-		t.Fatalf("peer alert promoted an uncorrelated log alternative: %+v", peer)
+	if !strings.Contains(peer.Mechanism, "bounded first/last UTC timestamps") ||
+		!strings.Contains(peer.Action, "timestamped SyncingEngine") {
+		t.Fatalf("peer alert lost its bounded timestamp qualification: %+v", peer)
 	}
 	progress := requireAlertClass(t, alerts, "subtensor-progress")
 	if !strings.Contains(progress.Mechanism, "litep2p notification negotiation or peerset reconnect") ||
@@ -561,14 +561,14 @@ func TestSubtensorSignalSeparatesPeerRejectionAndContainerPathOutcomes(t *testin
 		{
 			name: "database import rejection",
 			alter: func(diagnostics *subtensorPeerDiagnostics) {
-				diagnostics.Log.Outcomes.DatabaseOrImportRejection = 2
+				diagnostics.Log.Outcomes[subtensorPeerLogDatabaseOrImport] = syntheticSubtensorPeerLogOutcome(2)
 			},
 			wantMechanism: "database/import rejection class",
 		},
 		{
 			name: "chain fork rejection",
 			alter: func(diagnostics *subtensorPeerDiagnostics) {
-				diagnostics.Log.Outcomes.ChainOrForkRejection = 3
+				diagnostics.Log.Outcomes[subtensorPeerLogChainOrFork] = syntheticSubtensorPeerLogOutcome(3)
 			},
 			wantMechanism: "chain/fork or block-announcement rejection class",
 		},
@@ -614,10 +614,98 @@ func TestSubtensorSignalSeparatesPeerRejectionAndContainerPathOutcomes(t *testin
 				t.Fatalf("mechanism=%q unexpectedly contains %q", peer.Mechanism, test.dontWantMechanism)
 			}
 			if strings.Contains(test.name, "rejection") &&
-				(!strings.Contains(peer.Mechanism, "not event-time correlated") ||
-					!strings.Contains(peer.Action, "timestamped")) {
+				(!strings.Contains(peer.Mechanism, "first/last times") ||
+					!strings.Contains(peer.Action, "bounded rejection interval")) {
 				t.Fatalf("log-only outcome was not conservative: %+v", peer)
 			}
+		})
+	}
+}
+
+func TestSubtensorSignalKeepsTimestampedProtocolExitCausallyBounded(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.Direct.Health.Peers = 0
+	node.PeerDiagnostics.Metrics.BlockAnnounceOpenedTotal = 10
+	node.PeerDiagnostics.Metrics.BlockAnnounceClosedTotal = 10
+	node.PeerDiagnostics.Metrics.RawDistinctOpenedTotal = 0
+	node.PeerDiagnostics.Metrics.RawDistinctClosedTotal = 0
+	node.PeerDiagnostics.Log.Outcomes[subtensorPeerLogSyncEngineTermination] = syntheticSubtensorPeerLogOutcome(1)
+	node.PeerDiagnostics.Log.Outcomes[subtensorPeerLogBlockAnnounceProtocolExit] = syntheticSubtensorPeerLogOutcome(1)
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := requireAlertClass(t, alerts, "subtensor-peers")
+	for _, want := range []string{
+		"explicit SyncingEngine/NotificationService termination",
+		"proves the current cause only when",
+		"do not assume that protocol unregistration alone restarts",
+		"sync_engine_termination=1",
+		"block_announce_protocol_exit=1",
+		"2099-04-05T06:07:09.000000Z",
+	} {
+		if !strings.Contains(peer.Markdown(), want) {
+			t.Fatalf("timestamped protocol exit alert missing %q: %s", want, peer.Markdown())
+		}
+	}
+}
+
+func TestSubtensorSignalRejectsIncompleteTimestampedPeerDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		alter  func(*subtensorPeerDiagnostics)
+		needle string
+	}{
+		{
+			name: "old helper",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.Version = 1
+			},
+			needle: "unsupported peer diagnostics version=1",
+		},
+		{
+			name: "missing class",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				delete(diagnostics.Log.Outcomes, subtensorPeerLogSyncEngineTermination)
+			},
+			needle: "classes are incomplete",
+		},
+		{
+			name: "count without timestamps",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.Log.Outcomes[subtensorPeerLogDatabaseOrImport] = subtensorPeerLogOutcome{Count: 1}
+			},
+			needle: "not an explicit UTC timestamp",
+		},
+		{
+			name: "reversed outcome",
+			alter: func(diagnostics *subtensorPeerDiagnostics) {
+				diagnostics.Log.Outcomes[subtensorPeerLogDatabaseOrImport] = subtensorPeerLogOutcome{
+					Count: 1, FirstUTC: "2099-04-05T06:07:11Z", LastUTC: "2099-04-05T06:07:10Z",
+				}
+			},
+			needle: "outside its window",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation := healthySubtensorObservation()
+			test.alter(observation.Nodes[1].PeerDiagnostics)
+			problem := subtensorPeerDiagnosticsProblem(observation.Nodes[1].PeerDiagnostics)
+			if problem == nil || !strings.Contains(problem.Error(), test.needle) {
+				t.Fatalf("diagnostics problem=%v, want %q", problem, test.needle)
+			}
+			alerts, err := runSyntheticSubtensor(t, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			visibility := requireAlertClass(t, alerts, "cannot-observe")
+			if visibility.Target != "chain.example.test/lightnode/peer-diagnostics" || !strings.Contains(visibility.Observed, "error_class="+observationErrorClassUnclassified) {
+				t.Fatalf("invalid diagnostics did not fail closed: %+v", visibility)
+			}
+			requireAlertOmits(t, visibility, test.needle)
 		})
 	}
 }
@@ -901,16 +989,35 @@ func healthySubtensorNode(name, syncMode string, rpcPort, gatewayPort int, first
 
 func healthySubtensorPeerDiagnostics() *subtensorPeerDiagnostics {
 	return &subtensorPeerDiagnostics{
-		Version: 1, ContainerDNSStatus: "ok", BootnodeTCPStatus: "ok", MetricsStatus: "ok",
+		Version: subtensorPeerDiagnosticsVersion, ContainerDNSStatus: "ok", BootnodeTCPStatus: "ok", MetricsStatus: "ok",
 		Log: subtensorPeerLogDiagnostics{
-			Scope: "current-process-tail", EventTimeCorrelated: false,
+			Scope: subtensorPeerLogScope, EventTimeCorrelated: true,
+			WindowStartUTC: "2099-04-05T06:07:08Z", WindowEndUTC: "2099-04-05T06:08:08Z",
 			TailLimit: 5000, LinesScanned: 120,
+			Outcomes: syntheticSubtensorPeerLogOutcomes(),
 		},
 		Metrics: subtensorPeerMetrics{
 			BlockAnnounceOpenedTotal: 20, BlockAnnounceClosedTotal: 12,
 			RawDistinctOpenedTotal: 30, RawDistinctClosedTotal: 20,
 			SyncRequestSuccessTotal: 100,
 		},
+	}
+}
+
+func syntheticSubtensorPeerLogOutcomes() map[string]subtensorPeerLogOutcome {
+	outcomes := map[string]subtensorPeerLogOutcome{}
+	for _, name := range subtensorPeerLogOutcomeNames {
+		outcomes[name] = subtensorPeerLogOutcome{}
+	}
+	return outcomes
+}
+
+func syntheticSubtensorPeerLogOutcome(count int64) subtensorPeerLogOutcome {
+	if count == 0 {
+		return subtensorPeerLogOutcome{}
+	}
+	return subtensorPeerLogOutcome{
+		Count: count, FirstUTC: "2099-04-05T06:07:09.000000Z", LastUTC: "2099-04-05T06:07:10.000000Z",
 	}
 }
 

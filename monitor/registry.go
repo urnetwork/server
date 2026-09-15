@@ -99,6 +99,8 @@ func NewSignals() []Signal {
 		NewJournalBufferSignal(),
 		NewProvenanceSignal(),
 		NewReleaseBuilderSignal(),
+		NewHostLoadSignal(),
+		NewServiceLoadSignal(),
 		NewRedisKeyEventsSignal(),
 		NewStuckLeasesSignal(),
 		NewTaskConvergenceSignal(),

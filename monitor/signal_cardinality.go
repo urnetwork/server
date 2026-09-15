@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const metricCardinalityMarker = "monitor-signal-11.20d-cardinality"
+const (
+	metricCardinalityMarker            = "monitor-signal-11.20d-cardinality"
+	metricCardinalityRedisSourceMarker = "monitor-signal-11.20d-redis-latencystats-source"
+)
 
 // Prometheus samples are decoded as float64. Reject values above the largest
 // exact integer before converting them to int so a malformed response cannot
@@ -43,6 +46,16 @@ type metricCardinalitySample struct {
 	redisLatencySeries       int
 }
 
+// The host-local reducer retains only fixed counts. Redis replies and node
+// addresses never enter an Alert.
+type redisLatencyTrackingObservation struct {
+	expected    int
+	enabled     int
+	disabled    int
+	invalid     int
+	unreachable int
+}
+
 func (metricCardinalityProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	hosts := env.cfg.hostsWithRole("services")
 	if len(hosts) == 0 {
@@ -61,7 +74,89 @@ func (metricCardinalityProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if err != nil {
 		return nil, err
 	}
-	return evaluateMetricCardinality(host.name, sample), nil
+	redisSource, redisSourceErr := observeRedisLatencyTracking(ctx, env)
+	return evaluateMetricCardinality(host.name, sample, redisSource, redisSourceErr), nil
+}
+
+func observeRedisLatencyTracking(ctx context.Context, env *probeEnv) (redisLatencyTrackingObservation, error) {
+	host := env.cfg.hostByRole("redis-cluster")
+	if host == nil {
+		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no redis-cluster host")
+	}
+	ports := host.redisNodePorts()
+	if len(ports) == 0 {
+		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: no node ports")
+	}
+	portFields := make([]string, 0, len(ports))
+	for _, port := range ports {
+		portFields = append(portFields, strconv.Itoa(port))
+	}
+	command := `# ` + metricCardinalityRedisSourceMarker + `
+set -eu
+command -v timeout >/dev/null
+command -v redis-cli >/dev/null
+expected=0
+enabled=0
+disabled=0
+invalid=0
+unreachable=0
+for port in ` + strings.Join(portFields, " ") + `; do
+  expected=$((expected + 1))
+  if ! response=$(timeout 4 redis-cli --raw -h 127.0.0.1 -p "$port" CONFIG GET latency-tracking 2>/dev/null); then
+    unreachable=$((unreachable + 1))
+    continue
+  fi
+  key=$(printf '%s\n' "$response" | sed -n '1p')
+  value=$(printf '%s\n' "$response" | sed -n '2p')
+  extra=$(printf '%s\n' "$response" | sed -n '3p')
+  if [ "$key" != latency-tracking ] || [ -n "$extra" ]; then
+    invalid=$((invalid + 1))
+    continue
+  fi
+  case "$value" in
+    yes) enabled=$((enabled + 1)) ;;
+    no) disabled=$((disabled + 1)) ;;
+    *) invalid=$((invalid + 1)) ;;
+  esac
+done
+printf 'expected=%d enabled=%d disabled=%d invalid=%d unreachable=%d\n' \
+  "$expected" "$enabled" "$disabled" "$invalid" "$unreachable"
+`
+	output, err := env.runner.shell(ctx, host, command)
+	if err != nil {
+		return redisLatencyTrackingObservation{expected: len(ports)}, fmt.Errorf("redis latencystats source: host reduction failed")
+	}
+	return parseRedisLatencyTrackingObservation(output, len(ports))
+}
+
+func parseRedisLatencyTrackingObservation(output string, configuredNodes int) (redisLatencyTrackingObservation, error) {
+	observation := redisLatencyTrackingObservation{}
+	trimmed := strings.TrimSpace(output)
+	parsed, err := fmt.Sscanf(
+		trimmed,
+		"expected=%d enabled=%d disabled=%d invalid=%d unreachable=%d",
+		&observation.expected,
+		&observation.enabled,
+		&observation.disabled,
+		&observation.invalid,
+		&observation.unreachable,
+	)
+	if err != nil || parsed != 5 || trimmed != fmt.Sprintf(
+		"expected=%d enabled=%d disabled=%d invalid=%d unreachable=%d",
+		observation.expected,
+		observation.enabled,
+		observation.disabled,
+		observation.invalid,
+		observation.unreachable,
+	) {
+		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: invalid reduction")
+	}
+	if configuredNodes <= 0 || observation.expected != configuredNodes ||
+		observation.enabled < 0 || observation.disabled < 0 || observation.invalid < 0 || observation.unreachable < 0 ||
+		observation.enabled+observation.disabled+observation.invalid+observation.unreachable != observation.expected {
+		return redisLatencyTrackingObservation{}, fmt.Errorf("redis latencystats source: inconsistent reduction")
+	}
+	return observation, nil
 }
 
 func metricCardinalityQuery(environment string) string {
@@ -137,13 +232,29 @@ func parseMetricCardinalitySample(output string) (metricCardinalitySample, error
 	}, nil
 }
 
-func evaluateMetricCardinality(host string, sample metricCardinalitySample) []finding {
+func evaluateMetricCardinality(
+	host string,
+	sample metricCardinalitySample,
+	redisSource redisLatencyTrackingObservation,
+	redisSourceErr error,
+) []finding {
 	observed := fmt.Sprintf(
 		"total_current_series=%d egress_health_bucket_series=%d egress_health_sum_series=%d egress_health_count_series=%d redis_latency_series=%d",
 		sample.totalSeries, sample.egressHealthBucketSeries, sample.egressHealthSumSeries,
 		sample.egressHealthCountSeries, sample.redisLatencySeries,
 	)
 	findings := []finding{}
+	redisSourceObserved := "source_observation=unavailable"
+	if redisSourceErr == nil {
+		redisSourceObserved = fmt.Sprintf(
+			"source_expected_nodes=%d source_enabled_nodes=%d source_disabled_nodes=%d source_invalid_nodes=%d source_unreachable_nodes=%d",
+			redisSource.expected,
+			redisSource.enabled,
+			redisSource.disabled,
+			redisSource.invalid,
+			redisSource.unreachable,
+		)
+	}
 	if sample.egressHealthBucketSeries > 0 {
 		findings = append(findings, finding{
 			probeId: "observability/metric-cardinality", tier: tierWarn,
@@ -183,22 +294,65 @@ func evaluateMetricCardinality(host string, sample metricCardinalitySample) []fi
 		))
 	}
 	if sample.redisLatencySeries > 0 {
+		action := "Restore the bounded live Redis source observation, then apply the reviewed latency-tracking policy only if any node is enabled. Retain commandstats, the thresholded latency monitor, and slowlog; do not restart Mimir or disable the exporter."
+		context := "This is a measured avoidable source, not proof it initiated a specific admission event. Thresholded LATENCY events and the slowlog remain independent incident evidence."
+		if redisSourceErr == nil && redisSource.enabled == 0 && redisSource.invalid == 0 && redisSource.unreachable == 0 {
+			action = "The live source is already disabled on every node. Do not rerun or restart Redis to clear query-visible samples; wait for Prometheus staleness and ordinary Mimir head compaction, while requiring commandstats to remain fresh."
+			context += " The live source has converged; a still-positive instant count is retained pre-convergence data within query lookback, not proof that Redis continues producing it."
+		}
 		findings = append(findings, finding{
 			probeId: "observability/metric-cardinality", tier: tierWarn,
 			class: "redis-latencystats-cardinality", target: "redis-cluster", frame: "info-latencystats", sustain: 1,
 			symptom:   "Redis exports unused per-command INFO latencystats summaries",
 			mechanism: "Each observed Redis command creates three percentile samples plus sum/count on every node. The dashboard uses commandstats calls and cumulative duration instead, so the latencystats families consume shared recent-head capacity without an operational consumer.",
 			baseline:  "Redis latency-tracking is disabled on every node and the three redis_latency_percentiles_usec families have zero current series while commandstats remains fresh.",
-			observed:  observed,
+			observed:  observed + " " + redisSourceObserved,
 			evidence:  "A bounded loopback Mimir query through " + host + " returned only the combined fixed-family count; command labels, nodes, and values were discarded.",
-			context:   "This is a measured avoidable source, not proof it initiated a specific admission event. Thresholded LATENCY events and the slowlog remain independent incident evidence.",
-			action:    "Apply the reviewed Redis latency-tracking policy through run-redis-clusters.sh after authorization. Retain commandstats, the thresholded latency monitor, and slowlog; do not restart Mimir or disable the exporter.",
+			context:   context,
+			action:    action,
 			verify:    "All Redis nodes report latency-tracking=no, the three latencystats families reach zero current series, command-rate/duration panels remain fresh, and §11.20a proves removed series and its complete quiet/headroom window.",
 			playbook:  "SIGNALS.md §11.20d, §11.14, and §11.20a",
 		})
 	} else {
 		findings = append(findings, healthyFinding(
 			"observability/metric-cardinality", tierWarn, "redis-latencystats-cardinality", "redis-cluster",
+		))
+	}
+
+	if redisSourceErr != nil || redisSource.invalid > 0 || redisSource.unreachable > 0 {
+		findings = append(findings, finding{
+			probeId: "observability/metric-cardinality", tier: tierWarn,
+			class: "redis-latencystats-source-unobservable", target: "redis-cluster", frame: "latency-tracking", sustain: 1,
+			symptom:   "The monitor cannot prove the live Redis latency-tracking policy on every configured node",
+			mechanism: "A missing, unreachable, or malformed CONFIG GET result leaves the avoidable latencystats producer state unknown. Query-visible absence alone can be temporary and must not be treated as durable source disablement.",
+			baseline:  "Every configured Redis node returns exactly latency-tracking=no through the bounded host-local reducer.",
+			observed:  redisSourceObserved,
+			evidence:  "Only fixed node counts leave the Redis host; ports, replies, addresses, and error text are discarded.",
+			action:    "Restore local Redis command reachability and the exact CONFIG GET reduction. Do not infer the missing node's setting, restart Redis, or use a zero Mimir count as a substitute.",
+			verify:    "Two fresh runs observe every configured node with latency-tracking disabled and no invalid or unreachable result.",
+			playbook:  "SIGNALS.md §11.20d",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/metric-cardinality", tierWarn, "redis-latencystats-source-unobservable", "redis-cluster",
+		))
+	}
+	if redisSourceErr == nil && redisSource.enabled > 0 {
+		findings = append(findings, finding{
+			probeId: "observability/metric-cardinality", tier: tierWarn,
+			class: "redis-latencystats-source-drift", target: "redis-cluster", frame: "latency-tracking", sustain: 1,
+			symptom:   "One or more Redis nodes still generate the unused INFO latencystats family",
+			mechanism: "The persistent template and live process setting diverged, or the cardinality reduction was staged without its live CONFIG SET. Future command observations can recreate the removed series.",
+			baseline:  "latency-tracking=no on every configured Redis node.",
+			observed:  redisSourceObserved,
+			evidence:  "The Redis host reduced exact CONFIG GET results to fixed counts; no port, address, command value beyond the yes/no enum, or raw reply enters the alert.",
+			action:    "Run the reviewed Redis convergence playbook, which updates both redis.conf and the live process setting without restarting Redis. Preserve commandstats, the thresholded latency monitor, and slowlog.",
+			verify:    "Two fresh runs observe every configured node with latency-tracking disabled; current latencystats series then expire and ordinary head compaction restores Mimir headroom.",
+			playbook:  "SIGNALS.md §11.20d and §11.20a",
+		})
+	} else if redisSourceErr == nil {
+		findings = append(findings, healthyFinding(
+			"observability/metric-cardinality", tierWarn, "redis-latencystats-source-drift", "redis-cluster",
 		))
 	}
 	return findings
