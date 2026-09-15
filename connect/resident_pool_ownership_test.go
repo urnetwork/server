@@ -73,6 +73,38 @@ func requireResidentPoolOwnersReturned(t *testing.T, witnesses [][]byte, descrip
 	}
 }
 
+// Creates only the callback-side Resident lifecycle used by queue ownership
+// tests; it does not attach transports or invoke database-backed controllers.
+func newResidentCallbackLifecycleFixture(
+	t *testing.T,
+	parentCtx context.Context,
+	settings *ExchangeSettings,
+) *Resident {
+	t.Helper()
+	residentCtx, residentCancel := context.WithCancel(parentCtx)
+	clientSettings := clientconnect.DefaultClientSettings()
+	clientSettings.ControlPingTimeout = 0
+	clientSettings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+	clientSettings.Log = clientconnect.NewNoopLogger()
+	client := clientconnect.NewClient(
+		residentCtx,
+		clientconnect.ControlId,
+		clientconnect.NewNoContractClientOob(),
+		clientSettings,
+	)
+	resident := &Resident{
+		ctx:        residentCtx,
+		cancel:     residentCancel,
+		exchange:   &Exchange{settings: settings},
+		clientId:   server.NewId(),
+		client:     client,
+		transports: map[*clientTransport]bool{},
+		forwards:   map[server.Id]*ResidentForward{},
+	}
+	resident.startClientCallbackWorkers()
+	return resident
+}
+
 // A listener callback that loses the client-close race must return the frame
 // that the closed client refuses instead of leaving one packet-class owner.
 func TestResidentNetworkPeerSendFailureReturnsFrameOwnership(t *testing.T) {
@@ -568,6 +600,193 @@ func TestResidentCloseJoinsDelayedProducer(t *testing.T) {
 			fmt.Sprintf("case %d delayed resident producer", caseIndex),
 		)
 	}
+}
+
+// Forward descriptors are cheap until their first destination reaches the
+// callback. First use creates one stable queue per shard while preserving the
+// exact configured aggregate capacity and its remainder distribution.
+func TestResidentForwardIngressStartsLazilyWithStableCapacity(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	settings := DefaultExchangeSettings()
+	settings.ResidentControlQueueSize = 1
+	settings.ResidentForwardQueueSize = 17
+	settings.ResidentForwardQueueShardCount = 4
+	resident := newResidentCallbackLifecycleFixture(t, testCtx, settings)
+
+	for shardIndex := range resident.forwardIngress {
+		if resident.forwardIngress[shardIndex].queue != nil {
+			t.Fatalf("forward shard %d allocated before first use", shardIndex)
+		}
+	}
+
+	wantCapacity := []int{5, 4, 4, 4}
+	totalCapacity := 0
+	for _, shardIndex := range []int{2, 0, 3, 1} {
+		if !resident.forwardIngressAdmission.start() {
+			t.Fatalf("forward shard %d was not admitted", shardIndex)
+		}
+		queue := resident.startClientForwardIngress(shardIndex)
+		resident.forwardIngressAdmission.done()
+		if queue == nil {
+			t.Fatalf("forward shard %d did not start", shardIndex)
+		}
+		if got := cap(queue); got != wantCapacity[shardIndex] {
+			t.Fatalf("forward shard %d capacity=%d, want %d", shardIndex, got, wantCapacity[shardIndex])
+		}
+		if !resident.forwardIngressAdmission.start() {
+			t.Fatalf("forward shard %d repeat was not admitted", shardIndex)
+		}
+		repeatedQueue := resident.startClientForwardIngress(shardIndex)
+		resident.forwardIngressAdmission.done()
+		if repeatedQueue != queue {
+			t.Fatalf("forward shard %d did not retain one destination-stable queue", shardIndex)
+		}
+		totalCapacity += cap(queue)
+	}
+	if totalCapacity != settings.ResidentForwardQueueSize {
+		t.Fatalf("aggregate forward capacity=%d, want %d", totalCapacity, settings.ResidentForwardQueueSize)
+	}
+	if err := resident.CloseAndWait(testCtx); err != nil {
+		t.Fatalf("close lazy forward resident: %v", err)
+	}
+}
+
+// Lazy worker registration occurs while the callback remains in the producer
+// admission set. Close therefore cannot begin its worker Wait while the final
+// callback can still perform a callbackWorkers.Add.
+func TestResidentForwardIngressWorkerRegistrationIsJoinedByClose(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	settings := DefaultExchangeSettings()
+	settings.ResidentForwardQueueSize = 1
+	settings.ResidentForwardQueueShardCount = 1
+	resident := newResidentCallbackLifecycleFixture(t, testCtx, settings)
+
+	workerStartEntered := make(chan struct{})
+	releaseWorkerStart := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseWorkerStart) })
+	resident.beforeForwardIngressWorkerStartForTest = func() {
+		close(workerStartEntered)
+		<-releaseWorkerStart
+	}
+	if !resident.forwardIngressAdmission.start() {
+		t.Fatal("lazy forward producer was not admitted")
+	}
+	queueResult := make(chan chan residentForwardIngress, 1)
+	go func() {
+		queueResult <- resident.startClientForwardIngress(0)
+		resident.forwardIngressAdmission.done()
+	}()
+	select {
+	case <-workerStartEntered:
+	case <-testCtx.Done():
+		t.Fatalf("lazy forward worker did not reach registration barrier: %v", testCtx.Err())
+	}
+
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- resident.CloseAndWait(testCtx)
+	}()
+	select {
+	case <-resident.Done():
+	case <-testCtx.Done():
+		t.Fatalf("resident close did not cancel callback workers: %v", testCtx.Err())
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("resident close passed an admitted lazy worker registration: %v", err)
+	default:
+	}
+
+	releaseOnce.Do(func() { close(releaseWorkerStart) })
+	select {
+	case queue := <-queueResult:
+		if queue == nil {
+			t.Fatal("admitted lazy forward worker lost its queue during close")
+		}
+	case <-testCtx.Done():
+		t.Fatalf("lazy forward worker registration did not resume: %v", testCtx.Err())
+	}
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("close lazy forward registration: %v", err)
+		}
+	case <-testCtx.Done():
+		t.Fatalf("resident did not join lazy forward worker registration: %v", testCtx.Err())
+	}
+}
+
+// A callback admitted before cancellation can win its queue send after the
+// worker observed cancellation and drained. The final joined drain reclaims
+// both forward and analogous control owners without closing producer channels.
+func TestResidentCloseAndWaitDrainsLateCallbackOwners(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	settings := DefaultExchangeSettings()
+	settings.ResidentControlQueueSize = 1
+	settings.ResidentForwardQueueSize = 1
+	settings.ResidentForwardQueueShardCount = 1
+	resident := newResidentCallbackLifecycleFixture(t, testCtx, settings)
+
+	if !resident.forwardIngressAdmission.start() {
+		t.Fatal("forward initializer was not admitted")
+	}
+	forwardQueue := resident.startClientForwardIngress(0)
+	resident.forwardIngressAdmission.done()
+	if forwardQueue == nil {
+		t.Fatal("forward initializer did not create its queue")
+	}
+	if !resident.controlIngressAdmission.start() {
+		t.Fatal("late control producer was not admitted")
+	}
+	if !resident.forwardIngressAdmission.start() {
+		resident.controlIngressAdmission.done()
+		t.Fatal("late forward producer was not admitted")
+	}
+
+	resident.cancel()
+	workersJoined := make(chan struct{})
+	go func() {
+		resident.callbackWorkers.Wait()
+		close(workersJoined)
+	}()
+	select {
+	case <-workersJoined:
+	case <-testCtx.Done():
+		resident.controlIngressAdmission.done()
+		resident.forwardIngressAdmission.done()
+		t.Fatalf("resident callback workers did not stop: %v", testCtx.Err())
+	}
+
+	controlBytes := clientconnect.MessagePoolGet(17)
+	controlWitness := retainResidentPoolWitness(controlBytes)
+	resident.controlIngress <- []*protocol.Frame{{MessageBytes: controlBytes}}
+	forwardBytes := clientconnect.MessagePoolGet(19)
+	forwardWitness := retainResidentPoolWitness(forwardBytes)
+	forwardQueue <- residentForwardIngress{
+		path: clientconnect.TransferPath{
+			SourceId:      clientconnect.NewId(),
+			DestinationId: clientconnect.NewId(),
+		},
+		transferFrameBytes: forwardBytes,
+	}
+	resident.controlIngressAdmission.done()
+	resident.forwardIngressAdmission.done()
+
+	if err := resident.CloseAndWait(testCtx); err != nil {
+		t.Fatalf("close resident with late callback owners: %v", err)
+	}
+	if got := len(resident.controlIngress); got != 0 {
+		t.Fatalf("resident close left %d late control owners", got)
+	}
+	if got := len(forwardQueue); got != 0 {
+		t.Fatalf("resident close left %d late forward owners", got)
+	}
+	requireResidentPoolOwnerReturned(t, controlWitness, "late control callback")
+	requireResidentPoolOwnerReturned(t, forwardWitness, "late forward callback")
 }
 
 // The accept-side forward queue can hold a framed message while its resident

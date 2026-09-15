@@ -345,11 +345,14 @@ func TestResidentForwardCallbackRetiresFullIngressWithoutWaiting(t *testing.T) {
 		clientconnect.MessagePoolReturn(message.transferFrameBytes)
 	}()
 	resident := &Resident{
-		ctx:            ctx,
-		cancel:         cancel,
-		clientId:       clientId,
-		forwardIngress: []chan residentForwardIngress{queue},
+		ctx:      ctx,
+		cancel:   cancel,
+		clientId: clientId,
+		forwardIngress: []residentForwardIngressShard{
+			{queue: queue},
+		},
 	}
+	resident.forwardIngress[0].startOnce.Do(func() {})
 	message := clientconnect.MessagePoolGet(211)
 	witness := clientconnect.MessagePoolShareReadOnly(message)
 	done := make(chan struct{})
@@ -487,8 +490,10 @@ func TestResidentClientCallbacksContainOnlyZeroWaitIngressWork(t *testing.T) {
 			name: "handleClientForward",
 			required: []string{
 				"forwardIngressAdmission.start()",
+				"shardIndex := int(destinationId[len(destinationId)-1]) % len(self.forwardIngress)",
+				"queue := self.startClientForwardIngress(shardIndex)",
 				"MessagePoolShareReadOnly(transferFrameBytes)",
-				"case self.forwardIngress[shardIndex] <- message:",
+				"case queue <- message:",
 				"default:",
 				"self.cancel()",
 			},

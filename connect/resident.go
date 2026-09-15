@@ -3281,7 +3281,7 @@ type Resident struct {
 	controlIngressAdmission pooledMessageSendAdmission
 	forwardIngressAdmission pooledMessageSendAdmission
 	controlIngress          chan []*protocol.Frame
-	forwardIngress          []chan residentForwardIngress
+	forwardIngress          []residentForwardIngressShard
 	callbackWorkers         sync.WaitGroup
 	closeOnce               sync.Once
 
@@ -3306,6 +3306,9 @@ type Resident struct {
 	beforeForwardCloseJoinForTest func()
 	// Nil in production; tests observe the exact internal-client join boundary.
 	beforeClientCloseJoinForTest func()
+	// Nil in production; tests pause lazy shard construction before its worker
+	// is registered, while the callback still owns forward admission.
+	beforeForwardIngressWorkerStartForTest func()
 	// Nil in production; tests capture the exact listener frame before its
 	// ownership is offered to the internal client.
 	beforeListenerFrameSendForTest func(*protocol.Frame)
@@ -3422,6 +3425,14 @@ type residentForwardIngress struct {
 	transferFrameBytes []byte
 }
 
+// One destination-stable callback lane. Its queue and sole consumer are
+// created together on first use; startOnce publishes the queue to concurrent
+// callbacks without multiplying the configured aggregate capacity.
+type residentForwardIngressShard struct {
+	startOnce sync.Once
+	queue     chan residentForwardIngress
+}
+
 func shareResidentControlFrames(frames []*protocol.Frame) []*protocol.Frame {
 	shared := make([]*protocol.Frame, len(frames))
 	for frameIndex, frame := range frames {
@@ -3448,49 +3459,52 @@ func residentControlFrameByteCount(frames []*protocol.Frame) int {
 	return byteCount
 }
 
-// Starts one ordered control consumer and destination-stable forward shards.
-// Channels remain open; cancellation stops each sole consumer, which then
-// drains and returns every queued pooled owner.
+// Returns every control-frame owner left after producers and the consumer have
+// joined. Channels remain open so an admitted callback can never send on a
+// closed channel during teardown.
+func returnReadyResidentControlIngress(queue <-chan []*protocol.Frame) {
+	for {
+		select {
+		case frames := <-queue:
+			returnResidentControlFrames(frames)
+		default:
+			return
+		}
+	}
+}
+
+// Returns every forward-frame owner left after producers and the consumer have
+// joined. The final owner can arrive after cancellation won the worker select.
+func returnReadyResidentForwardIngress(queue <-chan residentForwardIngress) {
+	for {
+		select {
+		case message := <-queue:
+			connect.MessagePoolReturn(message.transferFrameBytes)
+		default:
+			return
+		}
+	}
+}
+
+// Starts the ordered control consumer and installs lightweight descriptors for
+// destination-stable forward shards. Each forward queue and sole consumer are
+// started lazily by an admitted callback; cancellation leaves channels open.
 func (self *Resident) startClientCallbackWorkers() {
 	settings := self.exchange.settings
 	self.controlIngress = make(chan []*protocol.Frame, max(0, settings.ResidentControlQueueSize))
 
 	shardCount := max(1, settings.ResidentForwardQueueShardCount)
-	totalForwardCapacity := max(0, settings.ResidentForwardQueueSize)
-	self.forwardIngress = make([]chan residentForwardIngress, shardCount)
-	for shardIndex := range shardCount {
-		shardCapacity := totalForwardCapacity / shardCount
-		if shardIndex < totalForwardCapacity%shardCount {
-			shardCapacity++
-		}
-		self.forwardIngress[shardIndex] = make(chan residentForwardIngress, shardCapacity)
-	}
+	self.forwardIngress = make([]residentForwardIngressShard, shardCount)
 
 	self.callbackWorkers.Add(1)
 	go server.HandleError(func() {
 		defer self.callbackWorkers.Done()
 		self.runClientControlIngress()
 	}, self.cancel)
-	for shardIndex := range self.forwardIngress {
-		self.callbackWorkers.Add(1)
-		go server.HandleError(func() {
-			defer self.callbackWorkers.Done()
-			self.runClientForwardIngress(shardIndex)
-		}, self.cancel)
-	}
 }
 
 func (self *Resident) runClientControlIngress() {
-	defer func() {
-		for {
-			select {
-			case frames := <-self.controlIngress:
-				returnResidentControlFrames(frames)
-			default:
-				return
-			}
-		}
-	}()
+	defer returnReadyResidentControlIngress(self.controlIngress)
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -3514,18 +3528,39 @@ func (self *Resident) runClientControlIngress() {
 	}
 }
 
-func (self *Resident) runClientForwardIngress(shardIndex int) {
-	queue := self.forwardIngress[shardIndex]
-	defer func() {
-		for {
-			select {
-			case message := <-queue:
-				connect.MessagePoolReturn(message.transferFrameBytes)
-			default:
-				return
-			}
+// Starts one callback shard at most once. The caller must hold a successful
+// forwardIngressAdmission until this returns: CloseAndWait relies on that
+// producer fence to put every callbackWorkers.Add before callbackWorkers.Wait.
+func (self *Resident) startClientForwardIngress(shardIndex int) chan residentForwardIngress {
+	shard := &self.forwardIngress[shardIndex]
+	shard.startOnce.Do(func() {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
 		}
-	}()
+		if self.beforeForwardIngressWorkerStartForTest != nil {
+			self.beforeForwardIngressWorkerStartForTest()
+		}
+		shardCount := len(self.forwardIngress)
+		totalCapacity := max(0, self.exchange.settings.ResidentForwardQueueSize)
+		shardCapacity := totalCapacity / shardCount
+		if shardIndex < totalCapacity%shardCount {
+			shardCapacity++
+		}
+		queue := make(chan residentForwardIngress, shardCapacity)
+		shard.queue = queue
+		self.callbackWorkers.Add(1)
+		go server.HandleError(func() {
+			defer self.callbackWorkers.Done()
+			self.runClientForwardIngress(queue)
+		}, self.cancel)
+	})
+	return shard.queue
+}
+
+func (self *Resident) runClientForwardIngress(queue <-chan residentForwardIngress) {
+	defer returnReadyResidentForwardIngress(queue)
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -3825,16 +3860,20 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		return
 	}
 	defer self.forwardIngressAdmission.done()
+	shardIndex := int(destinationId[len(destinationId)-1]) % len(self.forwardIngress)
+	queue := self.startClientForwardIngress(shardIndex)
+	if queue == nil {
+		return
+	}
 	shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
 	message := residentForwardIngress{
 		path:               path,
 		transferFrameBytes: shared,
 	}
-	shardIndex := int(destinationId[len(destinationId)-1]) % len(self.forwardIngress)
 	select {
 	case <-self.ctx.Done():
 		connect.MessagePoolReturn(shared)
-	case self.forwardIngress[shardIndex] <- message:
+	case queue <- message:
 		return
 	default:
 		connect.MessagePoolReturn(shared)
@@ -4316,6 +4355,17 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 	self.controlIngressAdmission.wait()
 	self.forwardIngressAdmission.wait()
 	callbackErr := waitForWorkerGroup(ctx, &self.callbackWorkers, "resident callback workers")
+	if callbackErr == nil {
+		// A callback admitted before Close can win its ready queue send after a
+		// canceled worker's deferred drain. Producer and worker joins make this
+		// final drain race-free without closing callback-facing channels.
+		returnReadyResidentControlIngress(self.controlIngress)
+		for shardIndex := range self.forwardIngress {
+			if queue := self.forwardIngress[shardIndex].queue; queue != nil {
+				returnReadyResidentForwardIngress(queue)
+			}
+		}
+	}
 	if self.residentController != nil {
 		self.residentController.Close()
 	}
