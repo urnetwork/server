@@ -150,6 +150,21 @@ func ValidateNetworkName(networkName string) (string, error) {
 	return normalized, nil
 }
 
+// STATUS CODES. controller.NetworkCreate converts NetworkCreateResult.Error
+// into a Go error, and router.RaiseHttpError turns a leading "<code> " on that
+// message into the HTTP status, dropping the prefix from the body. Every
+// refusal below that a USER can cause therefore states its own status, the way
+// the wallet-challenge paths in this file already did -- otherwise
+// RaiseHttpError finds no prefix and answers 500 with the raw text, which tells
+// every SDK the server broke and to retry a request that will never succeed.
+//
+// Two refusals deliberately keep the 500, and must not be "fixed" to match
+// their neighbours: a network name the generator failed to produce, and a
+// seedphrase account whose id collided. Neither is anything the caller did.
+//
+// RESIDUAL: the body stays text/plain, so NetworkCreateResult.Error is still
+// not reachable as a structured body over HTTP. Making it one is a larger,
+// separate change.
 func NetworkCreate(
 	networkCreate NetworkCreateArgs,
 	session *session.ClientSession,
@@ -162,7 +177,7 @@ func NetworkCreate(
 		if !networkCreate.Terms {
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: AgreeToTerms,
+					Message: "400 " + AgreeToTerms,
 				},
 			}
 			return result, nil
@@ -175,6 +190,8 @@ func NetworkCreate(
 
 		validatedNetworkName, err := generateRandomNetworkName()
 		if err != nil {
+			// server fault, not caller input: deliberately unprefixed so this
+			// stays a 500 (see the status note on NetworkCreate)
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
 					Message: "Failed to generate network name.",
@@ -212,6 +229,9 @@ func NetworkCreate(
 			}
 			return result, nil
 		} else {
+			// the seedphrase path generates its own credential, so a failure
+			// here is a server-side collision rather than anything the caller
+			// supplied: deliberately unprefixed, stays a 500
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
 					Message: "Account might already exist. Please start over.",
@@ -255,7 +275,7 @@ func NetworkCreate(
 	if !networkCreate.Terms {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
-				Message: AgreeToTerms,
+				Message: "400 " + AgreeToTerms,
 			},
 		}
 		return result, nil
@@ -266,7 +286,7 @@ func NetworkCreate(
 	if error != nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
-				Message: error.Error(),
+				Message: "400 " + error.Error(),
 			},
 		}
 		return result, nil
@@ -277,7 +297,7 @@ func NetworkCreate(
 	if err != nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
-				Message: err.Error(),
+				Message: "409 " + err.Error(),
 			},
 		}
 		return result, nil
@@ -288,7 +308,7 @@ func NetworkCreate(
 	if networkCreate.UserAuth != nil && userAuth == nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
-				Message: "Invalid email or phone number.",
+				Message: "400 Invalid email or phone number.",
 			},
 		}
 		return result, nil
@@ -360,7 +380,7 @@ func NetworkCreate(
 		} else {
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "Account might already exist. Please start over.",
+					Message: "409 Account might already exist. Please start over.",
 				},
 			}
 			return result, nil
@@ -414,7 +434,7 @@ func NetworkCreate(
 			} else {
 				result := &NetworkCreateResult{
 					Error: &NetworkCreateResultError{
-						Message: "Account might already exist. Please log in again.",
+						Message: "409 Account might already exist. Please log in again.",
 					},
 				}
 				return result, nil
@@ -557,7 +577,7 @@ func NetworkCreate(
 		} else {
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "Account might already exist. Please log in again.",
+					Message: "409 Account might already exist. Please log in again.",
 				},
 			}
 			return result, nil
@@ -565,7 +585,7 @@ func NetworkCreate(
 
 	}
 
-	return nil, errors.New("invalid login")
+	return nil, errors.New("400 invalid login")
 }
 
 type networkCreateResult struct {
@@ -649,7 +669,14 @@ func networkCreateWalletAuth(
 			}
 		})
 		if conflictUserId != nil {
-			walletConflictErr = errors.New("This wallet is already linked to another account.")
+			// prefixed like every other user-caused refusal in this file:
+			// this reaches the caller through the `err` return below, and
+			// without a status RaiseHttpError answers 500 with the raw text.
+			// This is the divergent-mirror path -- the pre-check above catches
+			// the ordinary duplicate -- and it is reachable whenever
+			// network_user.wallet_address and network_user_auth_wallet have
+			// drifted, which is the legacy shape addWalletAuthInTx documents.
+			walletConflictErr = errors.New("409 This wallet is already linked to another account.")
 			return
 		}
 

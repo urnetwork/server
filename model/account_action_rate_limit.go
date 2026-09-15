@@ -63,6 +63,27 @@ func maxAccountActionAttemptsError(action string) error {
 	return fmt.Errorf("You have reached the maximum number of attempts for %s today. Please try again later.", name)
 }
 
+// accountActionRateLimitStatusError re-shapes a daily account-action refusal so
+// the router answers 429 rather than 500-with-raw-text.
+//
+// It wraps at the call site instead of changing maxAccountActionAttemptsError,
+// which is deliberate: that constructor is shared with four other callers
+// (claim/change network name, generate/regenerate seedphrase, extender
+// activate) that copy its text into a 200 response body, and one
+// (CheckVerifyPurchaseRateLimit) that already adds its own "429 " wrapper. A
+// prefix at the source would leak the literal digits into those bodies and
+// double-prefix that last one. Only /auth/add-auth and /auth/remove-auth opt
+// into the status here.
+//
+// No Retry-After accompanies it. The budget is a rolling 24h window, so the
+// honest wait is "until the oldest of your attempts ages out" -- a value the
+// limiter does not currently return, and advertising the whole window would
+// hold a caller back far longer than needed. A 429 with no hint still beats a
+// 500 that tells every SDK to retry immediately.
+func accountActionRateLimitStatusError(err error) error {
+	return &rateLimitError{message: "429 " + err.Error()}
+}
+
 func countRecentAccountActionAttempts(
 	ctx context.Context,
 	tx server.PgTx,

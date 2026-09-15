@@ -324,6 +324,13 @@ func TestHandleLoginWalletResolvesLegacyLowercaseBlockchainRow(t *testing.T) {
 // state is only reachable when the two have diverged, which is exactly the
 // legacy shape addWalletAuthInTx's own comment describes. Construct it
 // directly: a binding with no mirror.
+//
+// SCOPE: this asserts the MODEL contract and nothing about the wire. It passed
+// while /auth/network-create answered 500 for the same condition, because
+// controller.NetworkCreate flattens this structured result back into a bare Go
+// error afterwards. The HTTP behaviour is covered by
+// api/handlers TestNetworkCreateDuplicateWalletAnswers409, which is where a
+// regression in the status would actually be caught.
 func TestNetworkCreateDuplicateWalletReturnsStructuredError(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

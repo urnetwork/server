@@ -2,8 +2,8 @@ package controller
 
 import (
 	// "context"
+	"errors"
 	"fmt"
-	// "errors"
 	// "time"
 	"sync"
 
@@ -104,6 +104,9 @@ func AuthVerifySend(
 	session *session.ClientSession,
 ) (*AuthVerifySendResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&verifySend.UserAuth)
+	if userAuth == nil {
+		return nil, fmt.Errorf("400 Invalid user auth.")
+	}
 
 	verifyCodeType := model.VerifyCodeDefault
 	if verifySend.UseNumeric {
@@ -383,9 +386,24 @@ type RemoveAuthError struct {
 func RemoveAuth(args RemoveAuthArgs, session *session.ClientSession) (*RemoveAuthResult, error) {
 	err := model.RemoveAuth(session.Ctx, session.ByJwt.UserId, args.AuthType)
 	if err != nil {
+		// A rate limit is the one refusal here that travels as a status rather
+		// than a 200 body: it is the only one the client should back off on,
+		// and Retry-After can only ride a status error. Checked BEFORE the peel
+		// below -- peeling first would strip the "429 " and lose the status.
+		// Same one-method interface the router reads it through
+		// (router/handler_utils.go), so model keeps not importing the router.
+		var retryAfter interface{ RetryAfterSeconds() int }
+		if errors.As(err, &retryAfter) {
+			return nil, err
+		}
+		// Every other refusal keeps the spec'd 200 + RemoveAuthResult.error
+		// shape (bringyour.yml RemoveAuthResult), so the structured field stays
+		// reachable. Peel the status prefix the model uses for the paths that
+		// DO answer with a status, or the literal digits render in the client's
+		// error toast.
 		return &RemoveAuthResult{
 			Error: &RemoveAuthError{
-				Message: err.Error(),
+				Message: model.PeelStatusPrefix(err.Error()),
 			},
 		}, nil
 	}
