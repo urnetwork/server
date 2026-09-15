@@ -35,6 +35,7 @@ var backupArchiveGitHubFailureBoundaryFields = []struct {
 	{boundary: "storage-read-only", field: "github_failure_storage_read_only_lines"},
 	{boundary: "clearance-mount", field: "github_failure_clearance_mount_lines"},
 	{boundary: "auth", field: "github_failure_auth_lines"},
+	{boundary: "dns-resolution", field: "github_failure_dns_resolution_lines"},
 	{boundary: "api-rate", field: "github_failure_api_rate_lines"},
 	{boundary: "git-transfer", field: "github_failure_git_transfer_lines"},
 	{boundary: "capacity", field: "github_failure_capacity_lines"},
@@ -70,6 +71,7 @@ emit_github_failure_summary() {
 	printf 'github_failure_storage_read_only_lines=0\n'
 	printf 'github_failure_clearance_mount_lines=0\n'
 	printf 'github_failure_auth_lines=0\n'
+	printf 'github_failure_dns_resolution_lines=0\n'
 	printf 'github_failure_api_rate_lines=0\n'
 	printf 'github_failure_git_transfer_lines=0\n'
 	printf 'github_failure_capacity_lines=0\n'
@@ -89,6 +91,9 @@ reduce_github_failure_journal() {
 		# Explicit credential and HTTP 401 evidence takes precedence over the
 		# generic GitHub API/curl context carried by those same messages.
 		if (message ~ /authentication failed|permission denied \(publickey\)|publickey authentication|bad credentials|missing github backup ssh key|missing .* github api token file|github api token file.*(must|empty)|returned error: 401|http[^0-9]*401/) return "auth"
+		# Native curl exit 6 is a resolver boundary: there was no HTTP response
+		# from which to infer provider availability or a rate-limit condition.
+		if (message ~ /curl:[[:space:]]*\(6\)[[:space:]]+could not resolve host(:|[[:space:]]|$)/) return "dns-resolution"
 
 		class_count=0
 		class=""
@@ -133,6 +138,7 @@ reduce_github_failure_journal() {
 		printf "github_failure_storage_read_only_lines=%d\n", counts["storage-read-only"]
 		printf "github_failure_clearance_mount_lines=%d\n", counts["clearance-mount"]
 		printf "github_failure_auth_lines=%d\n", counts["auth"]
+		printf "github_failure_dns_resolution_lines=%d\n", counts["dns-resolution"]
 		printf "github_failure_api_rate_lines=%d\n", counts["api-rate"]
 		printf "github_failure_git_transfer_lines=%d\n", counts["git-transfer"]
 		printf "github_failure_capacity_lines=%d\n", counts["capacity"]
@@ -943,6 +949,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_failure_storage_read_only_lines",
 		"github_failure_clearance_mount_lines",
 		"github_failure_auth_lines",
+		"github_failure_dns_resolution_lines",
 		"github_failure_api_rate_lines",
 		"github_failure_git_transfer_lines",
 		"github_failure_capacity_lines",
@@ -1936,6 +1943,9 @@ func evaluateBackupArchiveGitHubRun(writer backupArchiveWriterObservation) findi
 		case "auth":
 			mechanism += " The exact failed invocation first exposed a GitHub SSH or API authentication boundary."
 			action += " Validate the installed backup identity and token-file contract through bounded provider checks without copying credential values into logs or alerts."
+		case "dns-resolution":
+			mechanism += " The exact failed invocation first exposed native curl DNS resolution failure before HTTP. Curl exit 6 does not prove an HTTP response, provider availability, authentication rejection, or a rate-limit condition."
+			action += " Establish the owning fatal command and generation, then compare the historical failure boundary with a bounded read-only DNS/NSS observation from the same host. Current resolution is a later control, not proof that the failed invocation recovered; do not rotate credentials or change provider limits from curl exit 6 alone."
 		case "api-rate":
 			mechanism += " The exact failed invocation first exposed GitHub API access, response-contract, or rate-limit evidence."
 			action += " Inspect the bounded provider response class and rate-limit window, preserving the prior archive; do not rotate credentials unless authentication is independently proven bad."

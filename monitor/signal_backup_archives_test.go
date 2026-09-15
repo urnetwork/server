@@ -1405,7 +1405,7 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 		{name: "HTTP 401", journal: "curl: (22) The requested URL returned error: 401", boundary: "auth"},
 		{name: "API rate", journal: "curl: (22) The requested URL returned error: 429", boundary: "api-rate"},
 		{name: "HTTP 403", journal: "curl: (22) The requested URL returned error: 403", boundary: "api-rate"},
-		{name: "curl failure", journal: "curl: (6) Could not resolve host: api-source.example.test", boundary: "api-rate"},
+		{name: "curl DNS resolution", journal: "curl: (6) Could not resolve host: api-source.example.test", boundary: "dns-resolution"},
 		{name: "malformed repository list", journal: "GitHub organization repositories response is not a list", boundary: "api-rate"},
 		{name: "unsafe repository name", journal: "unsafe GitHub repository name: '../synthetic-repository'", boundary: "api-rate"},
 		{name: "unexpected repository owner", journal: "unexpected GitHub repository owner: 'synthetic-other-org.example.test/synthetic-repository'", boundary: "api-rate"},
@@ -1458,6 +1458,88 @@ func TestBackupArchivesWriterCommandClassifiesGitHubFailureBoundaries(t *testing
 			!strings.Contains(alert.Action, "remained unresolved at the terminal boundary") {
 			t.Errorf("%s: explicit clearance error lost urgency or fatal-command qualification", testCase.name)
 		}
+	}
+}
+
+// Native curl host-resolution failures are not observed provider HTTP responses.
+func TestBackupArchivesWriterCommandClassifiesCurlHostResolutionFailure(t *testing.T) {
+	const privateSyntheticHost = "dns-redaction-marker.example.test"
+	const journalLines = 17
+	journal := strings.Repeat("curl: (6) Could not resolve host: "+privateSyntheticHost+"\n", journalLines-1) +
+		"curl: (6) Could not resolve host: " + privateSyntheticHost
+	output := runSyntheticBackupArchiveWriterCommand(t, "failed", "exit-code", 1, journal)
+	for _, want := range []string{
+		"github_failure_journal_status=complete\n",
+		"github_failure_first_boundary=dns-resolution\n",
+		"github_failure_journal_lines=17\n",
+		"github_failure_dns_resolution_lines=17\n",
+		"github_failure_api_rate_lines=0\n",
+		"github_failure_auth_lines=0\n",
+		"github_failure_git_transfer_lines=0\n",
+		"github_failure_unclassified_lines=0\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("native host-resolution observation missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, privateSyntheticHost) {
+		t.Error("native host-resolution observation leaked the raw synthetic host")
+	}
+}
+
+// The writer page must diagnose DNS without promoting it to an HTTP/rate cause.
+func TestBackupArchivesWriterCommandCurlHostResolutionUsesDnsAction(t *testing.T) {
+	const privateSyntheticHost = "dns-action-marker.example.test"
+	output := runSyntheticBackupArchiveWriterCommand(
+		t,
+		"failed",
+		"exit-code",
+		1,
+		"curl: (6) Could not resolve host: "+privateSyntheticHost,
+	)
+	writer, err := parseBackupArchiveWriterObservation("backup-writer.example.test", output)
+	if err != nil {
+		t.Fatalf("parse actual synthetic writer command: %v", err)
+	}
+	alert := alertFromFinding(SignalSettings{
+		Environment: "synthetic",
+		Now: func() time.Time {
+			return time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+		},
+	}, "11.22", "backup-archives", "Synthetic archive writer", evaluateBackupArchiveGitHubRun(writer))
+	if alert.Class != "backup-archive-writer-failed" ||
+		alert.Severity != SeverityPage || alert.Sustain != 1 {
+		t.Fatalf("DNS evidence lost the unsuccessful writer page/1: %s/%s/%d", alert.Class, alert.Severity, alert.Sustain)
+	}
+	for _, want := range []string{
+		"failure_journal_status=complete",
+		"first_failure_boundary=dns-resolution",
+		"failure_journal_lines=1",
+		"dns_resolution_lines=1",
+		"api_rate_lines=0",
+	} {
+		if !strings.Contains(alert.Observed, want) {
+			t.Errorf("DNS writer alert missing %q: %s", want, alert.Observed)
+		}
+	}
+	if !strings.Contains(alert.Mechanism, "DNS resolution") ||
+		!strings.Contains(alert.Mechanism, "does not prove an HTTP response") {
+		t.Error("native curl6 alert did not distinguish DNS resolution from HTTP evidence")
+	}
+	actionLower := strings.ToLower(alert.Action)
+	if !strings.Contains(alert.Action, "read-only DNS/NSS") ||
+		!strings.Contains(actionLower, "current") ||
+		!strings.Contains(actionLower, "historical") ||
+		!strings.Contains(alert.Action, "Establish the owning fatal command and generation") {
+		t.Error("native curl6 alert did not retain bounded DNS and failure-time ownership controls")
+	}
+	if strings.Contains(alert.Mechanism, "GitHub API access, response-contract, or rate-limit evidence") ||
+		strings.Contains(alert.Action, "Inspect the bounded provider response class and rate-limit window") {
+		t.Error("native curl6 alert asserted an unsupported provider HTTP/rate cause or repair")
+	}
+	if strings.Contains(output, privateSyntheticHost) ||
+		strings.Contains(alert.Markdown(), privateSyntheticHost) {
+		t.Error("DNS writer alert leaked the raw synthetic host")
 	}
 }
 
@@ -1925,7 +2007,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 61 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 62 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},

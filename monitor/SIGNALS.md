@@ -12935,7 +12935,7 @@ fallback, so a working direct path does not generate a denied privileged-access
 record on every failed-writer probe. The command returns only `complete`,
 `ambiguous`, or `unobservable`, the first uniquely recognized journal stage, total
 line count, and per-class counts for storage EIO, storage read-only,
-clearance/mount, authentication, API/rate, Git transfer, capacity,
+clearance/mount, authentication, DNS resolution, API/rate, Git transfer, capacity,
 compression/integrity, atomic publication, and unclassified text. A healthy or
 executing unit returns
 `not-applicable` without reading its invocation journal. The raw InvocationID,
@@ -12952,7 +12952,14 @@ naming and positive repository-list response context do not by themselves
 identify an API error stage. The native pagination refusal requires
 `refusing more than <count> GitHub API pages`, and the organization-response
 error requires `GitHub organization repositories response is not a list`.
-HTTP 403/429, `curl`, rate-limit, failed-discovery, unsafe-name,
+Native `curl: (6) Could not resolve host` is a DNS-resolution boundary before
+the generic `curl`/API classifier: it proves that invocation received no HTTP
+response, not provider availability, credential rejection, or rate limiting.
+A later successful DNS/NSS lookup is current state, not proof that the
+historical invocation recovered. The alert retains fatal-command and
+generation uncertainty and requires a bounded same-host historical/current
+comparison before repair. HTTP 403/429, other `curl` errors, rate-limit,
+failed-discovery, unsafe-name,
 unexpected-owner, and no-repositories contracts retain their API/rate
 recognition; authentication still takes precedence. Journal-stage
 classification and line counts are not fatal-command or archive-generation
@@ -12971,6 +12978,13 @@ overlap, overflow/redaction, and healthy journal-skip controls protect the
 retained contracts. This is synthetic monitor-attribution learning, not proof
 that any retained API-count row was positive, which command failed, or which
 archive/process generation owned that failure.
+
+The same date's bounded exact-invocation journal contained native curl exit 6
+host-resolution errors and no captured HTTP status. A later bounded same-host
+NSS lookup succeeded. The first observation supports the closed DNS stage; the
+second only describes current resolver state. Together they do not identify
+the fatal subprocess or executed archive generation, prove provider recovery,
+or authorize a writer retry.
 
 For `github-backup-archive.timer` it reads active state, durable unit-file
 state, and its next realtime trigger. The effective
