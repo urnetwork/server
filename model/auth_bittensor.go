@@ -93,12 +93,24 @@ func decodeSS58AddressWithPrefix(address string) ([32]byte, uint16, error) {
 		prefix = uint16(raw[0])
 	case 2 + 32 + 2:
 		prefixLen = 2
-		if raw[0] < 64 {
+		// substrate restricts the two-byte form's lead byte to 64..=127. The
+		// upper two bits are not part of the prefix and are masked off below,
+		// so without this upper bound four different lead bytes decode to the
+		// same prefix and one key yields four accepted address strings.
+		if raw[0] < 64 || 127 < raw[0] {
 			return publicKey, 0, fmt.Errorf("invalid ss58 address: malformed network prefix")
 		}
 		prefix = uint16(raw[0]&0b0011_1111)<<2 |
 			uint16(raw[1])>>6 |
 			uint16(raw[1]&0b0011_1111)<<8
+		// Reject a non-canonical encoding: prefixes below 64 belong to the
+		// one-byte form, and the two-byte form can also express them. Every
+		// account uniqueness check keys on the address STRING
+		// (UNIQUE (wallet_address, blockchain)), so admitting both encodings of
+		// one prefix admits two independent accounts for one key.
+		if prefix < 64 {
+			return publicKey, 0, fmt.Errorf("invalid ss58 address: non-canonical network prefix encoding")
+		}
 	default:
 		return publicKey, 0, fmt.Errorf("invalid ss58 address: unexpected length %d", len(raw))
 	}

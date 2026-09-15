@@ -23,8 +23,10 @@ const (
 	// pads the wall-clock sanity check either side of the challenge lifetime,
 	// which is the real gate.
 	WalletAuthChallengeSkewPast = 1 * time.Minute
-	// Allow a small future skew for legitimate clock drift, but not enough
-	// to hoard a challenge beyond its own expiry.
+	// Same reasoning in the other direction: there is no client clock to drift,
+	// so this only tolerates the server's own time moving backwards (an NTP
+	// step between issuing a challenge and verifying it) rather than a
+	// client-supplied timestamp.
 	WalletAuthChallengeSkewFuture = 1 * time.Minute
 	WalletAuthChallengeValueBytes = 32
 )
