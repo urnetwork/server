@@ -154,6 +154,33 @@ var proxyWireGuardReturnBackpressureDuration = prometheus.NewHistogram(
 	},
 )
 
+var proxyDeviceMemoryBudgetBytesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "device_memory_budget_bytes",
+		Help:      "Aggregate device memory budget admitted against by this instance",
+	},
+)
+
+var proxyDeviceMemoryBudgetUsedBytesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "device_memory_budget_used_bytes",
+		Help:      "Reserved bytes of the aggregate device memory budget",
+	},
+)
+
+var proxyDeviceAdmissionRefusedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "device_admission_refused_total",
+		Help:      "Device opens refused because the aggregate device memory budget was exhausted",
+	},
+)
+
 // Holds one instance-wide sample without per-customer labels or proxy ids.
 type proxyDeviceMemoryUsage struct {
 	DeviceCount                          int
@@ -293,6 +320,9 @@ func init() {
 	prometheus.MustRegister(proxyLockCacheEvictionsCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureDuration)
+	prometheus.MustRegister(proxyDeviceMemoryBudgetBytesGauge)
+	prometheus.MustRegister(proxyDeviceMemoryBudgetUsedBytesGauge)
+	prometheus.MustRegister(proxyDeviceAdmissionRefusedCounter)
 	proxyLockCacheCapacityGauge.Set(proxyLockCacheMaxEntries)
 }
 

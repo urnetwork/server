@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -20,10 +21,66 @@ import (
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
-		SequenceBufferSize:          2048,
-		DeviceMemoryTargetByteCount: proxyDeviceMemoryTargetByteCountFromConfig(),
+		CheckProxyDeviceIdleTimeout:        1 * time.Minute,
+		SequenceBufferSize:                 2048,
+		DeviceMemoryTargetByteCount:        proxyDeviceMemoryTargetByteCountFromConfig(),
+		ProcessDeviceMemoryBudgetByteCount: ProxyProcessDeviceMemoryBudgetByteCountFromConfig(),
 	}
+}
+
+// defaultProxyProcessDeviceMemoryBudgetByteCount bounds the SUM of installed
+// device targets in this process. It is derived from the deployment rather
+// than chosen round: vault/main/services.yml runs the proxy as ten blocks on
+// each of two hosts with no container memory_limit (so warp exports no
+// GOMEMLIMIT either), and the only per-instance memory ceiling this process
+// already declares for itself is the 8 GiB message-pool budget in
+// cli/proxy/main.go. Matching that gives the device plane an equal, explicit
+// second ceiling: 8 GiB / 24 MiB = 341 devices per instance, 3,410 per host,
+// and a declared per-instance envelope of about 16 GiB plus overhead against
+// the 80 GiB per host the pool budget alone already assumes.
+//
+// If the number is wrong for a host it is wrong in a visible, recoverable
+// direction. Too large for a small host: the aggregate never binds and the
+// host can still overcommit, exactly as it does today, so this is never worse
+// than the status quo. Too small for demand: admission refuses new devices
+// while existing ones keep running, which shows up as
+// urnetwork_proxy_device_admission_refused_total rising with
+// urnetwork_proxy_device_memory_budget_used_bytes pinned at the total. Both
+// are tunable per environment with process_device_memory_budget in proxy.yml
+// without a code change; 0 disables the budget and restores today's unbounded
+// admission.
+const defaultProxyProcessDeviceMemoryBudgetByteCount = model.ByteCount(8 * model.Gib)
+
+// ProxyProcessDeviceMemoryBudgetByteCountFromConfig loads the aggregate device
+// budget. An explicit 0 disables admission control; a negative or unparseable
+// value fails startup, matching device_memory_budget.
+func ProxyProcessDeviceMemoryBudgetByteCountFromConfig() model.ByteCount {
+	resource, err := server.Config.SimpleResource("proxy.yml")
+	if err != nil {
+		return defaultProxyProcessDeviceMemoryBudgetByteCount
+	}
+	values := resource.String("process_device_memory_budget")
+	if len(values) == 0 {
+		return defaultProxyProcessDeviceMemoryBudgetByteCount
+	}
+	if len(values) != 1 {
+		panic(fmt.Errorf("proxy.yml: process_device_memory_budget must have exactly one value"))
+	}
+	byteCount, err := model.ParseByteCount(values[0])
+	if err != nil {
+		panic(fmt.Errorf(
+			"proxy.yml: invalid process_device_memory_budget %q: %w",
+			values[0],
+			err,
+		))
+	}
+	if byteCount < 0 {
+		panic(fmt.Errorf(
+			"proxy.yml: process_device_memory_budget must not be negative, got %q",
+			values[0],
+		))
+	}
+	return byteCount
 }
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(24 * model.Mib)
@@ -65,6 +122,9 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 	DeviceMemoryTargetByteCount model.ByteCount
+	// ProcessDeviceMemoryBudgetByteCount bounds the sum of installed device
+	// targets. 0 disables admission control.
+	ProcessDeviceMemoryBudgetByteCount model.ByteCount
 	// HoldWindowIdentityRestore keeps a replacement from restoring identities
 	// while its predecessor is still draining. Fresh lazy-open identities are
 	// buffered and become durable when ReleaseWindowIdentityRestore runs.
@@ -107,7 +167,11 @@ type ProxyDeviceManager struct {
 	networkSpaceCloser  func(*sdk.NetworkSpace)
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
-	windowIdentityGate  *windowIdentityRestoreGate
+	// deviceMemoryBudget bounds the aggregate of installed device targets.
+	// One fixed reservation per device is taken before construction and
+	// released when the device closes. nil disables admission control.
+	deviceMemoryBudget *connect.TransferMemoryBudget
+	windowIdentityGate *windowIdentityRestoreGate
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -165,6 +229,13 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace.Close()
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
+	if 0 < settings.ProcessDeviceMemoryBudgetByteCount {
+		manager.deviceMemoryBudget = connect.NewTransferMemoryBudget(
+			connect.ByteCount(settings.ProcessDeviceMemoryBudgetByteCount),
+		)
+		proxyDeviceMemoryBudgetBytesGauge.Set(float64(settings.ProcessDeviceMemoryBudgetByteCount))
+		proxyDeviceMemoryBudgetUsedBytesGauge.Set(0)
+	}
 	return manager
 }
 
@@ -203,6 +274,49 @@ func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 		}
 	})
 	return self.networkSpace
+}
+
+// ErrProxyDeviceMemoryBudget is returned when admitting another device would
+// exceed the aggregate device memory budget for this process. The device is
+// not created; existing devices are never evicted to make room (see
+// tryReserveDeviceMemory).
+var ErrProxyDeviceMemoryBudget = errors.New("proxy device memory budget exhausted")
+
+// tryReserveDeviceMemory takes one device-sized reservation from the aggregate
+// budget. Admission REFUSES rather than evicting: a hosted device carries a
+// live tunnel (wg peer flows, established socks/http connections, an attached
+// device-rpc session), and the manager cannot distinguish a device that is
+// merely quiet between bursts from one that is finished. The idle reaper
+// (CheckProxyDeviceIdleTimeout, see startProxyDevice) already reclaims
+// genuinely idle devices and releases their reservation, so capacity recovers
+// on its own without a second eviction policy that could cut live traffic.
+func (self *ProxyDeviceManager) tryReserveDeviceMemory() bool {
+	budget := self.deviceMemoryBudget
+	if budget == nil {
+		return true
+	}
+	if !budget.TryReserve(connect.ByteCount(self.deviceMemoryReservationByteCount())) {
+		proxyDeviceAdmissionRefusedCounter.Inc()
+		return false
+	}
+	proxyDeviceMemoryBudgetUsedBytesGauge.Set(float64(budget.UsedByteCount()))
+	return true
+}
+
+// releaseDeviceMemory returns one device-sized reservation.
+func (self *ProxyDeviceManager) releaseDeviceMemory() {
+	budget := self.deviceMemoryBudget
+	if budget == nil {
+		return
+	}
+	budget.Release(connect.ByteCount(self.deviceMemoryReservationByteCount()))
+	proxyDeviceMemoryBudgetUsedBytesGauge.Set(float64(budget.UsedByteCount()))
+}
+
+// deviceMemoryReservationByteCount is the per-device target, the same value
+// each DeviceLocal is given, so the aggregate is exactly the sum of targets.
+func (self *ProxyDeviceManager) deviceMemoryReservationByteCount() model.ByteCount {
+	return self.settings.DeviceMemoryTargetByteCount
 }
 
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
@@ -274,7 +388,16 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		pdState.creating = c
 		pdState.StateLock.Unlock()
 
-		pd, err := self.proxyDeviceBuilder(proxyId)
+		// Admission precedes construction: a device that cannot be afforded is
+		// never built, so no gVisor stack or tun is allocated for it.
+		var pd *ProxyDevice
+		var err error
+		reserved := self.tryReserveDeviceMemory()
+		if reserved {
+			pd, err = self.proxyDeviceBuilder(proxyId)
+		} else {
+			err = ErrProxyDeviceMemoryBudget
+		}
 
 		accepted := false
 		pdState.StateLock.Lock()
@@ -294,8 +417,14 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 
 		if accepted {
 			self.startProxyDevice(proxyId, pd)
-		} else if pd != nil {
-			_ = pd.Close()
+		} else {
+			if pd != nil {
+				_ = pd.Close()
+			}
+			// the reservation outlives construction only for an installed device
+			if reserved {
+				self.releaseDeviceMemory()
+			}
 		}
 
 		// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
@@ -365,6 +494,7 @@ func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDev
 				}
 			}()
 			pd.Close()
+			self.releaseDeviceMemory()
 		}()
 		pd.Run()
 	})
