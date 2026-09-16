@@ -30,8 +30,8 @@ func claimProfileExcluded(_ *claimProfileArgs, _ *session.ClientSession) (*claim
 
 type claimProfileTarget struct {
 	Target
-	runs atomic.Int32
-	posts atomic.Int32
+	runs      atomic.Int32
+	posts     atomic.Int32
 	failPosts bool
 }
 

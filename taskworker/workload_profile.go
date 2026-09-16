@@ -22,7 +22,7 @@ import (
 type WorkloadProfile string
 
 const (
-	WorkloadProfileProduction WorkloadProfile = ""
+	WorkloadProfileProduction     WorkloadProfile = ""
 	WorkloadProfileSubnetOperator WorkloadProfile = "subnet-operator"
 )
 
@@ -91,7 +91,7 @@ func addProfileTargets(worker *task.TaskWorker, profile WorkloadProfile, targets
 // A nil schedule denotes API-enqueued or parent-enqueued work, not a disabled
 // task. Post retries are additionally scoped to this registry by task's claim.
 type subnetOperatorTask struct {
-	target task.Target
+	target   task.Target
 	schedule func(*session.ClientSession, server.PgTx)
 }
 

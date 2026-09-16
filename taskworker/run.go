@@ -52,9 +52,9 @@ func init() {
 }
 
 type RunOptions struct {
-	Port      int
-	Count     int
-	BatchSize int
+	Port            int
+	Count           int
+	BatchSize       int
 	WorkloadProfile WorkloadProfile
 }
 
