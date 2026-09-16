@@ -284,20 +284,22 @@ func TestNetworkCreateTestAuthIsImmediatelyVerified(t *testing.T) {
 				"UPDATE network_user_auth_password SET verified = false WHERE user_auth = $1",
 				phone,
 			))
+		}, server.OptReadWrite())
+		withReadOnlyModelDbSession(t, ctx, func() {
+			phoneLogin, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
+				UserAuth: phone,
+				Password: password,
+			}, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phoneLogin.VerificationRequired != nil {
+				t.Fatal("configured phone login unexpectedly required verification")
+			}
+			if phoneLogin.Network == nil || phoneLogin.Network.ByJwt == nil || *phoneLogin.Network.ByJwt == "" {
+				t.Fatal("configured phone could not log in after verification repair")
+			}
 		})
-		phoneLogin, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
-			UserAuth: phone,
-			Password: password,
-		}, clientSession)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if phoneLogin.VerificationRequired != nil {
-			t.Fatal("configured phone login unexpectedly required verification")
-		}
-		if phoneLogin.Network == nil || phoneLogin.Network.ByJwt == nil || *phoneLogin.Network.ByJwt == "" {
-			t.Fatalf("configured phone could not log in: %#v", phoneLogin)
-		}
 
 		ordinaryEmail := "acceptance@ordinary.example"
 		ordinary, err := NetworkCreate(NetworkCreateArgs{
@@ -340,16 +342,18 @@ func TestConfiguredPhoneLoginRepairsStaleFixturePassword(t *testing.T) {
 			t.Fatalf("could not create stale configured-phone fixture: %#v", created)
 		}
 
-		repaired, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
-			UserAuth: phone,
-			Password: configuredPassword,
-		}, clientSession)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if repaired.Network == nil || repaired.Network.ByJwt == nil {
-			t.Fatalf("configured password did not repair stale phone fixture: %#v", repaired)
-		}
+		withReadOnlyModelDbSession(t, ctx, func() {
+			repaired, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
+				UserAuth: phone,
+				Password: configuredPassword,
+			}, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repaired.Network == nil || repaired.Network.ByJwt == nil {
+				t.Fatal("configured password did not repair stale phone fixture")
+			}
+		})
 
 		staleLogin, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
 			UserAuth: phone,

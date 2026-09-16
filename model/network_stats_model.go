@@ -261,7 +261,7 @@ func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.I
 				now,
 				now.Add(-clientAuthTimeRefreshMinInterval),
 			))
-		})
+		}, server.OptReadWrite())
 	})
 }
 

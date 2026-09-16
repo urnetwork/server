@@ -816,7 +816,7 @@ func AuthLoginWithPassword(
 				userId,
 				userAuth,
 			))
-		})
+		}, server.OptReadWrite())
 		passwordMatches = true
 		userVerified = true
 	}
@@ -836,7 +836,7 @@ func AuthLoginWithPassword(
 					userId,
 					userAuth,
 				))
-			})
+			}, server.OptReadWrite())
 			userVerified = true
 		}
 
