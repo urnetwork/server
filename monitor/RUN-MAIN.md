@@ -16,7 +16,7 @@ and continue until the operator ends the run or its requested duration expires.
 Use two explicit, long-lived agent roles for every pass; reuse the same agents
 so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution: preflight,
+- A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution: preflight,
   immutable binary, authoritative watcher and tails, alert capture, focused
   reruns, source identity, and every verification gate. The Go watcher remains
   model-neutral; Terra operates and interprets it. The primary agent must retain
@@ -49,8 +49,10 @@ make the smallest owning fix with synthetic coverage and catalog updates; pass
 all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
-This is context-delivery optimization only: never substitute a cheaper model,
-skip a severity, lose warnings or `cannot-observe`, or delete/truncate evidence.
+This is context-delivery optimization only: use Terra at medium for the
+deterministic monitoring workload and retain Astra at max for diagnosis and
+repair. Never silently change those roles or efforts, skip a severity, lose
+warnings or `cannot-observe`, or delete/truncate evidence.
 Do not raise production `runLoopMaxConcurrentSignals`, add watchers outside
 bounded promotion, shorten windows, or persist sustain counters/ticket state.
 
@@ -275,6 +277,15 @@ the JSONL stream. A diagnostic relationship between different classes may be
 reported separately as a semantic reassignment only with both complete
 before/after identities and `causal_or_recovery_claim=false`; it is not a
 severity transition, a resolution, or a new identity replacement.
+
+The alert artifact is append-only while the watcher is live. Snapshot the
+inclusive ending row once, then extract with both lower and upper row bounds
+and verify the exact expected row count before hashing or reducing it. Never
+hash `tail -n +START` or another open-ended reader: rows appended during that
+pipeline produce a digest that cannot describe the recorded window. JSONL
+identity reducers use the lowercase wire keys `signal_id`, `class`, `target`,
+and `frame`; record the canonicalization algorithm alongside its digest so the
+primary agent can reproduce it without reading private evidence into a handoff.
 
 The ledger has one writer: the primary agent that owns the authoritative watcher
 session and production-mutation boundary. Each record is exactly one complete
