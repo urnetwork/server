@@ -34,6 +34,38 @@ func TestEgressSubmissionReturnedOutcomeClassification(t *testing.T) {
 	}
 }
 
+// Cancellation immediately before the inner return must not relabel either an
+// acknowledged call or an unrelated failure. The returned error owns the class.
+func TestEgressSubmissionConcurrentCancellationPreservesReturnedOutcome(t *testing.T) {
+	for _, kind := range []string{"health", "attempt"} {
+		for _, returned := range []error{nil, errors.New("synthetic-private-return.example")} {
+			ctx, cancel := context.WithCancel(context.Background())
+			inner := newFakeEgressProbeIngest()
+			inner.attemptErr, inner.healthErr = returned, returned
+			inner.beforeReturn = cancel
+			reporter := newEgressProbeMetricsReporter(inner, func(context.Context, string) string { return "" })
+			outcome := "acknowledged"
+			if returned != nil {
+				outcome = "error_or_unknown"
+			}
+			counter := egressProbeSubmissionOutcomesTotal.WithLabelValues(kind, outcome)
+			canceledCounter := egressProbeSubmissionOutcomesTotal.WithLabelValues(kind, "canceled")
+			before, canceledBefore := testutil.ToFloat64(counter), testutil.ToFloat64(canceledCounter)
+			var err error
+			if kind == "health" {
+				err = reporter.SubmitEgressHealth(ctx, "synthetic-provider", &egresshealth.Result{})
+			} else {
+				err = reporter.ReportAttempt(ctx, "synthetic-provider", "synthetic-failure")
+			}
+			canceledBeforeReturn := ctx.Err() == context.Canceled
+			cancel()
+			if !canceledBeforeReturn || err != returned || testutil.ToFloat64(counter) != before+1 || testutil.ToFloat64(canceledCounter) != canceledBefore {
+				t.Fatalf("%s/%s was relabeled by concurrent cancellation", kind, outcome)
+			}
+		}
+	}
+}
+
 func TestEgressSubmissionCountOccursAfterCallAndPreservesError(t *testing.T) {
 	for _, kind := range []string{"health", "attempt"} {
 		for _, outcome := range []string{"acknowledged", "unsupported", "canceled", "error_or_unknown"} {

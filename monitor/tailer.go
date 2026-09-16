@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -95,6 +96,9 @@ type logClass struct {
 	// classes intentionally aggregate retry volume by service; route-bound
 	// configuration defects must retain their resource, route, and generation.
 	groupBy func(string) string
+	// Keep the service-wide bucket while adding bounded independently actionable
+	// owner groups. Grouping must not hide a mixed-owner aggregate threshold.
+	aggregateWithGroup bool
 	// per-minute rate above which the class is a finding; §4 healthy is ~0
 	// for all classes, but transient blips (LOADING during a restart) are
 	// tolerated by the higher thresholds
@@ -742,8 +746,14 @@ var logClasses = []logClass{
 		verify:    "Every affected service runs the corrected server artifact, rollback regression tests preserve canceled transient and nontransient outcomes, and this exact dual-frame class remains zero for ten minutes after log-ingestion delay under comparable transaction traffic.",
 	},
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
+		sample: panicLogSample, groupBy: panicLogOwner, aggregateWithGroup: true,
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
-		meaning: "panic stack — the innermost app frame identifies the load-bearing call path"},
+		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
+		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
+		context:   "Only normalized function ownership, an allowlisted Go error type, and a PostgreSQL SQLSTATE may enter the sample. Unknown, malformed, oversized, or excess-cardinality stacks remain in the aggregate; an absent owner is not a healthy result.",
+		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
+		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
+	},
 	// Contract errors are emitted here only as rate-limited exemplars. Their
 	// lossless rates come from urnetwork_connect_contract_failures_total and
 	// are evaluated by the provisioned Grafana rules; counting these sampled
@@ -1036,6 +1046,145 @@ var novelNormalizeRes = []*regexp.Regexp{
 
 const novelRateThreshold = 20
 
+const (
+	panicLogMaxBytes       = 64 * 1024
+	panicLogMaxStackLines  = 128
+	panicLogOwnerMaxBytes  = 112
+	logClassMaxOwnerGroups = 16
+)
+
+// Only source symbols from the application's go.mod module closure can become
+// owner frames. Arguments, paths, line numbers and compiler closures never do.
+var panicLogFunctionRe = regexp.MustCompile(`^github\.com/urnetwork/((?:server|connect|sdk|proxy|operator-proxy|userwireguard|warp)(?:/[A-Za-z_][A-Za-z0-9_-]*)*)\.((?:\(\*?[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?\)|[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?|\.[0-9]+)*)(?:-fm)?\(`)
+var panicLogClosureRe = regexp.MustCompile(`\.(?:(?:func|gowrap)[0-9]+|[0-9]+)(?:\.|$)`)
+var panicLogSourceRe = regexp.MustCompile(`(?:^|/)[A-Za-z_][A-Za-z0-9_]*\.go:[0-9]+(?: \+0x[0-9a-f]+)?$`)
+var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
+
+// A fixed redacted projection; no raw error, source path or stack is retained.
+type panicLogObservation struct {
+	owner     string
+	errorType string
+	sqlstate  string
+}
+
+// Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
+// Unknown stack symbols do not borrow a later caller's apparent ownership.
+func parsePanicLogObservation(line string) panicLogObservation {
+	unknown := panicLogObservation{errorType: "unknown", sqlstate: "unknown"}
+	if len(line) > panicLogMaxBytes {
+		return unknown
+	}
+	_, body, ok := strings.Cut(line, "Unexpected error:")
+	if !ok {
+		return unknown
+	}
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(body)))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return unknown
+	}
+	var errorText string
+	var stack []string
+	errorSeen, stackSeen := false, false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return unknown
+		}
+		switch token {
+		case "error":
+			if errorSeen || decoder.Decode(&errorText) != nil {
+				return unknown
+			}
+			errorSeen = true
+		case "stack":
+			if stackSeen {
+				return unknown
+			}
+			stackSeen = true
+			if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+				return unknown
+			}
+			for decoder.More() {
+				token, err := decoder.Token()
+				line, ok := token.(string)
+				if err != nil || !ok || len(stack) >= panicLogMaxStackLines {
+					return unknown
+				}
+				stack = append(stack, line)
+			}
+			if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+				return unknown
+			}
+		default:
+			return unknown
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') ||
+		!errorSeen || errorText == "" || !stackSeen || len(stack) == 0 || len(stack) > panicLogMaxStackLines {
+		return unknown
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return unknown
+	}
+	observation := unknown
+	errorType, _, _ := strings.Cut(errorText, "=")
+	switch errorType {
+	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
+		observation.errorType = errorType
+	}
+	if errorType == "*pgconn.PgError" {
+		if match := panicLogSqlstateRe.FindStringSubmatch(strings.TrimSpace(errorText)); len(match) == 2 {
+			observation.sqlstate = match[1]
+		}
+	}
+	for index, line := range stack {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "github.com/urnetwork/") {
+			continue
+		}
+		match := panicLogFunctionRe.FindStringSubmatch(line)
+		if len(match) != 3 || index+1 >= len(stack) || !panicLogSourceRe.MatchString(strings.TrimSpace(stack[index+1])) {
+			return observation
+		}
+		// runtime/debug.Stack elides generic shapes to the literal [...].
+		// Accept only that producer form; type arguments never become owners.
+		function := strings.ReplaceAll(match[2], "[...]", "")
+		if suffix := panicLogClosureRe.FindStringIndex(function); suffix != nil {
+			function = function[:suffix[0]]
+		}
+		function = strings.NewReplacer("(*", "", "(", "", ")", "").Replace(function)
+		owner := match[1] + "." + function
+		switch owner {
+		case "server.HandleError", "server.HandleError1", "server.HandleError2", "server.HandleErrorWithReturn",
+			"server.Raise", "server.RaisePgResult", "server.WithPgResult",
+			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
+			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
+			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
+			continue
+		}
+		if len(owner) <= panicLogOwnerMaxBytes {
+			observation.owner = owner
+		}
+		return observation
+	}
+	return observation
+}
+
+// An empty owner deliberately leaves malformed or unknown records aggregate-only.
+func panicLogOwner(line string) string {
+	return parsePanicLogObservation(line).owner
+}
+
+// Fixed field names and allowlisted values fit below the ordinary sample budget.
+func panicLogSample(line string) string {
+	observation := parsePanicLogObservation(line)
+	owner := observation.owner
+	if owner == "" {
+		owner = "unknown"
+	}
+	return fmt.Sprintf("panic owner=%s error_type=%s sqlstate=%s", owner, observation.errorType, observation.sqlstate)
+}
+
 // One negative mirror is an integrity defect. A hundred mutation exposures in
 // one service/site minute is a fleet-scale availability/accounting incident,
 // as opposed to the small irreducible cross-store race retained for diagnosis.
@@ -1323,6 +1472,8 @@ type logTailer struct {
 	stateLock sync.Mutex
 	// class -> count in the current minute window
 	classCounts map[string]int
+	// Caps additive owner groups independently for each class and drain window.
+	classGroupCounts map[string]int
 	// class -> one sample line + one target from the window
 	classSamples map[string]string
 	classTargets map[string]string
@@ -1400,6 +1551,7 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		clock:                   clock,
 		startedAt:               startedAt,
 		classCounts:             map[string]int{},
+		classGroupCounts:        map[string]int{},
 		classSamples:            map[string]string{},
 		classTargets:            map[string]string{},
 		burstSecondCounts:       map[string]int{},
@@ -1961,8 +2113,24 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			attribution := ""
 			if c.groupBy != nil {
 				attribution = c.groupBy(line)
+				if c.aggregateWithGroup && attribution != "" {
+					groupKey := c.name + "\x00" + attribution
+					if _, exists := self.classCounts[groupKey]; !exists {
+						if self.classGroupCounts[c.name] >= logClassMaxOwnerGroups {
+							attribution = ""
+						} else {
+							self.classGroupCounts[c.name]++
+						}
+					}
+				}
 				if attribution != "" {
 					key += "\x00" + attribution
+				}
+			}
+			if c.aggregateWithGroup && key != c.name {
+				self.classCounts[c.name]++
+				if _, exists := self.classSamples[c.name]; !exists {
+					self.classSamples[c.name] = logClassSample(c, line)
 				}
 			}
 			self.classCounts[key] += 1
@@ -1970,7 +2138,7 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 				self.classSamples[key] = logClassSample(c, line)
 				if attribution != "" {
 					self.classTargets[key] = attribution
-				} else if target := targetRe.FindString(line); target != "" {
+				} else if target := targetRe.FindString(line); !c.aggregateWithGroup && target != "" {
 					self.classTargets[key] = target
 				}
 			}
@@ -2166,7 +2334,11 @@ func (self *logTailer) drainWindow() []finding {
 			if c.observationOnly {
 				observed += fmt.Sprintf(" observation_service=%s affected_selector=unknown", self.service)
 			} else if c.groupBy != nil {
-				observed += fmt.Sprintf(" frame=%s", attribution)
+				if attribution == "" {
+					observed += fmt.Sprintf(" target=%s", self.service)
+				} else {
+					observed += fmt.Sprintf(" frame=%s", attribution)
+				}
 			} else {
 				observed += fmt.Sprintf(" target=%s", self.service)
 				if attribution != "" {
@@ -2362,6 +2534,7 @@ func (self *logTailer) drainWindow() []finding {
 
 	// reset the window
 	self.classCounts = map[string]int{}
+	self.classGroupCounts = map[string]int{}
 	self.classSamples = map[string]string{}
 	self.classTargets = map[string]string{}
 	self.burstSecondCounts = map[string]int{}

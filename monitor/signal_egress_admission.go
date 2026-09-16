@@ -310,7 +310,7 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 				baseline:  "No expired selected-return events in the observed interval",
 				observed:  fmt.Sprintf("lane=%s expired_selected=%.0f complete_process_intervals=%d", lane, expired, complete),
 				action:    "Correlate direct §2.19 due/backoff/dark state and task outcomes; inspect API artifact/config convergence. Do not change scheduling or edit evidence rows from this aggregate alone.",
-				verify:    "Require two complete fresh process intervals with no new expired selections plus direct §2.19 deadline health; current zero expiry does not reconstruct a historical miss.",
+				verify:    "Require two complete fresh traffic-bearing process intervals with observed due-request activity and no new expired selections plus direct §2.19 deadline health. Quiet zero traffic is not recovery proof; current zero expiry does not reconstruct a historical miss.",
 				playbook:  "SIGNALS.md §2.19a",
 			})
 		}
@@ -344,7 +344,7 @@ func egressAdmissionUnobservable(reason string, complete, incomplete int) findin
 		mechanism: "Each observed API and Taskworker process needs a complete executable-owned bundle and two fresh advancing scrapes in the same generation. Missing, duplicate, stale, reset, overlapping or mixed telemetry cannot supply a healthy delta. Entirely absent process discovery remains owned by provenance and scrape-continuity probes.",
 		baseline:  "Both roles present; one complete fresh process per host/block; two monotonic same-generation observations no more than three minutes apart",
 		observed:  fmt.Sprintf("reason=%s complete_process_intervals=%d incomplete_process_intervals=%d", reason, complete, incomplete),
-		action:    "Verify source adapters and exact API/Taskworker executable capabilities; deploy the owning approved builds if telemetry is absent. A config-only rollout cannot add these metrics. Preserve direct §2.19 alerts and any confirmed failures from complete processes.",
+		action:    "Verify source adapters and exact API/Taskworker artifact ancestry. Deploy approved owning builds only when executable capability is proved missing. If capability is present, diagnose source transport, scrape freshness, joins, resets and overlap instead of redeploying from absent metrics. A config-only rollout cannot add these metrics. Preserve direct §2.19 alerts and any confirmed failures from complete processes.",
 		verify:    "After convergence, obtain two complete advancing observations, then two clean traffic-bearing intervals and direct deadline/submission controls; missing metrics do not prove an old scheduler or failed persistence.",
 		playbook:  "SIGNALS.md §2.19a",
 	}

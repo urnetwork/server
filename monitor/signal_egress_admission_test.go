@@ -132,7 +132,12 @@ func TestEgressAdmissionWarmupAndStableHealthyControl(t *testing.T) {
 	processes := egressAdmissionTestProcesses(now)
 	signal := NewEgressAdmissionSignal()
 	first := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
-	requireAlertClass(t, first, "egress-admission-unobservable")
+	unknown := requireAlertClass(t, first, "egress-admission-unobservable")
+	for _, want := range []string{"only when executable capability is proved missing", "If capability is present", "instead of redeploying from absent metrics"} {
+		if !strings.Contains(unknown.Markdown(), want) {
+			t.Fatalf("capability action omitted %q", want)
+		}
+	}
 	now = now.Add(time.Minute)
 	processes[0].values["requests"]++
 	processes[0].values["selected/stale-health/false"] += 2
@@ -220,6 +225,11 @@ func TestEgressAdmissionExpiredAndAllSubmissionFailuresKeepOwningLimits(t *testi
 	expired := requireAlertClass(t, alerts, "egress-admission-expired")
 	if expired.Frame != "stale-health" || !strings.Contains(expired.Observed, "expired_selected=3") || !strings.Contains(expired.Markdown(), "not which provider") {
 		t.Fatal("expired admission lost its actual-boundary limit")
+	}
+	for _, want := range []string{"traffic-bearing", "due-request activity", "Quiet zero traffic is not recovery proof"} {
+		if !strings.Contains(expired.Markdown(), want) {
+			t.Fatalf("expired-selection verification omitted %q", want)
+		}
 	}
 	for _, alert := range alerts {
 		if alert.Class == "egress-submission-unacknowledged" {

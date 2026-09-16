@@ -2,11 +2,292 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 )
+
+// Mirrors ErrorJson's array schema with deliberately private synthetic material
+// before the stack, in arguments, and in source paths that must never be retained.
+func panicOwnerTestLine(t *testing.T, errorText string, functions ...string) string {
+	t.Helper()
+	stack := []string{"goroutine 42 [running]:", "runtime/debug.Stack()", "/synthetic-private-path/stack.go:12345 +0x99"}
+	for _, function := range append([]string{
+		"github.com/urnetwork/server.HandleError.func1",
+		"github.com/urnetwork/server.dbWithPool.func1.1",
+		"github.com/urnetwork/server.Raise",
+		"github.com/urnetwork/server.RaisePgResult[...]",
+	}, functions...) {
+		stack = append(stack, function+"(0x12345678, {0x87654321, 0x33})", "/synthetic-private-path/owner.go:12345 +0x99")
+	}
+	body, err := json.Marshal(map[string]any{"error": errorText, "stack": stack})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "[synthetic-private-host][api][synthetic-generation][cid:synthetic-correlation] metadata={ignored} Unexpected error: " + string(body)
+}
+
+// Keeps only actionable panic findings; aggregate and owner views deliberately
+// overlap and are keyed by their distinct, stable frames.
+func panicOwnerTestAlerts(t *testing.T, tailer *logTailer) map[string]Alert {
+	t.Helper()
+	alerts := map[string]Alert{}
+	for _, finding := range tailer.drainWindow() {
+		if finding.class != "panic" || finding.healthy {
+			continue
+		}
+		alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", finding)
+		if _, duplicate := alerts[alert.Frame]; duplicate {
+			t.Fatal("duplicate panic frame")
+		}
+		if alert.Severity != SeverityPage || alert.Target != "api" || alert.SignalID != "logs/panic" {
+			t.Fatal("panic aggregate/owner changed its existing service, signal or page tier")
+		}
+		if len(tailer.classSamples) != 0 {
+			t.Fatal("drain retained prior window samples")
+		}
+		for _, private := range []string{
+			"synthetic-private-host", "synthetic-generation", "synthetic-correlation", "cid:",
+			"synthetic-private-path", "owner.go", "12345", "0x12345678", "0x87654321",
+			"synthetic-secret", "synthetic-customer", "192.0.2.88", "2001:db8::88", "@private.example",
+		} {
+			requireAlertOmits(t, alert, private)
+		}
+		alerts[alert.Frame] = alert
+	}
+	return alerts
+}
+
+// A long error used to consume the entire sample before the owning stack. Both
+// views must now retain the same bounded discriminator without private content.
+func TestPanicOwnerLongErrorRetainsPrivateSafeDiscriminator(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	line := panicOwnerTestLine(t,
+		"*pgconn.PgError=ERROR: "+strings.Repeat("synthetic-secret synthetic-customer 192.0.2.88:443 ", 20)+"(SQLSTATE 25006)",
+		"github.com/urnetwork/server/model.StampTopLevelClientContractTime.func1.1",
+	)
+	for range 5 {
+		tailer.classify(line)
+	}
+	if len(tailer.classSamples["panic"]) > 200 {
+		t.Fatal("redacted sample exceeded its existing budget")
+	}
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 2 {
+		t.Fatal("five owning diagnostics must preserve aggregate plus owner pages")
+	}
+	for _, frame := range []string{"", "server/model.StampTopLevelClientContractTime"} {
+		alert, ok := alerts[frame]
+		if !ok || !strings.Contains(alert.Observed, "rate=5/min") {
+			t.Fatal("aggregate or owning five-line page disappeared")
+		}
+		if frame == "" && strings.Contains(alert.Observed, "frame=") {
+			t.Fatal("service-wide aggregate rendered an empty owner frame")
+		}
+		for _, want := range []string{"owner=server/model.StampTopLevelClientContractTime", "error_type=*pgconn.PgError", "sqlstate=25006", "counts overlap"} {
+			if !strings.Contains(alert.Markdown(), want) {
+				t.Fatalf("bounded panic evidence omitted %q", want)
+			}
+		}
+	}
+}
+
+// Independent owner thresholds cannot split the original service-wide page.
+func TestPanicOwnerMixedThreePlusTwoPreservesAggregate(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	for index, owner := range []string{"SyntheticFirst", "SyntheticSecond"} {
+		line := panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/server/model."+owner)
+		for range 3 - index {
+			tailer.classify(line)
+		}
+	}
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 1 || !strings.Contains(alerts[""].Observed, "rate=5/min") {
+		t.Fatal("3+2 owner split hid or duplicated the original aggregate page")
+	}
+}
+
+// Compiler closure numbers and receiver notation do not create new identities;
+// different application owners still retain their own matching samples.
+func TestPanicOwnerNormalizationAndSampleSeparation(t *testing.T) {
+	for _, test := range []struct{ function, owner string }{
+		{function: "server/model.SyntheticWrite.func12.3", owner: "server/model.SyntheticWrite"},
+		{function: "connect.(*SyntheticResident).Forward.func2", owner: "connect.SyntheticResident.Forward"},
+		{function: "sdk.SyntheticDevice.Load-fm", owner: "sdk.SyntheticDevice.Load"},
+		{function: "proxy.SyntheticStart.gowrap2", owner: "proxy.SyntheticStart"},
+		{function: "operator-proxy/ingest.(*SyntheticClient).Submit", owner: "operator-proxy/ingest.SyntheticClient.Submit"},
+		{function: "userwireguard.SyntheticRun", owner: "userwireguard.SyntheticRun"},
+		{function: "warp/services.SyntheticRun.func1.2", owner: "warp/services.SyntheticRun"},
+		{function: "server/model.SyntheticWrite[...].func1", owner: "server/model.SyntheticWrite"},
+		{function: "connect.(*SyntheticResident[...]).Forward.func2", owner: "connect.SyntheticResident.Forward"},
+	} {
+		line := panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/"+test.function)
+		if got := panicLogOwner(line); got != test.owner {
+			t.Fatalf("normalized owner = %q, want %q", got, test.owner)
+		}
+	}
+	for _, wrapper := range []string{
+		"server.HandleError1[...].func1", "server.HandleError2[...].func2", "server.HandleErrorWithReturn[...]",
+		"connect.HandleError1[...].func1", "connect.HandleError2[...].func2",
+	} {
+		line := panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/"+wrapper,
+			"github.com/urnetwork/server/model.SyntheticWrite")
+		if got := panicLogOwner(line); got != "server/model.SyntheticWrite" {
+			t.Fatalf("generic recovery wrapper became owner %q", got)
+		}
+	}
+	tailer := newLogTailer("api", nil)
+	for _, owner := range []string{"SyntheticFirst", "SyntheticSecond"} {
+		for index := range 5 {
+			tailer.classify(panicOwnerTestLine(t, "*errors.errorString=synthetic-secret",
+				fmt.Sprintf("github.com/urnetwork/server/model.%s.func%d.1", owner, index+1)))
+		}
+	}
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 3 || !strings.Contains(alerts[""].Observed, "rate=10/min") {
+		t.Fatal("separate owners lost the aggregate or their own buckets")
+	}
+	for _, owner := range []string{"SyntheticFirst", "SyntheticSecond"} {
+		frame := "server/model." + owner
+		if !strings.Contains(alerts[frame].Evidence, "owner="+frame) || !strings.Contains(alerts[frame].Observed, "rate=5/min") {
+			t.Fatal("owner bucket borrowed another owner's sample or rate")
+		}
+	}
+}
+
+// Malformed/unknown/oversized records keep aggregate visibility and fixed safe
+// samples. An error message cannot inject ownership in place of a stack.
+func TestPanicOwnerMalformedAndOversizedStayAggregateOnly(t *testing.T) {
+	valid := panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/server/model.SyntheticWrite")
+	for _, line := range []string{
+		"panic: synthetic-secret 192.0.2.88:443",
+		"Unexpected error: {",
+		valid[:len(valid)-1],
+		strings.Repeat("x", panicLogMaxBytes) + valid,
+		`Unexpected error: {"error":"synthetic-secret","stack":"synthetic-private-path"}`,
+		`Unexpected error: {"error":"synthetic-secret","stack":[]}`,
+		`Unexpected error: {"error":"synthetic-secret","stack":["github.com/urnetwork/server/model.SyntheticWrite(0x12345678)"]}`,
+		strings.Replace(valid, `"error":`, `"error":"synthetic-secret","error":`, 1),
+		strings.Replace(valid, `"error":"*errors.errorString=synthetic-secret"`, `"error":null`, 1),
+		strings.Replace(valid, `"stack":[`, `"stack":[null,`, 1),
+		strings.Replace(valid, `"stack":[`, `"stack":[{},`, 1),
+		panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/unlisted.SyntheticWrite"),
+		panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/server/model.SyntheticWrite[unrecognized]",
+			"github.com/urnetwork/server/model.SyntheticCaller"),
+		panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/server/model."+strings.Repeat("Synthetic", 30)),
+		`Unexpected error: {"error":"*errors.errorString=github.com/urnetwork/server/model.SyntheticWrite(0x12345678)","stack":["goroutine 42 [running]"]}`,
+	} {
+		tailer := newLogTailer("api", nil)
+		for range 5 {
+			tailer.classify(line)
+		}
+		alerts := panicOwnerTestAlerts(t, tailer)
+		if len(alerts) != 1 || !strings.Contains(alerts[""].Observed, "rate=5/min") {
+			t.Fatal("unrecognized stack lost aggregate visibility or invented an owner")
+		}
+	}
+	stack := make([]string, panicLogMaxStackLines+1)
+	for index := range stack {
+		stack[index] = "runtime.synthetic()"
+	}
+	stack[0] = "github.com/urnetwork/server/model.SyntheticWrite(0x12345678)"
+	stack[1] = "/synthetic-private-path/owner.go:12345 +0x99"
+	body, err := json.Marshal(map[string]any{"error": "*errors.errorString=synthetic-secret", "stack": stack})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := panicLogOwner("Unexpected error: " + string(body)); got != "" {
+		t.Fatal("oversized stack array gained an owner")
+	}
+}
+
+// Unknown first samples must not leak endpoint attribution; raw Go type text and
+// SQLSTATE-like message substrings cannot escape their allowlists.
+func TestPanicOwnerUnknownFirstSampleAndTypeGuards(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	for range 4 {
+		tailer.classify("panic: synthetic-secret 192.0.2.88:443")
+	}
+	tailer.classify(panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/server/model.SyntheticWrite"))
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 1 || !strings.Contains(alerts[""].Evidence, "owner=unknown error_type=unknown sqlstate=unknown") {
+		t.Fatal("unknown first sample was replaced with invented ownership or raw text")
+	}
+	for _, errorText := range []string{
+		"*synthetic-secret.Error=synthetic-secret (SQLSTATE 25006)",
+		"*errors.errorString=synthetic-secret (SQLSTATE 25006)",
+		"*pgconn.PgError=synthetic-secret (SQLSTATE 25006) trailing",
+		"*pgconn.PgError=synthetic-secret (SQLSTATE secret)",
+	} {
+		observation := parsePanicLogObservation(panicOwnerTestLine(t, errorText, "github.com/urnetwork/server/model.SyntheticWrite"))
+		if observation.sqlstate != "unknown" || strings.Contains(observation.errorType, "synthetic-secret") {
+			t.Fatal("unvalidated Go error type or SQLSTATE escaped")
+		}
+	}
+}
+
+// Overflow is aggregate-only, existing owners remain admitted, and the next
+// minute starts with an empty owner budget rather than permanent suppression.
+func TestPanicOwnerCardinalityCapResetsWithoutSuppressingAggregate(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	lineForOwner := func(index int) string {
+		return panicOwnerTestLine(t, "*errors.errorString=synthetic-secret",
+			fmt.Sprintf("github.com/urnetwork/server/model.SyntheticOwner%d", index))
+	}
+	for index := range logClassMaxOwnerGroups {
+		tailer.classify(lineForOwner(index))
+	}
+	for range 4 {
+		tailer.classify(lineForOwner(0))
+	}
+	for range 5 {
+		tailer.classify(lineForOwner(logClassMaxOwnerGroups))
+	}
+	if tailer.classGroupCounts["panic"] != logClassMaxOwnerGroups || len(tailer.classCounts) != logClassMaxOwnerGroups+1 {
+		t.Fatal("owner state exceeded the bounded per-window cardinality")
+	}
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 2 || !strings.Contains(alerts[""].Observed, fmt.Sprintf("rate=%d/min", logClassMaxOwnerGroups+9)) ||
+		!strings.Contains(alerts["server/model.SyntheticOwner0"].Observed, "rate=5/min") {
+		t.Fatal("overflow suppressed aggregate events or an already-known owner")
+	}
+	if len(tailer.classGroupCounts) != 0 {
+		t.Fatal("drain retained an exhausted owner budget")
+	}
+	for range 5 {
+		tailer.classify(lineForOwner(logClassMaxOwnerGroups))
+	}
+	if len(panicOwnerTestAlerts(t, tailer)) != 2 {
+		t.Fatal("previous overflow owner was not admitted in a fresh window")
+	}
+	if len(panicOwnerTestAlerts(t, tailer)) != 0 {
+		t.Fatal("empty window retained a prior panic page")
+	}
+}
+
+// A known typed failure still wins before generic panic accounting, even when
+// its structured stack could otherwise produce an owner bucket.
+func TestPanicOwnerPreservesTypedClassPrecedence(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	line := panicOwnerTestLine(t,
+		"*pgconn.PgError=FATAL: server login has been failing, cached error: sorry, too many clients already (server_login_retry) (SQLSTATE 08P01)",
+		"github.com/urnetwork/server/model.SyntheticWrite",
+	)
+	for range 5 {
+		tailer.classify(line)
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "pg-client-capacity"); finding.healthy {
+		t.Fatal("typed database-capacity class lost precedence")
+	}
+	for _, finding := range findings {
+		if finding.class == "panic" && !finding.healthy {
+			t.Fatal("typed error also entered generic aggregate or owner buckets")
+		}
+	}
+}
 
 func TestLogErrorsSignalSyntheticLogRate(t *testing.T) {
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
