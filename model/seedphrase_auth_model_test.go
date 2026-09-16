@@ -106,6 +106,11 @@ func TestSeedphraseAlreadyExists(t *testing.T) {
 	})
 }
 
+// The seedphrase/email half of RemoveAuth. Wallet removal, removing a method
+// the account does not have, and the chain-precision of "solana" vs
+// "bittensor" are in model/wallet_add_remove_auth_test.go -- this test only
+// ever removes methods that ARE bound, so it passes either side of the
+// not-bound guard and is not a check on it.
 func TestRemoveAuth(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

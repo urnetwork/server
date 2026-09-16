@@ -24,7 +24,9 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 
 		result, err := NetworkCreate(networkCreate, clientSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error.Message, AgreeToTerms)
+		// user-caused refusals now carry the router's status prefix, which
+		// RaiseHttpError turns into a 400 and strips from the body
+		assert.Equal(t, result.Error.Message, "400 "+AgreeToTerms)
 	})
 }
 

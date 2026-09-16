@@ -52,9 +52,10 @@ func init() {
 }
 
 type RunOptions struct {
-	Port      int
-	Count     int
-	BatchSize int
+	Port            int
+	Count           int
+	BatchSize       int
+	WorkloadProfile WorkloadProfile
 }
 
 func (self RunOptions) Validate() error {
@@ -67,7 +68,7 @@ func (self RunOptions) Validate() error {
 	if self.BatchSize < 1 || self.BatchSize > 1_024 {
 		return fmt.Errorf("taskworker batch size %d is outside [1,1024]", self.BatchSize)
 	}
-	return nil
+	return self.WorkloadProfile.Validate()
 }
 
 // Run serves the production taskworker module until ctx is canceled. It keeps
@@ -97,10 +98,11 @@ type taskworkerRuntime interface {
 // and execution loops after readiness has admitted this process.
 func startTaskworkerRuntime(ctx context.Context, cancel context.CancelFunc, options RunOptions) taskworkerRuntime {
 	controller.StartStatsCollector(ctx)
-	InitTasks(ctx)
+	server.Raise(InitTasksForProfile(ctx, options.WorkloadProfile))
 	settings := task.DefaultTaskWorkerSettings()
 	settings.BatchSize = options.BatchSize
-	worker := InitTaskWorkerWithSettings(ctx, settings)
+	worker, err := InitTaskWorkerForProfile(ctx, settings, options.WorkloadProfile)
+	server.Raise(err)
 	task.StartQueueMetrics(ctx)
 	for range options.Count {
 		go server.HandleError(func() {

@@ -15,9 +15,18 @@ type AuthWalletNonceResult struct {
 }
 
 // AuthWalletNonceCreate issues a fresh single-use, short-lived nonce for wallet
-// login. The client must include the returned nonce in the message it signs; the
-// server validates and consumes it in handleLoginWallet so that a captured
-// (message, signature) pair cannot be replayed.
+// login.
+//
+// DEPRECATED, and inert: nothing consumes this nonce. handleLoginWallet calls
+// only UseWalletAuthChallenge, and WalletAuthArgs.Nonce is never read, so this
+// route provides NO replay protection -- do not describe it as one. Replay is
+// prevented by POST /auth/wallet-challenge, whose value the signed message
+// must carry verbatim and which is marked used atomically.
+//
+// The route is kept only so a client that still calls it does not start
+// getting 404s; it should be retired once no caller remains. Note it is an
+// unauthenticated, unrate-limited DB write, drained only by the
+// RemoveExpiredWalletNonces reaper.
 func AuthWalletNonceCreate(clientSession *session.ClientSession) (*AuthWalletNonceResult, error) {
 	nonce, err := newCodeBase32()
 	if err != nil {
@@ -46,7 +55,10 @@ func AuthWalletNonceCreate(clientSession *session.ClientSession) (*AuthWalletNon
 // consumeWalletAuthNonce atomically validates and consumes a wallet-login nonce.
 // Returns true only if the nonce existed, was unexpired, and had not already been
 // used. The single-use UPDATE (guarded on used = false) means the same nonce cannot
-// be consumed twice even under concurrent requests, which is what prevents replay.
+// be consumed twice even under concurrent requests.
+//
+// UNUSED: no login path calls this. Retained with AuthWalletNonceCreate so the
+// legacy route keeps a coherent shape until it is retired.
 func consumeWalletAuthNonce(ctx context.Context, tx server.PgTx, nonce string) bool {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,

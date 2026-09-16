@@ -391,3 +391,59 @@ func TestIncrementRateLimitWindowResetsAtExactBoundary(t *testing.T) {
 		}
 	})
 }
+
+// The wallet-challenge limiter must key on the client address alone. Keying
+// on the ephemeral source port as well gave every new TCP connection its own
+// bucket, so the limit never engaged for the caller it exists to bound.
+func TestWalletChallengeIpRateLimitIgnoresSourcePort(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var clientIpHash [32]byte
+		clientIpHash[0] = 0xd5
+		client := NewStoredRateLimitClient(clientIpHash)
+
+		lookback := 5 * time.Minute
+		failedLimit := 5
+
+		// each attempt arrives on a different ephemeral port, as a script
+		// opening a fresh connection per request does
+		for port := 41000; port < 41000+failedLimit-1; port += 1 {
+			attemptId, allowed := CheckWalletChallengeIpRateLimit(
+				ctx,
+				client,
+				port,
+				lookback,
+				failedLimit,
+			)
+			if !allowed {
+				t.Fatalf("port %d: blocked before the threshold", port)
+			}
+			SetWalletChallengeIpRateLimitSuccess(ctx, attemptId, false)
+		}
+
+		_, allowed := CheckWalletChallengeIpRateLimit(
+			ctx,
+			client,
+			49999,
+			lookback,
+			failedLimit,
+		)
+		if allowed {
+			t.Fatal("a fresh source port opened a new budget for the same address")
+		}
+
+		// a different address is unaffected
+		var otherIpHash [32]byte
+		otherIpHash[0] = 0xd6
+		_, allowed = CheckWalletChallengeIpRateLimit(
+			ctx,
+			NewStoredRateLimitClient(otherIpHash),
+			49999,
+			lookback,
+			failedLimit,
+		)
+		if !allowed {
+			t.Fatal("an unrelated address inherited the limit")
+		}
+	})
+}
