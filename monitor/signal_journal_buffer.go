@@ -68,10 +68,15 @@ journald_active_seconds=0
 if [ "$journald_active" = active ]; then
   active_enter_us=$(systemctl show systemd-journald.service \
     --property=ActiveEnterTimestampMonotonic --value 2>/dev/null) || exit 33
-  case "$active_enter_us" in ''|*[!0-9]*) exit 33 ;; esac
-  uptime_us=$(awk '{printf "%.0f", $1 * 1000000}' /proc/uptime 2>/dev/null) || exit 33
-  journald_active_seconds=$(( (uptime_us - active_enter_us) / 1000000 ))
-  [ "$journald_active_seconds" -ge 0 ] || exit 33
+  # systemd's activation clock excludes suspend, unlike /proc/uptime. Prior
+  # suspend time must not consume the refill grace of a new journald process.
+  journald_now_us=$(timeout 3s python3 -c 'import time; print(time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000)' 2>/dev/null) || exit 33
+  for journald_timestamp in "$active_enter_us" "$journald_now_us"; do
+    case "$journald_timestamp" in ''|*[!0-9]*) exit 33 ;; esac
+    [ "${#journald_timestamp}" -le 16 ] || exit 33
+  done
+  [ "$active_enter_us" -le "$journald_now_us" ] || exit 33
+  journald_active_seconds=$(( (journald_now_us - active_enter_us) / 1000000 ))
 fi
 
 parse_journal_timestamp() {

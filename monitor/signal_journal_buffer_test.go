@@ -654,19 +654,85 @@ func runJournalBufferCommandWithClock(t *testing.T, latestMode, boundaryMode, cl
 	return runJournalBufferCommandWithClockAndFiles(t, latestMode, boundaryMode, clockMode, "")
 }
 
+// A prior suspend increases /proc/uptime but not systemd's activation clock.
+// A newly restarted journal still needs its own complete refill grace.
+func TestJournalBufferRestartGraceUsesMonotonicClockAfterSuspend(t *testing.T) {
+	for _, testCase := range []struct {
+		name             string
+		startMonotonicUS string
+		wantAge          int
+		wantChecked      bool
+	}{
+		{name: "recent restart after prior suspend", startMonotonicUS: "99900000000", wantAge: 100},
+		{name: "one second before grace", startMonotonicUS: "95801000000", wantAge: 4199},
+		{name: "one microsecond before grace", startMonotonicUS: "95800000001", wantAge: 4199},
+		{name: "exact grace", startMonotonicUS: "95800000000", wantAge: 4200, wantChecked: true},
+		{name: "one second after grace", startMonotonicUS: "95799000000", wantAge: 4201, wantChecked: true},
+	} {
+		output, err := runJournalBufferCommandWithFileFixture(t, "string", "empty", "fixed", journalBufferFileFixture{
+			machineID: journalBufferTestMachineID, uptimeSeconds: "169000",
+			monotonicNowUS: "100000000000", journaldStartMonotonicUS: testCase.startMonotonicUS,
+		})
+		if err != nil {
+			t.Fatalf("%s: reducer failed: %v\n%s", testCase.name, err, output)
+		}
+		sample, err := parseJournalBufferSample(output)
+		if err != nil {
+			t.Fatalf("%s: observation did not parse: %v", testCase.name, err)
+		}
+		if sample.journaldActiveSeconds != testCase.wantAge || sample.coverageChecked != testCase.wantChecked || sample.coveragePresent {
+			t.Fatalf("%s: age=%d checked=%t present=%t, want age=%d checked=%t with no boundary",
+				testCase.name, sample.journaldActiveSeconds, sample.coverageChecked, sample.coveragePresent,
+				testCase.wantAge, testCase.wantChecked)
+		}
+		short := false
+		for _, finding := range evaluateJournalBuffer("synthetic-edge", sample) {
+			short = short || finding.class == "journal-buffer-short" && !finding.healthy
+		}
+		if short != testCase.wantChecked {
+			t.Fatalf("%s: short-buffer finding=%t, want %t", testCase.name, short, testCase.wantChecked)
+		}
+	}
+}
+
+func TestJournalBufferRestartAgeClockFailureIsNotCoverageEvidence(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		fixture journalBufferFileFixture
+	}{
+		{name: "clock failure", fixture: journalBufferFileFixture{monotonicClockExit: 1}},
+		{name: "clock timeout", fixture: journalBufferFileFixture{monotonicClockExit: 124}},
+		{name: "malformed clock", fixture: journalBufferFileFixture{monotonicNowUS: "private-clock-detail"}},
+		{name: "negative clock", fixture: journalBufferFileFixture{monotonicNowUS: "-1"}},
+		{name: "oversized clock", fixture: journalBufferFileFixture{monotonicNowUS: "10000000000000000"}},
+		{name: "malformed activation", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "private-start-detail"}},
+		{name: "oversized activation", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "10000000000000000"}},
+		{name: "activation one microsecond in future", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "100000000001"}},
+	} {
+		output, err := runJournalBufferCommandWithFileFixture(t, "string", "empty", "fixed", testCase.fixture)
+		if err == nil || strings.Contains(output, "observation_schema=") || strings.Contains(output, "private-") {
+			t.Fatalf("%s: unavailable clock emitted evidence or leaked source: exit=%v bytes=%d", testCase.name, err, len(output))
+		}
+	}
+}
+
 const journalBufferTestMachineID = "0123456789abcdef0123456789abcdef"
 
 type journalBufferFileFixture struct {
-	machineID           string
-	omitMachineID       bool
-	machineIDReadExit   int
-	machineIDFooterMode string
-	fileFooterMode      string
-	directoryState      string
-	files               []string
-	rows                string
-	findExit            int
-	shell               string
+	machineID                string
+	omitMachineID            bool
+	machineIDReadExit        int
+	machineIDFooterMode      string
+	fileFooterMode           string
+	directoryState           string
+	files                    []string
+	rows                     string
+	findExit                 int
+	shell                    string
+	uptimeSeconds            string
+	journaldStartMonotonicUS string
+	monotonicNowUS           string
+	monotonicClockExit       int
 }
 
 func runJournalBufferCommandWithClockAndFiles(t *testing.T, latestMode, boundaryMode, clockMode, fileRows string) (string, error) {
@@ -687,7 +753,7 @@ func runJournalBufferCommandWithFileFixture(t *testing.T, latestMode, boundaryMo
 	writeExecutable("systemctl", "#!/bin/sh\n"+journalVacuumUnitFixture+`
 case "$1" in
   is-active) echo active ;;
-  show) echo 0 ;;
+  show) printf '%s\n' "${JOURNALD_START_MONOTONIC_US:-0}" ;;
   *) exit 1 ;;
 esac
 `)
@@ -703,11 +769,14 @@ EOF
 `)
 	writeExecutable("sha256sum", "#!/bin/sh\n"+journalVacuumHashFixture)
 	writeExecutable("dpkg-query", "#!/bin/sh\nprintf '%s' unverified\n")
-	writeExecutable("python3", "#!/bin/sh\necho 100000000000\n")
+	writeExecutable("python3", `#!/bin/sh
+[ "${JOURNAL_MONOTONIC_CLOCK_STATUS:-0}" -eq 0 ] || exit "$JOURNAL_MONOTONIC_CLOCK_STATUS"
+printf '%s\n' "${JOURNAL_MONOTONIC_NOW_US:-100000000000}"
+`)
 	writeExecutable("awk", `#!/bin/sh
 case "$*" in
   *'/proc/uptime'*)
-    case "$*" in *1000000*) echo 100000000000 ;; *) echo 100000 ;; esac
+    case "$*" in *1000000*) printf '%s000000\n' "${JOURNAL_UPTIME_SECONDS:-100000}" ;; *) printf '%s\n' "${JOURNAL_UPTIME_SECONDS:-100000}" ;; esac
     exit 0
     ;;
 esac
@@ -891,6 +960,10 @@ esac
 		"JOURNAL_LATEST_MODE="+latestMode,
 		"JOURNAL_BOUNDARY_MODE="+boundaryMode,
 		"JOURNAL_CLOCK_MODE="+clockMode,
+		"JOURNAL_UPTIME_SECONDS="+files.uptimeSeconds,
+		"JOURNALD_START_MONOTONIC_US="+files.journaldStartMonotonicUS,
+		"JOURNAL_MONOTONIC_NOW_US="+files.monotonicNowUS,
+		fmt.Sprintf("JOURNAL_MONOTONIC_CLOCK_STATUS=%d", files.monotonicClockExit),
 		"JOURNAL_CLOCK_STATE="+filepath.Join(bin, "query-seen"),
 		"JOURNAL_FIND_OUTPUT="+files.rows,
 		fmt.Sprintf("JOURNAL_FIND_STATUS=%d", files.findExit),

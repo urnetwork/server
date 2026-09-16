@@ -10451,7 +10451,12 @@ remains its own §11.14 PAGE; no rotation count claims how many records were los
 host and the current journald activation have been live for 70 minutes, when a
 bounded current-boot query finds no retained entry at or before the 50-minute
 cutoff. The service-age gate allows an intentional configuration restart to
-refill its buffer. The query asks for the newest entry at or before the cutoff,
+refill its buffer. Its activation age uses `CLOCK_MONOTONIC`, matching systemd's
+`ActiveEnterTimestampMonotonic`; suspend-inclusive `/proc/uptime` must not be
+subtracted from that timestamp. A prior suspend otherwise makes a newly
+restarted journal appear old enough to fail its refill check. Missing, malformed
+or future activation-clock evidence is unknown, not proof that the grace has
+elapsed. The query asks for the newest entry at or before the cutoff,
 so a quiet five-minute interval does not look like lost data.
 `journal-buffer-unavailable` PAGEs when `systemd-journald` itself is inactive.
 `journal-buffer-file-headroom` WARNs when either the currently retained file
