@@ -525,12 +525,12 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			probeId: "observability/log-shipper", tier: tierWarn,
 			class: "log-shipper-churn", target: target, sustain: 2,
 			symptom:   fmt.Sprintf("%s Fluent Bit has restarted within its current unit activation", target),
-			mechanism: "systemd recorded one or more automatic restarts. The retry policy avoids permanent failure, but repeated starts can create telemetry gaps and usually preserve an actionable first error in the unit journal.",
-			baseline:  "NRestarts remains zero during steady state.", observed: observed,
+			mechanism: "systemd's NRestarts is a cumulative current-activation counter. A positive value proves at least one automatic restart, but does not prove current or recurring churn. Establish event timing and cause from bounded generation-specific evidence before attributing a new incident.",
+			baseline:  "NRestarts=0 means this activation has no retained automatic-restart history.", observed: observed,
 			evidence: fmt.Sprintf("restarts=%d result=%s", sample.restarts, sample.result),
-			context:  "This is process churn, not proof of missing downstream data; verify freshness in each configured output independently.",
-			action:   "Inspect the first bounded error before the restart and repair that cause. Do not clear the counter or reboot merely to hide the evidence.",
-			verify:   "Require a stable process and fresh data in each configured output for ten minutes. Require a fresh labeled Loki record only where a managed Warp log source exists.",
+			context:  "This WARN preserves restart history, not a rate or proof of current shipper failure or missing downstream data. A recovered stable process may retain it; verify output freshness and any independent journal-reader fault separately.",
+			action:   "Preserve the activation counter and inspect any retained bounded restart evidence. Repair only a proven cause. Do not reset the counter, restart the unit, or reboot solely to silence this WARN.",
+			verify:   "Ten stable minutes with fresh data in each configured output verify operational recovery, but do not clear the current-activation counter; this retained-history WARN can therefore remain. Require a fresh labeled Loki record only where a managed Warp log source exists.",
 			playbook: "SIGNALS.md §11.14",
 		})
 	} else {

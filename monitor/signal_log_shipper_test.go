@@ -120,6 +120,63 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 	}
 }
 
+func TestLogShipperRetainedRestartExplainsOperationalRecovery(t *testing.T) {
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return logShipperFixture(map[string]string{"restarts": "1"}), nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "shipper-fixture", Roles: []string{"services"}}}
+	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "log-shipper-churn")
+	if len(alerts) != 1 || alert.Severity != SeverityWarn {
+		t.Fatalf("retained restart alerts=%s, want one unchanged WARN", alerts.Markdown())
+	}
+	for _, want := range []string{
+		"restarts=1",
+		"cumulative current-activation counter",
+		"does not prove current or recurring churn",
+		"Repair only a proven cause",
+		"Do not reset the counter, restart the unit, or reboot solely to silence",
+		"Ten stable minutes",
+		"verify operational recovery, but do not clear the current-activation counter",
+		"retained-history WARN can therefore remain",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("retained restart Markdown missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Markdown(), "This is process churn") {
+		t.Fatalf("retained restart still attributes current churn:\n%s", alert.Markdown())
+	}
+}
+
+func TestLogShipperRetainedRestartDoesNotHideJournalLoss(t *testing.T) {
+	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+		return logShipperFixture(map[string]string{
+			"restarts": "1", "journal_reader_state": "ebadmsg",
+			"journal_reader_errors_10m": "2", "journal_reader_ebadmsg_errors_10m": "2",
+		}), nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "shipper-fixture", Roles: []string{"services"}}}
+	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restart := requireAlertClass(t, alerts, "log-shipper-churn")
+	loss := requireAlertClass(t, alerts, "log-shipper-journal-read-loss")
+	if len(alerts) != 2 || restart.Severity != SeverityWarn || loss.Severity != SeverityPage {
+		t.Fatalf("independent restart/loss alerts=%s, want retained WARN plus current PAGE", alerts.Markdown())
+	}
+	if !strings.Contains(restart.Markdown(), "independent journal-reader fault separately") ||
+		!strings.Contains(loss.Markdown(), "journal_reader_ebadmsg_errors_10m=2") {
+		t.Fatalf("independent restart/loss evidence missing:\n%s", alerts.Markdown())
+	}
+}
+
 func TestLogShipperSignalSyntheticMalformedIsVisibility(t *testing.T) {
 	source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
 		return logShipperFixture(map[string]string{"restarts": "secret\nunknown=value"}), nil

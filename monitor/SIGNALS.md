@@ -12722,7 +12722,24 @@ generation contains all three exact decoder frames. Both the structured-core
 and unit-journal selectors carry that same window and remain bounded to 400
 rows. This prevents an unrelated older boot crash from being attributed to the
 current restart; if the generation timestamp cannot be resolved, the reason
-remains other or unobservable. On a Redis-cluster host, the same reducer reads
+remains other or unobservable.
+
+`NRestarts` is cumulative within the current activation, not a restart rate.
+The unchanged `NRestarts > 0` predicate preserves even one historical automatic
+restart; it does not prove current or recurring churn. Ten stable minutes with
+fresh configured outputs verify operational recovery, but cannot clear that
+current-activation counter, so the retained-history WARN can remain afterward.
+Do not reset the counter, restart the unit, or reboot solely to silence it.
+Establish the event's timing and cause from generation-specific evidence, and
+repair only a proven cause. Missing old journal records leave the original
+cause unobservable; they do not exclude a crash, OOM, fd, or configuration fault.
+The bounded 2026-09-16 Main control demonstrated this distinction: one restart
+remained on a running process about 19 hours old, while its restart-window
+journal/core records were no longer observed. Current journal-reader loss and
+downstream freshness require their own evidence and closure; a stable process
+does not suppress those independent faults.
+
+On a Redis-cluster host, the same reducer reads
 the stable running `redis-exporter.service` process, its exact NUL-delimited
 argv, and its environment default when readable, reducing only the exact bool
 flag to `excluded`, `enabled`, `unobservable`, or `not-applicable`. A desired or
@@ -12757,8 +12774,9 @@ signal. These are process and startup-capacity signals, not an end-to-end
 delivery claim: closure additionally requires fresh per-host metrics through
 Mimir and fresh data in every configured output. Require a fresh labeled Warp
 record through Loki only where a managed Warp log source exists. Never clear a
-restart counter or reboot merely to hide evidence; repair the first bounded
-Fluent Bit error and restart only the shipper.
+restart counter or reboot merely to hide evidence. Repair only a proven bounded
+Fluent Bit error; restart only the shipper after authorization when that repair
+requires it, never solely to clear retained restart history.
 
 ### 11.15 Grafana 13 datasource rows without native plugins (2026-08-29, 2026-09-01, 2026-09-02, 2026-09-03)
 
