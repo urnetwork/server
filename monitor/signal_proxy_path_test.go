@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestActiveProxyPathsFromServicesUsesCurrentPlacementAndStableRoutingTable(t *testing.T) {
@@ -170,6 +171,59 @@ func TestProxyPathSignalClassifiesDockerDiscoveryFailure(t *testing.T) {
 	}
 	if strings.Contains(markdown, hostile) {
 		t.Fatal("discovery failure leaked raw runtime error")
+	}
+}
+
+func TestProxyPathAllocationAccessDeniedDoesNotProveRemoteExecution(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		status int
+		stderr string
+		class  string
+	}{
+		{"ssh-authentication", 255, "Permission denied (publickey)", observationErrorClassAccessDenied},
+		{"remote-runtime-denial", 1, "permission denied while connecting to the Docker daemon", observationErrorClassAccessDenied},
+		{"ambiguous-remote-status-255", 255, "permission denied", observationErrorClassAccessDenied},
+		{"other-command-failure", 1, "synthetic command failed", observationErrorClassCommandFailed},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			nativeExit := syntheticProcessExit(t, testCase.status)
+			cfg := &monitorConfig{addressMode: addressModeOverlay, commandTimeout: time.Second}
+			runner := newRunner(cfg)
+			runner.runSSH = func(_ context.Context, args []string, _ string) (string, string, error) {
+				if !strings.Contains(args[len(args)-1], proxyAllocationMarker) {
+					t.Fatal("fixture did not exercise the actual allocation discovery command")
+				}
+				return "", testCase.stderr + " private-auth-reason address=192.0.2.91", nativeExit
+			}
+			target := &host{name: "proxy-1", overlayIp: "192.0.2.91"}
+			allocations, err := discoverProxyAllocations(context.Background(), &probeEnv{cfg: cfg, runner: runner}, target)
+			if err == nil || len(allocations) != 0 || classifyObservationError(err) != testCase.class {
+				t.Fatal("allocation discovery lost the native observation failure")
+			}
+			finding := proxyAllocationCannotObserveFinding(target.name, err)
+			alert := alertFromFinding(syntheticSettings(&syntheticSource{}), "14.5", "proxy-path", "Public proxy path", finding)
+			if alert.Class != "cannot-observe" || alert.Target != "proxy-1/proxy-allocations" || alert.Sustain != 2 {
+				t.Fatal("phase correction changed visibility identity or sustain")
+			}
+			requireAlertOmits(t, alert, "private-auth-reason", "192.0.2.91", "Permission denied (publickey)")
+			if testCase.class == observationErrorClassCommandFailed {
+				if alert.Observed != "error_class="+observationErrorClassCommandFailed {
+					t.Fatal("non-access failure was relabeled as access denial")
+				}
+				return
+			}
+			for _, required := range []string{"SSH authentication", "remote container-runtime/helper authorization", "does not prove that the remote command ran", "allocation_count=unknown", "phase-specific evidence"} {
+				if !strings.Contains(alert.Markdown(), required) {
+					t.Fatalf("allocation denial lost phase ambiguity: missing %q", required)
+				}
+			}
+			for _, falseClaim := range []string{"The monitor reached the proxy host", "The container-runtime command returned nonzero", "allocations=0 would be healthy"} {
+				if strings.Contains(alert.Markdown(), falseClaim) {
+					t.Fatal("access-denied class alone asserted remote execution or service health")
+				}
+			}
+		})
 	}
 }
 

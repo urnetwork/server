@@ -118,46 +118,110 @@ if [ "${uptime_seconds:-0}" -ge 4200 ] && [ "$journald_active_seconds" -ge 4200 
   fi
 fi
 
-# A byte ceiling does not provide the intended recovery headroom when journal
-# hash pressure rotates small files and SystemMaxFiles becomes the binding
-# limit. Reduce file metadata on-host; no file name or timestamp leaves it.
+# Count the default system journal's machine directory, as journald does.
+# File counts measure capacity, not the cause of rotation. Keep the machine ID
+# and file metadata on-host, including when identity or visibility is unknown.
 journal_file_scan_state=unavailable
 journal_files=0
 journal_bytes=0
 journal_archived_files_5m=0
 journal_system_archived_files_5m=0
 journal_user_archived_files_5m=0
-if [ -d /var/log/journal ]; then
+journal_machine_id=$(
+  # SSH uses the account shell, which need not support pipefail. Read byte
+  # codes so an awk that drops raw NULs cannot normalize a malformed ID.
+  # Require the producer's successful terminal footer before emitting it.
+  {
+    timeout 5s od -An -v -tu1 -N 34 /etc/machine-id 2>/dev/null
+    journal_machine_id_read_status=$?
+    printf 'monitor-journal-machine-id-status=%d\n' "$journal_machine_id_read_status"
+  } |
+    LC_ALL=C awk '
+      function fail() {failed=1; exit 1}
+      /^monitor-journal-machine-id-status=/ {
+        if (complete || $0 != "monitor-journal-machine-id-status=0") fail()
+        complete=1
+        next
+      }
+      complete || NF > 16 {fail()}
+      NF == 0 {next}
+      {
+        for (i=1; i<=NF; i++) {
+          if ($i !~ /^[0-9]+$/) fail()
+          byte=$i+0
+          bytes++
+          if (bytes <= 32) {
+            if (!((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 70) || (byte >= 97 && byte <= 102))) fail()
+            id=id sprintf("%c", byte)
+            if (byte != 48) nonzero=1
+          } else if (bytes != 33 || byte != 10) fail()
+        }
+      }
+      END {
+        if (!failed && complete && nonzero && (bytes == 32 || bytes == 33)) print tolower(id)
+        else exit 1
+      }
+    '
+)
+journal_machine_id_status=$?
+journal_directory="/var/log/journal/$journal_machine_id"
+if [ "$journal_machine_id_status" -eq 0 ] &&
+   [ -d "$journal_directory" ] && [ ! -L "$journal_directory" ] &&
+   [ -r "$journal_directory" ] && [ -x "$journal_directory" ]; then
   journal_file_now=$(date +%s) || exit 36
   journal_file_reduction=$(
-    set -o pipefail
-    timeout 10 find /var/log/journal -xdev -type f -name '*.journal' \
-      -printf '%T@ %b %f\n' 2>/dev/null |
+    {
+      timeout 10 find "$journal_directory" -xdev -mindepth 1 -maxdepth 1 -type f \
+        \( -name '*.journal' -o -name '*.journal~' \) \
+        -printf '%T@ %b %f\n' 2>/dev/null
+      journal_find_status=$?
+      printf 'monitor-journal-file-scan-status=%d\n' "$journal_find_status"
+    } |
       LC_ALL=C awk -v now="$journal_file_now" '
         function fail(code) {failed=1; exit code}
+        function hex(value, width) {return length(value) == width && value !~ /[^0-9a-fA-F]/}
+        /^monitor-journal-file-scan-status=/ {
+          if (complete || $0 != "monitor-journal-file-scan-status=0") fail(43)
+          complete=1
+          next
+        }
+        complete {fail(43)}
         NF != 3 {fail(43)}
         {
           mtime=$1
           blocks=$2
           name=$3
           if (mtime !~ /^[0-9]+([.][0-9]+)?$/ || blocks !~ /^[0-9]+$/) fail(43)
-          if (name !~ /^system([@][0-9a-f-]+)?[.]journal$/ &&
-              name !~ /^user-[0-9]+([@][0-9a-f-]+)?[.]journal$/) fail(43)
+          if (name !~ /[.]journal~?$/) fail(43)
           files++
           if (files > 4096) fail(42)
           bytes += blocks * 512
+          # Vacuum counts even unfamiliar or malformed archive names as
+          # active files. Only canonical archive suffixes identify archives.
+          archive=name
+          sub(/[.]journal~?$/, "", archive)
+          sub(/^.*@/, "", archive)
+          parts=split(archive, fields, "-")
+          is_archive=name ~ /@/ &&
+            ((name ~ /[.]journal$/ && parts == 3 && hex(fields[1], 32) && hex(fields[2], 16) && hex(fields[3], 16)) ||
+             (name ~ /[.]journal~$/ && parts == 2 && hex(fields[1], 16) && hex(fields[2], 16)))
           age=now-mtime
-          if (age >= -2 && age <= 300 && name ~ /@/) {
+          if (age >= -2 && age <= 300 && is_archive) {
             archived++
-            if (name ~ /^system@/) system_archived++
-            else if (name ~ /^user-[0-9]+@/) user_archived++
+            prefix=name
+            sub(/@[^@]*$/, "", prefix)
+            if (prefix == "system") system_archived++
+            else if (prefix ~ /^user-[0-9]+$/) user_archived++
           }
         }
         END {
-          if (!failed) printf "%d %d %d %d %d\n", files+0, bytes+0,
-            archived+0, system_archived+0, user_archived+0
+          if (!failed) {
+            if (!complete) exit 43
+            printf "%d %.0f %d %d %d\n", files+0, bytes+0,
+              archived+0, system_archived+0, user_archived+0
+          }
         }
-      '
+      ' 2>/dev/null
   )
   journal_file_status=$?
   if [ "$journal_file_status" -eq 0 ]; then
@@ -176,7 +240,7 @@ if [ -d /var/log/journal ]; then
 fi
 
 printf '%s\n' \
-  'observation_schema=4' \
+  'observation_schema=5' \
   "journald_active=${journald_active}" \
   "journald_active_seconds=${journald_active_seconds}" \
   "storage=${storage:--}" \
@@ -310,7 +374,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 			return journalBufferSample{}, fmt.Errorf("journal buffer: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "4" {
+	if values["observation_schema"] != "5" {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: unsupported observation schema")
 	}
 
@@ -394,8 +458,9 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: incomplete journal file scan retained values")
 	}
 	if journalFileScanState == "complete" &&
-		(journalArchivedFiles5m > journalFiles ||
-			journalSystemArchives5m+journalUserArchives5m != journalArchivedFiles5m) {
+		(journalFiles > 4096 || journalArchivedFiles5m > journalFiles ||
+			journalSystemArchives5m > journalArchivedFiles5m ||
+			journalUserArchives5m > journalArchivedFiles5m-journalSystemArchives5m) {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent journal file counts")
 	}
 	return journalBufferSample{
@@ -481,12 +546,12 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 					"%s journal file count does not preserve the fourfold local recovery headroom",
 					target,
 				),
-				mechanism: "Journal files can rotate before SystemMaxFileSize when high-cardinality entries fill the file's data hash table. SystemMaxFiles then becomes the binding capacity limit even while the 100 GiB byte ceiling has ample space; rapid rotation also increases exposure to journal-reader invalidation races.",
-				baseline:  "Current retained files and the five-minute rotation rate projected over one hour each use at most 25% of SystemMaxFiles, preserving at least fourfold file-count headroom alongside the byte cap.",
+				mechanism: "Retained files or recent archive-file activity exceed the file-count headroom budget. SystemMaxFiles can constrain the recovery buffer independently of the byte ceiling; file counts alone do not identify the rotation trigger.",
+				baseline:  "Current retained files and the five-minute archive-file count projected over one hour each use at most 25% of SystemMaxFiles, preserving at least fourfold file-count headroom alongside the byte cap.",
 				observed:  fileObserved,
-				evidence:  "The host reducer returns only total allocated bytes, aggregate file counts, and system/user archive counts. Journal filenames, timestamps, entries, cursors, and workload identifiers never leave the host.",
-				context:   "This is a rotation and local-capacity precursor. It does not by itself prove Fluent Bit loss, durable journal corruption, disk failure, or which producer owns the churn; correlate §11.14 before assigning data loss.",
-				action:    "Measure a bounded privacy-reduced producer suffix and remove only proven log amplification. Preserve the one-hour/100 GiB contract; change SystemMaxFiles only after checking inode cost, directory scan cost, and the journal-reader behavior under the measured rotation rate. Do not delete journals, reboot, or restart the shipper to hide the count.",
+				evidence:  "The host reducer scans regular .journal and .journal~ files only in the validated local machine directory and returns allocated bytes and aggregate total/system/user counts. Machine identity, filenames, timestamps, entries, cursors, and workload identifiers never leave the host.",
+				context:   "This is a local-capacity precursor. Recent archive mtimes approximate activity, not exact creation events or a future retention guarantee. Counts do not prove Fluent Bit loss, durable corruption, disk failure, or a responsible producer; correlate §11.14 before assigning data loss.",
+				action:    "Resolve the rotation trigger with bounded journald reason evidence and the exact running systemd source/configuration before changing producer logging or capacity. Preserve the one-hour/100 GiB contract; evaluate SystemMaxFiles changes against inode cost, directory scan cost, and reader behavior. Do not delete journals, reboot, or restart the shipper to hide the count.",
 				verify:    "Two consecutive five-minute observations keep both current and projected one-hour file use at or below 25% of SystemMaxFiles, the 50-minute boundary remains readable, §11.14 has zero iterator loss for ten minutes spanning ordinary rotation, and current-source Loki data stays fresh.",
 				playbook:  "SIGNALS.md §8.5b and §11.14",
 			})

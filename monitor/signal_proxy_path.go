@@ -79,12 +79,12 @@ func proxyAllocationCannotObserveFinding(host string, err error) finding {
 	if classifyObservationError(err) != "observation-access-denied" {
 		return finding
 	}
-	finding.mechanism = "The monitor reached the proxy host, but its execution identity was denied while enumerating the current container-runtime allocation. The monitor therefore cannot distinguish an absent allocation from a healthy allocation it is not permitted to inspect; treating the empty output as allocations=0 would be a false service diagnosis."
+	finding.mechanism = "Access was denied while attempting current proxy allocation discovery. The denial may be SSH authentication or remote container-runtime/helper authorization; this class does not prove that the remote command ran. The monitor therefore cannot distinguish an absent allocation from a healthy allocation it is not permitted to inspect; treating the empty output as allocations=0 would be a false service diagnosis."
 	finding.baseline = "Every configured proxy host exposes a narrowly scoped, read-only inventory of current proxy container names, WARP_PORTS mappings, and internal readiness to the monitor identity."
 	finding.observed = "error_class=observation-access-denied allocation_count=unknown"
-	finding.evidence = "The container-runtime command returned nonzero before any allocation rows were parsed; raw command output and runtime details are intentionally omitted."
+	finding.evidence = "The observation attempt returned an access-denied class before any allocation rows were accepted. The denial phase and current allocation count remain unproved; raw command output and runtime details are intentionally omitted."
 	finding.context = "This is an operational observation-access prerequisite, not proof that the Proxy service or its public path is down. Membership in the Docker group is effectively root access and is not an acceptable casual monitoring workaround."
-	finding.action = "Provide the monitor execution identity a reviewed least-privilege, read-only helper or equivalent inventory surface for only the required proxy allocation fields. Do not add the identity to the Docker group, run the entire monitor as root, or infer zero allocations while access is denied."
+	finding.action = "First distinguish SSH authentication from remote container-runtime/helper authorization using bounded phase-specific evidence. Restore the intended SSH authentication only when that phase is proved. If remote inventory authorization is denied, provide the monitor identity a reviewed least-privilege, read-only helper or equivalent surface for only the required allocation fields. Do not add the identity to the Docker group, run the entire monitor as root, or infer zero allocations while access is denied."
 	finding.verify = "Run proxy-path twice and require a concrete current allocation on every configured proxy host, internal readiness for each allocation, all configured public family/protocol handshakes, and no cannot-observe or inventory-coverage finding."
 	finding.playbook = "SIGNALS.md §14.5 and MONITOR.md §3.6"
 	return finding

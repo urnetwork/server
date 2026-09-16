@@ -11,6 +11,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
@@ -28,8 +29,10 @@ const (
 	statusTestClientAddress = "203.0.113.9:41001"
 	// same /29 as statusTestClientAddress, so a session built here shares the
 	// bucket the handler will compute
-	statusTestSameBucketAddress = "203.0.113.14:41002"
-	statusTestOtherAddress      = "198.51.100.20:41003"
+	statusTestSameBucketAddress       = "203.0.113.14:41002"
+	statusTestOtherAddress            = "198.51.100.20:41003"
+	statusTestWalletDupAddress        = "203.0.113.41:41011"
+	statusTestWalletMirrorlessAddress = "203.0.113.45:41015"
 )
 
 func networkCreateRequest(t testing.TB, remoteAddr string, args model.NetworkCreateArgs) *http.Request {
@@ -155,80 +158,193 @@ func assertRateLimitBody(t testing.TB, w *httptest.ResponseRecorder, branch stri
 	}
 }
 
-// TestNetworkCreateValidationRefusalIsNotReportedAsSuccess covers the
-// error-return convention (task item 5).
-//
-// The model returns validation refusals in the body as
-// NetworkCreateResult.Error with a nil Go error, and controller.NetworkCreate
-// converts that body error into a Go error. RaiseHttpError then turns a
-// leading "<code> " into the status and drops it from the body -- so the model
-// now prefixes its user-caused refusals ("400 " + AgreeToTerms) and this
-// endpoint answers 400 instead of the 500 it used to.
-//
-// This test previously pinned that 500 and said in its own text: "if this is
-// now 400 that is the fix, update this test". This is that update.
-//
-// Two properties are pinned. The first is the genuine safety property, and is
-// unchanged: a refusal must never reach the client as 200 with the error buried
-// in the body, which a status-checking client reads as a created account. The
-// second is that the status now discriminates a form mistake (4xx) from a
-// server fault (5xx).
-//
-// RESIDUAL, pinned deliberately: the body is still text/plain, so
-// NetworkCreateResult.Error remains unpopulated over HTTP. Making it a
-// structured body is a separate, larger change (it would need the spec's
-// NetworkCreateResult to become the refusal carrier); pinned here so that
-// change is made on purpose rather than by accident.
-func TestNetworkCreateValidationRefusalIsNotReportedAsSuccess(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		w := httptest.NewRecorder()
-		NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, model.NetworkCreateArgs{
-			Terms: false,
-		}))
-
-		if w.Code == http.StatusOK {
-			t.Fatalf(
-				"a signup refused for %q returned HTTP 200 with body %q: a status-checking "+
-					"client reads that as a created account",
-				model.AgreeToTerms, strings.TrimSpace(w.Body.String()),
-			)
-		}
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf(
-				"terms-not-accepted signup returned HTTP %d (%q), want 400: an unticked "+
-					"terms box is a form mistake, and 5xx tells every SDK the server broke "+
-					"and to retry",
-				w.Code, strings.TrimSpace(w.Body.String()),
-			)
-		}
-		// the status prefix is the transport's, not the user's: it must not
-		// survive into the message a person reads
-		if strings.TrimSpace(w.Body.String()) != string(model.AgreeToTerms) {
-			t.Fatalf("refusal body was %q, want the plain message %q with no status prefix",
-				strings.TrimSpace(w.Body.String()), model.AgreeToTerms)
-		}
-	})
+// Exercise the actual model -> controller -> unauthenticated HTTP wrapper.
+// Previously the controller turned unclassified refusal messages into Go
+// errors, so ordinary mistakes became 500s. Keep the established plain-text
+// error transport, not a success-shaped 200 with an error buried in JSON.
+func TestNetworkCreateExpectedRefusalsUseClientStatuses(t *testing.T) {
+	userAuth := "signup-status@example.invalid"
+	invalidAuth := "not-an-email-or-phone"
+	password := "synthetic-password-not-a-secret"
+	for _, test := range []struct {
+		name, message string
+		args          model.NetworkCreateArgs
+		status        int
+		seedUser      bool
+		seedNetwork   bool
+	}{
+		{name: "seedphrase-terms", message: model.AgreeToTerms, args: model.NetworkCreateArgs{}, status: http.StatusBadRequest},
+		{name: "email-terms", message: model.AgreeToTerms, args: model.NetworkCreateArgs{UserAuth: &userAuth}, status: http.StatusBadRequest},
+		{name: "name-syntax", message: "Network name must have at least 5 characters", args: model.NetworkCreateArgs{UserAuth: &userAuth, Terms: true, NetworkName: "x"}, status: http.StatusBadRequest},
+		{name: "invalid-contact", message: "Invalid email or phone number.", args: model.NetworkCreateArgs{UserAuth: &invalidAuth, Terms: true, NetworkName: "fresh-status-network"}, status: http.StatusBadRequest},
+		{name: "name-conflict", message: "Network name not available", args: model.NetworkCreateArgs{UserAuth: &userAuth, Terms: true, NetworkName: "occupied-status-network"}, status: http.StatusConflict, seedNetwork: true},
+		{name: "account-conflict", message: "Account might already exist. Please start over.", args: model.NetworkCreateArgs{UserAuth: &userAuth, Password: &password, Terms: true, NetworkName: "fresh-status-network"}, status: http.StatusConflict, seedUser: true},
+	} {
+		server.DefaultTestEnv().Run(t, func(t testing.TB) {
+			ctx := context.Background()
+			if test.seedUser || test.seedNetwork {
+				server.Tx(ctx, func(tx server.PgTx) {
+					if test.seedUser {
+						server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_user (user_id, user_name, auth_type, user_auth) VALUES ($1, 'synthetic', $2, $3)`, server.NewId(), model.AuthTypePassword, userAuth))
+					}
+					if test.seedNetwork {
+						server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network (network_id, network_name, admin_user_id) VALUES ($1, $2, $3)`, server.NewId(), test.args.NetworkName, server.NewId()))
+					}
+				})
+			}
+			before := model.CountNetworks(ctx)
+			w := httptest.NewRecorder()
+			NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, test.args))
+			if w.Code != test.status || strings.TrimSpace(w.Body.String()) != test.message {
+				t.Fatalf("%s refusal returned status=%d body=%q, want status=%d fixed message=%q", test.name, w.Code, strings.TrimSpace(w.Body.String()), test.status, test.message)
+			}
+			if !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") || w.Header().Get("Retry-After") != "" {
+				t.Fatal("ordinary refusal changed the error transport or acquired a retry hint")
+			}
+			if after := model.CountNetworks(ctx); after != before {
+				t.Fatal("a refused signup created a network")
+			}
+			for _, private := range []string{userAuth, password, "by_jwt", "seedphrase", "refusalStatus"} {
+				if strings.Contains(w.Body.String(), private) {
+					t.Fatal("refusal response included credentials, identity, or internal classification")
+				}
+			}
+		})
+	}
 }
 
-// Status-code coverage for the rest of /auth/network-create's refusals.
-//
-// The change that makes these possible is one line wide in effect -- the model
-// now prefixes its user-caused NetworkCreateResult.Error messages with the
-// router's "<code> " convention -- but it reaches EVERY signup branch: email,
-// phone, SSO, seedphrase and wallet. The blast radius is why the email and SSO
-// siblings are tested here alongside the wallet case, not just the wallet case
-// that prompted the work.
-//
-// Each test uses its own client address. The auth-attempt limiter is scoped to
-// the address and shared across everyone on it, so tests that make several
-// signup attempts would otherwise spend each other's budget.
-const (
-	statusTestWalletDupAddress        = "203.0.113.41:41011"
-	statusTestSsoMalformedAddress     = "203.0.113.42:41012"
-	statusTestEmailDupAddress         = "203.0.113.43:41013"
-	statusTestBadNameAddress          = "203.0.113.44:41014"
-	statusTestWalletMirrorlessAddress = "203.0.113.45:41015"
-)
+func TestNetworkCreateUnclassifiedFailureRemainsServerError(t *testing.T) {
+	for _, message := range []string{"Failed to generate network name.", "Account might already exist. Please log in again.", "synthetic internal creation failure", "invalid login", "Could not verify signed token.", "synthetic provider unavailable", "synthetic key-fetch failure"} {
+		w := httptest.NewRecorder()
+		impl := func(model.NetworkCreateArgs, *session.ClientSession) (*model.NetworkCreateResult, error) {
+			return nil, &model.NetworkCreateResultError{Message: message}
+		}
+		router.WrapWithInputNoAuth(impl, w, networkCreateRequest(t, statusTestClientAddress, model.NetworkCreateArgs{}))
+		if w.Code != http.StatusInternalServerError || strings.TrimSpace(w.Body.String()) != message {
+			t.Fatal("unclassified failure was inferred to be a client error from its text")
+		}
+	}
+}
+
+func TestNetworkCreateMalformedAuthShapesDoNotConsumeAttempts(t *testing.T) {
+	userAuth := "signup-shape@example.invalid"
+	password, token := "synthetic-password-not-a-secret", "synthetic-provider-token"
+	emptyToken, whitespaceToken := "", " \t\n"
+	google, unsupported := string(model.AuthTypeGoogle), "synthetic-unsupported-provider"
+	for _, test := range []struct {
+		name, message string
+		args          model.NetworkCreateArgs
+	}{
+		{name: "missing-password", message: "Password is required.", args: model.NetworkCreateArgs{UserAuth: &userAuth}},
+		{name: "missing-provider", message: "Authentication type is required.", args: model.NetworkCreateArgs{AuthJwt: &token}},
+		{name: "empty-token", message: "Authentication token is required.", args: model.NetworkCreateArgs{AuthJwt: &emptyToken, AuthJwtType: &google}},
+		{name: "whitespace-token", message: "Authentication token is required.", args: model.NetworkCreateArgs{AuthJwt: &whitespaceToken, AuthJwtType: &google}},
+		{name: "unsupported-provider", message: "Unsupported authentication type.", args: model.NetworkCreateArgs{AuthJwt: &token, AuthJwtType: &unsupported}},
+	} {
+		server.DefaultTestEnv().Run(t, func(t testing.TB) {
+			ctx := context.Background()
+			args := test.args
+			args.Terms, args.NetworkName = true, "fresh-shape-network"
+			before := model.CountNetworks(ctx)
+			// More malformed submissions than the entire budget must remain
+			// ordinary refusals, without reaching password hashing or a provider.
+			for i := 0; i <= model.AttemptFailedCountThreshold; i++ {
+				w := httptest.NewRecorder()
+				NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, args))
+				if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != test.message || w.Header().Get("Retry-After") != "" {
+					t.Fatalf("%s did not remain a fixed 400 refusal without a retry hint", test.name)
+				}
+				if !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
+					t.Fatal("malformed auth shape changed the established error transport")
+				}
+				for _, private := range []string{userAuth, password, token, unsupported, "refusalStatus", "by_jwt", "seedphrase"} {
+					if strings.Contains(w.Body.String(), private) {
+						t.Fatal("malformed auth refusal emitted identity, credentials, or internal status")
+					}
+				}
+			}
+			clientSession := session.NewLocalClientSession(ctx, statusTestClientAddress, nil)
+			defer clientSession.Cancel()
+			for i := 0; i < model.AttemptFailedCountThreshold; i++ {
+				if _, allow := model.UserAuthAttempt(args.UserAuth, clientSession); !allow {
+					t.Fatalf("%s spent auth budget before a valid attempt", test.name)
+				}
+			}
+			// Correcting the shape must preserve the existing exhausted-budget
+			// 429/Retry-After path. The synthetic token never reaches verification.
+			if args.UserAuth != nil {
+				args.Password = &password
+			} else {
+				args.AuthJwt, args.AuthJwtType = &token, &google
+			}
+			w := httptest.NewRecorder()
+			NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, args))
+			if w.Code != http.StatusTooManyRequests {
+				t.Fatalf("%s corrected exhausted request lost its 429 status", test.name)
+			}
+			assertRateLimitBody(t, w, test.name)
+			if model.CountNetworks(ctx) != before {
+				t.Fatal("malformed or rate-limited auth shape created a network")
+			}
+		})
+	}
+}
+
+func TestNetworkCreateOrphanCredentialsDoNotCreateSeedphraseOrConsumeBudget(t *testing.T) {
+	password, google := "synthetic-password-not-a-secret", string(model.AuthTypeGoogle)
+	for _, test := range []struct {
+		name, message string
+		args          model.NetworkCreateArgs
+	}{
+		{name: "orphan-password", message: "Email or phone number is required for password signup.", args: model.NetworkCreateArgs{Password: &password}},
+		{name: "orphan-provider", message: "Authentication token is required.", args: model.NetworkCreateArgs{AuthJwtType: &google}},
+	} {
+		server.DefaultTestEnv().Run(t, func(t testing.TB) {
+			ctx := context.Background()
+			before := model.CountNetworks(ctx)
+			args := test.args
+			w := httptest.NewRecorder()
+			NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, args))
+			if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != model.AgreeToTerms {
+				t.Fatal("orphan credential guard changed terms refusal precedence")
+			}
+			args.Terms = true
+			// No network name is needed: these must never enter the named-auth
+			// path or silently turn into random-name seedphrase creation.
+			for i := 0; i <= model.NetworkCreateDailyLimit; i++ {
+				w = httptest.NewRecorder()
+				NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, args))
+				if w.Code != http.StatusBadRequest || strings.TrimSpace(w.Body.String()) != test.message || w.Header().Get("Retry-After") != "" {
+					t.Fatalf("%s was not a fixed pre-selection 400 refusal", test.name)
+				}
+			}
+			if model.CountNetworks(ctx) != before {
+				t.Fatal("orphan credentials created an unintended seedphrase account")
+			}
+			clientSession := session.NewLocalClientSession(ctx, statusTestClientAddress, nil)
+			defer clientSession.Cancel()
+			for i := 0; i < model.NetworkCreateDailyLimit; i++ {
+				if err := model.CheckNetworkCreateRateLimit(ctx, clientSession); err != nil {
+					t.Fatal("orphan credentials consumed the seedphrase creation budget")
+				}
+			}
+			for i := 0; i < model.AttemptFailedCountThreshold; i++ {
+				if _, allow := model.UserAuthAttempt(nil, clientSession); !allow {
+					t.Fatal("orphan credentials consumed the shared authentication budget")
+				}
+			}
+			w = httptest.NewRecorder()
+			NetworkCreate(w, networkCreateRequest(t, statusTestClientAddress, model.NetworkCreateArgs{Terms: true}))
+			if w.Code != http.StatusTooManyRequests {
+				t.Fatal("valid exhausted seedphrase request lost its 429 status")
+			}
+			assertRateLimitBody(t, w, test.name)
+			if model.CountNetworks(ctx) != before {
+				t.Fatal("exhausted seedphrase request created an account")
+			}
+		})
+	}
+}
 
 // THE REGRESSION TEST FOR THE CONFIRMED DEFECT.
 //
@@ -301,131 +417,15 @@ func TestNetworkCreateDuplicateWalletAnswers409(t *testing.T) {
 	}
 }
 
-// WITNESS: fails on the base branch (500, not 400).
-//
-// Two ways an SSO signup falls past every branch and lands on NetworkCreate's
-// "invalid login" fallthrough:
-//   - auth_jwt present, auth_jwt_type absent -- the branch is guarded by `&&`
-//   - a token ParseAuthJwt cannot verify, which leaves authJwt nil and the
-//     branch has no else
-//
-// Both are ordinary client mistakes (an expired Apple token is the common one),
-// and both answered 500.
-func TestNetworkCreateMalformedSsoAnswers400(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		authJwt := "not-a-real-signed-sso-token"
-		authJwtType := "google"
-
-		cases := map[string]model.NetworkCreateArgs{
-			"auth_jwt with no type": {
-				AuthJwt:     &authJwt,
-				NetworkName: "ssobad-notype",
-				Terms:       true,
-			},
-			"unverifiable token": {
-				AuthJwt:     &authJwt,
-				AuthJwtType: &authJwtType,
-				NetworkName: "ssobad-badtoken",
-				Terms:       true,
-			},
-		}
-		for name, args := range cases {
-			w := httptest.NewRecorder()
-			NetworkCreate(w, networkCreateRequest(t, statusTestSsoMalformedAddress, args))
-			body := strings.TrimSpace(w.Body.String())
-			if w.Code == http.StatusInternalServerError {
-				t.Fatalf("%s: still answers 500 (%q)", name, body)
-			}
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("%s: HTTP %d (%q), want 400", name, w.Code, body)
-			}
-			if body != "invalid login" {
-				t.Fatalf("%s: body = %q, want the plain message with no status prefix", name, body)
-			}
-		}
-	})
-}
-
-// The shared-blast-radius siblings. The wallet fix is one change to a function
-// every signup path goes through, so the email and network-name branches are
-// asserted here to show the change is right for them too -- and that a server
-// fault is still a 5xx.
-//
-// WITNESS: both fail on the base branch (500).
-func TestNetworkCreateUserInputRefusalsCarryClientStatuses(t *testing.T) {
-	t.Run("duplicate email answers 409", func(t *testing.T) {
-		server.DefaultTestEnv().Run(t, func(t testing.TB) {
-			userAuth := "networkcreate-dup@example.com"
-			password := "SomeValidPassword123!"
-
-			w := httptest.NewRecorder()
-			NetworkCreate(w, networkCreateRequest(t, statusTestEmailDupAddress, model.NetworkCreateArgs{
-				UserAuth:    &userAuth,
-				Password:    &password,
-				NetworkName: "emaildup-first",
-				Terms:       true,
-			}))
-			if w.Code != http.StatusOK {
-				t.Fatalf("first email signup: HTTP %d (%q)", w.Code, strings.TrimSpace(w.Body.String()))
-			}
-
-			// the same address, a DIFFERENT network name (see the note on the
-			// wallet test: name-taken is also a 409 and sits above this)
-			w = httptest.NewRecorder()
-			NetworkCreate(w, networkCreateRequest(t, statusTestEmailDupAddress, model.NetworkCreateArgs{
-				UserAuth:    &userAuth,
-				Password:    &password,
-				NetworkName: "emaildup-second",
-				Terms:       true,
-			}))
-			body := strings.TrimSpace(w.Body.String())
-			if w.Code == http.StatusInternalServerError {
-				t.Fatalf("a duplicate email signup still answers 500 (%q)", body)
-			}
-			if w.Code != http.StatusConflict {
-				t.Fatalf("HTTP %d (%q), want 409", w.Code, body)
-			}
-			if body != "Account might already exist. Please start over." {
-				t.Fatalf("body = %q, want the duplicate-account message", body)
-			}
-		})
-	})
-
-	t.Run("bad network name answers 400", func(t *testing.T) {
-		server.DefaultTestEnv().Run(t, func(t testing.TB) {
-			userAuth := "networkcreate-badname@example.com"
-			password := "SomeValidPassword123!"
-
-			w := httptest.NewRecorder()
-			NetworkCreate(w, networkCreateRequest(t, statusTestBadNameAddress, model.NetworkCreateArgs{
-				UserAuth:    &userAuth,
-				Password:    &password,
-				NetworkName: "ab", // below the 5 character minimum
-				Terms:       true,
-			}))
-			body := strings.TrimSpace(w.Body.String())
-			if w.Code == http.StatusInternalServerError {
-				t.Fatalf("a too-short network name still answers 500 (%q)", body)
-			}
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("HTTP %d (%q), want 400", w.Code, body)
-			}
-			if body != "Network name must have at least 5 characters" {
-				t.Fatalf("body = %q, want the validation message with no status prefix", body)
-			}
-		})
-	})
-}
-
 // The OTHER duplicate-wallet path, which the test above cannot reach.
 //
 // networkCreateWalletAuth has two conflict checks. The ordinary duplicate is
 // caught by the network_user.wallet_address pre-check and answers through
 // NetworkCreate's Created==false branch. This one -- a binding in
 // network_user_auth_wallet whose mirror column was never set -- is caught by
-// the second check and answers through the `err` return instead, a completely
-// different line with its own message literal. Prefixing one and not the other
-// leaves this path answering 500 while the test above goes green.
+// the second check and carries a different message. Both checks must attach
+// the explicit private 409 classification; classifying only the ordinary path
+// leaves this divergent row shape answering 500 while the first test goes green.
 //
 // The state is not reachable through today's writers (they keep the two tables
 // in step), so it is constructed directly, the same way

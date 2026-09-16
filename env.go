@@ -59,6 +59,17 @@ var Vault = NewResolver(MOUNT_TYPE_VAULT)
 var Config = NewResolver(MOUNT_TYPE_CONFIG)
 var Site = NewResolver(MOUNT_TYPE_SITE)
 
+var (
+	// ErrResourceNotFound identifies a resource that is genuinely absent from
+	// every configured home. Optional-resource callers may explicitly noop on
+	// this error without also swallowing permission, I/O, or shape failures.
+	ErrResourceNotFound = errors.New("resource not found")
+	// ErrResourceUnavailable identifies a resource lookup that could not prove
+	// absence because a candidate path or version directory was inaccessible or
+	// had an invalid filesystem shape.
+	ErrResourceUnavailable = errors.New("resource unavailable")
+)
+
 var DefaultWarpHome = "/srv/warp"
 
 func init() {
@@ -159,23 +170,64 @@ func SiteHomes() []string {
 }
 
 func resolveMultiHome(root string) []string {
-	// always search the literal dir first
-	paths := []string{root}
+	observations := resolveMultiHomeObserved(root)
+	paths := make([]string, 0, len(observations))
+	for index, observation := range observations {
+		// Preserve the historical public shape: the literal root is always
+		// returned, while invalid optional environment/all homes are omitted.
+		if index == 0 || observation.err == nil {
+			paths = append(paths, observation.path)
+		}
+	}
+	return paths
+}
 
-	if env, err := Env(); err == nil {
-		envPath := filepath.Join(root, env)
-		if info, err := os.Stat(envPath); err == nil && info.Mode().IsDir() {
-			paths = append(paths, envPath)
+type resolverHomeObservation struct {
+	path string
+	err  error
+}
+
+func resolveMultiHomeObserved(root string) []resolverHomeObservation {
+	// always search the literal dir first
+	observations := []resolverHomeObservation{{path: root}}
+	if info, err := os.Stat(root); err == nil {
+		if !info.Mode().IsDir() {
+			observations[0].err = fmt.Errorf("%w: %s is not a directory", ErrResourceUnavailable, root)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if _, linkErr := os.Lstat(root); linkErr == nil {
+			observations[0].err = fmt.Errorf("%w: %s is a dangling filesystem entry", ErrResourceUnavailable, root)
+		} else if !errors.Is(linkErr, os.ErrNotExist) {
+			observations[0].err = fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, root, linkErr)
+		}
+	} else {
+		observations[0].err = fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, root, err)
+	}
+	appendDirectory := func(path string) {
+		if info, err := os.Stat(path); err == nil {
+			if info.Mode().IsDir() {
+				observations = append(observations, resolverHomeObservation{path: path})
+			} else {
+				observations = append(observations, resolverHomeObservation{path: path, err: fmt.Errorf("%w: %s is not a directory", ErrResourceUnavailable, path)})
+			}
+		} else if errors.Is(err, os.ErrNotExist) {
+			if _, linkErr := os.Lstat(path); linkErr == nil {
+				observations = append(observations, resolverHomeObservation{path: path, err: fmt.Errorf("%w: %s is a dangling filesystem entry", ErrResourceUnavailable, path)})
+			} else if !errors.Is(linkErr, os.ErrNotExist) {
+				observations = append(observations, resolverHomeObservation{path: path, err: fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, path, linkErr)})
+			}
+		} else {
+			observations = append(observations, resolverHomeObservation{path: path, err: fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, path, err)})
 		}
 	}
 
-	// allow an all path even if there is not an active env
-	allPath := filepath.Join(root, "all")
-	if info, err := os.Stat(allPath); err == nil && info.Mode().IsDir() {
-		paths = append(paths, allPath)
+	if env, err := Env(); err == nil {
+		appendDirectory(filepath.Join(root, env))
 	}
 
-	return paths
+	// allow an all path even if there is not an active env
+	appendDirectory(filepath.Join(root, "all"))
+	return observations
 }
 
 func Host() (string, error) {
@@ -473,23 +525,35 @@ func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
 		panic("Resource path must be relative.")
 	}
 
-	var homes []string
+	var homes []resolverHomeObservation
 	switch self.mountType {
 	case MOUNT_TYPE_VAULT:
-		homes = VaultHomes()
+		homes = resolveMultiHomeObserved(VaultHomeRoot())
 	case MOUNT_TYPE_CONFIG:
-		homes = ConfigHomes()
+		homes = resolveMultiHomeObserved(ConfigHomeRoot())
 	case MOUNT_TYPE_SITE:
-		homes = SiteHomes()
+		homes = resolveMultiHomeObserved(SiteHomeRoot())
 	default:
 		panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
 	}
 
 	paths := []string{}
+	lookupErrs := []error{}
+	recordError := func(err error) {
+		if err != nil && !errors.Is(err, ErrResourceNotFound) && len(paths) == 0 {
+			lookupErrs = append(lookupErrs, err)
+		}
+	}
 
 	for _, home := range homes {
-		path := filepath.Join(home, relPath)
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if home.err != nil {
+			recordError(home.err)
+			continue
+		}
+		path := filepath.Join(home.path, relPath)
+		if exists, err := regularResourcePath(path); err != nil {
+			recordError(err)
+		} else if exists {
 			paths = append(paths, path)
 		}
 	}
@@ -497,16 +561,43 @@ func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
 	// try versioned directories
 	// at each directory level, look for <dir>/<version>, and iterate them in descending order
 	for _, home := range homes {
-		if versionedPaths, err := versionLookup(home, strings.Split(relPath, "/")); err == nil {
+		if home.err != nil {
+			recordError(home.err)
+			continue
+		}
+		if versionedPaths, err := versionLookup(home.path, strings.Split(relPath, "/")); err == nil {
 			paths = append(paths, versionedPaths...)
+		} else {
+			recordError(err)
 		}
 	}
 
+	if len(lookupErrs) != 0 {
+		return nil, errors.Join(lookupErrs...)
+	}
 	if len(paths) == 0 {
-		return nil, errors.New(fmt.Sprintf("Resource not found in %s (%s)", self.mountType, relPath))
+		return nil, fmt.Errorf("%w in %s (%s)", ErrResourceNotFound, self.mountType, relPath)
 	}
 
 	return paths, nil
+}
+
+func regularResourcePath(path string) (bool, error) {
+	if info, err := os.Stat(path); err == nil {
+		if info.Mode().IsRegular() {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: %s is not a regular file", ErrResourceUnavailable, path)
+	} else if errors.Is(err, os.ErrNotExist) {
+		if _, linkErr := os.Lstat(path); linkErr == nil {
+			return false, fmt.Errorf("%w: %s is a dangling filesystem entry", ErrResourceUnavailable, path)
+		} else if !errors.Is(linkErr, os.ErrNotExist) {
+			return false, fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, path, linkErr)
+		}
+		return false, nil
+	} else {
+		return false, fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, path, err)
+	}
 }
 
 func (self *Resolver) RequirePath(relPath string) string {
@@ -770,50 +861,93 @@ func versionLookup(root string, path []string) (returnPaths []string, returnErr 
 	glog.Infof("[env]try %s, %s\n", root, path)
 
 	if len(path) == 0 {
-		returnErr = errors.New("Empty path")
+		returnErr = fmt.Errorf("%w: empty resource path", ErrResourceUnavailable)
 		return
+	}
+	lookupErrs := []error{}
+	recordError := func(err error) {
+		if err != nil && !errors.Is(err, ErrResourceNotFound) && len(returnPaths) == 0 {
+			lookupErrs = append(lookupErrs, err)
+		}
 	}
 	if len(path) == 1 {
 		versionedPath := filepath.Join(root, path[0])
-		if info, err := os.Stat(versionedPath); err == nil && info.Mode().IsRegular() {
+		if exists, err := regularResourcePath(versionedPath); err != nil {
+			recordError(err)
+		} else if exists {
 			returnPaths = append(returnPaths, versionedPath)
 		}
-		//  else {
-		//     return "", errors.New("Not found.")
-		// }
 	}
 
 	if 1 < len(path) {
 		// the versioned version takes precedence
 		if versionedPaths, err := versionLookup(filepath.Join(root, path[0]), path[1:]); err == nil {
 			returnPaths = append(returnPaths, versionedPaths...)
+		} else {
+			recordError(err)
 		}
 	}
 
-	versionNames := map[semver.Version]string{}
+	type versionRootObservation struct {
+		name string
+		err  error
+	}
+	versionRoots := map[semver.Version]versionRootObservation{}
 	if entries, err := os.ReadDir(root); err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() {
-				if version, err := semver.NewVersion(entry.Name()); err == nil {
-					versionNames[*version] = entry.Name()
-				}
+			version, versionErr := semver.NewVersion(entry.Name())
+			if versionErr != nil {
+				continue
 			}
+			versionedRoot := filepath.Join(root, entry.Name())
+			observation := versionRootObservation{name: entry.Name()}
+			// Version-directory symlinks were not traversed by the original
+			// DirEntry.IsDir contract. Keep that boundary explicit: following a
+			// semver symlink can create recursive/cyclic version graphs.
+			if info, statErr := os.Lstat(versionedRoot); statErr == nil {
+				if !info.Mode().IsDir() {
+					observation.err = fmt.Errorf("%w: %s is not a directory", ErrResourceUnavailable, versionedRoot)
+				}
+			} else if errors.Is(statErr, os.ErrNotExist) {
+				observation.err = fmt.Errorf("%w: %s disappeared during lookup", ErrResourceUnavailable, versionedRoot)
+			} else {
+				observation.err = fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, versionedRoot, statErr)
+			}
+			versionRoots[*version] = observation
 		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if _, linkErr := os.Lstat(root); linkErr == nil {
+			recordError(fmt.Errorf("%w: %s is a dangling filesystem entry", ErrResourceUnavailable, root))
+		} else if !errors.Is(linkErr, os.ErrNotExist) {
+			recordError(fmt.Errorf("%w: inspect %s: %w", ErrResourceUnavailable, root, linkErr))
+		}
+	} else {
+		recordError(fmt.Errorf("%w: list %s: %w", ErrResourceUnavailable, root, err))
 	}
-	versions := slices.Collect(maps.Keys(versionNames))
+	versions := slices.Collect(maps.Keys(versionRoots))
 	semverSortWithBuild(versions)
 	for i := len(versions) - 1; 0 <= i; i -= 1 {
-		versionedRoot := filepath.Join(root, versionNames[versions[i]])
+		observation := versionRoots[versions[i]]
+		versionedRoot := filepath.Join(root, observation.name)
 		glog.Infof("[env]test %s, %s\n", versionedRoot, path)
-		if info, err := os.Stat(versionedRoot); err == nil && info.Mode().IsDir() {
-			if versionedPaths, err := versionLookup(versionedRoot, path); err == nil {
-				returnPaths = append(returnPaths, versionedPaths...)
-			}
+		if observation.err != nil {
+			recordError(observation.err)
+			continue
+		}
+		if versionedPaths, err := versionLookup(versionedRoot, path); err == nil {
+			returnPaths = append(returnPaths, versionedPaths...)
+		} else {
+			recordError(err)
 		}
 	}
 
+	if len(lookupErrs) != 0 {
+		returnErr = errors.Join(lookupErrs...)
+		returnPaths = nil
+		return
+	}
 	if len(returnPaths) == 0 {
-		returnErr = errors.New("Not found.")
+		returnErr = fmt.Errorf("%w under %s (%s)", ErrResourceNotFound, root, strings.Join(path, "/"))
 		return
 	}
 

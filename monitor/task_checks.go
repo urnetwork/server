@@ -471,6 +471,9 @@ const taskFailureSummarySQL = `
 		       left(coalesce(reschedule_error,''),160) AS last_error,
 		       run_max_time_seconds,
 		       CASE
+		         WHEN split_part(function_name,'.',3) = 'AdvancePayment'
+		           AND lower(coalesce(reschedule_error,'')) LIKE '%; invalid destination reset error = %'
+		           THEN 'invalid-destination-reset-failed'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%statement timeout%'
 		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 57014%'
 		           THEN 'postgres-statement-timeout'
@@ -580,9 +583,12 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 	add("connection-cleanup-deadline",
 		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
 		"the legacy retention query and new 120-second cleanup failures disappear")
+	add("invalid-destination-reset-failed",
+		"investigate the guarded attempt reset for invalid-destination-reset-failed rows: distinguish concurrent, terminal, or on-chain payment state from a persistence failure; preserve the existing idempotency key and reconcile the outcome before any new submission; do not infer unchanged wallet configuration or manually clear payment rows or keys",
+		"the guarded reset succeeds when eligible or the existing attempt reaches a reconciled terminal outcome, invalid-destination-reset-failed clears, and ambiguous submissions retain their keys without duplicate transfers")
 	add("processor-invalid-destination",
-		"verify typed-reset commit b8af229f in every active taskworker artifact and deploy it only to blocks whose artifact predates it; on already-current blocks, repeated rejection means the invalid configured wallet is still selected, so correct chain-mismatched payout wallets through the supported account API; never clear payment rows or keys manually",
-		"every active taskworker contains typed-reset commit b8af229f, the next retry selects the corrected wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination clears")
+		"verify typed-reset commit b8af229f in every active taskworker artifact and deploy it only to blocks whose artifact predates it; confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection before attributing recurrence to unchanged wallet configuration; correct a proven chain-mismatched payout wallet through the supported account API; never clear payment rows or keys manually",
+		"every active taskworker contains typed-reset commit b8af229f, a confirmed safe reset lets the next retry select the corrected wallet with a fresh key, it completes without a duplicate transfer, and processor-invalid-destination clears")
 	add("processor-bad-request",
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
@@ -913,6 +919,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		lastError, maxTimeSeconds := r.str(6), r.str(7)
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		lastErrorClass := representativeTaskErrorClass(task, lastError, causeClassCount, causeSummary)
+		invalidDestinationResetFailed := task == "AdvancePayment" && lastErrorClass == taskErrorClassInvalidDestinationResetFailed
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
 		closeExpiredAlreadySettled := task == "CloseExpiredContracts" &&
@@ -943,7 +950,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		alertContext := "Each task function is grouped before reporting; another noisy function cannot consume a global row limit and hide this failure. Parked and fresh-claim counts are independent predicates and can overlap briefly during reschedule handoff; do not add them together."
 		if strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertContext += fmt.Sprintf(" This literal Timeout is the task evaluator's configured deadline of %ss. Compare the matching eval-error duration; an exact match means the task needs a smaller checkpointed batch or a justified task-specific MaxTime, not a database restart.", maxTimeSeconds)
-		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline && !clockBackfillDeadline {
+		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline && !clockBackfillDeadline && !invalidDestinationResetFailed {
 			alertContext += fmt.Sprintf(" This is a non-drain context cancellation with a configured task deadline of %ss; compare the taskworker eval-error duration with that deadline. An exact match identifies an undersized task-specific MaxTime, not a deploy drain.", maxTimeSeconds)
 		}
 		if mixedCauses {
@@ -955,6 +962,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				alertAction = "Investigate and remediate each listed cause class independently; do not apply the private representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 			}
+		} else if invalidDestinationResetFailed {
+			alertMechanism = "AdvancePayment reported an invalid-destination rejection followed by a failed guarded attempt reset. The reset can fail because payment state became terminal or on-chain, because another attempt changed it, or because persistence failed. The original rejection does not prove that the configured wallet remains unchanged or that the idempotency key was released."
+			alertAction = "Inspect the guarded reset and current payment state privately: distinguish concurrent, terminal, or on-chain state from a persistence failure, and reconcile any existing processor attempt before a new submission. Preserve the existing idempotency key. Do not infer unchanged wallet configuration, change wallet data solely from this class, manually release an attempt, or clear payment/task rows."
+			alertVerify = "The guarded reset succeeds only for an eligible pre-chain attempt, or the existing attempt reaches a reconciled terminal outcome. The reset-failed cohort clears on natural retries without duplicate transfers; keys remain stable for ambiguous submissions. Observe the normal 30–90-minute retry window plus ingestion delay after the authorized correction."
+			alertPlaybook = "SIGNALS.md §1.2 and §5.7"
 		} else if closeExpiredAlreadySettled {
 			alertMechanism = "CloseExpiredContracts selected an open snapshot immediately before a live or concurrent close settled the same contract. The sweep then observed the exact already-terminal settled outcome. That is successful convergence, not malformed escrow and not a conflicting terminal result."
 			alertContext += " Current source distinguishes this exact settled duplicate, skips quarantine, and clears it only after the existing terminal-row verification and Redis stream cleanup both succeed. Other close errors and other terminal outcomes remain failures."
@@ -1009,10 +1021,10 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertMechanism = "The external payout wallet does not own enough of the requested asset to fund pending payouts. Task retries cannot create that balance; repeated HTTP 400 responses only move the rows through backoff."
 			alertAction = "Finance/operations must fund the named payout wallet with the required asset, or explicitly pause payouts. Do not treat this as an API, PostgreSQL, or Redis availability incident."
 			alertVerify = "After funding, AdvancePayment retries succeed and the family count converges to zero without manual row deletion."
-		} else if task == "AdvancePayment" && strings.Contains(lowerError, "invalid destination address") {
-			alertMechanism = "The payout wallet address is invalid for its declared chain. A pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC, then Circle definitively rejects the destination before creating a transfer. The current taskworker clears only that typed pre-chain attempt automatically; if the configured payout wallet is not corrected, UpdatePaymentWallet selects the same invalid wallet on the next retry and the row persists on its one-hour-mean backoff. Saturated retries are dispersed across 30–90 minutes after the proportional-jitter taskworker is deployed."
-			alertAction = "Correct the network's payout wallet through the supported account API. Do not manually release the attempt, edit payment rows, or rotate idempotency keys: the current taskworker already releases this exact typed rejection while preserving keys for transport errors, rate limits, and ambiguous submits."
-			alertVerify = "The next retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero after at most 90 minutes plus ingestion delay."
+		} else if task == "AdvancePayment" && lastErrorClass == taskErrorClassProcessorInvalidDestination {
+			alertMechanism = "The stored task error reports an invalid payout destination. Historically, a pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC, invalid for its declared chain. A typed definitive pre-chain rejection permits the guarded attempt reset; after a successful reset, an unchanged payout-wallet selection repeats the failure on its one-hour-mean backoff. Saturated retries are dispersed across 30–90 minutes after the proportional-jitter taskworker is deployed. This text class alone does not prove typed status, successful reset, or current wallet selection."
+			alertAction = "Verify typed-reset commit b8af229f in every active artifact, then confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection. Correct a proven chain-mismatched payout wallet through the supported account API. Do not manually release the attempt, edit payment rows, or rotate idempotency keys; retain the reset's safety guard while preserving keys for transport errors, rate limits, and ambiguous submits."
+			alertVerify = "After a confirmed safe reset and authorized wallet correction, the next retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero after at most 90 minutes plus ingestion delay."
 		}
 		symptom := fmt.Sprintf("task family %s has %d failing row(s) on %s (%d parked >5m; %d with a fresh claim heartbeat; sets may overlap)",
 			task, familyCount, target, parkedCount, freshClaimCount)

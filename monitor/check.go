@@ -111,9 +111,9 @@ func cannotObserveFinding(target string, err error) finding {
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",
 		observed:  "error_class=" + errorClass,
-		action:    "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident.",
+		action:    observationFailureAction(errorClass, "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident."),
 		verify:    "The same target returns a concrete healthy or broken observation on the next run.",
-		playbook:  "MONITOR.md §3.6",
+		playbook:  "SIGNALS.md §1.7 and MONITOR.md §3.6",
 	}
 }
 

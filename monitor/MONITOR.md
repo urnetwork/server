@@ -329,7 +329,9 @@ The current CLI supplies this handler to `RunLoop`, skips empty batches, and
 writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
-current CLI capabilities; additional sinks remain deferred.
+current CLI capabilities; additional sinks remain deferred. The fixed-schema
+`monitor-log-reconcile ` diagnostic receipt described below is bounded
+collector evidence, not an Alert, ticket event, or all-probes heartbeat.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
@@ -361,7 +363,37 @@ misses). Tailer self-health: a tailer that exits or goes silent while its
 service is running restarts with backoff and raises `monitor/visibility`
 if it cannot stay up. Failed, stale, or truncated reconciliation raises the
 independent `tailer-reconcile` visibility class, because a connected process
-does not prove complete contents. The separate `loki-tail-backend-eof` class
+does not prove complete contents. Producer-declared timestamp skipping also
+fails every aggregate, block, or continuation page, even when the query exits
+zero below the requested cap; the fixed diagnostic resets completion proof
+without retaining the producer's timestamp, count, or block selector.
+
+Every standing-log cadence also writes one line to retained stderr: the exact
+prefix `monitor-log-reconcile ` followed by a schema-1 JSON object. It contains
+`schema`, `observed_at`, integer `collectors`, `enabled`, `fresh`, and
+`consecutive_two`, plus five `{oldest,newest}` UTC timestamp ranges:
+`collector_started_at`, `previous_window_start`, `latest_window_start`,
+`previous_completed_at`, and `latest_completed_at`. Missing range endpoints
+are JSON null. No service, block, host, label, content, or raw error is emitted.
+Only two successful query receipts per collector remain in memory; failures,
+incomplete queries, and cancellation clear the pair. Both query lower bounds
+and completions must advance, with less than 90 seconds between completions;
+latest completions must be no more than the current observation time and less
+than 90 seconds old. Repeated snapshots cannot create another success.
+
+For two-window closure, bind the receipt to the current watcher generation's
+immutable binary/session/stderr artifact and intended collector inventory.
+Require `collectors=enabled=fresh=consecutive_two > 0`, valid ordered ranges,
+and starts/completions meeting the incident's post-boundary window. Collector
+start ranges bind the process-local history; never combine predecessor and
+candidate receipts. These are query lower bounds and local completions, not
+source-record timestamps or proof that live tails are connected. Require
+independent fresh-source controls and the signal's no-loss observation window
+as well. Missing, malformed, stale, partial-scope, or unwritten receipts leave
+completion unknown; alert absence alone is insufficient. Diagnostic sink
+failure is nonfatal and never changes findings or manufactures an Alert.
+
+The separate `loki-tail-backend-eof` class
 matches only the internal tail-querier's unquoted EOF; client-driven
 `context canceled` during deliberate watcher retirement is excluded.
 Escalation batteries pull incident windows non-interactively with

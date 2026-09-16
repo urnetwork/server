@@ -40,7 +40,7 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Terra and Sol may prepare manifests; they do not append",
+		"Terra and Astra may prepare manifests; they do not append",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -48,6 +48,22 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	}
 	if strings.Contains(documentation, "The ledger has one writer: the long-lived Terra runner") {
 		t.Fatal("RUN-MAIN.md assigns the primary ledger to Terra")
+	}
+}
+
+func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution",
+		"A `gpt-6-astra` agent at `max` reasoning owns diagnosis and repair",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md does not retain %q", required)
+		}
+	}
+	if strings.Contains(documentation, "gpt-5.6-sol") {
+		t.Fatal("RUN-MAIN.md still assigns the diagnosis role to Sol")
 	}
 }
 
@@ -89,6 +105,28 @@ func TestMonitorDocumentationDistinguishesActiveAlertsFromLegacyEvents(t *testin
 			if !strings.Contains(documentation, required) {
 				t.Errorf("%s does not distinguish the current output contract: missing %q", path, required)
 			}
+		}
+	}
+}
+
+func TestRunMainRequiresRetainedReconciliationReceipts(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"`monitor-log-reconcile `",
+		"schema-1 JSON from the current watcher generation's stderr artifact",
+		"collectors=enabled=fresh=consecutive_two > 0",
+		"collector_started_at",
+		"previous_window_start",
+		"latest_window_start",
+		"previous_completed_at",
+		"latest_completed_at",
+		"never combine predecessor and candidate histories",
+		"alert absence alone is insufficient",
+		"does not change alert-only JSONL",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md lost reconciliation evidence contract %q", required)
 		}
 	}
 }

@@ -2,11 +2,150 @@ package monitor
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func syntheticProcessExit(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != code {
+		t.Fatalf("synthetic process did not supply native exit status %d", code)
+	}
+	return err
+}
+
+func TestSSHNativeExitStatusPreservesVisibilityAndPrivacy(t *testing.T) {
+	exit255 := syntheticProcessExit(t, 255)
+	exit1 := syntheticProcessExit(t, 1)
+	const privateText = "private-token address=192.0.2.91 task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	for _, testCase := range []struct {
+		name   string
+		err    error
+		stderr string
+		want   string
+	}{
+		{name: "native-ssh-255", err: exit255, stderr: "ssh: connect to host 192.0.2.91 port 22: No route to host", want: observationErrorClassSSHExit255},
+		{name: "native-255-without-reason-is-not-localized", err: exit255, want: observationErrorClassSSHExit255},
+		{name: "wrapped-native-255", err: fmt.Errorf("wrapped: %w", exit255), want: observationErrorClassSSHExit255},
+		{name: "remote-command-1", err: exit1, want: observationErrorClassCommandFailed},
+		{name: "remote-command-1-with-255-looking-text", err: exit1, stderr: "exit status 255", want: observationErrorClassCommandFailed},
+		{name: "status-looking-error-is-not-native", err: errors.New("exit status 255"), want: observationErrorClassCommandFailed},
+		{name: "authentication-keeps-specific-class", err: exit255, stderr: "Permission denied (publickey)", want: observationErrorClassAccessDenied},
+		{name: "timeout-keeps-specific-class", err: exit255, stderr: "connection timeout", want: observationErrorClassTimeout},
+		{name: "successful-command-with-hostile-stderr", stderr: "exit status 255"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := &monitorConfig{
+				addressMode:       addressModeOverlay,
+				sshConnectTimeout: time.Second, commandTimeout: time.Second,
+			}
+			runner := newRunner(cfg)
+			runner.runSSH = func(context.Context, []string, string) (string, string, error) {
+				return "synthetic observation", testCase.stderr + " " + privateText, testCase.err
+			}
+			output, err := runner.shell(context.Background(), &host{name: "edge", overlayIp: "192.0.2.91"}, "true")
+			if output != "synthetic observation" {
+				t.Fatal("SSH error wrapping discarded the existing stdout contract")
+			}
+			if testCase.want == "" {
+				if err != nil {
+					t.Fatal("successful command stderr manufactured an SSH failure")
+				}
+				return
+			}
+			if got := classifyObservationError(err); got != testCase.want {
+				t.Fatalf("error_class=%s, want %s", got, testCase.want)
+			}
+			if !errors.Is(err, testCase.err) {
+				t.Fatal("typed SSH wrapper lost the original execution error")
+			}
+			settings := syntheticSettings(&syntheticSource{})
+			signal := NewMigrationsSignal()
+			wholeSignal := visibilityAlert(settings, signal, err)
+			perTarget := alertFromFinding(settings, signal.Number(), signal.Key(), signal.Name(), cannotObserveFinding("edge/observation", err))
+			for _, alert := range []Alert{wholeSignal, perTarget} {
+				if alert.Class != "cannot-observe" || alert.Severity != SeverityWarn ||
+					alert.Sustain != 2 || alert.Observed != "error_class="+testCase.want {
+					t.Fatal("SSH taxonomy changed or suppressed the existing visibility alert")
+				}
+				requireAlertOmits(t, alert, privateText, "192.0.2.91", "aaaaaaaa-aaaa", "No route to host", "exit status 255")
+				if testCase.want == observationErrorClassSSHExit255 {
+					for _, discriminator := range []string{"remote command", "independent targets", "observer route", "intended VPN-session evidence before attributing"} {
+						if !strings.Contains(alert.Action, discriminator) {
+							t.Fatalf("SSH exit 255 action lost the %q discriminator", discriminator)
+						}
+					}
+				}
+			}
+			generic := visibilityAlert(settings, signal, errors.New("exit status 1"))
+			if wholeSignal.Identity() != generic.Identity() || perTarget.Target != "edge/observation" {
+				t.Fatal("SSH taxonomy changed per-signal or per-target visibility identity")
+			}
+			if testCase.want == observationErrorClassSSHExit255 &&
+				(strings.Contains(wholeSignal.Mechanism, "VPN") || strings.Contains(wholeSignal.Mechanism, "local route")) {
+				t.Fatal("SSH exit 255 alone attributed a workstation transport cause")
+			}
+		})
+	}
+}
+
+func TestSSHParentCancellationOverridesChildExitStatus(t *testing.T) {
+	exit255 := syntheticProcessExit(t, 255)
+	for _, childErr := range []error{exit255, nil} {
+		ctx, cancel := context.WithCancel(context.Background())
+		runner := newRunner(&monitorConfig{addressMode: addressModeOverlay, commandTimeout: time.Minute})
+		runner.runSSH = func(context.Context, []string, string) (string, string, error) {
+			cancel()
+			return "partial observation", "private child stderr", childErr
+		}
+		output, err := runner.shell(ctx, &host{name: "edge", overlayIp: "192.0.2.91"}, "true")
+		cancel()
+		if !errors.Is(err, context.Canceled) || classifyObservationError(err) != observationErrorClassCanceled {
+			t.Fatal("authoritative cancellation became an SSH or command failure")
+		}
+		if output != "partial observation" {
+			t.Fatal("cancellation changed partial stdout ownership")
+		}
+		if len(runner.remoteCommands.hostSlots("192.0.2.91")) != 0 {
+			t.Fatal("canceled SSH command retained its admission slot")
+		}
+	}
+}
+
+func TestSSHPreCanceledContextDoesNotInvokeChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner := newRunner(&monitorConfig{addressMode: addressModeOverlay})
+	runner.runSSH = func(context.Context, []string, string) (string, string, error) {
+		t.Fatal("pre-canceled SSH command invoked its child")
+		return "", "", nil
+	}
+	_, err := runner.shell(ctx, &host{name: "edge"}, "true")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("pre-canceled context was replaced by missing-address evidence")
+	}
+}
+
+func TestSSHChildDeadlineRemainsTimeoutWithLiveParent(t *testing.T) {
+	exit255 := syntheticProcessExit(t, 255)
+	runner := newRunner(&monitorConfig{addressMode: addressModeOverlay, commandTimeout: time.Nanosecond})
+	runner.runSSH = func(ctx context.Context, _ []string, _ string) (string, string, error) {
+		<-ctx.Done()
+		return "", "private child stderr", exit255
+	}
+	_, err := runner.shell(context.Background(), &host{name: "edge", overlayIp: "192.0.2.91"}, "true")
+	var unreachable *unreachableError
+	if !errors.As(err, &unreachable) || classifyObservationError(err) != observationErrorClassTimeout {
+		t.Fatal("per-command deadline lost the existing timeout semantics")
+	}
+}
 
 // PostgreSQL text may contain every former line and pipe delimiter. The psql
 // CSV contract must retain it in one cell instead of manufacturing rows.
@@ -207,8 +346,8 @@ func TestSSHCommandsSharePerHostLimitAcrossProbeEnvironments(t *testing.T) {
 	cancelBlocked()
 	select {
 	case err := <-blockedDone:
-		if err == nil {
-			t.Fatal("canceled command-slot wait returned no error")
+		if !errors.Is(err, context.Canceled) || classifyObservationError(err) != observationErrorClassCanceled {
+			t.Fatal("canceled command-slot wait lost authoritative cancellation")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled command-slot wait did not return")

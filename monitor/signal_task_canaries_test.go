@@ -892,7 +892,7 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"queued, cursor-batched CompletePayment retention path",
 		"verify typed-reset commit b8af229f in every active taskworker artifact",
 		"deploy it only to blocks whose artifact predates it",
-		"on already-current blocks, repeated rejection means the invalid configured wallet is still selected",
+		"confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection",
 		"every active taskworker contains typed-reset commit b8af229f",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
@@ -1000,9 +1000,9 @@ func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
 	for _, want := range []string{
 		"invalid for its declared chain",
 		"pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC",
-		"definitively rejects the destination before creating a transfer",
-		"current taskworker clears only that typed pre-chain attempt automatically",
-		"same invalid wallet on the next retry",
+		"A typed definitive pre-chain rejection permits the guarded attempt reset",
+		"after a successful reset, an unchanged payout-wallet selection repeats the failure",
+		"This text class alone does not prove typed status, successful reset, or current wallet selection",
 		"one-hour-mean backoff",
 		"dispersed across 30–90 minutes",
 		"through the supported account API",
@@ -1015,6 +1015,77 @@ func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
 			t.Fatalf("invalid-destination alert missing %q:\n%s", want, markdown)
 		}
 	}
+	if strings.Contains(markdown, "representative_error_class=invalid-destination-reset-failed") {
+		t.Fatalf("ordinary invalid destination was misclassified as a reset failure:\n%s", markdown)
+	}
+}
+
+func TestTaskCanariesSignalExplainsInvalidDestinationResetFailureFromFullClass(t *testing.T) {
+	const privateId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	// The SQL-owned full-text class survives a representative truncated before
+	// the reset suffix; raw persistence details must never reach Markdown.
+	raw := "[" + privateId + "]Payment create transaction error = 400 Bad Request Invalid destination address. private.fixture.example 192.0.2.83"
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"AdvancePayment", "2", "2", "0", "8", "1800", raw, "120", "1", "invalid-destination-reset-failed=2"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-parked")
+	for _, want := range []string{
+		"representative_error_class=invalid-destination-reset-failed",
+		"failed guarded attempt reset",
+		"concurrent, terminal, or on-chain state from a persistence failure",
+		"Preserve the existing idempotency key",
+		"Do not infer unchanged wallet configuration",
+		"without duplicate transfers",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("reset-failure alert missing %q", want)
+		}
+	}
+	requireAlertOmits(t, alert, privateId, "private.fixture.example", "192.0.2.83", "Correct the network's payout wallet", "current taskworker already releases", "undersized task-specific MaxTime")
+	for _, private := range []string{privateId, "private.fixture.example", "192.0.2.83"} {
+		if strings.Contains(alerts.Markdown(), private) {
+			t.Errorf("complete alert set retained private detail %q", private)
+		}
+	}
+}
+
+func TestTaskCanariesSignalMixedResetFailureDoesNotInventWalletCorrection(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"AdvancePayment", "9", "8", "1", "8", "1800", "insufficient token balance", "120", "2", "wallet-insufficient=7,invalid-destination-reset-failed=2"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-parked")
+	for _, want := range []string{
+		"2 distinct error classes", "fund or pause the payout wallet for wallet-insufficient rows",
+		"investigate the guarded attempt reset", "preserve the existing idempotency key",
+		"invalid-destination-reset-failed clears",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("mixed reset-failure alert missing %q", want)
+		}
+	}
+	requireAlertOmits(t, alert, "correct a proven chain-mismatched", "supported account API", "verify typed-reset commit", "unchanged wallet is still selected")
 }
 
 func TestTaskCanariesSignalExplainsNonDrainDeadlineCancellation(t *testing.T) {

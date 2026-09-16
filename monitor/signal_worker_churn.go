@@ -21,8 +21,9 @@ const (
 // Signal worker-churn implements SIGNALS.md §2.12a. It detects a taskworker
 // that is simultaneously CPU-saturated and allocating at an exceptional rate,
 // even when its bounded live heap no longer trips the §2.12 memory-skew guard.
-// A marker-ready score task is attributed further only when its complete fixed
-// phase family is fresh; partial rollout data stays explicitly unobservable.
+// A score-correlated outlier is enriched only when its exact runtime's complete
+// fixed phase family is source-fresh, independently of the global alias marker.
+// Phase occupancy does not attribute process allocation to a task.
 func NewWorkerChurnSignal() Signal {
 	return &signalAdapter{
 		number: "2.12a", key: "worker-churn", name: "Taskworker CPU/allocation churn",
@@ -206,6 +207,9 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		verify := "For two consecutive one-minute probes, either CPU falls below 3.8 cores, allocation falls below 256MiB/s, or both rates return within 8x of the fleet median; implicated tasks also complete inside their historical duration band."
 		aliasEvidence := ""
 		if scoreActive {
+			observed += " score_alias_marker_scope=global score_exporter_capability=unverified"
+			action = "First verify the exact outlier Taskworker artifact and score-exporter capability; the global alias marker cannot attest this process or its current code path. If the artifact is caller-oriented, deploy the target-oriented UpdateClientScores fanout and alias-aware cache. If target-oriented capability is independently proven, retain the process through terminal and collection boundaries and profile recurring source-load, target-map, gob-encode, or cache-write work before changing it. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
+			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the executor returns below the CPU/allocation guards for two consecutive probes after terminal/collection boundaries without selection loss or Redis capacity pressure. A global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
 				aliasesReadyLoaded = true
 				redisHost := env.cfg.hostByRole("redis-cluster")
@@ -218,39 +222,28 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			switch {
 			case aliasesReadyErr != nil:
 				observed += " score_alias_schema_ready=unknown"
-				mechanism = "UpdateClientScores is active on the exact hot executor, but the alias-schema marker lookup failed. Executor correlation still identifies score export as a candidate allocator; without the marker, this probe cannot distinguish the former caller-oriented fanout from residual allocation in the target-oriented sparse exporter."
-				aliasEvidence = " The score-alias deployment boundary could not be read: " + aliasesReadyErr.Error()
-				action = "Read the client_score_alias_v1_ready marker before changing the deployment. If absent, deploy the target-oriented fanout and alias-aware cache; if present, do not redeploy it—let the current task cross its terminal boundary and observe the next collection before profiling the remaining target maps and encoding concurrency. Preserve bounded streaming and do not restart or raise the CPU limit to erase the evidence."
-				verify = "The marker state is known, the corresponding sparse writer path is active, and consecutive score runs finish with the executor returning below the CPU/allocation guards for two consecutive probes without selection loss or Redis capacity pressure."
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, but the global alias-schema marker lookup failed. Score export is a correlated allocation candidate, not established heap ownership. Neither marker state nor exact exporter capability is established."
+				aliasEvidence = " The global score-alias compatibility marker could not be read."
 			case aliasesReady:
 				observed += " score_alias_schema_ready=true"
-				mechanism = "UpdateClientScores is active on the exact hot executor, and the durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass. This is therefore residual allocation in the deployed sparse exporter, not evidence that the former caller-oriented fix is missing."
-				if !phaseObservationsLoaded {
-					phaseObservationsLoaded = true
-					phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
-				}
-				phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
-				if phaseObservationsErr != nil || !phaseReady {
-					observed += " score_phase_observability=unavailable"
-					mechanism += " The fixed phase series are unavailable or incomplete for this exact runtime, which is expected during a mixed rollout or before two metric scrapes. The residual source-load, target-map, gob-encode, and cache-write owner is therefore explicitly unobservable, not healthy."
-					action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Converge the taskworker phase-telemetry build and retain the current process until every fixed series has two scrapes. On the next guarded recurrence, use phase occupancy and exact work-byte rates to select the profiling boundary. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
-					verify = "Every active taskworker exposes the complete fixed phase set, then consecutive post-marker score runs complete inside their normal band and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
-					if phaseObservationsErr != nil {
-						aliasEvidence += " The phase-metric query was unavailable: " + phaseObservationsErr.Error()
-					} else {
-						aliasEvidence += " The phase metric query returned no complete fixed phase set for this exact runtime; partial data was not interpreted as health."
-					}
-				} else {
-					observed += " " + phaseObservation.summary()
-					mechanism += " Fixed phase telemetry is complete for this runtime: " + phaseObservation.discriminator() + ". The phase seconds and deterministic work bytes localize the next profile boundary, but work bytes are not mislabeled as process heap allocations."
-					action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Preserve this process through the terminal boundary and profile the observed source-load, target-map, gob-encode, or cache-write phase if the all-guard recurrence sustains. Preserve bounded streaming; do not restart or raise the CPU limit to erase the evidence."
-					verify = "The complete fixed phase set remains fresh, consecutive post-marker score runs complete inside their normal band, and the affected executor returns below the CPU/allocation guards for two consecutive probes after each terminal boundary without selection loss or Redis capacity pressure."
-				}
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, and the global alias-schema marker shows that some writer previously completed a compatibility pass. That persistent shared marker is not provenance for this exact worker artifact or proof that its current export uses target-oriented fanout. Score export is a correlated allocation candidate, not established ownership of the process allocation."
 			default:
 				observed += " score_alias_schema_ready=false"
-				mechanism = "UpdateClientScores is active on the exact hot executor. A target's exported score payload is caller-invariant unless that caller blocks a network present in the target; encoding the unchanged target separately for every caller multiplies gob work by the caller-location count and produces the observed CPU/allocation churn even when streaming keeps live heap bounded."
-				action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and independently encode full overrides only for callers whose blocked networks actually remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not raise the CPU limit or restart to erase the evidence."
-				verify = "A post-deploy UpdateClientScores run completes inside its historical band while its exact executor remains below the CPU/allocation guards for two consecutive probes; aliases preserve unfiltered selections, excluded callers still use overrides, and the score-byte signal drains after the legacy TTL."
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, and the global alias-schema marker is absent. This may be a pending or incomplete compatibility pass, legacy writers, or missing cache state; it does not identify this worker's artifact. Score export is a correlated allocation candidate, not established ownership of the process allocation."
+			}
+			if !phaseObservationsLoaded {
+				phaseObservationsLoaded = true
+				phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
+			}
+			phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
+			if phaseObservationsErr != nil || !phaseReady {
+				observed += " score_phase_observability=unavailable"
+				mechanism += " The complete source-fresh phase set is unavailable for this exact runtime; the profiling boundary is explicitly unobservable, not healthy. The process-rate finding remains valid."
+				aliasEvidence += " Phase lookup failed or returned incomplete, stale, or different-generation data; no partial set or other worker was substituted."
+			} else {
+				observed += " " + phaseObservation.summary()
+				mechanism += " Fixed phase telemetry is complete for this exact runtime: " + phaseObservation.discriminator() + ". Phase occupancy and deterministic work bytes select a profiling boundary, not heap ownership; completed-span seconds are not CPU time and work bytes are not process heap allocations."
+				aliasEvidence += " Each phase family was filtered by its underlying source timestamp before the exact host/block/instance join; the instant-query evaluation timestamp alone is not freshness evidence."
 			}
 			if closeActive {
 				mechanism += " CloseExpiredContracts is active on the same host/block, so this process-local saturation can delay its Go work between otherwise short PostgreSQL statements; close-duration and open-contract age buckets remain the authoritative impact measures."

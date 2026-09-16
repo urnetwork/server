@@ -62,6 +62,9 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 	ratePayload := workerRatesFixtureJSON(t, now, workers...)
 	source := &syntheticSource{
 		hostFn: func(host HostSettings, command string) (string, error) {
+			if strings.Contains(command, "monitor_score_phase_metric") {
+				return workerScorePhaseFixtureJSON(t, now, "edge-3", "g2", "hot", true), nil
+			}
 			if host.Name != "metrics-1" || !strings.Contains(command, "monitor_rate") ||
 				!strings.Contains(command, "%22synthetic%22") {
 				t.Fatalf("unexpected Mimir command on %s: %s", host.Name, command)
@@ -104,7 +107,8 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		"alloc_ratio_1m=216.7",
 		"active_tasks=UpdateClientScores:2875s,CloseExpiredContracts:7s",
 		"score_alias_schema_ready=false",
-		"target's exported score payload is caller-invariant",
+		"does not identify this worker's artifact",
+		"score_phase_observability=ready",
 		"CloseExpiredContracts is active on the same host/block",
 		"delay its Go work between otherwise short PostgreSQL statements",
 		"target-oriented UpdateClientScores fanout",
@@ -142,12 +146,11 @@ func runWorkerChurnAliasSynthetic(
 		{host: "worker-hot", block: "g2", instance: "runtime-hot", cpuRate: 4.001, allocRate: 320 << 20},
 	}
 	redisReads := 0
+	phaseReads := 0
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, command string) (string, error) {
 			if strings.Contains(command, "monitor_score_phase_metric") {
-				if markerValue != redisScoreAliasReadyValue || markerErr != nil {
-					return "", fmt.Errorf("unexpected phase query")
-				}
+				phaseReads++
 				return workerScorePhaseFixtureJSON(t, now, "worker-hot", "g2", "runtime-hot", phaseComplete), nil
 			}
 			return workerRatesFixtureJSON(t, now, workers...), nil
@@ -169,6 +172,13 @@ func runWorkerChurnAliasSynthetic(
 		t.Fatal(err)
 	}
 	alert := requireAlertClass(t, alerts, "worker-cpu-allocation-churn")
+	wantPhaseReads := 0
+	if taskName == "UpdateClientScores" {
+		wantPhaseReads = 1
+	}
+	if phaseReads != wantPhaseReads {
+		t.Fatalf("phase reads = %d, want %d regardless of marker state", phaseReads, wantPhaseReads)
+	}
 	requireAlertOmits(t, alert, "02b166d9-86af-517f-5172-714a1ed9797a")
 	return alert, redisReads
 }
@@ -184,10 +194,10 @@ func TestWorkerChurnSignalTreatsMixedPhaseRolloutAsUnobservable(t *testing.T) {
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"score_phase_observability=unavailable",
-		"mixed rollout or before two metric scrapes",
+		"complete source-fresh phase set is unavailable for this exact runtime",
 		"explicitly unobservable, not healthy",
-		"partial data was not interpreted as health",
-		"Converge the taskworker phase-telemetry build",
+		"no partial set or other worker was substituted",
+		"The process-rate finding remains valid",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("mixed phase rollout diagnosis missing %q:\n%s", want, markdown)
@@ -213,8 +223,9 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 			markerValue: "",
 			want: []string{
 				"score_alias_schema_ready=false",
-				"target's exported score payload is caller-invariant",
-				"Deploy the target-oriented UpdateClientScores fanout",
+				"does not identify this worker's artifact",
+				"If the artifact is caller-oriented, deploy the target-oriented UpdateClientScores fanout",
+				"score_phase_observability=ready",
 			},
 			omit: []string{"already active; do not redeploy"},
 		},
@@ -223,15 +234,16 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 			markerValue: redisScoreAliasReadyValue,
 			want: []string{
 				"score_alias_schema_ready=true",
-				"durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass",
-				"residual allocation in the deployed sparse exporter",
+				"some writer previously completed a compatibility pass",
+				"not provenance for this exact worker artifact",
 				"score_phase_observability=ready",
 				"score_phase_active=source_load:0,target_export:0,target_map:0,gob_encode:12,cache_write:0",
 				"score_phase_mib_per_s_1m=source_load:1.00,target_export:2.00,target_map:3.00,gob_encode:4.00,cache_write:5.00",
 				"the scrape found 12 active gob_encode spans",
-				"work bytes are not mislabeled as process heap allocations",
-				"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
-				"profile the observed source-load, target-map, gob-encode, or cache-write phase",
+				"work bytes are not process heap allocations",
+				"completed-span seconds are not CPU time",
+				"First verify the exact outlier Taskworker artifact",
+				"profile recurring source-load, target-map, gob-encode, or cache-write work",
 			},
 			omit: []string{"Deploy the target-oriented UpdateClientScores fanout"},
 		},
@@ -241,9 +253,10 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 			want: []string{
 				"score_alias_schema_ready=unknown",
 				"alias-schema marker lookup failed",
-				"cannot distinguish the former caller-oriented fanout from residual allocation",
-				"score-alias deployment boundary could not be read: synthetic marker unavailable",
-				"Read the client_score_alias_v1_ready marker before changing the deployment",
+				"Neither marker state nor exact exporter capability is established",
+				"global score-alias compatibility marker could not be read",
+				"First verify the exact outlier Taskworker artifact",
+				"score_phase_observability=ready",
 			},
 			omit: []string{"score_alias_schema_ready=false", "score_alias_schema_ready=true"},
 		},
@@ -260,6 +273,15 @@ func TestWorkerChurnSignalSyntheticScoreAliasStates(t *testing.T) {
 				t.Fatalf("score-alias reads = %d, want 1", redisReads)
 			}
 			markdown := alert.Markdown()
+			if alert.Target != "worker-hot/g2" || alert.Frame != "runtime-hot" || alert.Sustain != 2 || alert.Severity != SeverityWarn {
+				t.Fatal("marker state changed the real churn finding")
+			}
+			for _, want := range []string{"score_alias_marker_scope=global score_exporter_capability=unverified", "not heap ownership"} {
+				if !strings.Contains(markdown, want) {
+					t.Fatalf("missing phase/provenance limit %q", want)
+				}
+			}
+			requireAlertOmits(t, alert, "This is therefore residual allocation in the deployed sparse exporter", "already active; do not redeploy them")
 			for _, want := range test.want {
 				if !strings.Contains(markdown, want) {
 					t.Fatalf("worker-churn %s diagnosis missing %q:\n%s", test.name, want, markdown)
@@ -357,7 +379,7 @@ func TestWorkerChurnSignalSyntheticRefreshesClockAfterDelayedLogFallback(t *test
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"active_tasks=UpdateClientScores:4190s",
-		"target's exported score payload is caller-invariant",
+		"does not identify this worker's artifact",
 		"target-oriented UpdateClientScores fanout",
 	} {
 		if !strings.Contains(markdown, want) {

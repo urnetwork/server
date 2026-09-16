@@ -69,6 +69,42 @@ var proxyPlatformTransportSlotFullPendingH1DevicesDesc = prometheus.NewDesc(
 	nil, nil,
 )
 
+var proxyPlatformTransportHandoffTransportsDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_active_handoff_transports",
+	"Temporary carrier-count allowance owned by active private-budget H1/H3 handoffs",
+	nil, nil,
+)
+
+var proxyPlatformTransportHandoffBytesDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_active_handoff_bytes",
+	"Temporary byte allowance owned by active private-budget H1/H3 handoffs",
+	nil, nil,
+)
+
+var proxyPlatformTransportSlotFullHandoffDevicesDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices",
+	"Slot-full pending DeviceLocals whose own budget has a pending or active policy handoff",
+	nil, nil,
+)
+
+var proxyPlatformTransportSlotFullHandoffUnsatisfiedDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices",
+	"Slot-full pending DeviceLocals with a same-budget handoff and a known unsatisfied provider window",
+	nil, nil,
+)
+
+var proxyPlatformTransportSlotFullDemandUnsatisfiedDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices",
+	"Slot-full pending DeviceLocals without a same-budget handoff and with a known unsatisfied provider window",
+	nil, nil,
+)
+
+var proxyPlatformTransportSlotFullWindowUnknownDesc = prometheus.NewDesc(
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices",
+	"Slot-full pending DeviceLocals with no current provider-window readiness sample",
+	nil, nil,
+)
+
 var proxyPlatformTransportH3PreemptionsDesc = prometheus.NewDesc(
 	"urnetwork_proxy_platform_transport_h3_preemptions_total",
 	"H3 carrier leases preempted for H1 admission across hosted DeviceLocals",
@@ -193,6 +229,12 @@ type proxyDeviceMemoryUsage struct {
 	PlatformPendingH1Count               int
 	PlatformPendingH1ByteCount           sdk.ByteCount
 	PlatformSlotFullPendingH1DeviceCount int
+	PlatformHandoffTransportCount        int
+	PlatformHandoffByteCount             sdk.ByteCount
+	PlatformSlotFullHandoffDeviceCount   int
+	PlatformSlotFullHandoffUnsatisfied   int
+	PlatformSlotFullDemandUnsatisfied    int
+	PlatformSlotFullWindowUnknown        int
 	PlatformH3PreemptionDelta            int64
 	PlatformSlotFullH3PreemptionDelta    int64
 }
@@ -271,6 +313,12 @@ func (self *proxyDeviceMemoryMetrics) Describe(ch chan<- *prometheus.Desc) {
 		proxyPlatformTransportPendingH1Desc,
 		proxyPlatformTransportPendingH1BytesDesc,
 		proxyPlatformTransportSlotFullPendingH1DevicesDesc,
+		proxyPlatformTransportHandoffTransportsDesc,
+		proxyPlatformTransportHandoffBytesDesc,
+		proxyPlatformTransportSlotFullHandoffDevicesDesc,
+		proxyPlatformTransportSlotFullHandoffUnsatisfiedDesc,
+		proxyPlatformTransportSlotFullDemandUnsatisfiedDesc,
+		proxyPlatformTransportSlotFullWindowUnknownDesc,
 		proxyPlatformTransportH3PreemptionsDesc,
 		proxyPlatformTransportSlotFullH3PreemptionsDesc,
 	} {
@@ -296,6 +344,12 @@ func (self *proxyDeviceMemoryMetrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportPendingH1Desc, prometheus.GaugeValue, float64(usage.PlatformPendingH1Count))
 	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportPendingH1BytesDesc, prometheus.GaugeValue, float64(usage.PlatformPendingH1ByteCount))
 	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullPendingH1DevicesDesc, prometheus.GaugeValue, float64(usage.PlatformSlotFullPendingH1DeviceCount))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportHandoffTransportsDesc, prometheus.GaugeValue, float64(usage.PlatformHandoffTransportCount))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportHandoffBytesDesc, prometheus.GaugeValue, float64(usage.PlatformHandoffByteCount))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullHandoffDevicesDesc, prometheus.GaugeValue, float64(usage.PlatformSlotFullHandoffDeviceCount))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullHandoffUnsatisfiedDesc, prometheus.GaugeValue, float64(usage.PlatformSlotFullHandoffUnsatisfied))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullDemandUnsatisfiedDesc, prometheus.GaugeValue, float64(usage.PlatformSlotFullDemandUnsatisfied))
+	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullWindowUnknownDesc, prometheus.GaugeValue, float64(usage.PlatformSlotFullWindowUnknown))
 	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportH3PreemptionsDesc, prometheus.CounterValue, h3Preemptions)
 	ch <- prometheus.MustNewConstMetric(proxyPlatformTransportSlotFullH3PreemptionsDesc, prometheus.CounterValue, slotFullH3Preemptions)
 }
@@ -345,10 +399,24 @@ func aggregateProxyDeviceMemoryUsage(
 		aggregate.PlatformUsedTransportCount += usage.PlatformTransportUsedCount
 		aggregate.PlatformPendingH1Count += usage.PlatformTransportPendingH1Count
 		aggregate.PlatformPendingH1ByteCount += usage.PlatformTransportPendingH1Bytes
+		aggregate.PlatformHandoffTransportCount += usage.PlatformTransportHandoffCount
+		aggregate.PlatformHandoffByteCount += usage.PlatformTransportHandoffByteCount
 		if 0 < usage.PlatformTransportPendingH1Count &&
 			0 < usage.PlatformTransportMaxCount &&
 			usage.PlatformTransportMaxCount <= usage.PlatformTransportUsedCount {
 			aggregate.PlatformSlotFullPendingH1DeviceCount++
+			handoff := usage.PlatformTransportPendingHandoffCount > 0 || usage.PlatformTransportActiveHandoffCount > 0
+			if handoff {
+				aggregate.PlatformSlotFullHandoffDeviceCount++
+			}
+			switch {
+			case !usage.ProviderWindowKnown:
+				aggregate.PlatformSlotFullWindowUnknown++
+			case !usage.ProviderWindowMinSatisfied && handoff:
+				aggregate.PlatformSlotFullHandoffUnsatisfied++
+			case !usage.ProviderWindowMinSatisfied:
+				aggregate.PlatformSlotFullDemandUnsatisfied++
+			}
 		}
 	}
 	return aggregate

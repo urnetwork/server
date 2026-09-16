@@ -246,6 +246,15 @@ func newRunner(cfg *monitorConfig) *runner {
 
 type sshCommandRunner func(ctx context.Context, args []string, stdin string) (stdout string, stderr string, err error)
 
+// sshCommandError preserves the execution source as well as the native process
+// status. An exit-255-shaped string from another command is not SSH evidence.
+// OpenSSH's status 255 does not locate the fault: it can also be the remote
+// command's own status, so this type must not imply observer or host route loss.
+type sshCommandError struct{ err error }
+
+func (e *sshCommandError) Error() string { return e.err.Error() }
+func (e *sshCommandError) Unwrap() error { return e.err }
+
 func runSSHCommand(ctx context.Context, args []string, stdin string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	if stdin != "" {
@@ -270,6 +279,8 @@ func (self *unreachableError) Error() string {
 	return fmt.Sprintf("unreachable %s: %s", self.host, self.err)
 }
 
+func (self *unreachableError) Unwrap() error { return self.err }
+
 // ssh runs remoteCmd on h, feeding stdin, returning stdout. It applies the
 // config's hard timeout; a timeout or missing address is returned as
 // *unreachableError.
@@ -281,6 +292,9 @@ func (self *runner) ssh(ctx context.Context, h *host, remoteCmd string, stdin st
 // deliberately slow reads (the daily keyspace scan) that exceed the default
 // budget.
 func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, stdin string, timeout time.Duration) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	addr := h.addr(self.cfg.addressMode)
 	if addr == "" {
 		return "", &unreachableError{host: h.name, err: fmt.Errorf("no address for mode %q", self.cfg.addressMode)}
@@ -316,11 +330,13 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return out, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
 	}
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
 	if err != nil {
-		// ssh dial failures (exit 255) mean the host itself is unobservable;
-		// a nonzero exit from the remote command is a command error. Both
-		// surface with the stderr text.
-		return out, fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut))
+		// Retain native SSH status for the fixed error classifier. Neither 255
+		// nor stderr alone proves a local VPN, network, or remote-host cause.
+		return out, &sshCommandError{err: fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut))}
 	}
 	return out, nil
 }

@@ -57,6 +57,7 @@ func TestRepresentativeTaskErrorClassUsesBoundedDatabaseClass(t *testing.T) {
 		t.Fatalf("unknown database class = %q, want %q", got, taskErrorClassUnclassified)
 	}
 	for _, class := range []string{
+		taskErrorClassInvalidDestinationResetFailed,
 		taskErrorClassPostgresStatementTimeout,
 		taskErrorClassDeadlineTimeout,
 		taskErrorClassDrained,
@@ -76,6 +77,7 @@ func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 		taskErrorClassIdleTransactionTimeout,
 		taskErrorClassConnectionCleanupDeadline,
 		taskErrorClassProcessorRateLimit,
+		taskErrorClassInvalidDestinationResetFailed,
 		taskErrorClassProcessorInvalidDestination,
 		taskErrorClassProcessorBadRequest,
 		taskErrorClassSchemaObjectMissing,
@@ -109,6 +111,44 @@ func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 	}
 }
 
+func TestInvalidDestinationResetFailurePrecedesProcessorAndPersistenceErrors(t *testing.T) {
+	for _, suffix := range []string{
+		"Invalid payment.",
+		"statement timeout (SQLSTATE 57014)",
+		"failed to deallocate cached statement(s): conn closed",
+		"context canceled",
+	} {
+		raw := "Payment create transaction error = 400 Bad Request Invalid destination address.; invalid destination reset error = " + suffix
+		if got := classifyTaskError("AdvancePayment", raw); got != taskErrorClassInvalidDestinationResetFailed {
+			t.Errorf("reset suffix %q classified as %q", suffix, got)
+		}
+	}
+	resetIndex := strings.Index(taskFailureSummarySQL, "THEN 'invalid-destination-reset-failed'")
+	for _, class := range []string{taskErrorClassProcessorInvalidDestination, taskErrorClassPostgresStatementTimeout, taskErrorClassConnectionCleanupDeadline} {
+		if index := strings.Index(taskFailureSummarySQL, "THEN '"+class+"'"); resetIndex < 0 || index < resetIndex {
+			t.Errorf("SQL reset classifier must precede %q", class)
+		}
+	}
+	if !strings.Contains(taskFailureSummarySQL, "WHEN split_part(function_name,'.',3) = 'AdvancePayment'\n\t\t           AND lower(coalesce(reschedule_error,'')) LIKE '%; invalid destination reset error = %'") {
+		t.Fatal("SQL reset classifier lost the task-scoped exact composed marker")
+	}
+}
+
+func TestInvalidDestinationResetFailureRequiresExactOwnedMarker(t *testing.T) {
+	for _, raw := range []string{
+		"400 Bad Request Invalid destination address.",
+		"Invalid destination address.; invalid destination reset error",
+		"Invalid destination address.; invalid destination reset error: synthetic",
+	} {
+		if got := classifyTaskError("AdvancePayment", raw); got != taskErrorClassProcessorInvalidDestination {
+			t.Errorf("ordinary destination control classified as %q", got)
+		}
+	}
+	if got := classifyTaskError("SyntheticTask", "Invalid destination address.; invalid destination reset error = synthetic"); got != taskErrorClassProcessorInvalidDestination {
+		t.Fatalf("unrelated task's ordinary destination error was replaced by reset class: %q", got)
+	}
+}
+
 func TestClassifyObservationErrorNeverReturnsRawText(t *testing.T) {
 	hostile := "provider supplied task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa address=192.0.2.91 pointer=0xdeadbeef goroutine synthetic.Stack"
 	tests := []struct {
@@ -137,6 +177,21 @@ func TestClassifyObservationErrorNeverReturnsRawText(t *testing.T) {
 				t.Fatalf("classifyObservationError() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestClassifyObservationErrorRequiresSSHSourceForNative255(t *testing.T) {
+	localExit := syntheticProcessExit(t, 255)
+	if got := classifyObservationError(localExit); got != observationErrorClassCommandFailed {
+		t.Fatalf("local process exit 255 became SSH evidence: %s", got)
+	}
+	if got := classifyObservationError(&sshCommandError{err: fmt.Errorf("wrapped: %w", localExit)}); got != observationErrorClassSSHExit255 {
+		t.Fatalf("native SSH exit 255 was not distinguished: %s", got)
+	}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got, want := classifyObservationError(&sshCommandError{err: cause}), classifyObservationError(cause); got != want {
+			t.Fatalf("SSH wrapper changed lifecycle classification: %s, want %s", got, want)
+		}
 	}
 }
 

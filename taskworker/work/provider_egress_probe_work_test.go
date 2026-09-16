@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -109,6 +111,19 @@ blackhole:
 	}
 	if settings.Full.ProbeTimeoutSeconds != 60 {
 		t.Fatalf("unspecified full timeout lost its default: %+v", settings.Full)
+	}
+}
+
+func TestProviderEgressProbeSettingsRejectUnavailableOptionalResource(t *testing.T) {
+	t.Setenv("WARP_DOMAIN", "example.test")
+	configHome := t.TempDir()
+	t.Setenv("WARP_CONFIG_HOME", configHome)
+	t.Setenv("WARP_ENV", "")
+	if err := os.Mkdir(filepath.Join(configHome, "provider_egress_probe.yml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProviderEgressProbeSettings(); !errors.Is(err, server.ErrResourceUnavailable) {
+		t.Fatalf("unavailable optional resource fell back to built-in settings: %v", err)
 	}
 }
 

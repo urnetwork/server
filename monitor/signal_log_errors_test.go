@@ -996,7 +996,8 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 	for _, detail := range []string{
 		"invalid for its declared chain",
 		"safely releases only that pre-chain submit attempt",
-		"selects the same invalid payout_wallet configuration",
+		"when its guarded reset succeeds",
+		"select the same invalid payout_wallet configuration",
 		"Historical bounded controls on a pre-dispersion taskworker",
 		"same six payments recurring at the same minute",
 		"not a statement about the currently deployed artifact",
@@ -1030,6 +1031,89 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 		if strings.Contains(markdown, id) {
 			t.Fatalf("invalid-destination alert leaked id %s:\n%s", id, markdown)
 		}
+	}
+	if requireAlertClassCount(alerts, "payout-invalid-destination-reset-failed") != 0 {
+		t.Fatal("ordinary invalid-destination control produced a reset-failure alert")
+	}
+}
+
+func TestLogErrorsSignalSeparatesInvalidDestinationResetFailure(t *testing.T) {
+	const paymentId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const taskId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	line := `[synthetic-host][taskworker][synthetic-block][cid:fixture][I][2026-09-01T12:00:00Z][task.go:1930][` + taskId + `]eval error = AdvancePayment({"payment_id":"` + paymentId + `"}) = [` + paymentId + `]Payment create transaction error = Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}; invalid destination reset error = private.fixture.example dial tcp 192.0.2.83:5432 i/o timeout wallet=2001:db8::83 goroutine 123 [synthetic.Stack]`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return line + "\n" + line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "payout-invalid-destination-reset-failed")
+	for _, want := range []string{
+		"failed guarded attempt reset", "Concurrent, terminal, or on-chain payment state",
+		"Preserve the existing idempotency key", "Do not infer unchanged wallet configuration",
+		"invalid_destination_reset_failed_events=1", "diagnostic_lines=2",
+		"frame=phase=guarded-reset", "without duplicate transfers",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("reset-failure log alert missing %q", want)
+		}
+	}
+	requireAlertOmits(t, alert, paymentId, taskId, "private.fixture.example", "192.0.2.83", "2001:db8::83", "synthetic.Stack", "selects the same invalid", "account-owner/operations action only")
+	for _, class := range []string{"payout-invalid-destination", "dial-io-timeout", "panic"} {
+		if requireAlertClassCount(alerts, class) != 0 {
+			t.Errorf("reset failure was also attributed to %q", class)
+		}
+	}
+}
+
+func TestInvalidDestinationResetLogRequiresExactComposedMarker(t *testing.T) {
+	var resetClass *logClass
+	for i := range logClasses {
+		if logClasses[i].name == "payout-invalid-destination-reset-failed" {
+			resetClass = &logClasses[i]
+			break
+		}
+	}
+	if resetClass == nil {
+		t.Fatal("missing reset-failure log class")
+	}
+	for _, line := range []string{
+		"Bad status: 400 Bad Request Invalid destination address.",
+		"Payment create transaction error = Invalid destination address.; invalid destination reset error: synthetic",
+		"Payment create transaction error = Invalid destination address.; invalid destination reset error = ",
+		"unrelated failure; invalid destination reset error = synthetic",
+	} {
+		if resetClass.re.MatchString(line) {
+			t.Errorf("non-composed control matched reset-failure class: %q", line)
+		}
+	}
+	for _, line := range []string{
+		"Payment create transaction error = Invalid destination address.; invalid destination reset error = Invalid payment.",
+		"Payment create transaction error = processor code 155219; invalid destination reset error = context canceled",
+	} {
+		if !resetClass.re.MatchString(line) {
+			t.Errorf("owned reset-failure marker was not classified: %q", line)
+		}
+	}
+}
+
+func TestLogErrorsSignalHealthyWindowHasNoResetFailure(t *testing.T) {
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return "", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requireAlertClassCount(alerts, "payout-invalid-destination-reset-failed") != 0 {
+		t.Fatal("healthy log window produced a reset-failure alert")
 	}
 }
 

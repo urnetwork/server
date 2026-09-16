@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/operator-proxy/fleetprobe"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -26,7 +30,11 @@ func NewEgressCoverageSignal() Signal {
 	}
 }
 
-type egressCoverageProbe struct{}
+type egressCoverageProbe struct {
+	// The per-probe seam keeps synthetic observations independent of the
+	// workstation's active Config resource. Production reloads it each cadence.
+	loadDesiredConfig func() egressCoverageDesiredConfig
+}
 
 func (egressCoverageProbe) id() string             { return "pg/egress-coverage" }
 func (egressCoverageProbe) tier() string           { return tierWarn }
@@ -64,6 +72,7 @@ type egressCoverageGeometry struct {
 	blackholeConcurrency    int
 	blackholeTimeoutSeconds int
 	indices                 []int
+	settings                egressCoverageConfig
 }
 
 type egressCoverageConfig struct {
@@ -78,7 +87,214 @@ type egressCoverageConfig struct {
 	bandwidthCDNURL  string
 }
 
-func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+type egressCoverageDesiredConfig struct {
+	present       bool
+	enabled       bool
+	invalidReason string
+	settings      egressCoverageConfig
+}
+
+// Positive/default-dependent settings must be explicit before the monitor
+// compares them. In particular, absent config is not the Taskworker's built-in
+// four-slot geometry, and an omitted full-bandwidth flag is not false. The
+// current zero-valued optional batch modes retain their serialization defaults.
+type egressCoverageDesiredBatchYAML struct {
+	Limit                   int            `yaml:"limit"`
+	Concurrency             int            `yaml:"concurrency"`
+	ProbeTimeoutSeconds     int            `yaml:"probe_timeout_seconds"`
+	AllDestinations         bool           `yaml:"all_destinations"`
+	Bandwidth               *bool          `yaml:"bandwidth"`
+	BandwidthTimeoutSeconds *int           `yaml:"bandwidth_timeout_seconds"`
+	Unknown                 map[string]any `yaml:",inline"`
+}
+
+func (batch egressCoverageDesiredBatchYAML) args() egressCoverageBatchArgs {
+	args := egressCoverageBatchArgs{
+		Limit: batch.Limit, Concurrency: batch.Concurrency,
+		ProbeTimeoutSeconds: batch.ProbeTimeoutSeconds, AllDestinations: batch.AllDestinations,
+	}
+	if batch.Bandwidth != nil {
+		args.Bandwidth = *batch.Bandwidth
+	}
+	if batch.BandwidthTimeoutSeconds != nil {
+		args.BandwidthTimeoutSeconds = *batch.BandwidthTimeoutSeconds
+	}
+	return args
+}
+
+type egressCoverageDesiredYAML struct {
+	Enabled          *bool                          `yaml:"enabled"`
+	ShardCount       int                            `yaml:"shard_count"`
+	IdleDelaySeconds int                            `yaml:"idle_delay_seconds"`
+	MaxTimeSeconds   int                            `yaml:"max_time_seconds"`
+	Full             egressCoverageDesiredBatchYAML `yaml:"full"`
+	Blackhole        egressCoverageDesiredBatchYAML `yaml:"blackhole"`
+	APIURL           string                         `yaml:"api_url"`
+	PlatformURL      string                         `yaml:"platform_url"`
+	PublicAPIURL     *string                        `yaml:"public_api_url"`
+	BandwidthCDNURL  *string                        `yaml:"bandwidth_cdn_url"`
+	Unknown          map[string]any                 `yaml:",inline"`
+}
+
+func loadEgressCoverageDesiredConfig() egressCoverageDesiredConfig {
+	resource, err := server.Config.SimpleResource("provider_egress_probe.yml")
+	if err != nil {
+		if errors.Is(err, server.ErrResourceNotFound) {
+			// This resource is optional. Do not manufacture desired settings from
+			// either source defaults or the rows being checked, or claim a match.
+			return egressCoverageDesiredConfig{}
+		}
+		return egressCoverageDesiredConfig{present: true, invalidReason: "resource-unavailable"}
+	}
+	return inspectEgressCoverageDesiredConfig(resource.UnmarshalYamlE)
+}
+
+func inspectEgressCoverageDesiredConfig(load func(any) error) egressCoverageDesiredConfig {
+	desired := egressCoverageDesiredConfig{present: true}
+	var raw egressCoverageDesiredYAML
+	if err := load(&raw); err != nil {
+		desired.invalidReason = "resource-unreadable-or-malformed"
+		return desired
+	}
+	if raw.Enabled == nil {
+		desired.invalidReason = "enabled-state-unavailable"
+		return desired
+	}
+	desired.enabled = *raw.Enabled
+	if !desired.enabled {
+		// Taskworker deliberately does not validate inactive execution settings.
+		return desired
+	}
+	if len(raw.Unknown)+len(raw.Full.Unknown)+len(raw.Blackhole.Unknown) > 0 {
+		desired.invalidReason = "unknown-execution-setting"
+		return desired
+	}
+	if raw.Full.Bandwidth == nil || raw.Full.BandwidthTimeoutSeconds == nil ||
+		raw.PublicAPIURL == nil || raw.BandwidthCDNURL == nil {
+		desired.invalidReason = "default-dependent-execution-settings"
+		return desired
+	}
+	desired.settings = egressCoverageConfig{
+		shardCount: raw.ShardCount, idleDelaySeconds: raw.IdleDelaySeconds, maxTimeSeconds: raw.MaxTimeSeconds,
+		full: raw.Full.args(), blackhole: raw.Blackhole.args(),
+		apiURL: raw.APIURL, platformURL: raw.PlatformURL,
+		publicAPIURL: *raw.PublicAPIURL, bandwidthCDNURL: *raw.BandwidthCDNURL,
+	}
+	if !validEgressCoverageConfig(desired.settings) {
+		desired.invalidReason = "invalid-or-incomplete-execution-settings"
+	}
+	return desired
+}
+
+func validEgressCoverageConfig(config egressCoverageConfig) bool {
+	if !(1 <= config.shardCount && config.shardCount <= 256 &&
+		0 < config.idleDelaySeconds && 0 < config.maxTimeSeconds &&
+		validEgressCoverageBatchArgs(config.full) && validEgressCoverageBatchArgs(config.blackhole) &&
+		strings.TrimSpace(config.apiURL) != "" && strings.TrimSpace(config.platformURL) != "") {
+		return false
+	}
+	probeTimeout := time.Duration(config.full.ProbeTimeoutSeconds) * time.Second
+	return fleetprobe.EgressHealthOptions(probeTimeout, config.full.AllDestinations).PerRequestTimeout >= egresshealth.DefaultPerRequestTimeout
+}
+
+const egressCoverageConfigConvergenceAction = "Deploy config-updater first and verify that the desired configuration version is completely published; then deploy Taskworker so every executor mounts that completed version. Let successful ProviderEgressProbe post-steps replace the four-or-configured-count durable snapshots, or normal disabled-task cleanup retire them when disabled. Failed executions retry their old arguments, and an old-config worker can recreate stale settings. Do not insert, delete, or hand-edit pending_task rows."
+
+func egressCoverageConfigFindings(target string, desired egressCoverageDesiredConfig, rowCount int, geometry egressCoverageGeometry, geometryErr error) []finding {
+	if !desired.present {
+		return nil
+	}
+	invalidReason := desired.invalidReason
+	if invalidReason == "" && desired.enabled && rowCount > 0 && geometryErr != nil {
+		invalidReason = "durable-geometry-unavailable"
+	}
+	if invalidReason != "" {
+		return []finding{{
+			probeId: "pg/egress-coverage", tier: tierWarn,
+			class: "egress-probe-config-unobservable", target: target, frame: "desired-config", sustain: 2,
+			symptom:   "Desired provider-egress configuration cannot be compared with one complete durable execution snapshot.",
+			mechanism: "A present but unreadable, malformed, incomplete, or unknown desired setting, or mixed durable geometry, cannot establish either agreement or drift. Built-in defaults must not be mistaken for the active desired configuration.",
+			baseline:  "An optional resource may be absent; when present, explicit enablement and complete observable execution settings can be compared with internally coherent durable rows.",
+			observed:  fmt.Sprintf("desired_resource_present=true config_observation=%s provider_egress_task_rows=%d", invalidReason, rowCount),
+			evidence:  "Only a fixed structural reason and aggregate row count are exported; parser errors, resource paths, endpoints, raw YAML/JSON, credentials and task identities are never rendered.",
+			context:   "This is an observation gap, not proof of configuration drift or recovery. Existing schema, shard, liveness, fairness and measured-rate findings remain independent.",
+			action:    "Restore the active provider_egress_probe.yml resource and its complete execution-setting contract, or converge mixed durable rows through the normal deployment/post-step path. Never copy runtime rows into desired state to silence the comparison. " + egressCoverageConfigConvergenceAction,
+			verify:    "The resource becomes observable and the complete durable geometry is available; then verify explicit desired-versus-durable agreement for two cadences without suppressing independent capacity findings.",
+			playbook:  "SIGNALS.md §2.19",
+		}}
+	}
+	findings := []finding{healthyFinding("pg/egress-coverage", tierWarn, "egress-probe-config-unobservable", target)}
+	changes := []string{}
+	if desired.enabled != (rowCount > 0) {
+		changes = append(changes, "enabled")
+	}
+	observed := fmt.Sprintf("desired_resource_present=true desired_enabled=%t durable_tasks_present=%t provider_egress_task_rows=%d", desired.enabled, rowCount > 0, rowCount)
+	if desired.enabled {
+		observed += " " + egressCoverageSafeSettings("desired", desired.settings)
+		if rowCount > 0 {
+			changes = append(changes, egressCoverageConfigChanges(desired.settings, geometry.settings)...)
+			observed += " " + egressCoverageSafeSettings("durable", geometry.settings)
+		}
+	}
+	if len(changes) == 0 {
+		return append(findings, healthyFinding("pg/egress-coverage", tierWarn, "egress-probe-config-drift", target))
+	}
+	return append(findings, finding{
+		probeId: "pg/egress-coverage", tier: tierWarn,
+		class: "egress-probe-config-drift", target: target, frame: "desired-config", sustain: 2,
+		symptom:   "The active desired provider-egress configuration differs from the durable task execution settings.",
+		mechanism: "Each RunOnce shard stores an immutable argument snapshot. Reinitialization merges scheduling metadata, not args_json; a successful post-step reloads the worker's mounted configuration for its successor. A clean config checkout alone does not update mounted versions or retrying durable rows.",
+		baseline:  "Explicit disabled state has no recurring probe rows; enabled state has one complete common durable geometry matching every desired execution setting.",
+		observed:  observed + " mismatched_fields=" + strings.Join(changes, ","),
+		evidence:  "Only enablement, aggregate counts, safe execution scalars and fixed mismatch names are exported. Endpoint equality is compared in memory; endpoint values, credentials, raw YAML/JSON and task identities never enter the alert.",
+		context:   "The monitor's active resource is desired state, not proof of any worker's mounted configuration or executable capability. A mixed or malformed durable snapshot remains a separate shard PAGE and cannot be called converged. Measured-rate capacity remains independently authoritative.",
+		action:    egressCoverageConfigConvergenceAction,
+		verify:    "Prove the completed config version and independent-drain Taskworker artifact on every executor, then observe all configured shards adopt matching successor settings (or retire when explicitly disabled) for two cadences. For capacity changes, only after complete convergence begin two three-hour verdict lifetimes of measured-rate/coverage verification with more than 25% PostgreSQL headroom and healthy PgBouncer, API and Taskworker CPU/memory controls.",
+		playbook:  "SIGNALS.md §2.19, §2.23, and §2.24",
+	})
+}
+
+func egressCoverageConfigChanges(desired, durable egressCoverageConfig) []string {
+	changes := []string{}
+	note := func(name string, want, have any) {
+		if want != have {
+			changes = append(changes, name)
+		}
+	}
+	note("shard_count", desired.shardCount, durable.shardCount)
+	note("idle_delay_seconds", desired.idleDelaySeconds, durable.idleDelaySeconds)
+	note("max_time_seconds", desired.maxTimeSeconds, durable.maxTimeSeconds)
+	for _, batch := range []struct {
+		name       string
+		want, have egressCoverageBatchArgs
+	}{{"full", desired.full, durable.full}, {"blackhole", desired.blackhole, durable.blackhole}} {
+		note(batch.name+".limit", batch.want.Limit, batch.have.Limit)
+		note(batch.name+".concurrency", batch.want.Concurrency, batch.have.Concurrency)
+		note(batch.name+".probe_timeout_seconds", batch.want.ProbeTimeoutSeconds, batch.have.ProbeTimeoutSeconds)
+		note(batch.name+".all_destinations", batch.want.AllDestinations, batch.have.AllDestinations)
+		note(batch.name+".bandwidth", batch.want.Bandwidth, batch.have.Bandwidth)
+		note(batch.name+".bandwidth_timeout_seconds", batch.want.BandwidthTimeoutSeconds, batch.have.BandwidthTimeoutSeconds)
+	}
+	// Names are fixed; values are deliberately excluded even from diagnostics.
+	note("api_url", desired.apiURL, durable.apiURL)
+	note("platform_url", desired.platformURL, durable.platformURL)
+	note("public_api_url", desired.publicAPIURL, durable.publicAPIURL)
+	note("bandwidth_cdn_url", desired.bandwidthCDNURL, durable.bandwidthCDNURL)
+	return changes
+}
+
+func egressCoverageSafeSettings(prefix string, config egressCoverageConfig) string {
+	fields := []string{fmt.Sprintf("%s_shards=%d %s_idle_delay_seconds=%d %s_max_time_seconds=%d", prefix, config.shardCount, prefix, config.idleDelaySeconds, prefix, config.maxTimeSeconds)}
+	for _, batch := range []struct {
+		name string
+		args egressCoverageBatchArgs
+	}{{"full", config.full}, {"blackhole", config.blackhole}} {
+		name := prefix + "_" + batch.name
+		fields = append(fields, fmt.Sprintf("%s_limit=%d %s_concurrency_per_shard=%d %s_probe_timeout_seconds=%d %s_all_destinations=%t %s_bandwidth=%t %s_bandwidth_timeout_seconds=%d", name, batch.args.Limit, name, batch.args.Concurrency, name, batch.args.ProbeTimeoutSeconds, name, batch.args.AllDestinations, name, batch.args.Bandwidth, name, batch.args.BandwidthTimeoutSeconds))
+	}
+	return strings.Join(fields, " ")
+}
+
+func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	schemaRows, err := env.runner.pg(ctx, `
 		SELECT
 		 EXISTS (
@@ -128,6 +344,19 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		return nil, err
 	}
 	target := pgTarget(env)
+	loadDesired := p.loadDesiredConfig
+	if loadDesired == nil {
+		loadDesired = loadEgressCoverageDesiredConfig
+	}
+	desired := loadDesired()
+	geometry, geometryErr := inspectEgressCoverageTasks(taskRows)
+	configFindings := egressCoverageConfigFindings(target, desired, len(taskRows), geometry, geometryErr)
+	if desired.present && desired.invalidReason == "" && !desired.enabled && len(taskRows) == 0 {
+		// Explicit disablement makes zero rows intentional, not an unarmed
+		// rollout. Lingering rows still pass through shard integrity and activity
+		// checks until normal disabled-task cleanup has actually retired them.
+		return configFindings, nil
+	}
 	if !tlsIntegrityArmed || len(taskRows) == 0 {
 		missing := []string{}
 		if !tlsIntegrityArmed {
@@ -143,7 +372,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if tlsIntegrityArmed && healthDeadlineIndexArmed {
 			action = "The append-only provider-egress schema, including migration 657, is already armed; do not repeat migrations. Deploy the API artifact containing the EDF scheduler, then deploy the Taskworker artifact containing selective attempt cleanup and let normal task initialization converge the shards; do not insert, delete, or hand-edit pending_task rows."
 		}
-		return []finding{{
+		return append(configFindings, finding{
 			probeId: "pg/egress-coverage", tier: tierWarn,
 			class: "egress-probe-unarmed", target: target, frame: "rollout", sustain: 2,
 			symptom:   "The provider-egress pipeline is not fully armed: " + strings.Join(missing, " and ") + " are absent.",
@@ -155,12 +384,11 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			action:    action,
 			verify:    "Migration 657's exact ordered health-deadline index is valid and ready, every API is on the EDF scheduler generation, every Taskworker is on the selective-cleanup/task generation, all shard rows appear, and this signal observes fresh category-local output or no due work for two cadences.",
 			playbook:  "SIGNALS.md §2.19, §2.10, and §8.9",
-		}}, nil
+		}), nil
 	}
 
-	geometry, geometryErr := inspectEgressCoverageTasks(taskRows)
 	if geometryErr != nil {
-		return []finding{{
+		return append(configFindings, finding{
 			probeId: "pg/egress-coverage", tier: tierPage,
 			class: "egress-probe-shards", target: target, frame: "durable-geometry", sustain: 1,
 			symptom:   "Durable provider-egress tasks do not form one complete, internally consistent shard geometry.",
@@ -172,7 +400,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			action:    "Converge every Taskworker on one configuration and allow the normal ProviderEgressProbe post-step/bootstrap scheduler to replace stale geometry. Do not manually clone, delete, or rewrite task rows.",
 			verify:    "The durable rows converge to one complete geometry and execution snapshot, and every shard either has no due candidates or advances its own aggregate full and blackhole evidence within the derived execution bound.",
 			playbook:  "SIGNALS.md §2.19 and §8.9",
-		}}, nil
+		}), nil
 	}
 
 	activityRows, err := env.runner.pg(ctx, egressCoverageActivityQuery(geometry.shardCount))
@@ -184,9 +412,9 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		return nil, err
 	}
 	stallSeconds := int64(geometry.maxTimeSeconds) + int64(geometry.idleDelaySeconds) + int64((5*time.Minute)/time.Second)
-	findings := []finding{
+	findings := append(configFindings,
 		healthyFinding("pg/egress-coverage", tierPage, "egress-probe-shards", target),
-	}
+	)
 	if healthDeadlineIndexArmed {
 		findings = append(findings, healthyFinding("pg/egress-coverage", tierWarn, "egress-probe-unarmed", target))
 	} else {
@@ -260,10 +488,7 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			apiURL: args.APIURL, platformURL: args.PlatformURL,
 			publicAPIURL: args.PublicAPIURL, bandwidthCDNURL: args.BandwidthCDNURL,
 		}
-		if config.shardCount < 1 || 256 < config.shardCount || args.ShardIndex < 0 || config.shardCount <= args.ShardIndex ||
-			config.idleDelaySeconds < 1 || config.maxTimeSeconds < 1 ||
-			!validEgressCoverageBatchArgs(config.full) || !validEgressCoverageBatchArgs(config.blackhole) ||
-			strings.TrimSpace(config.apiURL) == "" || strings.TrimSpace(config.platformURL) == "" {
+		if !validEgressCoverageConfig(config) || args.ShardIndex < 0 || config.shardCount <= args.ShardIndex {
 			problems = append(problems, fmt.Sprintf("row_%d_invalid_settings", rowIndex+1))
 			continue
 		}
@@ -288,6 +513,7 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			geometry.fullTimeoutSeconds = args.Full.ProbeTimeoutSeconds
 			geometry.blackholeConcurrency = args.Blackhole.Concurrency
 			geometry.blackholeTimeoutSeconds = args.Blackhole.ProbeTimeoutSeconds
+			geometry.settings = config
 			expected = config
 		} else if expected != config {
 			problems = append(problems, fmt.Sprintf("row_%d_mixed_settings", rowIndex+1))
@@ -337,6 +563,45 @@ func validEgressCoverageBatchArgs(args egressCoverageBatchArgs) bool {
 	return 0 < args.Limit && 0 < args.Concurrency && args.Concurrency <= args.Limit &&
 		0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds)
 }
+
+// Deadline feasibility depends on every cumulative deadline prefix, not the
+// complete category count compared with only its oldest row. All timestamps and
+// prefix counts stay in PostgreSQL; output remains three scalars per shard.
+const egressCoverageDeadlineCTEs = `,
+		deadline_counts AS (
+		 SELECT c.shard_index, c.urgent_lane,
+		        CASE c.urgent_lane
+		          WHEN 'stale-location' THEN c.observed_at + interval '7 days'
+		          WHEN 'stale-health' THEN c.measured_at + interval '24 hours'
+		          WHEN 'missing-health' THEN c.observed_at + interval '24 hours'
+		        END AS deadline_at,
+		        count(*) AS due_at_deadline
+		 FROM classified c
+		 WHERE c.urgent_lane IN ('stale-location', 'stale-health', 'missing-health')
+		   AND c.attempt_due AND NOT c.current_dark
+		 GROUP BY c.shard_index, c.urgent_lane, deadline_at
+		), deadline_prefixes AS (
+		 SELECT shard_index, urgent_lane, deadline_at,
+		        sum(due_at_deadline) OVER (
+		          PARTITION BY shard_index, urgent_lane ORDER BY deadline_at
+		          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+		        ) AS prefix_due
+		 FROM deadline_counts
+		), deadline_slack AS (
+		 SELECT p.shard_index,
+		        min(floor(extract(epoch FROM (p.deadline_at - s.now_utc)) -
+		          p.prefix_due * 3600::numeric / NULLIF(s.full_attempted_last_hour, 0))::bigint)
+		          FILTER (WHERE p.urgent_lane = 'stale-location') AS stale_location_deadline_slack_seconds,
+		        min(floor(extract(epoch FROM (p.deadline_at - s.now_utc)) -
+		          p.prefix_due * 3600::numeric / NULLIF(s.full_attempted_last_hour, 0))::bigint)
+		          FILTER (WHERE p.urgent_lane = 'stale-health') AS stale_health_deadline_slack_seconds,
+		        min(floor(extract(epoch FROM (p.deadline_at - s.now_utc)) -
+		          p.prefix_due * 3600::numeric / NULLIF(s.full_attempted_last_hour, 0))::bigint)
+		          FILTER (WHERE p.urgent_lane = 'missing-health') AS missing_health_deadline_slack_seconds
+		 FROM deadline_prefixes p
+		 JOIN snapshot s USING (shard_index)
+		 GROUP BY p.shard_index
+		)`
 
 func egressCoverageActivityQuery(shardCount int) string {
 	return fmt.Sprintf(`
@@ -426,7 +691,7 @@ func egressCoverageActivityQuery(shardCount int) string {
 		 FROM shards s
 		 LEFT JOIN classified c USING (shard_index)
 		 GROUP BY s.shard_index
-		)
+		)%s
 		SELECT shard_index::text, eligible::text,
 		       no_location_due::text, stale_location_due::text, stale_health_due::text,
 		       stale_location_expired_due::text, stale_health_expired_due::text,
@@ -439,33 +704,40 @@ func egressCoverageActivityQuery(shardCount int) string {
 		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_stale_health)))::bigint, -1)::text,
 		       missing_health_due::text, missing_health_expired_due::text,
 		       COALESCE(floor(extract(epoch FROM (now_utc - oldest_missing_health_anchor)))::bigint, -1)::text,
-		       deferred_current_dark_due::text
+		       deferred_current_dark_due::text,
+		       COALESCE(stale_location_deadline_slack_seconds::text, 'unavailable'),
+		       COALESCE(stale_health_deadline_slack_seconds::text, 'unavailable'),
+		       COALESCE(missing_health_deadline_slack_seconds::text, 'unavailable')
 		FROM snapshot
+		LEFT JOIN deadline_slack USING (shard_index)
 		ORDER BY shard_index;
-	`, shardCount, shardCount, shardCount, shardCount)
+	`, shardCount, shardCount, shardCount, shardCount, egressCoverageDeadlineCTEs)
 }
 
 type egressCoverageSnapshot struct {
-	shardIndex                    int
-	eligible                      int64
-	noLocationDue                 int64
-	staleLocationDue              int64
-	staleHealthDue                int64
-	staleLocationExpiredDue       int64
-	staleHealthExpiredDue         int64
-	blackholeDue                  int64
-	fullAgeSeconds                int64
-	blackholeAgeSeconds           int64
-	fullCurrent                   int64
-	blackholeCurrent              int64
-	fullAttemptsLastHour          int64
-	blackholeLastHour             int64
-	staleLocationOldestAgeSeconds int64
-	staleHealthOldestAgeSeconds   int64
-	missingHealthDue              int64
-	missingHealthExpiredDue       int64
-	missingHealthOldestAgeSeconds int64
-	deferredCurrentDarkDue        int64
+	shardIndex                        int
+	eligible                          int64
+	noLocationDue                     int64
+	staleLocationDue                  int64
+	staleHealthDue                    int64
+	staleLocationExpiredDue           int64
+	staleHealthExpiredDue             int64
+	blackholeDue                      int64
+	fullAgeSeconds                    int64
+	blackholeAgeSeconds               int64
+	fullCurrent                       int64
+	blackholeCurrent                  int64
+	fullAttemptsLastHour              int64
+	blackholeLastHour                 int64
+	staleLocationOldestAgeSeconds     int64
+	staleHealthOldestAgeSeconds       int64
+	missingHealthDue                  int64
+	missingHealthExpiredDue           int64
+	missingHealthOldestAgeSeconds     int64
+	deferredCurrentDarkDue            int64
+	staleLocationDeadlineSlackSeconds *int64
+	staleHealthDeadlineSlackSeconds   *int64
+	missingHealthDeadlineSlackSeconds *int64
 }
 
 func (s egressCoverageSnapshot) fullDue() int64 {
@@ -479,11 +751,11 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 	snapshots := make([]egressCoverageSnapshot, 0, shardCount)
 	seen := map[int]bool{}
 	for _, row := range rows {
-		if len(row) != 20 {
+		if len(row) != 23 {
 			return nil, fmt.Errorf("provider egress activity returned an invalid row shape")
 		}
 		values := make([]int64, 20)
-		for i := range row {
+		for i := range values {
 			value, err := strconv.ParseInt(strings.TrimSpace(row.str(i)), 10, 64)
 			isAge := i == 8 || i == 9 || i == 14 || i == 15 || i == 18
 			if err != nil || (!isAge && value < 0) || (isAge && value < -1) {
@@ -523,6 +795,28 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 			(snapshot.missingHealthDue > 0 && snapshot.missingHealthOldestAgeSeconds < 0) {
 			return nil, fmt.Errorf("provider egress activity returned contradictory shard counts")
 		}
+		for i, category := range []struct {
+			due   int64
+			slack **int64
+		}{
+			{snapshot.staleLocationDue, &snapshot.staleLocationDeadlineSlackSeconds},
+			{snapshot.staleHealthDue, &snapshot.staleHealthDeadlineSlackSeconds},
+			{snapshot.missingHealthDue, &snapshot.missingHealthDeadlineSlackSeconds},
+		} {
+			field := strings.TrimSpace(row.str(20 + i))
+			expectSlack := category.due > 0 && snapshot.fullAttemptsLastHour > 0
+			if field == "unavailable" {
+				if expectSlack {
+					return nil, fmt.Errorf("provider egress activity omitted deadline-prefix slack for category %d", i)
+				}
+				continue
+			}
+			value, err := strconv.ParseInt(field, 10, 64)
+			if err != nil || !expectSlack {
+				return nil, fmt.Errorf("provider egress activity returned invalid deadline-prefix slack for category %d", i)
+			}
+			*category.slack = &value
+		}
 		snapshots = append(snapshots, snapshot)
 	}
 	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].shardIndex < snapshots[j].shardIndex })
@@ -553,6 +847,12 @@ func egressBlackholeCapacityFinding(
 	probeTimeoutSeconds := int64(geometry.blackholeTimeoutSeconds)
 	blackholeOnlyTimeoutCeilingPerHour := configuredBlackholeConcurrency * int64(time.Hour/time.Second) / probeTimeoutSeconds
 	blackholeOnlyDeadlineMinimumConcurrency := (requiredPerHour*probeTimeoutSeconds + int64(time.Hour/time.Second) - 1) / int64(time.Hour/time.Second)
+	reservedEvidence := "independent_drain_overlap_possible=false full_reserved_blackhole_concurrency_per_shard=unavailable full_reserved_total_blackhole_concurrency=unavailable full_reserved_timeout_ceiling_per_hour=unavailable"
+	if geometry.fullConcurrency < geometry.blackholeConcurrency {
+		reservedPerShard := int64(geometry.blackholeConcurrency - geometry.fullConcurrency)
+		reservedTotal := int64(geometry.shardCount) * reservedPerShard
+		reservedEvidence = fmt.Sprintf("independent_drain_overlap_possible=true full_reserved_blackhole_concurrency_per_shard=%d full_reserved_total_blackhole_concurrency=%d full_reserved_timeout_ceiling_per_hour=%d", reservedPerShard, reservedTotal, reservedTotal*int64(time.Hour/time.Second)/probeTimeoutSeconds)
+	}
 	coveragePercent := 100 * float64(current) / float64(eligible)
 	return finding{
 		probeId: "pg/egress-coverage", tier: tierPage,
@@ -564,15 +864,16 @@ func egressBlackholeCapacityFinding(
 		mechanism: "Shard timestamps are advancing, but aggregate production is too slow to refresh the complete eligible population before verdicts expire. A known-dark provider therefore ages out of the exclusion set and becomes selectable again without a successful recheck; shard-local liveness alone cannot see this chronic under-capacity state. The blackhole-only slot calculation does not include residence time spent on full probes inside the same durable task.",
 		baseline:  fmt.Sprintf("The measured one-hour blackhole-check rate is at least %d providers/hour, so one complete fleet sweep fits inside the %s verdict lifetime, or current coverage is already complete.", requiredPerHour, model.ProviderBlackholeCheckMaxAge),
 		observed: fmt.Sprintf(
-			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_blackhole_concurrency_per_shard=%d configured_total_blackhole_concurrency=%d blackhole_probe_timeout_seconds=%d blackhole_only_timeout_ceiling_per_hour=%d blackhole_only_deadline_minimum_concurrency=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d full_probe_timeout_seconds=%d",
+			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_blackhole_concurrency_per_shard=%d configured_total_blackhole_concurrency=%d blackhole_probe_timeout_seconds=%d blackhole_only_timeout_ceiling_per_hour=%d blackhole_only_deadline_minimum_concurrency=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d full_probe_timeout_seconds=%d %s",
 			eligible, current, coveragePercent, checkedLastHour, requiredPerHour,
 			(time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
 			geometry.shardCount, geometry.blackholeConcurrency, configuredBlackholeConcurrency,
 			probeTimeoutSeconds, blackholeOnlyTimeoutCeilingPerHour, blackholeOnlyDeadlineMinimumConcurrency,
 			geometry.fullLimit, geometry.fullConcurrency, geometry.fullTimeoutSeconds,
+			reservedEvidence,
 		),
 		evidence: "The query counts one latest row per eligible provider inside PostgreSQL and joins those aggregate rates only to the complete common execution geometry parsed from the durable task arguments. Provider, network, task, endpoint, and failure identities never leave the database.",
-		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full blackhole deadline and depress throughput. The blackhole-only timeout rate is not a whole-task ceiling when a running artifact serializes full work in the same shard; measured throughput remains authoritative because full-probe residence, setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
+		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full blackhole deadline and depress throughput. On an independent-drain artifact, while both queues are due, Full.Concurrency is reserved from Blackhole.Concurrency, so the full_reserved figures model the smaller effective blackhole pool without adding full slots to the configured peak. When full concurrency is not smaller, overlap is unavailable rather than a negative or zero throughput claim. These are conditional sizing models, not runtime capability or queue-activity attestations. The blackhole-only timeout rate is not a whole-task ceiling when a running artifact serializes full work in the same shard; measured throughput remains authoritative because full-probe residence, setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
 		action:   "Run §2.23 and §2.24 first, then establish the running Taskworker's execution behavior. If full work blocks blackhole progress inside one shard task, deploy the architecture-preserving correction that overlaps one full batch with a repeated blackhole drain while reserving its configured concurrency; do not increase concurrency first. If independent drain is already present and the measured rate still misses the bound, capacity-test any geometry change against PostgreSQL/PgBouncer, API, and Taskworker CPU/memory headroom. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
 		verify:   "After convergence, for two complete verdict lifetimes every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable. Keep more than 25% PostgreSQL normal-role headroom and verify PgBouncer, API, and Taskworker CPU/memory controls throughout the sustained duty cycle.",
 		playbook: "SIGNALS.md §2.19, §2.23, and §2.24",
@@ -644,29 +945,33 @@ func egressFullFairnessFindings(
 	findings := []finding{}
 	for _, snapshot := range snapshots {
 		categories := []struct {
-			name             string
-			due              int64
-			expiredDue       int64
-			oldestAgeSeconds int64
-			maxAge           time.Duration
+			name                 string
+			due                  int64
+			expiredDue           int64
+			oldestAgeSeconds     int64
+			maxAge               time.Duration
+			deadlineSlackSeconds *int64
 		}{
 			{
 				name: "stale-location", due: snapshot.staleLocationDue,
-				expiredDue:       snapshot.staleLocationExpiredDue,
-				oldestAgeSeconds: snapshot.staleLocationOldestAgeSeconds,
-				maxAge:           model.ProviderEgressLocationMaxAge,
+				expiredDue:           snapshot.staleLocationExpiredDue,
+				oldestAgeSeconds:     snapshot.staleLocationOldestAgeSeconds,
+				maxAge:               model.ProviderEgressLocationMaxAge,
+				deadlineSlackSeconds: snapshot.staleLocationDeadlineSlackSeconds,
 			},
 			{
 				name: "stale-health", due: snapshot.staleHealthDue,
-				expiredDue:       snapshot.staleHealthExpiredDue,
-				oldestAgeSeconds: snapshot.staleHealthOldestAgeSeconds,
-				maxAge:           model.ProviderEgressHealthMaxAge,
+				expiredDue:           snapshot.staleHealthExpiredDue,
+				oldestAgeSeconds:     snapshot.staleHealthOldestAgeSeconds,
+				maxAge:               model.ProviderEgressHealthMaxAge,
+				deadlineSlackSeconds: snapshot.staleHealthDeadlineSlackSeconds,
 			},
 			{
 				name: "missing-health", due: snapshot.missingHealthDue,
-				expiredDue:       snapshot.missingHealthExpiredDue,
-				oldestAgeSeconds: snapshot.missingHealthOldestAgeSeconds,
-				maxAge:           model.ProviderEgressHealthMaxAge,
+				expiredDue:           snapshot.missingHealthExpiredDue,
+				oldestAgeSeconds:     snapshot.missingHealthOldestAgeSeconds,
+				maxAge:               model.ProviderEgressHealthMaxAge,
+				deadlineSlackSeconds: snapshot.missingHealthDeadlineSlackSeconds,
 			},
 		}
 		for _, category := range categories {
@@ -679,7 +984,7 @@ func egressFullFairnessFindings(
 			if 0 < snapshot.fullAttemptsLastHour {
 				projectedSeconds = (category.due*int64(time.Hour/time.Second) + snapshot.fullAttemptsLastHour - 1) / snapshot.fullAttemptsLastHour
 			}
-			deadlineAtRisk := 0 <= projectedSeconds && remainingSeconds < projectedSeconds
+			deadlineAtRisk := category.deadlineSlackSeconds != nil && *category.deadlineSlackSeconds < 0
 			deadlineMissed := 0 < category.expiredDue
 			if !deadlineMissed && !deadlineAtRisk {
 				continue
@@ -689,30 +994,34 @@ func egressFullFairnessFindings(
 			if 0 <= projectedSeconds {
 				projectedText = (time.Duration(projectedSeconds) * time.Second).Round(time.Second).String()
 			}
+			slackText := "unavailable_zero_gross_attempts"
+			if category.deadlineSlackSeconds != nil {
+				slackText = strconv.FormatInt(*category.deadlineSlackSeconds, 10)
+			}
 			frame := fmt.Sprintf("shard-%d-of-%d/%s", snapshot.shardIndex, geometry.shardCount, category.name)
 			findings = append(findings, finding{
 				probeId: "pg/egress-coverage", tier: tierPage,
 				class: "egress-full-fairness", target: target, frame: frame, sustain: 2,
 				symptom: fmt.Sprintf(
-					"Full-probe category %s has %d due providers in %s, including %d past its absolute deadline; assigning every recent full attempt to this category projects %s.",
-					category.name, category.due, frame, category.expiredDue, projectedText,
+					"Full-probe category %s has %d due providers in %s, including %d past its absolute deadline; minimum measured-rate deadline-prefix slack is %s seconds.",
+					category.name, category.due, frame, category.expiredDue, slackText,
 				),
-				mechanism: "The category has crossed an existing absolute deadline, or cannot meet the oldest row's remaining window even under the optimistic assumption that every gross full-probe attempt serves it. Location and existing-health rows use their hard evidence expiries; missing health uses location observed_at plus the existing 24-hour health lifetime and does not claim that health evidence ever existed. This success-inclusive lower bound avoids treating successful probes that leave a category as missing progress. The corrected scheduler merges bounded timestamp-indexed location and health heads plus an output-bounded anti-health head by absolute deadline before filling from unlocated work.",
+				mechanism: "At least one due row has crossed its absolute deadline, or a cumulative deadline prefix has negative slack when every gross full-probe attempt is assigned to this category at the measured last-hour rate. The projection uses each actual deadline, not the whole category count against only its oldest row. A forecast shortfall is conditional on unchanged throughput; it does not prove an unavoidable future miss or scheduler starvation. Location and existing-health rows use their hard evidence expiries; missing health uses location observed_at plus the existing 24-hour health lifetime and does not claim that health evidence ever existed. The corrected scheduler merges bounded timestamp-indexed location and health heads plus an output-bounded anti-health head by absolute deadline before filling from unlocated work.",
 				baseline: fmt.Sprintf(
-					"No due %s row has crossed its %s category deadline, and when gross attempts are measurable the optimistic all-capacity projection fits inside the oldest row's remaining window.",
+					"No due %s row has crossed its %s category deadline, and when gross attempts are measurable every cumulative deadline prefix has nonnegative slack at that rate.",
 					category.name, category.maxAge,
 				),
 				observed: fmt.Sprintf(
-					"frame=%s category=%s due=%d expired_due=%d gross_full_attempted_last_hour=%d oldest_deadline_anchor_age=%s remaining_deadline_window=%s optimistic_all_capacity_drain=%s deadline_missed=%t deadline_at_risk=%t all_shards_unlocated_can_fill_batch=%t configured_full_limit_per_shard=%d",
+					"frame=%s category=%s due=%d expired_due=%d gross_full_attempted_last_hour=%d oldest_deadline_anchor_age=%s remaining_deadline_window=%s optimistic_all_capacity_drain=%s minimum_deadline_prefix_slack_seconds=%s deadline_missed=%t deadline_at_risk=%t all_shards_unlocated_can_fill_batch=%t configured_full_limit_per_shard=%d",
 					frame, category.name, category.due, category.expiredDue, snapshot.fullAttemptsLastHour,
 					(time.Duration(category.oldestAgeSeconds) * time.Second).Round(time.Second),
-					(time.Duration(remainingSeconds) * time.Second).Round(time.Second), projectedText,
+					(time.Duration(remainingSeconds) * time.Second).Round(time.Second), projectedText, slackText,
 					deadlineMissed, deadlineAtRisk, allShardsUnlocatedSaturated, geometry.fullLimit,
 				),
-				evidence: "The query separates no-location from present-location work, then assigns each present-location urgent row to the location, existing-health, or missing-health lane with the earliest absolute deadline; an exact location/health tie is stable in favor of location, matching the scheduler merge. It returns shard-local due, expired, oldest-anchor-age, and gross success-inclusive attempt aggregates only. Giving one category all gross attempts is deliberately optimistic; if that bound fails, no unknown allocation can make the deadline. No provider or task identifier leaves PostgreSQL.",
-				context:  "The all-shards-unlocated shape is diagnostic only: it proves starvation when joined to a running API artifact with fixed pass precedence, but it is not itself a post-EDF failure. This finding is deadline preservation for already-evidenced providers, not complete scheduler fairness. First attempts and retries still share the unlocated lane, whose only defined contract is a six-hour minimum retry backoff; maximum retry delay or an allocation remains an explicit product decision.",
+				evidence: "The query separates no-location from present-location work and assigns each urgent row to its earliest-deadline lane, with exact location/health ties stable in favor of location. Within each shard/category it groups equal deadlines, accumulates due counts through each deadline, and returns only the minimum slack plus due, expired, oldest-age, and success-inclusive gross-attempt aggregates. Whole-category drain and oldest remaining time are context, not the at-risk predicate. No provider or task identifier leaves PostgreSQL.",
+				context:  "The all-shards-unlocated shape is diagnostic only: it proves starvation when joined to a running API artifact with fixed pass precedence, but it is not itself a post-EDF failure. Nonnegative per-category slack does not certify the simultaneous cross-category schedule or future successful outcomes: each category is given all gross capacity for this necessary-condition screen. First attempts and retries still share the unlocated lane, whose only defined contract is a six-hour minimum retry backoff; maximum retry delay or an allocation remains an explicit product decision.",
 				action:   "Establish the running API scheduler behavior. If it retains fixed pass precedence and every unlocated head can fill the batch, apply the ordered health index migration and deploy the bounded EDF API correction; deploy the selective attempt cleanup with Taskworker. If EDF is already running, diagnose full capacity and category outcomes without inventing weights or deleting evidence.",
-				verify:   "After API and Taskworker convergence, require expired_due=0 and an optimistic drain within each urgent category's remaining deadline window for two samples, preserve stale-health evidence through its 12-hour due-to-expiry window, keep missing-health at zero or advancing after attempt backoff, and complete a seven-day full sweep. Separately retain the open product decision and capacity gate for first attempts versus retries.",
+				verify:   "After API and Taskworker convergence, require expired_due=0 and nonnegative measured-rate minimum deadline-prefix slack for each urgent category for two samples; an unavailable zero-rate projection is not a healthy forecast. Preserve stale-health evidence through its 12-hour due-to-expiry window, keep missing-health at zero or advancing after attempt backoff, and complete a seven-day full sweep. Separately retain the open product decision and capacity gate for first attempts versus retries.",
 				playbook: "SIGNALS.md §2.19, §2.23, and §2.24",
 			})
 		}

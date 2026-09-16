@@ -110,6 +110,10 @@ func TestProxyDeviceMemoryMetricsCollectsOneSnapshot(t *testing.T) {
 		PlatformPendingH1Count:               1,
 		PlatformPendingH1ByteCount:           256 * 1024,
 		PlatformSlotFullPendingH1DeviceCount: 1,
+		PlatformHandoffTransportCount:        1,
+		PlatformHandoffByteCount:             256 * 1024,
+		PlatformSlotFullHandoffDeviceCount:   1,
+		PlatformSlotFullHandoffUnsatisfied:   1,
 		PlatformH3PreemptionDelta:            4,
 		PlatformSlotFullH3PreemptionDelta:    2,
 	})
@@ -165,21 +169,27 @@ func TestProxyDeviceMemoryMetricsCollectsOneSnapshot(t *testing.T) {
 		}
 	}
 	checkSnapshot(snapshot, map[*prometheus.Desc]float64{
-		devicesLiveDesc:                                    1,
-		proxyDeviceMemoryTargetBytesDesc:                   24 * 1024 * 1024,
-		proxyDeviceMemoryUsedBytesDesc:                     7 * 1024 * 1024,
-		proxyPlatformTransportBudgetBytesDesc:              6 * 1024 * 1024,
-		proxyPlatformTransportUsedBytesDesc:                2 * 1024 * 1024,
-		proxyPlatformTransportMaxDesc:                      16,
-		proxyPlatformTransportUsedDesc:                     16,
-		proxyPlatformTransportPendingH1Desc:                1,
-		proxyPlatformTransportPendingH1BytesDesc:           256 * 1024,
-		proxyPlatformTransportSlotFullPendingH1DevicesDesc: 1,
-		proxyPlatformTransportH3PreemptionsDesc:            4,
-		proxyPlatformTransportSlotFullH3PreemptionsDesc:    2,
+		devicesLiveDesc:                                      1,
+		proxyDeviceMemoryTargetBytesDesc:                     24 * 1024 * 1024,
+		proxyDeviceMemoryUsedBytesDesc:                       7 * 1024 * 1024,
+		proxyPlatformTransportBudgetBytesDesc:                6 * 1024 * 1024,
+		proxyPlatformTransportUsedBytesDesc:                  2 * 1024 * 1024,
+		proxyPlatformTransportMaxDesc:                        16,
+		proxyPlatformTransportUsedDesc:                       16,
+		proxyPlatformTransportPendingH1Desc:                  1,
+		proxyPlatformTransportPendingH1BytesDesc:             256 * 1024,
+		proxyPlatformTransportSlotFullPendingH1DevicesDesc:   1,
+		proxyPlatformTransportHandoffTransportsDesc:          1,
+		proxyPlatformTransportHandoffBytesDesc:               256 * 1024,
+		proxyPlatformTransportSlotFullHandoffDevicesDesc:     1,
+		proxyPlatformTransportSlotFullHandoffUnsatisfiedDesc: 1,
+		proxyPlatformTransportSlotFullDemandUnsatisfiedDesc:  0,
+		proxyPlatformTransportSlotFullWindowUnknownDesc:      0,
+		proxyPlatformTransportH3PreemptionsDesc:              4,
+		proxyPlatformTransportSlotFullH3PreemptionsDesc:      2,
 	})
 
-	metricChannel = make(chan prometheus.Metric, 12)
+	metricChannel = make(chan prometheus.Metric, 18)
 	metrics.Collect(metricChannel)
 	close(metricChannel)
 	snapshot = nil
@@ -187,17 +197,103 @@ func TestProxyDeviceMemoryMetricsCollectsOneSnapshot(t *testing.T) {
 		snapshot = append(snapshot, metric)
 	}
 	checkSnapshot(snapshot, map[*prometheus.Desc]float64{
-		devicesLiveDesc:                                    2,
-		proxyDeviceMemoryTargetBytesDesc:                   48 * 1024 * 1024,
-		proxyDeviceMemoryUsedBytesDesc:                     10 * 1024 * 1024,
-		proxyPlatformTransportBudgetBytesDesc:              12 * 1024 * 1024,
-		proxyPlatformTransportUsedBytesDesc:                3 * 1024 * 1024,
-		proxyPlatformTransportMaxDesc:                      32,
-		proxyPlatformTransportUsedDesc:                     8,
-		proxyPlatformTransportPendingH1Desc:                0,
-		proxyPlatformTransportPendingH1BytesDesc:           0,
-		proxyPlatformTransportSlotFullPendingH1DevicesDesc: 0,
-		proxyPlatformTransportH3PreemptionsDesc:            7,
-		proxyPlatformTransportSlotFullH3PreemptionsDesc:    2,
+		devicesLiveDesc:                                      2,
+		proxyDeviceMemoryTargetBytesDesc:                     48 * 1024 * 1024,
+		proxyDeviceMemoryUsedBytesDesc:                       10 * 1024 * 1024,
+		proxyPlatformTransportBudgetBytesDesc:                12 * 1024 * 1024,
+		proxyPlatformTransportUsedBytesDesc:                  3 * 1024 * 1024,
+		proxyPlatformTransportMaxDesc:                        32,
+		proxyPlatformTransportUsedDesc:                       8,
+		proxyPlatformTransportPendingH1Desc:                  0,
+		proxyPlatformTransportPendingH1BytesDesc:             0,
+		proxyPlatformTransportSlotFullPendingH1DevicesDesc:   0,
+		proxyPlatformTransportHandoffTransportsDesc:          0,
+		proxyPlatformTransportHandoffBytesDesc:               0,
+		proxyPlatformTransportSlotFullHandoffDevicesDesc:     0,
+		proxyPlatformTransportSlotFullHandoffUnsatisfiedDesc: 0,
+		proxyPlatformTransportSlotFullDemandUnsatisfiedDesc:  0,
+		proxyPlatformTransportSlotFullWindowUnknownDesc:      0,
+		proxyPlatformTransportH3PreemptionsDesc:              7,
+		proxyPlatformTransportSlotFullH3PreemptionsDesc:      2,
 	})
+}
+
+// A sibling's handoff or readiness must never explain this device's full cap.
+func TestAggregateProxyDeviceMemoryUsageJoinsHandoffAndWindowAtOwner(t *testing.T) {
+	for _, test := range []struct {
+		name                                                    string
+		active, pending                                         int
+		known, ready                                            bool
+		handoff, handoffUnsatisfied, demandUnsatisfied, unknown int
+	}{
+		{"demand", 0, 0, true, false, 0, 0, 1, 0},
+		{"active-handoff", 1, 0, true, false, 1, 1, 0, 0},
+		{"queued-handoff", 0, 2, true, false, 1, 1, 0, 0},
+		{"ready-handoff", 1, 0, true, true, 1, 0, 0, 0},
+		{"unknown-window", 1, 0, false, false, 1, 0, 0, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			usage := aggregateProxyDeviceMemoryUsage([]*sdk.DeviceLocalMemoryUsage{
+				{
+					PlatformTransportMaxCount: 16, PlatformTransportUsedCount: 16,
+					PlatformTransportPendingH1Count: 2, PlatformTransportPendingH1Bytes: 512 * 1024,
+					PlatformTransportActiveHandoffCount:  test.active,
+					PlatformTransportPendingHandoffCount: test.pending,
+					ProviderWindowKnown:                  test.known, ProviderWindowMinSatisfied: test.ready,
+				},
+				{
+					// Healthy, unrelated owner with an active handoff.
+					PlatformTransportMaxCount: 16, PlatformTransportUsedCount: 1,
+					PlatformTransportActiveHandoffCount: 1,
+					PlatformTransportHandoffCount:       1, PlatformTransportHandoffByteCount: 256 * 1024,
+					ProviderWindowKnown: true, ProviderWindowMinSatisfied: true,
+				},
+				nil,
+			})
+			if usage.PlatformSlotFullPendingH1DeviceCount != 1 ||
+				usage.PlatformSlotFullHandoffDeviceCount != test.handoff ||
+				usage.PlatformSlotFullHandoffUnsatisfied != test.handoffUnsatisfied ||
+				usage.PlatformSlotFullDemandUnsatisfied != test.demandUnsatisfied ||
+				usage.PlatformSlotFullWindowUnknown != test.unknown ||
+				usage.PlatformHandoffTransportCount != 1 || usage.PlatformHandoffByteCount != 256*1024 {
+				t.Fatalf("same-owner aggregate = %+v", usage)
+			}
+		})
+	}
+}
+
+// Six new gauges remain six unlabeled series regardless of device population;
+// a reset/new process starts from zero rather than retaining predecessor state.
+func TestProxyDeviceMemoryAdmissionMetricsHaveFixedCardinalityAndReset(t *testing.T) {
+	for _, devices := range []int{0, 1, 1000} {
+		metrics := &proxyDeviceMemoryMetrics{}
+		metrics.update(proxyDeviceMemoryUsage{
+			DeviceCount: devices, PlatformSlotFullPendingH1DeviceCount: devices,
+			PlatformSlotFullDemandUnsatisfied: devices,
+		})
+		registry := prometheus.NewPedanticRegistry()
+		registry.MustRegister(metrics)
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(families) != 18 {
+			t.Fatalf("families=%d for devices=%d", len(families), devices)
+		}
+		for _, family := range families {
+			if len(family.Metric) != 1 || len(family.Metric[0].Label) != 0 {
+				t.Fatalf("identity/cardinality leak in %s", family.GetName())
+			}
+		}
+		metrics.update(proxyDeviceMemoryUsage{})
+		families, err = registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, family := range families {
+			if value := family.Metric[0].GetGauge(); value != nil && value.GetValue() != 0 {
+				t.Fatalf("reset retained gauge %s", family.GetName())
+			}
+		}
+	}
 }

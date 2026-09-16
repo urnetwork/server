@@ -20,7 +20,10 @@ func NetworkCreate(
 		return nil, err
 	}
 	if result.Error != nil {
-		return nil, fmt.Errorf("%s", result.Error.Message)
+		// Preserve the model's explicit client-refusal classification. Turning
+		// every result message into a plain error reported ordinary form and
+		// duplicate-account refusals as unhandled HTTP 500 failures.
+		return nil, result.Error
 	}
 	enrollNetworkCreateOnboardingPostPrimary(result, session)
 

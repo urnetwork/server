@@ -33,17 +33,22 @@ full:
 
 blackhole:
   limit: 250
-  concurrency: 32
+  concurrency: 52
   probe_timeout_seconds: 15
 ```
 
-Main keeps four durable rows and runs 32 blackhole workers inside each row.
-That is 128 total probe slots without consuming more taskworker executor slots.
-At the 15-second request deadline the timeout-only ceiling before setup and
-teardown is 30,720 checks per hour; the measured fleet rate remains
-authoritative because overhead and fast successes change realized throughput.
-Monitor §2.19 reports both this configured bound and the measured complete-sweep
-projection.
+Main keeps four durable rows with a combined peak of 52 probe workers per row,
+or 208 slots without consuming more taskworker executor slots. A blackhole-only
+pass can use all 52. While both queues are due, the independent drain reserves
+the two full-probe workers and uses 50 blackhole workers per row: 200 blackhole
+slots plus eight full slots fleet-wide, not 208 plus eight. At the 15-second
+request deadline those two conditional timeout-only models are 49,920 and
+48,000 blackhole checks per hour before setup and teardown. The latter retains
+about 34% nominal capacity above the 35,796/hour rate required by the
+107,387-provider fleet observed on 2026-09-15. The measured fleet rate remains
+authoritative because overhead, queue residence, and fast successes change
+realized throughput. Monitor §2.19 reports these sizing bounds separately from
+the measured complete-sweep projection.
 
 `enabled` defaults to `true` to preserve existing deployments. Set it
 explicitly to `false` in a simulation or environment that must not contact the

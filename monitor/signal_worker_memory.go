@@ -241,6 +241,9 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	aliasesReady := false
 	var aliasesReadyErr error
 	aliasesReadyLoaded := false
+	phaseObservations := map[string]workerScorePhaseObservation{}
+	var phaseObservationsErr error
+	phaseObservationsLoaded := false
 	for _, worker := range workers {
 		if worker.heap <= 0 {
 			continue
@@ -324,6 +327,9 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		action := "Identify the co-resident task families, then roll out their bounded or streaming working-set fixes. Preserve task deadlines and durable evidence; do not restart the worker merely to erase the heap unless an explicitly authorized operational emergency requires it."
 		verify := "The affected process returns below both the absolute and fleet-skew guards, heap-object count contracts, and the same task families complete inside their historical bands on consecutive scheduled runs without an OOM or deadline increase."
 		if scoreActive {
+			observed += " score_alias_marker_scope=global score_exporter_capability=unverified"
+			action = "First verify the exact outlier Taskworker artifact and score-exporter capability; the global alias marker cannot attest this process or its current code path. If the artifact is caller-oriented, deploy the target-oriented UpdateClientScores fanout and alias-aware cache. If target-oriented capability is independently proven, let the current score run cross its terminal boundary and observe the next collection; recurring crossings then require phase-local allocation evidence before bounding provider maps or encoding concurrency. Preserve bounded streaming; do not restart or raise the memory limit to erase the evidence."
+			verify = "The exact outlier's exporter capability is independently established, consecutive score runs complete inside their normal band, and the affected executor returns below the heap guards after terminal/collection boundaries. Verify sparse score bytes after the legacy TTL, populated selections, and no Redis capacity error; a global marker alone does not close this process-local finding."
 			if !aliasesReadyLoaded {
 				aliasesReadyLoaded = true
 				redisHost := env.cfg.hostByRole("redis-cluster")
@@ -336,20 +342,31 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			switch {
 			case aliasesReadyErr != nil:
 				observed += " score_alias_schema_ready=unknown"
-				mechanism = "UpdateClientScores is active on the exact heap outlier, but the alias-schema marker lookup failed. Production start/stop controls still identify score export as the portable allocator; without the marker, this probe cannot distinguish the former caller-oriented fanout from residual allocation in the target-oriented sparse exporter."
-				evidence += " The score-alias deployment boundary could not be read: " + aliasesReadyErr.Error()
-				action = "Read the client_score_alias_v1_ready marker before changing the deployment. If absent, deploy the target-oriented fanout and alias-aware cache; if present, do not redeploy it—let the current task cross its terminal boundary and observe the next collection before profiling the remaining target maps and encoding concurrency. Preserve bounded streaming and do not restart or raise the memory limit to erase the evidence."
-				verify = "The marker state is known, the corresponding sparse writer path is active, and consecutive score runs finish with the executor returning below both heap guards after their terminal boundaries without selection loss or Redis capacity pressure."
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, but the global alias-schema marker lookup failed. Historical start/stop controls make score export an allocation candidate, not proof of this task's heap ownership or this worker's code path. Neither marker state nor exact exporter capability is established."
+				evidence += " The global score-alias compatibility marker could not be read."
 			case aliasesReady:
 				observed += " score_alias_schema_ready=true"
-				mechanism = "UpdateClientScores is active on the exact heap outlier, and the durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass. This is therefore residual allocation in the deployed sparse exporter, not evidence that the former caller-oriented fix is missing. HeapAlloc can include the current provider maps and encodings plus unreachable objects from a prior pass awaiting collection; executor correlation alone does not separate those components."
-				action = "The target-oriented fanout and alias-aware cache are already active; do not redeploy them. Let the current score run cross its terminal boundary and observe the next collection. If consecutive sparse passes still cross both guards or the heap does not return below them, capture phase-local allocation evidence and bound the remaining provider-map or encoding concurrency. Preserve bounded streaming; do not restart or raise the memory limit to erase the evidence."
-				verify = "Consecutive post-marker score runs complete inside their normal band, the affected executor returns below both heap guards after each terminal boundary, score bytes remain sparse after the legacy TTL, selections stay populated, and no Redis capacity error appears."
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, and the global alias-schema marker shows that some writer previously completed a compatibility pass. That persistent shared marker is not provenance for this exact worker artifact or proof that its current export uses target-oriented fanout. Score export is a correlated allocation candidate, not established ownership of the whole heap. HeapAlloc can include current provider maps and encodings plus unreachable objects awaiting collection; this observation does not distinguish those components."
 			default:
 				observed += " score_alias_schema_ready=false"
-				mechanism = "UpdateClientScores is active on the exact heap outlier. Production start/stop controls identify score export as the portable allocator: deployed streaming batches reduced the former 28–45GiB peaks, but caller-oriented fanout still re-encodes caller-invariant target payloads hundreds of times. That sustained allocation can keep HeapAlloc above the guard between collections even though the stream bounds its retained command batch."
-				action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and encode full overrides only for callers whose blocked networks remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not restart or raise the memory limit to erase the evidence."
-				verify = "A post-deploy UpdateClientScores run completes inside its historical band while this executor remains below the absolute and fleet-skew heap guards, heap-object count contracts, aliases preserve unfiltered selections, excluded callers retain overrides, and score bytes drain after the legacy TTL."
+				mechanism = "UpdateClientScores has a fresh heartbeat on the outlier's host/block, and the global alias-schema marker is absent. This may be a pending or incomplete compatibility pass, legacy writers, or missing cache state; it does not identify this worker's artifact. Historical start/stop controls make score export an allocation candidate, but phase-local and exact-process evidence must distinguish caller-oriented amplification from target-oriented maps, encodings, or uncollected objects."
+			}
+			// Phase visibility belongs to the heap outlier itself: neither a
+			// global marker nor the independent churn thresholds gate this read.
+			// Load once per check, then match every outlier's exact generation.
+			if !phaseObservationsLoaded {
+				phaseObservationsLoaded = true
+				phaseObservations, phaseObservationsErr = loadWorkerScorePhaseObservations(ctx, env, metricHosts, metricHost)
+			}
+			phaseObservation, phaseReady := phaseObservations[workerScorePhaseKey(worker.host, worker.block, worker.instance)]
+			if phaseObservationsErr != nil || !phaseReady {
+				observed += " score_phase_observability=unavailable"
+				mechanism += " The complete source-fresh phase set is unavailable for this exact runtime; the profiling boundary is explicitly unobservable, not healthy. The heap-skew finding remains valid."
+				evidence += " Phase lookup failed or returned incomplete, stale, or different-generation data; no partial set or other worker was substituted."
+			} else {
+				observed += " " + phaseObservation.summary()
+				mechanism += " Fixed phase telemetry is complete for this exact runtime: " + phaseObservation.discriminator() + ". Phase occupancy and deterministic work bytes select a profiling boundary, not heap ownership; completed-span seconds are not CPU time and work bytes are not process heap allocations."
+				evidence += " Each phase family was filtered by its underlying source timestamp before the exact host/block/instance join; the instant-query evaluation timestamp alone is not freshness evidence."
 			}
 			if closeActive {
 				mechanism += " CloseExpiredContracts is active on the same host/block, so allocator and CPU pressure share its process budget; close-duration and open-contract age buckets remain the authoritative impact measures."

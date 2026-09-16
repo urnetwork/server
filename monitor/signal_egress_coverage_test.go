@@ -4,11 +4,454 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/operator-proxy/fleetprobe"
+	"github.com/urnetwork/server"
+	"gopkg.in/yaml.v3"
 )
+
+func syntheticEgressCoverageSignal() Signal {
+	signal := NewEgressCoverageSignal().(*signalAdapter)
+	signal.probe = egressCoverageProbe{loadDesiredConfig: func() egressCoverageDesiredConfig {
+		return egressCoverageDesiredConfig{}
+	}}
+	return signal
+}
+
+// Main-shaped: the zero-valued blackhole destination/bandwidth fields are
+// intentionally omitted, just as they are in provider_egress_probe.yml.
+const syntheticEgressDesiredConfig = `enabled: true
+shard_count: 4
+idle_delay_seconds: 300
+max_time_seconds: 1800
+api_url: https://private-desired-api.example.invalid
+platform_url: wss://private-desired-platform.example.invalid
+public_api_url: https://private-desired-public.example.invalid
+bandwidth_cdn_url: https://private-desired-cdn.example.invalid/down
+full:
+  limit: 8
+  concurrency: 2
+  probe_timeout_seconds: 60
+  all_destinations: false
+  bandwidth: true
+  bandwidth_timeout_seconds: 5
+blackhole:
+  limit: 250
+  concurrency: 52
+  probe_timeout_seconds: 15
+`
+
+func syntheticDesiredEgressConfig(t *testing.T, raw string) egressCoverageDesiredConfig {
+	t.Helper()
+	return inspectEgressCoverageDesiredConfig(func(value any) error {
+		return yaml.Unmarshal([]byte(raw), value)
+	})
+}
+
+func syntheticEgressMinimumFullTimeoutSeconds(allDestinations bool) int {
+	minimum := time.Duration(fleetprobe.EgressHealthRounds(allDestinations)) * egresshealth.DefaultPerRequestTimeout
+	return int((minimum + time.Second - 1) / time.Second)
+}
+
+func syntheticEgressRowsForConfig(t *testing.T, config egressCoverageConfig) []Row {
+	t.Helper()
+	rows := make([]Row, 0, config.shardCount)
+	for index := range config.shardCount {
+		rows = append(rows, syntheticEgressCoverageTaskWithArgs(t, egressCoverageTaskArgs{
+			ShardIndex: index, ShardCount: config.shardCount,
+			IdleDelaySeconds: config.idleDelaySeconds, MaxTimeSeconds: config.maxTimeSeconds,
+			Full: config.full, Blackhole: config.blackhole,
+			APIURL: config.apiURL, PlatformURL: config.platformURL,
+			PublicAPIURL: config.publicAPIURL, BandwidthCDNURL: config.bandwidthCDNURL,
+		}))
+	}
+	return rows
+}
+
+func syntheticEgressConfigSource(t *testing.T, taskRows *[]Row) *syntheticSource {
+	t.Helper()
+	return &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "pg_attribute"):
+			return []Row{{"t", "t"}}, nil
+		case strings.Contains(query, "FROM pending_task"):
+			return *taskRows, nil
+		case strings.Contains(query, "WITH lifecycle_clock AS"):
+			rows := make([]Row, 0, len(*taskRows))
+			for index := range *taskRows {
+				rows = append(rows, syntheticEgressCoverageActivity(egressCoverageSnapshot{
+					shardIndex: index, eligible: 100, fullCurrent: 100, blackholeCurrent: 100,
+					fullAgeSeconds: 10, blackholeAgeSeconds: 10,
+					fullAttemptsLastHour: 1, blackholeLastHour: 1,
+					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
+				}))
+			}
+			return rows, nil
+		default:
+			t.Fatalf("unexpected config-drift query")
+			return nil, nil
+		}
+	}}
+}
+
+func requireEgressConfigPrivacy(t *testing.T, alerts Alerts, forbidden ...string) {
+	t.Helper()
+	for _, alert := range alerts {
+		encoded, err := json.Marshal(alert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, value := range append(forbidden, "private-desired-", "example.invalid", "private-runtime-marker") {
+			if strings.Contains(alert.Markdown(), value) || strings.Contains(string(encoded), value) {
+				t.Fatal("egress config finding leaked a private fixture in Markdown or JSON")
+			}
+		}
+	}
+}
+
+func TestEgressCoverageDesiredConfigDriftAndConvergence(t *testing.T) {
+	pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(syntheticEgressDesiredConfig))
+	defer pop()
+	desired := loadEgressCoverageDesiredConfig()
+	if !desired.present || !desired.enabled || desired.invalidReason != "" ||
+		desired.settings.shardCount != 4 || desired.settings.blackhole.Concurrency != 52 ||
+		desired.settings.blackhole.Bandwidth || desired.settings.blackhole.AllDestinations ||
+		desired.settings.blackhole.BandwidthTimeoutSeconds != 0 {
+		t.Fatal("Main-shaped config with omitted blackhole modes was not observable")
+	}
+	old := desired.settings
+	old.blackhole.Concurrency = 32
+	rows := syntheticEgressRowsForConfig(t, old)
+	source := syntheticEgressConfigSource(t, &rows)
+	signal := NewEgressCoverageSignal()
+	alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "egress-probe-config-drift")
+	if alert.Severity != Severity(tierWarn) || alert.Sustain != 2 {
+		t.Fatal("config drift must be a two-cadence WARN, independent of the capacity PAGE")
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"desired_enabled=true", "desired_shards=4", "durable_shards=4",
+		"desired_blackhole_concurrency_per_shard=52", "durable_blackhole_concurrency_per_shard=32",
+		"mismatched_fields=blackhole.concurrency", "not args_json", "successful ProviderEgressProbe post-steps",
+		"then deploy Taskworker", "mounts that completed version", "Do not insert, delete, or hand-edit pending_task",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("config-drift Markdown is missing %q", want)
+		}
+	}
+	if strings.Index(alert.Action, "config-updater") >= strings.Index(alert.Action, "Taskworker") {
+		t.Fatal("config-updater must precede Taskworker")
+	}
+	requireEgressConfigPrivacy(t, alerts, rows[0][1])
+
+	// One successful successor does not make a mixed generation converged.
+	converged := syntheticEgressRowsForConfig(t, desired.settings)
+	rows[0] = converged[0]
+	alerts, err = signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "egress-probe-shards")
+	requireAlertClass(t, alerts, "egress-probe-config-unobservable")
+	for _, alert := range alerts {
+		if alert.Class == "egress-probe-config-drift" {
+			t.Fatal("mixed rows were reported as one complete desired/durable snapshot")
+		}
+	}
+	requireEgressConfigPrivacy(t, alerts)
+	rows = converged
+	alerts, err = signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("complete successor convergence is not healthy: alerts=%d err=%v", len(alerts), err)
+	}
+
+	// The same probe reloads the active resource rather than caching agreement.
+	popNext := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(strings.Replace(syntheticEgressDesiredConfig, "concurrency: 52", "concurrency: 48", 1)))
+	defer popNext()
+	alerts, err = signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alert := requireAlertClass(t, alerts, "egress-probe-config-drift"); !strings.Contains(alert.Observed, "desired_blackhole_concurrency_per_shard=48") {
+		t.Fatal("desired configuration was cached across observations")
+	}
+}
+
+func TestEgressCoverageDesiredConfigComparesEveryExecutionSetting(t *testing.T) {
+	desired := syntheticDesiredEgressConfig(t, syntheticEgressDesiredConfig)
+	cases := []struct {
+		field   string
+		prepare func(*egressCoverageConfig)
+		mutate  func(*egressCoverageConfig)
+	}{
+		{field: "shard_count", mutate: func(c *egressCoverageConfig) { c.shardCount = 3 }},
+		{field: "idle_delay_seconds", mutate: func(c *egressCoverageConfig) { c.idleDelaySeconds++ }},
+		{field: "max_time_seconds", mutate: func(c *egressCoverageConfig) { c.maxTimeSeconds++ }},
+		{field: "full.limit", mutate: func(c *egressCoverageConfig) { c.full.Limit++ }},
+		{field: "full.concurrency", mutate: func(c *egressCoverageConfig) { c.full.Concurrency++ }},
+		{field: "full.probe_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.full.ProbeTimeoutSeconds++ }},
+		{
+			field: "full.all_destinations",
+			prepare: func(c *egressCoverageConfig) {
+				c.full.ProbeTimeoutSeconds = syntheticEgressMinimumFullTimeoutSeconds(true)
+			},
+			mutate: func(c *egressCoverageConfig) { c.full.AllDestinations = true },
+		},
+		{field: "full.bandwidth", mutate: func(c *egressCoverageConfig) { c.full.Bandwidth = false }},
+		{field: "full.bandwidth_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.full.BandwidthTimeoutSeconds++ }},
+		{field: "blackhole.limit", mutate: func(c *egressCoverageConfig) { c.blackhole.Limit++ }},
+		{field: "blackhole.concurrency", mutate: func(c *egressCoverageConfig) { c.blackhole.Concurrency++ }},
+		{field: "blackhole.probe_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.blackhole.ProbeTimeoutSeconds++ }},
+		{field: "blackhole.all_destinations", mutate: func(c *egressCoverageConfig) { c.blackhole.AllDestinations = true }},
+		{field: "blackhole.bandwidth", mutate: func(c *egressCoverageConfig) { c.blackhole.Bandwidth = true; c.blackhole.BandwidthTimeoutSeconds = 5 }},
+		{field: "blackhole.bandwidth_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.blackhole.BandwidthTimeoutSeconds++ }},
+		{field: "api_url", mutate: func(c *egressCoverageConfig) { c.apiURL += "/private-runtime-marker" }},
+		{field: "platform_url", mutate: func(c *egressCoverageConfig) { c.platformURL += "/private-runtime-marker" }},
+		{field: "public_api_url", mutate: func(c *egressCoverageConfig) { c.publicAPIURL += "/private-runtime-marker" }},
+		{field: "bandwidth_cdn_url", mutate: func(c *egressCoverageConfig) { c.bandwidthCDNURL += "/private-runtime-marker" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			expected := desired
+			if tc.prepare != nil {
+				tc.prepare(&expected.settings)
+			}
+			actual := expected.settings
+			tc.mutate(&actual)
+			rows := syntheticEgressRowsForConfig(t, actual)
+			pgRows := make([]pgRow, len(rows))
+			for index, row := range rows {
+				pgRows[index] = pgRow(row)
+			}
+			geometry, err := inspectEgressCoverageTasks(pgRows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := egressCoverageConfigFindings("pg-1", expected, len(rows), geometry, nil)
+			alerts := Alerts{}
+			for _, f := range findings {
+				if !f.healthy {
+					alerts = append(alerts, alertFromFinding(syntheticSettings(nil), "2.19", "egress-coverage", "Provider egress probe coverage", f))
+				}
+			}
+			alert := requireAlertClass(t, alerts, "egress-probe-config-drift")
+			if !strings.Contains(alert.Observed, "mismatched_fields="+tc.field) {
+				t.Fatalf("complete comparison omitted %s", tc.field)
+			}
+			requireEgressConfigPrivacy(t, alerts, rows[0][1])
+		})
+	}
+}
+
+func TestEgressCoverageDesiredConfigMissingAndInvalid(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("WARP_CONFIG_HOME", configHome)
+	if desired := loadEgressCoverageDesiredConfig(); desired.present {
+		t.Fatal("absent optional resource invented desired state")
+	}
+	if findings := egressCoverageConfigFindings("pg-1", egressCoverageDesiredConfig{}, 4, egressCoverageGeometry{}, nil); len(findings) != 0 {
+		t.Fatal("default-only environment fabricated drift or agreement")
+	}
+	if err := os.Mkdir(filepath.Join(configHome, "provider_egress_probe.yml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := loadEgressCoverageDesiredConfig()
+	if !unavailable.present || unavailable.invalidReason != "resource-unavailable" {
+		t.Fatal("unavailable desired resource was mistaken for optional absence")
+	}
+	findings := egressCoverageConfigFindings("pg-1", unavailable, 4, egressCoverageGeometry{}, nil)
+	if len(findings) != 1 || findings[0].class != "egress-probe-config-unobservable" || findings[0].healthy {
+		t.Fatal("unavailable desired resource did not emit an observation-gap finding")
+	}
+	for _, raw := range []string{
+		"enabled: [\nprivate-parser-marker",
+		"enabled: null\n",
+		"enabled: true\nshard_count: 4\n",
+		strings.Replace(syntheticEgressDesiredConfig, "  bandwidth: true\n", "", 1),
+		strings.Replace(syntheticEgressDesiredConfig, "bandwidth_timeout_seconds: 5", "bandwidth_timeout_seconds: 0", 1),
+		strings.Replace(syntheticEgressDesiredConfig, "concurrency: 52", "concurrency: 251", 1),
+		syntheticEgressDesiredConfig + "private-parser-marker: private-parser-marker\n",
+		strings.Replace(syntheticEgressDesiredConfig, "  concurrency: 52", "  private-parser-marker: private-parser-marker\n  concurrency: 52", 1),
+	} {
+		desired := syntheticDesiredEgressConfig(t, raw)
+		if !desired.present || desired.invalidReason == "" {
+			t.Fatal("invalid desired resource appeared observable")
+		}
+		findings := egressCoverageConfigFindings("pg-1", desired, 4, egressCoverageGeometry{}, nil)
+		if len(findings) != 1 || findings[0].class != "egress-probe-config-unobservable" || findings[0].healthy {
+			t.Fatal("invalid desired state fabricated drift or recovery")
+		}
+		alert := alertFromFinding(syntheticSettings(nil), "2.19", "egress-coverage", "Provider egress probe coverage", findings[0])
+		requireEgressConfigPrivacy(t, Alerts{alert}, "private-parser-marker", raw)
+	}
+	desired := inspectEgressCoverageDesiredConfig(func(any) error { return fmt.Errorf("private-read-error-marker") })
+	if desired.invalidReason != "resource-unreadable-or-malformed" {
+		t.Fatal("read error was not safely classified")
+	}
+	findings = egressCoverageConfigFindings("pg-1", desired, 0, egressCoverageGeometry{}, nil)
+	alert := alertFromFinding(syntheticSettings(nil), "2.19", "egress-coverage", "Provider egress probe coverage", findings[0])
+	requireEgressConfigPrivacy(t, Alerts{alert}, "private-read-error-marker")
+}
+
+func TestEgressCoverageDesiredConfigUsesTaskworkerHealthTimeoutFloor(t *testing.T) {
+	desired := syntheticDesiredEgressConfig(t, syntheticEgressDesiredConfig)
+	for _, allDestinations := range []bool{false, true} {
+		config := desired.settings
+		config.full.AllDestinations = allDestinations
+		minimum := syntheticEgressMinimumFullTimeoutSeconds(allDestinations)
+		if minimum < 2 {
+			t.Fatal("synthetic health geometry has no below-boundary timeout")
+		}
+
+		config.full.ProbeTimeoutSeconds = minimum - 1
+		if validEgressCoverageConfig(config) {
+			t.Fatal("monitor accepted a timeout that Taskworker rejects below its cold-request floor")
+		}
+		config.full.ProbeTimeoutSeconds = minimum
+		if !validEgressCoverageConfig(config) {
+			t.Fatal("monitor rejected the exact timeout floor accepted by Taskworker")
+		}
+	}
+}
+
+func TestEgressCoverageDanglingDesiredResourceIsUnobservable(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("WARP_CONFIG_HOME", configHome)
+	t.Setenv("WARP_ENV", "")
+	if err := os.Symlink("missing-provider-egress-config", filepath.Join(configHome, "provider_egress_probe.yml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	desired := loadEgressCoverageDesiredConfig()
+	if !desired.present || desired.invalidReason != "resource-unavailable" {
+		t.Fatal("dangling desired resource was mistaken for optional absence")
+	}
+	findings := egressCoverageConfigFindings("pg-1", desired, 0, egressCoverageGeometry{}, nil)
+	if len(findings) != 1 || findings[0].class != "egress-probe-config-unobservable" || findings[0].healthy {
+		t.Fatal("dangling desired resource did not retain the observation gap")
+	}
+}
+
+func TestEgressCoverageDesiredEnablement(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw      string
+		rows           bool
+		drift, unarmed bool
+	}{
+		{"enabled without rows", syntheticEgressDesiredConfig, false, true, true},
+		{"disabled with old rows", "enabled: false\n", true, true, false},
+		{"disabled and retired", "enabled: false\n", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(tc.raw))
+			defer pop()
+			rows := []Row{}
+			if tc.rows {
+				rows = syntheticEgressRowsForConfig(t, syntheticDesiredEgressConfig(t, syntheticEgressDesiredConfig).settings)
+			}
+			alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(syntheticEgressConfigSource(t, &rows)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drift, unarmed := false, false
+			for _, alert := range alerts {
+				drift = drift || alert.Class == "egress-probe-config-drift"
+				unarmed = unarmed || alert.Class == "egress-probe-unarmed"
+			}
+			if drift != tc.drift || unarmed != tc.unarmed {
+				t.Fatal("enablement comparison confused absent tasks with intentional disablement")
+			}
+			requireEgressConfigPrivacy(t, alerts)
+		})
+	}
+}
+
+func TestEgressCoverageDisabledDesiredStateDoesNotSuppressDurableFaults(t *testing.T) {
+	pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte("enabled: false\n"))
+	defer pop()
+
+	t.Run("mixed geometry", func(t *testing.T) {
+		rows := []Row{
+			syntheticEgressCoverageTask(t, 0, 3),
+			syntheticEgressCoverageTask(t, 2, 3),
+		}
+		alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(syntheticEgressConfigSource(t, &rows)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, "egress-probe-config-drift")
+		requireAlertClass(t, alerts, "egress-probe-shards")
+		for _, alert := range alerts {
+			if alert.Class == "egress-probe-unarmed" {
+				t.Fatal("explicit disablement was confused with an unarmed enabled rollout")
+			}
+		}
+		requireEgressConfigPrivacy(t, alerts)
+	})
+
+	t.Run("capacity pressure", func(t *testing.T) {
+		rows := []Row{syntheticEgressCoverageTask(t, 0, 1)}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "pg_attribute"):
+				return []Row{{"t", "t"}}, nil
+			case strings.Contains(query, "FROM pending_task"):
+				return rows, nil
+			case strings.Contains(query, "WITH lifecycle_clock AS"):
+				return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
+					shardIndex: 0, eligible: 301,
+					fullCurrent: 301, blackholeCurrent: 200,
+					fullAgeSeconds: 10, blackholeAgeSeconds: 10,
+					fullAttemptsLastHour: 100, blackholeLastHour: 100,
+					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
+				})}, nil
+			default:
+				t.Fatalf("unexpected disabled-capacity query: %s", query)
+				return nil, nil
+			}
+		}}
+		alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, "egress-probe-config-drift")
+		requireAlertClass(t, alerts, "egress-blackhole-capacity")
+		requireEgressConfigPrivacy(t, alerts, rows[0][1])
+	})
+}
+
+func TestEgressCoverageCapacityFullReservationIsConditional(t *testing.T) {
+	for _, tc := range []struct {
+		blackhole, full int
+		want            string
+	}{
+		{32, 2, "independent_drain_overlap_possible=true full_reserved_blackhole_concurrency_per_shard=30 full_reserved_total_blackhole_concurrency=120 full_reserved_timeout_ceiling_per_hour=28800"},
+		{52, 2, "independent_drain_overlap_possible=true full_reserved_blackhole_concurrency_per_shard=50 full_reserved_total_blackhole_concurrency=200 full_reserved_timeout_ceiling_per_hour=48000"},
+		{2, 2, "independent_drain_overlap_possible=false full_reserved_blackhole_concurrency_per_shard=unavailable"},
+		{1, 2, "independent_drain_overlap_possible=false full_reserved_blackhole_concurrency_per_shard=unavailable"},
+	} {
+		geometry := egressCoverageGeometry{shardCount: 4, blackholeConcurrency: tc.blackhole, blackholeTimeoutSeconds: 15, fullConcurrency: tc.full, fullLimit: 8, fullTimeoutSeconds: 60}
+		for _, eligible := range []int64{300, 301} {
+			f, present := egressBlackholeCapacityFinding("pg-1", geometry, []egressCoverageSnapshot{{eligible: eligible, blackholeCurrent: 200, blackholeLastHour: 100}})
+			if present != (eligible == 301) {
+				t.Fatal("reserved-slot model changed the measured-rate PAGE predicate")
+			}
+			if present && (!strings.Contains(f.observed, tc.want) || !strings.Contains(f.context, "not runtime capability or queue-activity attestations")) {
+				t.Fatal("capacity finding misstated the conditional full-reservation model")
+			}
+		}
+	}
+}
 
 func syntheticEgressCoverageTask(t *testing.T, shardIndex, shardCount int) Row {
 	t.Helper()
@@ -42,6 +485,17 @@ func syntheticEgressCoverageTaskWithArgs(t *testing.T, args egressCoverageTaskAr
 }
 
 func syntheticEgressCoverageActivity(snapshot egressCoverageSnapshot) Row {
+	// Existing aggregate-only fixtures describe coincident deadlines. Tests of
+	// heterogeneous cohorts supply slack from the exact SQL prefix reducer.
+	slack := func(value *int64, due, age, maxAge int64) string {
+		if value != nil {
+			return fmt.Sprint(*value)
+		}
+		if due == 0 || snapshot.fullAttemptsLastHour == 0 {
+			return "unavailable"
+		}
+		return fmt.Sprint(maxAge - age - (due*3600+snapshot.fullAttemptsLastHour-1)/snapshot.fullAttemptsLastHour)
+	}
 	return Row{
 		fmt.Sprint(snapshot.shardIndex), fmt.Sprint(snapshot.eligible),
 		fmt.Sprint(snapshot.noLocationDue), fmt.Sprint(snapshot.staleLocationDue),
@@ -54,6 +508,9 @@ func syntheticEgressCoverageActivity(snapshot egressCoverageSnapshot) Row {
 		fmt.Sprint(snapshot.missingHealthDue), fmt.Sprint(snapshot.missingHealthExpiredDue),
 		fmt.Sprint(snapshot.missingHealthOldestAgeSeconds),
 		fmt.Sprint(snapshot.deferredCurrentDarkDue),
+		slack(snapshot.staleLocationDeadlineSlackSeconds, snapshot.staleLocationDue, snapshot.staleLocationOldestAgeSeconds, 7*24*3600),
+		slack(snapshot.staleHealthDeadlineSlackSeconds, snapshot.staleHealthDue, snapshot.staleHealthOldestAgeSeconds, 24*3600),
+		slack(snapshot.missingHealthDeadlineSlackSeconds, snapshot.missingHealthDue, snapshot.missingHealthOldestAgeSeconds, 24*3600),
 	}
 }
 
@@ -84,7 +541,7 @@ func TestEgressCoverageSignalSyntheticUnarmedRollout(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +580,7 @@ func TestEgressCoverageSignalSyntheticSchemaArmedTasksAbsent(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +631,7 @@ func TestEgressCoverageSignalSyntheticHealthDeadlineIndexAbsent(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +681,7 @@ func TestEgressCoverageSignalSyntheticIncompleteShardGeometry(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +733,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +816,7 @@ func TestEgressCoverageSignalSyntheticHealthyNoDueWork(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +871,7 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +943,7 @@ func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +1004,7 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 					return nil, nil
 				}
 			}}
-			alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+			alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -582,7 +1039,7 @@ func TestEgressCoverageSignalSyntheticFullCapacity(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +1117,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessIsCategoryLocal(t *testing.T) 
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +1139,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessIsCategoryLocal(t *testing.T) 
 			"past its absolute deadline",
 			"deadline_missed=true", "expired_due=",
 			"all_shards_unlocated_can_fill_batch=true", "output-bounded anti-health head",
-			"success-inclusive lower bound", "not itself a post-EDF failure",
+			"cumulative deadline prefix", "not itself a post-EDF failure",
 			"First attempts and retries",
 			"No provider or task identifier leaves PostgreSQL",
 		} {
@@ -714,7 +1171,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessDeadlineProjection(t *testing.
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +1207,7 @@ func TestEgressCoverageSignalSyntheticMissingHealthFairness(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +1256,7 @@ func TestEgressCoverageSignalSyntheticFullBoundariesAreHealthy(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,6 +1302,7 @@ func TestInspectEgressCoverageTasksRejectsMixedCompleteExecutionSettings(t *test
 	}{
 		{name: "all destinations", mutate: func(args *egressCoverageTaskArgs) {
 			args.Full.AllDestinations = !args.Full.AllDestinations
+			args.Full.ProbeTimeoutSeconds = syntheticEgressMinimumFullTimeoutSeconds(args.Full.AllDestinations)
 		}},
 		{name: "bandwidth enabled", mutate: func(args *egressCoverageTaskArgs) {
 			args.Full.Bandwidth = !args.Full.Bandwidth
@@ -947,5 +1405,269 @@ func TestParseEgressCoverageActivityRejectsAmbiguousRows(t *testing.T) {
 				t.Fatal("ambiguous activity rows were accepted")
 			}
 		})
+	}
+}
+
+type syntheticEgressDeadlineRow struct {
+	ShardIndex     int    `json:"shard_index"`
+	Lane           string `json:"urgent_lane"`
+	DeadlineMicros int64  `json:"deadline_offset_microseconds"`
+	AttemptDue     bool   `json:"attempt_due"`
+	CurrentDark    bool   `json:"current_dark"`
+}
+
+// Execute the production prefix CTEs against values only: no production table,
+// identity, clock, write, or duplicate Go implementation of the SQL reducer.
+func syntheticEgressDeadlineSlacks(t *testing.T, ctx context.Context, conn server.PgConn, input []syntheticEgressDeadlineRow, rates map[int]int64) map[int][3]*int64 {
+	t.Helper()
+	if input == nil {
+		input = []syntheticEgressDeadlineRow{}
+	}
+	rateRows := []map[string]int64{}
+	for shard, rate := range rates {
+		rateRows = append(rateRows, map[string]int64{"shard_index": int64(shard), "full_attempted_last_hour": rate})
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rateJSON, err := json.Marshal(rateRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := `WITH fixture AS (
+	 SELECT * FROM jsonb_to_recordset($1::jsonb) AS input(
+	  shard_index integer, urgent_lane text, deadline_offset_microseconds bigint,
+	  attempt_due boolean, current_dark boolean)
+	), classified AS (
+	 SELECT shard_index, urgent_lane, attempt_due, current_dark,
+	  timestamp '2026-01-01 00:00:00' + (deadline_offset_microseconds::text || ' microseconds')::interval -
+	   CASE WHEN urgent_lane = 'stale-location' THEN interval '7 days' ELSE interval '24 hours' END AS observed_at,
+	  timestamp '2026-01-01 00:00:00' + (deadline_offset_microseconds::text || ' microseconds')::interval - interval '24 hours' AS measured_at
+	 FROM fixture
+	), snapshot AS (
+	 SELECT shard_index, full_attempted_last_hour, timestamp '2026-01-01 00:00:00' AS now_utc
+	 FROM jsonb_to_recordset($2::jsonb) AS rates(shard_index integer, full_attempted_last_hour bigint)
+	)` + egressCoverageDeadlineCTEs + `
+	 SELECT shard_index,
+	  COALESCE(stale_location_deadline_slack_seconds::text, 'unavailable'),
+	  COALESCE(stale_health_deadline_slack_seconds::text, 'unavailable'),
+	  COALESCE(missing_health_deadline_slack_seconds::text, 'unavailable')
+	 FROM snapshot LEFT JOIN deadline_slack USING (shard_index) ORDER BY shard_index`
+	rows, err := conn.Query(ctx, query, string(inputJSON), string(rateJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	result := map[int][3]*int64{}
+	for rows.Next() {
+		var shard int
+		var fields [3]string
+		if err := rows.Scan(&shard, &fields[0], &fields[1], &fields[2]); err != nil {
+			t.Fatal(err)
+		}
+		var values [3]*int64
+		for i, field := range fields {
+			if field != "unavailable" {
+				value, err := strconv.ParseInt(field, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				values[i] = &value
+			}
+		}
+		result[shard] = values
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestEgressCoverageDeadlinePrefixSQL(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("deadline-prefix query fixtures require the attested local test environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	row := func(shard int, lane string, deadlineMicros int64) syntheticEgressDeadlineRow {
+		return syntheticEgressDeadlineRow{ShardIndex: shard, Lane: lane, DeadlineMicros: deadlineMicros, AttemptDue: true}
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		var previousLegacyRow Row
+		for _, coincident := range []bool{false, true} {
+			t.Run(fmt.Sprintf("aggregate-equivalent-coincident-%t", coincident), func(t *testing.T) {
+				input := []syntheticEgressDeadlineRow{row(0, "stale-health", 5590*1e6)}
+				for i := 1; i < 188; i++ {
+					deadline := int64(43140)
+					if coincident {
+						deadline = 5590
+					}
+					input = append(input, row(0, "stale-health", deadline*1e6))
+				}
+				// Independent EDF oracle: fixed throughput, one attempt per row.
+				misses := 0
+				for i, candidate := range input {
+					if int64(i+1)*3600*1e6 > candidate.DeadlineMicros*78 {
+						misses++
+					}
+				}
+				if (misses > 0) != coincident {
+					t.Fatalf("counterexample EDF misses=%d coincident=%t", misses, coincident)
+				}
+				values := syntheticEgressDeadlineSlacks(t, ctx, conn, input, map[int]int64{0: 78})[0]
+				want := int64(5543)
+				if coincident {
+					want = -3087
+				}
+				if values[1] == nil || *values[1] != want {
+					t.Fatalf("deadline-prefix slack=%v, want %d", values[1], want)
+				}
+				snapshot := egressCoverageSnapshot{
+					eligible: 188, staleHealthDue: 188, fullAttemptsLastHour: 78,
+					fullCurrent: 188, blackholeCurrent: 188, blackholeLastHour: 1,
+					fullAgeSeconds: 10, blackholeAgeSeconds: 10,
+					staleLocationOldestAgeSeconds: -1, missingHealthOldestAgeSeconds: -1,
+					staleHealthOldestAgeSeconds: 80810, staleHealthDeadlineSlackSeconds: values[1],
+				}
+				activity := syntheticEgressCoverageActivity(snapshot)
+				if previousLegacyRow != nil && strings.Join(previousLegacyRow[:20], "|") != strings.Join(activity[:20], "|") {
+					t.Fatal("counterexample did not preserve the original twenty aggregate columns")
+				}
+				previousLegacyRow = activity
+				if 24*3600-snapshot.staleHealthOldestAgeSeconds >= (snapshot.staleHealthDue*3600+77)/78 {
+					t.Fatal("fixture does not reproduce the former false at-risk predicate")
+				}
+				source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+					switch {
+					case strings.Contains(query, "pg_attribute"):
+						return []Row{{"t", "t"}}, nil
+					case strings.Contains(query, "FROM pending_task"):
+						return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
+					case strings.Contains(query, "WITH lifecycle_clock AS"):
+						if !strings.Contains(query, egressCoverageDeadlineCTEs) {
+							t.Fatal("production activity query omitted the exercised deadline-prefix reducer")
+						}
+						return []Row{activity}, nil
+					default:
+						t.Fatal("unexpected query")
+						return nil, nil
+					}
+				}}
+				alerts, err := syntheticEgressCoverageSignal().Run(ctx, syntheticSettings(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !coincident {
+					if len(alerts) != 0 {
+						t.Fatal("feasible EDF cohort produced a false alert")
+					}
+					return
+				}
+				alert := requireAlertClass(t, alerts, "egress-full-fairness")
+				for _, required := range []string{"minimum_deadline_prefix_slack_seconds=-3087", "deadline_missed=false", "deadline_at_risk=true", "conditional on unchanged throughput", "not the at-risk predicate"} {
+					if !strings.Contains(alert.Markdown(), required) {
+						t.Fatalf("deadline-prefix alert omitted %q", required)
+					}
+				}
+				for _, unsupported := range []string{"no unknown allocation can make the deadline", "cannot meet the oldest row's remaining window", "do-not-copy-provider"} {
+					if strings.Contains(alert.Markdown(), unsupported) {
+						t.Fatalf("deadline-prefix alert contains unsupported or private text %q", unsupported)
+					}
+				}
+			})
+		}
+		for _, test := range []struct {
+			name   string
+			micros []int64
+			rate   int64
+			want   string
+		}{
+			{"exact-zero", []int64{3600 * 1e6}, 1, "0"},
+			{"plus-one-second", []int64{3601 * 1e6}, 1, "1"},
+			{"minus-one-second", []int64{3599 * 1e6}, 1, "-1"},
+			{"plus-one-microsecond", []int64{3600*1e6 + 1}, 1, "0"},
+			{"minus-one-microsecond", []int64{3600*1e6 - 1}, 1, "-1"},
+			{"fractional-drain-feasible", []int64{514300000}, 7, "0"},
+			{"fractional-drain-infeasible", []int64{514280000}, 7, "-1"},
+			{"interior-prefix", []int64{3600 * 1e6, 5400 * 1e6, 5400 * 1e6, 43000 * 1e6}, 1, "-5400"},
+			{"zero-rate", []int64{3600 * 1e6}, 0, "unavailable"},
+			{"empty-category", nil, 1, "unavailable"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				input := []syntheticEgressDeadlineRow{}
+				for _, micros := range test.micros {
+					input = append(input, row(0, "stale-health", micros))
+				}
+				value := syntheticEgressDeadlineSlacks(t, ctx, conn, input, map[int]int64{0: test.rate})[0][1]
+				actual := "unavailable"
+				if value != nil {
+					actual = fmt.Sprint(*value)
+				}
+				if actual != test.want {
+					t.Fatalf("slack=%s want=%s", actual, test.want)
+				}
+			})
+		}
+		t.Run("shard-category-and-eligibility-isolation", func(t *testing.T) {
+			input := []syntheticEgressDeadlineRow{
+				row(0, "stale-health", 3600*1e6), row(1, "stale-health", 3600*1e6),
+				row(0, "stale-location", 3600*1e6), row(0, "stale-location", 3600*1e6),
+				row(0, "missing-health", 7200*1e6), row(0, "no-location", -1),
+				{ShardIndex: 0, Lane: "stale-health", DeadlineMicros: -1, AttemptDue: false},
+				{ShardIndex: 0, Lane: "stale-health", DeadlineMicros: -1, AttemptDue: true, CurrentDark: true},
+			}
+			values := syntheticEgressDeadlineSlacks(t, ctx, conn, input, map[int]int64{0: 1, 1: 100})
+			for _, expected := range []struct {
+				shard, category int
+				slack           int64
+			}{{0, 0, -3600}, {0, 1, 0}, {0, 2, 3600}, {1, 1, 3564}} {
+				value := values[expected.shard][expected.category]
+				if value == nil || *value != expected.slack {
+					t.Fatalf("partitioned slack mismatch shard=%d category=%d", expected.shard, expected.category)
+				}
+			}
+			if values[1][0] != nil || values[1][2] != nil {
+				t.Fatal("category observations leaked across shards")
+			}
+		})
+	})
+}
+
+func TestEgressCoverageDeadlineSlackUnknownAndExpiredBoundaries(t *testing.T) {
+	base := egressCoverageSnapshot{eligible: 1, staleHealthDue: 1, fullAttemptsLastHour: 1, staleHealthOldestAgeSeconds: 23 * 3600}
+	for name, field := range map[string]string{
+		"missing": "unavailable", "empty": "", "malformed": "do-not-copy-provider", "overflow": "9223372036854775808",
+	} {
+		t.Run(name, func(t *testing.T) {
+			row := syntheticEgressCoverageActivity(base)
+			row[21] = field
+			_, err := parseEgressCoverageActivity([]pgRow{pgRow(row)}, 1)
+			if err == nil || strings.Contains(err.Error(), "do-not-copy-provider") {
+				t.Fatal("missing/invalid slack did not fail closed with a structural error")
+			}
+		})
+	}
+	for _, snapshot := range []egressCoverageSnapshot{{eligible: 1}, {eligible: 1, staleHealthDue: 1, staleHealthOldestAgeSeconds: 23 * 3600}} {
+		row := syntheticEgressCoverageActivity(snapshot)
+		row[21] = "0"
+		if _, err := parseEgressCoverageActivity([]pgRow{pgRow(row)}, 1); err == nil {
+			t.Fatal("slack accepted without due work or a gross rate")
+		}
+	}
+	legacy := syntheticEgressCoverageActivity(base)[:20]
+	if _, err := parseEgressCoverageActivity([]pgRow{pgRow(legacy)}, 1); err == nil {
+		t.Fatal("legacy aggregate-only response accepted as deadline evidence")
+	}
+	base.fullAttemptsLastHour = 0
+	base.staleHealthExpiredDue = 1
+	base.staleHealthOldestAgeSeconds = 25 * 3600
+	parsed, err := parseEgressCoverageActivity([]pgRow{pgRow(syntheticEgressCoverageActivity(base))}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := egressFullFairnessFindings("synthetic", egressCoverageGeometry{shardCount: 1, fullLimit: 8}, parsed)
+	if len(findings) != 1 || !strings.Contains(findings[0].observed, "deadline_missed=true deadline_at_risk=false") || !strings.Contains(findings[0].observed, "minimum_deadline_prefix_slack_seconds=unavailable_zero_gross_attempts") {
+		t.Fatal("zero-rate forecast suppressed a proved expiry or claimed numeric slack")
 	}
 }

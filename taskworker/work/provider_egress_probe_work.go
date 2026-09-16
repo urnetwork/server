@@ -194,7 +194,11 @@ func loadProviderEgressProbeSettings() (providerEgressProbeSettings, error) {
 		return providerEgressProbeSettings{}, err
 	}
 	settings := defaultProviderEgressProbeSettings(domain)
-	if resource, err := server.Config.SimpleResource("provider_egress_probe.yml"); err == nil {
+	resource, err := server.Config.SimpleResource("provider_egress_probe.yml")
+	if err != nil && !errors.Is(err, server.ErrResourceNotFound) {
+		return providerEgressProbeSettings{}, err
+	}
+	if err == nil {
 		if err := resource.UnmarshalYamlE(&settings); err != nil {
 			return providerEgressProbeSettings{}, err
 		}

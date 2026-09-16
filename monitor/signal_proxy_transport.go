@@ -60,6 +60,21 @@ var proxyTransportMetricNames = []string{
 	"urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total",
 }
 
+// Separate from the original contract so an old or mixed rollout cannot hide
+// already-observable pending admission behind missing attribution telemetry.
+var proxyTransportAdmissionMetricNames = []string{
+	"urnetwork_proxy_platform_transport_active_handoff_transports",
+	"urnetwork_proxy_platform_transport_active_handoff_bytes",
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices",
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices",
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices",
+	"urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices",
+}
+
+func proxyTransportAllMetricNames() []string {
+	return append(append([]string(nil), proxyTransportMetricNames...), proxyTransportAdmissionMetricNames...)
+}
+
 const (
 	proxyTransportCpuRateMetric        = "monitor_cpu_rate"
 	proxyTransportPreemptionRateMetric = "monitor_h3_preemption_rate"
@@ -77,8 +92,9 @@ type proxyTransportMetrics struct {
 // Filters each required family by producer freshness and preserves its source
 // timestamp; counter rates stay optional while their range warms.
 func proxyTransportQuery(environment string) string {
-	parts := make([]string, 0, 2*len(proxyTransportMetricNames)+2)
-	for _, metricName := range proxyTransportMetricNames {
+	metricNames := proxyTransportAllMetricNames()
+	parts := make([]string, 0, 2*len(metricNames)+2)
+	for _, metricName := range metricNames {
 		rawSeries := fmt.Sprintf(
 			`%s{env=%s,job="proxy"}`,
 			metricName,
@@ -275,6 +291,7 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 
 	missing := []string{}
 	incoherent := []string{}
+	admissionUnknown := []string{}
 	invalid := []string{}
 	isolation := []string{}
 	pending := []string{}
@@ -289,6 +306,11 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if reason := proxyTransportSnapshotReason(process); reason != "" {
 			incoherent = append(incoherent, fmt.Sprintf("%s[%s]", label, reason))
 			continue
+		}
+		if reason := proxyTransportAdmissionReason(process); reason != "" {
+			admissionUnknown = append(admissionUnknown, fmt.Sprintf("%s[%s]", label, reason))
+		} else if unknown := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices"]; unknown > 0 {
+			admissionUnknown = append(admissionUnknown, fmt.Sprintf("%s[provider-window-unknown-devices=%g]", label, unknown))
 		}
 		if reason := proxyTransportInvalidReason(process); reason != "" {
 			invalid = append(invalid, fmt.Sprintf("%s[%s;%s]", label, reason, proxyTransportObservation(process)))
@@ -319,6 +341,21 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 
 	findings := []finding{}
+	if len(admissionUnknown) > 0 {
+		findings = append(findings, finding{
+			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
+			class: "proxy-transport-admission-unobservable", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
+			symptom:   fmt.Sprintf("%d newest Proxy identities cannot fully attribute slot-full admission to handoff and provider-window state", len(admissionUnknown)),
+			mechanism: "Older or mixed Proxy/SDK telemetry can expose pending H1 without its private-budget handoff and same-device provider-window readiness. Absent or mixed-scrape attribution is unknown, never zero. A present exporter can also report an unavailable current window.",
+			baseline:  "Every newest process has six same-scrape identity-free handoff/readiness gauges; every slot-full pending device has a known current provider window.",
+			observed:  fmt.Sprintf("admission_unknown_identities=%d unknown=%s metrics_gateway=%s", len(admissionUnknown), strings.Join(admissionUnknown, ";"), metricHost.name),
+			evidence:  "Attribution joins only the exact host/block/instance and producer scrape. Existing pending and preemption findings remain active when this additional contract is unavailable.",
+			context:   "A healthy same-image sibling, process-ready=1, and zero preemption do not establish the blocked device's window readiness or policy state.",
+			action:    "Through an authorized normal Proxy rollout, deploy the SDK owner snapshot and Proxy aggregate exporter together, then promote this monitor reducer. For unknown current windows, inspect the lifecycle owner without exposing device identity. Do not restart, change policy, or raise caps to clear missing telemetry.",
+			verify:    "Every active newest identity has complete coherent attribution on two consecutive scrapes; retain the pending alert until its separate ten-minute recovery gate closes.",
+			playbook:  "SIGNALS.md §14.6",
+		})
+	}
 	if len(missingExpected) > 0 || len(missing) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-transport-budget", tier: tierWarn,
@@ -355,7 +392,7 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			class: "proxy-transport-metrics-invalid", target: "proxy-fleet", frame: metricHost.name, sustain: 2,
 			symptom:   fmt.Sprintf("%d newest fresh proxy identities export internally inconsistent carrier accounting", len(invalid)),
 			mechanism: "One same-scrape SDK aggregate violates a count, byte, or pending-device invariant. That can be exporter/label drift or an accounting bug; it cannot safely support a capacity or preemption diagnosis.",
-			baseline:  "Counts are integral and nonnegative; used carriers do not exceed the count cap; pending count and bytes agree on zero; slot-full pending devices do not exceed live devices; and an empty device set has no live carrier allocation.",
+			baseline:  "Counts are integral and nonnegative; used carrier counts and bytes do not exceed their ordinary budgets plus the same-scrape owner-reported active handoff allowances; each allowance is bounded by corresponding acquired use; pending count and bytes agree on zero; same-device handoff/readiness subsets fit the slot-full cohort; and an empty device set has no live carrier allocation.",
 			observed:  fmt.Sprintf("invalid_identities=%d invalid=%s metrics_gateway=%s", len(invalid), strings.Join(invalid, ";"), metricHost.name),
 			evidence:  "Every compared value belongs to the same exact process identity and producer scrape.",
 			context:   "Do not call this a shared budget, a provider failure, or host capacity pressure until the metric contract is valid.",
@@ -402,9 +439,9 @@ func (proxyTransportProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			mechanism: "A positive pending-H1 count means at least one private DeviceLocal budget cannot currently admit the requested H1 carrier by bytes or slots. A brief overlap can be normal; persistence across two one-minute probes requires correlation with that window's readiness and transport-policy transition.",
 			baseline:  "Pending H1 count and bytes return to zero within one probe cadence; no hosted window remains unsatisfied behind carrier admission.",
 			observed:  fmt.Sprintf("pending_identities=%d pending=%s metrics_gateway=%s", len(pending), strings.Join(pending, ";"), metricHost.name),
-			evidence:  "The aggregate preserves pending count/bytes and slot-full DeviceLocal count without retaining device identity. CPU and preemption rates are included when the two-minute range is available.",
+			evidence:  "The aggregate preserves pending count/bytes and slot-full DeviceLocal count without retaining device identity. Handoff overlap and unsatisfied/unknown provider-window subsets are joined inside each owning DeviceLocal before aggregation, never across sibling devices. The budget and window use separate owner locks: these are sample-time joins, not event ordering or proof that the same reservation persisted. CPU and preemption rates are included when the two-minute range is available.",
 			context:   "This is capacity pressure, not by itself the connect#211 loop, a provider outage, or a hardware requirement. Per-device carrier admission and host-wide proxy capacity have different owners.",
-			action:    "Correlate the exact generation with unsatisfied-window and retry evidence. On old/shared-budget code deploy private budgets; on current code diagnose the blocked mode transition or genuinely excessive per-device carrier demand. Do not blindly raise the cap, restart, or add hardware from this aggregate alone.",
+			action:    "Use admission_state: policy-handoff-overlap calls for bounded handoff completion/teardown diagnosis; slot-demand-no-handoff calls for the per-device carrier owner and release/demand accounting; mixed retains both cohorts. Neither proves a stuck transition or legitimate excess demand, and an unsatisfied subset is correlation rather than causation. Unavailable attribution requires the owner/exporter deployment, not a guessed diagnosis. On old/shared-budget code deploy private budgets. Do not blindly raise the cap, restart, or add hardware from this aggregate alone.",
 			verify:    "Pending count and bytes remain zero for ten minutes under comparable load, windows recover their minimum, and no preemption-churn alert appears.",
 			playbook:  "SIGNALS.md §14.6",
 		})
@@ -485,6 +522,21 @@ func proxyTransportSnapshotReason(process *proxyTransportMetrics) string {
 	return ""
 }
 
+// Requires the added contract on this process and this original scrape only.
+func proxyTransportAdmissionReason(process *proxyTransportMetrics) string {
+	sourceTime := process.sourceTimes["urnetwork_proxy_devices_live"]
+	for _, name := range proxyTransportAdmissionMetricNames {
+		if _, ok := process.values[name]; !ok {
+			return "missing=" + name
+		}
+		at, ok := process.sourceTimes[name]
+		if !ok || at != sourceTime {
+			return "attribution-source-time-skew=" + name
+		}
+	}
+	return ""
+}
+
 // Validates aggregate count and pending-state invariants before diagnosis.
 func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 	counts := []string{
@@ -500,14 +552,41 @@ func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 			return "non-integral-or-unrepresentable=" + metricName
 		}
 	}
+	admissionKnown := proxyTransportAdmissionReason(process) == ""
+	if admissionKnown {
+		for _, name := range proxyTransportAdmissionMetricNames {
+			value := process.values[name]
+			if value != math.Trunc(value) || value > float64(1<<53) {
+				return "non-integral-or-unrepresentable=" + name
+			}
+		}
+	}
 	devices := process.values["urnetwork_proxy_devices_live"]
 	used := process.values["urnetwork_proxy_platform_transports_used"]
 	maximum := process.values["urnetwork_proxy_platform_transports_max"]
 	pending := process.values["urnetwork_proxy_platform_transports_pending_h1"]
 	pendingBytes := process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"]
 	slotFull := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"]
-	if used > maximum {
-		return "used-carriers-exceed-maximum"
+	if admissionKnown {
+		usedBytes := process.values["urnetwork_proxy_platform_transport_used_bytes"]
+		budgetBytes := process.values["urnetwork_proxy_platform_transport_budget_bytes"]
+		handoffTransports := process.values["urnetwork_proxy_platform_transport_active_handoff_transports"]
+		handoffBytes := process.values["urnetwork_proxy_platform_transport_active_handoff_bytes"]
+		// Stats keeps both handoff endpoints charged and clears the allowance
+		// under the same budget lock when either endpoint releases or yields.
+		// Byte-only handoffs are valid: Auto-H3 need not consume another slot.
+		if handoffTransports > used {
+			return "active-handoff-transports-exceed-used"
+		}
+		if handoffBytes > usedBytes {
+			return "active-handoff-bytes-exceed-used"
+		}
+		if used > maximum+handoffTransports {
+			return "used-carriers-exceed-maximum"
+		}
+		if usedBytes > budgetBytes+handoffBytes {
+			return "used-carrier-bytes-exceed-budget-with-handoff"
+		}
 	}
 	if slotFull > devices {
 		return "slot-full-pending-devices-exceed-live-devices"
@@ -518,8 +597,21 @@ func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 	if slotFull > 0 && pending == 0 {
 		return "slot-full-device-without-pending-h1"
 	}
+	if admissionKnown {
+		handoff := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"]
+		handoffUnsatisfied := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices"]
+		demandUnsatisfied := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices"]
+		unknown := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices"]
+		if process.values["urnetwork_proxy_platform_transport_active_handoff_transports"] > devices {
+			return "active-handoff-allowance-exceeds-one-per-device"
+		}
+		if handoff > slotFull || handoffUnsatisfied > handoff || demandUnsatisfied > slotFull-handoff ||
+			unknown+handoffUnsatisfied+demandUnsatisfied > slotFull {
+			return "handoff-window-subsets-exceed-slot-full-cohort"
+		}
+	}
 	if devices == 0 {
-		for _, metricName := range []string{
+		liveMetrics := []string{
 			"urnetwork_proxy_device_memory_target_bytes",
 			"urnetwork_proxy_platform_transport_budget_bytes",
 			"urnetwork_proxy_platform_transport_used_bytes",
@@ -528,7 +620,11 @@ func proxyTransportInvalidReason(process *proxyTransportMetrics) string {
 			"urnetwork_proxy_platform_transports_pending_h1",
 			"urnetwork_proxy_platform_transports_pending_h1_bytes",
 			"urnetwork_proxy_platform_transport_slot_full_pending_h1_devices",
-		} {
+		}
+		if admissionKnown {
+			liveMetrics = append(liveMetrics, proxyTransportAdmissionMetricNames...)
+		}
+		for _, metricName := range liveMetrics {
 			if process.values[metricName] != 0 {
 				return "empty-device-set-has-live-carrier-state=" + metricName
 			}
@@ -571,7 +667,7 @@ func proxyTransportObservation(process *proxyTransportMetrics) string {
 		}
 		return "unknown"
 	}
-	return fmt.Sprintf(
+	observation := fmt.Sprintf(
 		"%s:devices=%s,target_bytes=%s,budget_bytes=%s,used_bytes=%s,max=%s,used=%s,pending_h1=%s,pending_h1_bytes=%s,slot_full_pending_devices=%s,h3_preemptions_total=%s,slot_full_h3_preemptions_total=%s,slot_full_h3_preemptions_per_second=%s,cpu_cores=%s",
 		proxyTransportLabel(process),
 		value("urnetwork_proxy_devices_live"),
@@ -587,5 +683,31 @@ func proxyTransportObservation(process *proxyTransportMetrics) string {
 		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total"),
 		value(proxyTransportPreemptionRateMetric),
 		value(proxyTransportCpuRateMetric),
+	)
+	if proxyTransportAdmissionReason(process) != "" {
+		return observation + ",admission_state=unavailable"
+	}
+	slotFull := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"]
+	handoff := process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"]
+	state := "no-slot-full-pending"
+	if slotFull > 0 {
+		switch {
+		case handoff == 0:
+			state = "slot-demand-no-handoff"
+		case handoff == slotFull:
+			state = "policy-handoff-overlap"
+		default:
+			state = "mixed-handoff-and-slot-demand"
+		}
+	}
+	return observation + fmt.Sprintf(
+		",admission_state=%s,active_handoff_transports=%s,active_handoff_bytes=%s,slot_full_handoff_devices=%s,handoff_unsatisfied_devices=%s,demand_unsatisfied_devices=%s,window_unknown_devices=%s",
+		state,
+		value("urnetwork_proxy_platform_transport_active_handoff_transports"),
+		value("urnetwork_proxy_platform_transport_active_handoff_bytes"),
+		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"),
+		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices"),
+		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices"),
+		value("urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices"),
 	)
 }

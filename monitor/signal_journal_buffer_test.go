@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ func journalBufferFixture(overrides map[string]string) string {
 		"journal_system_archived_files_5m", "journal_user_archived_files_5m",
 	}
 	values := map[string]string{
-		"observation_schema": "4", "journald_active": "active", "journald_active_seconds": "7200",
+		"observation_schema": "5", "journald_active": "active", "journald_active_seconds": "7200",
 		"storage": "persistent", "max_use": "100G", "max_file_size": "256M", "max_files": "1024",
 		"max_file_sec": "5min", "max_retention": "1hour", "uptime_seconds": "7200",
 		"coverage_checked": "1", "coverage_present": "1",
@@ -148,6 +149,15 @@ func TestJournalBufferSignalSyntheticFileHeadroomProblem(t *testing.T) {
 				strings.Contains(alert.Markdown(), "system@") {
 				t.Fatalf("file-headroom alert=%+v", alert)
 			}
+			if strings.Contains(strings.ToLower(alert.Markdown()), "hash") ||
+				strings.Contains(alert.Mechanism, "high-cardinality") ||
+				strings.Contains(alert.Action, "remove only proven log amplification") {
+				t.Fatal("file-count evidence attributed a rotation cause or prescribed producer reduction")
+			}
+			if !strings.Contains(alert.Mechanism, "do not identify the rotation trigger") ||
+				!strings.Contains(alert.Action, "Resolve the rotation trigger") {
+				t.Fatal("file-count alert omitted the unresolved rotation-cause boundary")
+			}
 		})
 	}
 }
@@ -207,9 +217,11 @@ func TestJournalBufferSignalSyntheticFileScanUnavailableIsVisibility(t *testing.
 }
 
 func TestJournalBufferSampleRejectsPreviousSchema(t *testing.T) {
-	_, err := parseJournalBufferSample(journalBufferFixture(map[string]string{"observation_schema": "3"}))
-	if err == nil || !strings.Contains(err.Error(), "unsupported observation schema") {
-		t.Fatalf("parse error=%v, want unsupported schema", err)
+	for _, schema := range []string{"3", "4"} {
+		_, err := parseJournalBufferSample(journalBufferFixture(map[string]string{"observation_schema": schema}))
+		if err == nil || !strings.Contains(err.Error(), "unsupported observation schema") {
+			t.Fatalf("schema %s: parse error=%v, want unsupported schema", schema, err)
+		}
 	}
 }
 
@@ -246,14 +258,17 @@ func TestJournalBufferCommandIsBoundedAndUsesEffectiveConfig(t *testing.T) {
 		"--output-fields=__REALTIME_TIMESTAMP -o json",
 		"ActiveEnterTimestampMonotonic",
 		"Storage", "SystemMaxUse", "SystemMaxFileSize", "SystemMaxFiles", "MaxFileSec", "MaxRetentionSec",
-		"find /var/log/journal -xdev -type f -name '*.journal'",
+		"timeout 5s od -An -v -tu1 -N 34 /etc/machine-id",
+		`journal_directory="/var/log/journal/$journal_machine_id"`,
+		`timeout 10 find "$journal_directory" -xdev -mindepth 1 -maxdepth 1 -type f`,
+		`\( -name '*.journal' -o -name '*.journal~' \)`,
 		"journal_archived_files_5m", "journal_system_archived_files_5m", "journal_user_archived_files_5m",
 	} {
 		if !strings.Contains(journalBufferCommand, want) {
 			t.Errorf("command lacks %q", want)
 		}
 	}
-	for _, forbidden := range []string{"sudo", "--list-boots", "mktemp", ">/tmp", "> /tmp", "cat /var/log/journal"} {
+	for _, forbidden := range []string{"sudo", "--list-boots", "mktemp", ">/tmp", "> /tmp", "cat /var/log/journal", "set -o pipefail"} {
 		if strings.Contains(journalBufferCommand, forbidden) {
 			t.Errorf("command contains unsafe/unbounded boundary %q", forbidden)
 		}
@@ -261,9 +276,12 @@ func TestJournalBufferCommandIsBoundedAndUsesEffectiveConfig(t *testing.T) {
 }
 
 func TestJournalBufferCommandReducesFileMetadataWithoutNames(t *testing.T) {
-	const fileRows = "1999999990.0 2048 system@aaaa-bbbb.journal\n" +
-		"1999999980.0 1024 user-1000@cccc-dddd.journal\n" +
-		"1999999970.0 512 system.journal\n"
+	const fileRows = "1999999990.0 20971520 system@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001-0000000000000002.journal\n" +
+		"1999999980.0 1024 user-1000@0000000000000003-0000000000000004.journal~\n" +
+		"1999999970.0 512 system.journal\n" +
+		"1999999990.0 1 private-prefix@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0000000000000005-0000000000000006.journal\n" +
+		"1999999990.0 1 private-unfamiliar.journal\n" +
+		"1999999990.0 1 system@malformed-archive.journal\n"
 	output, err := runJournalBufferCommandWithClockAndFiles(t, "string", "string", "fixed", fileRows)
 	if err != nil {
 		t.Fatalf("file metadata reducer failed: %v\n%s", err, output)
@@ -272,12 +290,12 @@ func TestJournalBufferCommandReducesFileMetadataWithoutNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sample.journalFileScanState != "complete" || sample.journalFiles != 3 ||
-		sample.journalBytes != 1835008 || sample.journalArchivedFiles5m != 2 ||
+	if sample.journalFileScanState != "complete" || sample.journalFiles != 6 ||
+		sample.journalBytes != 10738206208 || sample.journalArchivedFiles5m != 3 ||
 		sample.journalSystemArchives5m != 1 || sample.journalUserArchives5m != 1 {
 		t.Fatalf("file metadata sample=%+v", sample)
 	}
-	for _, private := range []string{"aaaa-bbbb", "cccc-dddd", "user-1000"} {
+	for _, private := range []string{"aaaaaaaa", "bbbbbbbb", "user-1000", "private-", "malformed-archive", journalBufferTestMachineID} {
 		if strings.Contains(output, private) {
 			t.Fatalf("file metadata reducer leaked %q: %s", private, output)
 		}
@@ -285,7 +303,7 @@ func TestJournalBufferCommandReducesFileMetadataWithoutNames(t *testing.T) {
 }
 
 func TestJournalBufferCommandMalformedFileMetadataIsVisibility(t *testing.T) {
-	const fileRows = "1999999990.0 2048 private-unexpected-name.journal\n"
+	const fileRows = "1999999990.0 2048 private unexpected name.journal\n"
 	output, err := runJournalBufferCommandWithClockAndFiles(t, "string", "string", "fixed", fileRows)
 	if err != nil {
 		t.Fatalf("malformed file metadata must preserve other journal observations: %v\n%s", err, output)
@@ -297,8 +315,225 @@ func TestJournalBufferCommandMalformedFileMetadataIsVisibility(t *testing.T) {
 	if sample.journalFileScanState != "unavailable" {
 		t.Fatalf("file scan state=%q, want unavailable", sample.journalFileScanState)
 	}
-	if strings.Contains(output, "private-unexpected-name") {
+	if strings.Contains(output, "private") {
 		t.Fatalf("malformed file metadata leaked: %s", output)
+	}
+}
+
+func TestJournalBufferCommandExcludesSiblingAndNestedDirectories(t *testing.T) {
+	files := []string{
+		journalBufferTestMachineID + "/system.journal",
+		journalBufferTestMachineID + "/user-1000.journal",
+		"system.journal",
+		journalBufferTestMachineID + ".private-namespace/system.journal",
+	}
+	for i := 0; i < 300; i++ {
+		files = append(files,
+			fmt.Sprintf("99999999999999999999999999999999/user-%d.journal", i),
+			fmt.Sprintf("%s/private-nested/user-%d.journal", journalBufferTestMachineID, i),
+		)
+	}
+	output, err := runJournalBufferCommandWithFileFixture(t, "string", "string", "fixed", journalBufferFileFixture{
+		machineID: journalBufferTestMachineID + "\n", files: files,
+	})
+	if err != nil {
+		t.Fatalf("directory census failed: %v", err)
+	}
+	sample, err := parseJournalBufferSample(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.journalFileScanState != "complete" || sample.journalFiles != 2 || sample.journalBytes != 2048 {
+		t.Fatalf("census included a sibling, nested directory, or non-regular file: %+v", sample)
+	}
+	for _, finding := range evaluateJournalBuffer("edge", sample) {
+		if !finding.healthy {
+			t.Fatalf("stale directory manufactured a finding: %s", finding.class)
+		}
+	}
+	for _, private := range []string{journalBufferTestMachineID, "99999999", "private-", "user-1000"} {
+		if strings.Contains(output, private) {
+			t.Fatal("directory census leaked identity or a filename")
+		}
+	}
+}
+
+func TestJournalBufferCommandIncludesJournalTildeAtCapacityBoundary(t *testing.T) {
+	files := []string{journalBufferTestMachineID + "/system@0000000000000001-0000000000000002.journal~"}
+	for i := 0; i < 256; i++ {
+		files = append(files, fmt.Sprintf("%s/user-%d.journal", journalBufferTestMachineID, i))
+	}
+	output, err := runJournalBufferCommandWithFileFixture(t, "string", "string", "fixed", journalBufferFileFixture{
+		machineID: journalBufferTestMachineID + "\n", files: files,
+	})
+	if err != nil {
+		t.Fatalf("directory census failed: %v", err)
+	}
+	sample, err := parseJournalBufferSample(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.journalFileScanState != "complete" || sample.journalFiles != 257 ||
+		sample.journalArchivedFiles5m != 1 || sample.journalSystemArchives5m != 1 {
+		t.Fatalf("census omitted a .journal~ file: %+v", sample)
+	}
+	for _, finding := range evaluateJournalBuffer("edge", sample) {
+		if finding.class == "journal-buffer-file-headroom" && !finding.healthy {
+			return
+		}
+	}
+	t.Fatal(".journal~ file did not trigger the retained-file capacity boundary")
+}
+
+func TestJournalBufferCommandIdentityAndDirectoryVisibility(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		fixture journalBufferFileFixture
+		want    string
+	}{
+		{name: "valid", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID + "\n"}, want: "complete"},
+		{name: "valid-no-newline", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID}, want: "complete"},
+		{name: "valid-uppercase-canonicalized", fixture: journalBufferFileFixture{machineID: strings.ToUpper(journalBufferTestMachineID)}, want: "complete"},
+		{name: "missing-identity", fixture: journalBufferFileFixture{omitMachineID: true}},
+		{name: "empty-identity", fixture: journalBufferFileFixture{}},
+		{name: "null-identity", fixture: journalBufferFileFixture{machineID: strings.Repeat("0", 32)}},
+		{name: "short-identity", fixture: journalBufferFileFixture{machineID: "0123456789abcdef"}},
+		{name: "invalid-identity", fixture: journalBufferFileFixture{machineID: "../../private-machine-id-content"}},
+		{name: "ambiguous-identity", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID + "\n" + journalBufferTestMachineID + "\n"}},
+		{name: "extra-blank-line", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID + "\n\n"}},
+		{name: "oversized-identity", fixture: journalBufferFileFixture{machineID: strings.Repeat(journalBufferTestMachineID, 10)}},
+		{name: "missing-directory", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, directoryState: "missing"}},
+		{name: "symlink-directory", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, directoryState: "symlink"}},
+		{name: "not-a-directory", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, directoryState: "file"}},
+		{name: "incomplete-scan", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, rows: "1999999990.0 2 system.journal\n", findExit: 1}},
+		{name: "scan-timeout", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, findExit: 124}},
+		{name: "scan-file-bound", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID, rows: strings.Repeat("1999999990.0 2 system.journal\n", 4097)}, want: "truncated"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			output, err := runJournalBufferCommandWithFileFixture(t, "string", "string", "fixed", testCase.fixture)
+			if err != nil {
+				t.Fatalf("file visibility must preserve other journal observations: %v", err)
+			}
+			sample, err := parseJournalBufferSample(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := testCase.want
+			if want == "" {
+				want = "unavailable"
+			}
+			if sample.journalFileScanState != want || !sample.coveragePresent {
+				t.Fatalf("file scan state=%s coverage=%t, want %s with coverage", sample.journalFileScanState, sample.coveragePresent, want)
+			}
+			if want != "complete" {
+				if sample.journalFiles != 0 || sample.journalBytes != 0 || sample.journalArchivedFiles5m != 0 {
+					t.Fatal("unknown scan retained partial file observations")
+				}
+				visibility := false
+				for _, finding := range evaluateJournalBuffer("edge", sample) {
+					if finding.class == "cannot-observe" && finding.target == "edge/journal-buffer-files" {
+						visibility = true
+					}
+					if finding.class == "journal-buffer-file-headroom" {
+						t.Fatal("unknown file census asserted a headroom result")
+					}
+				}
+				if !visibility {
+					t.Fatal("unknown file census omitted its visibility finding")
+				}
+			}
+			for _, private := range []string{journalBufferTestMachineID, strings.ToUpper(journalBufferTestMachineID), "private-"} {
+				if strings.Contains(output, private) {
+					t.Fatal("identity or directory failure leaked private source data")
+				}
+			}
+		})
+	}
+}
+
+func TestJournalBufferCommandPOSIXProducerStatus(t *testing.T) {
+	const partialRows = "1999999990.0 2 system.journal\n"
+	for _, shellName := range []string{"sh", "dash"} {
+		t.Run(shellName, func(t *testing.T) {
+			shell, err := exec.LookPath(shellName)
+			if err != nil {
+				t.Skipf("%s is not installed", shellName)
+			}
+			for _, testCase := range []struct {
+				name    string
+				fixture journalBufferFileFixture
+				want    string
+				files   int
+			}{
+				{name: "empty-success", want: "complete"},
+				{name: "files-success", fixture: journalBufferFileFixture{files: []string{
+					journalBufferTestMachineID + "/system.journal",
+					journalBufferTestMachineID + "/system.journal~",
+				}}, want: "complete", files: 2},
+				{name: "identity-without-newline", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID}, want: "complete"},
+				{name: "identity-with-nul", fixture: journalBufferFileFixture{machineID: journalBufferTestMachineID + "\x00\n"}},
+				{name: "identity-read-fails-after-valid-bytes", fixture: journalBufferFileFixture{machineIDReadExit: 1}},
+				{name: "identity-read-times-out-after-valid-bytes", fixture: journalBufferFileFixture{machineIDReadExit: 124}},
+				{name: "find-fails-after-valid-row", fixture: journalBufferFileFixture{rows: partialRows, findExit: 1}},
+				{name: "find-times-out-after-valid-row", fixture: journalBufferFileFixture{rows: partialRows, findExit: 124}},
+				{name: "identity-footer-missing", fixture: journalBufferFileFixture{machineIDFooterMode: "missing"}},
+				{name: "identity-footer-duplicate", fixture: journalBufferFileFixture{machineIDFooterMode: "duplicate"}},
+				{name: "identity-footer-truncated", fixture: journalBufferFileFixture{machineIDFooterMode: "truncated"}},
+				{name: "identity-footer-nonterminal", fixture: journalBufferFileFixture{machineIDFooterMode: "nonterminal"}},
+				{name: "find-footer-missing", fixture: journalBufferFileFixture{rows: partialRows, fileFooterMode: "missing"}},
+				{name: "find-footer-duplicate", fixture: journalBufferFileFixture{rows: partialRows, fileFooterMode: "duplicate"}},
+				{name: "find-footer-truncated", fixture: journalBufferFileFixture{rows: partialRows, fileFooterMode: "truncated"}},
+				{name: "find-footer-nonterminal", fixture: journalBufferFileFixture{rows: partialRows, fileFooterMode: "nonterminal"}},
+				{name: "file-bound-truncated", fixture: journalBufferFileFixture{rows: strings.Repeat(partialRows, 4097)}, want: "truncated"},
+			} {
+				t.Run(testCase.name, func(t *testing.T) {
+					fixture := testCase.fixture
+					fixture.shell = shell
+					if fixture.machineID == "" {
+						fixture.machineID = journalBufferTestMachineID + "\n"
+					}
+					output, err := runJournalBufferCommandWithFileFixture(t, "string", "string", "fixed", fixture)
+					if err != nil {
+						t.Fatalf("file census failure lost independent journal coverage: %v", err)
+					}
+					sample, err := parseJournalBufferSample(output)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := testCase.want
+					if want == "" {
+						want = "unavailable"
+					}
+					if sample.journalFileScanState != want || sample.journalFiles != testCase.files || !sample.coveragePresent {
+						t.Fatalf("state=%s files=%d coverage=%t, want %s files=%d with coverage",
+							sample.journalFileScanState, sample.journalFiles, sample.coveragePresent, want, testCase.files)
+					}
+					if want != "complete" {
+						if sample.journalBytes != 0 || sample.journalArchivedFiles5m != 0 ||
+							sample.journalSystemArchives5m != 0 || sample.journalUserArchives5m != 0 {
+							t.Fatal("failed producer or footer retained partial census values")
+						}
+						visibility := false
+						for _, finding := range evaluateJournalBuffer("edge", sample) {
+							if finding.class == "cannot-observe" && finding.target == "edge/journal-buffer-files" {
+								visibility = true
+							}
+							if finding.class == "journal-buffer-file-headroom" {
+								t.Fatal("failed producer or footer asserted a headroom result")
+							}
+						}
+						if !visibility {
+							t.Fatal("failed producer or footer omitted its visibility finding")
+						}
+					}
+					for _, private := range []string{journalBufferTestMachineID, "system.journal", "private-", "monitor-journal-"} {
+						if strings.Contains(output, private) {
+							t.Fatal("producer or footer exposed raw private input or internal protocol")
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -414,7 +649,28 @@ func runJournalBufferCommandWithClock(t *testing.T, latestMode, boundaryMode, cl
 	return runJournalBufferCommandWithClockAndFiles(t, latestMode, boundaryMode, clockMode, "")
 }
 
+const journalBufferTestMachineID = "0123456789abcdef0123456789abcdef"
+
+type journalBufferFileFixture struct {
+	machineID           string
+	omitMachineID       bool
+	machineIDReadExit   int
+	machineIDFooterMode string
+	fileFooterMode      string
+	directoryState      string
+	files               []string
+	rows                string
+	findExit            int
+	shell               string
+}
+
 func runJournalBufferCommandWithClockAndFiles(t *testing.T, latestMode, boundaryMode, clockMode, fileRows string) (string, error) {
+	return runJournalBufferCommandWithFileFixture(t, latestMode, boundaryMode, clockMode, journalBufferFileFixture{
+		machineID: journalBufferTestMachineID + "\n", rows: fileRows,
+	})
+}
+
+func runJournalBufferCommandWithFileFixture(t *testing.T, latestMode, boundaryMode, clockMode string, files journalBufferFileFixture) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	writeExecutable := func(name, body string) {
@@ -454,17 +710,118 @@ exec /usr/bin/awk "$@"
 shift
 exec "$@"
 `)
+	writeExecutable("od", `#!/bin/sh
+/usr/bin/od "$@"
+journal_test_read_status=$?
+[ "$journal_test_read_status" -eq 0 ] || exit "$journal_test_read_status"
+if [ "$JOURNAL_MACHINE_ID_READ_STATUS" -ne 0 ]; then
+  echo 'private-machine-id-read-error' >&2
+fi
+exit "$JOURNAL_MACHINE_ID_READ_STATUS"
+`)
 	journalRoot := filepath.Join(bin, "journal")
-	commandSource := journalBufferCommand
-	if fileRows != "" {
-		if err := os.Mkdir(journalRoot, 0o700); err != nil {
+	if err := os.Mkdir(journalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	machineIDPath := filepath.Join(bin, "machine-id")
+	if !files.omitMachineID {
+		if err := os.WriteFile(machineIDPath, []byte(files.machineID), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		writeExecutable("find", `#!/bin/sh
-printf '%s' "$JOURNAL_FIND_OUTPUT"
-`)
-		commandSource = strings.ReplaceAll(commandSource, "/var/log/journal", journalRoot)
 	}
+	journalDirectory := filepath.Join(journalRoot, journalBufferTestMachineID)
+	switch files.directoryState {
+	case "missing":
+	case "symlink":
+		if err := os.Symlink(journalRoot, journalDirectory); err != nil {
+			t.Fatal(err)
+		}
+	case "file":
+		if err := os.WriteFile(journalDirectory, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		if err := os.Mkdir(journalDirectory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// Journald ignores directories and symlinks even with journal suffixes.
+		if err := os.Mkdir(filepath.Join(journalDirectory, "private-directory.journal"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(machineIDPath, filepath.Join(journalDirectory, "private-link.journal~")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range files.files {
+		path := filepath.Join(journalRoot, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	realFind, err := exec.LookPath("find")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Native find executes the production path/depth/type/name selection. Only
+	// GNU -printf is adapted for macOS, with deterministic synthetic metadata.
+	writeExecutable("find", `#!/bin/bash
+if [ -n "$JOURNAL_FIND_OUTPUT" ] || [ "$JOURNAL_FIND_STATUS" -ne 0 ]; then
+  printf '%s' "$JOURNAL_FIND_OUTPUT"
+  if [ "$JOURNAL_FIND_STATUS" -ne 0 ]; then
+    echo 'private-directory-visibility-error' >&2
+  fi
+  exit "$JOURNAL_FIND_STATUS"
+fi
+find_args=()
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -printf ]; then
+    [ "$2" = '%T@ %b %f\n' ] || exit 1
+    find_args+=(-exec "$JOURNAL_FIND_METADATA" '{}' +)
+    shift 2
+  else
+    find_args+=("$1")
+    shift
+  fi
+done
+exec "$JOURNAL_REAL_FIND" "${find_args[@]}"
+`)
+	writeExecutable("journal-file-metadata", `#!/bin/sh
+for journal_path do
+  printf '1999999990.0 2 %s\n' "${journal_path##*/}"
+done
+`)
+	commandSource := strings.ReplaceAll(journalBufferCommand, "/var/log/journal", journalRoot)
+	commandSource = strings.ReplaceAll(commandSource, "/etc/machine-id", machineIDPath)
+	// Inject only status-footer write faults; all producer commands and actual
+	// production reducers still execute in the selected account-shell fixture.
+	commandSource = `printf() {
+  journal_test_footer_mode=
+  case "$1" in
+    'monitor-journal-machine-id-status=%d\n') journal_test_footer_mode=$JOURNAL_MACHINE_ID_FOOTER_MODE ;;
+    'monitor-journal-file-scan-status=%d\n') journal_test_footer_mode=$JOURNAL_FILE_FOOTER_MODE ;;
+  esac
+  case "$journal_test_footer_mode" in
+    missing) return 1 ;;
+    duplicate) command printf "$@" ;;
+    truncated)
+      case "$1" in
+        'monitor-journal-machine-id-status=%d\n') command printf 'monitor-journal-machine-id-status=' ;;
+        *) command printf 'monitor-journal-file-scan-status=' ;;
+      esac
+      return 1
+      ;;
+    nonterminal)
+      command printf "$@"
+      command printf 'private-after-terminal-footer\n'
+      return 0
+      ;;
+  esac
+  command printf "$@"
+}
+` + commandSource
 	// The command and its fake journalctl child must share one clock. Sampling
 	// the real clock twice made a loaded test host manufacture a future latest
 	// record when process startup crossed more than one second. Cross mode makes
@@ -516,14 +873,24 @@ case "$mode" in
 esac
 `)
 
-	command := exec.Command("sh", "-c", commandSource)
+	shell := files.shell
+	if shell == "" {
+		shell = "sh"
+	}
+	command := exec.Command(shell, "-c", commandSource)
 	command.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"JOURNAL_LATEST_MODE="+latestMode,
 		"JOURNAL_BOUNDARY_MODE="+boundaryMode,
 		"JOURNAL_CLOCK_MODE="+clockMode,
 		"JOURNAL_CLOCK_STATE="+filepath.Join(bin, "query-seen"),
-		"JOURNAL_FIND_OUTPUT="+fileRows,
+		"JOURNAL_FIND_OUTPUT="+files.rows,
+		fmt.Sprintf("JOURNAL_FIND_STATUS=%d", files.findExit),
+		fmt.Sprintf("JOURNAL_MACHINE_ID_READ_STATUS=%d", files.machineIDReadExit),
+		"JOURNAL_MACHINE_ID_FOOTER_MODE="+files.machineIDFooterMode,
+		"JOURNAL_FILE_FOOTER_MODE="+files.fileFooterMode,
+		"JOURNAL_REAL_FIND="+realFind,
+		"JOURNAL_FIND_METADATA="+filepath.Join(bin, "journal-file-metadata"),
 	)
 	output, err := command.CombinedOutput()
 	return string(output), err

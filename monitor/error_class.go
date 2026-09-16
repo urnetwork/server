@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"regexp"
 	"strings"
 )
@@ -14,6 +15,7 @@ const (
 	taskErrorClassIdleTransactionTimeout        = "idle-transaction-timeout"
 	taskErrorClassConnectionCleanupDeadline     = "connection-cleanup-deadline"
 	taskErrorClassProcessorRateLimit            = "processor-rate-limit"
+	taskErrorClassInvalidDestinationResetFailed = "invalid-destination-reset-failed"
 	taskErrorClassProcessorInvalidDestination   = "processor-invalid-destination"
 	taskErrorClassProcessorBadRequest           = "processor-bad-request"
 	taskErrorClassSchemaObjectMissing           = "schema-object-missing"
@@ -36,6 +38,8 @@ func classifyTaskError(taskName, value string) string {
 	trimmed := strings.TrimSpace(value)
 	lower := strings.ToLower(trimmed)
 	switch {
+	case taskName == "AdvancePayment" && strings.Contains(lower, "; invalid destination reset error = "):
+		return taskErrorClassInvalidDestinationResetFailed
 	case strings.Contains(lower, "statement timeout") && strings.Contains(lower, "sqlstate 57014"):
 		return taskErrorClassPostgresStatementTimeout
 	case taskName == "CloseExpiredContracts" && strings.Contains(lower, "contract already closed with outcome settled:"):
@@ -82,6 +86,7 @@ func fixedTaskErrorClass(value string) string {
 		taskErrorClassIdleTransactionTimeout,
 		taskErrorClassConnectionCleanupDeadline,
 		taskErrorClassProcessorRateLimit,
+		taskErrorClassInvalidDestinationResetFailed,
 		taskErrorClassProcessorInvalidDestination,
 		taskErrorClassProcessorBadRequest,
 		taskErrorClassSchemaObjectMissing,
@@ -123,9 +128,11 @@ const (
 	observationErrorClassInvalidResponse  = "observation-invalid-response"
 	observationErrorClassAccessDenied     = "observation-access-denied"
 	observationErrorClassCommandFailed    = "observation-command-failed"
+	observationErrorClassSSHExit255       = "observation-ssh-exit-255"
 	observationErrorClassUnclassified     = "observation-unclassified"
 )
 
+// SIGNALS.md §1.7 shared observation taxonomy and observer-route coverage gap.
 // classifyObservationError gives monitor-internal observation failures the
 // same fixed-output boundary as task errors. It deliberately does not return
 // or embed the underlying error text.
@@ -141,6 +148,9 @@ func classifyObservationError(err error) string {
 	}
 
 	lower := strings.ToLower(err.Error())
+	var sshFailure *sshCommandError
+	var exitFailure *exec.ExitError
+	sshExit255 := errors.As(err, &sshFailure) && errors.As(sshFailure, &exitFailure) && exitFailure.ExitCode() == 255
 	var unreachable *unreachableError
 	if errors.As(err, &unreachable) {
 		if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
@@ -171,6 +181,8 @@ func classifyObservationError(err error) string {
 		strings.Contains(lower, "http 401") ||
 		strings.Contains(lower, "http 403"):
 		return observationErrorClassAccessDenied
+	case sshExit255:
+		return observationErrorClassSSHExit255
 	case strings.Contains(lower, "exit status"):
 		return observationErrorClassCommandFailed
 	case strings.Contains(lower, "parse") ||
@@ -181,4 +193,13 @@ func classifyObservationError(err error) string {
 	default:
 		return observationErrorClassUnclassified
 	}
+}
+
+// observationFailureAction keeps the SSH status discriminator identical for
+// whole-signal and partial-target visibility without attributing a route cause.
+func observationFailureAction(errorClass, fallback string) string {
+	if errorClass == observationErrorClassSSHExit255 {
+		return "Determine whether status 255 came from SSH transport/authentication or the remote command. Correlate failures across independent targets with bounded observer route and intended VPN-session evidence before attributing local overlay loss. Restore the proved observation path and rerun every affected signal."
+	}
+	return fallback
 }

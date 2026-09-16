@@ -283,7 +283,9 @@ func TestTailTransportRouteLossUsesMonitorRouterLifetimeExpirationDiscriminator(
 		"monitor_interface=en0",
 		"monitor_router_lifetime_expired=1",
 		"monitor_autoconf_detach=2",
+		"The bounded window separately recorded 2 autoconfiguration detach/deprecate transition(s).",
 		"monitor_ipv6_absent=2026-09-01 06:59:49.500",
+		"IPv6 network state returned at 2026-09-01 06:59:55.750.",
 		"supersedes edge attribution",
 		"not evidence that the named production edge",
 		"Do not change the named production edge",
@@ -297,6 +299,67 @@ func TestTailTransportRouteLossUsesMonitorRouterLifetimeExpirationDiscriminator(
 	}
 	if strings.HasPrefix(routeLoss.action, "Immediately run the §18.1 exact-address battery") {
 		t.Fatalf("locally proven router expiry still starts with edge diagnosis: %s", routeLoss.action)
+	}
+}
+
+func TestTailTransportRouteLossWithoutDetachDoesNotInventTransition(t *testing.T) {
+	for _, restored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restored=%t", restored), func(t *testing.T) {
+			lines := []string{
+				"2026-09-15 19:41:12.924 Df configd[1:2] RTADV en0: router lifetime became zero",
+				"2026-09-15 19:41:12.961 Df configd[1:2] network changed: v4(en0:192.0.2.10) DNS! Proxy!",
+			}
+			if restored {
+				lines = append(lines, "2026-09-15 19:41:21.562 Df configd[1:2] network changed: v4(en0:192.0.2.10) v6(en0:2001:db8:1::10) DNS! Proxy!")
+			}
+			tailer := newLogTailer("api", nil)
+			tailer.recordTransportDiagnostic("2026/09/15 19:41:20 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.")
+			probe := &logTailProbe{
+				tailers: []*logTailer{tailer},
+				monitorRouteEvidence: func(context.Context, *probeEnv, map[string]*tailTransportRouteAggregate) tailTransportMonitorRouteEvidence {
+					return parseTailTransportMonitorRouteEvidence(strings.Join(lines, "\n"))
+				},
+			}
+			env := &probeEnv{cfg: &monitorConfig{hosts: []*host{{
+				name:     "synthetic-edge",
+				edgeIPv6: []EdgeIPv6InterfaceSettings{{Interface: "public0", Address: "2001:db8:2::44"}},
+			}}}}
+			findings, err := probe.check(context.Background(), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+			if loss.healthy || loss.target != "synthetic-edge" || loss.frame != "public0/2001:db8:2::44" || loss.sustain != 1 {
+				t.Fatal("zero-detach evidence changed route-loss identity or visibility")
+			}
+			for _, want := range []string{
+				"default-router lifetime on en0 reached zero at 2026-09-15 19:41:12.924",
+				"loss of that interface's IPv6 network state at 2026-09-15 19:41:12.961",
+				"does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements",
+			} {
+				if !strings.Contains(loss.mechanism, want) {
+					t.Fatalf("zero-detach mechanism omitted proved boundary %q", want)
+				}
+			}
+			if strings.Contains(loss.mechanism, "detach") || strings.Contains(loss.mechanism, "deprecat") {
+				t.Fatal("zero-detach evidence asserted an unobserved detach/deprecate transition")
+			}
+			if strings.Contains(loss.mechanism, "IPv6 network state returned at") != restored {
+				t.Fatal("restoration claim does not match the bounded evidence")
+			}
+			if !strings.Contains(loss.observed, "monitor_autoconf_detach=0") ||
+				!strings.Contains(loss.evidence, "0 autoconfiguration detach/deprecate transition(s)") ||
+				!strings.Contains(loss.action, "Do not change the named production edge") ||
+				!strings.Contains(loss.verify, "For at least 30 minutes") {
+				t.Fatal("zero-detach correction lost the measured count, owner or verification gate")
+			}
+			alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", loss)
+			for _, raw := range []string{"configd[", "network changed:", "then detached/deprecated"} {
+				if strings.Contains(alert.Markdown(), raw) {
+					t.Fatal("route-loss Markdown retained raw source text or the old unsupported claim")
+				}
+			}
+		})
 	}
 }
 

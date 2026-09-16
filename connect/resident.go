@@ -220,6 +220,21 @@ var residentClientsGauge = prometheus.NewGauge(
 	},
 )
 
+// This artifact capability is intentionally identity-free. The monitor joins
+// it to the exact process identity supplied by the metrics transport. A value
+// of one proves that resident forward-ingress queues and workers are created
+// on first destination use instead of eagerly multiplying every resident by
+// the configured shard count.
+var residentLazyForwardIngressEnabledGauge = prometheus.NewGaugeFunc(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_lazy_forward_ingress_enabled",
+		Help:      "Whether resident forward-ingress queues and workers start lazily on first destination use",
+	},
+	func() float64 { return 1 },
+)
+
 // drainResidentsRemainingGauge is the drain progress without ssh-ing to find
 // the `docker stop` child: the remaining resident/connection count while the
 // service drains, 0 once the drain completes (CONNECTDRAIN2.md §3.5)
@@ -267,6 +282,7 @@ func init() {
 	prometheus.MustRegister(exchangeIOBytesCounter)
 	prometheus.MustRegister(exchangeActiveConnectionsGauge)
 	prometheus.MustRegister(residentClientsGauge)
+	prometheus.MustRegister(residentLazyForwardIngressEnabledGauge)
 	prometheus.MustRegister(drainResidentsRemainingGauge)
 	prometheus.MustRegister(drainExcusesWrittenCounter)
 	prometheus.MustRegister(nominationRefusedCounter)

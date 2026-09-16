@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -149,6 +150,7 @@ func (m *Monitor) prepareRunLoop(ctx context.Context) ([]Signal, []*logTailer, e
 		probe: &logTailProbe{
 			tailers:              tailers,
 			monitorRouteEvidence: collectTailTransportMonitorRouteEvidence,
+			reconcileDiagnostics: os.Stderr,
 		},
 		accept: logSignal.accept,
 	}

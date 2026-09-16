@@ -184,10 +184,12 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 		"active_log_source=warpctl",
 		"process-local allocator/GC contention",
 		"score_alias_schema_ready=true",
-		"durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass",
-		"residual allocation in the deployed sparse exporter",
+		"score_alias_marker_scope=global score_exporter_capability=unverified",
+		"some writer previously completed a compatibility pass",
+		"not provenance for this exact worker artifact",
+		"correlated allocation candidate, not established ownership of the whole heap",
 		"CloseExpiredContracts is active on the same host/block",
-		"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
+		"First verify the exact outlier Taskworker artifact",
 		"co-resident close checkpoint also returns below 120 seconds",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -248,7 +250,7 @@ func TestWorkerMemorySignalSyntheticFallsBackToHostJournalForActiveTasks(t *test
 	for _, want := range []string{
 		"active_tasks=UpdateClientScores:3940s",
 		"active_log_source=host-journal-fallback",
-		"UpdateClientScores is active on the exact heap outlier",
+		"UpdateClientScores has a fresh heartbeat on the outlier's host/block",
 		"target-oriented UpdateClientScores fanout and alias-aware cache",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -258,6 +260,85 @@ func TestWorkerMemorySignalSyntheticFallsBackToHostJournalForActiveTasks(t *test
 	requireAlertOmits(t, alert, "01a05616-2af9-07af-9ce6-8ba1bc304862")
 	if strings.Contains(markdown, "task-lifecycle lookup was degraded") {
 		t.Fatalf("complete host-journal fallback was reported as degraded:\n%s", markdown)
+	}
+}
+
+func TestWorkerMemoryGlobalAliasMarkerDoesNotAttestOutlierArtifact(t *testing.T) {
+	now := time.Date(2026, 9, 16, 11, 58, 30, 0, time.UTC)
+	const gib = float64(uint64(1) << 30)
+	const privateTaskID = "01a0530b-0e6a-9c14-6694-11a165f3c27b"
+	workers := []workerMetricFixture{
+		{host: "edge-0", block: "g1", instance: "peer", heap: 0.25 * gib},
+		{host: "edge-1", block: "g1", instance: "unattested", heap: 9 * gib, cpuRate: 1.4, allocRate: 200 << 20},
+		{host: "edge-3", block: "g1", instance: "control", heap: 0.3 * gib},
+	}
+	metrics := workerMetricsFixtureJSON(t, now, workers...)
+	rates := workerRatesFixtureJSON(t, now, workers...)
+	for _, tc := range []struct {
+		name, marker, state, mechanism string
+		err                            error
+	}{
+		{"prior writer completed", redisScoreAliasReadyValue, "true", "some writer previously completed a compatibility pass", nil},
+		{"no marker", "", "false", "does not identify this worker's artifact", nil},
+		{"marker unavailable", "", "unknown", "Neither marker state nor exact exporter capability is established", errors.New("synthetic marker unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			phaseReads := 0
+			source := &syntheticSource{
+				hostFn: func(_ HostSettings, command string) (string, error) {
+					if strings.Contains(command, "monitor_score_phase_metric") {
+						phaseReads++
+						return workerScorePhaseFixtureJSON(t, now, "edge-1", "g1", "unattested", true), nil
+					}
+					if strings.Contains(command, "monitor_rate") {
+						return rates, nil
+					}
+					return metrics, nil
+				},
+				redisFn: func(_ HostSettings, _ int, args ...string) (string, error) {
+					if strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+						t.Fatal("unexpected marker operation")
+					}
+					return tc.marker, tc.err
+				},
+				localFn: func(string, ...string) (string, error) {
+					return fmt.Sprintf("[edge-1][taskworker][g1][cid:unattested][I][%s][task.go:1938][%s]eval active(101.0s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})\n", now.Add(-5*time.Second).Format(time.RFC3339Nano), privateTaskID), nil
+				},
+			}
+			alerts, err := NewWorkerMemorySignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			alert := requireAlertClass(t, alerts, "worker-memory-skew")
+			if len(alerts) != 1 || alert.Target != "edge-1/g1" || alert.Frame != "unattested" || alert.Sustain != 2 || alert.Severity != Severity(tierWarn) {
+				t.Fatal("marker state changed the real skew's identity, severity or sustain")
+			}
+			if phaseReads != 1 {
+				t.Fatalf("phase reads = %d, want 1 despite marker state and below-churn rates", phaseReads)
+			}
+			for _, want := range []string{
+				"9.00GiB of allocated Go heap", "active_tasks=UpdateClientScores:101s",
+				"score_alias_schema_ready=" + tc.state,
+				"score_alias_marker_scope=global score_exporter_capability=unverified",
+				tc.mechanism, "First verify the exact outlier Taskworker artifact",
+				"If target-oriented capability is independently proven",
+				"score_phase_observability=ready", "the scrape found 12 active gob_encode spans",
+				"not heap ownership", "completed-span seconds are not CPU time",
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("marker provenance regression missing %q", want)
+				}
+			}
+			requireAlertOmits(t, alert, privateTaskID,
+				"This is therefore residual allocation in the deployed sparse exporter",
+				"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
+				"UpdateClientScores is active on the exact heap outlier",
+			)
+			encoded, err := json.Marshal(alert)
+			if err != nil || strings.Contains(string(encoded), privateTaskID) {
+				t.Fatal("marker provenance regression leaked the private task identity in JSON")
+			}
+		})
 	}
 }
 

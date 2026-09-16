@@ -80,6 +80,7 @@ func NewSignals() []Signal {
 		NewProbeCleanupSignal(),
 		NewSignupQualitySignal(),
 		NewSubscriptionMetricsSignal(),
+		NewSignupLivenessSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),
@@ -287,9 +288,9 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 		Mechanism:    "The monitor could not reach or parse a source of truth, so the associated production condition is currently unknown.",
 		Baseline:     "Every registered signal completes within its command timeout.",
 		Observed:     "error_class=" + errorClass,
-		Action:       "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident.",
+		Action:       observationFailureAction(errorClass, "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident."),
 		Verify:       "The signal completes and reports either no alert or a concrete target alert.",
-		Playbook:     "SIGNALS.md §1.4 and MONITOR.md §3.6",
+		Playbook:     "SIGNALS.md §1.7 and MONITOR.md §3.6",
 	}
 }
 

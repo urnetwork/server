@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -395,6 +396,24 @@ func windowGeneratorCanceledLogSample(line string) string {
 
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
+	// Preserve the controller-owned reset phase before its processor response
+	// or persistence suffix can match an ordinary destination/network class.
+	{name: "payout-invalid-destination-reset-failed", re: regexp.MustCompile(`(?is)Payment create transaction error = .*; invalid destination reset error = \S`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2, §4, and §5.7",
+		canonical: &logCanonical{
+			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:    "invalid_destination_reset_failed_events",
+		},
+		sample: func(string) string {
+			return "AdvancePayment invalid-destination-reset-failed (private payment and persistence details omitted)"
+		},
+		groupBy:   func(string) string { return "phase=guarded-reset" },
+		meaning:   "AdvancePayment reported a failed guarded attempt reset after an invalid-destination rejection",
+		mechanism: "The controller reported a definitive pre-chain destination rejection followed by an unsuccessful guarded attempt reset. Concurrent, terminal, or on-chain payment state can prevent that reset, as can a persistence failure. The rejection does not prove that the configured wallet remains unchanged or that the idempotency key was released.",
+		context:   "This composed controller marker identifies the reset phase, not the persistence root cause. Diagnostic and exact-replay-deduplicated evaluator counts are not unique payment counts. A separate ordinary Circle-client rejection can still appear for the same attempt; it does not override this reset failure.",
+		action:    "Inspect current payment and processor state privately, distinguish concurrent or terminal progress from a persistence failure, and reconcile the existing attempt before any new submission. Preserve the existing idempotency key. Do not infer unchanged wallet configuration, change wallet data solely from this class, manually release attempts, or clear payment/task rows.",
+		verify:    "The guarded reset succeeds only for an eligible pre-chain attempt, or the existing attempt reaches a reconciled terminal outcome. Both invalid_destination_reset_failed_events and the durable invalid-destination-reset-failed cohort clear on natural retries without duplicate transfers; keys remain stable for ambiguous submissions. Observe the full 90-minute retry window plus ingestion delay after the authorized correction.",
+		redactIDs: true},
 	// Current Grafana fronts emit only a fixed rejected-batch schema. Keep the
 	// legacy body matcher during rollout, but never retain that body's contents.
 	// Order matters: all three fixed rejection classes precede generic network
@@ -773,9 +792,9 @@ var logClasses = []logClass{
 			name:    "invalid_destination_events",
 		},
 		meaning:   "Circle definitively rejected a payout destination before creating a transfer because the configured wallet address is invalid for its declared chain",
-		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt, but the next retry selects the same invalid payout_wallet configuration until the account owner or operator corrects it.",
+		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt when its guarded reset succeeds. After that successful reset, an unchanged account wallet causes the next retry to select the same invalid payout_wallet configuration.",
 		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. Historical bounded controls on a pre-dispersion taskworker found the same six payments recurring at the same minute in each UTC hour. That history proves persistent invalid wallet selection after the safe typed reset, but it is not a statement about the currently deployed artifact and this alert intentionally does not infer runtime provenance from a historical version. Retry dispersion cannot repair wallet data; the separate payout-retry-microburst finding owns any remaining software-rollout diagnosis.",
-		action:    "Correct the affected network's payout wallet through the supported account API so its address matches its declared payout chain. This alert is an account-owner/operations action only. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
+		action:    "Confirm the guarded reset succeeded and inspect the current wallet selection before correcting a proven chain mismatch through the supported account API. Wallet correction is an account-owner/operations action only. If payout-invalid-destination-reset-failed also fires, resolve that persistence/reset boundary first; an ordinary Circle-client line is not proof of reset success. If payout-retry-microburst also fires, follow that separate finding's artifact-provenance and 90-minute observation gate; do not redeploy taskworker solely from this invalid-destination alert. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
 		verify:    "After the payout wallet is corrected, the next natural retry selects it with a fresh key released only by the prior definitive rejection, completes without a duplicate transfer, invalid_destination_events remains zero, and the durable processor-invalid-destination count converges to zero within 90 minutes plus log-ingestion delay.",
 		redactIDs: true},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
@@ -1336,6 +1355,9 @@ type logTailer struct {
 	reconcileInitialized bool
 	lastReconcileTime    time.Time
 	lastReconcileError   string
+	// Bounded successful-query receipts belong only to this collector
+	// generation. Failure or cancellation invalidates the consecutive pair.
+	reconcileSuccesses [2]logReconcileSuccess
 
 	// stream is a test seam over runner.warpctlStream; nil = the real stream
 	stream func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error)
@@ -1482,6 +1504,24 @@ type reconcileLine struct {
 	observedAt time.Time
 }
 
+// Warp's range client can skip a server-limited timestamp and still exit
+// successfully below our requested cap. Its stderr uses Go's date/time/file
+// prefix; unprefixed clients use the same warning. Neither form is a remote
+// timestamp-framed record or an ordinary successful-retry diagnostic.
+var logReconcileIncompleteRe = regexp.MustCompile(`(?m)^(?:[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)? [^[:space:]:]+\.go:[0-9]+: )?Warning: at least [1-9][0-9]* entries at [^\r\n]+\. The range api cannot page within one nanosecond; skipping the rest of this timestamp\.$`)
+
+var errLogReconcileIncomplete = errors.New("bounded overlap producer declared incomplete timestamp coverage")
+
+// Every aggregate, block, and continuation page crosses this completion
+// boundary before parsing. Do not retain the producer's count or timestamp.
+func (self *logTailer) reconcilePage(ctx context.Context, start time.Time, blocks []string) (string, error) {
+	out, err := self.reconcile(ctx, start, blocks)
+	if err == nil && logReconcileIncompleteRe.MatchString(out) {
+		return "", errLogReconcileIncomplete
+	}
+	return out, err
+}
+
 func parseReconcileLines(out string) []reconcileLine {
 	lines := []reconcileLine{}
 	for _, line := range strings.Split(out, "\n") {
@@ -1563,7 +1603,7 @@ func (self *logTailer) completeReconcilePartition(
 		}
 
 		pageStart = boundary
-		out, err := self.reconcile(ctx, pageStart, blocks)
+		out, err := self.reconcilePage(ctx, pageStart, blocks)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -1588,13 +1628,23 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 	if self.reconcile == nil {
 		return
 	}
+	defer func() {
+		if ctx.Err() != nil {
+			self.stateLock.Lock()
+			self.reconcileSuccesses = [2]logReconcileSuccess{}
+			self.stateLock.Unlock()
+		}
+	}()
+	if ctx.Err() != nil {
+		return
+	}
 	start := self.clock().Add(-logReconcileLookback)
-	out, err := self.reconcile(ctx, start, nil)
+	out, err := self.reconcilePage(ctx, start, nil)
 	if ctx.Err() != nil {
 		return
 	}
 	if err != nil {
-		self.recordReconcile(err)
+		self.recordReconcile(start, err)
 		return
 	}
 
@@ -1606,19 +1656,19 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 				return
 			}
 			if err != nil {
-				self.recordReconcile(err)
+				self.recordReconcile(start, err)
 				return
 			}
 		} else {
 			lines = nil
 			for _, block := range self.blocks {
 				blockPartition := []string{block}
-				out, err := self.reconcile(ctx, start, blockPartition)
+				out, err := self.reconcilePage(ctx, start, blockPartition)
 				if ctx.Err() != nil {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(fmt.Errorf("block %s overlap: %w", block, err))
+					self.recordReconcile(start, fmt.Errorf("block %s overlap: %w", block, err))
 					return
 				}
 				blockLines, err := self.completeReconcilePartition(
@@ -1631,7 +1681,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 					return
 				}
 				if err != nil {
-					self.recordReconcile(err)
+					self.recordReconcile(start, err)
 					return
 				}
 				lines = append(lines, blockLines...)
@@ -1647,18 +1697,33 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 		count := !initial || !entry.observedAt.Before(self.startedAt)
 		self.ingestStanding(entry.line, false, count)
 	}
-	self.recordReconcile(nil)
+	if ctx.Err() != nil {
+		return
+	}
+	self.recordReconcile(start, nil)
 }
 
-func (self *logTailer) recordReconcile(err error) {
+func (self *logTailer) recordReconcile(start time.Time, err error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if err != nil {
+		if errors.Is(err, errLogReconcileIncomplete) {
+			// Block/continuation wrappers must not add private selectors to
+			// this fixed producer-completeness diagnostic.
+			err = errLogReconcileIncomplete
+		}
 		self.lastReconcileError = err.Error()
+		self.reconcileSuccesses = [2]logReconcileSuccess{}
 		return
 	}
 	self.lastReconcileTime = self.clock()
 	self.lastReconcileError = ""
+	latest := logReconcileSuccess{start: start, completed: self.lastReconcileTime}
+	previous := self.reconcileSuccesses[1]
+	self.reconcileSuccesses = [2]logReconcileSuccess{{}, latest}
+	if previous.advancesTo(latest) {
+		self.reconcileSuccesses[0] = previous
+	}
 }
 
 // tailOnce runs one log stream to completion: start, scan lines, reap the
@@ -2360,6 +2425,9 @@ type logTailProbe struct {
 	// event must remain visible even when the monitor host cannot expose recent
 	// router-advertisement state. Tests inject it explicitly.
 	monitorRouteEvidence tailTransportMonitorRouteEvidenceCollector
+	// Successful overlap evidence stays in the existing diagnostic stream,
+	// separate from active Alerts. A sink failure must not affect findings.
+	reconcileDiagnostics io.Writer
 }
 
 // tailerSilentThreshold: no line for this long means the monitor is blind to
@@ -2425,6 +2493,9 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		monitorEvidence = self.monitorRouteEvidence(ctx, env, routeEvents)
 	}
 	findings = append(findings, tailTransportRouteFindings(env, routeEvents, monitorEvidence)...)
+	if ctx.Err() == nil {
+		self.writeReconcileReceipt(now)
+	}
 	return findings, nil
 }
 
@@ -2716,10 +2787,17 @@ func tailTransportRouteFindings(
 				restoredAt = monitorEvidence.ipv6RestoredAt.Format(monitorIPv6LogTimeLayout)
 			}
 			mechanism = fmt.Sprintf(
-				"The monitor host recorded that its IPv6 default-router lifetime on %s reached zero at %s inside the transport-failure window. The monitor then detached/deprecated its autoconfigured IPv6 state, so independent warpctl tails lost their common local route while their child processes remained alive. This proves local default-router expiration and supersedes edge attribution, but the configd record alone does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements.",
+				"The monitor host recorded that its IPv6 default-router lifetime on %s reached zero at %s inside the transport-failure window, followed by loss of that interface's IPv6 network state at %s. Independent warpctl tails lost their common local route while their child processes remained alive. This proves local default-router expiration and supersedes edge attribution, but the configd record alone does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements.",
 				monitorEvidence.interfaceName,
 				expiredAt,
+				absentAt,
 			)
+			if monitorEvidence.autoconfDetachCount > 0 {
+				mechanism += fmt.Sprintf(" The bounded window separately recorded %d autoconfiguration detach/deprecate transition(s).", monitorEvidence.autoconfDetachCount)
+			}
+			if !monitorEvidence.ipv6RestoredAt.IsZero() {
+				mechanism += fmt.Sprintf(" IPv6 network state returned at %s.", restoredAt)
+			}
 			observed += fmt.Sprintf(
 				" monitor_interface=%s monitor_router_lifetime_expired=%d monitor_autoconf_detach=%d monitor_ipv6_absent=%s monitor_ipv6_restored=%s",
 				monitorEvidence.interfaceName,
@@ -2806,7 +2884,7 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
 		action:    "Restore bounded warpctl/Loki query visibility. Retain active services.yml block partitioning and inclusive boundary continuation. If one boundary cannot advance or a partition consumes the eight-page budget, diagnose and remove the high-cardinality log producer before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
-		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation, and the standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
+		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile schema=1 diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
 		playbook:  "SIGNALS.md 1.5",
 	}
 }

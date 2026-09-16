@@ -24,7 +24,7 @@ so their evidence context and open causal boundaries remain intact:
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
-- A `gpt-5.6-sol` agent at `max` reasoning owns diagnosis and repair for every
+- A `gpt-6-astra` agent at `max` reasoning owns diagnosis and repair for every
   new, changed, or unresolved causal boundary. It may run bounded read-only
   discriminators, but Terra remains the runner and verifier.
 
@@ -32,12 +32,12 @@ For each such boundary, Terra sends a deterministic delta manifest referencing
 the prior ledger record and object hashes described below; group shared
 dependency/artifact/rollout failures and keep unrelated causes separate. Never
 paste full all-signal Markdown, logs, raw evidence, or test output into a model
-handoff. Sol pulls the complete Alert and only bounded relevant source objects
+handoff. Astra pulls the complete Alert and only bounded relevant source objects
 by hash on demand, then returns cause/patch/regressions/prerequisites/window;
 Terra returns gate manifests. Keep both agents and the watcher alive unless
 safe promotion requires a handoff.
 
-The primary agent owns the append-only run ledger. Terra and Sol produce
+The primary agent owns the append-only run ledger. Terra and Astra produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
 must not append ledger records themselves. This keeps process/session ownership,
 production mutation authority, and the single-writer chain in one place.
@@ -275,7 +275,7 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Terra and Sol may prepare manifests;
+make its old physical layout valid JSONL. Terra and Astra may prepare manifests;
 they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
@@ -412,13 +412,28 @@ Useful source-of-truth pairings are:
 | Redis state | each node's own `INFO`, `CLUSTER NODES`, and key metadata | host listener/process/cgroup state and PostgreSQL durable owner state |
 | host memory, OOM, or UDP loss | kernel journal, `/proc`, cgroup files, `nstat`, and socket queues | process generations, overlap timeline, swap and application metrics |
 | host or edge address | live interface and policy-routing state | active `services.yml`, host config, router path, and exact-origin probes |
-| log loss | standing tail health and privacy-safe drop summaries | bounded absolute-window reconciliation per service/block and direct host journal |
+| log loss | standing tail health and privacy-safe drop summaries | current-watcher `monitor-log-reconcile ` diagnostic receipt, bounded absolute-window reconciliation per service/block, and direct host journal |
 | metrics identity | fresh process-emitted series with host/block/instance labels | live process start, listener, ring membership, and scrape age |
 | metrics restart durability | exact loopback Mimir `/config`, reduced remotely to `flush_blocks_on_shutdown`, `query_store_after`, `query_ingesters_within`, blocks-storage `ignore_blocks_within`, bucket-store `sync_interval`, and compactor `cleanup_interval` | separate exact-process lifecycle proof plus a controlled replacement with no new bounded §11.20 gap through the complete handoff and discovery window; config and sustain state are process-local |
 
 Use the existing SSH and Warpctl transports and the commands documented in
 `SIGNALS.md`; do not improvise a less safe secret path. Never contact a disabled
 host while trying to improve denominator coverage.
+
+For a two-reconciliation closure gate, retain the exact `monitor-log-reconcile `
+prefix plus schema-1 JSON from the current watcher generation's stderr artifact.
+Require `collectors=enabled=fresh=consecutive_two > 0`, matching the intended
+collector inventory. Check `collector_started_at`, `previous_window_start`,
+`latest_window_start`, `previous_completed_at`, and `latest_completed_at`:
+their oldest/newest ranges must be non-null, ordered, advancing, and meet the
+incident's post-boundary window. Bind the receipt to the immutable binary,
+durable session, and stderr object; never combine predecessor and candidate
+histories. Query lower bounds and local completions do not establish fresh
+source-record timestamps or live-stream liveness; retain those independent
+controls and the required no-loss window. Missing, malformed, stale, or
+partial-scope receipts leave completion unknown; alert absence alone is
+insufficient. This diagnostic does not change alert-only JSONL or invent
+healthy Alerts. See `SIGNALS.md` §1.5 and `MONITOR.md` §3.7 for the fixed schema.
 
 ## Daily three-way improvement research
 
@@ -461,7 +476,7 @@ Research all three directions:
    removing them would make old evidence uninterpretable.
 
 Terra owns the reproducible crosswalk, registry/test inventory, current watcher
-delta, and verification manifests. Sol owns semantic review of observation
+delta, and verification manifests. Astra owns semantic review of observation
 authority, causal discrimination, false-positive/false-negative boundaries,
 and the smallest source/test corrections. The primary agent reviews their
 manifests, writes the single chained ledger record, and owns all source and

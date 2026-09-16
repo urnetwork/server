@@ -335,7 +335,7 @@ func TestProxyTransportSignalSyntheticCancellation(t *testing.T) {
 
 // Builds one coherent, healthy process with two private carrier budgets.
 func healthyProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
-	return proxyTransportFixtureProcess{
+	process := proxyTransportFixtureProcess{
 		host: "proxy-node.invalid", block: "lane-a", instance: "generation-a",
 		sampleTime: now, sourceTime: now,
 		values: map[string]float64{
@@ -358,6 +358,10 @@ func healthyProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
 		},
 		omit: map[string]bool{}, sourceOffsets: map[string]time.Duration{},
 	}
+	for _, name := range proxyTransportAdmissionMetricNames {
+		process.values[name] = 0
+	}
+	return process
 }
 
 // Supplies the generated query with a synthetic metrics gateway response.
@@ -409,7 +413,7 @@ func proxyTransportFixtureJson(t testing.TB, processes ...proxyTransportFixtureP
 	t.Helper()
 	result := []map[string]any{}
 	for _, process := range processes {
-		for _, metricName := range proxyTransportMetricNames {
+		for _, metricName := range proxyTransportAllMetricNames() {
 			if process.omit[metricName] {
 				continue
 			}
@@ -454,4 +458,253 @@ func proxyTransportFixtureJson(t testing.TB, processes ...proxyTransportFixtureP
 		t.Fatal(err)
 	}
 	return string(payload)
+}
+
+// These are same-owner joined cohorts, not the intersection of fleet totals.
+func TestProxyTransportAdmissionDistinguishesSlotDemandAndPolicyHandoff(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, state                                                                  string
+		slotFull, handoff, handoffUnsatisfied, demandUnsatisfied, unknown, allowance float64
+	}{
+		{"slot-demand", "slot-demand-no-handoff", 1, 0, 0, 1, 0, 0},
+		{"policy-handoff", "policy-handoff-overlap", 1, 1, 1, 0, 0, 1},
+		{"mixed", "mixed-handoff-and-slot-demand", 2, 1, 1, 1, 0, 1},
+		{"unknown-window", "policy-handoff-overlap", 1, 1, 0, 0, 1, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := pendingProxyTransportFixture(now)
+			process.values["urnetwork_proxy_platform_transports_used"] = 32 + test.allowance
+			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"] = test.slotFull
+			process.values["urnetwork_proxy_platform_transport_active_handoff_transports"] = test.allowance
+			process.values["urnetwork_proxy_platform_transport_active_handoff_bytes"] = test.allowance * 256 * 1024
+			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"] = test.handoff
+			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices"] = test.handoffUnsatisfied
+			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices"] = test.demandUnsatisfied
+			process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices"] = test.unknown
+			alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
+			alert := requireAlertClass(t, alerts, "proxy-transport-admission-pending")
+			for _, want := range []string{
+				"admission_state=" + test.state,
+				fmt.Sprintf("handoff_unsatisfied_devices=%g", test.handoffUnsatisfied),
+				fmt.Sprintf("demand_unsatisfied_devices=%g", test.demandUnsatisfied),
+				fmt.Sprintf("window_unknown_devices=%g", test.unknown),
+				"joined inside each owning DeviceLocal",
+				"not event ordering", "Neither proves a stuck transition or legitimate excess demand",
+				"Do not blindly raise the cap", "ten minutes under comparable load",
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("attribution Markdown lacks %q:\n%s", want, alert.Markdown())
+				}
+			}
+			for _, alert := range alerts {
+				if alert.Class == "proxy-transport-metrics-invalid" || alert.Class == "proxy-transport-preemption-churn" {
+					t.Fatalf("bounded handoff/no-churn fixture misclassified: %s", alert.Class)
+				}
+			}
+			if test.unknown > 0 {
+				requireAlertClass(t, alerts, "proxy-transport-admission-unobservable")
+			}
+		})
+	}
+}
+
+// Missing/mixed additional telemetry never erases the original pending signal.
+func TestProxyTransportAdmissionUnavailablePreservesPending(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 1, 0, 0, time.UTC)
+	for _, mode := range []string{"legacy", "partial", "mixed-scrape"} {
+		t.Run(mode, func(t *testing.T) {
+			process := pendingProxyTransportFixture(now)
+			// An unreported handoff can validly exceed either ordinary cap.
+			// Partial attribution must not manufacture a zero allowance.
+			process.values["urnetwork_proxy_platform_transports_used"] = 33
+			process.values["urnetwork_proxy_platform_transport_used_bytes"] = 12*1024*1024 + 256*1024
+			switch mode {
+			case "legacy":
+				for _, name := range proxyTransportAdmissionMetricNames {
+					process.omit[name] = true
+				}
+			case "partial":
+				process.omit[proxyTransportAdmissionMetricNames[0]] = true
+			case "mixed-scrape":
+				process.sourceOffsets[proxyTransportAdmissionMetricNames[0]] = -15 * time.Second
+			}
+			alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
+			unknown := requireAlertClass(t, alerts, "proxy-transport-admission-unobservable")
+			pending := requireAlertClass(t, alerts, "proxy-transport-admission-pending")
+			for _, alert := range alerts {
+				if alert.Class == "proxy-transport-metrics-invalid" {
+					t.Fatalf("unreported handoff was treated as zero allowance: %s", alert.Markdown())
+				}
+			}
+			if !strings.Contains(pending.Markdown(), "admission_state=unavailable") ||
+				strings.Contains(pending.Markdown(), "admission_state=slot-demand-no-handoff") {
+				t.Fatalf("missing attribution became zero handoffs:\n%s", pending.Markdown())
+			}
+			for _, want := range []string{"unknown, never zero", "Existing pending and preemption findings remain active", "process-ready=1", "SDK owner snapshot and Proxy aggregate exporter together"} {
+				if !strings.Contains(unknown.Markdown(), want) {
+					t.Fatalf("visibility Markdown lacks %q", want)
+				}
+			}
+		})
+	}
+}
+
+// The same owner-reported allowance bounds byte overage without requiring an
+// extra carrier slot: an Auto-H3 side of the handoff may be slotless.
+func TestProxyTransportAdmissionByteAllowanceBounds(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 6, 0, 0, time.UTC)
+	const budget = 12 * 1024 * 1024
+	const handoff = 256 * 1024
+	for _, test := range []struct {
+		name                      string
+		usedBytes, allowanceBytes float64
+		reason                    string
+	}{
+		{"ordinary-limit", budget, 0, ""},
+		{"bounded-byte-only-handoff", budget + handoff, handoff, ""},
+		{"one-byte-above-handoff-bound", budget + handoff + 1, handoff, "used-carrier-bytes-exceed-budget-with-handoff"},
+		{"overage-without-handoff", budget + 1, 0, "used-carrier-bytes-exceed-budget-with-handoff"},
+		{"allowance-exceeds-acquired-bytes", handoff - 1, handoff, "active-handoff-bytes-exceed-used"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := pendingProxyTransportFixture(now)
+			process.values["urnetwork_proxy_platform_transport_used_bytes"] = test.usedBytes
+			process.values["urnetwork_proxy_platform_transport_active_handoff_bytes"] = test.allowanceBytes
+			if test.allowanceBytes > 0 {
+				process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"] = 1
+			}
+			alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
+			if test.reason != "" {
+				invalid := requireAlertClass(t, alerts, "proxy-transport-metrics-invalid")
+				for _, want := range []string{test.reason, "used carrier counts and bytes", "each allowance is bounded by corresponding acquired use"} {
+					if !strings.Contains(invalid.Markdown(), want) {
+						t.Fatalf("byte-accounting Markdown lacks %q:\n%s", want, invalid.Markdown())
+					}
+				}
+				return
+			}
+			requireAlertClass(t, alerts, "proxy-transport-admission-pending")
+			for _, alert := range alerts {
+				if alert.Class == "proxy-transport-metrics-invalid" || alert.Class == "proxy-transport-admission-unobservable" {
+					t.Fatalf("valid coherent byte allowance rejected: %s", alert.Markdown())
+				}
+			}
+		})
+	}
+}
+
+func TestProxyTransportAdmissionRejectsAllowanceAboveAcquiredCarriers(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 7, 0, 0, time.UTC)
+	process := healthyProxyTransportFixture(now)
+	process.values["urnetwork_proxy_platform_transports_used"] = 0
+	process.values["urnetwork_proxy_platform_transport_active_handoff_transports"] = 1
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
+	invalid := requireAlertClass(t, alerts, "proxy-transport-metrics-invalid")
+	if !strings.Contains(invalid.Markdown(), "active-handoff-transports-exceed-used") {
+		t.Fatalf("acquired-carrier allowance mismatch not classified:\n%s", invalid.Markdown())
+	}
+}
+
+// Two instances can use the same image/producer contract while only one owner
+// has pending demand. A healthy control never supplies its sibling's evidence.
+func TestProxyTransportAdmissionSameImageHealthyControlAndMixedRollout(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 2, 0, 0, time.UTC)
+	affected := pendingProxyTransportFixture(now)
+	control := healthyProxyTransportFixture(now)
+	control.block, control.instance = "lane-b", "healthy-control"
+	for _, mixed := range []bool{false, true} {
+		if mixed {
+			affected.omit[proxyTransportAdmissionMetricNames[0]] = true
+		}
+		alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, affected, control), "lane-a", "lane-b")
+		pending := requireAlertClass(t, alerts, "proxy-transport-admission-pending")
+		if !strings.Contains(pending.Markdown(), "pending_identities=1") || strings.Contains(pending.Markdown(), "healthy-control") {
+			t.Fatalf("healthy control contaminated pending cohort:\n%s", pending.Markdown())
+		}
+		if mixed {
+			unknown := requireAlertClass(t, alerts, "proxy-transport-admission-unobservable")
+			if !strings.Contains(unknown.Markdown(), "admission_unknown_identities=1") {
+				t.Fatalf("mixed rollout borrowed sibling capability:\n%s", unknown.Markdown())
+			}
+		}
+	}
+}
+
+// Neither handoff state nor completeness is inherited across process epochs.
+func TestProxyTransportAdmissionGenerationAndGaugeReset(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 3, 0, 0, time.UTC)
+	old := pendingProxyTransportFixture(now)
+	old.instance = "old-generation"
+	old.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices"] = 1
+	old.values["urnetwork_proxy_platform_transport_h3_preemptions_total"] = 900
+	current := healthyProxyTransportFixture(now)
+	current.instance = "current-generation"
+	current.values["process_start_time_seconds"] = float64(now.Add(-time.Minute).Unix())
+	current.values["urnetwork_proxy_platform_transport_h3_preemptions_total"] = 0
+	if alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, old, current)); len(alerts) != 0 {
+		t.Fatalf("old generation survived reset: %+v", alerts)
+	}
+	current.omit[proxyTransportAdmissionMetricNames[0]] = true
+	alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, old, current))
+	unknown := requireAlertClass(t, alerts, "proxy-transport-admission-unobservable")
+	if !strings.Contains(unknown.Markdown(), "current-generation") || strings.Contains(unknown.Markdown(), "old-generation") {
+		t.Fatalf("old generation supplied current capability:\n%s", unknown.Markdown())
+	}
+}
+
+func TestProxyTransportAdmissionRejectsImpossibleSubsetsAndAllowance(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 4, 0, 0, time.UTC)
+	for _, test := range []struct {
+		metric string
+		value  float64
+	}{
+		{"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices", 2},
+		{"urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices", 1},
+		{"urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices", 2},
+		{"urnetwork_proxy_platform_transport_active_handoff_transports", 3},
+		{"urnetwork_proxy_platform_transport_active_handoff_transports", 0.5},
+	} {
+		t.Run(test.metric, func(t *testing.T) {
+			process := pendingProxyTransportFixture(now)
+			process.values[test.metric] = test.value
+			alerts := runProxyTransportFixture(t, now, proxyTransportFixtureJson(t, process))
+			requireAlertClass(t, alerts, "proxy-transport-metrics-invalid")
+		})
+	}
+}
+
+// Extra gateway labels cannot enter observation text or increase exporter
+// cardinality. Only existing infrastructure identity frames are retained.
+func TestProxyTransportAdmissionMarkdownDoesNotRetainCustomerLabels(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 5, 0, 0, time.UTC)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(proxyTransportFixtureJson(t, pendingProxyTransportFixture(now))), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range payload["data"].(map[string]any)["result"].([]any) {
+		labels := row.(map[string]any)["metric"].(map[string]any)
+		labels["device_id"], labels["network_id"], labels["address"] = "private-device-sentinel", "private-network-sentinel", "private-address-sentinel"
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := runProxyTransportFixture(t, now, string(encoded))
+	for _, alert := range alerts {
+		for _, forbidden := range []string{"private-device-sentinel", "private-network-sentinel", "private-address-sentinel", "device_id", "network_id"} {
+			if strings.Contains(alert.Markdown(), forbidden) {
+				t.Fatalf("private label reached Markdown: %s", forbidden)
+			}
+		}
+	}
+}
+
+func pendingProxyTransportFixture(now time.Time) proxyTransportFixtureProcess {
+	process := healthyProxyTransportFixture(now)
+	process.values["urnetwork_proxy_platform_transports_used"] = 32
+	process.values["urnetwork_proxy_platform_transports_pending_h1"] = 2
+	process.values["urnetwork_proxy_platform_transports_pending_h1_bytes"] = 512 * 1024
+	process.values["urnetwork_proxy_platform_transport_slot_full_pending_h1_devices"] = 1
+	return process
 }
