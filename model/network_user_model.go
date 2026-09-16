@@ -223,7 +223,7 @@ func AddAuth(
 		if err != nil {
 			return &AddAuthMethodResult{
 				Error: &AddAuthMethodError{
-					Message: err.Error(),
+					Message: PeelStatusPrefix(err.Error()),
 				},
 			}, nil
 		}
@@ -237,6 +237,13 @@ func AddAuth(
 		if err != nil {
 			return &AddAuthMethodResult{
 				Error: &AddAuthMethodError{
+					// NOT peeled, unlike the other three branches: ParseAuthJwt
+					// propagates errors from the third-party JWT parsers, so
+					// this is the one message here the model did not construct.
+					// Peeling it could truncate a provider string that merely
+					// happens to begin with digits (an echoed "400 Bad
+					// Request"), and there is no prefix to remove because
+					// nothing on this path adds one.
 					Message: fmt.Sprintf("Error parsing auth jwt: %s", err.Error()),
 				},
 			}, nil
@@ -262,7 +269,7 @@ func AddAuth(
 		if err != nil {
 			return &AddAuthMethodResult{
 				Error: &AddAuthMethodError{
-					Message: err.Error(),
+					Message: PeelStatusPrefix(err.Error()),
 				},
 			}, nil
 		}
@@ -280,14 +287,26 @@ func AddAuth(
 		if err != nil {
 			return &AddAuthMethodResult{
 				Error: &AddAuthMethodError{
-					Message: err.Error(),
+					Message: PeelStatusPrefix(err.Error()),
 				},
 			}, nil
 		}
 		return &AddAuthMethodResult{}, nil
 	}
 
-	return nil, nil
+	// A body that matches none of the three branches above.
+	//
+	// This used to `return nil, nil`. The router sees a nil error and marshals
+	// the typed-nil result, so the caller got HTTP 200 with the body `null` --
+	// indistinguishable from success to a status-checking client, and not the
+	// AddAuthResult shape the spec describes. Reachable from an ordinary
+	// request: {"user_auth":"a@b.com"} with no password, {"auth_jwt":"..."}
+	// with no auth_jwt_type, or {}.
+	return &AddAuthMethodResult{
+		Error: &AddAuthMethodError{
+			Message: "no auth method supplied",
+		},
+	}, nil
 }
 
 type AddUserAuthArgs struct {
@@ -737,20 +756,20 @@ func addWalletAuth(
 
 func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 	if walletAuth == nil {
-		return errors.New("wallet auth is required")
+		return errors.New("400 wallet auth is required")
 	}
 	if walletAuth.Signature == "" || walletAuth.Message == "" {
-		return errors.New("wallet signature and message are required")
+		return errors.New("400 wallet signature and message are required")
 	}
 	if walletAuth.Blockchain == "" {
 		walletAuth.Blockchain = SOL.String()
 	}
 	parsedBlockchain, err := ParseBlockchain(walletAuth.Blockchain)
 	if err != nil {
-		return err
+		return errors.New("400 " + err.Error())
 	}
 	if parsedBlockchain != SOL && parsedBlockchain != TAO {
-		return errors.New("wallet auth only supports solana and bittensor")
+		return errors.New("400 wallet auth only supports solana and bittensor")
 	}
 	walletAuth.Blockchain = parsedBlockchain.String()
 	// Validate the address before verifying, the way CreateWalletAuthChallenge
@@ -766,7 +785,7 @@ func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 		validAddress = IsValidBittensorAddress(walletAuth.PublicKey)
 	}
 	if !validAddress {
-		return errors.New("invalid wallet address")
+		return errors.New("400 invalid wallet address")
 	}
 	isValid, err := VerifySignature(
 		walletAuth.Blockchain,
@@ -786,12 +805,12 @@ func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 			err.Error(),
 		)
 		if errors.Is(err, ErrWalletSignatureEncoding) {
-			return errors.New("invalid signature encoding")
+			return errors.New("400 invalid signature encoding")
 		}
-		return errors.New("invalid signature")
+		return errors.New("401 invalid signature")
 	}
 	if !isValid {
-		return errors.New("invalid signature")
+		return errors.New("401 invalid signature")
 	}
 	return nil
 }
@@ -875,11 +894,11 @@ func addWalletAuthInTx(
 		}
 	})
 	if conflictUserId != nil {
-		err = errors.New("This wallet is already linked to another account.")
+		err = errors.New("409 This wallet is already linked to another account.")
 		return
 	}
 	if boundWalletAddress != nil && *boundWalletAddress != walletAuth.PublicKey {
-		err = errors.New("A different wallet is already linked to this account. Remove that wallet first; if it is your only sign-in method, add an email or phone before removing it.")
+		err = errors.New("409 A different wallet is already linked to this account. Remove that wallet first; if it is your only sign-in method, add an email, phone, or generate a seedphrase before removing it.")
 		return
 	}
 
@@ -909,7 +928,9 @@ func addWalletAuthInTx(
 			walletAuth.Blockchain,
 		)
 
-		err = dbErr
+		// the detail is in the log above; the client gets a message it can act
+		// on, not the database's text
+		err = errors.New("Could not link this wallet. Please try again.")
 		return
 	}
 
@@ -945,7 +966,7 @@ func addWalletAuthInTx(
 			walletAuth.Blockchain,
 		)
 
-		err = dbErr
+		err = errors.New("Could not link this wallet. Please try again.")
 		return
 	}
 	return err
@@ -1168,6 +1189,29 @@ func FindNetworkIdByWalletAddress(ctx context.Context, walletAddress string) (ne
 	return
 }
 
+// migratedWalletBlockchain canonicalises a legacy network_user.wallet_blockchain
+// for the network_user_auth_wallet row the migration writes.
+//
+// Both migrations passed SOL unconditionally while the value was sitting in the
+// row they had already read (NetworkUserToMigrate.Blockchain, scanned from
+// nu.wallet_blockchain). A legacy TAO account migrated that way gets a row
+// labelled 'SOL': filterWalletAuthsByBlockchain then drops it for a TAO caller,
+// so the account is unreachable by its own wallet and GET /network/user reports
+// auth_types:["solana"].
+//
+// The uniqueness checks and filterWalletAuthsByBlockchain compare this column
+// byte-exactly, so the label must be the canonical one ParseBlockchain produces,
+// not the raw legacy text. SOL stays the fallback for a NULL or unparseable
+// value -- what the column held before wallet_blockchain existed.
+func migratedWalletBlockchain(blockchain *string) string {
+	if blockchain != nil {
+		if parsed, err := ParseBlockchain(*blockchain); err == nil {
+			return parsed.String()
+		}
+	}
+	return SOL.String()
+}
+
 /**
  * Migrating network_user to the new model
  * This is a temporary structure to hold the data
@@ -1313,7 +1357,7 @@ func MigrateNetworkUserChildAuthsOriginal(
 						// the blockchain column, not the auth type: writing
 						// AuthTypeSolana ("solana") here produced rows that the
 						// byte-exact 'SOL' uniqueness checks could not see
-						SOL.String(),
+						migratedWalletBlockchain(networkUser.Blockchain),
 					)
 
 					if err != nil {
@@ -1478,7 +1522,7 @@ func MigrateNetworkUserChildAuths(
 					networkUser.WalletAddress,
 					// the blockchain column, not the auth type -- see the same
 					// fix in MigrateNetworkUserChildAuthsOriginal
-					SOL.String(),
+					migratedWalletBlockchain(networkUser.Blockchain),
 				)
 
 				if err != nil {
@@ -1531,6 +1575,23 @@ func HasAnyAuthMethod(ctx context.Context, userId server.Id) bool {
 	return 0 < count
 }
 
+// removeAuthMethodIsBound reports whether the row backing a requested auth
+// method exists, so RemoveAuth can refuse instead of running a DELETE that
+// matches nothing and reporting success.
+func removeAuthMethodIsBound(
+	ctx context.Context,
+	tx server.PgTx,
+	query string,
+	args ...any,
+) bool {
+	bound := false
+	result, err := tx.Query(ctx, query, args...)
+	server.WithPgResult(result, err, func() {
+		bound = result.Next()
+	})
+	return bound
+}
+
 func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 	if err := CheckAccountActionRateLimit(
 		ctx,
@@ -1580,8 +1641,62 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 			return
 		}
 
+		// The wallet this account has bound, named the way auth_types[] names
+		// it, or empty when it has none. Read before the switch because two
+		// things need it: the refusal below, and the scalar reconcile at the
+		// end of this function, which used to classify the chain with its own
+		// SQL CASE. That CASE recognised 'TAO' but not the 'bittensor' spelling
+		// ParseBlockchain also accepts, so a row carrying the non-canonical
+		// label was reconciled to 'solana'. Deriving the name once, in Go,
+		// through walletAuthType leaves one classification rule instead of two.
+		//
+		// blockchain is `varchar(32) NOT NULL`, so scanning into a string
+		// cannot raise and turn a refusal into a 500.
+		walletLabel := ""
+		var storedBlockchain string
+		walletResult, walletErr := tx.Query(
+			ctx,
+			`SELECT blockchain FROM network_user_auth_wallet WHERE user_id = $1`,
+			userId,
+		)
+		server.WithPgResult(walletResult, walletErr, func() {
+			if walletResult.Next() {
+				server.Raise(walletResult.Scan(&storedBlockchain))
+				walletLabel = walletAuthType(storedBlockchain)
+			}
+		})
+
+		// Every branch below refuses a method this account does not actually
+		// have. Previously the only guard was the last-method count: the DELETE
+		// then matched nothing and the call still reported success, so a client
+		// that unlinked Apple from a google+email account was told it worked.
+		//
+		// The wallet branch was the sharpest instance. Its DELETE has no
+		// blockchain predicate, so "solana" and "bittensor" behaved as
+		// interchangeable aliases and {"auth_type":"solana"} deleted a
+		// Bittensor wallet. Comparing against walletLabel makes the chain a
+		// predicate instead of a label, without a special case.
+		//
+		// The message carries the status the refusal deserves even though this
+		// function's only caller answers 200 with a structured body and peels
+		// the prefix off (controller.RemoveAuth). That is deliberate: every
+		// user-caused refusal in this package states its own status, so the
+		// value is right wherever the error ends up, and the endpoint's wire
+		// shape stays a decision made at the boundary rather than encoded here.
+		notBound := func() {
+			validationErr = fmt.Errorf("400 %s is not a sign-in method on this account", authType)
+		}
+
 		switch authType {
 		case "email", "phone":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_password WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			) {
+				notBound()
+				return
+			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_password
@@ -1589,6 +1704,14 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId, authType,
 			))
 		case "apple", "google":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_sso WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			) {
+				notBound()
+				return
+			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_sso
@@ -1596,6 +1719,10 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId, authType,
 			))
 		case "solana", "bittensor":
+			if walletLabel != authType {
+				notBound()
+				return
+			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_wallet
@@ -1611,7 +1738,16 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 WHERE user_id = $1`,
 				userId,
 			))
+			walletLabel = ""
 		case "seedphrase":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1`,
+				userId,
+			) {
+				notBound()
+				return
+			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_seedphrase
@@ -1619,13 +1755,28 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId,
 			))
 		default:
-			validationErr = fmt.Errorf("unknown auth type: %s", authType)
+			// network_user.auth_type is a second, wider vocabulary (it can hold
+			// 'password', 'bringyour', 'guest'); a client that echoes that
+			// scalar back lands here. Name the surface that carries the values
+			// this endpoint does accept.
+			validationErr = fmt.Errorf(
+				"unknown auth type: %s (use a value from auth_types in GET /network/user)",
+				authType,
+			)
 			return
 		}
 
 		// Update network_user.auth_type to match what's actually left.
 		// The app reads this field to show available sign-in methods,
 		// so it must reflect reality after removal.
+		//
+		// walletLabel is NULL when no wallet row survives this call, so the
+		// wallet arm of the COALESCE is skipped exactly as an empty subquery
+		// would have been.
+		var remainingWalletLabel *string
+		if walletLabel != "" {
+			remainingWalletLabel = &walletLabel
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`UPDATE network_user
@@ -1633,13 +1784,13 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 (SELECT auth_type FROM network_user_auth_password  WHERE user_id = $1 LIMIT 1),
 				 (SELECT 'apple'   FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'apple'  LIMIT 1),
 				 (SELECT 'google'  FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'google' LIMIT 1),
-				 (SELECT CASE WHEN upper(blockchain) = 'TAO' THEN 'bittensor' ELSE 'solana' END
-				    FROM network_user_auth_wallet WHERE user_id = $1 LIMIT 1),
+				 (SELECT $2::text  FROM network_user_auth_wallet    WHERE user_id = $1 LIMIT 1),
 				 (SELECT 'seedphrase' FROM network_user_auth_seedphrase WHERE user_id = $1 LIMIT 1),
 				 auth_type
 			 )
 			 WHERE user_id = $1`,
 			userId,
+			remainingWalletLabel,
 		))
 	})
 
@@ -1648,4 +1799,37 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 	}
 
 	return validationErr
+}
+
+// Testing_AddWalletAuth binds a wallet to a user without a signature, for tests
+// that need an account in a given wallet state rather than to exercise the
+// signature path.
+//
+// Blockchain is a parameter, unlike Testing_CreateNetworkByWallet which hard
+// codes AuthTypeSolana -- a TAO fixture built on that helper silently produces
+// a SOL row and any assertion about Bittensor reporting passes for the wrong
+// reason.
+func Testing_AddWalletAuth(
+	ctx context.Context,
+	userId server.Id,
+	blockchain string,
+	walletAddress string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user_auth_wallet
+				(user_id, wallet_address, blockchain)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (user_id)
+				DO UPDATE SET
+					wallet_address = $2,
+					blockchain = $3
+			`,
+			userId,
+			walletAddress,
+			blockchain,
+		))
+	})
 }
