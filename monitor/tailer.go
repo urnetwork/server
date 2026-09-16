@@ -496,9 +496,31 @@ var logClasses = []logClass{
 		action:    "Match the emitting parent and local child generation, child shutdown/SIGTERM, HTTP-front shutdown, listener, and rollout boundary. If the artifact predates the drain-before-child-stop correction in Warp commit 6544fe1, deploy a Grafana artifact containing it only after proving ancestry. If it is current or occurs outside drain, diagnose the named generation's Mimir readiness, restart, bind, and OOM evidence. Do not restart Redis, suppress the push error, or treat a healthy replacement as proof that the rejected old-generation samples were delivered.",
 		verify:    "Every active Grafana artifact contains Warp commit 6544fe1; during a controlled rolling replacement every old HTTP front stops accepting and finishes in-flight requests (or is closed at the bounded deadline) before its Mimir/Loki children stop; no grafana-mimir-push-refused line occurs through the full rollout plus 10 steady minutes; every exact child /ready and front /status remains healthy; and fresh pushed metrics remain queryable without a new §11.20 continuity gap.",
 	},
+	// A resolver fanout leg is not a logical lookup outcome. Keep this before
+	// generic TCP timeouts, including the endpoint-free timeout form.
+	{name: "doh-dial-timeout", re: regexp.MustCompile(`\[(?:family|egress)\]dial tag=doh[[:space:]][^\r\n]*\berr=(?:dial tcp(?:4|6)? [^[:space:]\r\n]+: )?i/o timeout(?:$|[[:space:]])`),
+		sample: func(string) string {
+			return "DoH resolver dial attempt: i/o timeout (endpoint and correlation metadata omitted)"
+		},
+		groupBy:       func(string) string { return "doh-attempt" },
+		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §5.2",
+		meaning:   "an outgoing DoH resolver dial attempt timed out; the logical DNS outcome is unknown",
+		mechanism: "The resolver races endpoint attempts and can return a usable answer from another leg. These per-target throttled diagnostic lines count neither unique attempts nor failed logical DNS queries; endpoint-free timeouts cannot identify a particular public resolver.",
+		context:   "This is not evidence of a Redis event-loop wedge, a host outage, or a failed user request. Later host TCP success does not prove that the earlier process path was healthy, and a success-only DoH result callback cannot supply a logical failure denominator. Fixed samples and a single doh-attempt frame omit endpoints, queried domains, and correlation identifiers.",
+		action:    "Correlate the emitting process and original path with bounded same-window TCP, resource, and resolver controls. Distinguish endpoint attempts from the final logical DNS result; if that result is unavailable, retain impact as unknown rather than asserting either an outage or successful fallback. Do not restart Redis, change resolver policy, lengthen timeouts, or suppress the alert from an individual fanout-leg failure.",
+		verify:    "Require this diagnostic class below its unchanged 10/min PAGE threshold for 10 minutes with fresh observation coverage and healthy original-path controls. Claim user-facing DNS recovery only with an independent final-query or end-to-end outcome; endpoint TCP success and quiet sampled logs alone do not establish it.",
+	},
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
-		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md 5.2",
-		meaning: "node accept path starving — process alive but event loop wedged (or syn drop)"},
+		sample: func(string) string {
+			return "outgoing TCP dial: i/o timeout (correlation metadata and other fields omitted)"
+		},
+		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §5.2",
+		meaning:   "an otherwise-unclassified outgoing TCP connection attempt exceeded its deadline",
+		mechanism: "A dial timeout identifies an unfinished connection attempt, not the target service or cause. Remote listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives until independently distinguished.",
+		context:   "Service-specific signatures take precedence. Do not infer a Redis event-loop wedge or a persistent target outage from this generic text alone; the stable service target names the emitter and the endpoint frame names only the attempted destination.",
+		action:    "Resolve the exact target and original source path, then compare bounded same-window process, listener, TCP, and resource evidence. Use §5.2 only for an identified Redis node with a corroborating local PING hang and accept-path evidence. Do not restart an inferred service before attribution and authorization.",
+		verify:    "The original source path reaches the intended target, its owning health signal remains healthy, and this class stays below threshold for 10 minutes through the relevant lifecycle. Later reachability alone does not establish the earlier cause.",
+	},
 	{name: "connection-refused", re: regexp.MustCompile(`connect: connection refused`),
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4",
 		meaning:   "an otherwise-unclassified TCP target had no accepting listener at the attempted address and instant",

@@ -22,6 +22,134 @@ func TestLogErrorsSignalSyntheticLogRate(t *testing.T) {
 	requireAlertClass(t, alerts, "pubsub-drops")
 }
 
+// Resolver-leg diagnostics retain the page guard without claiming a lookup
+// failed or copying the endpoint, domain, or correlation identity.
+func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
+	testCases := []struct {
+		name string
+		line string
+	}{
+		{name: "family IPv4", line: "[family]dial tag=doh net=tcp family=? policy=force4 demoted=none err=dial tcp 192.0.2.53:443: i/o timeout"},
+		{name: "family IPv6", line: "[family]dial tag=doh net=tcp6 family=? policy=force6 demoted=none err=dial tcp6 [2001:db8::53]:443: i/o timeout"},
+		{name: "endpoint-free family", line: "[family]dial tag=doh net=tcp family=? policy=force4 demoted=none err=i/o timeout"},
+		{name: "bound egress", line: "[egress]dial tag=doh tcp 192.0.2.53:443 if=4:2/6:0 bound=yes err=dial tcp 192.0.2.53:443: i/o timeout (2 suppressed)"},
+	}
+	for _, testCase := range testCases {
+		line := "[synthetic-proxy.example][proxy][synthetic-block][cid:synthetic-private-correlation]" +
+			"[I][2026-01-01T00:00:00Z][egress_dial.go:306]" + testCase.line + " domain=private-query.example"
+		source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+			if len(args) > 1 && args[0] == "ls" {
+				return "repo names synthetic-proxy", nil
+			}
+			return strings.Repeat(line+"\n", 10), nil
+		}}
+		alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatalf("%s: %v", testCase.name, err)
+		}
+		alert := requireAlertClass(t, alerts, "doh-dial-timeout")
+		if alert.Severity != SeverityPage || alert.Frame != "doh-attempt" {
+			t.Fatalf("%s: resolver attempt lost its page or fixed frame", testCase.name)
+		}
+		markdown := alert.Markdown()
+		for _, want := range []string{
+			"rate=10/min", "logical DNS outcome is unknown",
+			"count neither unique attempts nor failed logical DNS queries",
+			"success-only DoH result callback", "Do not restart Redis",
+			"independent final-query or end-to-end outcome", "10 minutes",
+		} {
+			if !strings.Contains(markdown, want) {
+				t.Errorf("%s: resolver attempt guidance omitted %q", testCase.name, want)
+			}
+		}
+		for _, private := range []string{
+			"synthetic-proxy.example", "synthetic-block", "synthetic-private-correlation",
+			"cid:", "private-query.example", "192.0.2.53", "2001:db8::53", "if=4:2",
+			"node accept path starving", "event loop wedged",
+		} {
+			if strings.Contains(markdown, private) {
+				t.Errorf("%s: alert retained private data or the old wedge claim", testCase.name)
+			}
+		}
+		for _, other := range alerts {
+			if other.Class == "dial-io-timeout" || other.Class == "novel" {
+				t.Errorf("%s: resolver attempt fell through to %s", testCase.name, other.Class)
+			}
+		}
+	}
+}
+
+// The retained threshold counts diagnostic lines across resolver legs. Empty
+// windows and process replacement must not carry the prior minute's rate.
+func TestDohDialTimeoutThresholdAndWindowReset(t *testing.T) {
+	tailer := newLogTailer("proxy", nil)
+	line := "[family]dial tag=doh net=tcp family=? policy=force4 demoted=none err=i/o timeout"
+	for range 9 {
+		tailer.classify(line)
+	}
+	if finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout"); !finding.healthy {
+		t.Fatal("nine diagnostic lines crossed the unchanged ten-line threshold")
+	}
+	for index := range 10 {
+		tailer.classify(fmt.Sprintf("[family]dial tag=doh net=tcp family=? policy=force4 demoted=none err=dial tcp 192.0.2.%d:443: i/o timeout", index+1))
+	}
+	finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout")
+	if finding.healthy || finding.tier != tierPage || finding.frame != "doh-attempt" || finding.target != "proxy" {
+		t.Fatal("mixed resolver endpoints split or weakened the diagnostic page")
+	}
+	if finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout"); !finding.healthy {
+		t.Fatal("an empty window retained the prior diagnostic page")
+	}
+	replacement := newLogTailer("proxy", nil)
+	if finding := findingByClass(t, replacement.drainWindow(), "doh-dial-timeout"); !finding.healthy {
+		t.Fatal("a replacement collector inherited diagnostic counts")
+	}
+}
+
+// Only the exact DoH producer shape gains attempt attribution; unrelated
+// targets retain the generic timeout page without a Redis-cause assertion.
+func TestDohDialTimeoutDoesNotCaptureOtherDialOwners(t *testing.T) {
+	for _, line := range []string{
+		"dial tcp 192.0.2.80:6380: i/o timeout",
+		"[family]dial tag=api net=tcp err=dial tcp 192.0.2.80:443: i/o timeout",
+		"[family]dial tag=doh-other net=tcp err=dial tcp 192.0.2.80:443: i/o timeout",
+		"[other]dial tag=doh net=tcp err=dial tcp 192.0.2.80:443: i/o timeout",
+	} {
+		tailer := newLogTailer("proxy", nil)
+		for range 10 {
+			tailer.classify("[synthetic-host.example][proxy][synthetic-block][cid:synthetic-private-correlation] " + line)
+		}
+		findings := tailer.drainWindow()
+		generic := findingByClass(t, findings, "dial-io-timeout")
+		if generic.healthy || generic.tier != tierPage || generic.frame == "" {
+			t.Fatal("generic endpoint timeout lost its page or endpoint frame")
+		}
+		if !strings.Contains(generic.mechanism, "remain alternatives") ||
+			!strings.Contains(generic.action, "corroborating local PING hang") ||
+			strings.Contains(generic.evidence, "synthetic-private-correlation") ||
+			strings.Contains(generic.evidence, "event loop wedged") {
+			t.Fatal("generic timeout retained unsupported attribution or private correlation data")
+		}
+		if doh := findingByClass(t, findings, "doh-dial-timeout"); !doh.healthy {
+			t.Fatal("an unrelated dial owner was classified as DoH")
+		}
+	}
+	for _, line := range []string{
+		"[family]dial tag=doh net=tcp family=4 policy=force4 demoted=none local=192.0.2.80:12345",
+		"[family]dial tag=doh net=tcp err=context canceled",
+		"[family]dial tag=doh net=tcp err=dial tcp 192.0.2.80:443: connect: connection refused",
+		"err=i/o timeout",
+	} {
+		tailer := newLogTailer("proxy", nil)
+		for range 10 {
+			tailer.classify(line)
+		}
+		if finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout"); !finding.healthy {
+			t.Fatal("a non-timeout or ownerless line gained DoH timeout attribution")
+		}
+	}
+}
+
 func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 	tests := []struct {
 		name  string
