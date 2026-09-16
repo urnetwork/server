@@ -6045,6 +6045,98 @@ after attempt backoff, deduplicate overlap, prove attempt-driven advancement,
 retain eligible no-location attempts, and sweep located/ineligible/inactive/
 orphan attempts.
 
+### 2.19a Egress admission and submission — observe the owning boundaries
+Probe: `egress-admission`
+
+This complements §2.19's current database due/deadline state. It observes actual
+API selected-return events and Taskworker reporter returns without provider,
+client, network, task, endpoint, or shard labels. It cannot reconstruct a
+provider's overwritten historical state, and current zero-expired state is not
+retrospective proof of recovery from an earlier absolute deadline miss.
+
+The existing due model returns identity-free diagnostics alongside the unchanged
+selected identifiers. Both old model API wrappers remain available. Diagnostics
+count only the limited, deduplicated selection: an overlapping urgent row belongs
+to its earliest deadline, equal deadlines retain the existing first-head tie
+break, and no-location rows have no evidence deadline and cannot be expired.
+The due handler emits `urnetwork_egress_due_selected_total{lane,expired}` using
+the four fixed lanes `no-location`, `stale-location`, `stale-health`, and
+`missing-health`, crossed with `false`/`true`. All eight series are preseeded.
+`urnetwork_egress_due_requests_total` separately counts completed model returns,
+including empty selections; `urnetwork_egress_due_observation_enabled=1` is an
+executable-owned capability, not traffic. Counters are emitted before response
+encoding: they prove selected-return events, not successful response delivery,
+probe execution, a claim/lease, or persistence. Expiry uses the model's selection
+clock and strict deadline-before-now comparison, not the later scrape time.
+
+Taskworker emits `urnetwork_egress_probe_submission_outcomes_total{kind,outcome}`
+only after the existing reporter call returns. Its fixed kinds are `health` and
+`attempt`; outcomes are `acknowledged`, `unsupported`, `canceled`, and
+`error_or_unknown`. All eight series are preseeded, with separate executable
+capability `urnetwork_egress_probe_submission_observation_enabled=1`.
+Classification uses the returned error, including wrapped owning unsupported
+sentinels and context cancellation/deadline errors. Concurrent context cancellation
+does not relabel a successful return or an unrelated failure. Nil health results
+retain the existing forwarded no-request path and produce no outcome. Existing
+pre-submit measurement counters remain unchanged and are not acknowledgments.
+An error can follow a successful write whose acknowledgment was lost; the new
+metrics do not prove non-persistence or authorize retries. Returned errors and
+the prober's existing non-fatal behavior are unchanged.
+
+The reusable probe runs once per minute using one fixed seven-family Mimir
+instant query through an inventory services gateway. It returns values plus
+their underlying source timestamps, with a 15-second request limit and 2 MiB
+remote/in-process response cap. The observation timestamp alone is insufficient.
+The parser requires exact environment/job/host/block/instance joins, both roles,
+all fixed zero series, capability=1, a coherent source scrape at most 90 seconds
+old (at most 30 seconds future), positive process start/RSS, and finite integer
+counters. Unknown finite-domain values, duplicate samples even when ignored
+labels differ, partial warning responses, or malformed bodies fail closed. No
+remote body, raw error, ignored label, or process identity enters Alert Markdown.
+The raw response remains bounded adapter input, not exported evidence.
+
+Two complete advancing observations of the same process/start are needed for
+deltas; they must be at most three minutes apart. First observation, missing
+roles/capability/fixed series, source staleness, mixed telemetry, overlapping
+same-block generations, reused instances with a new start, counter reset, and
+nonadvancing scrapes yield `egress-admission-unobservable` WARN. Selected deltas
+without a request delta are also unobservable: even cross-family scrape
+interleaving must not manufacture a coherent admission event. The observer keeps
+only the previous complete process snapshots in memory and warms up after its
+own restart. Discovery of entirely absent processes remains owned by provenance
+and scrape-continuity probes; this probe does not infer fleet completeness from
+the surviving Mimir series.
+
+Any confirmed expired selected-return delta yields `egress-admission-expired`
+WARN by fixed lane. Any unsupported/canceled/error-or-unknown submission delta
+yields `egress-submission-unacknowledged` WARN by fixed kind, with separate
+acknowledged and failure counts. These findings remain additive when another
+process is unobservable. They do not establish why admission was delayed, which
+provider was affected, or whether a later current database row recovered that
+historical event. Both classes retain direct §2.19 deadline/config controls; no
+scheduler, lifecycle, retry, concurrency, or queue behavior changes here.
+
+Action: after ordinary source/test/release approval, deploy the owning API and
+Taskworker builds and separately promote the monitor build. Config-only rollout
+cannot add these capabilities. This patch neither deploys nor promotes anything.
+Verify exact executable capabilities and stable process cohorts, obtain two
+complete advancing observations, then two clean traffic-bearing intervals with
+no new expired selections or unacknowledged returns. Confirm acknowledged traffic
+for the affected kind plus direct §2.19 deadline/submission health. Quiet zero
+traffic or absent metrics is not recovery. Do not edit provider evidence/task
+rows, add per-provider labels, or infer historical ownership from these aggregates.
+
+Implementation convention: SIGNALS.md §2.19a (`egress-admission`) maps to
+`signal_egress_admission.go` and `signal_egress_admission_test.go`. Deterministic
+synthetic coverage pins warmup/healthy/idle controls, missing and mixed telemetry,
+underlying source freshness, duplicate ignored labels, process overlap/reset,
+unpaired selection/request deltas, each post-call failure class, additive real
+alerts, bounded query/response cost, privacy, and Markdown. Producer regressions
+pin the strict expiry boundary, actual limited/deduplicated EDF counts, fixed
+preseeded label domains, post-call timing/error identity, and nil-health no-op.
+Formal Go execution remains subject to the repository's toolchain/license gate;
+formatting or package metadata checks do not substitute for executing these tests.
+
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
 

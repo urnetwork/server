@@ -24,6 +24,7 @@ package work
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,18 @@ const egressProbeFleetRefreshInterval = time.Minute
 // egressProbeHealthLatencyInterval is the wall-clock bucket owned by the
 // paired maximum and timestamp. The sum/count summary remains cumulative.
 const egressProbeHealthLatencyInterval = time.Minute
+
+// Only completed reporter calls are counted here. Existing attempt and health
+// result counters above the call remain measurement events, not acknowledgments.
+var egressProbeSubmissionOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_egress_probe_submission_outcomes_total",
+	Help: "Completed health and attempt reporter calls by acknowledged, unsupported, canceled, or error_or_unknown outcome; not durable history or provider identity",
+}, []string{"kind", "outcome"})
+
+var egressProbeSubmissionObservationEnabled = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_egress_probe_submission_observation_enabled",
+	Help: "Executable-owned capability for identity-free post-call submission outcomes",
+}, func() float64 { return 1 })
 
 var egressProbeAttemptsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
@@ -311,7 +324,14 @@ var egressProbeFleetSnapshotTimestamp = prometheus.NewGauge(prometheus.GaugeOpts
 })
 
 func init() {
+	for _, kind := range []string{"health", "attempt"} {
+		for _, outcome := range []string{"acknowledged", "unsupported", "canceled", "error_or_unknown"} {
+			egressProbeSubmissionOutcomesTotal.WithLabelValues(kind, outcome)
+		}
+	}
 	prometheus.MustRegister(
+		egressProbeSubmissionOutcomesTotal,
+		egressProbeSubmissionObservationEnabled,
 		egressProbeAttemptsTotal,
 		egressProbeLocationsTotal,
 		egressProbeLocationFlagsTotal,
@@ -480,7 +500,9 @@ func (self *egressProbeMetricsReporter) ReportAttempt(ctx context.Context, provi
 		egressProbeResultLabel(probeFailure),
 		self.country(ctx, providerClientId),
 	).Inc()
-	return self.inner.ReportAttempt(ctx, providerClientId, probeFailure)
+	err := self.inner.ReportAttempt(ctx, providerClientId, probeFailure)
+	egressProbeSubmissionOutcomesTotal.WithLabelValues("attempt", egressProbeSubmissionOutcome(err, ingest.ErrAttemptUnsupported)).Inc()
+	return err
 }
 
 func (self *egressProbeMetricsReporter) SubmitEgressHealth(ctx context.Context, providerClientId string, res *egresshealth.Result) error {
@@ -504,7 +526,28 @@ func (self *egressProbeMetricsReporter) SubmitEgressHealth(ctx context.Context, 
 			egressProbeHealthRatio.Observe(float64(res.OKCount) / float64(res.Total))
 		}
 	}
-	return self.inner.SubmitEgressHealth(ctx, providerClientId, res)
+	err := self.inner.SubmitEgressHealth(ctx, providerClientId, res)
+	// A nil result is the ingest client's intentional no-request path.
+	if res != nil {
+		egressProbeSubmissionOutcomesTotal.WithLabelValues("health", egressProbeSubmissionOutcome(err, egresshealth.ErrUnsupported)).Inc()
+	}
+	return err
+}
+
+// Classifies returned errors only; a concurrent context cancellation must not
+// relabel an acknowledged call or an unrelated failure. The original error is
+// returned unchanged, preserving the prober's existing non-fatal semantics.
+func egressProbeSubmissionOutcome(err error, unsupported error) string {
+	switch {
+	case err == nil:
+		return "acknowledged"
+	case errors.Is(err, unsupported):
+		return "unsupported"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "canceled"
+	default:
+		return "error_or_unknown"
+	}
 }
 
 func (self *egressProbeMetricsReporter) ReserveBandwidth(ctx context.Context, providerClientId string, byteCount int64) error {

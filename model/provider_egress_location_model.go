@@ -994,13 +994,29 @@ func GetProviderEgressLocationDueSharded(
 	shardIndex int,
 	shardCount int,
 ) []server.Id {
+	clientIds, _ := GetProviderEgressLocationDueShardedWithDiagnostics(ctx, minObservedAt, minAttemptAt, limit, shardIndex, shardCount)
+	return clientIds
+}
+
+// Returns the unchanged due selection and identity-free counts of the rows
+// actually selected. Expiry uses the selection clock, not a later scrape clock.
+func GetProviderEgressLocationDueShardedWithDiagnostics(
+	ctx context.Context,
+	minObservedAt time.Time,
+	minAttemptAt time.Time,
+	limit int,
+	shardIndex int,
+	shardCount int,
+) ([]server.Id, ProviderEgressDueDiagnostics) {
 	now := server.NowUtc()
 	minBlackholeCheckedAt := now.Add(-ProviderBlackholeCheckMaxAge)
 	clientIds := []server.Id{}
+	diagnostics := ProviderEgressDueDiagnostics{}
 	server.Db(ctx, func(conn server.PgConn) {
 		type dueCandidate struct {
 			clientId server.Id
 			deadline time.Time
+			lane     ProviderEgressDueLane
 		}
 
 		// The urgent heads may overlap completely. A limit-sized head from each
@@ -1078,6 +1094,7 @@ func GetProviderEgressLocationDueSharded(
 				addUrgent(dueCandidate{
 					clientId: clientId,
 					deadline: observedAt.Add(ProviderEgressLocationMaxAge),
+					lane:     ProviderEgressDueStaleLocation,
 				})
 			}
 		})
@@ -1106,6 +1123,7 @@ func GetProviderEgressLocationDueSharded(
 				addUrgent(dueCandidate{
 					clientId: clientId,
 					deadline: measuredAt.Add(ProviderEgressHealthMaxAge),
+					lane:     ProviderEgressDueStaleHealth,
 				})
 			}
 		})
@@ -1189,6 +1207,7 @@ func GetProviderEgressLocationDueSharded(
 				addUrgent(dueCandidate{
 					clientId: clientId,
 					deadline: observedAt.Add(ProviderEgressHealthMaxAge),
+					lane:     ProviderEgressDueMissingHealth,
 				})
 			}
 		})
@@ -1208,6 +1227,7 @@ func GetProviderEgressLocationDueSharded(
 				break
 			}
 			clientIds = append(clientIds, candidate.clientId)
+			diagnostics.record(candidate.lane, candidate.deadline, now)
 		}
 
 		if len(clientIds) >= limit {
@@ -1284,13 +1304,14 @@ func GetProviderEgressLocationDueSharded(
 					continue
 				}
 				clientIds = append(clientIds, clientId)
+				diagnostics.record(ProviderEgressDueNoLocation, time.Time{}, now)
 				if len(clientIds) == limit {
 					break
 				}
 			}
 		})
 	})
-	return clientIds
+	return clientIds, diagnostics
 }
 
 // RemoveExpiredProviderEgressLocations drops entries probed before

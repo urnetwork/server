@@ -985,11 +985,29 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 		// Every limit is the exact prefix of the same stable ordering. Limits 1
 		// through 4 are all smaller than the saturated unlocated backlog and
 		// therefore fail under the former fixed-pass precedence.
+		expectedLanes := map[server.Id]ProviderEgressDueLane{
+			crossedDeadlines: ProviderEgressDueStaleHealth, overlap: ProviderEgressDueStaleHealth,
+			healthFirst: ProviderEgressDueStaleHealth, missingHealth: ProviderEgressDueMissingHealth,
+			locationSecond: ProviderEgressDueStaleLocation, locationTie: ProviderEgressDueStaleLocation,
+			healthTie: ProviderEgressDueStaleHealth,
+		}
 		for limit := 0; limit <= len(expected)+2; limit += 1 {
 			want := expected[:min(limit, len(expected))]
-			got := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, limit)
+			got, diagnostics := GetProviderEgressLocationDueShardedWithDiagnostics(ctx, minObservedAt, minAttemptAt, limit, 0, 1)
 			if !slices.Equal(got, want) {
 				t.Errorf("limit %d: due = %v, want %v", limit, got, want)
+			}
+			wantDiagnostics := ProviderEgressDueDiagnostics{}
+			for _, clientId := range want {
+				lane := expectedLanes[clientId]
+				if clientId == crossedDeadlines {
+					wantDiagnostics.Selected[lane].Expired++
+				} else {
+					wantDiagnostics.Selected[lane].Current++
+				}
+			}
+			if diagnostics != wantDiagnostics {
+				t.Errorf("limit %d: selected diagnostics = %+v, want %+v", limit, diagnostics, wantDiagnostics)
 			}
 		}
 	})

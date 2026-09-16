@@ -72,6 +72,7 @@ func NewSignals() []Signal {
 		NewMissingOriginSignal(),
 		NewStaleDestinationSignal(),
 		NewEgressCoverageSignal(),
+		NewEgressAdmissionSignal(),
 		NewStaleContractsSignal(),
 		NewPaymentReconciliationSignal(),
 		NewPaymentFailuresSignal(),

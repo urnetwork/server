@@ -295,16 +295,16 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 	minObservedAt := now.Add(-providerEgressDueAge)
 	minAttemptAt := now.Add(-model.ProviderEgressProbeAttemptBackoff)
 
-	result := &ProviderEgressLocationDueResult{
-		ClientIds: model.GetProviderEgressLocationDueSharded(
-			r.Context(),
-			minObservedAt,
-			minAttemptAt,
-			limit,
-			shardIndex,
-			shardCount,
-		),
-	}
+	clientIds, diagnostics := model.GetProviderEgressLocationDueShardedWithDiagnostics(
+		r.Context(),
+		minObservedAt,
+		minAttemptAt,
+		limit,
+		shardIndex,
+		shardCount,
+	)
+	providerEgressDueMetrics.observe(diagnostics)
+	result := &ProviderEgressLocationDueResult{ClientIds: clientIds}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {

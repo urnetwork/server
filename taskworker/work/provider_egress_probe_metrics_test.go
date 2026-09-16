@@ -71,13 +71,15 @@ func TestEgressProbeHealthLatencyAvoidsBucketCardinalityAndKeepsFreshMaximum(t *
 // fakeEgressProbeIngest records what reached the operator so the tests can
 // prove the reporter forwards every submission unchanged.
 type fakeEgressProbeIngest struct {
-	submitted   []string
-	attempts    map[string]string
-	health      []string
-	bandwidth   []string
-	blackhole   []ingest.BlackholeCheck
-	attemptErr  error
-	healthCalls int
+	submitted    []string
+	attempts     map[string]string
+	health       []string
+	bandwidth    []string
+	blackhole    []ingest.BlackholeCheck
+	attemptErr   error
+	healthErr    error
+	beforeReturn func()
+	healthCalls  int
 }
 
 func newFakeEgressProbeIngest() *fakeEgressProbeIngest {
@@ -91,13 +93,19 @@ func (self *fakeEgressProbeIngest) Submit(_ context.Context, providerClientId st
 
 func (self *fakeEgressProbeIngest) ReportAttempt(_ context.Context, providerClientId string, probeFailure string) error {
 	self.attempts[providerClientId] = probeFailure
+	if self.beforeReturn != nil {
+		self.beforeReturn()
+	}
 	return self.attemptErr
 }
 
 func (self *fakeEgressProbeIngest) SubmitEgressHealth(_ context.Context, providerClientId string, _ *egresshealth.Result) error {
 	self.healthCalls += 1
 	self.health = append(self.health, providerClientId)
-	return nil
+	if self.beforeReturn != nil {
+		self.beforeReturn()
+	}
+	return self.healthErr
 }
 
 func (self *fakeEgressProbeIngest) ReserveBandwidth(context.Context, string, int64) error {
