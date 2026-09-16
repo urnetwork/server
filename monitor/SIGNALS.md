@@ -20716,14 +20716,24 @@ The software signal now queries only that narrow recent local record after a
 tail route event and attaches the affirmative discriminator without copying
 general system-log contents. When present, its alert says not to mutate the
 named edge and instead directs the operator to correlate the local first-hop
-router's uptime, WAN/failover state, RA daemon, and local-link health, then
-capture timestamped ICMPv6 type 134 traffic on the monitor interface during
-recurrence. Repair the RA source if the capture shows an explicit withdrawal;
-repair RA cadence or delivery if refreshes are absent or late. Verify at least
+router's uptime, WAN/failover state, RA daemon, local-link health, and the
+monitor's stored-router state. Timestamped ICMPv6 type 134 capture on the
+monitor interface during recurrence requires explicit operator authorization.
+Correlate complete packet coverage with local state before choosing among
+explicit withdrawal, missed/late refresh delivery, and local RA-state
+invalidation. An absent packet in an incomplete capture proves none of these.
+Select a router, delivery-path, or local-client repair only after that
+discriminator; configd text and detach counts alone cannot choose the owner.
+The alert must preserve this three-way ambiguity even when only one standing
+tail reports the event; it must not invent independent multi-tail evidence.
+Verify at least
 30 minutes with the stored router lifetime refreshing before expiry, an
 unrelated IPv6 control, and every configured edge. This is an
-operational/network-appliance repair; deploying API, Connect, Proxy, Warpctl,
-or another edge service cannot fix it.
+operational first-hop or local-client repair; deploying API, Connect, Proxy,
+Warpctl, or another edge service cannot fix it. A short restoration inside the
+two-second diagnostic-delivery grace explains correlation, not durable
+recovery. Synthetic controls retain acceptance at exactly two seconds and
+rejection one millisecond beyond it.
 
 The 2026-09-04 periodic-probe incident is the deterministic common-mode
 reproduction. The monitor recorded `RTADV en0: router lifetime became zero` at

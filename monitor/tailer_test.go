@@ -263,6 +263,7 @@ func TestTailTransportRouteLossRetainsRtadvDetachEvidence(t *testing.T) {
 	for _, want := range []string{
 		"separately recorded 2 autoconfiguration detach/deprecate transition(s)",
 		"does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements",
+		"or local RA-state invalidation",
 		"IPv6 network state returned at 2026-01-02 03:04:12.130",
 	} {
 		if !strings.Contains(loss.mechanism, want) {
@@ -273,6 +274,22 @@ func TestTailTransportRouteLossRetainsRtadvDetachEvidence(t *testing.T) {
 		t.Fatalf("RTADV action=%q verify=%q omitted the edge exclusion or 30-minute gate", loss.action, loss.verify)
 	}
 	alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", loss)
+	for _, want := range []string{
+		"With explicit operator authorization",
+		"Correlate complete packet coverage with local state",
+		"local RA-state invalidation",
+		"An absent packet in incomplete capture is not proof of missed delivery",
+		"Select a router, delivery-path, or local-client repair only after that discriminator",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("route-loss Markdown omitted causal or authorization limit %q: %s", want, alert.Markdown())
+		}
+	}
+	for _, unsupported := range []string{"Independent warpctl tails lost their common local route", "repair the identified RA source or delivery path"} {
+		if strings.Contains(alert.Markdown(), unsupported) {
+			t.Fatalf("single-tail route-loss Markdown retained unsupported scope or repair claim %q: %s", unsupported, alert.Markdown())
+		}
+	}
 	for _, raw := range []string{"configd[", "network changed:", "192.0.2.10", "2001:db8:1::10", "other0", "RTADV observer0:"} {
 		if strings.Contains(alert.Markdown(), raw) {
 			t.Fatalf("route-loss Markdown retained synthetic local log fragment %q", raw)
@@ -466,6 +483,24 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	)
 	if restoredOutsideDeliveryGrace.matches(event) {
 		t.Fatal("route loss restored outside the bounded delivery grace was treated as causal")
+	}
+	first, _, ok := tailTransportRouteEventBounds(map[string]*tailTransportRouteAggregate{"synthetic": event})
+	if !ok {
+		t.Fatal("synthetic route event has no valid bounds")
+	}
+	for _, test := range []struct {
+		delay time.Duration
+		want  bool
+	}{
+		{delay: monitorIPv6RestorationDiagnosticGracePeriod - time.Millisecond, want: true},
+		{delay: monitorIPv6RestorationDiagnosticGracePeriod, want: true},
+		{delay: monitorIPv6RestorationDiagnosticGracePeriod + time.Millisecond, want: false},
+	} {
+		boundary := activeInterval
+		boundary.ipv6RestoredAt = first.Add(-test.delay)
+		if got := boundary.matches(event); got != test.want {
+			t.Fatalf("restoration delay=%s matches=%t; want %t", test.delay, got, test.want)
+		}
 	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
