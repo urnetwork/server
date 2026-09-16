@@ -306,6 +306,17 @@ probe with one standing `warpctl logs ... -f` stream per active service. Confirm
 the watcher is alive and owns every expected standing stream. A live parent
 with missing children is not healthy observation coverage.
 
+Classify standing tails by the exact child command containing `logs` and `-f`,
+not by the `warpctl logs` prefix alone. The independent bounded overlap
+reconciliation also creates short-lived `warpctl logs --since ... --limit ...`
+children without `-f`; those and transient SSH helpers are dynamic context, not
+additional standing tails. Process enumeration can race their normal exit, so
+an ended non-tail child does not invalidate otherwise matching parent, binary,
+stdout/stderr descriptors, zero standing-tail zombies, and one live `-f` child
+per expected service. A missing standing service, or a persistent duplicate
+`-f` stream for one service, remains an observation defect; investigate it
+rather than weakening the expected-tail invariant.
+
 When recovering or auditing an existing watcher, resolve its actual stdout and
 stderr file descriptors before checking file age. The immutable binary's
 directory may belong to a predecessor run; stale files there do not prove the
