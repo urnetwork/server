@@ -13805,15 +13805,29 @@ Inactive/unobservable processes and zero owned connections do not clear a
 prior connection incident; they emit visibility findings instead. An exact
 alias file with unobservable running route inputs cannot clear placement drift.
 
-The smallest correction is convergence of the already reviewed owning Xops
-database and Redis playbooks, followed by reconnecting only the affected
-publisher generation after authorization. This signal does not authorize that
-production mutation, a Mimir restart, or a limit increase. Close only when
+First compare active `services.yml` Grafana membership with the owning Xops
+`grafana_lan_hosts` source and explicit publisher preferences. Correct a source
+mismatch before running the database or Redis publisher playbook: rerunning a
+stale source reproduces its obsolete alias members. If source already matches,
+converge only the affected publishers and reconnect their persistent shipper
+generations after authorization. Correct first preferences do not clear extra
+alias members, and membership drift does not prove current ingestion loss.
+This signal does not authorize a production mutation, Mimir restart, or limit
+increase. Close only when
 every publisher reports exact active membership, its explicit desired preferred
 ordinal, observable running route inputs, and process-owned live destinations
 consistent with those preferences. Then require two balanced §11.20b samples and independent zero
 increments with fresh required metrics throughout both §11.20a two-hour quiet
 windows.
+
+The 2026-09-16 retained watcher reported six alias entries, two recognized active
+fronts, four extras, and correct distinct first preferences on both publishers.
+Local source independently contained the same two-active-versus-six-configured
+mismatch despite the preceding successful publisher playbooks. This proves a
+source convergence prerequisite, not the exact identity of the live extras or
+their traffic effect. Running route inputs, process-owned connections, and
+exact live artifact membership remain separate verification gates; the bounded
+direct follow-up obtained no valid remote observation.
 
 ### 11.20d Avoidable metric cardinality
 

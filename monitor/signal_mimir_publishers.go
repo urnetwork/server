@@ -620,13 +620,13 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		findings = append(findings, finding{
 			probeId: "observability/mimir-publishers", tier: tierWarn,
 			class: "mimir-publisher-placement-drift", target: "publisher-fleet", sustain: 1,
-			symptom:   "High-volume Mimir publishers do not follow their explicit preferred fronts",
+			symptom:   "High-volume Mimir publishers have not converged to their active-front routing policy",
 			mechanism: "The live alias membership, first position, or running route inputs differ from the owning placement policy. Unintentionally shared first entries can concentrate independent publishers on one distributor token bucket; low traffic can hide that prerequisite from rate-based balance checks.",
 			baseline:  fmt.Sprintf("%d observable publisher(s) follow their Xops-owned preference and use %d distinct front ordinal(s).", len(ordered), expectedDistinct),
 			observed:  fmt.Sprintf("publishers=%d observable_preference_groups=%d expected_distinct=%d", len(ordered), len(preferred), expectedDistinct),
 			evidence:  "Only aggregate publisher counts and active-front ordinals leave the hosts; hostnames, addresses, paths, and raw policy files are omitted.",
 			context:   "This is desired-versus-live routing drift, not proof of current ingestion loss. It is a recurrence prerequisite that remains actionable even when §11.20b is temporarily green under low load.",
-			action:    "Converge the owning database and Redis publisher playbooks so each publisher has the exact active front set and its explicit desired first entry (distinct only where the inventory requires it), then reconnect the persistent shipper generation after authorization. Do not raise Mimir limits or restart Mimir.",
+			action:    "First compare active services.yml Grafana membership with the owning Xops grafana_lan_hosts source and explicit publisher preferences. Correct any source mismatch before running a publisher playbook: rerunning stale source cannot converge the live alias. If source already matches, converge only the affected database and Redis publishers after authorization, preserving each explicit desired first entry (distinct only where inventory requires it), then reconnect their persistent shipper generations. Do not raise Mimir limits or restart Mimir.",
 			verify:    "Every publisher reports the exact active set, its explicit Xops-owned preference, and observable matching running route inputs; an observable active Fluent Bit process owns live connections following that preference. Then require two balanced §11.20b samples and both §11.20a admission counters flat for two hours.",
 			playbook:  "SIGNALS.md §11.20c, §11.20b, and §11.20a",
 		})
@@ -669,7 +669,7 @@ func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPubli
 			observed:  observed,
 			evidence:  "The on-host reducer returns counts, booleans, and active-front ordinals only; it never returns hostnames, addresses, paths, unit arguments, or raw files.",
 			context:   "This drift can exist without a current overload, so a green rate-balance sample cannot clear it.",
-			action:    "Run the owning publisher playbook after reviewing its active-front set and explicit desired preference, then reconnect only the affected shipper after authorization. Do not learn desired state from the live file.",
+			action:    "First compare active services.yml Grafana membership with the owning Xops grafana_lan_hosts source and explicit publisher preferences. Correct any source mismatch before running a publisher playbook: rerunning stale source cannot converge the live alias. If source already matches, run only the affected publisher playbook and reconnect that shipper after authorization. Do not learn desired state from the live file.",
 			verify:    "The same publisher reports exact membership and its desired preferred ordinal; an observable active Fluent Bit process owns live connections to that preferred ordinal.",
 			playbook:  "SIGNALS.md §11.20c",
 		})

@@ -152,6 +152,61 @@ func TestMimirPublishersDetectMembershipAndRouteDrift(t *testing.T) {
 	}
 }
 
+// Correct first preferences do not make obsolete failover members healthy, and
+// a playbook whose source still contains them cannot converge by being rerun.
+func TestMimirPublishersStaleSourceGuidancePreservesMatchedPreferences(t *testing.T) {
+	source := &syntheticSource{hostFn: func(host HostSettings, _ string) (string, error) {
+		overrides := map[string]string{
+			"alias_entries": "6", "unknown_fronts": "4", "route_state": "unobservable",
+			"connections_observable": "false", "connections_total": "0",
+			"connections_preferred": "0", "connections_distinct_fronts": "0",
+		}
+		if host.Name == "cache.invalid" {
+			overrides["preferred_ordinal"] = "2"
+		}
+		return mimirPublisherFixture(overrides), nil
+	}}
+	alerts, err := NewMimirPublishersSignal().Run(context.Background(), mimirPublisherSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	driftCount, unknownCount := 0, 0
+	for _, alert := range alerts {
+		requireAlertOmits(t, alert, "database.invalid", "cache.invalid", "front-a.invalid", "front-b.invalid", "192.0.2.10", "192.0.2.11")
+		switch alert.Class {
+		case "mimir-publisher-placement-drift":
+			driftCount++
+			if alert.Severity != SeverityWarn {
+				t.Fatal("source guidance changed the placement warning threshold")
+			}
+			for _, want := range []string{
+				"active services.yml Grafana membership", "Xops grafana_lan_hosts source",
+				"Correct any source mismatch before running", "rerunning stale source cannot converge",
+				"If source already matches", "after authorization",
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("source-convergence guidance omitted %q", want)
+				}
+			}
+			if alert.Target == "publisher-fleet" {
+				if strings.Contains(alert.Symptom, "do not follow their explicit preferred fronts") ||
+					!strings.Contains(alert.Observed, "observable_preference_groups=2 expected_distinct=2") {
+					t.Fatal("obsolete membership was misattributed to the matched first preferences")
+				}
+			} else if !strings.Contains(alert.Observed, "unknown_fronts=4") {
+				t.Fatal("source guidance hid the existing alias-membership evidence")
+			}
+		case "cannot-observe":
+			unknownCount++
+		default:
+			t.Fatalf("unexpected class %s", alert.Class)
+		}
+	}
+	if driftCount != 3 || unknownCount != 2 {
+		t.Fatal("stale alias members lost per-publisher/fleet drift or independent runtime visibility")
+	}
+}
+
 func TestMimirPublishersDetectLiveConnectionDrift(t *testing.T) {
 	source := &syntheticSource{hostFn: func(host HostSettings, _ string) (string, error) {
 		if host.Name == "database.invalid" {
