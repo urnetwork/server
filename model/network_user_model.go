@@ -180,7 +180,11 @@ func AddAuth(
 		AccountActionAddAuthDailyLimit,
 		AccountActionDailyWindow,
 	); err != nil {
-		return nil, accountActionRateLimitStatusError(err)
+		return &AddAuthMethodResult{
+			Error: &AddAuthMethodError{
+				Message: err.Error(),
+			},
+		}, nil
 	}
 
 	defer func() {
@@ -1596,7 +1600,7 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 		AccountActionRemoveAuthDailyLimit,
 		AccountActionDailyWindow,
 	); err != nil {
-		return accountActionRateLimitStatusError(err)
+		return err
 	}
 
 	var validationErr error
@@ -1795,4 +1799,37 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 	}
 
 	return validationErr
+}
+
+// Testing_AddWalletAuth binds a wallet to a user without a signature, for tests
+// that need an account in a given wallet state rather than to exercise the
+// signature path.
+//
+// Blockchain is a parameter, unlike Testing_CreateNetworkByWallet which hard
+// codes AuthTypeSolana -- a TAO fixture built on that helper silently produces
+// a SOL row and any assertion about Bittensor reporting passes for the wrong
+// reason.
+func Testing_AddWalletAuth(
+	ctx context.Context,
+	userId server.Id,
+	blockchain string,
+	walletAddress string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user_auth_wallet
+				(user_id, wallet_address, blockchain)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (user_id)
+				DO UPDATE SET
+					wallet_address = $2,
+					blockchain = $3
+			`,
+			userId,
+			walletAddress,
+			blockchain,
+		))
+	})
 }

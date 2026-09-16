@@ -2,7 +2,6 @@ package controller
 
 import (
 	// "context"
-	"errors"
 	"fmt"
 	// "time"
 	"sync"
@@ -386,16 +385,6 @@ type RemoveAuthError struct {
 func RemoveAuth(args RemoveAuthArgs, session *session.ClientSession) (*RemoveAuthResult, error) {
 	err := model.RemoveAuth(session.Ctx, session.ByJwt.UserId, args.AuthType)
 	if err != nil {
-		// A rate limit is the one refusal here that travels as a status rather
-		// than a 200 body: it is the only one the client should back off on,
-		// and Retry-After can only ride a status error. Checked BEFORE the peel
-		// below -- peeling first would strip the "429 " and lose the status.
-		// Same one-method interface the router reads it through
-		// (router/handler_utils.go), so model keeps not importing the router.
-		var retryAfter interface{ RetryAfterSeconds() int }
-		if errors.As(err, &retryAfter) {
-			return nil, err
-		}
 		// Every other refusal keeps the spec'd 200 + RemoveAuthResult.error
 		// shape (bringyour.yml RemoveAuthResult), so the structured field stays
 		// reachable. Peel the status prefix the model uses for the paths that
