@@ -1,6 +1,6 @@
 BITTENSOR LOGIN
 
-The contract for signing in, creating a network, and adding or removing a sign-in method with a Bittensor (TAO) wallet. The server side is complete; the client must sign the exact message the server issues. Verified against the code on 2026-09-09: `model/wallet_auth_challenge_model.go`, `model/auth_bittensor.go`, `model/auth_model.go` (`handleLoginWallet`), `model/network_model.go` (`NetworkCreate`, wallet path), `model/network_user_model.go` (`AddAuth`, `RemoveAuth`).
+The contract for signing in, creating a network, and adding or removing a sign-in method with a Bittensor (TAO) wallet. The server side is complete; the client must sign the exact message the server issues. Re-verified against the code on 2026-09-15: `model/wallet_auth_challenge_model.go`, `model/auth_bittensor.go`, `model/auth_model.go` (`handleLoginWallet`), `model/network_model.go` (`NetworkCreate`, wallet path), `model/network_user_model.go` (`AddAuth`, `RemoveAuth`).
 
 WHY THE CURRENT CLIENT IS DENIED
 
@@ -21,9 +21,11 @@ THE FLOW (three calls)
      "message_template": "Sign in to URnetwork\nChallenge: <challenge>\nTimestamp: 1757340000"
    }
 
-   `wallet_address` is optional but recommended: when given, the challenge is bound to that address and any other address is rejected with `400 challenge wallet address mismatch`. The challenge lives 5 minutes and is single use. Requests are rate limited per client address (`403` after too many attempts).
+   `wallet_address` is optional but recommended: when given, the challenge is bound to that address and any other address is rejected with `400 challenge wallet address mismatch`. The challenge lives 5 minutes (`expires_in`, honoured end to end) and is single use. Failed requests are rate limited per client address (`429` after too many).
 
-2. Sign `message_template` with the wallet, byte for byte, as UTF-8. Do not add, reorder or trim anything; the three lines are separated by `\n` (LF) only.
+2. Sign `message_template` with the wallet, byte for byte, as UTF-8. Do not add, reorder or trim anything; the three lines are separated by `\n` (LF) only. It is the finished text, not a template with holes — the challenge and the timestamp are already interpolated into it, and `challenge`/`timestamp` are returned alongside only so a client can display or check them. Never rebuild the message from those two fields.
+
+   There is no QR payload in this response, by design. A WalletConnect pairing QR encodes a relay topic and a symmetric key and structurally cannot carry an application payload; the challenge and timestamp reach the wallet after pairing, as the `polkadot_signMessage` request built from `message_template`. So a pairing QR legitimately contains neither value.
 
    Bittensor keys are substrate sr25519 keys. The standard signing path (polkadot-js `signRaw`, WalletConnect `polkadot_signMessage`, most mobile wallets) uses the `substrate` signing context and wraps the payload in `<Bytes>…</Bytes>` before signing. The server accepts both the wrapped and the raw form of the signature, so use whatever the wallet does — but always submit the unwrapped `message_template` text as `wallet_message`.
 
@@ -49,15 +51,16 @@ THE FLOW (three calls)
 
 ADDRESS FORMAT
 
-An ss58 address of the 32-byte public key. The checksum is verified; the network prefix (42 for Bittensor and generic substrate, 1–2 bytes) is validated structurally but not pinned. One wallet address can be bound to one user; binding it elsewhere fails with `This wallet is already linked to another account.`
+An ss58 address of the 32-byte public key. The checksum is verified and the network prefix is pinned to 42 (Bittensor and generic substrate). Re-encoding the same public key under another prefix is rejected with `400 invalid wallet address` — one key therefore has exactly one accepted address string, which is what the account uniqueness checks rely on. One wallet address can be bound to one user; binding it elsewhere fails with `This wallet is already linked to another account.`, and binding a *second, different* wallet to a user that already has one fails with `A different wallet is already linked to this account.` — the previous behaviour silently replaced it. Rotating a wallet is therefore remove-then-add via `/auth/remove-auth`; note a wallet-only account cannot remove its wallet (`cannot remove your last auth method`) and must add an email or phone first.
 
 ERRORS (message text, prefixed with the HTTP-style code)
 
 - `400 invalid message format` — the signed text is not the issued template (random string, CRLF, `<Bytes>` wrapper submitted as the message, extra lines).
-- `400 invalid wallet address` — not a valid ss58 address.
-- `400 challenge timestamp too old` / `too far in the future` — the message timestamp is outside ±1 minute of now.
+- `400 invalid wallet address` — not a valid ss58 address (bad base58, bad checksum, or a network prefix other than 42).
+- `400 challenge timestamp too old` / `too far in the future` — the message timestamp is outside the challenge lifetime (5 minutes back, plus a minute of slack) or more than a minute ahead of now. In practice the binding deadline is `403 challenge expired` at 5 minutes.
 - `400 challenge timestamp mismatch` / `challenge blockchain mismatch` / `challenge wallet address mismatch` — the message or address does not match the issued challenge.
-- `401 invalid signature` — the signature does not verify over the message (wrong key, wrong text, wrong context).
+- `400 invalid signature encoding` — the signature could not be decoded at all: not hex, not 64 bytes, or 64 bytes that are not a well formed sr25519 signature.
+- `401 invalid signature` — the signature decoded but does not verify over the message (wrong key, wrong text, wrong context).
 - `401 challenge not found` — unknown challenge value.
 - `403 challenge already used` / `403 challenge expired` — request a new challenge.
 

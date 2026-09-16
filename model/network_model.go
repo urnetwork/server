@@ -594,9 +594,12 @@ func networkCreateWalletAuth(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var walletConflictErr error
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		var userId *server.Id
+		// cleared per attempt so a transient retry cannot inherit it
+		walletConflictErr = nil
 
 		result, err := tx.Query(
 			ctx,
@@ -613,6 +616,40 @@ func networkCreateWalletAuth(
 
 		if userId != nil {
 			glog.Infof("Network user already exists with this wallet address")
+			return
+		}
+
+		// Detect a wallet already bound in network_user_auth_wallet here,
+		// before any INSERT. Left to addWalletAuthInTx below it raises a
+		// plain error, which server.Tx cannot classify as transient, so the
+		// panic escaped the transaction and the router's recover answered
+		// the generic "Error. Please email support@ur.io for help." 500 --
+		// instead of the structured NetworkCreateResult.Error every other
+		// failure in this function returns. Moving the check up rather than
+		// capturing that error is what keeps it safe: the network_user
+		// INSERT below has already run by then, and the raise is what aborts
+		// the transaction and prevents an orphan user row.
+		//
+		// Today's writers keep the two tables in step (addWalletAuthInTx
+		// mirrors onto network_user.wallet_address and RemoveAuth clears
+		// both), so the pre-check above catches the ordinary cases and this
+		// one covers the divergence -- the legacy shape addWalletAuthInTx's
+		// own comment describes.
+		var conflictUserId *server.Id
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user_auth_wallet WHERE wallet_address = $1
+			`,
+			networkCreate.WalletAuth.PublicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&conflictUserId))
+			}
+		})
+		if conflictUserId != nil {
+			walletConflictErr = errors.New("This wallet is already linked to another account.")
 			return
 		}
 
@@ -678,6 +715,10 @@ func networkCreateWalletAuth(
 
 		created = true
 	})
+
+	if walletConflictErr != nil {
+		return networkCreateResult{}, walletConflictErr
+	}
 
 	return networkCreateResult{
 		Created:     created,

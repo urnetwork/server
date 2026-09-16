@@ -6,6 +6,7 @@ require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
 	github.com/TwiN/go-away v1.8.0
 	github.com/aws/aws-sdk-go v1.55.8
+	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/centrifuge/go-substrate-rpc-client/v4 v4.2.2-0.20240919131012-e3b938563803
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/coreos/go-semver v0.3.1

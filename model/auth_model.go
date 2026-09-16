@@ -49,9 +49,12 @@ type WalletAuthArgs struct {
 	Signature  string `json:"wallet_signature,omitempty"`
 	Message    string `json:"wallet_message,omitempty"`
 	Blockchain string `json:"blockchain,omitempty"`
-	// Nonce is a server-issued single-use challenge (see AuthWalletNonceCreate) that
-	// the client must embed in Message and echo here for wallet login, to prevent
-	// signature replay. Optional during client rollout; enforced when present.
+	// Nonce is the legacy wallet-login nonce (see AuthWalletNonceCreate).
+	// DEPRECATED and inert: nothing on the server reads it. Replay is
+	// prevented instead by the server-issued single-use challenge that
+	// Message must carry verbatim (UseWalletAuthChallenge). The field is
+	// kept only so a client that still sends it keeps deserializing; new
+	// clients must not send it.
 	Nonce string `json:"wallet_nonce,omitempty"`
 }
 
@@ -517,6 +520,17 @@ func handleLoginWallet(
 		return
 	}
 
+	// Keep only the bindings for the chain the caller actually proved a key
+	// on. getWalletAuthsByAddress matches the address alone, so without this
+	// a second row for the same address (reachable today, because the column
+	// has held non-canonical values such as the legacy lowercase 'solana'
+	// written by MigrateNetworkUserChildAuths) makes the account selection
+	// below depend on Postgres row order. Comparing parsed blockchains
+	// rather than the raw strings is what lets a legacy 'solana' row keep
+	// resolving for a caller presenting 'SOL' -- a byte-exact or even
+	// case-insensitive compare would silently stop resolving those accounts.
+	walletAuths = filterWalletAuthsByBlockchain(walletAuths, walletAuth.Blockchain)
+
 	if len(walletAuths) <= 0 {
 
 		/**
@@ -595,6 +609,16 @@ func handleLoginWallet(
 	}
 }
 
+// ErrWalletSignatureEncoding marks a signature the server could not decode
+// at all -- bad hex or base64, the wrong length, or bytes that are not a well
+// formed curve signature -- as distinct from one that decoded cleanly and
+// simply did not verify. Wallet-auth callers map it to
+// `400 invalid signature encoding` and every other verifier error to
+// `401 invalid signature`, so malformed client input can never escape as a
+// 500 carrying raw internal error text (router/handler_utils.go turns any
+// unprefixed error into exactly that).
+var ErrWalletSignatureEncoding = errors.New("invalid signature encoding")
+
 func VerifySignature(blockchain string, publicKey string, message string, signature string) (bool, error) {
 
 	if blockchain == "" || strings.EqualFold(blockchain, "solana") || strings.EqualFold(blockchain, "sol") {
@@ -658,7 +682,13 @@ func VerifySolanaSignature(publicKeyStr string, message string, signatureStr str
 	// Parse the signature from string
 	signatureBytes, err := base64.StdEncoding.DecodeString(signatureStr)
 	if err != nil {
-		return false, fmt.Errorf("invalid signature encoding: %v", err)
+		return false, fmt.Errorf("%w: %v", ErrWalletSignatureEncoding, err)
+	}
+	// solana.Signature is a fixed [64]byte, so a short signature would be
+	// silently zero padded and a long one truncated. Reject instead, so the
+	// length contract matches the Bittensor verifier's.
+	if len(signatureBytes) != 64 {
+		return false, fmt.Errorf("%w: signature must be 64 bytes", ErrWalletSignatureEncoding)
 	}
 
 	// Convert signature bytes to the expected format
