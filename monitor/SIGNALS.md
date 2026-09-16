@@ -8035,7 +8035,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `panic: Missing host port for service port <port>` (LB startup) | The image's nginx config contains a logical listener absent from runtime `WARP_PORTS`; usually services.yml/image generation is newer than the systemd unit's baked `--portblocks`/`--forwardports`. The desired LB version may look deployed while the new container is Exited(2) and the old LB keeps serving. | Compare `systemctl cat`, container `WARP_PORTS`, and baked nginx listeners; regenerate and deploy units (§11.8), then require the new LB to stay `Up` before evaluating its behavior. |
 | `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125` in its `warp-main-*` unit) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. A replaced executable or Docker version drift is only transition evidence: compatible releases can keep creating containers normally. | The monitor reads bounded daemon-identifier and Warp-supervisor suffixes; its startup-version context is optional after the one-hour buffer ages out. PAGE on an observed containerd split, native TTRPC rejection, or concrete `Start container failed`. Use Xops' privileged maintenance probe for definitive client/server comparison during package transitions and recovery. Recover only with explicit one-host-at-a-time authorization and require a replacement container at `Up`; never reboot merely because a package changed. See §8.5a. |
 | `invalid mount config for type "bind": bind source path does not exist` with `configVersion=<valid-semver>.tmp` and exit 125 (`container-runtime-staging-bind-source`) | The complete bounded host window has a nonzero exact three-way count equality: Warp start exit-125, `.tmp` config deploy-failure, and Docker bind-source-missing aggregates reconcile. That production signature came from config-updater copying into its reserved `.tmp` directory while pre-`f1503d6` Warpctl admitted the suffix as semver build metadata and ranked staging above the completed version. The aggregate records are not per-event joins, so any mixed counts retain generic `container-runtime-incompatible`. | Stop further config publication to affected units and deploy a Warpctl artifact containing `f1503d6`, which excludes only the exact `<valid-semver>.tmp` staging namespace before ordinary semver ranking. Do not recreate the vanished path, restart Docker, or reboot for this defect. Exercise a later publication and require the completed version selected, terminal deploy success on every enabled host, and zero `.tmp` exit-125 selections or bind-source-missing failures for ten minutes. See §8.5a. |
-| `journal-buffer-config`, `journal-buffer-short`, `journal-buffer-file-headroom`, or `journal-buffer-unavailable` | The effective edge journal policy drifted from the one-hour/100 GiB/1024-file contract, measured history no longer reaches the near-hour boundary, current/projected file use defeats the fourfold headroom, or journald is down. File counts do not identify the rotation trigger or prove Loki data loss. | Apply the reviewed journald drop-in for policy drift. For coverage or file-headroom failure, establish the rotation trigger using bounded reason evidence and the exact running systemd source/configuration before changing logging or capacity; correlate §11.14. Require two boundary/headroom observations plus fresh Loki data. See §8.5b. |
+| `journal-buffer-config`, `journal-buffer-short`, `journal-buffer-file-headroom`, `journal-buffer-unavailable`, `journal-buffer-vacuum`, or `journal-buffer-retention-rotation` | The one-hour archive policy or bounded capacity drifted, history is short, file headroom is low, journald is down, age maintenance is failed/stale, or the source-confirmed unsafe retention configuration/exact retention-rotation branch is present. File counts alone still do not identify a rotation trigger or prove Loki loss. | After authorization, deploy the reviewed age-vacuum service/timer before disabling `MaxRetentionSec`, retaining `MaxFileSec=5min` and capacity limits. Never remove age retention without its replacement. Unknown package backports are not guessed from a major version; exact reader loss remains independent in §11.14. Require fresh successful vacuum, two boundary/headroom observations, zero retention rotations/reader loss for ten minutes and fresh Loki controls. See §8.5b. |
 | `log-shipper-down`, `log-shipper-fd-budget`, `log-shipper-churn`, `log-shipper-prometheus-histogram-decoder-crash`, `log-shipper-journal-read-loss`, or `redis-latency-histogram-policy-drift` | The host Fluent Bit unit is stopped, its fd budget regressed, systemd restarted it, its bounded generation contains the exact cmetrics decoder stack, its live systemd input reports losing unread journal records, or a Redis host's live exporter is not active with the optional command-latency histogram excluded. A live unit and zero restarts do not disprove journal-reader loss. The direct policy class detects the unsafe histogram input before a later decoder crash; the crash stack alone still does not identify its scrape source. | Repair the first bounded cause and restart only the owning unit after authorization. For journal-reader loss, correlate rotation, delayed source timestamps, and storage health before acting; online `journalctl --verify` is not durable-corruption proof. On Redis, converge the exporter with only `--exclude-latency-histogram-metrics`, retain commandstats, and independently require fresh `redis_commands_processed_total`, `redis_commands_duration_seconds_total`, and `redis_up`. Do not delete journals, seek to their retained head, force a major Fluent Bit upgrade, or raise Mimir limits as the first fix. Require active/running state, both fd limits, fresh outputs, and ten stable minutes. See §11.14. |
 | `tailer-stale-arrival` | The standing Loki WebSocket delivered one or more exact-replay-deduplicated records whose valid source timestamp was older than the monitor's two-minute live overlap. Those records are observation-path history, not current product errors, and their contents are not retained. A missing/malformed or future wrapper timestamp is not assigned this class because staleness is unproved. | Inspect Warpctl/Loki cursor behavior and the bounded source-time reconciliation for that selector. Do not act on the historical product line as if it occurred in the arrival minute. Require two complete reconciliations, current-source controls, and zero stale arrivals for ten minutes. See §1.5. |
 | `[warpctl][loki-tail-pre-cursor-entries] service=<service> count=<n>` (`loki-tail-pre-cursor-entries`) | Loki returned late or replayed records older than Warpctl's requested live-tail cursor. Warpctl suppressed the historical contents and retained only the bounded service/count summary, so this is observation-path evidence rather than a current product failure. | Reconcile the named selector by source time and inspect Loki ingestion latency and reconnects. Preserve both cursor and monitor source-time guards; do not replay the suppressed contents or restart the named product service. Require two complete reconciliations, current-source controls, and zero summaries for ten minutes. See §1.5. |
@@ -9845,6 +9845,8 @@ Tier-0 (page):
 | oom-writes | pg+logs | OOM class in task errors or logs | any sustained 2 min | node attribution from error text |
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |
 | journal-buffer-unavailable | host | §8.5b `systemd-journald` active state | any inactive enabled edge; immediate | effective buffer policy and Fluent Bit state |
+| journal-buffer-vacuum | host | §8.5b loaded owned service/timer and monotonic completed execution | inactive/disabled/failed age maintenance or last successful vacuum older than seven minutes; immediate | fixed policy/runtime states and age; in-progress/unreadable is unknown, not healthy |
+| journal-buffer-retention-rotation | host | §8.5b source-audited affected package plus enabled retention, or exact bounded journald reason | known unsafe combination or any exact retention-triggered rotation in five minutes; immediate | fixed build/state enums and count; capped evidence also retains visibility loss; never infer hash pressure or reader loss |
 | log-shipper-down | host | §11.14 Fluent Bit active/sub state | any non-running managed host; immediate | result, restart count, soft/hard fd limits |
 | log-shipper-journal-read-loss | host | §11.14 bounded Fluent Bit unit journal | any exact `sd_journal_next()` loss event in ten minutes; immediate | privacy-reduced total and errno-74 counts only; live unit state cannot clear it |
 | host-cpu-saturation / host-io-saturation | Mimir node metrics | §8.14 fresh normalized load plus five-minute CPU-mode ratios | non-idle/non-I/O-wait execution >=90% or I/O wait >=20%, respectively, with load1/logical CPUs >=1.25 for 2 probes | exact host; load/core, CPU execution, I/O wait, and memory-available ratios |
@@ -9886,7 +9888,7 @@ Tier-1 (warn):
 | open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
-| journal-buffer-config / journal-buffer-short / journal-buffer-file-headroom | host | §8.5b effective policy, bounded near-hour entry, and privacy-reduced active-machine journal-file census | any policy drift for 2 probes; no record at or before the 50-minute cutoff after 70 minutes host/journald uptime for 2 probes; or current/projected one-hour files use >25% of `SystemMaxFiles` for 2 probes; counts do not identify the rotation cause |
+| journal-buffer-config / journal-buffer-short / journal-buffer-file-headroom | host | §8.5b effective journald/loaded age-vacuum policy, bounded near-hour entry, and privacy-reduced active-machine journal-file census | any policy drift for 2 probes; no record at or before the 50-minute cutoff after 70 minutes host/journald uptime for 2 probes; or current/projected one-hour files use >25% of `SystemMaxFiles` for 2 probes; counts do not identify the rotation cause |
 | log-shipper-fd-budget / log-shipper-churn | host | §11.14 Fluent Bit soft/hard fd limits and automatic restart count | either limit < 65,536 or NRestarts > 0 for 2 probes |
 | redis-latency-histogram-policy-drift | Redis host runtime | §11.14 stable running redis-exporter argv/environment and exact optional-histogram exclusion | exporter observably inactive or optional histograms observably enabled; immediate; missing runtime evidence is unknown |
 | stats-landmine | pg | fewer than three valid/ready exact isolated pair/payer structural index shapes, or `transfer_contract.open` statistics target is not the bounded value 300; legacy n_distinct/reltuples remain evidence while the structural repair is incomplete | daily check |
@@ -10333,7 +10335,7 @@ recent bootstrap/start outcomes remain required, and Xops' privileged
 maintenance probe owns the definitive client/server comparison during package
 transitions and recovery. The host journal is intentionally only a one-hour recovery/debug
 buffer: Fluent Bit owns durable Warp-log delivery to Loki. Xops sets persistent
-storage, `MaxRetentionSec=1hour`, `MaxFileSec=5min`, a 100 GiB safety cap for at
+storage, an explicit one-hour archive-age vacuum timer, `MaxFileSec=5min`, a 100 GiB safety cap for at
 least four times the expected one-hour burst envelope, 256 MiB files, and 1,024
 files so journald's default 100-file ceiling cannot silently undercut the byte
 cap. The old seven-day setting stated an unnecessary target at current
@@ -10378,8 +10380,31 @@ SystemMaxUse=100G
 SystemMaxFileSize=256M
 SystemMaxFiles=1024
 MaxFileSec=5min
-MaxRetentionSec=1hour
 ```
+
+`MaxRetentionSec` is omitted (its disabled default), not left enabled on the
+unpatched retention-rotation path. The owned `warp-journal-vacuum.service`
+runs only `journalctl --quiet --directory=/var/log/journal/%m --vacuum-time=1hour`:
+archived files only, scoped to the local default journal, without `--rotate`,
+cursor seeks or an active-file rewrite. `%m` is systemd's local machine-ID
+specifier; it is never retained in monitor output. The oneshot has a 30-second
+start timeout and five-second stop timeout. Its timer uses `OnBootSec=1min`,
+`OnUnitInactiveSec=5min`, `RandomizedDelaySec=1min`, and `AccuracySec=10s`, all
+supported on systemd 249 and 255. Inactive-relative scheduling and a single
+oneshot prevent overlap; random delay avoids synchronized fleet metadata scans.
+The successful-schedule conservative age envelope is one hour plus five-minute
+file granularity, five-minute cadence, one-minute jitter, ten-second accuracy,
+and 35 seconds of bounded execution/stop: **71m45s**. This is not a hard age
+guarantee through suspension, scheduling delay, failed vacuum or storage errors;
+stale/failed execution is independently visible. The usable-history minimum
+remains 50 minutes, not an assertion that every record lasts exactly one hour.
+
+`playbook-edges` installs and enables the age owner before changing the
+journald drop-in. Timer unit changes reload/restart only the timer; otherwise
+enabling it is idempotent. Journald restart and persistent flush remain gated
+solely by the existing `journald_warp_config.changed` condition. Source changes
+are not deployment authority, and removing `MaxRetentionSec` without operative
+replacement age maintenance is never a valid rollout.
 
 The byte cap is a safety ceiling with at least four times the expected
 one-hour burst envelope. `SystemMaxFiles` is part of the capacity contract:
@@ -10398,8 +10423,31 @@ one month. `MaxFileSec=5min` bounds that low-volume deletion granularity, and
 explicit `Storage=persistent` plus `journalctl --flush` makes the intended
 restart behavior independent of pre-existing host state.
 
-`journal-buffer-config` WARNs when the effective merged configuration differs
-from any of those six values. `journal-buffer-short` WARNs only after both the
+`journal-buffer-config` WARNs when the effective merged configuration or loaded
+owned age-vacuum policy differs. The reducer checks the exact service/timer
+hashes, expected manager fragment paths, absence of drop-ins and absence of a
+pending daemon reload; a file merely present on disk is not loaded-policy proof.
+`journal-buffer-vacuum` PAGEs when the enabled active timer or its execution is
+failed/stale: successful completion must be no more than seven minutes old.
+An in-progress run, initial scheduled run, unreadable manager evidence, future
+timestamp, or incomplete policy observation remains `cannot-observe` and cannot
+certify recovery. Only a completed exit-zero generation supplies the success
+age. A bounded Python3 `CLOCK_MONOTONIC` read uses the same suspend-excluding
+timebase as systemd; `/proc/uptime` would wrongly include suspended time.
+Python3 is an Ansible-managed-host prerequisite; unavailable clock support
+fails closed. No argv, unit text, machine identity or private path leaves the reducer.
+
+`journal-buffer-retention-rotation` PAGEs on either a finite enabled retention
+setting with the source-audited affected Ubuntu `255.4-1ubuntu8.17` package, or
+any exact `Retention time reached, rotating.` record in a bounded five-minute
+current-boot journald window. An unknown distro/build is not convicted from
+`255` alone. Enabled retention with unverified build semantics stays unknown;
+the general replacement-policy drift still warns. The 401-record sentinel
+retains both affirmative branch evidence and a truncation visibility finding;
+failed/partial/malformed selection is unknown, not zero. Exact iterator loss
+remains its own §11.14 PAGE; no rotation count claims how many records were lost.
+
+`journal-buffer-short` WARNs only after both the
 host and the current journald activation have been live for 70 minutes, when a
 bounded current-boot query finds no retained entry at or before the 50-minute
 cutoff. The service-age gate allows an intentional configuration restart to
@@ -10442,8 +10490,8 @@ emitting an identity or counters; they do not rely on `pipefail`. Numeric-byte
 validation rejects embedded NULs even on an `awk` that drops raw NUL input.
 A failed or timed-out producer, even after valid partial output, or a missing,
 duplicate, truncated, or nonterminal footer leaves the census unknown while preserving
-independent journal-coverage observations. Schema 5 rejects older observations
-that lack this census contract.
+independent journal-coverage observations. Schema 6 rejects older observations
+that lack this census and age-maintenance contract.
 Missing or malformed latest-entry metadata, malformed cutoff metadata, an
 unsupported option, or unreadable journal output is `cannot-observe`; none is
 converted to a zero-age short-retention claim.
@@ -10454,15 +10502,18 @@ the size cap fills. A latest-entry read first proves that the monitor can read
 and parse the journal. The cutoff read may then return zero rows as affirmative
 short-buffer evidence. A short local window is not proof of Loki loss.
 Correlate it with §11.14 `log-shipper` before
-assigning durable data loss. Fix configuration drift with
+assigning durable data loss. After explicit rollout authorization, fix configuration drift with
 `xops/main/ansible/run-edges.sh`
 without rebooting. If the exact policy is present but coverage or file headroom
 fails, first distinguish rotation triggers using bounded journald reason
 evidence and the exact running systemd source/configuration. Change producer
 logging only after proving amplification; evaluate capacity changes from
 measured file/byte demand, inode cost, directory scan cost, and reader behavior.
-Closure requires two consecutive coverage/headroom observations and fresh
-per-host data through Loki.
+Closure requires two consecutive coverage/headroom observations, operative age
+maintenance with fresh completed successes, ten minutes without retention
+rotation or §11.14 reader loss, and fresh per-host data through Loki. The current
+watcher generation must also supply two advancing completed overlap receipts;
+absence of alerts alone is insufficient.
 
 **2026-09-04 systemd-version discriminator.** Enabled edges 0, 1, and 4
 reported `journal-buffer-short` with age zero even though bounded direct
@@ -10501,7 +10552,7 @@ about 14 GiB against `SystemMaxUse=100G`. Those reported counts imply about 15%
 nominal file headroom while the byte ceiling had ample space. That comparison
 is authoritative only after proving the machine-directory scope and including
 `.journal~`; the pre-correction recursive `.journal`-only monitor census did not
-establish that scope. Reobserve with schema 5 before treating it as current
+establish that scope. Reobserve with the corrected census (now schema 6) before treating it as current
 per-directory capacity evidence.
 
 The healthy controls show that rotation count alone does not imply reader loss.
@@ -10532,8 +10583,24 @@ This can rotate files independently of their hash fill or `MaxFileSec`.
 later removed that retention-triggered rotation. Upstream v255 source and a
 distro version label do not establish whether Ubuntu `255.4-1ubuntu8.17`
 contains a backport, or whether that branch executed on the observed host.
-Require direct package/source evidence and bounded live reason counts before
-assigning this cause; no live retention-rotation alert is implemented or claimed.
+Direct package/source evidence and bounded live reason counts are required
+before assigning this cause.
+
+**2026-09-16 retention-rotation discriminator.** One bounded ten-minute host
+window contained 107 exact retention-triggered rotations, 841 retained files
+and 72 recently archived files in five minutes, despite roughly 10 GiB of
+journal allocation and ample filesystem space. The independent exact §11.14
+reducer observed five unread-loss clauses, all errno -74. Unit generations
+were stable and the bounded kernel/storage-error query had no matches. This
+matches [upstream issue #31315](https://github.com/systemd/systemd/issues/31315).
+The official Ubuntu `255.4-1ubuntu8.17` source delta has 84 applied patch entries
+and none contains the retention branch/function or upstream fix; its 255.4
+orig base predates `b63c18d`. Together with the exact live marker, this supplies
+the source/branch discriminator missing from the earlier observation. It is
+not executable-byte attestation, proof of durable corruption, or proof that
+the rotation defect caused every errno-74 event. The replacement age policy
+removes the demonstrated rotation feedback while preserving independent
+reader-loss and recovery-window verification.
 
 Preserve the one-hour/100 GiB contract while establishing the trigger. A change
 to producer logging needs a demonstrated causal effect and an explicitly

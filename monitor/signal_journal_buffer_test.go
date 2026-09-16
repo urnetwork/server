@@ -18,16 +18,21 @@ func journalBufferFixture(overrides map[string]string) string {
 		"boundary_entry_age_seconds", "coverage_target_seconds", "journal_file_scan_state",
 		"journal_files", "journal_bytes", "journal_archived_files_5m",
 		"journal_system_archived_files_5m", "journal_user_archived_files_5m",
+		"journal_vacuum_policy_state", "journal_vacuum_runtime_state", "journal_vacuum_last_success_age_seconds",
+		"journal_retention_build", "journal_retention_rotation_state", "journal_retention_rotations_5m",
 	}
 	values := map[string]string{
-		"observation_schema": "5", "journald_active": "active", "journald_active_seconds": "7200",
+		"observation_schema": "6", "journald_active": "active", "journald_active_seconds": "7200",
 		"storage": "persistent", "max_use": "100G", "max_file_size": "256M", "max_files": "1024",
-		"max_file_sec": "5min", "max_retention": "1hour", "uptime_seconds": "7200",
+		"max_file_sec": "5min", "max_retention": "-", "uptime_seconds": "7200",
 		"coverage_checked": "1", "coverage_present": "1",
 		"boundary_entry_age_seconds": "3300", "coverage_target_seconds": "3000",
 		"journal_file_scan_state": "complete", "journal_files": "200", "journal_bytes": "10737418240",
 		"journal_archived_files_5m": "10", "journal_system_archived_files_5m": "7",
 		"journal_user_archived_files_5m": "3",
+		"journal_vacuum_policy_state":    "valid", "journal_vacuum_runtime_state": "complete",
+		"journal_vacuum_last_success_age_seconds": "5", "journal_retention_build": "unverified",
+		"journal_retention_rotation_state": "complete", "journal_retention_rotations_5m": "0",
 	}
 	for key, value := range overrides {
 		values[key] = value
@@ -44,7 +49,7 @@ func journalBufferFixture(overrides map[string]string) string {
 func TestJournalBufferSignalSyntheticProblemClasses(t *testing.T) {
 	observations := map[string]string{
 		"healthy": journalBufferFixture(nil),
-		"drift":   journalBufferFixture(map[string]string{"max_retention": "7day"}),
+		"drift":   journalBufferFixture(map[string]string{"max_file_sec": "1month"}),
 		"short": journalBufferFixture(map[string]string{
 			"coverage_present": "0", "boundary_entry_age_seconds": "1200",
 		}),
@@ -217,7 +222,7 @@ func TestJournalBufferSignalSyntheticFileScanUnavailableIsVisibility(t *testing.
 }
 
 func TestJournalBufferSampleRejectsPreviousSchema(t *testing.T) {
-	for _, schema := range []string{"3", "4"} {
+	for _, schema := range []string{"3", "4", "5"} {
 		_, err := parseJournalBufferSample(journalBufferFixture(map[string]string{"observation_schema": schema}))
 		if err == nil || !strings.Contains(err.Error(), "unsupported observation schema") {
 			t.Fatalf("schema %s: parse error=%v, want unsupported schema", schema, err)
@@ -679,7 +684,7 @@ func runJournalBufferCommandWithFileFixture(t *testing.T, latestMode, boundaryMo
 			t.Fatal(err)
 		}
 	}
-	writeExecutable("systemctl", `#!/bin/sh
+	writeExecutable("systemctl", "#!/bin/sh\n"+journalVacuumUnitFixture+`
 case "$1" in
   is-active) echo active ;;
   show) echo 0 ;;
@@ -694,9 +699,11 @@ SystemMaxUse=100G
 SystemMaxFileSize=256M
 SystemMaxFiles=1024
 MaxFileSec=5min
-MaxRetentionSec=1hour
 EOF
 `)
+	writeExecutable("sha256sum", "#!/bin/sh\n"+journalVacuumHashFixture)
+	writeExecutable("dpkg-query", "#!/bin/sh\nprintf '%s' unverified\n")
+	writeExecutable("python3", "#!/bin/sh\necho 100000000000\n")
 	writeExecutable("awk", `#!/bin/sh
 case "$*" in
   *'/proc/uptime'*)
@@ -840,6 +847,7 @@ exec /bin/date "$@"
 `)
 	writeExecutable("journalctl", `#!/bin/sh
 case " $* " in
+  *' --grep='*) exit 1 ;;
   *' --list-boots '*)
     echo ' 0 redacted Fri 2026-09-04 19:45:54 UTC—Fri 2026-09-04 20:45:20 UTC'
     exit 0

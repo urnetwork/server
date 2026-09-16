@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -239,8 +240,10 @@ if [ "$journal_machine_id_status" -eq 0 ] &&
   fi
 fi
 
+` + journalVacuumPolicyCommand + `
+
 printf '%s\n' \
-  'observation_schema=5' \
+  'observation_schema=6' \
   "journald_active=${journald_active}" \
   "journald_active_seconds=${journald_active_seconds}" \
   "storage=${storage:--}" \
@@ -259,29 +262,41 @@ printf '%s\n' \
   "journal_bytes=${journal_bytes}" \
   "journal_archived_files_5m=${journal_archived_files_5m}" \
   "journal_system_archived_files_5m=${journal_system_archived_files_5m}" \
-  "journal_user_archived_files_5m=${journal_user_archived_files_5m}"
+  "journal_user_archived_files_5m=${journal_user_archived_files_5m}" \
+  "journal_vacuum_policy_state=${journal_vacuum_policy_state}" \
+  "journal_vacuum_runtime_state=${journal_vacuum_runtime_state}" \
+  "journal_vacuum_last_success_age_seconds=${journal_vacuum_last_success_age_seconds}" \
+  "journal_retention_build=${journal_retention_build}" \
+  "journal_retention_rotation_state=${journal_retention_rotation_state}" \
+  "journal_retention_rotations_5m=${journal_retention_rotations_5m}"
 `
 
 type journalBufferSample struct {
-	journaldActive          string
-	journaldActiveSeconds   int
-	storage                 string
-	maxUse                  string
-	maxFileSize             string
-	maxFiles                string
-	maxFileSec              string
-	maxRetention            string
-	uptimeSeconds           int
-	coverageChecked         bool
-	coveragePresent         bool
-	boundaryEntryAgeSeconds int
-	coverageTargetSeconds   int
-	journalFileScanState    string
-	journalFiles            int
-	journalBytes            uint64
-	journalArchivedFiles5m  int
-	journalSystemArchives5m int
-	journalUserArchives5m   int
+	journaldActive                     string
+	journaldActiveSeconds              int
+	storage                            string
+	maxUse                             string
+	maxFileSize                        string
+	maxFiles                           string
+	maxFileSec                         string
+	maxRetention                       string
+	uptimeSeconds                      int
+	coverageChecked                    bool
+	coveragePresent                    bool
+	boundaryEntryAgeSeconds            int
+	coverageTargetSeconds              int
+	journalFileScanState               string
+	journalFiles                       int
+	journalBytes                       uint64
+	journalArchivedFiles5m             int
+	journalSystemArchives5m            int
+	journalUserArchives5m              int
+	journalVacuumPolicyState           string
+	journalVacuumRuntimeState          string
+	journalVacuumLastSuccessAgeSeconds int
+	journalRetentionBuild              string
+	journalRetentionRotationState      string
+	journalRetentionRotations5m        int
 }
 
 type journalBufferResult struct {
@@ -349,6 +364,8 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		"boundary_entry_age_seconds", "coverage_target_seconds", "journal_file_scan_state",
 		"journal_files", "journal_bytes", "journal_archived_files_5m",
 		"journal_system_archived_files_5m", "journal_user_archived_files_5m",
+		"journal_vacuum_policy_state", "journal_vacuum_runtime_state", "journal_vacuum_last_success_age_seconds",
+		"journal_retention_build", "journal_retention_rotation_state", "journal_retention_rotations_5m",
 	}
 	values := map[string]string{}
 	allowed := map[string]bool{}
@@ -374,7 +391,7 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 			return journalBufferSample{}, fmt.Errorf("journal buffer: observation omitted %s", key)
 		}
 	}
-	if values["observation_schema"] != "5" {
+	if values["observation_schema"] != "6" {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: unsupported observation schema")
 	}
 
@@ -463,6 +480,42 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 			journalUserArchives5m > journalArchivedFiles5m-journalSystemArchives5m) {
 		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent journal file counts")
 	}
+	for key, accepted := range map[string][]string{
+		"journal_vacuum_policy_state":      {"valid", "drift", "unavailable"},
+		"journal_vacuum_runtime_state":     {"complete", "pending", "running", "failed", "stale", "unavailable"},
+		"journal_retention_build":          {"known-affected", "unverified"},
+		"journal_retention_rotation_state": {"complete", "truncated", "unavailable"},
+	} {
+		valid := false
+		for _, value := range accepted {
+			valid = valid || values[key] == value
+		}
+		if !valid {
+			return journalBufferSample{}, fmt.Errorf("journal buffer: invalid %s", key)
+		}
+	}
+	vacuumAge, err := parseNonnegative("journal_vacuum_last_success_age_seconds")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	vacuumState := values["journal_vacuum_runtime_state"]
+	if (vacuumState == "complete" && vacuumAge > 420) ||
+		(vacuumState == "stale" && vacuumAge <= 420) ||
+		(vacuumState != "complete" && vacuumState != "stale" && vacuumAge != 0) ||
+		((vacuumState == "complete" || vacuumState == "stale" || vacuumState == "running" || vacuumState == "pending") && values["journal_vacuum_policy_state"] != "valid") {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent vacuum completion")
+	}
+	retentionRotations, err := parseNonnegative("journal_retention_rotations_5m")
+	if err != nil {
+		return journalBufferSample{}, err
+	}
+	rotationState := values["journal_retention_rotation_state"]
+	if retentionRotations > 401 ||
+		(rotationState == "unavailable" && retentionRotations != 0) ||
+		(rotationState == "truncated" && retentionRotations != 401) ||
+		(rotationState == "complete" && retentionRotations >= 401) {
+		return journalBufferSample{}, fmt.Errorf("journal buffer: inconsistent retention rotation count")
+	}
 	return journalBufferSample{
 		journaldActive: values["journald_active"], journaldActiveSeconds: activeSeconds,
 		storage: values["storage"], maxUse: values["max_use"], maxFileSize: values["max_file_size"],
@@ -471,17 +524,24 @@ func parseJournalBufferSample(raw string) (journalBufferSample, error) {
 		boundaryEntryAgeSeconds: boundaryEntryAge, coverageTargetSeconds: coverageTarget,
 		journalFileScanState: journalFileScanState, journalFiles: journalFiles,
 		journalBytes: journalBytes, journalArchivedFiles5m: journalArchivedFiles5m,
-		journalSystemArchives5m: journalSystemArchives5m,
-		journalUserArchives5m:   journalUserArchives5m,
+		journalSystemArchives5m:            journalSystemArchives5m,
+		journalUserArchives5m:              journalUserArchives5m,
+		journalVacuumPolicyState:           values["journal_vacuum_policy_state"],
+		journalVacuumRuntimeState:          vacuumState,
+		journalVacuumLastSuccessAgeSeconds: vacuumAge,
+		journalRetentionBuild:              values["journal_retention_build"],
+		journalRetentionRotationState:      rotationState,
+		journalRetentionRotations5m:        retentionRotations,
 	}, nil
 }
 
 func evaluateJournalBuffer(target string, sample journalBufferSample) []finding {
 	observed := fmt.Sprintf(
-		"journald_active=%s journald_active_seconds=%d storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s uptime_seconds=%d coverage_checked=%t coverage_present=%t boundary_entry_age_seconds=%d coverage_target_seconds=%d",
+		"journald_active=%s journald_active_seconds=%d storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s uptime_seconds=%d coverage_checked=%t coverage_present=%t boundary_entry_age_seconds=%d coverage_target_seconds=%d vacuum_policy=%s vacuum_runtime=%s",
 		sample.journaldActive, sample.journaldActiveSeconds, sample.storage, sample.maxUse, sample.maxFileSize,
 		sample.maxFiles, sample.maxFileSec, sample.maxRetention, sample.uptimeSeconds,
 		sample.coverageChecked, sample.coveragePresent, sample.boundaryEntryAgeSeconds, sample.coverageTargetSeconds,
+		sample.journalVacuumPolicyState, sample.journalVacuumRuntimeState,
 	)
 	findings := []finding{}
 	if sample.journaldActive != "active" {
@@ -501,24 +561,27 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 		findings = append(findings, healthyFinding("host/journal-buffer", tierPage, "journal-buffer-unavailable", target))
 	}
 
+	retentionEnabled, retentionKnown := journalRetentionEnabled(sample.maxRetention)
 	configOK := sample.storage == "persistent" && sample.maxUse == "100G" && sample.maxFileSize == "256M" &&
-		sample.maxFiles == "1024" && sample.maxFileSec == "5min" && sample.maxRetention == "1hour"
+		sample.maxFiles == "1024" && sample.maxFileSec == "5min" && retentionKnown && !retentionEnabled &&
+		sample.journalVacuumPolicyState == "valid"
 	if !configOK {
 		findings = append(findings, finding{
 			probeId: "host/journal-buffer", tier: tierWarn,
 			class: "journal-buffer-config", target: target, sustain: 2,
 			symptom:   fmt.Sprintf("%s local journal policy differs from the one-hour buffer contract", target),
-			mechanism: "An unbounded retention policy can consume disk as host uptime grows; volatile storage loses the buffer on journald restart; and month-long journal files make whole-file rotation coarse, so age vacuuming can delete a large slice of newer low-volume evidence at once.",
-			baseline:  "Effective journald settings are Storage=persistent, SystemMaxUse=100G, SystemMaxFileSize=256M, SystemMaxFiles=1024, MaxFileSec=5min, and MaxRetentionSec=1hour.", observed: observed,
-			evidence: fmt.Sprintf("effective storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s", sample.storage, sample.maxUse, sample.maxFileSize, sample.maxFiles, sample.maxFileSec, sample.maxRetention),
+			mechanism: "The one-hour archive age is owned by a bounded vacuum timer, not MaxRetentionSec's defective rotation branch. Volatile storage, coarse whole-file rotation, missing age maintenance or changed capacity limits can remove the usable recovery window or retain excess history.",
+			baseline:  "Storage=persistent, SystemMaxUse=100G, SystemMaxFileSize=256M, SystemMaxFiles=1024 and MaxFileSec=5min; MaxRetentionSec disabled; the exact loaded bounded one-hour age-vacuum service and staggered timer are installed.", observed: observed,
+			evidence: fmt.Sprintf("effective storage=%s max_use=%s max_file_size=%s max_files=%s max_file_sec=%s max_retention=%s vacuum_policy=%s vacuum_runtime=%s", sample.storage, sample.maxUse, sample.maxFileSize, sample.maxFiles, sample.maxFileSec, sample.maxRetention, sample.journalVacuumPolicyState, sample.journalVacuumRuntimeState),
 			context:  "Loki owns durable history. Increasing local retention is not a substitute for repairing the shipper or Loki.",
 			action:   "Run the reviewed edge Ansible configuration to restore the exact bounded policy; do not reboot solely to apply it.",
-			verify:   "Read the effective merged journald configuration and require the exact six settings on every enabled edge.",
+			verify:   "Read the merged journald configuration and loaded vacuum policy; require a successful vacuum no more than seven minutes old plus the independent 50-minute recovery witness. Removing MaxRetentionSec without an operative replacement age policy is not closure.",
 			playbook: "SIGNALS.md §8.5b",
 		})
 	} else {
 		findings = append(findings, healthyFinding("host/journal-buffer", tierWarn, "journal-buffer-config", target))
 	}
+	findings = append(findings, evaluateJournalAgePolicy(target, sample, retentionEnabled, retentionKnown)...)
 
 	if sample.journalFileScanState != "complete" {
 		findings = append(findings, cannotObserveFinding(
@@ -577,6 +640,75 @@ func evaluateJournalBuffer(target string, sample journalBufferSample) []finding 
 		})
 	} else {
 		findings = append(findings, healthyFinding("host/journal-buffer", tierWarn, "journal-buffer-short", target))
+	}
+	return findings
+}
+
+var journalRetentionDurationPattern = regexp.MustCompile(`^([0-9]+([.][0-9]+)?)(us|ms|s|sec|seconds|min|minute|minutes|h|hour|hours|d|day|days|w|week|weeks|month|months|y|year|years)?$`)
+
+// Recognize only unambiguous single systemd time spans. Unknown syntax never
+// proves an enabled vulnerable branch or a disabled retention policy.
+func journalRetentionEnabled(value string) (bool, bool) {
+	if value == "-" || value == "infinity" {
+		return false, true
+	}
+	if len(value) > 48 {
+		return false, false
+	}
+	parts := journalRetentionDurationPattern.FindStringSubmatch(value)
+	if len(parts) != 4 {
+		return false, false
+	}
+	amount, err := strconv.ParseFloat(parts[1], 64)
+	return amount > 0, err == nil
+}
+
+// Keep the policy, affirmative unsafe branch and reader loss separate: absence
+// of a recent rotation cannot disprove a source-confirmed unsafe configuration.
+func evaluateJournalAgePolicy(target string, sample journalBufferSample, retentionEnabled, retentionKnown bool) []finding {
+	findings := []finding{}
+	observed := fmt.Sprintf("vacuum_policy=%s vacuum_runtime=%s last_success_age_seconds=%d retention_build=%s retention_rotation_state=%s retention_rotations_5m=%d",
+		sample.journalVacuumPolicyState, sample.journalVacuumRuntimeState, sample.journalVacuumLastSuccessAgeSeconds,
+		sample.journalRetentionBuild, sample.journalRetentionRotationState, sample.journalRetentionRotations5m)
+	if sample.journalVacuumPolicyState == "unavailable" || (sample.journalVacuumPolicyState != "drift" &&
+		(sample.journalVacuumRuntimeState == "unavailable" || sample.journalVacuumRuntimeState == "running" || sample.journalVacuumRuntimeState == "pending")) {
+		findings = append(findings, cannotObserveFinding(target+"/journal-vacuum", fmt.Errorf("journal age-vacuum completion %s", sample.journalVacuumRuntimeState)))
+	} else if sample.journalVacuumPolicyState != "valid" || sample.journalVacuumRuntimeState != "complete" {
+		findings = append(findings, finding{
+			probeId: "host/journal-buffer", tier: tierPage, class: "journal-buffer-vacuum", target: target, sustain: 1,
+			symptom:   "The bounded journal archive age policy drifted, failed or became stale.",
+			mechanism: "The dedicated age-vacuum timer must enforce the one-hour archive target while normal file rotation stays independent. A disabled, failed or stale execution cannot supply that age guarantee.",
+			baseline:  "An enabled active staggered timer and a successful exact-policy vacuum no more than seven minutes old.",
+			observed:  observed, evidence: "Only loaded-policy and execution states plus monotonic success age are retained; no unit argv, machine identity or journal content.",
+			context:  "This does not prove iterator loss or a full filesystem; those remain separate findings. An in-progress or unobserved run never certifies completion.",
+			action:   "Repair the owning Xops age-maintenance policy after authorization and inspect its fixed result before changing retention or limits. Do not force rotation, delete journals, or restart the shipper to silence this observation.",
+			verify:   "Two successive observations show exact loaded policy and a fresh successful vacuum; the 50-minute boundary and independent Loki delivery checks remain healthy.",
+			playbook: "SIGNALS.md §8.5b",
+		})
+	} else {
+		findings = append(findings, healthyFinding("host/journal-buffer", tierPage, "journal-buffer-vacuum", target))
+	}
+	knownUnsafe := retentionKnown && retentionEnabled && sample.journalRetentionBuild == "known-affected"
+	if knownUnsafe || sample.journalRetentionRotations5m > 0 {
+		findings = append(findings, finding{
+			probeId: "host/journal-buffer", tier: tierPage, class: "journal-buffer-retention-rotation", target: target, sustain: 1,
+			symptom:   "The journal uses a known unsafe retention-rotation configuration or reports the defective rotation branch.",
+			mechanism: "The source-confirmed systemd retention path rotates current journals while expiring archives, multiplying files. Upstream #33944 removes that rotation; archive age and MaxFileSec rotation must remain separate.",
+			baseline:  "MaxRetentionSec disabled with a working bounded age-vacuum policy, and zero exact retention-triggered rotation records in five minutes.",
+			observed:  observed, evidence: "The package enum is affirmative only for the audited vendor source; the independent reason counter matches the exact fixed journald retention-rotation message.",
+			context:  "Unknown versions are not classified as unpatched from a major number. File counts alone do not identify a cause; these records do. Neither this branch nor errno -74 alone proves durable media corruption or the number of records lost.",
+			action:   "After authorization, deploy the reviewed Xops age-vacuum replacement before disabling MaxRetentionSec, or prove and install a supported systemd containing the fix. Preserve the one-hour age target and normal five-minute file rotation; never disable age retention without its replacement.",
+			verify:   "Require operative age maintenance, zero retention-triggered rotations and zero separate §11.14 iterator-loss events for ten minutes spanning ordinary rotation; retain the 50-minute recovery witness and fresh Loki data.",
+			playbook: "SIGNALS.md §8.5b and §11.14",
+		})
+	} else if !retentionKnown || sample.journalRetentionRotationState != "complete" ||
+		(retentionEnabled && sample.journalRetentionBuild == "unverified") {
+		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", fmt.Errorf("journal retention implementation or bounded rotation evidence unavailable")))
+	} else {
+		findings = append(findings, healthyFinding("host/journal-buffer", tierPage, "journal-buffer-retention-rotation", target))
+	}
+	if sample.journalRetentionRotationState == "truncated" || (knownUnsafe && sample.journalRetentionRotationState == "unavailable") {
+		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", fmt.Errorf("bounded journal retention-rotation census %s", sample.journalRetentionRotationState)))
 	}
 	return findings
 }
