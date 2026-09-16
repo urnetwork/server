@@ -1,11 +1,11 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-09-15
+Status date: 2026-09-16
 
-Evaluator/baseline qualification: **measured-product qualification complete;
-corrected epoch-0 scorer image installed and smoke-tested; live API/config
-verified and staging epoch 4 open with its worker running; accepted live score
-pending**
+Evaluator/baseline qualification: **historical measured-product qualification
+preserved; staging epoch 4 open with its worker running; a database fix was
+omitted from its frozen source; repaired epoch-5 evaluator and accepted live
+score pending**
 
 Launch-control validation: **complete locally; release deployment and external actions pending**
 
@@ -31,6 +31,7 @@ Read these first:
 - [Apex open-question checklist](launch/APEX-OPEN-QUESTIONS.md)
 - [Submitter onboarding](launch/ONBOARDING.md)
 - [Incident response](launch/INCIDENT-RESPONSE.md)
+- [Staging epoch 4 G5 investigation](launch/STAGING-4-G5-INCIDENT.md)
 - [Agent season harness](RUN-MAIN.md)
 - [Machine-readable launch status](playbook.yml)
 
@@ -89,6 +90,19 @@ authentication. The forwarder is a transient systemd service and does not
 survive reboot. Persistent host routing, multi-endpoint failover, and complete
 monitoring/deployment verification remain pending; the publisher currently
 supports only its local endpoint.
+
+On September 16, investigation of a comment-only submission's G5 rejection
+proved that epoch 4's frozen source omitted database fix `46515d82`, which is
+present on `main` and in the qualified August baseline. A wrapped pgx write
+timeout therefore escaped the database recovery path during startup. All 18
+replicates completed, but the lifecycle-wide G5 gate correctly rejected the
+unexpected recovery. [The incident record](launch/STAGING-4-G5-INCIDENT.md)
+contains the source lineage and authenticated evidence hashes. The runtime
+repair and build guard passed independent regression, race, and vet checks,
+plus three consecutive sim-latency suite runs. A new evaluator image is still
+required for epoch 5; the operator approved pulling `main` for that boundary.
+Epoch 4's source/image and results remain unchanged. The new release and its
+live scoring proof are launch blockers.
 
 The config rollover also exposed a historical seed-reveal bug: decryption used
 the current base commit instead of the round's immutable policy base. The
@@ -736,6 +750,11 @@ Still to add or approve before a public competition starts:
   six-epoch weekly cadence and post-review finalization reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
+- [ ] build and qualify the epoch-5 evaluator with the repaired database code
+  and exact-source regression gate, then activate it only after staging epoch 4
+  drains. Code-level regression/race tests and three full sim-latency suite
+  runs have passed; see the
+  [G5 incident record](launch/STAGING-4-G5-INCIDENT.md);
 - [ ] verify an accepted live staging score and finalized leaderboard entry,
   then complete the exact production rebaseline. The corrected epoch-0 pin
   and polling contract are live, and staging epoch 4 is open with its worker

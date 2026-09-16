@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-09-15
-launch_state: staging_epoch_4_open_worker_running_accepted_live_score_pending
+status_date: 2026-09-16
+launch_state: staging_epoch_4_open_frozen_db_regression_repair_required_for_epoch_5
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -81,6 +81,27 @@ evaluator_release:
   simulator_sha256: fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f
   main_api_config_rollout: live_pin_and_polling_contract_verified_2026_09_15
   accepted_live_staging_score: pending
+  known_regression:
+    incident: launch/STAGING-4-G5-INCIDENT.md
+    cause: frozen_source_omitted_qualified_wrapped_database_error_fix
+    missing_server_commit: 46515d82fe98ff666c61b2b5bb1d34a89cf4dad8
+    current_main_contains_fix: true
+    repair_target_staging_epoch: 5
+    operator_approved_main_pull_for_epoch_5: true
+    status: runtime_repair_validated_new_epoch_5_evaluator_required
+    existing_round_source_image_and_results_unchanged: true
+    validation:
+      status: passed_2026_09_16
+      reviewed_code_diff_sha256: 1eece5fc9e0819b877f8ee0381bc7e1bc3f608ea73f26b2f8426c2651d0a6200
+      private_manifest_sha256: 6d96b30698c6dc93e7ed48611dde306907967c31590e2ec8cb71cd0242371b36
+      deterministic_pre_fix_reproductions: passed
+      targeted_database_tests: 9
+      adjacent_database_transaction_liveness_tests: 19
+      targeted_database_race: passed
+      targeted_database_consecutive_repetitions: 3
+      sim_latency_tests_consecutive_passes: 3
+      go_vet: passed
+      replacement_evaluator_image: not_built_or_activated
   smoke_log_sha256: 6f2652772933ae516f0e63b3b08a80a458d7c3de063b610c16c203a3026f7079
   retained_input_replay:
     official: false
@@ -191,7 +212,7 @@ monitoring:
 
 checklist:
   - id: evaluator_and_baseline
-    status: complete
+    status: historical_qualification_preserved_current_evaluator_repair_required
     evidence: connect/sim-latency/baseline/final-baseline.html
   - id: single_host_containment
     status: complete
@@ -231,6 +252,9 @@ checklist:
   - id: epoch_zero_evaluator_image
     status: local_install_smoke_and_live_pin_verified_accepted_score_and_production_rebaseline_pending
     evidence: config/main/sim-latency.yml and server/connect/sim-latency/evaluator/container/build-base.sh
+  - id: frozen_database_regression
+    status: runtime_fix_validated_epoch_5_image_and_live_proof_pending
+    evidence: server/connect/sim-latency/launch/STAGING-4-G5-INCIDENT.md
   - id: historical_round_seed_reveal
     status: tested_and_pushed_api_rollout_pending
     evidence: server_commit_45215c8f1cd3c3ef5855734042c513706a179b53

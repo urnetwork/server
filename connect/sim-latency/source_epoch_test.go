@@ -124,6 +124,28 @@ func TestEvaluatorBaseMarksEveryLockedRepositorySafe(t *testing.T) {
 	}
 }
 
+// The trusted build recipe must reject a frozen source epoch that dropped the
+// database write-classification and unsafe-replay regressions.
+func TestEvaluatorBaseRunsDatabaseWriteClassificationGate(t *testing.T) {
+	dockerfilePath := filepath.Join("evaluator", "container", "Dockerfile.base")
+	dockerfileBytes, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(dockerfileBytes)
+	for _, required := range []string{
+		"go test -list '^TestDbClassifiesWrappedConnectionWriteTimeout$' .",
+		"grep -Fx 'TestDbClassifiesWrappedConnectionWriteTimeout'",
+		"go test -list '^TestDbRejectsUnsafePgprotoWriteRetry$' .",
+		"grep -Fx 'TestDbRejectsUnsafePgprotoWriteRetry'",
+		"-run '^(TestDbClassifiesWrappedConnectionWriteTimeout|TestDbRejectsUnsafePgprotoWriteRetry)$'",
+	} {
+		if count := strings.Count(dockerfile, required); count != 1 {
+			t.Errorf("evaluator database gate %q occurrence count = %d, want 1", required, count)
+		}
+	}
+}
+
 func validSourceSignificance() *sourceSignificance {
 	return &sourceSignificance{
 		ScoreSha256:                               strings.Repeat("b", 64),

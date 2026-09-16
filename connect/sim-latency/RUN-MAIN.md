@@ -41,9 +41,11 @@ from a local checkout, its default branch, or the evaluator builder's current
 Before staging, each repository must also expose a `sim-latency-staging` branch
 whose head exactly equals its epoch-zero commit. The harness verifies all eight
 remote aliases before it creates, evaluates, or advances a staging epoch.
-Staging branches never advance or receive a winner; they isolate the name used
-for pre-production coordination while retaining the exact frozen baseline
-source content and evaluator protocol.
+Staging branches never receive a winner or advance automatically; they isolate
+the name used for pre-production coordination while retaining the exact frozen
+baseline source content and evaluator protocol. A reviewed evaluator repair is
+a separate release operation at a drained staging-round boundary, not a
+winner promotion or a change to a round already accepting/evaluating work.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -99,6 +101,24 @@ complete prior root-owned containment record when only the frozen
 qualification/image identity is stale. Every new attempt must still pass all
 current-image containment, isolation, cleanup, and artifact-integrity gates;
 this exception never makes the host production-eligible.
+
+### Evaluator repair between staging rounds
+
+Test the exact frozen source, not only the operator's `main` checkout. The
+[epoch-4 G5 investigation](launch/STAGING-4-G5-INCIDENT.md) found that a source
+branch omitted a database fix already present in the qualified baseline and
+on `main`. Pulling the API/worker cannot repair such an evaluator.
+
+For the approved epoch-5 repair, Sol max owns the source pull/merge and release
+review; Terra max owns independent regression and image validation. Require
+the relevant tests to exist and pass in the image build, review all eight
+pinned repositories, and retain the new source-lock and image digests. Do not
+change active source aliases, configuration, or installed evaluator commands
+while epoch 4 is open or draining. After it finalizes, verify the replacement
+source/image deployment before creating epoch 5; do not use `advance-staging`
+to create that next round against the old pin. Preserve every historical
+round's policy and outcomes, and require a fresh production rebaseline before
+public launch.
 
 `advance-staging` is the ordinary staging handoff. It atomically closes new
 admission without rewriting the published schedule or canceling accepted work.

@@ -50,6 +50,21 @@ counters/stderr/partial artifacts, and verify that no labeled container or
 network remains. Never run a broad Docker cleanup command. Rerun the host self
 check before resuming. A three-hour bound hit fails the submission.
 
+### Unexpected G5 failure on a no-op or comment-only patch
+
+Authenticate the patch, score, replicate logs, and resource records against
+their retained manifest before attributing the failure to a submission. G5
+covers startup and cleanup as well as the measurement window; a zero exit
+status or complete measurements do not override an unexpected recovery.
+
+Inspect the source inside the job's pinned evaluator, not just current `main`.
+Compare its history with the qualified baseline and require a deterministic
+regression test on that exact source. The
+[staging epoch 4 investigation](STAGING-4-G5-INCIDENT.md) identified a database
+fix omitted when the frozen branch was created. Preserve existing outcomes;
+repair and qualify a new source/image at a drained round boundary. Do not
+relax G5, erase a log finding, or silently rescore with a different image.
+
 ### Artifact archive or replication unready
 
 Stop new admissions. `/competition/readyz` must fail closed unless the MinIO

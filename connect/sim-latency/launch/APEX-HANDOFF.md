@@ -101,6 +101,15 @@ significance-capable evaluator. Macrocosmos can submit using its existing
 staging token. Accepted live scoring and finalized entries still need to be
 observed; this is not a claim that the downstream path has already passed.
 
+Update, 2026-09-16: a comment-only job completed all 18 replicates but failed
+G5 on a startup database recovery. Its frozen source omitted a wrapped-error
+fix already present on `main`; see the
+[G5 incident record](STAGING-4-G5-INCIDENT.md). The runtime repair and exact-source
+regression gate passed independent tests, including three full sim-latency
+suite runs. The new epoch-5 image and live scoring proof remain pending.
+Epoch 4's image and historical results remain unchanged; the next epoch is not
+yet ready to announce.
+
 A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is normalized score
 descending, raw score ascending, submission time, then job id. Statistical
