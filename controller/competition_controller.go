@@ -239,19 +239,48 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		return nil, errors.New("attempt archive identity is invalid")
 	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
-	for _, item := range []struct {
+	workerArtifacts := []struct {
 		path   string
 		digest string
 	}{
 		{path: "canonical.patch", digest: manifest.PatchSha256},
-		{path: "worker-result.json", digest: manifest.ResultSha256},
 		{path: "worker.stderr.log", digest: manifest.StderrSha256},
-	} {
-		_, size, err := hashRegularFile(filepath.Join(attemptDirectory, item.path))
-		if err != nil {
-			return nil, fmt.Errorf("authenticate retained %s: %w", item.path, err)
+	}
+	if manifest.Failure == nil || manifest.ResultSha256 != "" {
+		workerArtifacts = append(workerArtifacts, struct {
+			path   string
+			digest string
+		}{path: "worker-result.json", digest: manifest.ResultSha256})
+	}
+	for _, item := range workerArtifacts {
+		var size int64
+		if manifest.Failure != nil {
+			file, err := openFailureArtifactPath(attemptDirectory, item.path, false)
+			if err != nil {
+				return nil, fmt.Errorf("authenticate retained %s: %w", item.path, err)
+			}
+			info, statErr := file.Stat()
+			closeErr := file.Close()
+			if err := errors.Join(statErr, closeErr); err != nil {
+				return nil, err
+			}
+			size = info.Size()
+		} else {
+			var err error
+			_, size, err = hashRegularFile(filepath.Join(attemptDirectory, item.path))
+			if err != nil {
+				return nil, fmt.Errorf("authenticate retained %s: %w", item.path, err)
+			}
 		}
 		artifacts = append(artifacts, evaluationArtifact{Path: item.path, Sha256: item.digest, Bytes: size})
+	}
+	if manifest.Failure != nil {
+		if validateEvaluationError(manifest.Failure) != nil || manifest.PatchSha256 != job.PatchSha256 {
+			return nil, errors.New("attempt failure archive identity is invalid")
+		}
+		if err := authenticateFailureArchiveArtifacts(attemptDirectory, artifacts); err != nil {
+			return nil, fmt.Errorf("authenticate failure archive: %w", err)
+		}
 	}
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
 
@@ -1060,6 +1089,7 @@ type artifactManifest struct {
 	ResultSha256           string               `json:"result_sha256"`
 	Security               evaluationSecurity   `json:"security"`
 	Artifacts              []evaluationArtifact `json:"artifacts"`
+	Failure                *CompetitionError    `json:"failure,omitempty"`
 	Retention              *artifactRetention   `json:"retention,omitempty"`
 }
 
@@ -1155,6 +1185,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 		clear(requestBytes)
 		return infrastructureFailure("artifact_create_failed", "evaluator request artifact could not be written")
 	}
+	requestDigest := sha256.Sum256(append(requestBytes, '\n'))
 	clear(requestBytes)
 	stderrFile, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
 	if err != nil {
@@ -1164,8 +1195,18 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	stdout := &boundedBuffer{limit: maxSelfCheckBytes}
 	exitCode, runErr := runContainedCommand(evalCtx, attemptDir, settings.EvaluatorCommand,
 		[]string{"--request", requestPath, "--result", resultPath}, stdout, stderrFile)
+	evaluationCanceled := evalCtx.Err() != nil
 	cancel()
 	closeErr := stderrFile.Close()
+	archiveFailure := true
+	defer func() {
+		if archiveFailure && outcome.Error != nil {
+			outcome = archiveFailedEvaluation(
+				ctx, settings, job, attemptDir, hex.EncodeToString(requestDigest[:]), outcome.Error,
+				candidateStageFailureEligible(evaluationCanceled, exitCode, runErr, closeErr),
+			)
+		}
+	}()
 	if runErr != nil || closeErr != nil {
 		return infrastructureFailure("evaluator_process_failed", "evaluator process could not be completed and reaped")
 	}
@@ -1181,6 +1222,9 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil || result.Schema != 1 || result.JobId != job.JobId.String() {
 		return infrastructureFailure("evaluator_result_invalid", "evaluator result identity or schema is invalid")
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return infrastructureFailure("evaluator_result_invalid", "evaluator result contains trailing data")
 	}
 	if (result.Score == nil) == (result.EvalError == nil) {
 		return infrastructureFailure("evaluator_result_invalid", "evaluator must return exactly one of score or eval_error")
@@ -1230,6 +1274,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	if err := sealArtifactDirectory(attemptDir); err != nil {
 		return infrastructureFailure("artifact_seal_failed", "artifact directory could not be sealed read-only")
 	}
+	archiveFailure = false
 	if settings.artifactArchive == nil {
 		return infrastructureFailure("artifact_archive_unavailable", "durable artifact retention is unavailable")
 	}
@@ -1554,39 +1599,66 @@ func sealArtifactDirectory(root string) error {
 	return nil
 }
 
+// Own the process group through termination, including descendants that outlive
+// its leader. Bound inherited output pipes and ignore already-dead zombies.
 func runContainedCommand(ctx context.Context, directory, command string, args []string, stdout, stderr io.Writer) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
 	cmd := exec.Command(command, args...)
 	cmd.Dir = directory
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = processTermGrace
 	if err := cmd.Start(); err != nil {
 		return -1, err
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	terminateGroup := func() error {
+		deadline := time.Now().Add(processTermGrace)
+		for {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("kill evaluator process group: %w", err)
+			}
+			running, err := containedProcessGroupRunning(cmd.Process.Pid)
+			if err != nil || !running {
+				return err
+			}
+			if !time.Now().Before(deadline) {
+				return errors.New("evaluator process group did not terminate")
+			}
+			// An orphaned zombie may await the host reaper indefinitely. Only
+			// live group members, not kill(pid, 0) alone, keep this wait active.
+			<-time.After(10 * time.Millisecond)
+		}
+	}
 	var waitErr error
 	select {
 	case waitErr = <-done:
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		timer := time.NewTimer(processTermGrace)
+		leaderWaited := false
 		select {
 		case waitErr = <-done:
-			if !timer.Stop() {
-				<-timer.C
-			}
+			leaderWaited = true
 		case <-timer.C:
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		timer.Stop()
+		// A cooperative leader is not proof that its whole group stopped.
+		terminateErr := terminateGroup()
+		if !leaderWaited {
 			waitErr = <-done
 		}
-		return exitStatus(waitErr), ctx.Err()
+		return cmd.ProcessState.ExitCode(), errors.Join(ctx.Err(), terminateErr)
 	}
 
-	if err := syscall.Kill(-cmd.Process.Pid, 0); err == nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return exitStatus(waitErr), errors.New("evaluator left a descendant process running")
+	if running, err := containedProcessGroupRunning(cmd.Process.Pid); err != nil || running {
+		terminateErr := terminateGroup()
+		return cmd.ProcessState.ExitCode(), errors.Join(errors.New("evaluator left a descendant process running"), err, terminateErr)
 	}
 	if waitErr != nil {
 		var exitError *exec.ExitError
@@ -1596,6 +1668,48 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 		return -1, waitErr
 	}
 	return 0, nil
+}
+
+// Read Linux process-group membership without treating zombies awaiting their
+// external reaper as runnable descendants. Missing processes are ordinary races.
+func containedProcessGroupRunning(processGroupId int) (bool, error) {
+	if err := syscall.Kill(-processGroupId, 0); errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		stat, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		// The parenthesized command name may itself contain spaces or ')'.
+		end := bytes.LastIndexByte(stat, ')')
+		if end < 0 {
+			return false, errors.New("invalid process status")
+		}
+		fields := strings.Fields(string(stat[end+1:]))
+		if len(fields) < 3 {
+			return false, errors.New("incomplete process status")
+		}
+		groupId, err := strconv.Atoi(fields[2])
+		if err != nil {
+			return false, err
+		}
+		if groupId == processGroupId && fields[0] != "Z" && fields[0] != "X" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func exitStatus(err error) int {

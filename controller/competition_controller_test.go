@@ -2792,7 +2792,8 @@ func TestEvaluatorReservesManagementResources(t *testing.T) {
 		"MANAGEMENT_PHYSICAL_CORE_COUNT=2",
 		"RUNNER_MEMORY_LIMIT=72g",
 		"MINIMUM_MANAGEMENT_MEMORY_RESERVE_BYTES=25769803776",
-		"disjoint_cpu_sets:true,memory_capacity_passed:true",
+		"disjoint_cpu_sets:true",
+		"memory_capacity_passed:true",
 	} {
 		if !strings.Contains(boundary, required) {
 			t.Errorf("resource boundary is missing %q", required)

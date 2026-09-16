@@ -30,7 +30,7 @@ Before any candidate process runs, the pinned evaluator must:
   file, then build a candidate with the fixed `Dockerfile.submission`; every
   candidate `RUN` has `network=none`, `GOPROXY=off`, and `GOSUMDB=off`, and uses
   only the base image's read-only warmed module cache;
-- mount the complete untrusted work/evidence tree on a root-created 32 GiB
+- mount the complete untrusted work/evidence tree on a root-created 4 GiB
   tmpfs with `nosuid,nodev,noexec`. Candidate output and intermediate evidence
   share this aggregate ENOSPC boundary; only the bounded, sanitized tree is
   copied to durable retention after candidate execution has ended;
@@ -77,7 +77,11 @@ the authoritative host's SMT/governor/turbo/NUMA/IRQ/kernel/microcode and
 user-namespace or rootless-Docker policy. The 12-core host exposes only 10
 physical cores to builds and evaluation; the worker, Docker control plane, and
 cleanup execute on the other 2. The active runner/PostgreSQL/Redis ceilings
-total 96 GiB and must leave at least 24 GiB outside the active stack.
+total 96 GiB. The retained host evidence tmpfs adds a separately budgeted
+4 GiB, and at least 24 GiB must remain after both ceilings. Evidence pages and
+copies outlive individual stage cgroups; container limits alone do not reserve
+this management memory. Historical baseline artifacts retain their original
+limits; this changed boundary requires fresh qualification before activation.
 
 `worker-result.json` is strict JSON:
 
@@ -139,6 +143,34 @@ SHA-256 must authenticate or the worker replaces the result with a typed
 infrastructure failure. It hashes its own request, patch, stderr, and result,
 seals the attempt tree read-only, stores the manifest once behind a DB
 immutability trigger, and retains every attempt through the season.
+
+An interrupted or nonzero-exit command has a separate failure-retention path;
+it does not manufacture `worker-result.json`, a score, or passed security gates.
+The worker authenticates the sanitizer's `failed-evidence-manifest.json`, binds
+each permitted regular file by size and digest, and archives the failure through
+`server/blob`. If the command stopped before it produced a sanitized manifest,
+only trusted worker diagnostics and the canonical patch may be retained. The
+hidden-seed request, workload inputs, credentials, links, and unlisted files do
+not cross this boundary. Retention gets a separate bounded two-minute cleanup
+context after the evaluation process has stopped, including on cancellation;
+this does not extend the three-hour scoring deadline.
+
+A candidate run that exits unsuccessfully, with authenticated containment and
+healthy backing services, writes a trusted `evaluator-failure.json` outside the
+candidate mounts before cleanup. Only this strict candidate/run record, an
+authenticated sanitized evidence manifest, and successful durable archival can
+classify the command failure as terminal `submission/run_process_failed`.
+This includes a nonzero exit attributable only to the candidate's memory
+limit; the dedicated parent and PostgreSQL/Redis counters must prove the
+attribution. Missing or inconsistent counters remain infrastructure failures.
+The terminal record is invalidated if Docker or evidence-mount cleanup fails.
+Baseline, backing-service, cancellation, and malformed-evidence failures remain
+infrastructure failures. PostgreSQL/Redis OOM, exit, restart, or unhealthy state
+must never produce a clean resource report just because the runner exited zero.
+Each attempt uses its own project/cgroup identity so an earlier attempt's
+retained counters cannot contaminate it. Before allocating any new attempt,
+the single-job evaluator must reject leftover evaluator containers, networks,
+or evidence tmpfs mounts; it must not stack new work onto failed cleanup.
 
 The self-check result uses `HostSelfCheck` from `types.go`. The trusted
 self-check executable derives those booleans from root-owned provisioning state

@@ -84,7 +84,8 @@ evaluator image and round policy before opening epoch 1.
    record and must be derived from a successful live evaluator qualification;
    it binds the common service
    cgroup, 10+2 CPU split, management-memory reserve, resource limits, cleanup,
-   service images, 32 GiB artifact quota, successful CPU-/memory-bomb cleanup,
+   service images, 4 GiB artifact quota charged separately from the 96 GiB
+   active-container ceiling, successful CPU-/memory-bomb cleanup,
    the internal/no-published-port candidate network, networkless scorer, exact
    direct read-only local-leaf mounts and their frozen content hashes, plus the
    authenticated completion/evidence hashes.

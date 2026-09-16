@@ -50,6 +50,8 @@ expected_cpu_list="$(cfg '.cpu_list')"
 expected_evaluation_cpu_list="$(cfg '.evaluation_cpu_list')"
 expected_management_cpu_list="$(cfg '.management_cpu_list')"
 expected_active_memory_limit_bytes="$(cfg '.active_memory_limit_bytes')"
+expected_evidence_memory_limit_bytes="$(cfg '.evidence_memory_limit_bytes')"
+expected_total_evaluation_memory_limit_bytes="$(cfg '.total_evaluation_memory_limit_bytes')"
 expected_management_memory_reserve_bytes="$(cfg '.management_memory_reserve_bytes')"
 config_local_directory="$(cfg '.config_local_directory')"
 vault_local_directory="$(cfg '.vault_local_directory')"
@@ -160,6 +162,8 @@ fi
 evaluation_cpu_list="$(jq -r '.evaluation_cpuset // empty' <<<"$resource_boundary_json" 2>/dev/null || true)"
 management_cpu_list="$(jq -r '.management_cpuset // empty' <<<"$resource_boundary_json" 2>/dev/null || true)"
 active_memory_limit_bytes="$(jq -r '.active_memory_limit_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
+evidence_memory_limit_bytes="$(jq -r '.evidence_memory_limit_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
+total_evaluation_memory_limit_bytes="$(jq -r '.total_evaluation_memory_limit_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
 management_memory_reserve_bytes="$(jq -r '.minimum_management_memory_reserve_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
 capacity_reserve_bytes="$(jq -r '.capacity_reserve_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
 runner_memory_limit_bytes="$(jq -r '.runner_memory_limit_bytes // 0' <<<"$resource_boundary_json" 2>/dev/null || printf 0)"
@@ -201,6 +205,8 @@ facts="$(jq -cnS \
     --arg somaxconn "$somaxconn" \
     --arg port_range "$port_range" \
     --arg active_memory_limit_bytes "$active_memory_limit_bytes" \
+    --arg evidence_memory_limit_bytes "$evidence_memory_limit_bytes" \
+    --arg total_evaluation_memory_limit_bytes "$total_evaluation_memory_limit_bytes" \
     --arg management_memory_reserve_bytes "$management_memory_reserve_bytes" \
     --arg config_local_sha256 "$config_local_sha256" \
     --arg vault_local_sha256 "$vault_local_sha256" \
@@ -221,6 +227,8 @@ facts="$(jq -cnS \
       artifact_quota_bytes:$artifact_quota_bytes,
       somaxconn:$somaxconn,port_range:$port_range,
       active_memory_limit_bytes:$active_memory_limit_bytes,
+      evidence_memory_limit_bytes:$evidence_memory_limit_bytes,
+      total_evaluation_memory_limit_bytes:$total_evaluation_memory_limit_bytes,
       management_memory_reserve_bytes:$management_memory_reserve_bytes,
       config_local_sha256:$config_local_sha256,
       vault_local_sha256:$vault_local_sha256}')"
@@ -255,8 +263,17 @@ management_cpu_reserved=false
     management_cpu_reserved=true
 management_memory_reserved=false
 [ "$active_memory_limit_bytes" = "$expected_active_memory_limit_bytes" ] &&
+    [ "$evidence_memory_limit_bytes" = "$expected_evidence_memory_limit_bytes" ] &&
+    [ "$total_evaluation_memory_limit_bytes" = "$expected_total_evaluation_memory_limit_bytes" ] &&
     [ "$management_memory_reserve_bytes" = "$expected_management_memory_reserve_bytes" ] &&
     [ "${capacity_reserve_bytes:-0}" -ge "${expected_management_memory_reserve_bytes:-1}" ] 2>/dev/null &&
+    jq -e '.memory_capacity_passed == true and
+        .active_memory_limit_bytes == 103079215104 and .evidence_memory_limit_bytes == 4294967296 and
+        .total_evaluation_memory_limit_bytes == (.active_memory_limit_bytes + .evidence_memory_limit_bytes) and
+        .minimum_management_memory_reserve_bytes >= 25769803776 and
+        .capacity_reserve_bytes == (.host_memory_bytes - .total_evaluation_memory_limit_bytes) and
+        .capacity_reserve_bytes >= .minimum_management_memory_reserve_bytes' \
+        <<<"$resource_boundary_json" >/dev/null 2>&1 &&
     management_memory_reserved=true
 direct_local_mounts=false
 [ "$config_local_sha256" = "$expected_config_local_sha256" ] &&
@@ -315,6 +332,8 @@ if hash_marker "$cleanup_marker" "$cleanup_marker_sha" &&
        --arg management_cpu_list "$expected_management_cpu_list" \
        --argjson artifact_quota_bytes "${expected_artifact_quota_bytes:-0}" \
        --argjson active_memory_limit_bytes "${expected_active_memory_limit_bytes:-0}" \
+       --argjson evidence_memory_limit_bytes "${expected_evidence_memory_limit_bytes:-0}" \
+       --argjson total_evaluation_memory_limit_bytes "${expected_total_evaluation_memory_limit_bytes:-0}" \
        --argjson management_memory_reserve_bytes "${expected_management_memory_reserve_bytes:-0}" \
        --argjson runner_memory_limit_bytes "${runner_memory_limit_bytes:-0}" \
        --arg config_local_sha256 "$expected_config_local_sha256" \
@@ -328,6 +347,8 @@ if hash_marker "$cleanup_marker" "$cleanup_marker_sha" &&
         .evaluation_cpu_list == $evaluation_cpu_list and
         .management_cpu_list == $management_cpu_list and
         .active_memory_limit_bytes == $active_memory_limit_bytes and
+        .evidence_memory_limit_bytes == $evidence_memory_limit_bytes and
+        .total_evaluation_memory_limit_bytes == $total_evaluation_memory_limit_bytes and
         .management_memory_reserve_bytes == $management_memory_reserve_bytes and
         .services_in_job_cgroup == true and
         .resource_limits_verified == true and

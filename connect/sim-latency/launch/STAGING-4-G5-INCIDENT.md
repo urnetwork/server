@@ -76,7 +76,7 @@ activating that evaluator:
    and database callback lifecycle, including cancellation, connection
    disposal, and negative controls for genuine errors and unsafe retries.
 2. Have Terra max verify that the tests reproduce the pre-fix behavior and
-   pass on the repaired source; Sol max reviews the repair and merges.
+   pass on the repaired source; Astra max reviews the repair and merges.
 3. Require the relevant regressions to exist and pass against the exact
    source being built into the image. A passing test on a different `main`
    checkout is not qualification of the frozen evaluator.

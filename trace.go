@@ -1,7 +1,8 @@
 package server
 
 import (
-	// "context"
+	"context"
+	"errors"
 	// "sync"
 	"time"
 	// "slices"
@@ -18,24 +19,30 @@ import (
 	"github.com/urnetwork/glog"
 )
 
+// Only explicit shutdown signals are benign; diagnostic text is not evidence
+// of cancellation, and deadlines still require an unexpected-error report.
 func IsDoneError(r any) bool {
-	isDoneMessage := func(message string) bool {
-		switch {
-		case strings.HasPrefix(message, "Done"):
-			return true
-		// pgx
-		case strings.Contains(message, "context canceled"),
-			strings.HasPrefix(message, "failed to deallocate cached statement(s)"):
-			return true
-		default:
-			return false
-		}
-	}
 	switch v := r.(type) {
 	case error:
-		return isDoneMessage(v.Error())
+		if joined, ok := v.(interface{ Unwrap() []error }); ok {
+			causes := joined.Unwrap()
+			if len(causes) == 0 {
+				return false
+			}
+			for _, cause := range causes {
+				if !IsDoneError(cause) {
+					return false
+				}
+			}
+			return true
+		}
+		if cause := errors.Unwrap(v); cause != nil {
+			return IsDoneError(cause)
+		}
+		// Connect still returns fresh exact "Done" errors at shutdown.
+		return errors.Is(v, context.Canceled) || errors.Is(v, DbContextDoneError) || v.Error() == "Done"
 	case string:
-		return isDoneMessage(v)
+		return v == "Done"
 	default:
 		return false
 	}

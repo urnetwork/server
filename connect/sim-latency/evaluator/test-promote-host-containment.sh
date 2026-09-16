@@ -36,6 +36,8 @@ boundary="$($RESOURCE_BOUNDARY)"
 evaluation_cpuset="$(jq -er '.evaluation_cpuset' <<<"$boundary")"
 management_cpuset="$(jq -er '.management_cpuset' <<<"$boundary")"
 active_memory_limit_bytes="$(jq -er '.active_memory_limit_bytes' <<<"$boundary")"
+evidence_memory_limit_bytes="$(jq -er '.evidence_memory_limit_bytes' <<<"$boundary")"
+total_evaluation_memory_limit_bytes="$(jq -er '.total_evaluation_memory_limit_bytes' <<<"$boundary")"
 management_memory_reserve_bytes="$(jq -er '.minimum_management_memory_reserve_bytes' <<<"$boundary")"
 runner_memory_limit_bytes="$(jq -er '.runner_memory_limit_bytes' <<<"$boundary")"
 
@@ -154,11 +156,14 @@ make_host_config() {
         --arg marker "$marker" \
         --arg immutable_marker "$marker_prefix.immutable-reports.json" \
         --argjson active_memory "$active_memory_limit_bytes" \
+        --argjson evidence_memory "$evidence_memory_limit_bytes" \
+        --argjson total_memory "$total_evaluation_memory_limit_bytes" \
         --argjson reserve_memory "$management_memory_reserve_bytes" \
         '{schema:1,image_digest:$image_digest,job_cgroup:"/urnetwork/competition.slice/evaluator.scope",
           postgres_image:"postgres:fixture",redis_image:"redis:fixture",
           evaluation_cpu_list:$evaluation_cpuset,management_cpu_list:$management_cpuset,
-          artifact_quota_bytes:34359738368,active_memory_limit_bytes:$active_memory,
+          artifact_quota_bytes:$evidence_memory,active_memory_limit_bytes:$active_memory,
+          evidence_memory_limit_bytes:$evidence_memory,total_evaluation_memory_limit_bytes:$total_memory,
           management_memory_reserve_bytes:$reserve_memory,
           template_database_marker:$template_marker,
           template_database_marker_sha256:("0" * 64),

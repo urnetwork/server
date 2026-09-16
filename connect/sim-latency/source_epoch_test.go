@@ -146,6 +146,24 @@ func TestEvaluatorBaseRunsDatabaseWriteClassificationGate(t *testing.T) {
 	}
 }
 
+// Cancellation-like diagnostic text must never silently bypass the recovery
+// gate in a newly frozen evaluator image.
+func TestEvaluatorBaseRunsDoneErrorClassificationGate(t *testing.T) {
+	dockerfileBytes, err := os.ReadFile(filepath.Join("evaluator", "container", "Dockerfile.base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"RUN --network=none GOFLAGS=-mod=readonly go test -list '^TestIsDoneErrorRequiresExplicitShutdownSignal$' .",
+		"grep -Fx 'TestIsDoneErrorRequiresExplicitShutdownSignal'",
+		"go test -run '^TestIsDoneErrorRequiresExplicitShutdownSignal$' -count=1 .",
+	} {
+		if count := strings.Count(string(dockerfileBytes), required); count != 1 {
+			t.Errorf("evaluator cancellation gate %q occurrence count = %d, want 1", required, count)
+		}
+	}
+}
+
 func validSourceSignificance() *sourceSignificance {
 	return &sourceSignificance{
 		ScoreSha256:                               strings.Repeat("b", 64),

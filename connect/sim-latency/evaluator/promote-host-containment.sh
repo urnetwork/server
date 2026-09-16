@@ -102,6 +102,8 @@ readonly evaluation_cpuset="$(jq -er '.evaluation_cpu_list' "$host_config")"
 readonly management_cpuset="$(jq -er '.management_cpu_list' "$host_config")"
 readonly artifact_quota_bytes="$(jq -er '.artifact_quota_bytes' "$host_config")"
 readonly active_memory_limit_bytes="$(jq -er '.active_memory_limit_bytes' "$host_config")"
+readonly evidence_memory_limit_bytes="$(jq -er '.evidence_memory_limit_bytes' "$host_config")"
+readonly total_evaluation_memory_limit_bytes="$(jq -er '.total_evaluation_memory_limit_bytes' "$host_config")"
 readonly management_memory_reserve_bytes="$(jq -er '.management_memory_reserve_bytes' "$host_config")"
 readonly config_local_directory="$(jq -er '.config_local_directory' "$host_config")"
 readonly vault_local_directory="$(jq -er '.vault_local_directory' "$host_config")"
@@ -118,6 +120,8 @@ readonly immutable_output_path="$(jq -er '.immutable_reports_marker' "$host_conf
 [[ "$management_cpuset" =~ ^[0-9,-]+$ ]] || die "management CPU list is invalid"
 [[ "$artifact_quota_bytes" =~ ^[0-9]+$ ]] || die "artifact quota is invalid"
 [[ "$active_memory_limit_bytes" =~ ^[0-9]+$ ]] || die "active memory limit is invalid"
+[[ "$evidence_memory_limit_bytes" =~ ^[0-9]+$ ]] || die "evidence memory limit is invalid"
+[[ "$total_evaluation_memory_limit_bytes" =~ ^[0-9]+$ ]] || die "total evaluation memory limit is invalid"
 [[ "$management_memory_reserve_bytes" =~ ^[0-9]+$ ]] || die "management reserve is invalid"
 [[ "$config_local_sha256" =~ ^[0-9a-f]{64}$ ]] || die "config/local digest is invalid"
 [[ "$vault_local_sha256" =~ ^[0-9a-f]{64}$ ]] || die "vault/local digest is invalid"
@@ -140,10 +144,17 @@ jq -e \
     --arg evaluation_cpuset "$evaluation_cpuset" \
     --arg management_cpuset "$management_cpuset" \
     --argjson active_memory_limit_bytes "$active_memory_limit_bytes" \
+    --argjson evidence_memory_limit_bytes "$evidence_memory_limit_bytes" \
+    --argjson total_evaluation_memory_limit_bytes "$total_evaluation_memory_limit_bytes" \
     --argjson management_memory_reserve_bytes "$management_memory_reserve_bytes" \
     '.schema == 1 and .evaluation_cpuset == $evaluation_cpuset and
      .management_cpuset == $management_cpuset and
      .active_memory_limit_bytes == $active_memory_limit_bytes and
+     .evidence_memory_limit_bytes == $evidence_memory_limit_bytes and
+     .total_evaluation_memory_limit_bytes == $total_evaluation_memory_limit_bytes and
+     .total_evaluation_memory_limit_bytes == (.active_memory_limit_bytes + .evidence_memory_limit_bytes) and
+     .capacity_reserve_bytes == (.host_memory_bytes - .total_evaluation_memory_limit_bytes) and
+     .capacity_reserve_bytes >= .minimum_management_memory_reserve_bytes and
      .minimum_management_memory_reserve_bytes == $management_memory_reserve_bytes and
      .evaluation_physical_core_count == 10 and .management_physical_core_count == 2 and
      .disjoint_cpu_sets == true and .memory_capacity_passed == true' \
@@ -379,6 +390,8 @@ jq -n \
     --arg docker_gid_map_sha256 "$docker_gid_map_sha256" \
     --argjson artifact_quota_bytes "$artifact_quota_bytes" \
     --argjson active_memory_limit_bytes "$active_memory_limit_bytes" \
+    --argjson evidence_memory_limit_bytes "$evidence_memory_limit_bytes" \
+    --argjson total_evaluation_memory_limit_bytes "$total_evaluation_memory_limit_bytes" \
     --argjson management_memory_reserve_bytes "$management_memory_reserve_bytes" \
     --argjson runner_memory_limit_bytes "$runner_memory_limit_bytes" \
     --argjson cleanup_elapsed_ms "$(jq -er '.cleanup_elapsed_ms' "$resource_bomb_report")" \
@@ -392,6 +405,8 @@ jq -n \
       evaluation_cpu_list:$evaluation_cpu_list,
       management_cpu_list:$management_cpu_list,
       active_memory_limit_bytes:$active_memory_limit_bytes,
+      evidence_memory_limit_bytes:$evidence_memory_limit_bytes,
+      total_evaluation_memory_limit_bytes:$total_evaluation_memory_limit_bytes,
       management_memory_reserve_bytes:$management_memory_reserve_bytes,
       services_in_job_cgroup:true,resource_limits_verified:true,
       cpu_bomb_cleanup_verified:true,memory_bomb_oom_verified:true,

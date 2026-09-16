@@ -30,17 +30,9 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// taskPanicError converts a recovered task panic into the task's error.
-//
-// `server.IsDoneError` already classifies torn-down-connection pg panics
-// ("context canceled", "failed to deallocate cached statement(s)") as an
-// expected shutdown pattern, and `server.HandleError` drops them silently.
-// The task layer saw the same class and did the opposite — a multi-KB
-// "Unhandled:" blob with a full stack on every occurrence — because the
-// recover here runs BEFORE HandleError ever sees the panic, so that
-// classification never applied. Keep the failure itself loud (the task still
-// errors, reschedules, and names its cause) and drop only the stack for the
-// already-benign class; V(1) restores it when someone is debugging.
+// Explicit shutdown signals fail and reschedule the task without an unexpected
+// stack report. Database failures and cancellation-like diagnostic text retain
+// their full report; only typed cancellation is benign.
 func taskPanicError(r any) error {
 	if server.IsDoneError(r) {
 		if glog.V(1) {

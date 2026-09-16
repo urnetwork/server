@@ -95,6 +95,9 @@ RUN --network=none GOFLAGS=-mod=readonly go test -list '^TestDbClassifiesWrapped
 RUN --network=none GOFLAGS=-mod=readonly go test -list '^TestScoreProducesSharedContract$' ./connect/sim-latency \
         | grep -Fx 'TestScoreProducesSharedContract' \
     && GOFLAGS=-mod=readonly go test -run '^TestScoreProducesSharedContract$' -count=1 ./connect/sim-latency
+RUN --network=none GOFLAGS=-mod=readonly go test -list '^TestIsDoneErrorRequiresExplicitShutdownSignal$' . \
+        | grep -Fx 'TestIsDoneErrorRequiresExplicitShutdownSignal' \
+    && GOFLAGS=-mod=readonly go test -run '^TestIsDoneErrorRequiresExplicitShutdownSignal$' -count=1 .
 RUN test "$(sha256sum /opt/urnetwork/sim-latency.yml | awk '{print $1}')" = "${SOURCE_CONFIG_SHA256}" \
     && /opt/urnetwork/bin/sim-latency source-check \
         --epoch "${SOURCE_EPOCH}" \

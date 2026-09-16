@@ -22,8 +22,8 @@ readonly EMPTY_PATCH_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 readonly MAX_REQUEST_BYTES=$((2 * 1024 * 1024))
 readonly MAX_PROVIDERS_BYTES=$((1024 * 1024 * 1024))
 readonly MAX_BUILD_LOG_BYTES=$((4 * 1024 * 1024))
-readonly EVIDENCE_WORK_LIMIT=32g
-readonly EVIDENCE_WORK_BYTES=34359738368
+readonly EVIDENCE_WORK_LIMIT=4g
+readonly EVIDENCE_WORK_BYTES=4294967296
 
 # Season-frozen container ceilings. Host qualification verifies that their sum
 # plus the host reserve fits the physical box.
@@ -92,6 +92,29 @@ authenticate_local_mounts() {
         die "direct vault/local content does not match the frozen digest"
 }
 
+# This host admits one evaluator attempt at a time. Failed cleanup must block
+# the next allocation rather than accumulating containers or evidence charges.
+# Inspection only: recovery of any leftover resources requires the operator.
+check_evaluator_residual_resources() {
+    local containers networks mounts filesystem source
+    containers="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker ps -aq \
+        --filter label=com.urnetwork.competition.job-id)" || die "could not enumerate prior evaluator containers"
+    [ -z "$containers" ] || die "prior evaluator containers still exist"
+    networks="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker network ls -q \
+        --filter label=com.urnetwork.competition.job-id)" || die "could not enumerate prior evaluator networks"
+    [ -z "$networks" ] || die "prior evaluator networks still exist"
+    mounts="$(timeout --signal=TERM --kill-after=1s 3s findmnt -rn -o FSTYPE,SOURCE)" ||
+        die "could not enumerate prior evaluator evidence mounts"
+    [ -n "$mounts" ] || die "host mount enumeration was empty"
+    while read -r filesystem source; do
+        if [ "$filesystem" = tmpfs ]; then
+            case "$source" in
+                urnetwork-evidence-*) die "prior evaluator evidence mount still exists" ;;
+            esac
+        fi
+    done <<<"$mounts"
+}
+
 on_error() {
     local line="$1" rc="$2"
     if [ "$BASH_SUBSHELL" -eq 0 ]; then
@@ -155,6 +178,21 @@ cleanup() {
             [ -n "$network_id" ] && sudo -n docker network rm "$network_id" >/dev/null 2>&1 || true
         done < <(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" 2>/dev/null || true)
     fi
+    if [ -n "${artifact_dir:-}" ] && [ -f "$artifact_dir/evaluator-failure.json" ]; then
+        local residual_containers residual_networks
+        if residual_containers="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker ps -aq \
+               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
+           residual_networks="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker network ls -q \
+               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
+           [ -z "$residual_containers" ] && [ -z "$residual_networks" ]; then
+            :
+        else
+            # A candidate failure cannot become terminal while failed host
+            # cleanup might contaminate the next attempt's measurements.
+            rm -f -- "$artifact_dir/evaluator-failure.json"
+            log "ERROR: stage failure classification invalidated by incomplete cleanup"
+        fi
+    fi
     if [ "$rc" -ne 0 ] && [ -n "${active_work_mount:-}" ] &&
        [ "$active_work_mount" = "${artifact_dir:-}/.evidence-runtime" ] &&
        mountpoint -q "$active_work_mount" && [ -x "$RETAIN_FAILURE_EVIDENCE" ]; then
@@ -171,11 +209,17 @@ cleanup() {
             log "ERROR: could not retain sanitized failure evidence"
         fi
     fi
+    local work_cleanup_complete=true
     if [ -n "${active_work_mount:-}" ] && mountpoint -q "$active_work_mount"; then
-        sudo -n umount "$active_work_mount" >/dev/null 2>&1 || true
+        sudo -n timeout --signal=TERM --kill-after=1s 3s umount "$active_work_mount" >/dev/null 2>&1 ||
+            work_cleanup_complete=false
     fi
     if [ -n "${active_work_mount:-}" ] && [ -d "$active_work_mount" ]; then
-        rmdir "$active_work_mount" >/dev/null 2>&1 || true
+        rmdir "$active_work_mount" >/dev/null 2>&1 || work_cleanup_complete=false
+    fi
+    if [ "$work_cleanup_complete" != true ]; then
+        [ -z "${artifact_dir:-}" ] || rm -f -- "$artifact_dir/evaluator-failure.json"
+        log "ERROR: stage failure classification invalidated by incomplete evidence tmpfs cleanup"
     fi
     if [ -n "${artifact_dir:-}" ] && [ -d "$artifact_dir" ]; then
         sudo -n chown -R "$worker_uid:$worker_gid" "$artifact_dir" >/dev/null 2>&1 || true
@@ -187,9 +231,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in awk cat cp date df find findmnt git head install jq mkfifo mount mountpoint openssl realpath sed sha256sum sort stat sudo sync tail taskset umount; do
+for command in awk cat cp date df find findmnt git head install jq mkfifo mount mountpoint openssl realpath sed sha256sum sort stat sudo sync tail taskset timeout umount; do
     require_command "$command"
 done
+check_evaluator_residual_resources
 sudo -n docker info >/dev/null
 [ -x "$BUILD_SUBMISSION" ] || die "trusted submission builder is not executable"
 [ -x "$PREPARE_EVALUATION_SOURCE" ] || die "trusted evaluation source preparer is not executable"
@@ -247,6 +292,9 @@ replicates="$(jq -er '.evaluation_policy.replicates' "$request_path")"
 [[ "$round_id" =~ ^[0-9a-f-]{36}$ ]] || die "round id is invalid"
 [[ "$source_epoch" =~ ^[0-6]$ ]] || die "source epoch is invalid"
 [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "attempt is invalid"
+# A systemd slice may retain counters after its last Docker child disappears.
+# Include the authenticated retry identity without truncating stage suffixes.
+attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print substr($1, 1, 32)}')"
 [[ "$competition_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "competition id is invalid"
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || die "base SHA is invalid"
 [[ "$base_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "base image id is invalid"
@@ -290,6 +338,7 @@ jq -e \
     --argjson postgres_memory_bytes "$POSTGRES_MEMORY_BYTES" \
     --argjson redis_memory_bytes "$REDIS_MEMORY_BYTES" \
     --argjson active_memory_bytes "$ACTIVE_EVALUATION_MEMORY_BYTES" \
+    --argjson evidence_memory_bytes "$EVIDENCE_WORK_BYTES" \
     --argjson reserve_bytes "$MINIMUM_MANAGEMENT_MEMORY_RESERVE_BYTES" \
     '.schema == 1 and .kind == "sim-latency-resource-boundary" and
      .evaluation_physical_core_count == 10 and
@@ -301,6 +350,9 @@ jq -e \
      .postgres_memory_limit_bytes == $postgres_memory_bytes and
      .redis_memory_limit_bytes == $redis_memory_bytes and
      .active_memory_limit_bytes == $active_memory_bytes and
+     .evidence_memory_limit_bytes == $evidence_memory_bytes and
+     .total_evaluation_memory_limit_bytes == ($active_memory_bytes + $evidence_memory_bytes) and
+     .capacity_reserve_bytes == (.host_memory_bytes - .total_evaluation_memory_limit_bytes) and
      .minimum_management_memory_reserve_bytes == $reserve_bytes and
      .capacity_reserve_bytes >= $reserve_bytes' \
     <<<"$resource_boundary_json" >/dev/null || die "resource boundary does not match the frozen evaluator policy"
@@ -787,14 +839,20 @@ read_cgroup_peak() {
     printf '%s' "$value"
 }
 
+read_cgroup_oom_kills() {
+    awk '$1 == "oom_kill" {print $2; found=1} END {if (!found) exit 1}' \
+        "/sys/fs/cgroup$1/memory.events"
+}
+
 sample_cgroup_counters() {
     local target="$1"
     shift
-    local rel usage peak cpu_usec peak_bytes valid sample_tmp
+    local rel usage peak oom cpu_usec peak_bytes oom_kills valid sample_tmp
     sample_tmp="$target.new"
     while :; do
         cpu_usec=0
         peak_bytes=0
+        oom_kills=0
         valid=true
         for rel in "$@"; do
             if ! usage="$(read_cgroup_usage_usec "$rel" 2>/dev/null)"; then
@@ -805,19 +863,47 @@ sample_cgroup_counters() {
                 valid=false
                 break
             fi
-            if [[ ! "$usage" =~ ^[0-9]+$ ]] || [[ ! "$peak" =~ ^[0-9]+$ ]]; then
+            if ! oom="$(read_cgroup_oom_kills "$rel" 2>/dev/null)"; then
+                valid=false
+                break
+            fi
+            if [[ ! "$usage" =~ ^[0-9]+$ ]] || [[ ! "$peak" =~ ^[0-9]+$ ]] || [[ ! "$oom" =~ ^[0-9]+$ ]]; then
                 valid=false
                 break
             fi
             cpu_usec=$((cpu_usec + usage))
             peak_bytes=$((peak_bytes + peak))
+            oom_kills=$((oom_kills + oom))
         done
         if [ "$valid" = true ]; then
-            printf '%s %s\n' "$cpu_usec" "$peak_bytes" > "$sample_tmp"
+            printf '%s %s %s\n' "$cpu_usec" "$peak_bytes" "$oom_kills" > "$sample_tmp"
             mv "$sample_tmp" "$target"
         fi
         sleep 0.1
     done
+}
+
+# Docker inspection can contain credentials and bind-source paths. Persist
+# only this allowlist, before any policy failure or cleanup can discard it.
+write_container_inspection() {
+    local path="$1" pending="$1.new"
+    jq '[.[] | {
+          id:.Id,name:.Name,image_id:.Image,
+          config:{image:.Config.Image,user:.Config.User,labels:.Config.Labels},
+          host_config:{readonly_rootfs:.HostConfig.ReadonlyRootfs,
+            memory:.HostConfig.Memory,memory_swap:.HostConfig.MemorySwap,
+            pids_limit:.HostConfig.PidsLimit,cgroup_parent:.HostConfig.CgroupParent,
+            cpuset_cpus:.HostConfig.CpusetCpus,cap_drop:.HostConfig.CapDrop,
+            security_opt:.HostConfig.SecurityOpt,network_mode:.HostConfig.NetworkMode},
+          mounts:[.Mounts[]? | {type:.Type,destination:.Destination,rw:.RW}],
+          state:{status:.State.Status,exit_code:.State.ExitCode,
+            oom_killed:.State.OOMKilled,started_at:.State.StartedAt,
+            finished_at:.State.FinishedAt,running:.State.Running,
+            dead:.State.Dead,restarting:.State.Restarting,paused:.State.Paused,
+            restart_count:.RestartCount,health_status:.State.Health.Status,
+            health_failing_streak:.State.Health.FailingStreak}}]' > "$pending"
+    chmod 0400 "$pending"
+    mv -f -- "$pending" "$path"
 }
 
 baseline_csv=()
@@ -962,11 +1048,8 @@ run_stage() {
     ordinal="$(printf '%02d' "$index")"
     evaluation_id="${role}-${ordinal}-${job_id:0:8}"
     stage_token="${role}-${ordinal}"
-    project="urnetwork-eval-${job_id//-/}-${stage_token}"
-    project="${project:0:63}"
-    cgroup_parent="urnetwork-evaluation-${job_id//-/}-${stage_token}.slice"
-    cgroup_parent="${cgroup_parent:0:95}.slice"
-    cgroup_parent="${cgroup_parent/.slice.slice/.slice}"
+    project="urnetwork-eval-${attempt_token}-${stage_token}"
+    cgroup_parent="urnetwork-evaluation-${attempt_token}-${stage_token}.slice"
     stage_root="$work_dir/runs/$stage_token"
     output="$stage_root/output"
     runner_env="$stage_root/runner.env"
@@ -1003,47 +1086,72 @@ run_stage() {
     redis_generations+=("$(new_secret)")
 
     compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty runner preflight >&2
-    compose_with "$project" "$compose_env" --profile run up --no-deps --detach runner >&2
-    local runner_id postgres_id redis_id runner_cgroup postgres_cgroup redis_cgroup
-    runner_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet runner)"
+    local runner_id="" postgres_id redis_id runner_cgroup postgres_cgroup redis_cgroup
+    local inspect_path="$stage_root/containers.json" inspect_json
     postgres_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet postgres)"
     redis_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet redis)"
+    [ -n "$postgres_id" ] && [ -n "$redis_id" ] || die "$stage_token backing container identity missing"
+    inspect_json="$(sudo -n docker inspect "$postgres_id" "$redis_id")"
+    write_container_inspection "$inspect_path" <<<"$inspect_json"
+    postgres_cgroup="$(container_cgroup "$postgres_id")" || die "$stage_token postgres cgroup membership unavailable"
+    redis_cgroup="$(container_cgroup "$redis_id")" || die "$stage_token redis cgroup membership unavailable"
+    [ "${postgres_cgroup%/*}" = "${redis_cgroup%/*}" ] || die "$stage_token backing cgroup parents disagree"
+    case "$postgres_cgroup" in
+        *"/$cgroup_parent/"*) ;;
+        *) die "$stage_token backing container escaped the dedicated cgroup parent" ;;
+    esac
+    local pre_run_oom_kills
+    pre_run_oom_kills="$(read_cgroup_oom_kills "${postgres_cgroup%/*}")" ||
+        die "$stage_token pre-run memory events unavailable"
+    [ "$pre_run_oom_kills" = 0 ] || die "$stage_token pre-run resource containment failure"
+    compose_with "$project" "$compose_env" --profile run up --no-deps --detach runner >&2
+    runner_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet runner)"
     [ -n "$runner_id" ] && [ -n "$postgres_id" ] && [ -n "$redis_id" ] || die "$stage_token container identity missing"
+    inspect_json="$(sudo -n docker inspect "$runner_id" "$postgres_id" "$redis_id")"
+    write_container_inspection "$inspect_path" <<<"$inspect_json"
     for _ in $(seq 1 200); do
         runner_cgroup="$(container_cgroup "$runner_id" 2>/dev/null || true)"
         postgres_cgroup="$(container_cgroup "$postgres_id" 2>/dev/null || true)"
         redis_cgroup="$(container_cgroup "$redis_id" 2>/dev/null || true)"
         [ -n "$runner_cgroup" ] && [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] && break
+        # A fast crash removes its live cgroup before the first sample. Its
+        # immutable Docker identity and terminal state remain inspectable.
+        [ "$(sudo -n docker inspect --format '{{.State.Status}}' "$runner_id")" != exited ] || break
         sleep 0.1
     done
-    [ -n "$runner_cgroup" ] && [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] || die "$stage_token cgroup membership unavailable"
+    local cgroup_membership_available=false
+    [ -n "$runner_cgroup" ] && [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] && cgroup_membership_available=true
     for rel in "$runner_cgroup" "$postgres_cgroup" "$redis_cgroup"; do
         case "$rel" in
+            "") ;;
             *"/$cgroup_parent/"*) ;;
             *) die "$stage_token container escaped the dedicated cgroup parent" ;;
         esac
     done
 
-    local exit_code resource_sample sampler_pid cpu_usec peak_bytes
+    local exit_code resource_sample sampler_pid="" cpu_usec peak_bytes sampled_oom_kills=0 parent_oom_kills
     resource_sample="$stage_root/resource-counters.txt"
-    sample_cgroup_counters "$resource_sample" "$runner_cgroup" "$postgres_cgroup" "$redis_cgroup" &
-    sampler_pid=$!
-    active_sampler_pid="$sampler_pid"
+    if [ "$cgroup_membership_available" = true ]; then
+        sample_cgroup_counters "$resource_sample" "$runner_cgroup" "$postgres_cgroup" "$redis_cgroup" &
+        sampler_pid=$!
+        active_sampler_pid="$sampler_pid"
+    fi
     exit_code="$(sudo -n docker wait "$runner_id")"
-    kill "$sampler_pid" >/dev/null 2>&1 || true
-    wait "$sampler_pid" >/dev/null 2>&1 || true
+    if [ -n "$sampler_pid" ]; then
+        kill "$sampler_pid" >/dev/null 2>&1 || true
+        wait "$sampler_pid" >/dev/null 2>&1 || true
+    fi
     active_sampler_pid=""
     sudo -n docker logs "$runner_id" >&2 || true
-    [ "$exit_code" -eq 0 ] || die "$stage_token runner exited $exit_code"
-    [ -s "$resource_sample" ] || die "$stage_token resource counter sample missing"
-    read -r cpu_usec peak_bytes < "$resource_sample"
-    [[ "$cpu_usec" =~ ^[0-9]+$ ]] && [[ "$peak_bytes" =~ ^[0-9]+$ ]] ||
-        die "$stage_token resource counter sample invalid"
-    rm -f -- "$resource_sample"
-    local inspect_path="$stage_root/containers.json" inspect_json
     inspect_json="$(sudo -n docker inspect "$runner_id" "$postgres_id" "$redis_id")"
+    write_container_inspection "$inspect_path" <<<"$inspect_json"
+    [[ "$exit_code" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$exit_code" -le 255 ] ||
+        die "$stage_token runner exit status is invalid"
     jq -e --arg parent "$cgroup_parent" --arg image "$image" \
         --arg cpuset "$cpuset" \
+        --arg runner_id "$runner_id" --arg postgres_id "$postgres_id" --arg redis_id "$redis_id" \
+        --arg project "$project" --arg role "$role" --arg job_id "$job_id" --arg round_id "$round_id" \
+        --argjson exit_code "$exit_code" \
         --arg config_local "$config_local_directory" \
         --arg vault_local "$vault_local_directory" \
         --arg source "$source" \
@@ -1056,10 +1164,13 @@ run_stage() {
         'length == 3 and
          (map(select(.Name | endswith("-runner-1"))) | length == 1) and
          (map(select(.Name | endswith("-runner-1")))[0] |
+          .Id == $runner_id and .Name == ("/" + $project + "-runner-1") and
           .Config.Image == $image and .Config.User == "65532:65532" and
           .HostConfig.ReadonlyRootfs == true and .HostConfig.Memory == $runner_memory and
           .HostConfig.MemorySwap == $runner_memory and .HostConfig.PidsLimit == $runner_pids and
-          .HostConfig.CgroupParent == $parent and .State.ExitCode == 0 and .State.OOMKilled == false and
+          .HostConfig.CgroupParent == $parent and .State.Status == "exited" and
+          .State.Running == false and .State.ExitCode == $exit_code and
+          (.State.OOMKilled == false or ($role == "candidate" and $exit_code > 0 and .State.OOMKilled == true)) and
           (.HostConfig.CapDrop | index("ALL") != null) and
           (.HostConfig.SecurityOpt | index("no-new-privileges:true") != null) and
           ([.Mounts[] | select(.Destination | startswith("/runtime"))] | length == 2) and
@@ -1071,33 +1182,98 @@ run_stage() {
             .Destination == "/workspace" and .RW == false))) and
          (map(select(.Name | endswith("-postgres-1"))) | length == 1) and
          (map(select(.Name | endswith("-postgres-1")))[0] |
+          .Id == $postgres_id and .Name == ("/" + $project + "-postgres-1") and
           .Config.User == "999:999" and .HostConfig.Memory == $postgres_memory and
-          .HostConfig.MemorySwap == $postgres_memory and .HostConfig.PidsLimit == $postgres_pids) and
+          .HostConfig.MemorySwap == $postgres_memory and .HostConfig.PidsLimit == $postgres_pids and
+          .State.Status == "running" and .State.Running == true and .State.ExitCode == 0 and
+          .State.OOMKilled == false and
+          .State.Health.Status == "healthy" and .State.Health.FailingStreak == 0) and
          (map(select(.Name | endswith("-redis-1"))) | length == 1) and
          (map(select(.Name | endswith("-redis-1")))[0] |
+          .Id == $redis_id and .Name == ("/" + $project + "-redis-1") and
           .Config.User == "999:999" and .HostConfig.Memory == $redis_memory and
-          .HostConfig.MemorySwap == $redis_memory and .HostConfig.PidsLimit == $redis_pids) and
+          .HostConfig.MemorySwap == $redis_memory and .HostConfig.PidsLimit == $redis_pids and
+          .State.Status == "running" and .State.Running == true and .State.ExitCode == 0 and
+          .State.OOMKilled == false and
+          .State.Health.Status == "healthy" and .State.Health.FailingStreak == 0) and
          ([.[] | .HostConfig.CgroupParent == $parent and .HostConfig.ReadonlyRootfs == true and
            .HostConfig.CpusetCpus == $cpuset and
+           .RestartCount == 0 and .HostConfig.RestartPolicy.Name == "no" and
+           .State.Dead == false and .State.Paused == false and
+           .State.Restarting == false and .State.Error == "" and
+           .Config.Labels["com.docker.compose.project"] == $project and
+           .Config.Labels["com.urnetwork.competition.job-id"] == $job_id and
+           .Config.Labels["com.urnetwork.competition.round-id"] == $round_id and
+           .Config.Labels["com.urnetwork.competition.stage"] == $role and
            ((.HostConfig.CapDrop // []) | index("ALL") != null) and
            ((.HostConfig.SecurityOpt // []) | index("no-new-privileges:true") != null)] | all)' \
         <<<"$inspect_json" >/dev/null || die "$stage_token live container policy mismatch"
-    jq '[.[] | {
-          id:.Id,name:.Name,image_id:.Image,
-          config:{image:.Config.Image,user:.Config.User,labels:.Config.Labels},
-          host_config:{readonly_rootfs:.HostConfig.ReadonlyRootfs,
-            memory:.HostConfig.Memory,memory_swap:.HostConfig.MemorySwap,
-            pids_limit:.HostConfig.PidsLimit,cgroup_parent:.HostConfig.CgroupParent,
-            cpuset_cpus:.HostConfig.CpusetCpus,cap_drop:.HostConfig.CapDrop,
-            security_opt:.HostConfig.SecurityOpt,network_mode:.HostConfig.NetworkMode},
-          mounts:[.Mounts[] | {type:.Type,destination:.Destination,rw:.RW}],
-          state:{status:.State.Status,exit_code:.State.ExitCode,
-            oom_killed:.State.OOMKilled,started_at:.State.StartedAt,
-            finished_at:.State.FinishedAt}}]' <<<"$inspect_json" > "$inspect_path"
-    unset inspect_json
     local network_id="${project}_evaluation"
     sudo -n docker network inspect "$network_id" | jq -e '.[0].Internal == true' >/dev/null ||
         die "$stage_token network is not internal"
+
+    [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] &&
+        [ "${postgres_cgroup%/*}" = "${redis_cgroup%/*}" ] || die "$stage_token service cgroup membership unavailable"
+    # The dedicated parent survives a fast runner exit and records backend-only
+    # OOM kills even when Docker keeps reporting a healthy container init.
+    parent_oom_kills="$(read_cgroup_oom_kills "${postgres_cgroup%/*}")" ||
+        die "$stage_token parent memory events unavailable"
+    [[ "$parent_oom_kills" =~ ^[0-9]+$ ]] || die "$stage_token parent memory events invalid"
+    if [ -s "$resource_sample" ]; then
+        read -r cpu_usec peak_bytes sampled_oom_kills < "$resource_sample"
+        [[ "$cpu_usec" =~ ^[0-9]+$ ]] && [[ "$peak_bytes" =~ ^[0-9]+$ ]] &&
+            [[ "$sampled_oom_kills" =~ ^[0-9]+$ ]] || die "$stage_token resource counter sample invalid"
+    fi
+    local postgres_oom_kills redis_oom_kills
+    postgres_oom_kills="$(read_cgroup_oom_kills "$postgres_cgroup")" || die "$stage_token postgres memory events unavailable"
+    redis_oom_kills="$(read_cgroup_oom_kills "$redis_cgroup")" || die "$stage_token redis memory events unavailable"
+    [[ "$postgres_oom_kills" =~ ^[0-9]+$ ]] && [[ "$redis_oom_kills" =~ ^[0-9]+$ ]] ||
+        die "$stage_token backing memory events invalid"
+    [ "$parent_oom_kills" -ge "$((postgres_oom_kills + redis_oom_kills))" ] &&
+        [ "$parent_oom_kills" -ge "$sampled_oom_kills" ] || die "$stage_token memory event attribution inconsistent"
+    local resource_state
+    resource_state="$(jq --arg parent "$cgroup_parent" --arg cpuset "$cpuset" \
+        --argjson oom_kills "$parent_oom_kills" \
+        --argjson backing_oom_kills "$((postgres_oom_kills + redis_oom_kills))" \
+        '{exit_code:(map(select(.Name | endswith("-runner-1")))[0].State.ExitCode),
+          oom_killed:(any(.[]; .State.OOMKilled == true) or $oom_kills > 0),
+          runner_oom_kills:($oom_kills - $backing_oom_kills),backing_oom_kills:$backing_oom_kills,
+          runner_oom_killed:(map(select(.Name | endswith("-runner-1")))[0].State.OOMKilled),
+          hard_killed:any(.[]; .State.ExitCode == 137),
+          limit_escape:any(.[]; .HostConfig.CgroupParent != $parent or .HostConfig.CpusetCpus != $cpuset)}' \
+        <<<"$inspect_json")"
+    printf '%s\n' "$resource_state" > "$stage_root/container-resource-state.json"
+    chmod 0400 "$stage_root/container-resource-state.json"
+    unset inspect_json
+    jq -e '.backing_oom_kills == 0 and .limit_escape == false and
+        (.runner_oom_killed == false or .runner_oom_kills > 0)' <<<"$resource_state" >/dev/null ||
+        die "$stage_token resource containment failure"
+
+    if [ "$exit_code" -ne 0 ]; then
+        if [ "$role" = candidate ]; then
+            # Only trusted host inspection may publish this terminal failure;
+            # no candidate mount contains the attempt-root sidecar or its temp.
+            local failure_path="$artifact_dir/evaluator-failure.json" failure_tmp="$artifact_dir/.evaluator-failure.json.new"
+            [ ! -e "$failure_path" ] && [ ! -L "$failure_path" ] &&
+                [ ! -e "$failure_tmp" ] && [ ! -L "$failure_tmp" ] || die "stage failure path already exists"
+            jq -n --arg job_id "$job_id" --arg round_id "$round_id" \
+                --argjson attempt "$attempt" --argjson exit_code "$exit_code" \
+                '{schema:1,kind:"sim-latency-stage-failure",job_id:$job_id,round_id:$round_id,
+                  attempt:$attempt,role:"candidate",stage:"run",exit_code:$exit_code,
+                  error:{kind:"submission",code:"run_process_failed",
+                    message:"candidate runner exited unsuccessfully",retriable:false}}' > "$failure_tmp"
+            chmod 0400 "$failure_tmp"
+            sync -d "$failure_tmp"
+            mv -- "$failure_tmp" "$failure_path"
+            sync "$artifact_dir"
+        fi
+        die "$stage_token runner exited $exit_code"
+    fi
+    [ "$cgroup_membership_available" = true ] || die "$stage_token cgroup membership unavailable"
+    [ -s "$resource_sample" ] || die "$stage_token resource counter sample missing"
+    jq -e '.oom_killed == false and .hard_killed == false' <<<"$resource_state" >/dev/null ||
+        die "$stage_token resource containment failure"
+    rm -f -- "$resource_sample"
 
     local started_at finished_at resource_start_ms resource_end_ms
     started_at="$(jq -er 'map(select(.name | endswith("-runner-1")))[0].state.started_at' "$inspect_path")"
@@ -1128,10 +1304,12 @@ run_stage() {
         --argjson measurement_end_ms "$resource_end_ms" \
         --argjson cpu_seconds "$(awk -v value="$cpu_usec" 'BEGIN {printf "%.6f", value / 1000000}')" \
         --argjson peak_rss_bytes "$peak_bytes" \
+        --argjson resource_state "$resource_state" \
         '{schema:1,kind:"sim-latency-resource-report",evaluation_id:$evaluation_id,
           cgroup_id:$cgroup_id,measurement_start_ms:$measurement_start_ms,
-          measurement_end_ms:$measurement_end_ms,complete:true,exit_code:0,
-          oom_killed:false,hard_killed:false,limit_escape:false,
+          measurement_end_ms:$measurement_end_ms,complete:true,
+          exit_code:$resource_state.exit_code,oom_killed:$resource_state.oom_killed,
+          hard_killed:$resource_state.hard_killed,limit_escape:$resource_state.limit_escape,
           measurement_missing:false,cpu_seconds:$cpu_seconds,
           peak_rss_bytes:$peak_rss_bytes}' > "$resource_tmp"
     sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
@@ -1311,9 +1489,8 @@ chmod 0400 "$score_runner_env"
 baseline_score_output="$work_dir/baseline-score-output"
 install -d -m 0700 "$baseline_score_output"
 sudo -n chown "$container_host_uid:$container_host_gid" "$baseline_score_output"
-score_project="urnetwork-eval-${job_id//-/}-baseline-score"
-score_project="${score_project:0:63}"
-score_cgroup_parent="urnetwork-evaluation-${job_id//-/}-baseline-score.slice"
+score_project="urnetwork-eval-${attempt_token}-baseline-score"
+score_cgroup_parent="urnetwork-evaluation-${attempt_token}-baseline-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
     "$work_dir/scorer-input" "$baseline_score_output" "$score_cgroup_parent" "$baseline_source_root"
 sed -i 's/^EVALUATION_ACTION=.*/EVALUATION_ACTION=baseline/' "$score_compose_env"
@@ -1370,9 +1547,8 @@ chmod 0400 "$score_runner_env"
 candidate_score_output="$work_dir/candidate-score-output"
 install -d -m 0700 "$candidate_score_output"
 sudo -n chown "$container_host_uid:$container_host_gid" "$candidate_score_output"
-score_project="urnetwork-eval-${job_id//-/}-candidate-score"
-score_project="${score_project:0:63}"
-score_cgroup_parent="urnetwork-evaluation-${job_id//-/}-candidate-score.slice"
+score_project="urnetwork-eval-${attempt_token}-candidate-score"
+score_cgroup_parent="urnetwork-evaluation-${attempt_token}-candidate-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
     "$work_dir/scorer-input" "$candidate_score_output" "$score_cgroup_parent" "$baseline_source_root"
 sed -i 's/^EVALUATION_ACTION=.*/EVALUATION_ACTION=score/' "$score_compose_env"

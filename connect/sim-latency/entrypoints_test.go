@@ -128,16 +128,23 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Model-role contracts survive prose line wrapping but must keep the exact
+	// model, reasoning level, and ownership required by the current handoff.
+	runbook := strings.Join(strings.Fields(string(seasonRunbook)), " ")
 	for _, required := range []string{
 		"Mandatory candidate review",
-		"Terra with max reasoning",
-		"Sol with max reasoning",
+		"Use Terra (`gpt-5.6-terra`) with max reasoning for all test execution",
+		"failure or suspected flake must be handed to Astra (`gpt-6-astra`) with max reasoning to diagnose the root cause, implement the correction, and add a deterministic regression test",
+		"do not accept an Astra-run test as the independent completion result",
+		"Astra with max reasoning owns code evaluation",
+		"every winner promotion, and all source or config merge/push operations",
+		"Terra must not approve candidates, merge branches, or push source/config refs",
 		"fabricated measurements",
 		"status 20",
 		"mode-0700 temporary directory",
 		"After epoch 6",
 	} {
-		if !strings.Contains(string(seasonRunbook), required) {
+		if !strings.Contains(runbook, required) {
 			t.Errorf("RUN-MAIN.md is missing agent handoff contract %q", required)
 		}
 	}
