@@ -2727,7 +2727,7 @@ const (
 var (
 	monitorIPv6LogTimestampPattern      = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})`)
 	monitorRouterLifetimeExpiredPattern = regexp.MustCompile(`RTADV ([[:alnum:]_.-]+): router lifetime became zero`)
-	monitorAutoconfDetachedPattern      = regexp.MustCompile(`AUTOMATIC-V6 ([[:alnum:]_.-]+): all autoconf addresses detached/deprecated`)
+	monitorAutoconfDetachedPattern      = regexp.MustCompile(`(AUTOMATIC-V6|RTADV) ([[:alnum:]_.-]+): all autoconf addresses detached/deprecated`)
 )
 
 // collectTailTransportMonitorRouteEvidence asks only for the few local
@@ -2830,10 +2830,10 @@ func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRout
 			}
 			continue
 		}
-		if match := monitorAutoconfDetachedPattern.FindStringSubmatch(line); len(match) == 2 {
+		if match := monitorAutoconfDetachedPattern.FindStringSubmatch(line); len(match) == 3 {
 			// A detach on another interface is not causal evidence for this
 			// route loss. The default-router expiry chooses the identity.
-			if evidence.interfaceName != "" && match[1] == evidence.interfaceName {
+			if evidence.interfaceName != "" && match[2] == evidence.interfaceName {
 				evidence.autoconfDetachCount++
 			}
 			continue

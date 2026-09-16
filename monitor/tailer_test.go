@@ -230,6 +230,69 @@ func TestParseTailTransportMonitorRouteEvidenceDoesNotInferExpiryFromExplicitZer
 	}
 }
 
+// Both configd prefixes carry detach evidence, not the cause of router expiry.
+func TestTailTransportRouteLossRetainsRtadvDetachEvidence(t *testing.T) {
+	lines := []string{
+		"2026-01-02 03:04:05.000 Df configd[1:2] RTADV observer0: router lifetime became zero",
+		"2026-01-02 03:04:05.030 Df configd[1:2] network changed: v4(observer0:192.0.2.10)",
+		"2026-01-02 03:04:05.100 Df configd[1:2] RTADV other0: all autoconf addresses detached/deprecated",
+		"2026-01-02 03:04:05.200 Df configd[1:2] AUTOMATIC-V6 other0: all autoconf addresses detached/deprecated",
+		"2026-01-02 03:04:05.300 Df configd[1:2] OTHER observer0: all autoconf addresses detached/deprecated",
+		"2026-01-02 03:04:05.900 Df configd[1:2] RTADV observer0: all autoconf addresses detached/deprecated",
+		"2026-01-02 03:04:12.100 Df configd[1:2] RTADV observer0: all autoconf addresses detached/deprecated",
+		"2026-01-02 03:04:12.130 Df configd[1:2] network changed: v4(observer0:192.0.2.10) v6(observer0:2001:db8:1::10)",
+	}
+	evidence := parseTailTransportMonitorRouteEvidence(strings.Join(lines, "\n"))
+	if evidence.interfaceName != "observer0" || evidence.routerLifetimeExpiredCount != 1 || evidence.autoconfDetachCount != 2 {
+		t.Fatalf("RTADV evidence: interface=%q expirations=%d detaches=%d; want observer0, 1, 2", evidence.interfaceName, evidence.routerLifetimeExpiredCount, evidence.autoconfDetachCount)
+	}
+	event := &tailTransportRouteAggregate{
+		address:  "2001:db8:2::44",
+		count:    2,
+		first:    "2026/01/02 03:04:10",
+		last:     "2026/01/02 03:04:11",
+		services: map[string]struct{}{"synthetic-service": {}},
+	}
+	if !evidence.matches(event) || evidence.ipv6RestoredAt.Sub(evidence.ipv6AbsentAt) != 7100*time.Millisecond {
+		t.Fatalf("RTADV interval: matches=%t duration=%s; want true, 7.1s", evidence.matches(event), evidence.ipv6RestoredAt.Sub(evidence.ipv6AbsentAt))
+	}
+	loss := findingByClass(t, tailTransportRouteFindings(nil, map[string]*tailTransportRouteAggregate{event.address: event}, evidence), "tailer-ipv6-route-loss")
+	if loss.healthy || !strings.Contains(loss.observed, "monitor_autoconf_detach=2") {
+		t.Fatalf("RTADV finding: healthy=%t observed=%q; want unhealthy with detach count 2", loss.healthy, loss.observed)
+	}
+	for _, want := range []string{
+		"separately recorded 2 autoconfiguration detach/deprecate transition(s)",
+		"does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements",
+		"IPv6 network state returned at 2026-01-02 03:04:12.130",
+	} {
+		if !strings.Contains(loss.mechanism, want) {
+			t.Fatalf("RTADV mechanism %q omitted %q", loss.mechanism, want)
+		}
+	}
+	if !strings.Contains(loss.action, "Do not change the named production edge") || !strings.Contains(loss.verify, "For at least 30 minutes") {
+		t.Fatalf("RTADV action=%q verify=%q omitted the edge exclusion or 30-minute gate", loss.action, loss.verify)
+	}
+	alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", loss)
+	for _, raw := range []string{"configd[", "network changed:", "192.0.2.10", "2001:db8:1::10", "other0", "RTADV observer0:"} {
+		if strings.Contains(alert.Markdown(), raw) {
+			t.Fatalf("route-loss Markdown retained synthetic local log fragment %q", raw)
+		}
+	}
+}
+
+// Detach records alone must not create a stored-router-expiration interval.
+func TestParseTailTransportMonitorRouteEvidenceRequiresExpiryForEitherDetachPrefix(t *testing.T) {
+	for _, prefix := range []string{"AUTOMATIC-V6", "RTADV"} {
+		evidence := parseTailTransportMonitorRouteEvidence(
+			"2026-01-02 03:04:05.000 Df configd[1:2] " + prefix + " observer0: all autoconf addresses detached/deprecated\n" +
+				"2026-01-02 03:04:05.030 Df configd[1:2] network changed: v4(observer0:192.0.2.10)\n",
+		)
+		if evidence.interfaceName != "" || evidence.autoconfDetachCount != 0 || !evidence.routerLifetimeExpiredAt.IsZero() || !evidence.ipv6AbsentAt.IsZero() {
+			t.Fatalf("%s detach-only records invented local router expiry: %+v", prefix, evidence)
+		}
+	}
+}
+
 func TestTailTransportRouteLossUsesMonitorRouterLifetimeExpirationDiscriminator(t *testing.T) {
 	tailer := newLogTailer("api", nil)
 	tailer.recordTransportDiagnostic("2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.")
@@ -542,6 +605,8 @@ func TestCollectTailTransportMonitorRouteEvidenceCoversProvenDiagnosticLag(t *te
 		"--start 2026-09-01 06:49:49",
 		"--end 2026-09-01 07:00:05",
 		`process == "configd"`,
+		`eventMessage CONTAINS "RTADV "`,
+		`eventMessage CONTAINS "AUTOMATIC-V6 "`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("bounded configd command missing %q: %s", want, joined)

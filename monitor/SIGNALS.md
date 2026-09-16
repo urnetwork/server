@@ -20584,6 +20584,26 @@ infer one from IPv6 absence: `monitor_autoconf_detach=0` means the bounded
 records did not supply that additional transition evidence. A positive count
 is retained separately without selecting an on-wire RA cause.
 
+The 2026-09-16 recurrence at 17:30:33Z exposed a detach-count parser omission,
+not a new production edge fault. Nine standing service tails reported route
+loss at 17:30:38Z–17:30:39Z while local IPv6 network state was absent from
+17:30:33.120Z to 17:30:40.188Z. The bounded configd record contained two
+same-interface `RTADV ... all autoconf addresses detached/deprecated` records,
+but the parser recognized only the `AUTOMATIC-V6` prefix and reported zero.
+It now accepts either exact prefix while retaining the same-interface and
+stored-router-expiration requirements. Synthetic parser-to-Markdown coverage
+keeps the count, excludes unrelated interfaces and raw local log content, and
+preserves the causal ambiguity. Detach records alone do not prove router
+expiry or choose explicit zero-lifetime RA, missed/late refresh, or local
+RA-state invalidation.
+
+A bounded local power-log control from 17:25Z–17:35Z contained no
+Sleep/Wake/DarkWake transition and retained active sleep-prevention/display
+assertions through the event. This is a negative control against system sleep
+as the trigger for this recurrence, not a universal exclusion of local state
+changes. The seven-second IPv6 restoration is not operational closure: the
+type-134 evidence and 30-minute verification gate below still apply.
+
 The 2026-09-12 `16:36Z` recurrence established that bounded delivery grace.
 The monitor's stored-router lifetime reached zero, its IPv6 network state
 disappeared 29 milliseconds later, and IPv6 returned after 6.8 seconds. A
