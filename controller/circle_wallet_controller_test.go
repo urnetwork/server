@@ -72,6 +72,34 @@ func TestWalletValidateAddressMatchesDeclaredChain(t *testing.T) {
 			address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
 			valid:   false,
 		},
+		// TAO addresses are recorded, not paid out. The prefix is pinned to
+		// 42, so the same public key under another network prefix is a
+		// different -- and rejected -- address. These two are the well known
+		// substrate dev key at prefix 42 and prefix 0 respectively.
+		{
+			name:    "bittensor prefix 42",
+			chain:   "TAO",
+			address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+			valid:   true,
+		},
+		{
+			name:    "bittensor key at the polkadot prefix",
+			chain:   "TAO",
+			address: "15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5",
+			valid:   false,
+		},
+		{
+			name:    "bittensor bad checksum",
+			chain:   "TAO",
+			address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQZ",
+			valid:   false,
+		},
+		{
+			name:    "solana address labeled bittensor",
+			chain:   "TAO",
+			address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+			valid:   false,
+		},
 	}
 
 	for _, test := range tests {

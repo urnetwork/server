@@ -501,6 +501,15 @@ func RemoveExpiredNetworkCreateIpRateLimitAttempts(ctx context.Context, minTime 
 
 // Atomically records and checks a wallet-challenge source-address history.
 // Excluded callers receive a zero attempt id and never open PostgreSQL.
+//
+// Scope, stated precisely because it is easy to over-read: this bounds FAILED
+// issuance attempts per client address, matching what a login limiter does
+// (`success = false` below, set from the domain outcome by
+// controller.AuthWalletChallenge). It does NOT bound successful issuance, so a
+// caller sending well-formed requests is limited only by the generic api
+// limits and the hourly reaper on wallet_auth_challenge. Adding an issuance
+// cap here is a deliberate policy change -- it needs its own much higher
+// threshold, since NAT'd clients share one address hash.
 func CheckWalletChallengeIpRateLimit(
 	ctx context.Context,
 	client *RateLimitClient,
@@ -517,6 +526,11 @@ func CheckWalletChallengeIpRateLimit(
 
 	Tx(ctx, func(tx PgTx) {
 		attemptId = NewId()
+		// The port is recorded for forensics but must not be part of the
+		// count key: every request arrives on a fresh ephemeral port, so
+		// keying on it gave each attempt its own bucket and no limit ever
+		// engaged. Key on the address hash alone, as
+		// CheckNetworkCreateIpRateLimit and CheckIpRateLimitAttempt do.
 		RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -540,15 +554,13 @@ func CheckWalletChallengeIpRateLimit(
 					FROM wallet_auth_challenge_attempt
 					WHERE
 						client_address_hash = $1 AND
-						client_address_port = $2 AND
-						now() - INTERVAL '1 seconds' * $3 <= attempt_time AND
+						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
 						success = false
 					ORDER BY attempt_time DESC
-					LIMIT $4
+					LIMIT $3
 				) attempts
 			`,
 			client.clientIpHash[:],
-			clientPort,
 			lookback/time.Second,
 			failedLimit,
 		)
