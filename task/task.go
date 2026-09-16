@@ -1334,6 +1334,10 @@ type TaskWorkerSettings struct {
 	BatchSize              int
 	RetryTimeoutAfterError time.Duration
 	PollTimeout            time.Duration
+	// ClaimRegisteredTargetsOnly leaves other workloads' pending rows untouched.
+	// Filtering precedes the candidate limit, including the owner of a RunPost
+	// retry, so an unrelated backlog cannot starve registered work.
+	ClaimRegisteredTargetsOnly bool
 	// how long `Drain` waits for in-flight tasks to finish naturally before
 	// canceling their contexts
 	DrainFinishTimeout time.Duration
@@ -1715,6 +1719,34 @@ func (self *TaskWorker) takeTasks(n int) (
 
 	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
 	candidateLimit := n + 64
+	claimPredicate := ""
+	queryArgs := []any{nowBlock, candidateLimit}
+	if self.settings.ClaimRegisteredTargetsOnly {
+		functionNames := make([]string, 0, len(self.targets))
+		for functionName := range self.targets {
+			functionNames = append(functionNames, functionName)
+		}
+		// Match the same version-normalized aliases as dispatch. RunPost is a
+		// wrapper: admitting its name alone would execute excluded post hooks.
+		// Invalid or orphaned wrappers stay available to the ordinary worker;
+		// they cannot poison this profile's queue or consume its candidate limit.
+		claimPredicate = `
+			AND CASE WHEN regexp_replace(function_name, '/v[0-9]+', '', 'g') = $4 THEN
+				EXISTS (
+					SELECT 1 FROM finished_task
+					WHERE finished_task.task_id = CASE
+						WHEN pg_input_is_valid(pending_task.args_json, 'jsonb')
+						THEN CASE WHEN (pending_task.args_json::jsonb ->> 'task_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+							THEN (pending_task.args_json::jsonb ->> 'task_id')::uuid
+						END
+					END
+					AND regexp_replace(finished_task.function_name, '/v[0-9]+', '', 'g') = ANY($3)
+				)
+			ELSE regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($3)
+			END
+		`
+		queryArgs = append(queryArgs, functionNames, functionName(self.RunPost))
+	}
 	result, err := tx.Query(
 		self.ctx,
 		`
@@ -1724,12 +1756,12 @@ func (self *TaskWorker) takeTasks(n int) (
 				run_max_time_seconds
 			FROM pending_task
 			WHERE available_block <= $1
+		`+claimPredicate+`
 			ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		`,
-		nowBlock,
-		candidateLimit,
+		queryArgs...,
 	)
 	if err != nil {
 		return nil, nil, err

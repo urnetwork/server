@@ -139,14 +139,24 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 // registered. One TaskWorker can be shared with many goroutines calling
 // EvalTasks. Passing nil uses the defaults.
 func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings) *task.TaskWorker {
+	return initTaskWorkerWithSettings(ctx, settings, WorkloadProfileProduction)
+}
+
+// initTaskWorkerWithSettings selects targets before the worker can claim rows.
+func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorker {
 	if settings == nil {
 		settings = task.DefaultTaskWorkerSettings()
+	}
+	if profile == WorkloadProfileSubnetOperator {
+		profileSettings := *settings
+		profileSettings.ClaimRegisteredTargetsOnly = true
+		settings = &profileSettings
 	}
 	taskWorker := task.NewTaskWorker(ctx, settings)
 
 	// 2024.11.15 migration from "bringyour.com" to new package
 
-	taskWorker.AddTargets(
+	addProfileTargets(taskWorker, profile,
 		task.NewTaskTargetWithPost(
 			task.TaskCleanup,
 			task.TaskCleanupPost,
