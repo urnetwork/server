@@ -265,6 +265,17 @@ environment/mode/start timezone, alert/stderr objects, server commit/dirty
 state, expected tails, exclusions/reasons, boundaries, and deadlines. The
 session must support polling, graceful stop, and liveness proof.
 
+Delta reducers must use the exact monitor identity returned by
+`Alert.Identity()`: `SignalID + Class + Target + Frame`. Severity is not part
+of that identity. Report a WARN-to-PAGE or PAGE-to-WARN transition only when
+all four identity fields match exactly before and after; never pair alerts by
+`signal_key`, family, sort position, timestamp adjacency, or latest row. Two
+concurrent findings from one signal remain distinct even when they alternate in
+the JSONL stream. A diagnostic relationship between different classes may be
+reported separately as a semantic reassignment only with both complete
+before/after identities and `causal_or_recovery_claim=false`; it is not a
+severity transition, a resolution, or a new identity replacement.
+
 The ledger has one writer: the primary agent that owns the authoritative watcher
 session and production-mutation boundary. Each record is exactly one complete
 compact JSON object on one physical line. Canonicalize a prepared,

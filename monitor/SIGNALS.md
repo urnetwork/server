@@ -5788,6 +5788,33 @@ Taskworker so it mounts that completed version, prove every executor's source
 capability, and observe all four successful successors at 52 before starting
 the two-verdict-lifetime resource and coverage gate.
 
+A bounded direct Main discriminator at `2026-09-16T15:02:42Z` narrowed that
+boundary further. All four coherent durable rows still carried 32 and the only
+desired execution-setting mismatch was blackhole concurrency 52. In the prior
+three hours, 116/116 completed shard tasks had both full work and more than one
+250-provider blackhole batch due, and every task completed its post-step. That
+is behavioral evidence that the running Taskworkers repeatedly drain
+blackholes beside full work on every shard; source ancestry or a release date
+alone would not prove it. The immediate correction is therefore authorized
+configuration publication, Taskworker mount convergence, and four successful
+52-concurrency successors—not another independent-drain code change and not
+evidence that new hardware is presently required. The measured rate remains
+authoritative, and PgBouncer queueing plus sustained host, Taskworker,
+PostgreSQL, API, and Proxy headroom remain rollout gates.
+
+The same discriminator exposed a predecessor-monitor false forecast without
+erasing a real deadline miss. For the current shard-0 stale-health cohort, the
+old whole-category predicate would assign 7,200 seconds of work to only 4,614.9
+seconds remaining in a same-snapshot replay, while the exact cumulative
+deadline-prefix query had **+4,568 seconds** of minimum slack. The immediately
+preceding live-watcher PAGE was a different `15:00:20Z` sample at 79/hour with
+7,109 seconds of projected whole-category work; do not present the 7,200-second
+replay as an executed watcher observation. Current source uses the prefix
+query, so that forecast is not a current fairness failure. A separately
+observed `expired_due=1` sample remains a real historical absolute-deadline
+miss and stays open until artifact ownership and the documented healthy window
+are established; later positive slack is not retroactive recovery.
+
 The 2026-09-03 main incident is a dated rollout control, not a permanent
 version assertion: the TLS-integrity field was present but zero durable probe
 rows existed. All eight fresh Taskworkers reported the same modified base
