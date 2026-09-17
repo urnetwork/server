@@ -1235,7 +1235,11 @@ func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
 		"exact affected-service attribution",
 		"privacy-safe",
 		"does not distinguish the two stages",
-		"same-window ingester reset identifies the earlier path",
+		"same-window ingester reset corroborates ingester-side loss",
+		"cannot assign the reset to this exact service summary",
+		"rate counts summary lines",
+		"one response's bounded descriptor count",
+		"understate loss magnitude",
 		"Warp 35453fd contains that forwarding",
 		"prevents sub-processing-bound bursts",
 		"genuine sustained blockage still produces bounded descriptors",
@@ -1246,6 +1250,29 @@ func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("direct Loki dropped-entry alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestLogErrorsSignalHidesMalformedDirectLokiTailDroppedEntrySuffix(t *testing.T) {
+	line := `[warpctl][loki-tail-dropped-entries] service=fixture-service count=2 error=fixture-sensitive-suffix`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names fixture-service", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visibility := requireAlertClass(t, alerts, "loki-tail-dropped-entries-unobservable")
+	if strings.Contains(visibility.Markdown(), "fixture-sensitive-suffix") {
+		t.Fatal("malformed summary suffix reached Markdown")
+	}
+	for _, alert := range alerts {
+		if alert.Class == "loki-tail-dropped-entries" {
+			t.Fatal("malformed summary became affirmative loss evidence")
 		}
 	}
 }

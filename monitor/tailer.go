@@ -115,6 +115,12 @@ type logClass struct {
 	// shared layer but is not necessarily the affected application selector.
 	// Its alert symptom and observed fields must state that attribution limit.
 	observationOnly bool
+	// countEveryLiveOccurrence is reserved for strict, timestamp-free local
+	// summaries whose identical bytes represent distinct upstream responses.
+	// Such summaries cannot be returned by source-time reconciliation, so live
+	// replay suppression would hide real events rather than remove overlap.
+	// Reconciliation and ordinary source records retain exact replay dedup.
+	countEveryLiveOccurrence bool
 	// redactIDs removes UUID/server.Id values from the retained sample. Some
 	// classes need a representative site/error but their entity identifiers
 	// must not be copied into alert artifacts.
@@ -588,13 +594,25 @@ var logClasses = []logClass{
 	// querier response-channel path use the existing dropped_entries field.
 	// Warpctl receives that metadata on the affected service's WebSocket and
 	// can attribute it without retaining labels.
-	{name: "loki-tail-dropped-entries", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-dropped-entries\]\s+service=[A-Za-z0-9._-]+\s+count=[1-9][0-9]*(?:\s|$)`),
-		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+	{name: "loki-tail-dropped-entries", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-dropped-entries\]\s+service=[A-Za-z0-9._-]+\s+count=[1-9][0-9]*\s*$`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4", countEveryLiveOccurrence: true,
 		meaning:   "Loki declared live-tail loss for this service's standing tail and returned a non-empty dropped_entries list",
 		mechanism: "Two bounded Loki stages can populate this API field. The querier buffers ten tail responses and attaches up to 1,000 descriptors after that downstream channel overflows. Separately, each ingester sends up to ten DroppedStreams descriptors with its next stream; Warp 5927527 forwards those descriptors into the same existing response without enlarging a queue. Warp 35453fd contains that forwarding and prevents sub-processing-bound bursts from being dropped merely because the five-slot handoff is momentarily full; genuine sustained blockage still produces bounded descriptors. Older Warpctl decoded dropped_entries but silently discarded it; Warp commit 26089b2 emits one local service/count summary for every non-empty response.",
-		context:   "The owning monitor tail supplies exact affected-service attribution, but the summary alone does not distinguish the two stages. A same-window ingester reset identifies the earlier path; otherwise inspect the querier-to-WebSocket consumer path as well. The summary is privacy-safe: Warpctl deliberately omits dropped stream labels and timestamps. Bounded range reconciliation remains the content-recovery path.",
+		context:   "The owning monitor tail supplies exact affected-service attribution, but the summary alone does not distinguish the two stages. A same-window ingester reset corroborates ingester-side loss in that window but cannot assign the reset to this exact service summary without a privacy-safe join; inspect the querier-to-WebSocket consumer path as well. The alert rate counts summary lines, while the retained count is only one response's bounded descriptor count; neither is a unique lost-record total. Both Loki stages bound descriptor metadata, so the summary can understate loss magnitude. The summary is privacy-safe: Warpctl deliberately omits dropped stream labels and timestamps. Bounded range reconciliation remains the content-recovery path.",
 		action:    "Verify the running Grafana artifact contains Warp 35453fd and the Warpctl artifact contains 26089b2 or later, retain bounded overlap reconciliation for the named service, and remove any residual producer burst or genuinely blocked consumer. Do not print dropped labels or timestamps, disable reconciliation, or raise any Loki response or ingester queue.",
 		verify:    "The named service tail stays connected, two consecutive overlap reconciliations complete, and no service-attributed loki-tail-dropped-entries summary, ingester reset, or backend EOF appears for 10 minutes through the workload that triggered the loss.",
+	},
+	// Reserve the local summary prefix after the strict valid shape. A malformed
+	// producer must remain visible without falling into the generic novel path,
+	// which would retain an arbitrary trailing field in its sample.
+	{name: "loki-tail-dropped-entries-unobservable", re: regexp.MustCompile(`^\[warpctl\]\[loki-tail-dropped-entries\]`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4", countEveryLiveOccurrence: true,
+		meaning:   "Warpctl emitted the reserved dropped-entries summary prefix without the complete fixed privacy-safe schema, so live-tail loss metadata is unobservable",
+		mechanism: "The valid local event requires exactly one bounded service token and a positive decimal descriptor count with no trailing fields. A zero or malformed count, missing field, or suffix indicates producer/version drift or corrupted local output. The monitor reserves the prefix and retains only a fixed schema error rather than copying the malformed suffix into a generic novel sample.",
+		context:   "This visibility finding does not prove zero loss, a particular Loki loss stage, or a descriptor cardinality. The malformed event cannot safely establish the affected service or magnitude, and its raw suffix is deliberately discarded.",
+		action:    "Verify the running Warpctl artifact contains the fixed dropped-entries summary contract, inspect its local producer path without copying the malformed suffix, and repair version drift or serialization. Preserve bounded range reconciliation; do not reinterpret a malformed count as zero or expose trailing fields.",
+		verify:    "The standing tail stays connected, two consecutive overlap reconciliations complete, every future summary matches the strict privacy-safe schema, and this visibility class plus the three Loki loss classes remain zero for 10 minutes through comparable load.",
+		sample:    func(string) string { return "[warpctl][loki-tail-dropped-entries] invalid_schema" },
 	},
 	// Loki's live API can deliver a record after ingestion even when its source
 	// timestamp is behind the WebSocket cursor. Warpctl drops that record before
@@ -2068,7 +2086,7 @@ func (self *logTailer) classify(line string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.lastLineTime = self.clock()
-	self.classifyLocked(line, false, true, self.clock())
+	self.classifyLocked(line, false, true, self.clock(), false)
 }
 
 // ingestStanding is used by both standing transports. Exact replay
@@ -2093,17 +2111,17 @@ func (self *logTailer) ingestStanding(line string, updateLiveness bool, count bo
 			return
 		}
 	}
-	self.classifyLocked(line, true, count, now)
+	self.classifyLocked(line, true, count, now, updateLiveness)
 }
 
-func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool, now time.Time) {
+func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool, now time.Time, liveStanding bool) {
 	if isGrafanaQueryEcho(self.service, line) {
 		return
 	}
 
 	for _, c := range logClasses {
 		if c.re.MatchString(line) && (c.match == nil || c.match(line)) {
-			if deduplicate && self.standingReplayLocked(line, now) {
+			if deduplicate && !(liveStanding && c.countEveryLiveOccurrence) && self.standingReplayLocked(line, now) {
 				return
 			}
 			if !count {
@@ -2407,6 +2425,9 @@ func (self *logTailer) drainWindow() []finding {
 		unknownMimirRejection := self.classCounts["mimir-rejection-unobservable\x00rejection-schema"] > 0
 		withholdHealthy := unknownMimirRejection && (c.name == "mimir-series-limit" ||
 			c.name == "mimir-ingestion-rate-limit" || c.name == "mimir-push-rejected")
+		if c.name == "loki-tail-dropped-entries" && self.classCounts["loki-tail-dropped-entries-unobservable"] > 0 {
+			withholdHealthy = true
+		}
 		if !broken && !withholdHealthy {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}

@@ -1962,16 +1962,21 @@ table-lookup info records, bucket-index version convergence below two minutes,
 healthy rules/metrics/warnings/errors, complete bounded reconciliation, and
 zero raw reset, service-attributed dropped-entry, plus EOF classes for ten
 minutes. Any residual dropped-entry summary names the affected service tail;
-pair it with same-window resets to identify the ingester stage. Any residual
-EOF remains framed by backend and must be diagnosed on that exact node.
+same-window resets corroborate ingester-side loss in that window but cannot
+assign that reset to this exact service summary without a privacy-safe join.
+Any residual EOF remains framed by backend and must be diagnosed on that exact
+node.
 
 The querier also has its own ten-response channel to the WebSocket. If that
 later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors to a
 successful HTTP tail response. After Warp `5927527`, the earlier ingester
 descriptors use this same response field, so a non-empty response proves loss
 for the named service but does not by itself distinguish the two stages. A
-same-window raw reset identifies the ingester path. Warpctl decoded the API
-field but `LiveTail` ignored it and printed only `streams`. Warp commit
+same-window raw reset corroborates ingester-side loss in that window but does
+not assign that loss to the exact service summary; the downstream querier-to-
+WebSocket queue remains a candidate without a privacy-safe join. Warpctl
+decoded the API field but `LiveTail` ignored it and printed only `streams`.
+Warp commit
 `26089b2` fixes this client defect by emitting one local
 `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` summary for
 each non-empty response. It deliberately omits labels and timestamps, which
@@ -1982,6 +1987,37 @@ exercise the same response-processing function as `LiveTail`, require the
 summary, and prove no label or timestamp reaches output. A server synthetic
 test requires that direct summary to open the downstream class against the
 affected service.
+
+The retained 2026-09-17 boundary supplied two additional qualifier controls.
+One minute contained two valid non-empty response summaries and a separate
+ingester reset, with no backend EOF. The summaries affirm live-tail delivery
+loss for their owning service tails; they do not prove source-journal or
+durable-Loki loss, unique lost-record cardinality, application failure, or the
+exact internal loss stage. The alert rate counts summary lines, while each
+retained `count` is only that response's bounded descriptor count. Both Loki
+stages bound descriptor metadata, so even an exact summary can understate the
+loss magnitude. A same-cadence reset proves some ingester-side loss but cannot
+join that unknown-selector reset to one exact service summary. Range
+reconciliation remains the content-completeness authority.
+
+That boundary also proved a monitor false negative. The fixed privacy-safe
+summary has no timestamp, and the standing-tail overlap reducer previously
+deduplicated identical whole lines for four minutes. Two distinct responses
+with the same service and descriptor count could therefore produce only one
+alert and manufacture quiet follow-up windows. This class now counts every
+strict live local occurrence while preserving ordinary source-record and
+range-reconciliation replay suppression. Its grammar is anchored through end
+of line. Zero counts, malformed counts, missing fields, and arbitrary trailing
+fields produce `loki-tail-dropped-entries-unobservable`; they do not become
+affirmative loss evidence or generic novel samples, and their raw suffix is
+discarded. While that visibility finding is active, the affirmative loss class
+does not emit a healthy sibling or resolve an existing ticket. Older Warpctl
+before `26089b2`, Grafana Warp before
+`5927527`, bounded descriptor metadata, and missing or incomplete standing-tail
+or reconciliation receipts remain false-negative qualifiers. Silence is not
+recovery: require a connected standing tail, two advancing complete overlap
+reconciliations, and zero summaries, resets, and EOFs for ten minutes through
+comparable load.
 
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
@@ -8159,7 +8195,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | One request named a plugin type that the serving Grafana process could not resolve. A missing native datasource is one cause; a stale dashboard/browser payload or another unsupported request type can emit the same generic line while the required datasource plugins work. | Retain the request path/referer and query both `warp-mimir` and `warp-loki` through that exact generation's `/api/ds/query`. A failed control is the image/plugin branch in §11.15; if both controls succeed and both plugin processes remain present, repair the request/dashboard client instead. Do not infer an image omission or recreate a datasource from the generic log alone. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path after all six active ring nodes were healthy. Loki 3.7.3 also discarded short bursts whenever its five-slot handoff was momentarily full despite capacity in the 100-slot processing queue. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Verify the running Grafana artifacts contain Warp `1e95aef` and `bca37cf`; deploy them only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `35453fd`, which contains `5927527`'s descriptor forwarding and makes the short-burst handoff cancellation-aware without enlarging queues or hiding sustained pressure. Require query-frontend/evaluator and table-lookup info records zero, bucket-index convergence below two minutes, rules/metrics healthy, and EOF/reset/service-drop classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3 uses a nonblocking handoff into a five-stream channel, so a burst larger than five can drop despite room in the 100-stream processing queue; sustained pressure beyond that queue remains a genuine bounded-overflow case. The accompanying `resp.DroppedStreams` also requires the `5927527` forwarding contained by `35453fd`. Continued genuine blockage after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. | Verify the running Grafana and Proxy artifacts contain Warp `1e95aef` and server `e055c98c`, deploying only where absent. For current Grafana blocks, deploy Warp `35453fd`; its blocking cancellation-aware handoff preserves short bursts and retains bounded drop metadata under real pressure without raising a queue. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
-| `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution but requires a same-window raw reset to distinguish the ingester path. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print the dropped labels or timestamps or raise either queue. Require zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through the triggering load. See §1.5. |
+| `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
@@ -10010,6 +10046,7 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; raw observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe, service-attributed Warpctl summary from either bounded HTTP tail loss stage | any |
+| loki-tail-dropped-entries-unobservable | logs | §1.5 reserved Warpctl summary prefix with a zero/malformed count, missing required field, or arbitrary suffix; raw suffix discarded | any; visibility warning, never healthy or affirmative loss evidence |
 | tailer-stale-arrival | logs | §1.5 monitor-side source timestamp behind the two-minute live overlap; contents excluded from current product classes | any exact-replay-deduplicated stale arrival |
 | loki-tail-pre-cursor-entries | logs | §1.5 privacy-safe Warpctl service/count summary for records older than its requested monotonic cursor; contents suppressed before monitor classification | any nonzero summary |
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
