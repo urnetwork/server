@@ -93,6 +93,29 @@ func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T)
 	}
 }
 
+func TestMonitorDocumentationRejectsMissingPredecessorTransitions(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"RUN-MAIN.md", "SIGNALS.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documentation := strings.Join(strings.Fields(string(data)), " ")
+		for _, required := range []string{
+			"authoritative predecessor",
+			"prior severity",
+			"identity as new",
+			"incomplete or unsealed",
+			"new=1, transitions=0",
+			"new=0, transitions=1",
+		} {
+			if !strings.Contains(documentation, required) {
+				t.Errorf("%s lost exact-identity transition guidance %q", path, required)
+			}
+		}
+	}
+}
+
 func TestRunMainRetainsWholeHostScopeSafety(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)

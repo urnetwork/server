@@ -310,6 +310,16 @@ reported separately as a semantic reassignment only with both complete
 before/after identities and `causal_or_recovery_claim=false`; it is not a
 severity transition, a resolution, or a new identity replacement.
 
+Gate the severity comparison on authoritative predecessor existence. A
+missing, null, empty, or default prior severity is not a transition state:
+classify that exact identity as new and do not also increment transition or
+downgrade counts. If the prior prefix is incomplete or unsealed, newness and
+transition absence are unknown rather than zero. Every reducer regression must
+include prior `A/PAGE` with window `B/WARN, A/PAGE`
+(`new=1, transitions=0, downgrades=0`) and prior `A/PAGE` with window `A/WARN`
+(`new=0, transitions=1, downgrades=1`). This existence gate must run before
+evaluating `before_severity != after_severity`.
+
 The alert artifact is append-only while the watcher is live. Snapshot the
 inclusive ending row once, then extract with both lower and upper row bounds
 and verify the exact expected row count before hashing or reducing it. Never

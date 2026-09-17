@@ -336,6 +336,20 @@ the ambiguous/unobservable case without putting production identifiers or
 values in fixtures. Record a discriminator learned during an incident
 immediately rather than waiting for the daily catalog audit.
 
+Window and ledger reducers have an additional qualifier boundary: a severity
+transition requires an authoritative predecessor for the same exact
+`SignalID + Class + Target + Frame` identity. Test identity existence before
+comparing severity. A missing, null, empty, or default prior severity is not a
+predecessor: classify that identity as new, not as a WARN/PAGE transition.
+Treating `null != severity` as a change creates one false transition for every
+new identity. Conversely, an incomplete or unsealed prefix cannot prove that
+an apparent first sighting
+is new or that no transition occurred; classify that history as unobservable
+until the prefix or another authoritative prior-state receipt is complete.
+The deterministic healthy control is prior `A/PAGE` followed by window
+`B/WARN, A/PAGE` (`new=1, transitions=0, downgrades=0`); the matched control is
+prior `A/PAGE` followed by `A/WARN` (`new=0, transitions=1, downgrades=1`).
+
 Follow-up diagnostic executors are part of the observation path. Bind request
 fields by JSON name or a NUL-safe typed encoding, not positional whitespace or
 TSV parsing when a field can be empty. Before contact, prove from the rendered
@@ -2315,6 +2329,21 @@ single ClientRead older than one minute still identifies a client/pool path
 that must be attributed. The rebuilt watcher validated the negative branch:
 a direct production sample again found seven distinct ClientRead PIDs with a
 4ms oldest command, while the wait-events probe emitted no alert.
+
+False-positive qualifier for persistence attribution: cadence sustain is keyed
+by database target and wait family, not PID, query ID, or query start. Two
+consecutive age-guard failures can therefore be two different aged backends in
+the same family. They prove a recurring family condition, but not that one
+backend persisted; require a separate bounded history with matching PID,
+query-start, and query identity before making that claim. The emitted alert
+retains only the current oldest-waiter snapshot. False-negative qualifier: one
+long-running backend can alternate wait families and reset each per-frame
+sustain counter. Corroborate with §2.1 active-query identity/history whenever
+the command remains old but this class does not mature. Five-minute snapshots
+also miss waits that begin and end between ticks, and each grouped row retains
+only its oldest query shape; absent/unknown query IDs cannot establish
+continuity. Missing prior samples or incomplete active-query history leave
+persistence unknown, not healthy.
 
 At 06:03Z on 2026-08-31, a read-only one-shot observation found one
 `IO:DataFileRead` waiter at 71s. It cleared before the immediate attribution
@@ -4671,6 +4700,18 @@ all four guards after a complete-metric rollout, profile the phase selected by
 that evidence and only then bound the proved source-map, target-map, encoding,
 or cache-write owner. Do not lower score-export concurrency or change scheduler
 parallelism from heartbeat correlation alone.
+
+A retained 2026-09-17 boundary supplied another identity qualifier. A new
+runtime frame crossed all four guards for two cadences, while the same stable
+host/block target had three mature churn emissions on an older runtime. The
+rate violation was real, but the new exact frame established process
+replacement rather than a new causal mechanism. Compare stable-target history
+across runtime frames before labeling churn novel. No later alert in a frozen
+slice is not recovery because alert-only JSONL carries no positive per-probe
+receipt. Sub-two-minute bursts and process replacement can evade this probe;
+§8.15's complete runtime-family check remains the independent missing-rate
+control. Task heartbeats, the global alias marker, and phase occupancy remain
+correlation only and cannot assign process allocation ownership.
 
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
