@@ -166,8 +166,10 @@ configuration does not already select the identities.
 test -n "$BRINGYOUR_HOME"
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
-go test ./monitor
-go test -race ./monitor
+bash -c \
+  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+bash -c \
+  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
 go vet ./monitor
 monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.preflight.XXXXXXXX")
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
@@ -443,8 +445,9 @@ watcher. A `settings-freshness` finding means this boundary has already been
 crossed; validate the current generation with a fresh one-shot before
 promotion. Promote it as a controlled handoff:
 
-1. run focused tests, `go test ./monitor`, `go test -race ./monitor`, and
-   `go vet ./monitor`;
+1. run focused tests, the attested-local sequential package and race gates, and
+   `go vet ./monitor` exactly as described under Deterministic verification
+   gates below;
 2. build a new uniquely named binary and record its hash;
 3. start it alongside the old watcher;
 4. prove the new parent remains alive, loads the expected signals, and starts
@@ -745,12 +748,28 @@ or wall-clock sleeps. Cover, as applicable:
 Run the narrow test first, then the package and race suite:
 
 ```sh
-go test ./monitor -run 'TestRelevantName' -count=1
-go test ./monitor
-go test -race ./monitor
+bash -c \
+  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor -run "TestRelevantName" -count=1'
+bash -c \
+  'unset WARP_ENV; source ./test-env.sh && exec go test ./monitor'
+bash -c \
+  'unset WARP_ENV; source ./test-env.sh && exec go test -race ./monitor'
 go vet ./monitor
 git diff --check
 ```
+
+`WARP_ENV=main` selects the production probe target; it is not a Go-test
+environment. Run the monitor package and race gates sequentially in separate
+attested Bash subshells as shown above. An unset or `main` test environment must fail
+closed on SQL fixtures and is a test-harness failure, not a production probe
+alert. Never label that result a probe failure or use it to diagnose main.
+Source `test-env.sh` separately for each gate so its authority and resource
+attestations are current; setting bare
+`WARP_ENV=local` is not equivalent. Keep `WARP_ENV=main` in the parent shell for
+the watcher, and let each subshell leave that parent state unchanged on exit.
+Do not overlap the package and race gates: although no fixed-path collision is
+established, they share local PostgreSQL, proxy, CPU, and process capacity, so
+overlap can create load-dependent failures and is not formal gate evidence.
 
 Run the owning repository's full release-relevant tests for product fixes. A
 focused test is not sufficient when the change affects generated service

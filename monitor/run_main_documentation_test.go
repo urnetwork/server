@@ -69,6 +69,24 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	}
 }
 
+func TestRunMainUsesAttestedLocalSequentialMonitorGates(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"`WARP_ENV=main` selects the production probe target; it is not a Go-test environment",
+		"separate attested Bash subshells",
+		"setting bare `WARP_ENV=local` is not equivalent",
+		"Do not overlap the package and race gates",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md does not retain attested test-gate guidance %q", required)
+		}
+	}
+	if got := strings.Count(documentation, "unset WARP_ENV; source ./test-env.sh && exec go test"); got != 5 {
+		t.Fatalf("attested monitor test command count = %d, want 5", got)
+	}
+}
+
 func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{"RUN-MAIN.md", "SIGNALS.md"} {
