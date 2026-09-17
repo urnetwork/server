@@ -24,7 +24,7 @@ so their evidence context and open causal boundaries remain intact:
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
-- A `gpt-6-astra` agent at `max` reasoning owns diagnosis and repair for every
+- A `gpt-5.6-sol` agent at `max` reasoning owns diagnosis and repair for every
   new, changed, or unresolved causal boundary. It may run bounded read-only
   discriminators, but Terra remains the runner and verifier.
 
@@ -32,12 +32,12 @@ For each such boundary, Terra sends a deterministic delta manifest referencing
 the prior ledger record and object hashes described below; group shared
 dependency/artifact/rollout failures and keep unrelated causes separate. Never
 paste full all-signal Markdown, logs, raw evidence, or test output into a model
-handoff. Astra pulls the complete Alert and only bounded relevant source objects
+handoff. Sol pulls the complete Alert and only bounded relevant source objects
 by hash on demand, then returns cause/patch/regressions/prerequisites/window;
 Terra returns gate manifests. Keep both agents and the watcher alive unless
 safe promotion requires a handoff.
 
-The primary agent owns the append-only run ledger. Terra and Astra produce
+The primary agent owns the append-only run ledger. Terra and Sol produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
 must not append ledger records themselves. This keeps process/session ownership,
 production mutation authority, and the single-writer chain in one place.
@@ -50,7 +50,7 @@ all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
 This is context-delivery optimization only: use Terra at medium for the
-deterministic monitoring workload and retain Astra at max for diagnosis and
+deterministic monitoring workload and retain Sol at max for diagnosis and
 repair. Never silently change those roles or efforts, skip a severity, lose
 warnings or `cannot-observe`, or delete/truncate evidence.
 Do not raise production `runLoopMaxConcurrentSignals`, add watchers outside
@@ -297,7 +297,7 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Terra and Astra may prepare manifests;
+make its old physical layout valid JSONL. Terra and Sol may prepare manifests;
 they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
@@ -509,7 +509,7 @@ Research all three directions:
    removing them would make old evidence uninterpretable.
 
 Terra owns the reproducible crosswalk, registry/test inventory, current watcher
-delta, and verification manifests. Astra owns semantic review of observation
+delta, and verification manifests. Sol owns semantic review of observation
 authority, causal discrimination, false-positive/false-negative boundaries,
 and the smallest source/test corrections. The primary agent reviews their
 manifests, writes the single chained ledger record, and owns all source and
