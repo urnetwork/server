@@ -11178,6 +11178,7 @@ This is the version-to-artifact contract checked by the probe:
 | 672 | nullable, no-default UUID `network_extender.country_location_id` |
 | 673 | required timestamp `contract_extender.create_time` with `now()` default |
 | 674 | exact valid/ready `(create_time, contract_id)` `contract_extender_create_time_contract_id` index |
+| 675 | exact valid/ready `(client_address_hash, attempt_time)` `wallet_auth_challenge_attempt_client_address_hash_attempt_time` index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -11256,6 +11257,15 @@ monitor checks each append's exact type, nullability, default, and index
 definition/readiness rather than accepting a same-name object. Current
 Extender location/contract readers require head 674 and all six additional
 artifact checks; these do not renumber or replace the earlier appends.
+
+Version 675 appends the wallet-challenge attempt limiter's address/time index
+after the limiter stopped grouping by source port. The exact nonpartial btree
+definition, key order, validity, and readiness are operative: a same-name
+index with the old port key between address and time does not bound the new
+count query. On 2026-09-17, the full monitor gate caught that the append-only
+head had advanced while this artifact contract still ended at 674. That was a
+monitor coverage defect, not evidence that Main lacked the index; the catalog
+and lookalike-index fixtures now cover version 675 explicitly.
 
 The first live exact-identity probe exposed a separate detector-only failure:
 it selected `migration_index::text` and ordered by the unqualified

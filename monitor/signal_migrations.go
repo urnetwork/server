@@ -130,6 +130,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender.country_location_id", requiredVersion: 672, rowColumn: 83},
 	{name: "contract_extender.create_time", requiredVersion: 673, rowColumn: 84},
 	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
+	{name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", requiredVersion: 675, rowColumn: 86},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1011,6 +1012,14 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           WHERE table_name = 'contract_extender'
 		             AND index_name = 'contract_extender_create_time_contract_id'
 		             AND definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'wallet_auth_challenge_attempt'
+		             AND index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'
+		             AND definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       )
