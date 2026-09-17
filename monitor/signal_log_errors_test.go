@@ -1404,9 +1404,11 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyMarkdown := requireAlertClass(t, alerts, "loki-tail-backend-eof").Markdown()
-	if !strings.Contains(legacyMarkdown, "frame=") || strings.Contains(legacyMarkdown, "frame=backend=") {
-		t.Fatalf("legacy Loki EOF should remain un-attributed during rollout:\n%s", legacyMarkdown)
+	legacyAlert := requireAlertClass(t, alerts, "loki-tail-backend-eof")
+	legacyMarkdown := legacyAlert.Markdown()
+	if legacyAlert.Frame != "" || strings.Contains(legacyAlert.Observed, "frame=") ||
+		!strings.Contains(legacyAlert.Observed, "target=grafana") {
+		t.Fatalf("legacy Loki EOF should remain service-attributed without an invented backend frame:\n%s", legacyMarkdown)
 	}
 }
 
