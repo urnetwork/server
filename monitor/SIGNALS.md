@@ -12057,17 +12057,20 @@ added further buffered queues and workers. This made scheduler, stack, queue,
 and GC cost grow linearly with a large resident population before those
 individual shards demonstrated work.
 
-Server commit `77201554c49ec05bde83ec038bba6c600972892c` corrects that specific
-multiplier: it installs lightweight shard descriptors at resident construction,
-creates one destination-stable queue/consumer on first admitted use, preserves
-the configured aggregate queue capacity across shards, and joins admitted
-producer registration plus every started worker before the final pooled-owner
-drain. Deterministic tests cover zero allocation before first use, exact
-capacity/remainder distribution, stable one-worker-per-shard reuse, close
-racing first construction, and final owner return. The capability gauge above
-is part of the attributable correction and must be present on the running
-artifact; a Git base revision alone cannot prove a deliberate modified build's
-contents.
+Current-main Server commit `2425b71e71bff58448b6e26c84a0188871364409`
+corrects that specific multiplier. It is patch-identical for this boundary to
+the former throughput branch commit
+`77201554c49ec05bde83ec038bba6c600972892c`, but only the current-main replay is
+an actionable release ancestor. It installs lightweight shard descriptors at
+resident construction, creates one destination-stable queue/consumer on first
+admitted use, preserves the configured aggregate queue capacity across shards,
+and joins admitted producer registration plus every started worker before the
+final pooled-owner drain. Deterministic tests cover zero allocation before
+first use, exact capacity/remainder distribution, stable one-worker-per-shard
+reuse, close racing first construction, and final owner return. Current-main
+Server commit `7ed9a3065bb2e62653d0681b26527f56fb4001fe` adds the executable-owned
+capability gauge. Both commits must be present on the running artifact; a Git
+base revision alone cannot prove a deliberate modified build's contents.
 
 The simultaneous config rollout added old/new Connect generations while the
 old processes drained. That overlap raised total CPU, but live drain gauges
@@ -12083,10 +12086,21 @@ image digest, version `2026.9.14+1046068620`, Build revision
 block had exactly one generation. That Build object is available in the Build
 repository and its Server gitlink is `c2fa1d2b`. The matching Server release
 tag `v2026.9.14-1046068620` resolves to the same commit: it contains the eager
-`593c88a3` construction and predates `77201554`. This proves the intended tag
-and normal build input lacked the correction, but the modified bit still means
-tag ancestry alone is not a cryptographic proof of the executable's exact
-bytes; the executable-owned capability gauge remains the closure boundary.
+`593c88a3` construction and predates both current-main correction commits. This
+proves the intended tag and normal build input lacked the correction, but the
+modified bit still means tag ancestry alone is not a cryptographic proof of
+the executable's exact bytes; the executable-owned capability gauge remains
+the closure boundary.
+
+The 2026-09-17 control still found all 20 newest Connect processes on deployed
+version `2026.9.14+1046068620`, with zero capability-enabled and 20
+capability-missing processes. The eight hot edge-3/4 blocks each had a single
+generation yet retained roughly 18,000–22,000 residents, 41–48 GiB RSS,
+740,000–850,000 goroutines, and 5.4–6.5 CPU cores. This rules out rollout
+overlap as the current multiplier and makes a normal Connect rollout from a
+checkout containing both current-main commits the smallest software boundary.
+It does not prove the full post-rollout memory reduction in advance; retain
+resident-normalized controls and require the capability gauge after rollout.
 
 A matched fresh census supplied the workload discriminator. Hot edge-3/4
 blocks retained approximately 19,500–24,700 residents, versus about
@@ -12102,11 +12116,12 @@ current host saturation. Queue drops were low but nonzero on some controls;
 they neither explain the resident scaling nor prove service health.
 
 First require the newest executable capability plus §8.12 provenance. The
-current version's release tag lacks `77201554`, so the smallest verification
-action is a gated normal Connect build and rollout from an intentional checkout
-containing both the correction and its capability gauge; this does not require
-a source redesign. Do not call the current executable definitively eager from
-tag ancestry alone while its stamp remains modified. If independent exact-
+current version's release tag lacks both current-main correction commits, so
+the smallest verification action is a gated normal Connect build and rollout
+from an intentional checkout containing both the behavior and capability
+commits; this does not require a source redesign. Do not call the current
+executable definitively eager from tag ancestry alone while its stamp remains
+modified. If independent exact-
 artifact evidence proves that it already contains the capability, retain that
 generation long enough for a bounded aggregate profile instead of prescribing
 the same rollout. If a capability-proven fresh generation still crosses the

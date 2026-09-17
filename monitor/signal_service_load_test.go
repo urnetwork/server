@@ -226,6 +226,7 @@ func TestServiceLoadConnectLazyForwardCapabilityAndRunawayDiagnosis(t *testing.T
 	for _, want := range []string{
 		"newest_connect_processes=1 capability_enabled=0 capability_missing=1",
 		serviceLoadLazyForwardCommit,
+		serviceLoadLazyForwardCapabilityCommit,
 		"modified build",
 		"legacy artifact or metric-delivery loss",
 		"not proof that eager construction executed",
@@ -236,7 +237,7 @@ func TestServiceLoadConnectLazyForwardCapabilityAndRunawayDiagnosis(t *testing.T
 		}
 	}
 	runaway := requireAlertClass(t, missingAlerts, "service-runtime-runaway")
-	for _, want := range []string{"resident_lazy_forward_ingress_capability=missing", serviceLoadLazyForwardCommit, "Deploy Connect"} {
+	for _, want := range []string{"resident_lazy_forward_ingress_capability=missing", serviceLoadLazyForwardCommit, serviceLoadLazyForwardCapabilityCommit, "Deploy Connect"} {
 		if !strings.Contains(runaway.Markdown(), want) {
 			t.Fatalf("Connect runaway diagnosis omitted %q: %s", want, runaway.Markdown())
 		}
@@ -254,6 +255,15 @@ func TestServiceLoadConnectLazyForwardCapabilityAndRunawayDiagnosis(t *testing.T
 		if !strings.Contains(runaway.Markdown(), want) {
 			t.Fatalf("capability-proven diagnosis omitted %q: %s", want, runaway.Markdown())
 		}
+	}
+}
+
+func TestServiceLoadUsesCurrentMainLazyForwardBoundaries(t *testing.T) {
+	if serviceLoadLazyForwardCommit != "2425b71e71bff58448b6e26c84a0188871364409" {
+		t.Fatalf("lazy-forward behavior boundary = %q", serviceLoadLazyForwardCommit)
+	}
+	if serviceLoadLazyForwardCapabilityCommit != "7ed9a3065bb2e62653d0681b26527f56fb4001fe" {
+		t.Fatalf("lazy-forward capability boundary = %q", serviceLoadLazyForwardCapabilityCommit)
 	}
 }
 

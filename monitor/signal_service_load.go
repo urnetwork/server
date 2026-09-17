@@ -15,17 +15,18 @@ import (
 )
 
 const (
-	serviceLoadFreshness          = 90 * time.Second
-	serviceLoadRSSFloorBytes      = float64(16 << 30)
-	serviceLoadRSSHardBytes       = float64(64 << 30)
-	serviceLoadGoroutineFloor     = float64(250_000)
-	serviceLoadGoroutineHard      = float64(500_000)
-	serviceLoadAllocationFloor    = float64(256 << 20)
-	serviceLoadAllocationHard     = float64(1 << 30)
-	serviceLoadMinimumCPUCoreRate = 1.0
-	serviceLoadMaximumCPUCoreRate = 4.0
-	serviceLoadHostCPUFraction    = 0.0625
-	serviceLoadLazyForwardCommit  = "77201554c49ec05bde83ec038bba6c600972892c"
+	serviceLoadFreshness                   = 90 * time.Second
+	serviceLoadRSSFloorBytes               = float64(16 << 30)
+	serviceLoadRSSHardBytes                = float64(64 << 30)
+	serviceLoadGoroutineFloor              = float64(250_000)
+	serviceLoadGoroutineHard               = float64(500_000)
+	serviceLoadAllocationFloor             = float64(256 << 20)
+	serviceLoadAllocationHard              = float64(1 << 30)
+	serviceLoadMinimumCPUCoreRate          = 1.0
+	serviceLoadMaximumCPUCoreRate          = 4.0
+	serviceLoadHostCPUFraction             = 0.0625
+	serviceLoadLazyForwardCommit           = "2425b71e71bff58448b6e26c84a0188871364409"
+	serviceLoadLazyForwardCapabilityCommit = "7ed9a3065bb2e62653d0681b26527f56fb4001fe"
 )
 
 // Signal service-load implements SIGNALS.md §8.15. It attributes a saturated
@@ -422,9 +423,9 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				}
 			}
 			observedCapability = " resident_lazy_forward_ingress_capability=" + capability + " " + serviceLoadResidentCostEvidence(process)
-			contextText += " Connect commit " + serviceLoadLazyForwardCommit + " replaces the eager sixteen-shard worker/queue multiplier with first-destination construction. A capability value of one proves that behavior in the exact executable; an absent value is unknown under a modified build and does not by itself prove legacy code."
+			contextText += " Server commit " + serviceLoadLazyForwardCommit + " replaces the eager sixteen-shard worker/queue multiplier with first-destination construction, and commit " + serviceLoadLazyForwardCapabilityCommit + " exports its executable-owned capability gauge. A capability value of one proves that behavior in the exact executable; an absent value is unknown under a modified build and does not by itself prove legacy code."
 			contextText += " Resident-normalized RSS, heap, and goroutines describe this exact generation's total process cost divided by its current resident population; they do not isolate resident allocations, establish a leak or causal call site, or change the PAGE thresholds. Compare matched controls and traffic before distinguishing population growth from inflated per-resident cost; zero residents leaves ratios undefined while process state remains real."
-			actionText = "Use the fleet capability finding and §8.12 provenance first. Deploy Connect from an intentional checkout containing commit " + serviceLoadLazyForwardCommit + " only to newest artifacts that do not prove the capability. If the exact runaway generation reports capability=enabled, retain it long enough for a bounded aggregate profile and locate the remaining resident, transport, forward, or retained-generation owner before changing limits. Do not infer source ancestry from an unavailable modified base, reboot the host, or kill the current owner blindly."
+			actionText = "Use the fleet capability finding and §8.12 provenance first. Deploy Connect from an intentional checkout containing behavior commit " + serviceLoadLazyForwardCommit + " and capability commit " + serviceLoadLazyForwardCapabilityCommit + " only to newest artifacts that do not prove the capability. If the exact runaway generation reports capability=enabled, retain it long enough for a bounded aggregate profile and locate the remaining resident, transport, forward, or retained-generation owner before changing limits. Do not infer source ancestry from an unavailable modified base, reboot the host, or kill the current owner blindly."
 			verifyText = "Every newest Connect identity reports resident_lazy_forward_ingress_capability=enabled, then two consecutive runs place every process below the runtime band and §8.14 returns healthy while resident count, service traffic, and rollout convergence remain healthy."
 		}
 		findings = append(findings, finding{
@@ -506,12 +507,12 @@ func serviceLoadConnectCapabilityFinding(processes map[string]*serviceLoadMetric
 		probeId: "runtime/service-runaway", tier: tierWarn,
 		class: "connect-resident-ingress-capability-unobservable", target: "connect-fleet", sustain: 1,
 		symptom:   "The newest Connect fleet cannot prove the lazy resident forward-ingress capability.",
-		mechanism: "Commit " + serviceLoadLazyForwardCommit + " replaces sixteen eager per-resident forward shard queues and consumers with first-destination construction. The executable-owned gauge proves that exact behavior even for an intentional modified build whose base revision is unavailable; missing or non-one evidence leaves the principal runtime correction unknown.",
+		mechanism: "Server commit " + serviceLoadLazyForwardCommit + " replaces sixteen eager per-resident forward shard queues and consumers with first-destination construction; commit " + serviceLoadLazyForwardCapabilityCommit + " adds the executable-owned gauge. That gauge proves the behavior even for an intentional modified build whose base revision is unavailable; missing or non-one evidence leaves the principal runtime correction unknown.",
 		baseline:  "Every newest fresh Connect process reports urnetwork_connect_resident_lazy_forward_ingress_enabled=1 on its exact process identity.",
 		observed:  fmt.Sprintf("newest_connect_processes=%d capability_enabled=%d capability_missing=%d capability_invalid=%d generation_unselectable=%d", len(newest), enabled, missing, invalid, unselectable),
 		evidence:  "Only fixed fleet counts leave the Mimir join. Source revision, modified state, and image digest remain independently governed by §8.12; no client, resident, transport, command line, or raw label is retained.",
 		context:   "An absent gauge can mean a legacy artifact or metric-delivery loss and is not proof that eager construction executed. Conversely, a value of one proves the lazy-shard code path exists but does not prove every remaining per-resident allocation is bounded or that runtime pressure recovered.",
-		action:    "Use §8.12 to prove the newest artifact and metric delivery. Deploy Connect from an intentional checkout containing commit " + serviceLoadLazyForwardCommit + " only where the capability is absent because the artifact predates it; otherwise repair telemetry. If capability-proven processes still run away, preserve a bounded aggregate profile and attribute the remaining resident/transport/forward owner before changing limits.",
+		action:    "Use §8.12 to prove the newest artifact and metric delivery. Deploy Connect from an intentional checkout containing behavior commit " + serviceLoadLazyForwardCommit + " and capability commit " + serviceLoadLazyForwardCapabilityCommit + " only where the capability is absent because the artifact predates them; otherwise repair telemetry. If capability-proven processes still run away, preserve a bounded aggregate profile and attribute the remaining resident/transport/forward owner before changing limits.",
 		verify:    "For two consecutive scrapes every newest Connect identity reports capability=1 with valid provenance; after convergence, two service-load cadences stay below the runtime band while §8.14 and Connect traffic remain healthy.",
 		playbook:  "SIGNALS.md §8.15",
 	}
