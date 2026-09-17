@@ -75,7 +75,7 @@ activating that evaluator:
 1. Finish deterministic regression tests using the actual pgx protocol error
    and database callback lifecycle, including cancellation, connection
    disposal, and negative controls for genuine errors and unsafe retries.
-2. Have Terra max verify that the tests reproduce the pre-fix behavior and
+2. Have Terra medium verify that the tests reproduce the pre-fix behavior and
    pass on the repaired source; Astra max reviews the repair and merges.
 3. Require the relevant regressions to exist and pass against the exact
    source being built into the image. A passing test on a different `main`

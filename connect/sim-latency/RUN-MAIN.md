@@ -9,11 +9,11 @@ Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
 
-Use Terra (`gpt-5.6-terra`) with max reasoning for all test execution, including
-preflight, submission validation, post-promotion smoke tests, and reruns. A test
-failure or suspected flake must be handed to Astra (`gpt-6-astra`) with max
-reasoning to diagnose the root cause, implement the correction, and add a
-deterministic regression test. Terra max then reruns the affected test and
+Use Terra (`gpt-5.6-terra`) with medium reasoning for all test execution,
+including preflight, submission validation, post-promotion smoke tests, and
+reruns. A test failure or suspected flake must be handed to Astra (`gpt-6-astra`)
+with max reasoning to diagnose the root cause, implement the correction, and add
+a deterministic regression test. Terra medium then reruns the affected test and
 required suite; do not accept an Astra-run test as the independent completion
 result.
 
@@ -111,7 +111,7 @@ branch omitted a database fix already present in the qualified baseline and
 on `main`. Pulling the API/worker cannot repair such an evaluator.
 
 For the approved epoch-5 repair, Astra max owns the source pull/merge and release
-review; Terra max owns independent regression and image validation. Require
+review; Terra medium owns independent regression and image validation. Require
 the relevant tests to exist and pass in the image build, review all eight
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
@@ -121,14 +121,15 @@ to create that next round against the old pin. Preserve every historical
 round's policy and outcomes, and require a fresh production rebaseline before
 public launch.
 
-Before qualifying the repaired evaluator, Terra max must independently exercise
-the deterministic regressions for process-group cancellation, retained-evidence
-memory budgeting, PostgreSQL/Redis failure detection, terminal candidate exits,
-typed cancellation classification, and durable failed-attempt archival. Astra
-max reviews both the fixes and their red/green evidence. Keep the existing
-G5/G6 thresholds and replicate counts; these are correctness and containment
-repairs, not statistical relaxations. Recreate the containment record for the
-new evidence-memory boundary instead of reusing the prior host attestation.
+Before qualifying the repaired evaluator, Terra medium must independently
+exercise the deterministic regressions for process-group cancellation,
+retained-evidence memory budgeting, PostgreSQL/Redis failure detection, terminal
+candidate exits, typed cancellation classification, and durable failed-attempt
+archival. Astra max reviews both the fixes and their red/green evidence. Keep
+the existing G5/G6 thresholds and replicate counts; these are correctness and
+containment repairs, not statistical relaxations. Recreate the containment
+record for the new evidence-memory boundary instead of reusing the prior host
+attestation.
 
 `advance-staging` is the ordinary staging handoff. It atomically closes new
 admission without rewriting the published schedule or canceling accepted work.
