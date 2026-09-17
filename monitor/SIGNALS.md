@@ -19646,6 +19646,32 @@ all current-head identity checks remain strict after two-sample near-head
 evidence. The peer, progress, lag, and public-reference visibility findings
 remain independent.
 
+The 2026-09-17 audit found a separate gateway false negative. The collector
+already read the gateway runtime and EVM identity, but evaluation used only
+gateway health, chain, genesis, and head. A same-chain, near-head nginx route
+could therefore serve the wrong runtime/transaction/EVM interface without an
+alert. Runtime observation and runtime-name identity are now mandatory through
+the gateway at every head. Once both the first and final direct samples and
+both the first and final gateway samples are in the public near-head band,
+gateway runtime version, transaction version, EVM chain ID, and `eth_getLogs`
+must also pass independently; a method error fails closed.
+Before Frontier, unavailable gateway EVM and `eth_getLogs` methods remain
+expected only while the historical node is observably progressing. As a
+false-positive qualifier, sequential public, direct, and gateway reads can
+straddle the exact runtime-upgrade block: persistent same-generation samples
+or block-pinned reads must distinguish that boundary from durable gateway
+drift. As a false-negative qualifier, an unavailable or malformed gateway
+method is unknown, never proof that the surfaces agree.
+
+That audit also found the probe's transport deadline shorter than its own
+bounded command. Two sequential helper calls plus the paired-head interval can
+exceed the global 60-second SSH default, and the complete nested worst case is
+roughly 260 seconds. The Subtensor probe therefore uses an explicit five-minute
+command deadline without widening other probes. Reaching that deadline remains
+a `cannot-observe` result; the larger bound prevents an internally guaranteed
+timeout from hiding a node or gateway failure and does not make a slow or
+incomplete observation healthy.
+
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
 public-path proof):

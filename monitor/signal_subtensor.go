@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	subtensorMarker                           = "monitor-signal-17.1-subtensor"
+	subtensorMarker = "monitor-signal-17.1-subtensor"
+	// Two sequential, independently bounded container helpers plus the paired
+	// head interval can legitimately exceed the global one-minute SSH default.
+	subtensorObservationTimeout               = 5 * time.Minute
 	subtensorPeerDiagnosticsVersion           = 2
 	subtensorPeerLogScope                     = "current-process-timestamped-tail"
 	subtensorPeerLogDatabaseOrImport          = "database_or_import_rejection"
@@ -84,6 +87,7 @@ type subtensorNodeObservation struct {
 	Gateway                subtensorRPCObservation   `json:"gateway"`
 	FirstHead              string                    `json:"first_head"`
 	SecondHead             string                    `json:"second_head"`
+	GatewayFirstHead       string                    `json:"gateway_first_head"`
 	GatewayHTTP            int                       `json:"gateway_http"`
 	ContainerImage         string                    `json:"container_image"`
 	ContainerStarted       string                    `json:"container_started"`
@@ -202,7 +206,7 @@ func (subtensorProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			findings = append(findings, cannotObserveFinding(target.name+"/subtensor", err))
 			continue
 		}
-		output, err := env.runner.shell(ctx, target, command)
+		output, err := env.runner.sshTimeout(ctx, target, command, "", subtensorObservationTimeout)
 		if err != nil {
 			findings = append(findings, cannotObserveFinding(target.name+"/subtensor", err))
 			continue
@@ -351,6 +355,8 @@ for node in config["nodes"]:
     read(direct, "eth_get_logs", direct_url, "eth_getLogs", [{"fromBlock": "latest", "toBlock": "latest"}])
     direct["eth_get_logs"] = "eth_get_logs" in direct and isinstance(direct["eth_get_logs"], list)
     gateway = inspect_rpc(gateway_url)
+    read(gateway, "eth_get_logs", gateway_url, "eth_getLogs", [{"fromBlock": "latest", "toBlock": "latest"}])
+    gateway["eth_get_logs"] = "eth_get_logs" in gateway and isinstance(gateway["eth_get_logs"], list)
     gateway_http = 0
     try:
         with urllib.request.urlopen(gateway_url + "/healthz", timeout=5) as response:
@@ -366,6 +372,7 @@ for node in config["nodes"]:
         "gateway": gateway,
         "first_head": direct.get("head", ""),
         "second_head": "",
+        "gateway_first_head": gateway.get("head", ""),
         "gateway_http": gateway_http,
     }
     node_observation.update(inspect_container(node))
@@ -772,6 +779,24 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		findings = append(findings, cannotObserveFinding(identity+"/direct-rpc", fmt.Errorf("%s", subtensorErrors(essentialErrors, nil))))
 		return findings
 	}
+	targetHead := node.Direct.Sync.HighestBlock
+	if publicHeadErr == nil && publicHead > targetHead {
+		targetHead = publicHead
+	}
+	lag := targetHead - secondHead
+	if lag < 0 {
+		lag = 0
+	}
+	// Runtime, health, EVM, and eth_getLogs are sampled with firstHead. Do not
+	// infer current-head identity from system_syncState alone: a peerless node
+	// can collapse highestBlock to its stale currentBlock and report
+	// isSyncing=false. Both local head samples must instead be near an
+	// observable public head before the current-runtime pin applies.
+	currentRuntimeConvergenceObserved := publicHeadErr == nil &&
+		absInt64(publicHead-firstHead) <= 128 &&
+		absInt64(publicHead-secondHead) <= 128 &&
+		lag <= 128 &&
+		!node.Direct.Health.IsSyncing
 
 	if configured.ContainerName != "" {
 		if node.ContainerError != "" {
@@ -837,8 +862,18 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		}
 	}
 
+	gatewayFirstHead, gatewayFirstHeadErr := subtensorHex(node.GatewayFirstHead)
+	gatewayHead, gatewayHeadErr := subtensorHex(node.Gateway.Head)
+	gatewayCurrentRuntimeConvergenceObserved := currentRuntimeConvergenceObserved &&
+		gatewayFirstHeadErr == nil && gatewayHeadErr == nil &&
+		absInt64(publicHead-gatewayFirstHead) <= 128 &&
+		absInt64(publicHead-gatewayHead) <= 128
+	gatewayErrorKeys := []string{"healthz", "chain", "genesis", "head", "runtime"}
+	if gatewayCurrentRuntimeConvergenceObserved {
+		gatewayErrorKeys = append(gatewayErrorKeys, "evm_chain_id", "eth_get_logs")
+	}
 	gatewayErrors := map[string]string{}
-	for _, key := range []string{"healthz", "chain", "genesis", "head"} {
+	for _, key := range gatewayErrorKeys {
 		if value := node.Gateway.Errors[key]; value != "" {
 			gatewayErrors[key] = value
 		}
@@ -849,23 +884,22 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 			target: target.name, frame: configured.Name, sustain: 2,
 			symptom:   fmt.Sprintf("%s's Subtensor overlay gateway does not reproduce its direct node RPC", identity),
 			mechanism: "The backing loopback RPC is observable, but nginx health or JSON-RPC is not; overlay address ordering, nginx lifecycle, or the node-specific upstream is broken.",
-			baseline:  fmt.Sprintf("gateway port %d returns HTTP 200 and the same chain/genesis identity as loopback port %d", configured.GatewayPort, configured.RPCPort),
+			baseline:  fmt.Sprintf("gateway port %d returns HTTP 200 and reproduces the direct identity and current-runtime interface gates from loopback port %d", configured.GatewayPort, configured.RPCPort),
 			observed:  fmt.Sprintf("gateway_http=%d errors=%s", node.GatewayHTTP, subtensorErrors(gatewayErrors, nil)),
 			action:    "Check the exact overlay bind, nginx unit/journal, and this node's loopback upstream before changing chain data.",
-			verify:    "Require /healthz HTTP 200 and matching direct/gateway chain, genesis, and recent head.",
+			verify:    "Require /healthz HTTP 200 and matching direct/gateway chain, genesis, runtime name, recent head, and—at current convergence—runtime, transaction, EVM, and eth_getLogs behavior.",
 			playbook:  "SIGNALS.md §17.1",
 		})
 	} else {
-		gatewayHead, gatewayHeadErr := subtensorHex(node.Gateway.Head)
-		problems := []string{}
-		if node.Gateway.Chain != node.Direct.Chain {
-			problems = append(problems, fmt.Sprintf("gateway chain=%q direct=%q", node.Gateway.Chain, node.Direct.Chain))
-		}
-		if !strings.EqualFold(node.Gateway.Genesis, node.Direct.Genesis) {
-			problems = append(problems, fmt.Sprintf("gateway genesis=%q direct=%q", node.Gateway.Genesis, node.Direct.Genesis))
+		problems := subtensorIdentityProblems(settings, node.Gateway, gatewayCurrentRuntimeConvergenceObserved)
+		if gatewayFirstHeadErr != nil {
+			problems = append(problems, fmt.Sprintf("gateway first head=%q", node.GatewayFirstHead))
 		}
 		if gatewayHeadErr != nil || absInt64(gatewayHead-secondHead) > 128 {
 			problems = append(problems, fmt.Sprintf("gateway head=%q direct=%d", node.Gateway.Head, secondHead))
+		}
+		if gatewayCurrentRuntimeConvergenceObserved && !node.Gateway.EthGetLogs {
+			problems = append(problems, "eth_getLogs=unavailable")
 		}
 		if len(problems) > 0 {
 			findings = append(findings, subtensorIdentityFinding(target.name, configured.Name+"-gateway", problems, node.Gateway))
@@ -917,24 +951,6 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 		})
 	}
 
-	targetHead := node.Direct.Sync.HighestBlock
-	if publicHeadErr == nil && publicHead > targetHead {
-		targetHead = publicHead
-	}
-	lag := targetHead - secondHead
-	if lag < 0 {
-		lag = 0
-	}
-	// Runtime, health, EVM, and eth_getLogs are sampled with firstHead. Do not
-	// infer current-head identity from system_syncState alone: a peerless node
-	// can collapse highestBlock to its stale currentBlock and report
-	// isSyncing=false. Both local head samples must instead be near an
-	// observable public head before the current-runtime pin applies.
-	currentRuntimeConvergenceObserved := publicHeadErr == nil &&
-		absInt64(publicHead-firstHead) <= 128 &&
-		absInt64(publicHead-secondHead) <= 128 &&
-		lag <= 128 &&
-		!node.Direct.Health.IsSyncing
 	warpMaxLag := settings.WarpMaxLag
 	if warpMaxLag <= 0 {
 		warpMaxLag = 4096
