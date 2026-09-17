@@ -10414,6 +10414,19 @@ malformed or partial combined output, or any other status remains
 `cannot-observe`. This in-memory reduction creates no remote file, and raw
 journal errors are not copied into alert evidence.
 
+The remote command reserves native exits 20–25 for the journal baseline,
+Docker history, containerd history, Warp unit census, Warp lifecycle window,
+and recent daemon window. The probe maps only those typed exits to fixed
+privacy-safe `observation_phase` values while retaining the generic
+`observation-command-failed` error class. Unknown native exits, timeouts, SSH
+failures, and parser errors keep `observation_phase=unclassified`; raw stderr,
+commands, and host details never enter the phase. False-positive qualifier: a
+phase localizes the failed observation layer, not a daemon mismatch, failed
+deployment, or host failure. False-negative qualifier: an unclassified phase
+or any observation gap can hide a real runtime failure, and a later missing
+alert without a complete tuple is not recovery. Healthy control requires the
+same host to return a complete parseable runtime tuple on consecutive probes.
+
 The 2026-09-08 edge-3 maintenance control found a second query-shape boundary
 after the one-hour/100 GiB journal policy landed. The current boot occupied
 6.1 GiB in 520 journal files. The zero-row readability baseline returned
