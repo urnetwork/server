@@ -221,6 +221,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/device/set-name", handlers.DeviceSetName), router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
 		// Unauthenticated public-key lookup; see handlers.GetClientKey.
 		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
+		// Signed registration history for a client id. Empty list, not an
+		// error, when this operator does not run the signed path.
+		router.NewRoute("GET", "/key/([^/]+)/history", handlers.GetClientKeyHistory),
 		router.NewRoute("POST", "/sn/client-key/observation", handlers.SnClientKeyObservation),
 		router.NewRoute("POST", "/sn/client-key/observations", handlers.SnClientKeyObservations),
 		// routing verification (sn/VALIDATOR.md); auth is the protocol's own

@@ -31,3 +31,24 @@ func GetClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	router.WrapNoAuth(impl, w, r)
 }
+
+// GetClientKeyHistory backs `GET /key/<client_id>/history`. Unauthenticated for
+// the same reason as GetClientKey: it returns already-published signed
+// evidence. An operator that does not run the signed path returns an empty
+// history with 200, so a client can tell "no signed evidence" from "could not
+// reach the operator" without parsing status codes.
+func GetClientKeyHistory(w http.ResponseWriter, r *http.Request) {
+	pathValues := router.GetPathValues(r)
+	clientId, err := server.ParseId(pathValues[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	args := &controller.GetClientKeyHistoryArgs{
+		ClientId: clientId,
+	}
+	impl := func(clientSession *session.ClientSession) (*controller.GetClientKeyHistoryResult, error) {
+		return controller.GetClientKeyHistory(args, clientSession)
+	}
+	router.WrapNoAuth(impl, w, r)
+}
