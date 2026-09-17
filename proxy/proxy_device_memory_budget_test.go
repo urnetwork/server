@@ -31,6 +31,80 @@ func budgetTestManager(
 	return NewProxyDeviceManager(ctx, settings)
 }
 
+// Supplies the same initialized lifecycle owners that the manager starts in
+// production. A bare ProxyDevice lets HandleError hide a nil receiver panic
+// and release the reservation before the lifetime assertion can observe it.
+func budgetTestProxyDevice(t *testing.T, ctx context.Context) *ProxyDevice {
+	t.Helper()
+	deviceLocal, closeDevice := newProxyDeviceTransportTestDevice(t)
+	t.Cleanup(closeDevice)
+	deviceCtx, deviceCancel := context.WithCancel(ctx)
+	t.Cleanup(deviceCancel)
+	tun, err := connect.CreateTunWithDefaults(deviceCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := &ProxyDevice{
+		ctx:            deviceCtx,
+		cancel:         deviceCancel,
+		deviceLocal:    deviceLocal,
+		deviceState:    deviceLocal,
+		tun:            tun,
+		settings:       DefaultProxyDeviceSettings(),
+		receiveMonitor: connect.NewMonitor(),
+	}
+	device.UpdateActivity()
+	t.Cleanup(func() {
+		if err := device.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return device
+}
+
+// Even cancellation before the worker starts still registers the receive
+// callback. Run directly so a malformed fixture cannot pass through recovery.
+func TestProxyDeviceMemoryBudgetFixtureRunAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	device := budgetTestProxyDevice(t, ctx)
+	cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("canceled fixture Run panicked: %v", r)
+		}
+	}()
+	device.Run()
+}
+
+// The idle watcher must not interpret the zero timestamp as an expired device
+// and release the reservation before the lifetime test requests shutdown.
+func TestProxyDeviceMemoryBudgetFixtureStartsWithActivity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	device := budgetTestProxyDevice(t, ctx)
+	if device.CancelIfIdle() {
+		t.Fatal("new fixture was already idle")
+	}
+}
+
+// A successful fixture borrows the manager lifetime so CloseAndWait can join
+// its packet worker without depending on the test's later caller cancellation.
+func TestProxyDeviceMemoryBudgetFixtureFollowsManagerLifetime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := budgetTestManager(t, ctx, 24*model.Mib)
+	device := budgetTestProxyDevice(t, manager.ctx)
+	if err := manager.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-device.Done():
+	default:
+		t.Fatal("manager shutdown retained the fixture lifetime")
+	}
+}
+
 // The per-device target is unchanged at 24 MiB, and the aggregate default is
 // the process's other declared ceiling (the 8 GiB message pool budget).
 func TestProxyDeviceMemoryBudgetKeepsThePerDeviceTarget(t *testing.T) {
@@ -97,8 +171,7 @@ func TestProxyDeviceMemoryBudgetRefusesWithoutConstructing(t *testing.T) {
 	var builderCalls atomic.Int64
 	manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
 		builderCalls.Add(1)
-		deviceCtx, deviceCancel := context.WithCancel(ctx)
-		return &ProxyDevice{ctx: deviceCtx, cancel: deviceCancel, settings: DefaultProxyDeviceSettings()}, nil
+		return nil, errors.New("refused open reached device construction")
 	}
 
 	if !manager.tryReserveDeviceMemory() {
@@ -146,11 +219,14 @@ func TestProxyDeviceMemoryBudgetReleasedOnDeviceClose(t *testing.T) {
 	defer cancel()
 	manager := budgetTestManager(t, ctx, 24*model.Mib)
 	manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
-		deviceCtx, deviceCancel := context.WithCancel(ctx)
-		return &ProxyDevice{ctx: deviceCtx, cancel: deviceCancel, settings: DefaultProxyDeviceSettings()}, nil
+		return budgetTestProxyDevice(t, manager.ctx), nil
 	}
-	if _, err := manager.OpenProxyDevice(server.NewId()); err != nil {
+	device, err := manager.OpenProxyDevice(server.NewId())
+	if err != nil {
 		t.Fatalf("open err = %v", err)
+	}
+	if !device.Active() {
+		t.Fatal("installed fixture has no active device lifetime")
 	}
 	if used := manager.deviceMemoryBudget.UsedByteCount(); used != connect.ByteCount(24*model.Mib) {
 		t.Fatalf("installed device holds %d reserved bytes, want its target", used)
@@ -158,6 +234,12 @@ func TestProxyDeviceMemoryBudgetReleasedOnDeviceClose(t *testing.T) {
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer closeCancel()
+	manager.Close()
+	select {
+	case <-device.Done():
+	default:
+		t.Fatal("installed fixture does not borrow its manager lifetime")
+	}
 	if err := manager.CloseAndWait(closeCtx); err != nil {
 		t.Fatalf("close err = %v", err)
 	}
