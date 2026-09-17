@@ -968,6 +968,23 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   the count warning for capacity attribution, but require the explicit
   continuous-idle age before terminating any session or assigning a leak.
 
+The 2026-09-17 retained boundary established a second temporal qualifier for
+both §1.3 classes. Escalation batteries run on the first failing tick and are
+cached while the same identity remains broken; a sustain-2 alert therefore
+usually combines the later state summary with an earlier, non-atomic battery.
+Never subtract the battery's top groups from the later total or infer the
+later workload owner from that arithmetic. In a one-shot run the battery still
+begins after the summary and its statement delta spans a bounded interval, so
+it is not one atomic frame either. False-positive qualifier: active count above
+100 proves concurrency, not a CPU-plan wall, organic demand, or reindex
+causation; a low-concentration trip battery cannot classify a larger later
+total. False-negative qualifier: top-five/six grouping can omit singleton or
+NULL-query-id shapes, `pg_stat_statements` omits utility and already-completed
+work, and an empty delta is unknown rather than healthy. Attribute only from a
+complete time-aligned discriminator. The stable control is a current state
+summary back inside its band plus a fresh, complete attribution snapshot; an
+old cached battery or later alert silence is not that control.
+
 ### 1.3a PostgreSQL client-slot capacity and rejected logins
 Probe: `pg-capacity`
 
