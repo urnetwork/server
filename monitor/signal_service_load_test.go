@@ -227,7 +227,9 @@ func TestServiceLoadConnectLazyForwardCapabilityAndRunawayDiagnosis(t *testing.T
 		"newest_connect_processes=1 capability_enabled=0 capability_missing=1",
 		serviceLoadLazyForwardCommit,
 		"modified build",
-		"does not by itself prove legacy code",
+		"legacy artifact or metric-delivery loss",
+		"not proof that eager construction executed",
+		"does not prove every remaining per-resident allocation is bounded",
 	} {
 		if !strings.Contains(capabilityAlert.Markdown(), want) {
 			t.Fatalf("missing-capability alert omitted %q: %s", want, capabilityAlert.Markdown())
