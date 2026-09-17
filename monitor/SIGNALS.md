@@ -10598,6 +10598,23 @@ regression. Do not interpret historical exit 35 as journal loss; require the
 fixed probe to parse the same host and then evaluate its concrete policy and
 coverage findings.
 
+**2026-09-17 zero monotonic-clock discriminator.** The restart-grace reducer
+previously accepted `0` for either systemd's
+`ActiveEnterTimestampMonotonic` or the current `CLOCK_MONOTONIC` sample because
+zero is syntactically numeric and inside the length bound. A zero activation
+paired with a positive current clock manufactures service age equal to host
+monotonic uptime and can run the coverage check before a new journal has had
+70 minutes to refill. With no qualifying boundary this can false-positive as
+`journal-buffer-short`; with a retained pre-restart boundary it can instead
+false-negative by calling the refill healthy from evidence that predates the
+new activation. If both values are zero, the fabricated zero age skips the same
+check and can also hide a genuinely short buffer. An active journald sample now
+requires both values to be strictly positive and activation no later than the
+current clock. Zero, malformed, oversized, future, failed, or timed-out clock
+evidence is `cannot-observe`, never elapsed grace or a healthy buffer. The
+deterministic reducer test covers zero current and zero activation separately;
+the normal control uses a positive 4,200-second activation age.
+
 **2026-09-15 file-ceiling and iterator discriminator.** Edge-3 ran Ubuntu
 systemd `255.4-1ubuntu8.17`, the Noble candidate at that observation, and Fluent Bit 4.2.3.
 Its active Fluent Bit generation stayed running with zero restarts while the
