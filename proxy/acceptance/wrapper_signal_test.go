@@ -18,14 +18,22 @@ import (
 )
 
 const (
-	proxyWrapperSignalChild = "URNETWORK_PROXY_WRAPPER_SIGNAL_CHILD"
-	proxyWrapperSignalName  = "URNETWORK_PROXY_WRAPPER_SIGNAL_NAME"
+	proxyWrapperSignalChild  = "URNETWORK_PROXY_WRAPPER_SIGNAL_CHILD"
+	proxyWrapperSignalName   = "URNETWORK_PROXY_WRAPPER_SIGNAL_NAME"
+	proxyWrapperSignalScope  = "URNETWORK_PROXY_WRAPPER_SIGNAL_SCOPE"
+	proxyWrapperRepeatSignal = "URNETWORK_PROXY_WRAPPER_REPEAT_SIGNAL"
+	proxyWrapperRunnerExit   = "URNETWORK_PROXY_WRAPPER_RUNNER_EXIT"
+	proxyWrapperLoggerExit   = "URNETWORK_PROXY_WRAPPER_LOGGER_EXIT"
 )
 
 // A terminal interrupt must remain a request for graceful cancellation until
 // the timed runner and log consumer finish, not tear down their output pipe.
 func TestProxyAcceptanceWrapperWaitsForCleanupAfterInterrupt(t *testing.T) {
-	t.Setenv(proxyWrapperSignalName, "INT")
+	// The fake runner re-enters through this test for every scenario. Keep the
+	// parent's expected signal in the child so TERM forwarding is checked too.
+	if os.Getenv(proxyWrapperSignalChild) != "1" {
+		t.Setenv(proxyWrapperSignalName, "INT")
+	}
 	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
 }
 
@@ -36,9 +44,79 @@ func TestProxyAcceptanceWrapperWaitsForCleanupAfterTerm(t *testing.T) {
 	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
 }
 
+// A direct interrupt is normalized to TERM for the background timeout owner,
+// retaining graceful runner cleanup and the wrapper's canceled exit status.
+func TestProxyAcceptanceWrapperForwardsInterruptToRunner(t *testing.T) {
+	t.Setenv(proxyWrapperSignalName, "INT")
+	t.Setenv(proxyWrapperSignalScope, "wrapper")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// A direct termination must reach the runner as TERM and still join cleanup.
+func TestProxyAcceptanceWrapperForwardsTermToRunner(t *testing.T) {
+	t.Setenv(proxyWrapperSignalName, "TERM")
+	t.Setenv(proxyWrapperSignalScope, "wrapper")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// Force a second interrupted wait while the runner still owns its cleanup.
+func TestProxyAcceptanceWrapperWaitsForCleanupAfterRepeatedTerm(t *testing.T) {
+	t.Setenv(proxyWrapperSignalName, "TERM")
+	t.Setenv(proxyWrapperSignalScope, "wrapper")
+	t.Setenv(proxyWrapperRepeatSignal, "1")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// Ordinary completion keeps the zero status and removes all temporary owners.
+func TestProxyAcceptanceWrapperCompletesWithoutSignal(t *testing.T) {
+	t.Setenv(proxyWrapperRunnerExit, "0")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// A joined runner failure must not be replaced by its successful log consumer.
+func TestProxyAcceptanceWrapperRetainsRunnerFailure(t *testing.T) {
+	t.Setenv(proxyWrapperRunnerExit, "43")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// Losing the log is a failure even if the campaign itself completed normally.
+func TestProxyAcceptanceWrapperReportsLoggerFailure(t *testing.T) {
+	t.Setenv(proxyWrapperRunnerExit, "0")
+	t.Setenv(proxyWrapperLoggerExit, "47")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
+// The campaign failure remains primary when the output consumer also fails.
+func TestProxyAcceptanceWrapperRetainsRunnerFailureWhenLoggerFails(t *testing.T) {
+	t.Setenv(proxyWrapperRunnerExit, "43")
+	t.Setenv(proxyWrapperLoggerExit, "47")
+	testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t)
+}
+
 // Runs the real wrapper around a controlled child with descriptor-backed
 // lifecycle barriers, keeping timing out of the signal-ordering proof.
 func testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t *testing.T) {
+	runnerStatus := 130
+	waitForSignal := os.Getenv(proxyWrapperRunnerExit) == ""
+	if !waitForSignal {
+		var err error
+		runnerStatus, err = strconv.Atoi(os.Getenv(proxyWrapperRunnerExit))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	loggerStatus := 0
+	if value := os.Getenv(proxyWrapperLoggerExit); value != "" {
+		var err error
+		loggerStatus, err = strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	resultMessage := "canceled after cleanup"
+	if !waitForSignal {
+		resultMessage = "completed after cleanup"
+	}
 	if os.Getenv(proxyWrapperSignalChild) == "1" {
 		startedWriter := os.NewFile(3, "started-writer")
 		canceledWriter := os.NewFile(4, "canceled-writer")
@@ -61,9 +139,29 @@ func testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t *testing.T) {
 			os.Exit(70)
 		}
 		_ = startedWriter.Close()
-		<-signalChannel
-		if _, err := canceledWriter.Write([]byte{1}); err != nil {
-			os.Exit(70)
+		if waitForSignal {
+			signalMatches := func(received os.Signal) bool {
+				if os.Getenv(proxyWrapperSignalName) == "TERM" || os.Getenv(proxyWrapperSignalScope) == "wrapper" {
+					return received == syscall.SIGTERM
+				}
+				// A group interrupt reaches the child directly as INT and via
+				// the wrapper as TERM; either is a graceful cancellation request.
+				return received == os.Interrupt || received == syscall.SIGTERM
+			}
+			if !signalMatches(<-signalChannel) {
+				os.Exit(71)
+			}
+			if _, err := canceledWriter.Write([]byte{1}); err != nil {
+				os.Exit(70)
+			}
+			if os.Getenv(proxyWrapperRepeatSignal) == "1" {
+				if !signalMatches(<-signalChannel) {
+					os.Exit(71)
+				}
+				if _, err := canceledWriter.Write([]byte{2}); err != nil {
+					os.Exit(70)
+				}
+			}
 		}
 		_ = canceledWriter.Close()
 		var releaseByte [1]byte
@@ -84,10 +182,14 @@ func testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(resultPath), 0o700); err != nil {
 			os.Exit(70)
 		}
-		if err := os.WriteFile(resultPath, []byte("server/proxy\thttp\tFAIL\tcanceled after cleanup\n"), 0o600); err != nil {
+		resultStatus := "FAIL"
+		if runnerStatus == 0 {
+			resultStatus = "PASS"
+		}
+		if err := os.WriteFile(resultPath, []byte("server/proxy\thttp\t"+resultStatus+"\t"+resultMessage+"\n"), 0o600); err != nil {
 			os.Exit(70)
 		}
-		os.Exit(130)
+		os.Exit(runnerStatus)
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("the proxy acceptance wrapper requires Unix process groups")
@@ -202,6 +304,24 @@ exec "$URNETWORK_PROXY_WRAPPER_TEST_BINARY" -test.run='^TestProxyAcceptanceWrapp
 		"URNETWORK_PROXY_WRAPPER_MARKER_DIRECTORY": markerDirectory,
 		"URNETWORK_PROXY_WRAPPER_TEST_BINARY":      testBinaryPath,
 	}
+	if loggerStatus != 0 {
+		realTee, err := exec.LookPath("tee")
+		if err != nil {
+			t.Fatal(err)
+		}
+		binDirectory := filepath.Join(temporaryRoot, "bin")
+		if err := os.Mkdir(binDirectory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(binDirectory, "tee"), []byte(`#!/usr/bin/env bash
+"$URNETWORK_PROXY_WRAPPER_REAL_TEE" "$@"
+exit "$URNETWORK_PROXY_WRAPPER_LOGGER_EXIT"
+`), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		overrides["PATH"] = binDirectory + string(os.PathListSeparator) + os.Getenv("PATH")
+		overrides["URNETWORK_PROXY_WRAPPER_REAL_TEE"] = realTee
+	}
 	environment := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, variable := range os.Environ() {
 		name, _, _ := strings.Cut(variable, "=")
@@ -260,10 +380,22 @@ exec "$URNETWORK_PROXY_WRAPPER_TEST_BINARY" -test.run='^TestProxyAcceptanceWrapp
 	if os.Getenv(proxyWrapperSignalName) == "TERM" {
 		wrapperSignal = syscall.SIGTERM
 	}
-	if err := syscall.Kill(-command.Process.Pid, wrapperSignal); err != nil {
-		t.Fatal(err)
+	if waitForSignal {
+		target := -command.Process.Pid
+		if os.Getenv(proxyWrapperSignalScope) == "wrapper" {
+			target = command.Process.Pid
+		}
+		if err := syscall.Kill(target, wrapperSignal); err != nil {
+			t.Fatal(err)
+		}
+		readBarrier("runner canceled", canceledReader)
+		if os.Getenv(proxyWrapperRepeatSignal) == "1" {
+			if err := syscall.Kill(target, wrapperSignal); err != nil {
+				t.Fatal(err)
+			}
+			readBarrier("runner canceled again before cleanup", canceledReader)
+		}
 	}
-	readBarrier("runner canceled", canceledReader)
 	if _, err := releaseWriter.Write([]byte{1}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,9 +408,16 @@ exec "$URNETWORK_PROXY_WRAPPER_TEST_BINARY" -test.run='^TestProxyAcceptanceWrapp
 	case <-time.After(10 * time.Second):
 		t.Fatal("wrapper did not join the canceled runner")
 	}
-	exitErr, ok := wrapperErr.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 130 {
-		t.Fatalf("wrapper exit = %v, want status 130", wrapperErr)
+	expectedStatus := runnerStatus
+	if expectedStatus == 0 {
+		expectedStatus = loggerStatus
+	}
+	if expectedStatus == 0 {
+		if wrapperErr != nil {
+			t.Fatalf("wrapper exit = %v, want success", wrapperErr)
+		}
+	} else if exitErr, ok := wrapperErr.(*exec.ExitError); !ok || exitErr.ExitCode() != expectedStatus {
+		t.Fatalf("wrapper exit = %v, want status %d", wrapperErr, expectedStatus)
 	}
 	if err := outputFile.Sync(); err != nil {
 		t.Fatal(err)
@@ -300,7 +439,7 @@ exec "$URNETWORK_PROXY_WRAPPER_TEST_BINARY" -test.run='^TestProxyAcceptanceWrapp
 	if err != nil {
 		t.Fatalf("runner result marker: %v", err)
 	}
-	if !strings.Contains(string(resultBytes), "canceled after cleanup") {
+	if !strings.Contains(string(resultBytes), resultMessage) {
 		t.Fatalf("runner result = %q", resultBytes)
 	}
 	credentialPathBytes, err := os.ReadFile(filepath.Join(markerDirectory, "credential-path"))
