@@ -1394,6 +1394,25 @@ failure in the named product service. Distinct records at the cursor timestamp
 remain visible. Reconcile the source-time overlap and inspect Loki ingestion
 latency/reconnects; never replay suppressed contents into the current window.
 
+The resolved Warpctl executable is part of this observation contract. On
+2026-09-17, the standing watcher resolved revision
+`3745537bca26d16a4641ebf33bc8b84ae9f25b5c`, which predates the cursor guard in
+`d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`; Loki's pre-cursor records therefore
+escaped the wrapper and became repeated `tailer-stale-arrival` warnings. A clean
+current executable at `1dc4d320e48d8358363b1fd8b7b34debb9add4de` contains the
+guard and its deterministic equal-timestamp and cursor-preservation controls.
+This is a false-positive qualifier for attributing those warnings to a product
+service, not evidence that Loki delivery is healthy: after a controlled watcher
+promotion, the same condition must become bounded
+`loki-tail-pre-cursor-entries` summaries. Conversely, the capable wrapper
+deliberately hides raw pre-cursor contents, so absence of
+`tailer-stale-arrival` alone is a false-negative qualifier for observation-path
+health. Require the bounded summary or a current-source control, live standing
+tail, two clean reconciliations, and ten quiet minutes before closing the
+visibility finding. Record and verify the VCS identity of the executable that
+the watcher children actually resolve; the revision of a nearby checkout does
+not establish that boundary.
+
 The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
 takes precedence over generic `panic`. It requires the final
 `*errors.errorString=tx is closed` together with both deployed `txWithPool`

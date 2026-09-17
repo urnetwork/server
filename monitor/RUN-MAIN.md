@@ -279,10 +279,36 @@ go build -o "$monitor_run_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_run_dir/monitor"
 test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+monitor_warpctl=$(command -v warpctl)
+test -n "$monitor_warpctl"
+test -x "$monitor_warpctl"
+go version -m "$monitor_warpctl" >"$monitor_run_dir/warpctl.version.txt"
+rg -q 'vcs\.revision=[0-9a-f]{40}$' "$monitor_run_dir/warpctl.version.txt"
+rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
+shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
+monitor_warpctl_dir=$(dirname "$monitor_warpctl")
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main \
+  "$monitor_run_dir/monitor" -mode overlay \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
+
+Treat the exact Warpctl resolved by the watcher as part of the immutable
+observation boundary. Before launch, require its `go version -m` output to carry
+a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
+that its source revision contains every collector capability assumed by the
+active catalog. In particular, §1.5 requires the Loki live-tail cursor guard at
+Warp commit `d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`. Do not infer capability
+from the HEAD of a nearby checkout while an older executable appears first on
+ambient `PATH`. Build through the existing local Warp checkout convention when
+the resolved executable is stale, then pin only this watcher invocation's
+`PATH` to the validated executable directory. This does not alter Warpctl's
+release/build architecture or install anything on managed hosts.
+
+During candidate validation, inspect the executable image of every standing
+`warpctl logs ... -f` child, not only its abbreviated process command, and
+require it to match the recorded watcher-side Warpctl hash. A candidate that
+silently resolves a different copy cannot be promoted.
 
 Run the final command in a durable attached session. Give the run a stable ID
 and append only to `$BRINGYOUR_HOME/monitor/runs/<run-id>/ledger.jsonl`. Keep

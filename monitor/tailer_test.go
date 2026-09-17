@@ -1050,6 +1050,10 @@ func TestStandingTailPreCursorReductionIsDocumented(t *testing.T) {
 		"Distinct records at the cursor timestamp",
 		"remain visible",
 		"never replay suppressed contents",
+		"resolved Warpctl executable",
+		"d857872c4cae8e4768ed2314fdb53fc96b4fdbdb",
+		"false-positive qualifier",
+		"false-negative qualifier",
 	} {
 		if !strings.Contains(catalog, required) {
 			t.Errorf("pre-cursor catalog guidance omits %q", required)
