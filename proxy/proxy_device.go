@@ -801,6 +801,25 @@ type ProxyDevice struct {
 	receive        chan []byte
 	receiveAddr    netip.Addr
 
+	// WireGuard source NAT (threat model §9.4). A wg peer's tunnel address is
+	// allocated from a durable pool and written into its config, so it is
+	// stable across sessions AND identical at every provider in the peer's
+	// window -- which lets colluding providers tell that those flows belong to
+	// one client. natAddr is a per-device address from the same 169.254/16 pool
+	// the app path's tun uses; egress packets are rewritten to it and return
+	// packets are rewritten back. Taken once at construction and returned on
+	// close, which puts the wg path on the same footing as the app path, whose
+	// tun address is per session and never persisted.
+	//
+	// Invalid when no address was available, which disables the rewrite rather
+	// than dropping traffic: the fallback is the pre-NAT behavior, not an
+	// outage.
+	natAddr netip.Addr
+	// natClientAddr is the peer's own tunnel address, learned from
+	// SetReceiveForAddress. Invalid until a wg peer attaches, which is what
+	// leaves the HTTP and SOCKS paths (no wg address) untouched.
+	natClientAddr netip.Addr
+
 	// Nil in production. Ownership tests replace the final asynchronous sends
 	// while retaining the same borrowed-to-owned copy boundary.
 	sendOwnedPacketForTest  func([]byte) bool
@@ -931,6 +950,12 @@ func NewProxyDevice(
 		rpcListener:       rpcListener,
 		deviceGeneration:  deviceGeneration,
 	}
+	// One NAT address per device, held for its lifetime (see natAddr).
+	if natAddr, ok := connect.TakeLocalIpv4Address(); ok {
+		proxyDevice.natAddr = natAddr
+	} else {
+		glog.Infof("[pd]no local nat address available; wg source is not rewritten\n")
+	}
 	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
@@ -1050,7 +1075,7 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 	if !self.UpdateActivity() {
 		return
 	}
-	receive, receiveAddr, receiveNotify := self.receiveWithNotify()
+	receive, receiveAddr, natClientAddr, receiveNotify := self.receiveWithNotifyNat()
 	if receive == nil {
 		_, _ = self.tun.WriteBatch(packets)
 		self.UpdateActivity()
@@ -1081,6 +1106,14 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 
 	for _, packet := range packets {
 		if !proxyPacketMatchesReceiveAddress(packet, receiveAddr) {
+			continue
+		}
+		// Restore the peer's own address before it reaches WireGuard. The
+		// packet is this batch's borrowed buffer and is about to be shared
+		// read-only, so the rewrite happens here, after the partition has
+		// finished reading destinations and before anything takes a reference.
+		if !self.natRewriteReturn(packet, natClientAddr) {
+			observeWireGuardPacket("destination_to_client", "dropped", len(packet))
 			continue
 		}
 		if !self.deliverWireGuardReturn(receive, receiveNotify, packet) {
@@ -1146,6 +1179,14 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 		return false
 	}
 	ownedPacket := connect.MessagePoolCopy(packet)
+	// Rewrite the owned copy, never the borrowed input. A refusal drops rather
+	// than forwards: emitting the peer's tunnel address to a provider is the
+	// linkability this removes (threat model §9.4).
+	if !self.natRewriteEgress(ownedPacket) {
+		connect.MessagePoolReturn(ownedPacket)
+		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
+		return false
+	}
 	sent := false
 	if self.sendOwnedPacketForTest != nil {
 		sent = self.sendOwnedPacketForTest(ownedPacket)
@@ -1168,9 +1209,24 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
 		return 0
 	}
-	ownedPackets := make([][]byte, len(packets))
-	for packetIndex, packet := range packets {
-		ownedPackets[packetIndex] = connect.MessagePoolCopy(packet[offset:])
+	// The owned copies stay 1:1 with the input, because the count returned
+	// below is a PREFIX of the caller's packets. A packet the rewrite cannot
+	// repair therefore ends the batch instead of being skipped over: skipping
+	// would shift every later index and silently mis-report which of the
+	// caller's packets were consumed. The remainder is reported not-sent and
+	// the caller re-offers it.
+	ownedPackets := make([][]byte, 0, len(packets))
+	for _, packet := range packets {
+		ownedPacket := connect.MessagePoolCopy(packet[offset:])
+		if !self.natRewriteEgress(ownedPacket) {
+			connect.MessagePoolReturn(ownedPacket)
+			break
+		}
+		ownedPackets = append(ownedPackets, ownedPacket)
+	}
+	if len(ownedPackets) == 0 {
+		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
+		return 0
 	}
 	if self.sendOwnedPacketsForTest != nil {
 		sentPacketCount := min(
@@ -1186,7 +1242,7 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 	}
 	// DeviceLocal's batch contract consumes every pooled packet, including
 	// members rejected by the selected route.
-	sentPacketCount := min(max(0, self.deviceLocal.SendPacketsNoCopy(ownedPackets)), len(packets))
+	sentPacketCount := min(max(0, self.deviceLocal.SendPacketsNoCopy(ownedPackets)), len(ownedPackets))
 	observeWireGuardPackets("client_to_destination", "delivered", packets[:sentPacketCount], offset)
 	observeWireGuardPackets("client_to_destination", "dropped", packets[sentPacketCount:], offset)
 	return sentPacketCount
@@ -1212,13 +1268,84 @@ func (self *ProxyDevice) SetReceiveForAddress(receiveAddr netip.Addr, receive ch
 	self.receiveMonitor.NotifyAll()
 	self.receive = receive
 	self.receiveAddr = receiveAddr
+	// The wg peer's own address, which egress packets are rewritten FROM and
+	// return packets are rewritten back TO. HTTP and SOCKS attach no address,
+	// so they leave this invalid and the rewrite never engages for them.
+	self.natClientAddr = receiveAddr
 	self.receiveNotify = self.receiveMonitor.NotifyChannel()
 }
 
-func (self *ProxyDevice) receiveWithNotify() (chan []byte, netip.Addr, chan struct{}) {
+// natActiveWithLock reports whether the source rewrite is engaged: a wg peer is
+// attached and this device holds a NAT address. Callers hold stateLock.
+func (self *ProxyDevice) natActiveWithLock() bool {
+	return self.natAddr.IsValid() && self.natClientAddr.IsValid()
+}
+
+// natAddrs snapshots the rewrite pair. The wg send path runs per packet and
+// must not hold stateLock across a send, so it reads the pair once.
+func (self *ProxyDevice) natAddrs() (natAddr netip.Addr, clientAddr netip.Addr, active bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return self.receive, self.receiveAddr, self.receiveNotify
+	return self.natAddr, self.natClientAddr, self.natActiveWithLock()
+}
+
+// natRewriteEgress substitutes the NAT address for the peer's tunnel address on
+// a packet leaving for a provider. Reports whether the packet may be sent:
+// false means the rewrite could not be completed and the packet must be
+// dropped rather than forwarded with the peer's address on it, which is the
+// linkability this exists to remove.
+func (self *ProxyDevice) natRewriteEgress(packet []byte) bool {
+	natAddr, clientAddr, active := self.natAddrs()
+	if !active {
+		return true
+	}
+	// only the attached peer's own traffic is rewritten; anything else on this
+	// device is left exactly as it was
+	source, ok := netip.AddrFromSlice(packetIpv4Source(packet))
+	if !ok || source != clientAddr {
+		return true
+	}
+	return connect.RewriteIpv4Source(packet, natAddr)
+}
+
+// natRewriteReturn restores the peer's tunnel address on a return packet, which
+// the provider addressed to the NAT address. Reports whether the packet may be
+// delivered.
+func (self *ProxyDevice) natRewriteReturn(packet []byte, clientAddr netip.Addr) bool {
+	if !clientAddr.IsValid() {
+		return true
+	}
+	return connect.RewriteIpv4Destination(packet, clientAddr)
+}
+
+// packetIpv4Source returns the source field of an IPv4 packet, or nil. Kept
+// allocation-free: it runs once per egress packet.
+func packetIpv4Source(packet []byte) []byte {
+	if len(packet) < 20 || packet[0]>>4 != 4 {
+		return nil
+	}
+	return packet[12:16]
+}
+
+// receiveWithNotify returns the attachment plus the address return packets are
+// MATCHED on. With the rewrite engaged that is the NAT address, because that is
+// what the provider addressed them to; the peer's own address is returned
+// separately so the match can be undone before delivery.
+func (self *ProxyDevice) receiveWithNotify() (chan []byte, netip.Addr, chan struct{}) {
+	receive, matchAddr, _, receiveNotify := self.receiveWithNotifyNat()
+	return receive, matchAddr, receiveNotify
+}
+
+func (self *ProxyDevice) receiveWithNotifyNat() (chan []byte, netip.Addr, netip.Addr, chan struct{}) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	matchAddr := self.receiveAddr
+	clientAddr := netip.Addr{}
+	if self.natActiveWithLock() {
+		matchAddr = self.natAddr
+		clientAddr = self.natClientAddr
+	}
+	return self.receive, matchAddr, clientAddr, self.receiveNotify
 }
 
 // proxyPacketMatchesReceiveAddress is allocation-free because it runs once per
@@ -1418,6 +1545,11 @@ func (self *ProxyDevice) Cancel() {
 func (self *ProxyDevice) Close() error {
 	if self.cancel != nil {
 		self.cancel()
+	}
+
+	if self.natAddr.IsValid() {
+		connect.ReturnLocalIpv4Address(self.natAddr)
+		self.natAddr = netip.Addr{}
 	}
 
 	if self.deviceLocal != nil {
