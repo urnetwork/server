@@ -17,6 +17,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -150,23 +152,23 @@ func openFailureArtifactPath(root, relative string, directory bool) (*os.File, e
 	}
 	fullPath := filepath.Join(root, relative)
 	components := strings.Split(strings.TrimPrefix(fullPath, string(filepath.Separator)), string(filepath.Separator))
-	directoryFd, err := syscall.Open(string(filepath.Separator), syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	directoryFd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	for index, component := range components {
 		if component == "" || component == "." || component == ".." {
-			syscall.Close(directoryFd)
+			unix.Close(directoryFd)
 			return nil, errors.New("failure artifact path component is invalid")
 		}
-		flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
+		flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW
 		if index+1 < len(components) || directory {
-			flags |= syscall.O_DIRECTORY
+			flags |= unix.O_DIRECTORY
 		} else {
-			flags |= syscall.O_NONBLOCK
+			flags |= unix.O_NONBLOCK
 		}
-		nextFd, err := syscall.Openat(directoryFd, component, flags, 0)
-		syscall.Close(directoryFd)
+		nextFd, err := unix.Openat(directoryFd, component, flags, 0)
+		unix.Close(directoryFd)
 		if err != nil {
 			return nil, err
 		}
@@ -334,8 +336,8 @@ func writeControllerFailureArtifact(root string, job *queuedJob, failure *Compet
 	if err := directory.Chmod(0o700); err != nil {
 		return evaluationArtifact{}, err
 	}
-	fd, err := syscall.Openat(int(directory.Fd()), "controller-failure.json",
-		syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o400)
+	fd, err := unix.Openat(int(directory.Fd()), "controller-failure.json",
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o400)
 	if err != nil {
 		return evaluationArtifact{}, err
 	}

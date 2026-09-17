@@ -276,6 +276,32 @@ func TestCommandEvaluatorArchivesMinimalFailureWithoutFailureManifest(t *testing
 	}
 }
 
+// The controller diagnostic must never replace an existing attempt artifact,
+// even when the existing leaf contains a valid-looking synthetic record.
+func TestWriteControllerFailureArtifactUsesExclusiveDirectoryRelativeCreate(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "controller-failure.json")
+	original := []byte("synthetic preexisting controller diagnostic\n")
+	if err := os.WriteFile(path, original, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{JobId: server.NewId(), RoundId: server.NewId()},
+		AttemptCount:   1,
+	}
+	if _, err := writeControllerFailureArtifact(root, job,
+		infrastructureError("synthetic_failure", "synthetic controller failure")); err == nil {
+		t.Fatal("exclusive controller diagnostic create replaced an existing leaf")
+	}
+	retained, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(retained) != string(original) {
+		t.Fatalf("existing controller diagnostic changed: bytes=%d, want %d", len(retained), len(original))
+	}
+}
+
 // Invalid present manifests must never fall back to trusting arbitrary attempt files.
 func TestCommandEvaluatorRejectsUnauthenticatedFailureManifest(t *testing.T) {
 	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
