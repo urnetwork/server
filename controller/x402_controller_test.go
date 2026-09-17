@@ -27,10 +27,18 @@ func TestX402OffByDefault(t *testing.T) {
 func TestX402RefusesHalfConfigured(t *testing.T) {
 	// enabled, but no facilitator/pay_to -> must not be usable
 	for _, c := range []*X402Config{
-		{Enabled: true, PayTo: "0xmerchant", Networks: []string{"base"}},
+		{Enabled: true, PayTo: map[string]string{"base": "0xmerchant"}, Networks: []string{"base"}},
 		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, Networks: []string{"base"}},
-		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f"}, PayTo: "0xmerchant", Networks: []string{"base"}},
-		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, PayTo: "0xmerchant"},
+		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f"}, PayTo: map[string]string{"base": "0xmerchant"}, Networks: []string{"base"}},
+		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, PayTo: map[string]string{"base": "0xmerchant"}},
+		// a quoted network with no settlement address of its own: quoting it
+		// would hand an agent an address that does not exist on that chain
+		{
+			Enabled:     true,
+			Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
+			PayTo:       map[string]string{"base": "0xmerchant"},
+			Networks:    []string{"base", "solana"},
+		},
 	} {
 		connect.AssertEqual(t, x402ConfigUsable(c), false)
 	}
@@ -39,7 +47,7 @@ func TestX402RefusesHalfConfigured(t *testing.T) {
 	connect.AssertEqual(t, x402ConfigUsable(&X402Config{
 		Enabled:     true,
 		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:       "0xmerchant",
+		PayTo:       map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
 		Networks:    []string{"base"},
 	}), true)
 }
@@ -56,14 +64,25 @@ func TestUsdToAtomic(t *testing.T) {
 }
 
 // TestX402PaymentRequiredQuotesEveryNetwork pins chain-neutrality: we quote one term
-// per configured network, all to the same merchant and amount, and the agent picks.
+// per configured network, each to ITS OWN settlement address, at the same amount,
+// and the agent picks.
+//
+// The per-network address is the load-bearing part. Base and Tempo settle to an EVM
+// 0x address and Solana to a base58 account, so quoting one address across all three
+// hands an agent an address that does not exist on two of the chains it was offered.
+// USDC sent there is unrecoverable.
 func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 	skipWithoutProYml(t)
 
+	payTo := map[string]string{
+		"base":   "0xmerchantbase",
+		"solana": "SoLmerchantsolana",
+		"tempo":  "0xmerchanttempo",
+	}
 	c := &X402Config{
 		Enabled:       true,
 		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:         "0xmerchant",
+		PayTo:         payTo,
 		Networks:      []string{"base", "solana", "tempo"},
 		Asset:         "usdc",
 		MaxPaymentUsd: 100,
@@ -77,11 +96,14 @@ func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 
 	for _, accept := range paymentRequired.Accepts {
 		connect.AssertEqual(t, accept.Scheme, "exact")
-		connect.AssertEqual(t, accept.PayTo, "0xmerchant")
+		connect.AssertEqual(t, accept.PayTo, payTo[accept.Network])
 		connect.AssertEqual(t, accept.Asset, "usdc")
 		connect.AssertEqual(t, accept.MaxAmountRequired, "3000000")
 		connect.AssertEqual(t, accept.Resource, "/x402/purchase")
 	}
+	// Each address really is distinct, so the assertion above cannot pass by
+	// every network sharing one string again.
+	connect.AssertNotEqual(t, paymentRequired.Accepts[0].PayTo, paymentRequired.Accepts[1].PayTo)
 	connect.AssertEqual(t, paymentRequired.Accepts[0].Network, "base")
 	connect.AssertEqual(t, paymentRequired.Accepts[1].Network, "solana")
 	connect.AssertEqual(t, paymentRequired.Accepts[2].Network, "tempo")
@@ -99,7 +121,7 @@ func TestX402RefusesToQuoteBadSku(t *testing.T) {
 	c := &X402Config{
 		Enabled:       true,
 		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:         "0xmerchant",
+		PayTo:         map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
 		Networks:      []string{"base"},
 		Asset:         "usdc",
 		MaxPaymentUsd: 10,
@@ -137,7 +159,7 @@ func TestX402PricesComeFromProYml(t *testing.T) {
 	c := &X402Config{
 		Enabled:     true,
 		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:       "0xmerchant",
+		PayTo:       map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
 		Networks:    []string{"base"},
 		Asset:       "usdc",
 		Skus: map[string]x402SkuConfig{

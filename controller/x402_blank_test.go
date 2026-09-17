@@ -23,7 +23,7 @@ facilitator:
   url: ""
   api_key: ""
 
-pay_to: ""
+pay_to: {}
 
 networks:
   - base
@@ -65,7 +65,7 @@ func TestX402BlankConfigNoops(t *testing.T) {
 	connect.AssertEqual(t, false, c.Enabled)
 	connect.AssertEqual(t, false, X402Enabled())
 	connect.AssertEqual(t, "", c.Facilitator.Url)
-	connect.AssertEqual(t, "", c.PayTo)
+	connect.AssertEqual(t, 0, len(c.PayTo))
 
 	ctx := context.Background()
 
@@ -119,7 +119,7 @@ func TestX402ConfigUsable(t *testing.T) {
 		return &X402Config{
 			Enabled:     true,
 			Facilitator: x402FacilitatorConfig{Url: "https://x402.stripe.com", ApiKey: "sk_test_x"},
-			PayTo:       "0xmerchant",
+			PayTo:       map[string]string{"base": "0xmerchant"},
 			Networks:    []string{"base"},
 		}
 	}
@@ -131,9 +131,15 @@ func TestX402ConfigUsable(t *testing.T) {
 	for name, breakIt := range map[string]func(*X402Config){
 		"blank facilitator url":     func(c *X402Config) { c.Facilitator.Url = "" },
 		"blank facilitator api key": func(c *X402Config) { c.Facilitator.ApiKey = "" },
-		"blank pay_to":              func(c *X402Config) { c.PayTo = "" },
-		"no networks":               func(c *X402Config) { c.Networks = nil },
-		"the checked-in stub":       func(c *X402Config) { *c = X402Config{Enabled: true} },
+		"blank pay_to":              func(c *X402Config) { c.PayTo = nil },
+		"pay_to missing this network": func(c *X402Config) {
+			c.PayTo = map[string]string{"solana": "SoLmerchant"}
+		},
+		"a second network with no pay_to": func(c *X402Config) {
+			c.Networks = []string{"base", "solana"}
+		},
+		"no networks":         func(c *X402Config) { c.Networks = nil },
+		"the checked-in stub": func(c *X402Config) { *c = X402Config{Enabled: true} },
 	} {
 		c := full()
 		breakIt(c)

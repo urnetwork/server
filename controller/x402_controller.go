@@ -68,9 +68,18 @@ type x402FacilitatorConfig struct {
 }
 
 type X402Config struct {
-	Enabled       bool                     `yaml:"enabled"`
-	Facilitator   x402FacilitatorConfig    `yaml:"facilitator"`
-	PayTo         string                   `yaml:"pay_to"`
+	Enabled     bool                  `yaml:"enabled"`
+	Facilitator x402FacilitatorConfig `yaml:"facilitator"`
+	// PayTo is the settlement address PER NETWORK, keyed by the same names as
+	// Networks.
+	//
+	// It is a map and not one string because the address is network-specific
+	// and the forms are not interchangeable: Base and Tempo settle to an EVM
+	// 0x address, Solana to a base58 account. Quoting one string across all
+	// three would hand an agent an address that does not exist on two of the
+	// chains it was offered, and USDC sent there is gone. A network with no
+	// entry here is not quoted at all.
+	PayTo         map[string]string        `yaml:"pay_to"`
 	Networks      []string                 `yaml:"networks"`
 	Asset         string                   `yaml:"asset"`
 	Skus          map[string]x402SkuConfig `yaml:"skus"`
@@ -86,13 +95,28 @@ func x402ConfigUsable(c *X402Config) bool {
 	if !c.Enabled {
 		return false
 	}
-	if c.Facilitator.Url == "" || c.Facilitator.ApiKey == "" || c.PayTo == "" {
+	if c.Facilitator.Url == "" || c.Facilitator.ApiKey == "" {
 		return false
 	}
 	if len(c.Networks) == 0 {
 		return false
 	}
+	// Every network we would quote needs its own settlement address. Missing
+	// one is not a network we quietly drop -- it means the operator believes
+	// they configured a chain they did not, so the whole feature stays off
+	// rather than silently offering fewer chains than the vault lists.
+	for _, network := range c.Networks {
+		if c.PayTo[network] == "" {
+			return false
+		}
+	}
 	return true
+}
+
+// X402PayTo is the settlement address for one network, or empty when that
+// network has none.
+func (c *X402Config) X402PayTo(network string) string {
+	return c.PayTo[network]
 }
 
 // x402Config loads vault/<env>/x402.yml. The resource is OPTIONAL: an env with no
@@ -110,7 +134,8 @@ var x402Config = sync.OnceValue(func() *X402Config {
 	if c.Enabled && !x402ConfigUsable(c) {
 		glog.Errorf(
 			"[x402]enabled but not fully configured " +
-				"(facilitator.url, facilitator.api_key, pay_to, networks); x402 is off\n",
+				"(facilitator.url, facilitator.api_key, networks, and a pay_to " +
+				"address for every network); x402 is off\n",
 		)
 		c.Enabled = false
 	}
@@ -301,7 +326,7 @@ func x402PaymentRequiredForConfig(
 			Resource:          resource,
 			Description:       sku.Description,
 			MimeType:          "application/json",
-			PayTo:             c.PayTo,
+			PayTo:             c.PayTo[network],
 			Asset:             c.Asset,
 			MaxTimeoutSeconds: 300,
 		})
@@ -529,6 +554,11 @@ func X402Purchase(
 		)
 		return nil, fmt.Errorf("x402 grant failed after settlement: %w", err)
 	}
+
+	// Record the settled transfer in Stripe. The money is already on chain and
+	// the entitlement is already granted, so this is bookkeeping: a failure is
+	// logged loudly and never propagated (see x402RecordStripePayment).
+	x402RecordStripePayment(ctx, sku, requirements, settleResponse)
 
 	if c.Receipt.Enabled && purchase.Email != "" {
 		x402SendReceipt(ctx, purchase.Email, sku, settleResponse)
