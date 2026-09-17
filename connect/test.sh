@@ -10,14 +10,19 @@ server_dir="${script_dir%/*}"
 cd "$script_dir" || exit $?
 source "$server_dir/test-env.sh" || exit $?
 
-test_directories="$(find . -iname '*_test.go' -print | while IFS= read -r test_file; do dirname "$test_file"; done | sort -u)" || exit $?
+# Share repository exclusions so immutable evidence is never treated as source.
+test_directories="$("$server_dir/test-dirs.sh")" || exit $?
 while IFS= read -r d; do
-    [[ -n "$d" ]] || continue
+    case "$d" in
+        ./connect|./connect/*) ;;
+        *) continue ;;
+    esac
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
-        pushd "$d"
+        pushd "$server_dir/${d#./}" || exit $?
         # highlight source files in this dir
         match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
-        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 900m "$@" -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
+        # Self-contained helper packages do not register glog flags.
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 900m "$@" | grep --color=always -e "^" -e "$match"
             # -trace profile/trace -coverprofile profile/cover 
         test_status=${PIPESTATUS[0]}
         if [[ $test_status != 0 ]]; then

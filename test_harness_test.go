@@ -385,6 +385,127 @@ func TestLocalTestRunnersUseBash(t *testing.T) {
 	}
 }
 
+// Copies the real connect runner and package selector into an isolated source
+// tree; the synthetic go command records each package and argument verbatim.
+func writeTestConnectRunnerFixture(t *testing.T, directories []string) (*exec.Cmd, string, string) {
+	t.Helper()
+	serverDir := filepath.Join(t.TempDir(), "server fixture")
+	binDir := filepath.Join(serverDir, "fixture-tools")
+	for _, directory := range append([]string{"connect", "fixture-tools"}, directories...) {
+		if err := os.MkdirAll(filepath.Join(serverDir, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, scriptPath := range []string{"connect/test.sh", "test-dirs.sh"} {
+		content, err := os.ReadFile(scriptPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(serverDir, scriptPath), content, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, directory := range directories {
+		if err := os.WriteFile(filepath.Join(serverDir, directory, "fixture_test.go"), []byte("package fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "test-env.sh"), []byte("export TEST_CONNECT_ENV_READY=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	goScript := `#!/usr/bin/env bash
+[[ "$TEST_CONNECT_ENV_READY" == 1 ]] || exit 85
+printf '%s\0' "${PWD#"$TEST_CONNECT_SERVER_DIR"/}" "$@" >> "$TEST_CONNECT_RUN_RECORD"
+printf '\n' >> "$TEST_CONNECT_RUN_RECORD"
+printf 'synthetic package completed\n'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(goScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(serverDir, "invocations")
+	cmd := exec.Command("bash", filepath.Join(serverDir, "connect/test.sh"), "-run", "^Test fixture$", "-count=1")
+	cmd.Dir = t.TempDir()
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TEST_CONNECT_SERVER_DIR": serverDir,
+		"TEST_CONNECT_RUN_RECORD": recordPath,
+	}, "TEST_CONNECT_ENV_READY")
+	return cmd, serverDir, recordPath
+}
+
+// Connect runs each canonical source package once, including testdata packages,
+// while excluding immutable evidence and similarly named sibling subtrees.
+func TestConnectTestScriptUsesCanonicalPackageBoundaries(t *testing.T) {
+	keptDirectories := []string{
+		"connect",
+		"connect/perfvar",
+		"connect/sim-latency",
+		"connect/sim-latency/evaluator/container/testdata/resource-bomb",
+	}
+	ignoredDirectories := []string{
+		"connect/sim-latency/baseline/v1/independent-references/validation",
+		"connect/sim-latency/eval-fixture/snapshot",
+		"connect/build/copied-tests",
+		"connect/profile/copied-tests",
+		"connect/acceptance",
+		"connectivity",
+		"proxy",
+	}
+	cmd, _, recordPath := writeTestConnectRunnerFixture(t, append(slices.Clone(keptDirectories), ignoredDirectories...))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("connect runner: %v\n%s", err, output)
+	}
+	record, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directories := []string{}
+	for _, invocation := range bytes.Split(bytes.TrimSuffix(record, []byte("\n")), []byte("\n")) {
+		directory, _, _ := bytes.Cut(invocation, []byte{0})
+		directories = append(directories, string(directory))
+	}
+	if !slices.Equal(directories, keptDirectories) {
+		t.Fatalf("connect packages = %q; want %q", directories, keptDirectories)
+	}
+}
+
+// Packages without glog receive only Go test and caller arguments; an argument
+// containing spaces remains a single argument across the wrapper boundary.
+func TestConnectTestScriptPreservesPortableGoArguments(t *testing.T) {
+	directory := "connect/sim-latency/evaluator/container/testdata/resource-bomb"
+	cmd, _, recordPath := writeTestConnectRunnerFixture(t, []string{directory})
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("connect runner: %v\n%s", err, output)
+	}
+	record, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRecord := strings.Join([]string{directory, "test", "-timeout", "900m", "-run", "^Test fixture$", "-count=1", ""}, "\x00") + "\n"
+	if string(record) != wantRecord {
+		t.Fatalf("connect invocation = %q; want %q", record, wantRecord)
+	}
+}
+
+// A failed selector must stop before any partial package list is executed.
+func TestConnectTestScriptPropagatesDiscoveryFailure(t *testing.T) {
+	cmd, serverDir, recordPath := writeTestConnectRunnerFixture(t, []string{"connect"})
+	selector := "#!/usr/bin/env bash\nprintf './connect\\n'\nexit 43\n"
+	if err := os.WriteFile(filepath.Join(serverDir, "test-dirs.sh"), []byte(selector), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 43 {
+		t.Fatalf("selector failure = %v, %q; want exit 43", err, output)
+	}
+	if record, err := os.ReadFile(recordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("selector failure ran packages: record=%q err=%v", record, err)
+	}
+}
+
 // Builds an isolated copy of the root runner with four synthetic package tiers
 // and injected go/grep commands; no repository test or service preflight runs.
 func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
