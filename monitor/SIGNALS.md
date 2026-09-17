@@ -311,6 +311,42 @@ Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuou
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
 settlement and public evidence. A healthy §17 result does not satisfy §22.
 
+### False-positive and false-negative qualifier discipline
+
+Whenever debugging establishes a clear discriminator that changes how a probe
+should interpret evidence, update the owning numbered signal entry, reducer,
+and deterministic tests together. Each applicable entry must state both sides:
+
+- A **false-positive qualifier** names the condition that can produce the
+  alert's observed shape without the described failure, the authoritative
+  observation that distinguishes it, and a healthy control.
+- A **false-negative qualifier** names the condition that can hide a real
+  failure, including lossy aggregation, wrong denominators, max-versus-sum
+  reduction, stale snapshots, delayed corrections, partial source coverage,
+  missing series, or failed observation paths. It also names the independent
+  observation needed to recover visibility.
+
+An unavailable, incomplete, stale, malformed, or contradictory discriminator
+is unknown or `cannot-observe`, not healthy. Split the class or emit a
+visibility alert when the ambiguity is operationally material; never suppress
+the original symptom merely to quiet the monitor. Qualifiers require bounded
+causal evidence and a healthy control, not a plausible theory. Synthetic
+coverage must include the misleading-but-healthy case, the true failure, and
+the ambiguous/unobservable case without putting production identifiers or
+values in fixtures. Record a discriminator learned during an incident
+immediately rather than waiting for the daily catalog audit.
+
+Follow-up diagnostic executors are part of the observation path. Bind request
+fields by JSON name or a NUL-safe typed encoding, not positional whitespace or
+TSV parsing when a field can be empty. Before contact, prove from the rendered
+argv that optional identities do not shift the endpoint and that secrets occur
+only in their intended stdin/environment channel. A nonzero transport exit,
+missing schema, field-binding mismatch, or incomplete provider step is a
+false-negative risk and leaves the proposed qualifier unproved; it cannot turn
+an alert into a healthy zero. Deterministic executor tests must cover empty
+optional fields and reject any argv/address/filename containing a fixture
+secret.
+
 Related docs: FOLLOWUP.md (open items ledger), redis conf overrides in
 xops .../redis/redis.conf.j2, grafana redis-cluster dashboard + alert rules.
 
@@ -6579,6 +6615,21 @@ an alert. A payment received but not fulfilled can require an **authorized
 financial/operations decision** (for example a verified refund when an
 underpayment cannot be credited); software must preserve the evidence and
 idempotency boundary but cannot choose or authorize that disposition.
+
+The 2026-09-17 investigation of a newly observed `underpaid` recovery row
+established an observation-tool boundary, not a payment cause. The first
+follow-up discriminator failed before contacting the inventory-owned database
+endpoint because an empty optional identity field collapsed during positional
+whitespace parsing and shifted later request fields. No unique row or provider
+transfer reduction was obtained. Therefore largest-versus-summed qualifying
+transfers and quote/intent mismatch remain unproved false-positive candidates,
+and provider/source incompleteness remains an unmeasured false-negative
+candidate. Keep the durable alert open and its cause unknown. A replacement
+diagnostic must use named or NUL-safe fields, prove the exact non-secret argv,
+obtain one unique immutable intent row, and completely enumerate the exact
+provider transaction before it may classify those qualifiers. The affected
+credential requires operator disposition before another request; never retain
+or reproduce it in this catalog, an alert, a fixture, or a transcript.
 
 The 2026-09-08 Main split of the original entitlement alert found zero affected
 existing networks. Its missing-Pro denominator contained four deleted Stripe

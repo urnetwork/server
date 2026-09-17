@@ -40,7 +40,7 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Terra and Astra may prepare manifests; they do not append",
+		"Terra and Sol may prepare manifests; they do not append",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -55,15 +55,41 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-5.6-terra` agent at `max` reasoning owns monitor execution",
-		"A `gpt-6-astra` agent at `max` reasoning owns diagnosis and repair",
+		"A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution and evidence work",
+		"bounded read-only investigation, fact collection, evidence-authority checks, failure triage",
+		"A `gpt-5.6-sol` agent at `max` reasoning owns root-cause debugging and repair",
+		"Sol consumes Terra's fact and triage manifests",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
 		}
 	}
-	if strings.Contains(documentation, "gpt-5.6-sol") {
-		t.Fatal("RUN-MAIN.md still assigns the diagnosis role to Sol")
+	if strings.Contains(documentation, "gpt-6-astra") {
+		t.Fatal("RUN-MAIN.md still assigns the diagnosis role to Astra")
+	}
+}
+
+func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"RUN-MAIN.md", "SIGNALS.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documentation := strings.Join(strings.Fields(string(data)), " ")
+		for _, required := range []string{
+			"false-positive",
+			"false-negative",
+			"healthy control",
+			"unknown or `cannot-observe`",
+			"deterministic test",
+			"NUL-safe",
+			"empty optional",
+		} {
+			if !strings.Contains(strings.ToLower(documentation), strings.ToLower(required)) {
+				t.Errorf("%s does not retain qualifier guidance %q", path, required)
+			}
+		}
 	}
 }
 

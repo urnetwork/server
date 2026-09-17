@@ -56,6 +56,19 @@ make the smallest owning fix with synthetic coverage and catalog updates; pass
 all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
+Every investigation and root-cause handoff must explicitly report
+`false_positive_qualifiers` and `false_negative_qualifiers`. Terra records the
+candidate discriminator, its observation authority, source completeness, and
+healthy control in the fact/triage manifest; Sol decides whether the evidence
+establishes a real probe boundary. When it does, update the owning numbered
+`SIGNALS.md` entry and the probe reducer/tests in the same correction. Cover
+the misleading-but-healthy input, the true failure, and unavailable,
+partial, stale, corrected, or ambiguous evidence as applicable. Missing
+authority must remain unknown or `cannot-observe`, never healthy. Do not add a
+qualifier from speculation, suppress the original symptom, or wait for the
+daily research pass to record a discriminator learned during an active
+incident.
+
 This is context-delivery optimization only: use Terra at medium for
 deterministic monitoring, investigation, fact collection, and failure triage;
 retain Sol at max for root-cause debugging and repair. Never silently change
@@ -87,6 +100,17 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
   customer identifiers, balances, contract IDs, or stream labels into a shell
   transcript, alert, test failure, commit, or agent response. Feed credentials
   on stdin through the existing monitor transports.
+- Bind diagnostic-request fields by JSON name or a NUL-safe typed encoding;
+  never unpack optional or secret-bearing fields with whitespace/TSV `read`.
+  Before contact, assert the rendered argv separately from execution: an empty
+  optional identity list emits no `-i`, the target equals the inventory-owned
+  `user@endpoint`, and a password can appear only in the intended remote stdin
+  or environment channel, never a local argv, address, filename, or DNS lookup.
+  A binding mismatch, missing result schema, or nonzero transport exit stops
+  the discriminator without retry and leaves the production fact unknown. If
+  a secret may have entered an unintended channel, restrict the evidence,
+  report the exposure without quoting it, and require credential disposition
+  before issuing a fresh request.
 - Treat dashboards as navigation aids, not proof. Deployment state comes from
   the running unit/container and its immutable artifact identity; database,
   Redis, network, kernel, and process state come from those systems directly.
@@ -514,7 +538,11 @@ Research all three directions:
    prerequisite, or escaped failure class, either update the owning catalog and
    probe with a deterministic regression or record why an existing probe
    already covers it. Historical class names remain documented as aliases when
-   removing them would make old evidence uninterpretable.
+   removing them would make old evidence uninterpretable. Review each causal
+   finding for both false-positive and false-negative qualifiers: aggregation,
+   denominator, timing, stale or corrected data, partial source coverage, and
+   observation failure are explicit candidates, but become probe rules only
+   when a bounded discriminator and healthy control establish them.
 
 Terra owns the reproducible crosswalk, registry/test inventory, current watcher
 delta, bounded investigation and fact collection, observation-authority review,

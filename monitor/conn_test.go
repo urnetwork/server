@@ -186,6 +186,71 @@ func TestPostgreSQLRowsPreserveEmbeddedRecordAndFieldDelimiters(t *testing.T) {
 	}
 }
 
+// An absent optional identity must not shift later connection fields into
+// SSH's -i or target positions. The canonical PostgreSQL transport builds argv
+// from named settings and carries the password only on stdin line 1 for the
+// remote PGPASSWORD reader.
+func TestPostgreSQLTransportEmptyIdentityPathsCannotShiftTargetOrSecret(t *testing.T) {
+	const (
+		overlayAddress  = "192.0.2.44"
+		sshUser         = "synthetic-observer"
+		fixturePassword = "fixture-db-password-never-an-ssh-target"
+		query           = "SELECT 'synthetic transport contract'"
+	)
+	cfg := &monitorConfig{
+		sshUser:     sshUser,
+		sshKeyPaths: []string{"", " \t"},
+		addressMode: addressModeOverlay,
+		hosts: []*host{{
+			name: "synthetic-pg", overlayIp: overlayAddress, roles: []string{"pg-primary"},
+		}},
+		pgPort: 5432, pgUser: "synthetic-db-user", pgPassword: fixturePassword, pgDb: "synthetic-db",
+		sshConnectTimeout: time.Second, commandTimeout: time.Second,
+	}
+	runner := newRunner(cfg)
+	var capturedArgs []string
+	var capturedStdin string
+	runner.runSSH = func(_ context.Context, args []string, stdin string) (string, string, error) {
+		capturedArgs = append([]string(nil), args...)
+		capturedStdin = stdin
+		return "contract,complete\n", "", nil
+	}
+
+	rows, err := runner.pg(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 2 || rows[0].str(0) != "contract" || rows[0].str(1) != "complete" {
+		t.Fatalf("structural PostgreSQL result = %#v", rows)
+	}
+	if len(capturedArgs) < 2 {
+		t.Fatalf("SSH argv too short: %#v", capturedArgs)
+	}
+	for _, arg := range capturedArgs {
+		if arg == "-i" {
+			t.Fatalf("empty identity path emitted -i: %#v", capturedArgs)
+		}
+		if strings.Contains(arg, fixturePassword) {
+			t.Fatal("fixture PostgreSQL password escaped into SSH argv or remote command")
+		}
+	}
+	wantTarget := sshUser + "@" + overlayAddress
+	if got := capturedArgs[len(capturedArgs)-2]; got != wantTarget {
+		t.Fatalf("SSH target = %q, want %q", got, wantTarget)
+	}
+	remoteCmd := capturedArgs[len(capturedArgs)-1]
+	if !strings.Contains(remoteCmd, "IFS= read -r PGPASSWORD; export PGPASSWORD") {
+		t.Fatalf("remote PostgreSQL command lost its stdin credential channel: %q", remoteCmd)
+	}
+	passwordLine, sql, found := strings.Cut(capturedStdin, "\n")
+	if !found || passwordLine != fixturePassword || sql != query {
+		t.Fatal("PostgreSQL stdin is not exactly password line 1 followed by SQL")
+	}
+	if strings.Count(capturedStdin, fixturePassword) != 1 {
+		t.Fatal("fixture PostgreSQL password did not occur exactly once in stdin")
+	}
+}
+
 // Malformed or truncated output is unknown state, never a partial database
 // observation that downstream probes may attribute to a real object.
 func TestPostgreSQLRowsFailClosedOnMalformedOrTruncatedOutput(t *testing.T) {
