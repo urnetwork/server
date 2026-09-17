@@ -258,7 +258,7 @@ type logShipperResult struct {
 }
 
 func logShipperHosts(cfg *monitorConfig) []*host {
-	roles := []string{"services", "pg-primary", "redis-cluster", "subtensor", "backup"}
+	roles := []string{"services", "pg-primary", "redis-cluster", "subtensor", "backup", "vpn-server"}
 	hosts := []*host{}
 	for _, target := range cfg.hosts {
 		for _, role := range roles {
@@ -464,11 +464,11 @@ func evaluateLogShipper(target string, sample logShipperSample, redisClusterHost
 			probeId: "observability/log-shipper", tier: tierPage,
 			class: "log-shipper-down", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s is not shipping host logs and metrics", target),
-			mechanism: "The host-managed fluent-bit unit is not active/running. Warp containers can remain healthy while this independent unit permanently stops, removing that host's Mimir telemetry and any configured Warp log stream from Loki.",
-			baseline:  "fluent-bit.service is active/running on every managed Warp, database, Redis, backup, and Subtensor host.", observed: observed,
+			mechanism: "The required host-managed fluent-bit unit is absent or not active/running. Managed workloads can remain healthy while this independent publisher is unavailable, removing that host's Mimir telemetry and any configured Warp log stream from Loki.",
+			baseline:  "fluent-bit.service is active/running on every managed Warp, database, Redis, backup, Subtensor, and VPN-server host.", observed: observed,
 			evidence: fmt.Sprintf("service=%s/%s result=%s", sample.activeState, sample.subState, sample.result),
-			context:  "This is affirmative shipper-process loss. It does not identify whether the original trigger was configuration, fd exhaustion, credentials, or an output failure.",
-			action:   "Inspect the bounded fluent-bit journal and effective unit limits, fix the first startup/output failure, then restart only fluent-bit. Do not reboot the host or infer workload failure from missing telemetry.",
+			context:  "This is affirmative shipper-process absence. It does not distinguish missing provisioning from configuration, fd exhaustion, credentials, or an output failure.",
+			action:   "If the unit or configuration is absent, converge the owning Xops host role after authorization. Otherwise inspect the bounded fluent-bit journal and effective unit limits, fix the first startup/output failure, then restart only fluent-bit. Do not reboot the host or infer workload failure from missing telemetry.",
 			verify:   "Require active/running state, the expected fd budget, and fresh per-host Mimir metrics. Require a fresh labeled Loki record only where a managed Warp log source exists.",
 			playbook: "SIGNALS.md §11.14",
 		})

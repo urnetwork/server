@@ -12852,8 +12852,9 @@ stage a supported OS correction. Do not delete the journal, restart Fluent Bit,
 or reboot merely to clear the evidence.
 
 The `log-shipper` probe reads the host unit directly on services, PostgreSQL,
-Redis/MinIO, backup, and Subtensor hosts. `log-shipper-down` PAGEs when the
-unit is not active/running; `log-shipper-fd-budget` WARNs when either the soft
+Redis/MinIO, backup, Subtensor, and enabled management-VPN server hosts.
+`log-shipper-down` PAGEs when the unit is not active/running;
+`log-shipper-fd-budget` WARNs when either the soft
 or hard limit is below 65,536; `log-shipper-churn` WARNs when systemd has
 automatically restarted the current activation for another or unobservable
 reason; and `log-shipper-prometheus-histogram-decoder-crash` WARNs immediately
@@ -12909,8 +12910,14 @@ complete, and neither stale-tail nor pre-cursor evidence recurs.
 The host-side reducer returns only schema version, unit states, restart count,
 fd limits, a sanitized package version, bounded restart/policy enums, and
 bounded journal-reader counts; raw unit arguments, journal text, core text,
-metric data, cursors, and paths never leave the host. A VPN-only host is outside this
-signal. These are process and startup-capacity signals, not an end-to-end
+metric data, cursors, and paths never leave the host. An enabled `vpn-server`
+host is inside this signal because Xops `run-vpn.sh` owns the same hardened
+Fluent Bit unit and bounded node-metric publisher there. This direct lifecycle
+check remains independent from §8.14's five-family end-to-end telemetry join.
+Inactive state alone does not distinguish a never-provisioned unit from a
+stopped installation; use a hostname-bound unit/configuration/executable
+bootstrap discriminator before selecting deployment or repair.
+These are process and startup-capacity signals, not an end-to-end
 delivery claim: closure additionally requires fresh per-host metrics through
 Mimir and fresh data in every configured output. Require a fresh labeled Warp
 record through Loki only where a managed Warp log source exists. Never clear a
