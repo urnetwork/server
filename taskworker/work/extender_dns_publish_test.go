@@ -209,6 +209,7 @@ func sampleTestExtenderDnsRecordSets(
 		addresses,
 		sampleCount,
 		mathrand.New(mathrand.NewPCG(7, 11)),
+		nil,
 	)
 }
 
@@ -396,11 +397,13 @@ func TestExtenderDnsSampleRotatesBetweenTicks(t *testing.T) {
 		addresses,
 		testExtenderDnsSampleCount,
 		mathrand.New(mathrand.NewPCG(7, 11)),
+		nil,
 	)
 	second := sampleExtenderDnsRecordSets(
 		addresses,
 		testExtenderDnsSampleCount,
 		mathrand.New(mathrand.NewPCG(13, 17)),
+		nil,
 	)
 	connect.AssertNotEqual(t, first[0].ips, second[0].ips)
 
@@ -410,6 +413,7 @@ func TestExtenderDnsSampleRotatesBetweenTicks(t *testing.T) {
 		addresses,
 		testExtenderDnsSampleCount,
 		mathrand.New(mathrand.NewPCG(7, 11)),
+		nil,
 	)
 	connect.AssertEqual(t, first[0].ips, repeated[0].ips)
 }
@@ -1053,6 +1057,8 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 		connect.AssertEqual(t, batch.deletedSetIdentifiers, []string{})
 		// a continent with no address of a family has no set, so there is
 		// nothing for AF, AN, OC or SA and no A set for asia
+		// and one txt set per location the address sets answer for, in the
+		// order the locations were first answered
 		connect.AssertEqual(t, batch.setIdentifiers(), []string{
 			"extender-EU-A",
 			"extender-NA-A",
@@ -1060,6 +1066,10 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 			"extender-AS-AAAA",
 			"extender-NA-AAAA",
 			"extender-default-AAAA",
+			"extender-EU-TXT",
+			"extender-NA-TXT",
+			"extender-default-TXT",
+			"extender-AS-TXT",
 		})
 
 		globalIpv4Ips := testExtenderDnsIps(4, 1, 2, 3, 4, 5, 8)
@@ -1154,6 +1164,9 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 			"extender-EU-A",
 			"extender-NA-A",
 			"extender-default-A",
+			"extender-EU-TXT",
+			"extender-NA-TXT",
+			"extender-default-TXT",
 		})
 		connect.AssertEqual(t, first.deletedSetIdentifiers, []string{})
 
@@ -1165,12 +1178,17 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 		connect.AssertEqual(t, second.setIdentifiers(), []string{
 			"extender-NA-A",
 			"extender-default-A",
+			"extender-NA-TXT",
+			"extender-default-TXT",
 		})
-		connect.AssertEqual(t, second.deletedSetIdentifiers, []string{"extender-EU-A"})
+		// the continent's txt set goes with its address set
+		connect.AssertEqual(t, second.deletedSetIdentifiers, []string{"extender-EU-A", "extender-EU-TXT"})
 		// and the zone the ticks left behind holds exactly what is desired
 		connect.AssertEqual(t, publisher.zoneSetIdentifiers, []string{
 			"extender-NA-A",
 			"extender-default-A",
+			"extender-NA-TXT",
+			"extender-default-TXT",
 		})
 	})
 }
@@ -1192,7 +1210,7 @@ func TestExtenderDnsPublishFailureDoesNotStopTheDrip(t *testing.T) {
 		connect.AssertEqual(t, result.Published, 1)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 1)
 		// the batch was attempted and left the zone as it was
-		connect.AssertEqual(t, len(publisher.onlyBatch(t).upsertSets), 2)
+		connect.AssertEqual(t, len(publisher.onlyBatch(t).upsertSets), 4)
 		connect.AssertEqual(t, publisher.zoneSetIdentifiers, []string{})
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
@@ -1285,11 +1303,13 @@ func TestExtenderDnsDeletedSetIdentifiers(t *testing.T) {
 // twice must all leave the batch with exactly one delete of our own stale set:
 // anything else either destroys someone's record or fails the whole batch on a
 // repeated change.
-func TestRoute53ExtenderDnsIgnoresForeignAndNonAddressSets(t *testing.T) {
+func TestRoute53ExtenderDnsIgnoresForeignSets(t *testing.T) {
 	name := testExtenderDnsRecordName + "."
 	staleSet := testRoute53RecordSet(name, "extender-AS-A", route53.RRTypeA, "198.51.100.95")
 	repeatedStaleSet := testRoute53RecordSet(name, "extender-AS-A", route53.RRTypeA, "198.51.100.96")
-	txtSet := testRoute53RecordSet(name, "extender-AS-TXT", route53.RRTypeTxt, "\"not an address\"")
+	// a txt set that is not ours: the prefix is what marks ours, in every
+	// type this publisher owns
+	txtSet := testRoute53RecordSet(name, "operator-TXT", route53.RRTypeTxt, "\"not ours\"")
 	foreignSet := testRoute53RecordSet(name, "operator-A", route53.RRTypeA, "198.51.100.97")
 	api := &testRoute53Api{
 		existingRecordSets: []*route53.ResourceRecordSet{
