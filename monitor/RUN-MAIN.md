@@ -16,26 +16,33 @@ and continue until the operator ends the run or its requested duration expires.
 Use two explicit, long-lived agent roles for every pass; reuse the same agents
 so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution: preflight,
-  immutable binary, authoritative watcher and tails, alert capture, focused
-  reruns, source identity, and every verification gate. The Go watcher remains
-  model-neutral; Terra operates and interprets it. The primary agent must retain
+- A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution and
+  evidence work: preflight, immutable binary, authoritative watcher and tails,
+  alert capture, bounded read-only investigation, fact collection,
+  evidence-authority checks, failure triage, focused reruns, source identity,
+  and every verification gate. The Go watcher remains model-neutral; Terra
+  operates and interprets it. The primary agent must retain
   the actual durable execution-session handle unless Terra remains active for
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
-- A `gpt-5.6-sol` agent at `max` reasoning owns diagnosis and repair for every
-  new, changed, or unresolved causal boundary. It may run bounded read-only
-  discriminators, but Terra remains the runner and verifier.
+- A `gpt-5.6-sol` agent at `max` reasoning owns root-cause debugging and repair
+  for every new, changed, or unresolved causal boundary. Sol consumes Terra's
+  fact and triage manifests, inspects the bounded relevant source, and runs
+  local deterministic controls. When another production fact is required, Sol
+  specifies the missing discriminator for Terra to collect rather than
+  independently recollecting production evidence.
 
-For each such boundary, Terra sends a deterministic delta manifest referencing
-the prior ledger record and object hashes described below; group shared
-dependency/artifact/rollout failures and keep unrelated causes separate. Never
-paste full all-signal Markdown, logs, raw evidence, or test output into a model
-handoff. Sol pulls the complete Alert and only bounded relevant source objects
-by hash on demand, then returns cause/patch/regressions/prerequisites/window;
-Terra returns gate manifests. Keep both agents and the watcher alive unless
-safe promotion requires a handoff.
+For each such boundary, Terra sends deterministic delta, investigation, fact,
+and triage manifests referencing the prior ledger record and object hashes
+described below; group shared dependency/artifact/rollout failures and keep
+unrelated causes separate. Never paste full all-signal Markdown, logs, raw
+evidence, or test output into a model handoff. Sol pulls the complete Alert and
+only bounded relevant source objects by hash on demand. If the packet is
+insufficient, Sol returns a precise missing-fact request to Terra; otherwise Sol
+returns cause/patch/regressions/prerequisites/window and Terra returns gate
+manifests. Keep both agents and the watcher alive unless safe promotion requires
+a handoff.
 
 The primary agent owns the append-only run ledger. Terra and Sol produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
@@ -49,10 +56,11 @@ make the smallest owning fix with synthetic coverage and catalog updates; pass
 all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
-This is context-delivery optimization only: use Terra at medium for the
-deterministic monitoring workload and retain Sol at max for diagnosis and
-repair. Never silently change those roles or efforts, skip a severity, lose
-warnings or `cannot-observe`, or delete/truncate evidence.
+This is context-delivery optimization only: use Terra at medium for
+deterministic monitoring, investigation, fact collection, and failure triage;
+retain Sol at max for root-cause debugging and repair. Never silently change
+those roles or efforts, skip a severity, lose warnings or `cannot-observe`, or
+delete/truncate evidence.
 Do not raise production `runLoopMaxConcurrentSignals`, add watchers outside
 bounded promotion, shorten windows, or persist sustain counters/ticket state.
 
@@ -509,11 +517,12 @@ Research all three directions:
    removing them would make old evidence uninterpretable.
 
 Terra owns the reproducible crosswalk, registry/test inventory, current watcher
-delta, and verification manifests. Sol owns semantic review of observation
-authority, causal discrimination, false-positive/false-negative boundaries,
-and the smallest source/test corrections. The primary agent reviews their
-manifests, writes the single chained ledger record, and owns all source and
-production authority decisions.
+delta, bounded investigation and fact collection, observation-authority review,
+failure triage, and verification manifests. Sol owns root-cause debugging,
+causal discrimination, false-positive/false-negative boundaries, and the
+smallest source/test corrections. The primary agent reviews their manifests,
+writes the single chained ledger record, and owns all source and production
+authority decisions.
 
 The pass is complete only when every catalog signal is implemented or remains
 an explicit active coverage finding with a named missing source prerequisite;
