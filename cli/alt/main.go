@@ -30,6 +30,12 @@ func splitOption(opts docopt.Opts, name string) []string {
 }
 
 func main() {
+	// Address scrubbing for everything this process writes to stdout and
+	// stderr, installed before anything can log. A failure here is not fatal:
+	// it degrades to the previous unscrubbed behavior rather than losing
+	// logging entirely. See server.ScrubProcessLogs.
+	server.ScrubProcessLogs()
+
 	usage := `BringYour alt server. Serves the connect node and the API
 directly on public UDP, with no load balancer in front.
 
