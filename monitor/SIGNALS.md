@@ -2276,6 +2276,15 @@ retain precedence. Parent cancellation remains watcher lifecycle rather than
 an SSH failure, including cancellation while waiting for a shared command slot;
 the per-command deadline retains its timeout classification.
 
+Every monitor SSH command is noninteractive, identity-confined, and pinned to
+the operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
+`StrictHostKeyChecking=yes`, and `UpdateHostKeys=no`. The transport uses only
+the selected inventory identity paths and never accepts a new host key or
+rewrites trust state while observing production. An unknown or changed host
+key, or an unusable selected identity, is a `cannot-observe` result. Legitimate
+host-key rotation is operator-owned and must be preprovisioned in the
+monitor's known-hosts state before observation resumes.
+
 Status 255 is deliberately **not a transport diagnosis**: OpenSSH can return it
 for connection/authentication failures or propagate the remote command's own
 status 255. This field alone proves neither a failed VPN nor a remote service
@@ -2285,6 +2294,14 @@ visibility; shared-cause correlation does not suppress or replace them. Only
 fixed classes enter these Alerts, never SSH stderr, connection addresses,
 credentials, or raw route/session output. Healthy sibling results remain
 visible, and unknown targets remain unknown.
+
+FALSE POSITIVE QUALIFIER: strict SSH failure can mean missing local trust,
+an identity available only through an agent, or a legitimate key rotation
+that has not been preprovisioned while the host and service remain healthy.
+FALSE NEGATIVE QUALIFIER: successful SSH proves only authentication to the
+locally trusted key for the selected address. It does not prove inventory or
+source completeness, establish the original key's trust, or make a successful
+remote command a service-health result.
 
 ACTION: first distinguish SSH transport/authentication from the remote
 command's status. Before attributing a local overlay failure, correlate

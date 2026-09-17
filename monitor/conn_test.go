@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,7 @@ func TestSSHNativeExitStatusPreservesVisibilityAndPrivacy(t *testing.T) {
 		{name: "remote-command-1-with-255-looking-text", err: exit1, stderr: "exit status 255", want: observationErrorClassCommandFailed},
 		{name: "status-looking-error-is-not-native", err: errors.New("exit status 255"), want: observationErrorClassCommandFailed},
 		{name: "authentication-keeps-specific-class", err: exit255, stderr: "Permission denied (publickey)", want: observationErrorClassAccessDenied},
+		{name: "host-key-verification-remains-generic-ssh", err: exit255, stderr: "Host key verification failed.", want: observationErrorClassSSHExit255},
 		{name: "timeout-keeps-specific-class", err: exit255, stderr: "connection timeout", want: observationErrorClassTimeout},
 		{name: "successful-command-with-hostile-stderr", stderr: "exit status 255"},
 	} {
@@ -93,6 +95,26 @@ func TestSSHNativeExitStatusPreservesVisibilityAndPrivacy(t *testing.T) {
 				t.Fatal("SSH exit 255 alone attributed a workstation transport cause")
 			}
 		})
+	}
+}
+
+func TestSSHArgsRequirePinnedNonMutatingIdentityContract(t *testing.T) {
+	runner := newRunner(&monitorConfig{sshKeyPaths: []string{
+		"/synthetic/observer-key-one", "", " \t", "/synthetic/observer-key-two",
+	}})
+	args := runner.sshArgs("observer@host.invalid", "true", 7*time.Second)
+	want := []string{
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "ConnectTimeout=7",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UpdateHostKeys=no",
+		"-i", "/synthetic/observer-key-one",
+		"-i", "/synthetic/observer-key-two",
+		"observer@host.invalid", "true",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("SSH argv = %#v, want %#v", args, want)
 	}
 }
 
@@ -232,6 +254,17 @@ func TestPostgreSQLTransportEmptyIdentityPathsCannotShiftTargetOrSecret(t *testi
 		}
 		if strings.Contains(arg, fixturePassword) {
 			t.Fatal("fixture PostgreSQL password escaped into SSH argv or remote command")
+		}
+	}
+	for name, want := range map[string]string{
+		"BatchMode":             "yes",
+		"IdentitiesOnly":        "yes",
+		"StrictHostKeyChecking": "yes",
+		"UpdateHostKeys":        "no",
+	} {
+		option := name + "=" + want
+		if !slices.Contains(capturedArgs, option) {
+			t.Fatalf("SSH argv omitted %q: %#v", option, capturedArgs)
 		}
 	}
 	wantTarget := sshUser + "@" + overlayAddress
