@@ -532,6 +532,28 @@ WHERE function_name LIKE '%UpdateClient%'
   preserve the existing key and reconcile before another submission. Neither
   a matching destination phrase nor a current source base proves successful
   reset or unchanged account configuration. Never clear rows or keys manually.
+- The 2026-09-18 Main `AdvancePayment` investigation established the current
+  operations/configuration split with a bounded read-only primary query. Of
+  1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
+  nonterminal with its existing idempotency key and without a processor record
+  or chain hash, so they are source-wallet liquidity work, not a stuck-worker
+  or retry-reset defect. Thirty-eight rows had fresh claims; changing parked
+  and claim counts therefore describe scheduler state, not recovery. The two
+  `processor-invalid-destination` rows were also nonterminal and unpinned, and
+  selected current active, owned MATIC wallets whose address shape was not a
+  valid EVM address. That independently establishes an account-wallet
+  configuration fault, not a generic processor outage. The current selected
+  wallet is not evidence of source liquidity, and a stored rejection alone is
+  not evidence that a reset succeeded; retain both checks. One logical
+  provider attempt can emit two diagnostic lines, so line rate is not a task
+  count. Finance must verify/fund the exact source network/token wallet (or
+  authorize a payout pause), and the account owner/operator must submit the
+  valid intended destination through the supported account API. Do not deploy,
+  restart, replay, clear idempotency, accelerate retries, or retarget a pinned
+  payout to address either class. After authorized corrections, require an
+  independent 90-minute natural-retry window plus ingestion delay, intended
+  successful transfers without duplicates, and no new admission failures or
+  rate limits before closing both cohorts.
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -1365,7 +1387,10 @@ ledger crosswalks deterministic:
   `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
   reason-specific successors to the legacy sender class in §14.6. They keep
   admission, encryption readiness, lifecycle closure, and unknown errors
-  causally separate.
+  causally separate. Newer `not-admitted` diagnostics also retain the local
+  refusal gate, signal kind and reset flag. Its service aggregate remains
+  alertable so splitting a burst across those finite groups cannot hide it;
+  old mode/reason-only lines explicitly leave the gate unobserved.
 
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
@@ -8343,7 +8368,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | legacy `[signal]send failed -><destination>` from `transport_p2p_webrtc.go` (`signal-send-unclassified`) | The emitting service hosts Connect's signaling sender, but its legacy boolean-only call discarded the detailed result. The line cannot distinguish bounded admission refusal, required-encryption refusal, client/generation/sequence closure, or another send error. A Taskworker selector identifies the host process, not an owning task or a Taskworker implementation defect; the September 10 record cited as historical Taskworker ancestry was later corrected to Connect and must not be reused as ancestry for this event. The retained sample omits the destination. | At 20/min WARN, prove the embedded Connect input under §8.12 and deploy the structured, identity-free diagnostic before choosing a behavioral correction. Do not infer pressure, lifecycle, transport failure, or the effect of a later Connect commit from the legacy line. Require this class to disappear on every relevant artifact and the reason-specific class to remain below 20/min for ten minutes under comparable traffic. See §14.6. |
-| `[signal]send failed mode=<sender|receive-reply> reason=<not-admitted|encryption-not-ready|canceled-or-closed|other>` (`signal-send-*`) | Current Connect preserves the detailed enqueue boundary without retaining destinations or raw errors. `not-admitted` is a false result with no error; on `receive-reply` it is the intentional zero-wait callback boundary, while `sender` requires its own wait-budget audit. `encryption-not-ready` is the typed required-encryption gate. `canceled-or-closed` deliberately groups the transfer layer's untyped client, generation, sequence, and capability `Done` outcomes. `other` is a privacy-safe fallback and not a transport diagnosis. | Each reason is a separate 20/min WARN class and mode is its bounded frame. Correlate only the matching control: send admission and negotiation recovery; encryption/session establishment; or exact drain/generation/sequence lifecycle. Reproduce `other` locally before adding a stable typed reason. Never block a receive callback, bypass encryption, enlarge a queue, log a raw error/destination, or restart a stable service from one class alone. Require the class below 20/min for ten minutes and retain deterministic zero-wait, typed-error, cancellation, and pooled-buffer ownership tests. See §14.6. |
+| `[signal]send failed mode=<sender|receive-reply> reason=<not-admitted|encryption-not-ready|canceled-or-closed|other>` (`signal-send-*`), optionally followed by the exact `boundary=... kind=... reset=...` diagnostic schema | `not-admitted` is a false result with no error; on `receive-reply` it is the intentional zero-wait callback policy. Old mode/reason-only records cannot identify the refusal gate. New `boundary` distinguishes reliable resend capacity, Pack admission, final queue handoff and loopback; `kind` and `reset` describe only the refused local frame. `encryption-not-ready` is the typed encryption gate; `canceled-or-closed` groups untyped `Done` outcomes; `other` preserves unexpected errors without raw text. | Each reason is a separate 20/min WARN class. Admission keeps both its service aggregate and finite diagnostic groups, so mixed gates cannot hide a burst. A Pack refusal can reflect fairness rather than exhausted total capacity; a final handoff can be a zero-buffer rendezvous rather than a full Pack budget. A refused answer or candidate is not proved recovered by offer replay. Correlate the exact gate and signal kind with negotiation completion or usable exchange fallback; require ten comparable minutes below threshold and the independent recovery control after every emitting service and the monitor contain the diagnostic. Never block receive callbacks, bypass encryption, enlarge queues, log identities/SDP/raw errors, or restart from this line alone. See §14.6 for the exact schema and closure qualifiers. |
 | `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly. That dispatch does not itself produce `window_stall failed=1`, but a later reason change can publish that compatibility transition while the failed latch remains set. The class rate intentionally counts both diagnostic lines; `failed_window_events` separately counts exact-replay-deduplicated authoritative events. Compatibility-only evidence keeps the alert but renders that cardinality unknown. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer incident size from the diagnostic line rate, terminal impact from `failed=0`, or a root cause from `window_failed` or compatible `failed=1` alone. Do not restart Taskworker or deploy a transport change from these lines. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | `[rel] event=evaluation_budget_exhausted ...` (`window-evaluation-budget`) | One or more initial provider pings remained unresolved at the owning pass's safety boundary. On pre-fix Connect, one `WindowExpandTimeout` deadline incorrectly bounded both candidate acquisition and already-started pings: `effective_min < ping_timeout` directly proves that the acquisition phase clipped the configured evaluation budget. Connect `b11d722` or later ends acquisition at `expand_timeout`, retains the same pass through each full `PingTimeout`, and reserves this event for the later acquisition-plus-ping safety envelope. `candidates` is the pass-owned cleanup count; `observed_max` is elapsed wall time. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement do not emit it. The event identifies the budget owner, not why the receiver stayed silent, and its line rate is neither candidate nor failed-window cardinality. | At 20/min WARN, prove the emitting Connect input and branch on `effective_min` versus `ping_timeout`. For the clipped pre-fix shape, rebuild the emitting Connect-bearing artifact with `b11d722` or later; do not lengthen either timeout as a legacy-HMAC remedy. On corrected source, diagnose a full acquisition-plus-ping expiry at the timer, callback, or scheduler boundary. Preserve pass ownership, no-overlap/no-late-admission cleanup, and exactly-once accounting. Correlate §2.24 HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal state independently. After complete convergence require zero clipped events for ten minutes, ordinary unanswered candidates retiring only after their full ping budget, and provider addition or recovery; retain deterministic acquisition-edge, full-budget, terminal-boundary, and lifecycle-cancellation barriers. See §14.6. |
@@ -17596,22 +17621,64 @@ that change unreliable-flight and acknowledgement behavior were absent from
 that artifact, but the legacy line cannot prove that either change would have
 prevented these sends.
 
-Current Connect calls `SendWithTimeoutDetailed` without changing timeout,
-options, sequencing, or pooled-message ownership. It logs only the fixed mode
+Current Connect uses the same detailed Client send path without changing
+timeout, options, sequencing, public false/nil results, or pooled-message
+ownership. The original structured diagnostic retained only fixed mode
 (`sender` or `receive-reply`) and reason. `not-admitted` is the no-error refusal;
-for a receive reply it identifies the required zero-wait boundary, not a bug in
-that nonblocking policy. `encryption-not-ready` preserves the typed entry-gate
-error. `canceled-or-closed` deliberately groups the transfer layer's still-
-untyped client, generation, sequence, and capability closure results. `other`
-retains an unexpected result without copying raw error text into logs. The
-monitor keeps the exact legacy shape as `signal-send-unclassified`, separates
-the four structured reasons and mode frames, and leaves malformed modes,
-reasons, or field order in generic novelty. Verification requires all relevant
-artifacts to stop emitting the legacy form, each reason-specific class below
-20/min for ten minutes under comparable traffic, and the causal control for
-the observed reason. Never block the shared receive callback, enlarge an
-admission queue, bypass encryption, or restart a stable Taskworker from the
-legacy count alone.
+for a receive reply it identifies the required zero-wait policy, not which
+gate refused or a bug in that policy. `encryption-not-ready` preserves the
+typed entry-gate error. `canceled-or-closed` deliberately groups the transfer
+layer's still-untyped client, generation, sequence, and capability closure
+results. `other` retains an unexpected result without raw error text.
+
+The additional exact suffix is `boundary=<unknown|loopback|resend-capacity|pack-admission|queue-handoff> kind=<none|offer|answer|candidate|waiting|mixed|unknown> reset=<true|false|unknown>`.
+The gate is recorded synchronously at the actual false/nil return, before
+ownership can transfer; it is not guessed from queue lengths after the send.
+Non-admission error reasons carry `boundary=unknown`. The kind/reset decoder
+reads at most 64 KiB and classifies only batches of at most 64 signal values;
+larger, malformed, wrong-type or unrecognized frames cannot leak payloads into
+the fixed vocabulary. No
+destination, stream/generation identifier, SDP, ICE candidate, raw error,
+address or free-form label is retained. This adds observation, not a retry or
+queue policy.
+
+| Refusal gate | Evidence established | False-positive discriminator / required control |
+| --- | --- | --- |
+| `pack-admission` | The fixed pre-sequence count/fairness gate refused the offer. | Fairness may reserve a slot even when total capacity is not exhausted. Inspect the effective admission policy; this alone does not prove host memory/CPU or remote failure. |
+| `resend-capacity` | Reliable resend capacity was unavailable before count admission. | A count slot can still be free. Inspect the resend/delivery/acknowledgement control; do not infer that enlarging the Pack queue helps. |
+| `queue-handoff` | Earlier gates passed, but the final channel offer refused. | A configured zero-buffer rendezvous with no ready consumer has this result without a full Pack budget. Verify effective sequence buffer and consumer progress. |
+| `loopback` | The local Client queue refused a self-directed frame. | This is not a remote transport result. Confirm local queue/consumer state. |
+| `unknown`, or mode/reason-only schema (`boundary=unobserved` in the monitor frame) | No exact gate is established. | Do not borrow the gate or kind from another process or artifact. `kind=unknown` can reflect the bounded decoder, not necessarily malformed signaling. |
+
+**Recovery and false-negative qualifiers:** `kind=offer` may replay when
+`WaitingForSdpOffer` arrives. A passive peer already holding an offer ignores
+its duplicate; a refused answer is therefore not proved replayed by that
+duplicate. Candidate flush clears its local buffer before sending, so a
+refused candidate is not proved regenerated either. An outer P2P generation
+timeout/reconnect or a usable exchange route can still recover service. This
+asymmetry alone does not establish an outage or justify changing negotiation;
+correlate the exact kind with independent negotiation completion, fresh
+generation recovery or demonstrated exchange fallback. `reset=true` describes
+only the local frame, not an observed remote restart. Accepted sends do not
+prove remote delivery, and a quiet interval without comparable traffic does
+not prove recovery.
+
+The monitor retains the exact oldest shape as `signal-send-unclassified`,
+accepts both structured versions, groups the new admission suffix by its
+finite fields, and keeps the admission class's service aggregate so several
+sub-threshold groups cannot hide a threshold-crossing burst. Partial, unknown
+or misordered fields and extra trailing text remain generic novelty; an
+admission gate attached to a non-admission error reason is also rejected.
+Every emitting service must contain the diagnostic Connect input and the
+monitor must contain its parser before the gate is considered observable.
+Closure requires the oldest form to disappear, ten minutes of fresh
+comparable traffic with the aggregate and each reason/group below 20/min, and
+the independent recovery control for the observed kind. Preserve deterministic
+resend-capacity, full Pack-admission and zero-buffer handoff tests, public
+false/nil compatibility, zero-wait callbacks, exact pooled ownership and
+mixed-group aggregate coverage. Never block the shared receive callback,
+enlarge admission queues, bypass encryption, or restart a stable Taskworker
+from a refusal count alone.
 
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy

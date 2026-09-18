@@ -225,7 +225,9 @@ var (
 	)
 	signalSendStructuredRe = regexp.MustCompile(
 		`\[transport_p2p_webrtc\.go:[0-9]+\](\[signal\]send failed mode=(sender|receive-reply) ` +
-			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other))[[:space:]]*$`,
+			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other)` +
+			`(?: boundary=(unknown|loopback|resend-capacity|pack-admission|queue-handoff)` +
+			` kind=(none|offer|answer|candidate|waiting|mixed|unknown) reset=(true|false|unknown))?)[[:space:]]*$`,
 	)
 	onboardingPostPrimaryCanceledRe = regexp.MustCompile(
 		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
@@ -330,9 +332,15 @@ func mimirRejectedLogGroup(line string) string {
 }
 
 func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
+	boundaries := "unknown"
+	if reason == "not-admitted" {
+		boundaries += "|loopback|resend-capacity|pack-admission|queue-handoff"
+	}
 	return regexp.MustCompile(
 		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ` +
-			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) + `[[:space:]]*$`,
+			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) +
+			`(?: boundary=(?:` + boundaries + `)` +
+			` kind=(?:none|offer|answer|candidate|waiting|mixed|unknown) reset=(?:true|false|unknown))?[[:space:]]*$`,
 	)
 }
 
@@ -342,10 +350,10 @@ func signalSendLegacyLogSample(string) string {
 	return "[signal]send failed (legacy destination omitted; result unavailable)"
 }
 
-// Retains only the fixed mode/reason suffix from current Connect output.
+// Retains only fixed diagnostic fields, including both deployed schema versions.
 func signalSendStructuredLogSample(line string) string {
 	match := signalSendStructuredRe.FindStringSubmatch(line)
-	if len(match) != 4 {
+	if len(match) != 7 {
 		return "[signal]send failed (malformed structured result omitted)"
 	}
 	return match[1]
@@ -353,10 +361,24 @@ func signalSendStructuredLogSample(line string) string {
 
 func signalSendLogMode(line string) string {
 	match := signalSendStructuredRe.FindStringSubmatch(line)
-	if len(match) != 4 {
+	if len(match) != 7 {
 		return "unknown"
 	}
 	return match[2]
+}
+
+// Legacy mode-only evidence cannot identify an admission gate. New finite
+// groups retain the gate and payload kind; the class also keeps its aggregate
+// so splitting a mixed burst never hides the original service-level threshold.
+func signalSendLogAdmission(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 7 {
+		return "unknown"
+	}
+	if match[4] == "" {
+		return match[2] + "/boundary=unobserved"
+	}
+	return match[2] + "/boundary=" + match[4] + "/kind=" + match[5] + "/reset=" + match[6]
 }
 
 func onboardingPostPrimaryCanceledStage(line string) string {
@@ -922,14 +944,15 @@ var logClasses = []logClass{
 		redactIDs: true,
 	},
 	{name: "signal-send-not-admitted", re: signalSendStructuredReasonRe("not-admitted"),
-		sample:        signalSendStructuredLogSample,
-		groupBy:       signalSendLogMode,
-		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "the Connect signaling send returned false without an error; mode identifies whether this was the receive-reply zero-wait boundary or the ordinary sender path",
-		mechanism: "A receive-reply send deliberately offers into bounded admission with timeout zero so one peer cannot block the shared receive callback. A full admission boundary therefore refuses that reply and leaves retry machinery to recover it. Sender mode does not use that zero-wait policy and requires a separate send-budget audit.",
-		context:   "This result identifies admission refusal, not CPU, memory, transport, or provider failure. Correlate it with the exact mode, send-admission controls, negotiation retry/recovery, and artifact ancestry. A burst distributed across processes is not by itself proof that their resources are saturated.",
-		action:    "For receive-reply mode, inspect bounded send-admission pressure and retry recovery without changing the nonblocking callback contract. For sender mode, verify its effective wait and owning generation. Prove any proposed queue, lane, or carrier correction with a deterministic admission test; do not block the receive path or enlarge a queue from this log alone.",
-		verify:    "The class stays below 20/min for ten minutes under comparable signaling traffic, refused receive replies recover through ordinary negotiation retry, and deterministic full-admission tests retain zero-wait callback behavior and exact pooled-frame return.",
+		sample:             signalSendStructuredLogSample,
+		groupBy:            signalSendLogAdmission,
+		aggregateWithGroup: true,
+		rateThreshold:      novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send returned false without an error; mode identifies the receive-reply zero-wait policy, and newer artifacts retain the exact local refusal gate and signal kind",
+		mechanism: "boundary=pack-admission means the fixed pre-sequence count/fairness gate refused; resend-capacity means reliable resend capacity was unavailable before that gate; queue-handoff means the final channel offer refused after passing the earlier gates, including a zero-buffer rendezvous without a ready consumer; loopback is the client's own queue. Old mode/reason-only lines leave the boundary unobserved. None of these is a remote delivery result.",
+		context:   "A finite kind identifies offer, answer, candidate, waiting, none, mixed, or unknown; reset describes only the local frame's generation-reset flag. Unknown can mean a malformed, oversized, or unrecognized frame, not a proved protocol error. Pack refusal does not prove total capacity exhausted because fairness also reserves capacity; queue-handoff does not prove a full Pack budget. Distributed counts do not prove CPU, memory, provider failure, or successful fallback. The aggregate threshold is retained across diagnostic groups.",
+		action:    "For receive-reply mode, correlate the exact gate with its effective buffer/count or resend policy and the identified kind's negotiation recovery. An offer may replay on WaitingForSdpOffer; a refused answer is not replayed merely by a duplicate offer, and a refused candidate is not proved regenerated after its local flush. Verify fresh-generation reconnect or usable exchange fallback where replay is absent. For sender mode, audit its own wait budget and generation. Preserve zero-wait callbacks, encryption, and queue bounds; do not restart from this line alone.",
+		verify:    "Deploy the diagnostic Connect input into every emitting service and refresh the monitor parser. Require fresh comparable traffic for ten minutes with the aggregate and each group below 20/min, plus independent negotiation success or usable exchange fallback for the refused signal kind. Quiet or accepted sends alone do not prove remote delivery. Deterministic tests must force resend-capacity, Pack-admission, and final-handoff refusals, retain public false/nil results and zero-wait replies, and return each pooled frame exactly once.",
 		redactIDs: true,
 	},
 	{name: "signal-send-encryption-not-ready", re: signalSendStructuredReasonRe("encryption-not-ready"),

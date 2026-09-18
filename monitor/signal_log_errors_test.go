@@ -578,7 +578,13 @@ func TestLogErrorsSignalClassifiesStructuredSignalSendReasons(t *testing.T) {
 			t.Fatal(err)
 		}
 		alert := requireAlertClass(t, alerts, test.class)
-		if !strings.Contains(alert.Observed, "frame="+test.mode) {
+		modeObserved := false
+		for _, candidate := range alerts {
+			if candidate.Class == test.class && strings.Contains(candidate.Observed, "frame="+test.mode) {
+				modeObserved = true
+			}
+		}
+		if !modeObserved {
 			t.Errorf("%s alert omitted bounded mode: %+v", test.class, alert)
 		}
 		if !strings.Contains(alert.Markdown(), "mode="+test.mode+" reason="+test.reason) {
