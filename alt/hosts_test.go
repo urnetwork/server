@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urnetwork/warp/services"
 	"gopkg.in/yaml.v3"
 )
 
@@ -46,8 +45,8 @@ versions:
                 - private.alt.example
 `
 
-func testServicesConfig(t testing.TB) *services.ServicesConfig {
-	servicesConfig := &services.ServicesConfig{}
+func testServicesConfig(t testing.TB) *ServicesConfig {
+	servicesConfig := &ServicesConfig{}
 	if err := yaml.Unmarshal([]byte(testServicesYml), servicesConfig); err != nil {
 		t.Fatal(err)
 	}

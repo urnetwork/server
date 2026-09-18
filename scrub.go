@@ -15,8 +15,10 @@ package server
 // `ErrorLog`, anything in a dependency, and anything added later, because it
 // operates on the descriptor rather than on the writer.
 //
-// Uses the same `warp.ScrubAddrs` the lb uses for nginx, so there is one
-// implementation of the scrubber and one set of tests for it.
+// The scrubber itself (scrub_addrs.go) is the lb's, carried here as a copy:
+// the root `warp` package is the lb's process runtime, which a service must
+// not depend on. The lb's address corpus runs against the copy so a change
+// on either side has to be made on both.
 
 import (
 	"bytes"
@@ -26,8 +28,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-
-	"github.com/urnetwork/warp"
 )
 
 // scrubMaxLineSize bounds how much is held waiting for a newline. A writer that
@@ -146,7 +146,7 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 			_, err := out.Write(line)
 			return err == nil
 		}
-		_, err := out.Write(warp.ScrubAddrs(line))
+		_, err := out.Write(scrubAddrs(line))
 		return err == nil
 	}
 

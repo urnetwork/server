@@ -14,8 +14,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/urnetwork/warp/services"
-
 	"github.com/urnetwork/server"
 )
 
@@ -28,12 +26,12 @@ const (
 )
 
 // Reads the running environment's services config out of the vault.
-func LoadServicesConfig() (*services.ServicesConfig, error) {
+func LoadServicesConfig() (*ServicesConfig, error) {
 	resource, err := server.Vault.SimpleResource(servicesResourceName)
 	if err != nil {
 		return nil, err
 	}
-	servicesConfig := &services.ServicesConfig{}
+	servicesConfig := &ServicesConfig{}
 	if err := resource.UnmarshalYamlE(servicesConfig); err != nil {
 		return nil, err
 	}
@@ -63,7 +61,7 @@ func ServiceHosts(service string) ([]string, error) {
 // `<env>-<service>.<domain>` for every domain, plus the service's own
 // aliases and domains. The bare domain and the lb names are deliberately
 // excluded: they belong to no service front and alt must not answer for them.
-func serviceHosts(servicesConfig *services.ServicesConfig, env string, service string) []string {
+func serviceHosts(servicesConfig *ServicesConfig, env string, service string) []string {
 	serviceConfig, ok := servicesConfig.Versions[0].Services[service]
 	if !ok || serviceConfig == nil || !serviceConfig.IsExposed() {
 		return nil
