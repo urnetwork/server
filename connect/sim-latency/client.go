@@ -26,6 +26,7 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -1036,22 +1037,34 @@ func (self *ClientDriver) writeCsvHeader() {
 	self.writeCsvLineLocked(resultCSVHeader + "\n")
 }
 
+// Emits the historical CSV bytes and retains exactly their timing precision.
+// The sidecar and scorer must summarize the same persisted observations.
 func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path string, depth int, status int, bytes int64, ttfb time.Duration, total time.Duration) {
 	bytesPerSecond := float64(0)
 	if 0 < total {
 		bytesPerSecond = float64(bytes) / total.Seconds()
 	}
+	// Parse the emitted text instead of independently rounding the duration:
+	// formatting ties and sub-microsecond values must match the CSV reader.
+	formatMillis := func(duration time.Duration) (string, float64) {
+		text := fmt.Sprintf("%.3f", float64(duration)/float64(time.Millisecond))
+		value, err := strconv.ParseFloat(text, 64)
+		server.Raise(err)
+		return text, value
+	}
+	ttfbText, ttfbMillis := formatMillis(ttfb)
+	totalText, totalMillis := formatMillis(total)
 	self.outLock.Lock()
 	defer self.outLock.Unlock()
-	line := fmt.Sprintf("%d,%s,%s,%d,%d,%d,%.3f,%.3f,%.0f\n",
+	line := fmt.Sprintf("%d,%s,%s,%d,%d,%d,%s,%s,%.0f\n",
 		startTime.UnixMilli(),
 		client,
 		path,
 		depth,
 		status,
 		bytes,
-		float64(ttfb)/float64(time.Millisecond),
-		float64(total)/float64(time.Millisecond),
+		ttfbText,
+		totalText,
 		bytesPerSecond,
 	)
 	self.writeCsvLineLocked(line)
@@ -1059,8 +1072,8 @@ func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path s
 		tStartMs: startTime.UnixMilli(),
 		status:   status,
 		bytes:    bytes,
-		ttfbMs:   float64(ttfb) / float64(time.Millisecond),
-		totalMs:  float64(total) / float64(time.Millisecond),
+		ttfbMs:   ttfbMillis,
+		totalMs:  totalMillis,
 	})
 }
 
