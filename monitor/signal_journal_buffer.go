@@ -74,6 +74,7 @@ if [ "$journald_active" = active ]; then
   for journald_timestamp in "$active_enter_us" "$journald_now_us"; do
     case "$journald_timestamp" in ''|*[!0-9]*) exit 33 ;; esac
     [ "${#journald_timestamp}" -le 16 ] || exit 33
+    [ "$journald_timestamp" -gt 0 ] || exit 33
   done
   [ "$active_enter_us" -le "$journald_now_us" ] || exit 33
   journald_active_seconds=$(( (journald_now_us - active_enter_us) / 1000000 ))

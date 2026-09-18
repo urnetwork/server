@@ -56,6 +56,19 @@ make the smallest owning fix with synthetic coverage and catalog updates; pass
 all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
+Every investigation and root-cause handoff must explicitly report
+`false_positive_qualifiers` and `false_negative_qualifiers`. Terra records the
+candidate discriminator, its observation authority, source completeness, and
+healthy control in the fact/triage manifest; Sol decides whether the evidence
+establishes a real probe boundary. When it does, update the owning numbered
+`SIGNALS.md` entry and the probe reducer/tests in the same correction. Cover
+the misleading-but-healthy input, the true failure, and unavailable,
+partial, stale, corrected, or ambiguous evidence as applicable. Missing
+authority must remain unknown or `cannot-observe`, never healthy. Do not add a
+qualifier from speculation, suppress the original symptom, or wait for the
+daily research pass to record a discriminator learned during an active
+incident.
+
 This is context-delivery optimization only: use Terra at medium for
 deterministic monitoring, investigation, fact collection, and failure triage;
 retain Sol at max for root-cause debugging and repair. Never silently change
@@ -87,6 +100,17 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
   customer identifiers, balances, contract IDs, or stream labels into a shell
   transcript, alert, test failure, commit, or agent response. Feed credentials
   on stdin through the existing monitor transports.
+- Bind diagnostic-request fields by JSON name or a NUL-safe typed encoding;
+  never unpack optional or secret-bearing fields with whitespace/TSV `read`.
+  Before contact, assert the rendered argv separately from execution: an empty
+  optional identity list emits no `-i`, the target equals the inventory-owned
+  `user@endpoint`, and a password can appear only in the intended remote stdin
+  or environment channel, never a local argv, address, filename, or DNS lookup.
+  A binding mismatch, missing result schema, or nonzero transport exit stops
+  the discriminator without retry and leaves the production fact unknown. If
+  a secret may have entered an unintended channel, restrict the evidence,
+  report the exposure without quoting it, and require credential disposition
+  before issuing a fresh request.
 - Treat dashboards as navigation aids, not proof. Deployment state comes from
   the running unit/container and its immutable artifact identity; database,
   Redis, network, kernel, and process state come from those systems directly.
@@ -255,10 +279,36 @@ go build -o "$monitor_run_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_run_dir/monitor"
 test -x "$monitor_run_dir/monitor"
 shasum -a 256 "$monitor_run_dir/monitor" >"$monitor_run_dir/binary.sha256"
-WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+monitor_warpctl=$(command -v warpctl)
+test -n "$monitor_warpctl"
+test -x "$monitor_warpctl"
+go version -m "$monitor_warpctl" >"$monitor_run_dir/warpctl.version.txt"
+rg -q 'vcs\.revision=[0-9a-f]{40}$' "$monitor_run_dir/warpctl.version.txt"
+rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
+shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
+monitor_warpctl_dir=$(dirname "$monitor_warpctl")
+PATH="$monitor_warpctl_dir:$PATH" WARP_ENV=main \
+  "$monitor_run_dir/monitor" -mode overlay \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
+
+Treat the exact Warpctl resolved by the watcher as part of the immutable
+observation boundary. Before launch, require its `go version -m` output to carry
+a full `vcs.revision` and Boolean `vcs.modified`, record its hash, and verify
+that its source revision contains every collector capability assumed by the
+active catalog. In particular, §1.5 requires the Loki live-tail cursor guard at
+Warp commit `d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`. Do not infer capability
+from the HEAD of a nearby checkout while an older executable appears first on
+ambient `PATH`. Build through the existing local Warp checkout convention when
+the resolved executable is stale, then pin only this watcher invocation's
+`PATH` to the validated executable directory. This does not alter Warpctl's
+release/build architecture or install anything on managed hosts.
+
+During candidate validation, inspect the executable image of every standing
+`warpctl logs ... -f` child, not only its abbreviated process command, and
+require it to match the recorded watcher-side Warpctl hash. A candidate that
+silently resolves a different copy cannot be promoted.
 
 Run the final command in a durable attached session. Give the run a stable ID
 and append only to `$BRINGYOUR_HOME/monitor/runs/<run-id>/ledger.jsonl`. Keep
@@ -285,6 +335,16 @@ the JSONL stream. A diagnostic relationship between different classes may be
 reported separately as a semantic reassignment only with both complete
 before/after identities and `causal_or_recovery_claim=false`; it is not a
 severity transition, a resolution, or a new identity replacement.
+
+Gate the severity comparison on authoritative predecessor existence. A
+missing, null, empty, or default prior severity is not a transition state:
+classify that exact identity as new and do not also increment transition or
+downgrade counts. If the prior prefix is incomplete or unsealed, newness and
+transition absence are unknown rather than zero. Every reducer regression must
+include prior `A/PAGE` with window `B/WARN, A/PAGE`
+(`new=1, transitions=0, downgrades=0`) and prior `A/PAGE` with window `A/WARN`
+(`new=0, transitions=1, downgrades=1`). This existence gate must run before
+evaluating `before_severity != after_severity`.
 
 The alert artifact is append-only while the watcher is live. Snapshot the
 inclusive ending row once, then extract with both lower and upper row bounds
@@ -514,7 +574,11 @@ Research all three directions:
    prerequisite, or escaped failure class, either update the owning catalog and
    probe with a deterministic regression or record why an existing probe
    already covers it. Historical class names remain documented as aliases when
-   removing them would make old evidence uninterpretable.
+   removing them would make old evidence uninterpretable. Review each causal
+   finding for both false-positive and false-negative qualifiers: aggregation,
+   denominator, timing, stale or corrected data, partial source coverage, and
+   observation failure are explicit candidates, but become probe rules only
+   when a bounded discriminator and healthy control establish them.
 
 Terra owns the reproducible crosswalk, registry/test inventory, current watcher
 delta, bounded investigation and fact collection, observation-authority review,

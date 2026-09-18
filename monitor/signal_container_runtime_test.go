@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,6 +273,88 @@ func TestContainerRuntimeSignalSyntheticMissingObservation(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "cannot-observe")
 	if alert.Target != "edge/container-runtime" {
 		t.Fatalf("target = %q", alert.Target)
+	}
+}
+
+func TestContainerRuntimeSignalClassifiesOnlyReservedNativeObservationPhases(t *testing.T) {
+	type phaseCase struct {
+		host       string
+		exitCode   int
+		phase      string
+		errorClass string
+		kind       string
+	}
+	cases := []phaseCase{
+		{host: "phase-baseline", exitCode: 20, phase: "journal-baseline", errorClass: observationErrorClassCommandFailed},
+		{host: "phase-docker-history", exitCode: 21, phase: "docker-history", errorClass: observationErrorClassCommandFailed},
+		{host: "phase-containerd-history", exitCode: 22, phase: "containerd-history", errorClass: observationErrorClassCommandFailed},
+		{host: "phase-unit-census", exitCode: 23, phase: "warp-unit-census", errorClass: observationErrorClassCommandFailed},
+		{host: "phase-warp-window", exitCode: 24, phase: "warp-lifecycle-window", errorClass: observationErrorClassCommandFailed},
+		{host: "phase-runtime-window", exitCode: 25, phase: "runtime-daemon-window", errorClass: observationErrorClassCommandFailed},
+		{host: "unknown-native-exit", exitCode: 19, phase: containerRuntimeObservationPhaseUnclassified, errorClass: observationErrorClassCommandFailed},
+		{host: "timeout", phase: containerRuntimeObservationPhaseUnclassified, errorClass: observationErrorClassTimeout, kind: "timeout"},
+		{host: "ssh", exitCode: 255, phase: containerRuntimeObservationPhaseUnclassified, errorClass: observationErrorClassSSHExit255, kind: "ssh"},
+	}
+	const hostile = "fixture-sensitive-stderr"
+	errorsByHost := map[string]error{}
+	settings := syntheticSettings(&syntheticSource{})
+	settings.Hosts = make([]HostSettings, 0, len(cases))
+	for _, test := range cases {
+		var err error
+		switch test.kind {
+		case "timeout":
+			err = fmt.Errorf("%w: %s", context.DeadlineExceeded, hostile)
+		default:
+			err = exec.Command("sh", "-c", fmt.Sprintf("exit %d", test.exitCode)).Run()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != test.exitCode {
+				t.Fatalf("synthetic exit %d did not preserve native status", test.exitCode)
+			}
+			err = fmt.Errorf("wrapped command: %w: %s", err, hostile)
+			if test.kind == "ssh" {
+				err = &sshCommandError{err: err}
+			}
+		}
+		errorsByHost[test.host] = err
+		settings.Hosts = append(settings.Hosts, HostSettings{Name: test.host, Roles: []string{"services"}})
+	}
+	settings.Source = &syntheticSource{hostFn: func(host HostSettings, _ string) (string, error) {
+		return "", errorsByHost[host.Name]
+	}}
+
+	alerts, err := NewContainerRuntimeSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != len(cases) {
+		t.Fatalf("visibility alerts = %d, want %d: %+v", len(alerts), len(cases), alerts)
+	}
+	alertsByTarget := map[string]Alert{}
+	for _, alert := range alerts {
+		alertsByTarget[alert.Target] = alert
+	}
+	for _, test := range cases {
+		alert := alertsByTarget[test.host+"/container-runtime"]
+		if alert.Class != "cannot-observe" {
+			t.Fatalf("%s class = %q, want cannot-observe", test.host, alert.Class)
+		}
+		for _, want := range []string{
+			"error_class=" + test.errorClass,
+			"observation_phase=" + test.phase,
+		} {
+			if !strings.Contains(alert.Observed, want) {
+				t.Errorf("%s observation missing %q: %q", test.host, want, alert.Observed)
+			}
+		}
+		for _, want := range []string{
+			"bounded collection layer",
+			"not a container-runtime, deployment, daemon, or host cause",
+		} {
+			if !strings.Contains(alert.Context, want) {
+				t.Errorf("%s context missing %q: %q", test.host, want, alert.Context)
+			}
+		}
+		requireAlertOmits(t, alert, hostile, "wrapped command", "exit status")
 	}
 }
 

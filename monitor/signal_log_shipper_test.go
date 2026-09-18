@@ -55,6 +55,7 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 		}),
 		"pg": logShipperFixture(nil), "redis": logShipperFixture(nil),
 		"backup": logShipperFixture(nil), "subtensor": logShipperFixture(nil),
+		"vpn": logShipperFixture(nil),
 	}
 	seen := map[string]int{}
 	var seenMu sync.Mutex
@@ -110,13 +111,40 @@ func TestLogShipperSignalSyntheticProblemClassesAndHostScope(t *testing.T) {
 		!strings.Contains(alert.Markdown(), "seeking the head can also replay") {
 		t.Fatalf("journal reader alert=%+v", alert)
 	}
-	for _, target := range []string{"healthy", "down", "low-fd", "churn", "decoder", "journal-loss", "pg", "redis", "backup", "subtensor"} {
+	for _, target := range []string{"healthy", "down", "low-fd", "churn", "decoder", "journal-loss", "pg", "redis", "backup", "subtensor", "vpn"} {
 		if seen[target] != 1 {
 			t.Errorf("host %s observations=%d, want 1", target, seen[target])
 		}
 	}
-	if seen["vpn"] != 0 {
-		t.Errorf("vpn-only host was probed")
+	if _, alerted := byTarget["vpn"]; alerted {
+		t.Errorf("healthy vpn-server host alerted: %+v", byTarget["vpn"])
+	}
+}
+
+func TestLogShipperSignalOwnsVPNServerUnitState(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		if host.Name != "vpn.example.test" || !strings.Contains(command, logShipperMarker) {
+			t.Fatalf("unexpected VPN log-shipper observation: host=%s command=%q", host.Name, command)
+		}
+		return logShipperFixture(map[string]string{
+			"active_state": "inactive",
+			"sub_state":    "dead",
+		}), nil
+	}})
+	settings.Hosts = []HostSettings{{Name: "vpn.example.test", Roles: []string{"vpn-server"}}}
+
+	alerts, err := NewLogShipperSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "log-shipper-down")
+	if len(alerts) != 1 || alert.Target != "vpn.example.test" || alert.Severity != SeverityPage {
+		t.Fatalf("VPN log-shipper alert=%+v, all=%+v", alert, alerts)
+	}
+	for _, want := range []string{"absent or not active/running", "missing provisioning", "owning Xops host role"} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("VPN log-shipper alert omitted %q: %s", want, alert.Markdown())
+		}
 	}
 }
 

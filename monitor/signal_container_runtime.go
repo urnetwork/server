@@ -2,7 +2,9 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -175,6 +177,39 @@ type containerRuntimeSample struct {
 	journalWindowSeconds          int
 }
 
+const containerRuntimeObservationPhaseUnclassified = "unclassified"
+
+func containerRuntimeObservationPhase(err error) string {
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) {
+		return containerRuntimeObservationPhaseUnclassified
+	}
+	switch exitError.ExitCode() {
+	case 20:
+		return "journal-baseline"
+	case 21:
+		return "docker-history"
+	case 22:
+		return "containerd-history"
+	case 23:
+		return "warp-unit-census"
+	case 24:
+		return "warp-lifecycle-window"
+	case 25:
+		return "runtime-daemon-window"
+	default:
+		return containerRuntimeObservationPhaseUnclassified
+	}
+}
+
+func containerRuntimeCannotObserveFinding(target string, err error) finding {
+	finding := cannotObserveFinding(target+"/container-runtime", err)
+	phase := containerRuntimeObservationPhase(err)
+	finding.observed += " observation_phase=" + phase
+	finding.context = "The fixed observation_phase identifies the bounded collection layer that failed, not a container-runtime, deployment, daemon, or host cause. An unclassified phase means the typed exit was not one of this probe's reserved phase exits; preserve the error_class and restore the observation path before diagnosing production state."
+	return finding
+}
+
 func (containerRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	targets := env.cfg.hostsWithRole("services")
 	if len(targets) == 0 {
@@ -201,15 +236,15 @@ func (containerRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	findings := make([]finding, 0, len(collected))
 	for _, result := range collected {
 		if result.err != nil {
-			findings = append(findings, cannotObserveFinding(
-				result.host.name+"/container-runtime", result.err,
+			findings = append(findings, containerRuntimeCannotObserveFinding(
+				result.host.name, result.err,
 			))
 			continue
 		}
 		sample, err := parseContainerRuntimeSample(result.raw)
 		if err != nil {
-			findings = append(findings, cannotObserveFinding(
-				result.host.name+"/container-runtime", err,
+			findings = append(findings, containerRuntimeCannotObserveFinding(
+				result.host.name, err,
 			))
 			continue
 		}

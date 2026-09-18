@@ -28,6 +28,42 @@ func TestSubtensorSignalHealthySyntheticNodes(t *testing.T) {
 	}
 }
 
+func TestSubtensorSignalUsesItsBoundedObservationTimeout(t *testing.T) {
+	observation, err := json.Marshal(healthySubtensorObservation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	timedCalls := 0
+	source := &syntheticSource{
+		hostFn: func(HostSettings, string) (string, error) {
+			return "", errors.New("untimed host path called")
+		},
+		hostTimeoutFn: func(host HostSettings, command string, timeout time.Duration) (string, error) {
+			timedCalls++
+			if host.Name != "chain.example.test" || host.Subtensor == nil {
+				t.Fatalf("unexpected host settings: %+v", host)
+			}
+			if subtensorObservationTimeout != 5*time.Minute {
+				t.Fatalf("Subtensor timeout constant = %s", subtensorObservationTimeout)
+			}
+			if timeout != subtensorObservationTimeout {
+				t.Fatalf("Subtensor observation timeout = %s", timeout)
+			}
+			if !strings.Contains(command, subtensorMarker) {
+				t.Fatal("Subtensor command lost its source marker")
+			}
+			return string(observation), nil
+		},
+	}
+	alerts, err := NewSubtensorSignal().Run(context.Background(), subtensorSyntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timedCalls != 1 || len(alerts) != 0 {
+		t.Fatalf("timed calls=%d alerts=%+v", timedCalls, alerts)
+	}
+}
+
 func TestSubtensorSignalDistinguishesStaleConvergenceFromActivelySyncingLag(t *testing.T) {
 	for _, syncing := range []bool{false, true} {
 		observation := healthySubtensorObservation()
@@ -171,6 +207,7 @@ func TestSubtensorSignalDoesNotMixHistoricalRuntimeWithSecondHeadConvergence(t *
 	observation.Public.Runtime.SpecVersion = 455
 	for i := range observation.Nodes {
 		observation.Nodes[i].Direct.Runtime.SpecVersion = 455
+		observation.Nodes[i].Gateway.Runtime.SpecVersion = 455
 	}
 
 	lightnode := &observation.Nodes[1]
@@ -200,6 +237,7 @@ func TestSubtensorSignalChecksCurrentRuntimeAfterStableConvergence(t *testing.T)
 	observation.Public.Runtime.SpecVersion = 455
 	for i := range observation.Nodes {
 		observation.Nodes[i].Direct.Runtime.SpecVersion = 455
+		observation.Nodes[i].Gateway.Runtime.SpecVersion = 455
 	}
 	lightnode := &observation.Nodes[1]
 	lightnode.Direct.Runtime.SpecVersion = 443
@@ -446,6 +484,9 @@ func TestSubtensorSignalCollectsContainerStartupDiscriminators(t *testing.T) {
 		`timeout=SUBTENSOR_HELPER_TIMEOUT_SECONDS`,
 		`result = json.loads(output)`,
 		`"container_error"`,
+		`"gateway_first_head": gateway.get("head", "")`,
+		`read(gateway, "eth_get_logs", gateway_url, "eth_getLogs"`,
+		`gateway["eth_get_logs"] = "eth_get_logs" in gateway`,
 	} {
 		if !strings.Contains(subtensorScript, want) {
 			t.Fatalf("Subtensor collector missing %q", want)
@@ -815,6 +856,170 @@ func TestSubtensorSignalDetectsGatewayAndIdentityProblems(t *testing.T) {
 	requireAlertClass(t, alerts, "subtensor-identity")
 }
 
+func TestSubtensorSignalFailsClosedOnCurrentGatewayMethodErrors(t *testing.T) {
+	for _, key := range []string{"runtime", "evm_chain_id", "eth_get_logs"} {
+		t.Run(key, func(t *testing.T) {
+			observation := healthySubtensorObservation()
+			observation.Nodes[0].Gateway.Errors[key] = "synthetic method failure"
+
+			alerts, err := runSyntheticSubtensor(t, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway := requireAlertClass(t, alerts, "subtensor-gateway")
+			if gateway.Frame != "archive" || !strings.Contains(gateway.Observed, key+"=synthetic method failure") {
+				t.Fatalf("gateway method failure %q was not preserved: %+v", key, gateway)
+			}
+		})
+	}
+}
+
+func TestSubtensorSignalDetectsIndependentCurrentGatewayIdentityDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		alter  func(*subtensorRPCObservation)
+		needle string
+	}{
+		{name: "runtime name", alter: func(rpc *subtensorRPCObservation) { rpc.Runtime.SpecName = "synthetic-wrong-runtime" }, needle: "specName="},
+		{name: "runtime version", alter: func(rpc *subtensorRPCObservation) { rpc.Runtime.SpecVersion-- }, needle: "specVersion="},
+		{name: "transaction version", alter: func(rpc *subtensorRPCObservation) { rpc.Runtime.TransactionVersion++ }, needle: "transactionVersion="},
+		{name: "EVM chain", alter: func(rpc *subtensorRPCObservation) { rpc.EVMChainID = "0xsynthetic" }, needle: "evm_chain_id="},
+		{name: "eth get logs", alter: func(rpc *subtensorRPCObservation) { rpc.EthGetLogs = false }, needle: "eth_getLogs=unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation := healthySubtensorObservation()
+			test.alter(&observation.Nodes[0].Gateway)
+
+			alerts, err := runSyntheticSubtensor(t, observation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var identity *Alert
+			for index := range alerts {
+				if alerts[index].Class == "subtensor-identity" && alerts[index].Frame == "archive-gateway" {
+					identity = &alerts[index]
+					break
+				}
+			}
+			if identity == nil || !strings.Contains(identity.Observed, test.needle) {
+				t.Fatalf("gateway identity drift %q was not detected: %+v", test.name, alerts)
+			}
+		})
+	}
+}
+
+func TestSubtensorSignalDoesNotApplyCurrentGatewayIdentityToHistoricalFirstSample(t *testing.T) {
+	observation := healthySubtensorObservation()
+	archive := &observation.Nodes[0]
+	archive.GatewayFirstHead = blockHex(6_900_000)
+	archive.Gateway.Runtime.SpecVersion = 440
+	archive.Gateway.EVMChainID = ""
+	archive.Gateway.EthGetLogs = false
+	archive.Gateway.Errors["evm_chain_id"] = "synthetic method unavailable before Frontier"
+	archive.Gateway.Errors["eth_get_logs"] = "synthetic method unavailable before Frontier"
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Frame == "archive-gateway" || (alert.Class == "subtensor-gateway" && alert.Frame == "archive") {
+			t.Fatalf("historical first gateway sample was treated as current: %+v", alert)
+		}
+	}
+}
+
+func TestSubtensorSignalFailsClosedOnMalformedGatewayFirstHead(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Nodes[0].GatewayFirstHead = "synthetic-malformed-head"
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-identity" && alert.Frame == "archive-gateway" && strings.Contains(alert.Observed, "gateway first head=") {
+			return
+		}
+	}
+	t.Fatalf("malformed gateway first head was not failed closed: %+v", alerts)
+}
+
+func TestSubtensorSignalAllowsHistoricalGatewayFrontierMethodsToBeUnavailable(t *testing.T) {
+	observation := healthySubtensorObservation()
+	archive := &observation.Nodes[0]
+	archive.FirstHead = blockHex(6_900_000)
+	archive.SecondHead = blockHex(6_900_010)
+	archive.GatewayFirstHead = archive.FirstHead
+	archive.Direct.Head = archive.FirstHead
+	archive.Gateway.Head = archive.SecondHead
+	archive.Direct.Health.IsSyncing = true
+	archive.Direct.Sync = subtensorSyncState{CurrentBlock: 6_900_010, HighestBlock: 7_910_000}
+	archive.Direct.Runtime.SpecVersion = 440
+	archive.Gateway.Runtime = archive.Direct.Runtime
+	archive.Gateway.Errors["evm_chain_id"] = "synthetic method unavailable before Frontier"
+	archive.Gateway.Errors["eth_get_logs"] = "synthetic method unavailable before Frontier"
+	archive.Gateway.EVMChainID = ""
+	archive.Gateway.EthGetLogs = false
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "subtensor-sync-lag")
+	for _, alert := range alerts {
+		if alert.Frame == "archive-gateway" || (alert.Class == "subtensor-gateway" && alert.Frame == "archive") {
+			t.Fatalf("historical pre-Frontier gateway was treated as current: %+v", alert)
+		}
+	}
+}
+
+func TestSubtensorSignalHistoricalGatewayStillRequiresRuntimeIdentity(t *testing.T) {
+	historicalObservation := func() subtensorObservation {
+		observation := healthySubtensorObservation()
+		archive := &observation.Nodes[0]
+		archive.FirstHead = blockHex(6_900_000)
+		archive.SecondHead = blockHex(6_900_010)
+		archive.GatewayFirstHead = archive.FirstHead
+		archive.Direct.Head = archive.FirstHead
+		archive.Gateway.Head = archive.SecondHead
+		archive.Direct.Health.IsSyncing = true
+		archive.Direct.Sync = subtensorSyncState{CurrentBlock: 6_900_010, HighestBlock: 7_910_000}
+		archive.Direct.Runtime.SpecVersion = 440
+		archive.Gateway.Runtime = archive.Direct.Runtime
+		return observation
+	}
+
+	t.Run("method error", func(t *testing.T) {
+		observation := historicalObservation()
+		observation.Nodes[0].Gateway.Errors["runtime"] = "synthetic runtime method failure"
+		alerts, err := runSyntheticSubtensor(t, observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateway := requireAlertClass(t, alerts, "subtensor-gateway")
+		if gateway.Frame != "archive" || !strings.Contains(gateway.Observed, "runtime=synthetic runtime method failure") {
+			t.Fatalf("historical gateway runtime failure was not preserved: %+v", gateway)
+		}
+	})
+
+	t.Run("runtime name", func(t *testing.T) {
+		observation := historicalObservation()
+		observation.Nodes[0].Gateway.Runtime.SpecName = "synthetic-wrong-runtime"
+		alerts, err := runSyntheticSubtensor(t, observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, alert := range alerts {
+			if alert.Class == "subtensor-identity" && alert.Frame == "archive-gateway" && strings.Contains(alert.Observed, "specName=") {
+				return
+			}
+		}
+		t.Fatalf("historical gateway runtime-name drift was not detected: %+v", alerts)
+	})
+}
+
 // A same-chain public runtime advance must identify the stale configuration
 // boundary without accusing the public RPC or progressing local databases.
 func TestSubtensorSignalClassifiesPublicRuntimeAhead(t *testing.T) {
@@ -1073,7 +1278,8 @@ func healthySubtensorNode(name, syncMode string, rpcPort, gatewayPort int, first
 	gateway := healthySubtensorRPC(second)
 	return subtensorNodeObservation{
 		Name: name, SyncMode: syncMode, RPCPort: rpcPort, GatewayPort: gatewayPort,
-		Direct: direct, Gateway: gateway, FirstHead: blockHex(first), SecondHead: blockHex(second), GatewayHTTP: 200,
+		Direct: direct, Gateway: gateway, FirstHead: blockHex(first), SecondHead: blockHex(second),
+		GatewayFirstHead: blockHex(first), GatewayHTTP: 200,
 		PeerDiagnostics: healthySubtensorPeerDiagnostics(),
 	}
 }

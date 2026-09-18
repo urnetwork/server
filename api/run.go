@@ -36,6 +36,20 @@ type RunOptions struct {
 	Port int
 }
 
+// The lb streams the request body of a `streamable_paths` route through at
+// the client's pace and marks it (router.RequestBufferingHeader); this
+// replaces the ReadTimeout and WriteTimeout below for that request. The
+// idle window outlasts the lb's client_body_timeout (15s) so the lb, not
+// the service, is what cuts a stalled client; the response timeout is the
+// WriteTimeout, restarted once the body is in hand instead of at the
+// headers. Every other route keeps the server timeouts: the lb hands it a
+// whole body at lan speed.
+var apiStreamingBody = router.StreamingBody{
+	IdleTimeout:     30 * time.Second,
+	ResponseTimeout: 30 * time.Second,
+	DrainTimeout:    5 * time.Second,
+}
+
 func apiWarmupTargets() []server.WarmupTarget {
 	// API serves the complete model/controller surface, including every search
 	// and location feature currently registered by the server. Keep this list
@@ -172,6 +186,7 @@ func runWithDependencies(
 		apiRouter = router.NewRouter(processCtx, routesWithReservedAttemptUpload(nil))
 	}
 	defer closeApiRouter()
+	apiRouter.SetStreamingBody(apiStreamingBody)
 
 	glog.Infof("[api]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)

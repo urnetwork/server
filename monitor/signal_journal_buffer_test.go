@@ -704,8 +704,10 @@ func TestJournalBufferRestartAgeClockFailureIsNotCoverageEvidence(t *testing.T) 
 		{name: "clock timeout", fixture: journalBufferFileFixture{monotonicClockExit: 124}},
 		{name: "malformed clock", fixture: journalBufferFileFixture{monotonicNowUS: "private-clock-detail"}},
 		{name: "negative clock", fixture: journalBufferFileFixture{monotonicNowUS: "-1"}},
+		{name: "zero clock", fixture: journalBufferFileFixture{monotonicNowUS: "0"}},
 		{name: "oversized clock", fixture: journalBufferFileFixture{monotonicNowUS: "10000000000000000"}},
 		{name: "malformed activation", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "private-start-detail"}},
+		{name: "zero activation", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "0"}},
 		{name: "oversized activation", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "10000000000000000"}},
 		{name: "activation one microsecond in future", fixture: journalBufferFileFixture{journaldStartMonotonicUS: "100000000001"}},
 	} {
@@ -753,7 +755,7 @@ func runJournalBufferCommandWithFileFixture(t *testing.T, latestMode, boundaryMo
 	writeExecutable("systemctl", "#!/bin/sh\n"+journalVacuumUnitFixture+`
 case "$1" in
   is-active) echo active ;;
-  show) printf '%s\n' "${JOURNALD_START_MONOTONIC_US:-0}" ;;
+  show) printf '%s\n' "${JOURNALD_START_MONOTONIC_US:-95800000000}" ;;
   *) exit 1 ;;
 esac
 `)

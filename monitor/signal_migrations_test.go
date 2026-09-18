@@ -516,10 +516,10 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	}
 }
 
-func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
+func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 	head := server.MigrationCount()
-	if head < 674 {
-		t.Fatalf("test requires extender migrations through version 674, got head %d", head)
+	if head < 675 {
+		t.Fatalf("test requires recent migrations through version 675, got head %d", head)
 	}
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
@@ -550,15 +550,18 @@ func TestMigrationArtifactCatalogPinsExtenderSchemaShapes(t *testing.T) {
 			"table_name = 'contract_extender' AND column_name = 'create_time' AND data_type = 'timestamp without time zone' AND is_nullable = 'NO' AND column_default = 'now()'",
 			"index_name = 'contract_extender_create_time_contract_id'",
 			"definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'",
+			"table_name = 'wallet_auth_challenge_attempt'",
+			"index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'",
+			"definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'",
 		} {
 			if !strings.Contains(normalized, want) {
-				t.Fatalf("extender migration query lost %q:\n%s", want, query)
+				t.Fatalf("recent migration query lost %q:\n%s", want, query)
 			}
 		}
 		return []Row{syntheticMigrationArtifactRow(head)}, nil
 	}}
 	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
-		t.Fatalf("complete extender migration artifact catalog is not coherent: %+v, %v", alerts, err)
+		t.Fatalf("complete recent migration artifact catalog is not coherent: %+v, %v", alerts, err)
 	}
 }
 
@@ -686,6 +689,7 @@ func TestMigrationsSignalRejectsLookalikePlainOrderedIndexes(t *testing.T) {
 		{version: 663, table: "network_extender_address", name: "network_extender_address_active_last_publish_time", keys: "(active, last_publish_time)"},
 		{version: 666, table: "network_client_connection", name: "network_client_connection_client_id_connected_extender_id", keys: "(client_id, connected, extender_id)"},
 		{version: 674, table: "contract_extender", name: "contract_extender_create_time_contract_id", keys: "(create_time, contract_id)"},
+		{version: 675, table: "wallet_auth_challenge_attempt", name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", keys: "(client_address_hash, attempt_time)"},
 		{version: 614, table: "st_epoch", name: "st_epoch_status", keys: "(deployment_key, status, epoch)", grouped: true},
 		{version: 614, table: "st_publish", name: "st_publish_epoch_kind", keys: "(deployment_key, epoch, kind, create_time)", grouped: true},
 		{version: 614, table: "st_event", name: "st_event_kind_block", keys: "(deployment_key, kind, block_number, log_index)", grouped: true},

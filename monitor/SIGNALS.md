@@ -311,6 +311,56 @@ Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuou
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,
 settlement and public evidence. A healthy §17 result does not satisfy §22.
 
+### False-positive and false-negative qualifier discipline
+
+Whenever debugging establishes a clear discriminator that changes how a probe
+should interpret evidence, update the owning numbered signal entry, reducer,
+and deterministic tests together. Each applicable entry must state both sides:
+
+- A **false-positive qualifier** names the condition that can produce the
+  alert's observed shape without the described failure, the authoritative
+  observation that distinguishes it, and a healthy control.
+- A **false-negative qualifier** names the condition that can hide a real
+  failure, including lossy aggregation, wrong denominators, max-versus-sum
+  reduction, stale snapshots, delayed corrections, partial source coverage,
+  missing series, or failed observation paths. It also names the independent
+  observation needed to recover visibility.
+
+An unavailable, incomplete, stale, malformed, or contradictory discriminator
+is unknown or `cannot-observe`, not healthy. Split the class or emit a
+visibility alert when the ambiguity is operationally material; never suppress
+the original symptom merely to quiet the monitor. Qualifiers require bounded
+causal evidence and a healthy control, not a plausible theory. Synthetic
+coverage must include the misleading-but-healthy case, the true failure, and
+the ambiguous/unobservable case without putting production identifiers or
+values in fixtures. Record a discriminator learned during an incident
+immediately rather than waiting for the daily catalog audit.
+
+Window and ledger reducers have an additional qualifier boundary: a severity
+transition requires an authoritative predecessor for the same exact
+`SignalID + Class + Target + Frame` identity. Test identity existence before
+comparing severity. A missing, null, empty, or default prior severity is not a
+predecessor: classify that identity as new, not as a WARN/PAGE transition.
+Treating `null != severity` as a change creates one false transition for every
+new identity. Conversely, an incomplete or unsealed prefix cannot prove that
+an apparent first sighting
+is new or that no transition occurred; classify that history as unobservable
+until the prefix or another authoritative prior-state receipt is complete.
+The deterministic healthy control is prior `A/PAGE` followed by window
+`B/WARN, A/PAGE` (`new=1, transitions=0, downgrades=0`); the matched control is
+prior `A/PAGE` followed by `A/WARN` (`new=0, transitions=1, downgrades=1`).
+
+Follow-up diagnostic executors are part of the observation path. Bind request
+fields by JSON name or a NUL-safe typed encoding, not positional whitespace or
+TSV parsing when a field can be empty. Before contact, prove from the rendered
+argv that optional identities do not shift the endpoint and that secrets occur
+only in their intended stdin/environment channel. A nonzero transport exit,
+missing schema, field-binding mismatch, or incomplete provider step is a
+false-negative risk and leaves the proposed qualifier unproved; it cannot turn
+an alert into a healthy zero. Deterministic executor tests must cover empty
+optional fields and reject any argv/address/filename containing a fixture
+secret.
+
 Related docs: FOLLOWUP.md (open items ledger), redis conf overrides in
 xops .../redis/redis.conf.j2, grafana redis-cluster dashboard + alert rules.
 
@@ -918,6 +968,23 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   the count warning for capacity attribution, but require the explicit
   continuous-idle age before terminating any session or assigning a leak.
 
+The 2026-09-17 retained boundary established a second temporal qualifier for
+both §1.3 classes. Escalation batteries run on the first failing tick and are
+cached while the same identity remains broken; a sustain-2 alert therefore
+usually combines the later state summary with an earlier, non-atomic battery.
+Never subtract the battery's top groups from the later total or infer the
+later workload owner from that arithmetic. In a one-shot run the battery still
+begins after the summary and its statement delta spans a bounded interval, so
+it is not one atomic frame either. False-positive qualifier: active count above
+100 proves concurrency, not a CPU-plan wall, organic demand, or reindex
+causation; a low-concentration trip battery cannot classify a larger later
+total. False-negative qualifier: top-five/six grouping can omit singleton or
+NULL-query-id shapes, `pg_stat_statements` omits utility and already-completed
+work, and an empty delta is unknown rather than healthy. Attribute only from a
+complete time-aligned discriminator. The stable control is a current state
+summary back inside its band plus a fresh, complete attribution snapshot; an
+old cached battery or later alert silence is not that control.
+
 ### 1.3a PostgreSQL client-slot capacity and rejected logins
 Probe: `pg-capacity`
 
@@ -1326,6 +1393,25 @@ on the first summary. This proves late or replayed observation, not a current
 failure in the named product service. Distinct records at the cursor timestamp
 remain visible. Reconcile the source-time overlap and inspect Loki ingestion
 latency/reconnects; never replay suppressed contents into the current window.
+
+The resolved Warpctl executable is part of this observation contract. On
+2026-09-17, the standing watcher resolved revision
+`3745537bca26d16a4641ebf33bc8b84ae9f25b5c`, which predates the cursor guard in
+`d857872c4cae8e4768ed2314fdb53fc96b4fdbdb`; Loki's pre-cursor records therefore
+escaped the wrapper and became repeated `tailer-stale-arrival` warnings. A clean
+current executable at `1dc4d320e48d8358363b1fd8b7b34debb9add4de` contains the
+guard and its deterministic equal-timestamp and cursor-preservation controls.
+This is a false-positive qualifier for attributing those warnings to a product
+service, not evidence that Loki delivery is healthy: after a controlled watcher
+promotion, the same condition must become bounded
+`loki-tail-pre-cursor-entries` summaries. Conversely, the capable wrapper
+deliberately hides raw pre-cursor contents, so absence of
+`tailer-stale-arrival` alone is a false-negative qualifier for observation-path
+health. Require the bounded summary or a current-source control, live standing
+tail, two clean reconciliations, and ten quiet minutes before closing the
+visibility finding. Record and verify the VCS identity of the executable that
+the watcher children actually resolve; the revision of a nearby checkout does
+not establish that boundary.
 
 The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
 takes precedence over generic `panic`. It requires the final
@@ -1895,16 +1981,21 @@ table-lookup info records, bucket-index version convergence below two minutes,
 healthy rules/metrics/warnings/errors, complete bounded reconciliation, and
 zero raw reset, service-attributed dropped-entry, plus EOF classes for ten
 minutes. Any residual dropped-entry summary names the affected service tail;
-pair it with same-window resets to identify the ingester stage. Any residual
-EOF remains framed by backend and must be diagnosed on that exact node.
+same-window resets corroborate ingester-side loss in that window but cannot
+assign that reset to this exact service summary without a privacy-safe join.
+Any residual EOF remains framed by backend and must be diagnosed on that exact
+node.
 
 The querier also has its own ten-response channel to the WebSocket. If that
 later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors to a
 successful HTTP tail response. After Warp `5927527`, the earlier ingester
 descriptors use this same response field, so a non-empty response proves loss
 for the named service but does not by itself distinguish the two stages. A
-same-window raw reset identifies the ingester path. Warpctl decoded the API
-field but `LiveTail` ignored it and printed only `streams`. Warp commit
+same-window raw reset corroborates ingester-side loss in that window but does
+not assign that loss to the exact service summary; the downstream querier-to-
+WebSocket queue remains a candidate without a privacy-safe join. Warpctl
+decoded the API field but `LiveTail` ignored it and printed only `streams`.
+Warp commit
 `26089b2` fixes this client defect by emitting one local
 `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` summary for
 each non-empty response. It deliberately omits labels and timestamps, which
@@ -1915,6 +2006,37 @@ exercise the same response-processing function as `LiveTail`, require the
 summary, and prove no label or timestamp reaches output. A server synthetic
 test requires that direct summary to open the downstream class against the
 affected service.
+
+The retained 2026-09-17 boundary supplied two additional qualifier controls.
+One minute contained two valid non-empty response summaries and a separate
+ingester reset, with no backend EOF. The summaries affirm live-tail delivery
+loss for their owning service tails; they do not prove source-journal or
+durable-Loki loss, unique lost-record cardinality, application failure, or the
+exact internal loss stage. The alert rate counts summary lines, while each
+retained `count` is only that response's bounded descriptor count. Both Loki
+stages bound descriptor metadata, so even an exact summary can understate the
+loss magnitude. A same-cadence reset proves some ingester-side loss but cannot
+join that unknown-selector reset to one exact service summary. Range
+reconciliation remains the content-completeness authority.
+
+That boundary also proved a monitor false negative. The fixed privacy-safe
+summary has no timestamp, and the standing-tail overlap reducer previously
+deduplicated identical whole lines for four minutes. Two distinct responses
+with the same service and descriptor count could therefore produce only one
+alert and manufacture quiet follow-up windows. This class now counts every
+strict live local occurrence while preserving ordinary source-record and
+range-reconciliation replay suppression. Its grammar is anchored through end
+of line. Zero counts, malformed counts, missing fields, and arbitrary trailing
+fields produce `loki-tail-dropped-entries-unobservable`; they do not become
+affirmative loss evidence or generic novel samples, and their raw suffix is
+discarded. While that visibility finding is active, the affirmative loss class
+does not emit a healthy sibling or resolve an existing ticket. Older Warpctl
+before `26089b2`, Grafana Warp before
+`5927527`, bounded descriptor metadata, and missing or incomplete standing-tail
+or reconciliation receipts remain false-negative qualifiers. Silence is not
+recovery: require a connected standing tail, two advancing complete overlap
+reconciliations, and zero summaries, resets, and EOFs for ten minutes through
+comparable load.
 
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
@@ -2279,6 +2401,21 @@ single ClientRead older than one minute still identifies a client/pool path
 that must be attributed. The rebuilt watcher validated the negative branch:
 a direct production sample again found seven distinct ClientRead PIDs with a
 4ms oldest command, while the wait-events probe emitted no alert.
+
+False-positive qualifier for persistence attribution: cadence sustain is keyed
+by database target and wait family, not PID, query ID, or query start. Two
+consecutive age-guard failures can therefore be two different aged backends in
+the same family. They prove a recurring family condition, but not that one
+backend persisted; require a separate bounded history with matching PID,
+query-start, and query identity before making that claim. The emitted alert
+retains only the current oldest-waiter snapshot. False-negative qualifier: one
+long-running backend can alternate wait families and reset each per-frame
+sustain counter. Corroborate with §2.1 active-query identity/history whenever
+the command remains old but this class does not mature. Five-minute snapshots
+also miss waits that begin and end between ticks, and each grouped row retains
+only its oldest query shape; absent/unknown query IDs cannot establish
+continuity. Missing prior samples or incomplete active-query history leave
+persistence unknown, not healthy.
 
 At 06:03Z on 2026-08-31, a read-only one-shot observation found one
 `IO:DataFileRead` waiter at 71s. It cleared before the immediate attribution
@@ -4636,6 +4773,18 @@ that evidence and only then bound the proved source-map, target-map, encoding,
 or cache-write owner. Do not lower score-export concurrency or change scheduler
 parallelism from heartbeat correlation alone.
 
+A retained 2026-09-17 boundary supplied another identity qualifier. A new
+runtime frame crossed all four guards for two cadences, while the same stable
+host/block target had three mature churn emissions on an older runtime. The
+rate violation was real, but the new exact frame established process
+replacement rather than a new causal mechanism. Compare stable-target history
+across runtime frames before labeling churn novel. No later alert in a frozen
+slice is not recovery because alert-only JSONL carries no positive per-probe
+receipt. Sub-two-minute bursts and process replacement can evade this probe;
+§8.15's complete runtime-family check remains the independent missing-rate
+control. Task heartbeats, the global alias marker, and phase occupancy remain
+correlation only and cannot assign process allocation ownership.
+
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
@@ -6580,6 +6729,21 @@ financial/operations decision** (for example a verified refund when an
 underpayment cannot be credited); software must preserve the evidence and
 idempotency boundary but cannot choose or authorize that disposition.
 
+The 2026-09-17 investigation of a newly observed `underpaid` recovery row
+established an observation-tool boundary, not a payment cause. The first
+follow-up discriminator failed before contacting the inventory-owned database
+endpoint because an empty optional identity field collapsed during positional
+whitespace parsing and shifted later request fields. No unique row or provider
+transfer reduction was obtained. Therefore largest-versus-summed qualifying
+transfers and quote/intent mismatch remain unproved false-positive candidates,
+and provider/source incompleteness remains an unmeasured false-negative
+candidate. Keep the durable alert open and its cause unknown. A replacement
+diagnostic must use named or NUL-safe fields, prove the exact non-secret argv,
+obtain one unique immutable intent row, and completely enumerate the exact
+provider transaction before it may classify those qualifiers. The affected
+credential requires operator disposition before another request; never retain
+or reproduce it in this catalog, an alert, a fixture, or a transcript.
+
 The 2026-09-08 Main split of the original entitlement alert found zero affected
 existing networks. Its missing-Pro denominator contained four deleted Stripe
 owners and one deleted Solana owner. Treating them as paying accounts was a
@@ -8050,7 +8214,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | One request named a plugin type that the serving Grafana process could not resolve. A missing native datasource is one cause; a stale dashboard/browser payload or another unsupported request type can emit the same generic line while the required datasource plugins work. | Retain the request path/referer and query both `warp-mimir` and `warp-loki` through that exact generation's `/api/ds/query`. A failed control is the image/plugin branch in §11.15; if both controls succeed and both plugin processes remain present, repair the request/dashboard client instead. Do not infer an image omission or recreate a datasource from the generic log alone. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path after all six active ring nodes were healthy. Loki 3.7.3 also discarded short bursts whenever its five-slot handoff was momentarily full despite capacity in the 100-slot processing queue. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Verify the running Grafana artifacts contain Warp `1e95aef` and `bca37cf`; deploy them only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `35453fd`, which contains `5927527`'s descriptor forwarding and makes the short-burst handoff cancellation-aware without enlarging queues or hiding sustained pressure. Require query-frontend/evaluator and table-lookup info records zero, bucket-index convergence below two minutes, rules/metrics healthy, and EOF/reset/service-drop classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3 uses a nonblocking handoff into a five-stream channel, so a burst larger than five can drop despite room in the 100-stream processing queue; sustained pressure beyond that queue remains a genuine bounded-overflow case. The accompanying `resp.DroppedStreams` also requires the `5927527` forwarding contained by `35453fd`. Continued genuine blockage after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. | Verify the running Grafana and Proxy artifacts contain Warp `1e95aef` and server `e055c98c`, deploying only where absent. For current Grafana blocks, deploy Warp `35453fd`; its blocking cancellation-aware handoff preserves short bursts and retains bounded drop metadata under real pressure without raising a queue. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
-| `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution but requires a same-window raw reset to distinguish the ingester path. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print the dropped labels or timestamps or raise either queue. Require zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through the triggering load. See §1.5. |
+| `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
@@ -9901,6 +10065,7 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; raw observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe, service-attributed Warpctl summary from either bounded HTTP tail loss stage | any |
+| loki-tail-dropped-entries-unobservable | logs | §1.5 reserved Warpctl summary prefix with a zero/malformed count, missing required field, or arbitrary suffix; raw suffix discarded | any; visibility warning, never healthy or affirmative loss evidence |
 | tailer-stale-arrival | logs | §1.5 monitor-side source timestamp behind the two-minute live overlap; contents excluded from current product classes | any exact-replay-deduplicated stale arrival |
 | loki-tail-pre-cursor-entries | logs | §1.5 privacy-safe Warpctl service/count summary for records older than its requested monotonic cursor; contents suppressed before monitor classification | any nonzero summary |
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
@@ -10305,6 +10470,19 @@ malformed or partial combined output, or any other status remains
 `cannot-observe`. This in-memory reduction creates no remote file, and raw
 journal errors are not copied into alert evidence.
 
+The remote command reserves native exits 20–25 for the journal baseline,
+Docker history, containerd history, Warp unit census, Warp lifecycle window,
+and recent daemon window. The probe maps only those typed exits to fixed
+privacy-safe `observation_phase` values while retaining the generic
+`observation-command-failed` error class. Unknown native exits, timeouts, SSH
+failures, and parser errors keep `observation_phase=unclassified`; raw stderr,
+commands, and host details never enter the phase. False-positive qualifier: a
+phase localizes the failed observation layer, not a daemon mismatch, failed
+deployment, or host failure. False-negative qualifier: an unclassified phase
+or any observation gap can hide a real runtime failure, and a later missing
+alert without a complete tuple is not recovery. Healthy control requires the
+same host to return a complete parseable runtime tuple on consecutive probes.
+
 The 2026-09-08 edge-3 maintenance control found a second query-shape boundary
 after the one-hour/100 GiB journal policy landed. The current boot occupied
 6.1 GiB in 520 journal files. The zero-row readability baseline returned
@@ -10546,6 +10724,23 @@ timestamp newer than that final clock, and has a deterministic T-to-T+1
 regression. Do not interpret historical exit 35 as journal loss; require the
 fixed probe to parse the same host and then evaluate its concrete policy and
 coverage findings.
+
+**2026-09-17 zero monotonic-clock discriminator.** The restart-grace reducer
+previously accepted `0` for either systemd's
+`ActiveEnterTimestampMonotonic` or the current `CLOCK_MONOTONIC` sample because
+zero is syntactically numeric and inside the length bound. A zero activation
+paired with a positive current clock manufactures service age equal to host
+monotonic uptime and can run the coverage check before a new journal has had
+70 minutes to refill. With no qualifying boundary this can false-positive as
+`journal-buffer-short`; with a retained pre-restart boundary it can instead
+false-negative by calling the refill healthy from evidence that predates the
+new activation. If both values are zero, the fabricated zero age skips the same
+check and can also hide a genuinely short buffer. An active journald sample now
+requires both values to be strictly positive and activation no later than the
+current clock. Zero, malformed, oversized, future, failed, or timed-out clock
+evidence is `cannot-observe`, never elapsed grace or a healthy buffer. The
+deterministic reducer test covers zero current and zero activation separately;
+the normal control uses a positive 4,200-second activation age.
 
 **2026-09-15 file-ceiling and iterator discriminator.** Edge-3 ran Ubuntu
 systemd `255.4-1ubuntu8.17`, the Noble candidate at that observation, and Fluent Bit 4.2.3.
@@ -11002,7 +11197,7 @@ This is the version-to-artifact contract checked by the probe:
 | 672 | nullable, no-default UUID `network_extender.country_location_id` |
 | 673 | required timestamp `contract_extender.create_time` with `now()` default |
 | 674 | exact valid/ready `(create_time, contract_id)` `contract_extender_create_time_contract_id` index |
-| 675 | exact valid/ready `(client_address_hash, attempt_time)` wallet-challenge limiter index |
+| 675 | exact valid/ready `(client_address_hash, attempt_time)` `wallet_auth_challenge_attempt_client_address_hash_attempt_time` index |
 | 676 | `competition_round_baseline` exact column shape plus enabled source and append-only guards |
 | 677 | candidate-review guard orders eligible submissions by absolute raw score, submission time, and job id |
 
@@ -11084,13 +11279,21 @@ definition/readiness rather than accepting a same-name object. Current
 Extender location/contract readers require head 674 and all six additional
 artifact checks; these do not renumber or replace the earlier appends.
 
-Version 675 makes the wallet-challenge address limiter independent of source
-ports and requires the exact valid/ready address-time index. Versions 676–677
-freeze one append-only scorer control per competition round and replace the
-historical normalized-score review order with absolute candidate raw latency.
-The monitor proves the baseline table shape, both enabled protection triggers,
-and a review function that contains the raw-score order and no normalized-score
-term; a numeric migration head alone is not sufficient evidence.
+Version 675 appends the wallet-challenge attempt limiter's address/time index
+after the limiter stopped grouping by source port. The exact nonpartial btree
+definition, key order, validity, and readiness are operative: a same-name
+index with the old port key between address and time does not bound the new
+count query. On 2026-09-17, the full monitor gate caught that the append-only
+head had advanced while this artifact contract still ended at 674. That was a
+monitor coverage defect, not evidence that Main lacked the index; the catalog
+and lookalike-index fixtures now cover version 675 explicitly.
+
+Versions 676–677 freeze one append-only scorer control per competition round
+and replace the historical normalized-score review order with absolute
+candidate raw latency. The monitor proves the baseline table shape, both
+enabled protection triggers, and a review function that contains the raw-score
+order and no normalized-score term; a numeric migration head alone is not
+sufficient evidence.
 
 The first live exact-identity probe exposed a separate detector-only failure:
 it selected `migration_index::text` and ordered by the unqualified
@@ -11882,17 +12085,20 @@ added further buffered queues and workers. This made scheduler, stack, queue,
 and GC cost grow linearly with a large resident population before those
 individual shards demonstrated work.
 
-Server commit `77201554c49ec05bde83ec038bba6c600972892c` corrects that specific
-multiplier: it installs lightweight shard descriptors at resident construction,
-creates one destination-stable queue/consumer on first admitted use, preserves
-the configured aggregate queue capacity across shards, and joins admitted
-producer registration plus every started worker before the final pooled-owner
-drain. Deterministic tests cover zero allocation before first use, exact
-capacity/remainder distribution, stable one-worker-per-shard reuse, close
-racing first construction, and final owner return. The capability gauge above
-is part of the attributable correction and must be present on the running
-artifact; a Git base revision alone cannot prove a deliberate modified build's
-contents.
+Current-main Server commit `2425b71e71bff58448b6e26c84a0188871364409`
+corrects that specific multiplier. It is patch-identical for this boundary to
+the former throughput branch commit
+`77201554c49ec05bde83ec038bba6c600972892c`, but only the current-main replay is
+an actionable release ancestor. It installs lightweight shard descriptors at
+resident construction, creates one destination-stable queue/consumer on first
+admitted use, preserves the configured aggregate queue capacity across shards,
+and joins admitted producer registration plus every started worker before the
+final pooled-owner drain. Deterministic tests cover zero allocation before
+first use, exact capacity/remainder distribution, stable one-worker-per-shard
+reuse, close racing first construction, and final owner return. Current-main
+Server commit `7ed9a3065bb2e62653d0681b26527f56fb4001fe` adds the executable-owned
+capability gauge. Both commits must be present on the running artifact; a Git
+base revision alone cannot prove a deliberate modified build's contents.
 
 The simultaneous config rollout added old/new Connect generations while the
 old processes drained. That overlap raised total CPU, but live drain gauges
@@ -11908,10 +12114,21 @@ image digest, version `2026.9.14+1046068620`, Build revision
 block had exactly one generation. That Build object is available in the Build
 repository and its Server gitlink is `c2fa1d2b`. The matching Server release
 tag `v2026.9.14-1046068620` resolves to the same commit: it contains the eager
-`593c88a3` construction and predates `77201554`. This proves the intended tag
-and normal build input lacked the correction, but the modified bit still means
-tag ancestry alone is not a cryptographic proof of the executable's exact
-bytes; the executable-owned capability gauge remains the closure boundary.
+`593c88a3` construction and predates both current-main correction commits. This
+proves the intended tag and normal build input lacked the correction, but the
+modified bit still means tag ancestry alone is not a cryptographic proof of
+the executable's exact bytes; the executable-owned capability gauge remains
+the closure boundary.
+
+The 2026-09-17 control still found all 20 newest Connect processes on deployed
+version `2026.9.14+1046068620`, with zero capability-enabled and 20
+capability-missing processes. The eight hot edge-3/4 blocks each had a single
+generation yet retained roughly 18,000–22,000 residents, 41–48 GiB RSS,
+740,000–850,000 goroutines, and 5.4–6.5 CPU cores. This rules out rollout
+overlap as the current multiplier and makes a normal Connect rollout from a
+checkout containing both current-main commits the smallest software boundary.
+It does not prove the full post-rollout memory reduction in advance; retain
+resident-normalized controls and require the capability gauge after rollout.
 
 A matched fresh census supplied the workload discriminator. Hot edge-3/4
 blocks retained approximately 19,500–24,700 residents, versus about
@@ -11927,11 +12144,12 @@ current host saturation. Queue drops were low but nonzero on some controls;
 they neither explain the resident scaling nor prove service health.
 
 First require the newest executable capability plus §8.12 provenance. The
-current version's release tag lacks `77201554`, so the smallest verification
-action is a gated normal Connect build and rollout from an intentional checkout
-containing both the correction and its capability gauge; this does not require
-a source redesign. Do not call the current executable definitively eager from
-tag ancestry alone while its stamp remains modified. If independent exact-
+current version's release tag lacks both current-main correction commits, so
+the smallest verification action is a gated normal Connect build and rollout
+from an intentional checkout containing both the behavior and capability
+commits; this does not require a source redesign. Do not call the current
+executable definitively eager from tag ancestry alone while its stamp remains
+modified. If independent exact-
 artifact evidence proves that it already contains the capability, retain that
 generation long enough for a bounded aggregate profile instead of prescribing
 the same rollout. If a capability-proven fresh generation still crosses the
@@ -12795,8 +13013,9 @@ stage a supported OS correction. Do not delete the journal, restart Fluent Bit,
 or reboot merely to clear the evidence.
 
 The `log-shipper` probe reads the host unit directly on services, PostgreSQL,
-Redis/MinIO, backup, and Subtensor hosts. `log-shipper-down` PAGEs when the
-unit is not active/running; `log-shipper-fd-budget` WARNs when either the soft
+Redis/MinIO, backup, Subtensor, and enabled management-VPN server hosts.
+`log-shipper-down` PAGEs when the unit is not active/running;
+`log-shipper-fd-budget` WARNs when either the soft
 or hard limit is below 65,536; `log-shipper-churn` WARNs when systemd has
 automatically restarted the current activation for another or unobservable
 reason; and `log-shipper-prometheus-histogram-decoder-crash` WARNs immediately
@@ -12852,8 +13071,14 @@ complete, and neither stale-tail nor pre-cursor evidence recurs.
 The host-side reducer returns only schema version, unit states, restart count,
 fd limits, a sanitized package version, bounded restart/policy enums, and
 bounded journal-reader counts; raw unit arguments, journal text, core text,
-metric data, cursors, and paths never leave the host. A VPN-only host is outside this
-signal. These are process and startup-capacity signals, not an end-to-end
+metric data, cursors, and paths never leave the host. An enabled `vpn-server`
+host is inside this signal because Xops `run-vpn.sh` owns the same hardened
+Fluent Bit unit and bounded node-metric publisher there. This direct lifecycle
+check remains independent from §8.14's five-family end-to-end telemetry join.
+Inactive state alone does not distinguish a never-provisioned unit from a
+stopped installation; use a hostname-bound unit/configuration/executable
+bootstrap discriminator before selecting deployment or repair.
+These are process and startup-capacity signals, not an end-to-end
 delivery claim: closure additionally requires fresh per-host metrics through
 Mimir and fresh data in every configured output. Require a fresh labeled Warp
 record through Loki only where a managed Warp log source exists. Never clear a
@@ -19463,6 +19688,32 @@ identity. Chain, genesis, and runtime-name identity remain unconditional, and
 all current-head identity checks remain strict after two-sample near-head
 evidence. The peer, progress, lag, and public-reference visibility findings
 remain independent.
+
+The 2026-09-17 audit found a separate gateway false negative. The collector
+already read the gateway runtime and EVM identity, but evaluation used only
+gateway health, chain, genesis, and head. A same-chain, near-head nginx route
+could therefore serve the wrong runtime/transaction/EVM interface without an
+alert. Runtime observation and runtime-name identity are now mandatory through
+the gateway at every head. Once both the first and final direct samples and
+both the first and final gateway samples are in the public near-head band,
+gateway runtime version, transaction version, EVM chain ID, and `eth_getLogs`
+must also pass independently; a method error fails closed.
+Before Frontier, unavailable gateway EVM and `eth_getLogs` methods remain
+expected only while the historical node is observably progressing. As a
+false-positive qualifier, sequential public, direct, and gateway reads can
+straddle the exact runtime-upgrade block: persistent same-generation samples
+or block-pinned reads must distinguish that boundary from durable gateway
+drift. As a false-negative qualifier, an unavailable or malformed gateway
+method is unknown, never proof that the surfaces agree.
+
+That audit also found the probe's transport deadline shorter than its own
+bounded command. Two sequential helper calls plus the paired-head interval can
+exceed the global 60-second SSH default, and the complete nested worst case is
+roughly 260 seconds. The Subtensor probe therefore uses an explicit five-minute
+command deadline without widening other probes. Reaching that deadline remains
+a `cannot-observe` result; the larger bound prevents an internally guaranteed
+timeout from hiding a node or gateway failure and does not make a slow or
+incomplete observation healthy.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a

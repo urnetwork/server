@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	mathrand "math/rand/v2"
 	"slices"
@@ -14,6 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
 
+	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -80,8 +84,15 @@ type extenderDnsRecordSet struct {
 	// the empty code is the default set, which answers every location no
 	// continent set covers
 	continentCode string
-	ipVersion     int
-	ips           []string
+	// 4 or 6 for an address set; 0 for the TXT set of the same location
+	ipVersion int
+	ips       []string
+	// records is the TXT set's values: one base64 signed gossip message per
+	// extender whose address the location's A or AAAA set answers with (C5).
+	// A client that resolved the name gets, beside the addresses, the
+	// operator's signature over each of them, so its bootstrap lands verified
+	// instead of waiting on gossip to vouch for what dns already said.
+	records []string
 }
 
 // What Route 53 tells two sets of the same name and type apart by.
@@ -93,13 +104,25 @@ func (self *extenderDnsRecordSet) setIdentifier() string {
 	return fmt.Sprintf("%s%s-%s", extenderDnsSetIdentifierPrefix, label, self.recordType())
 }
 
-// The record type the family is published as.
+// The record type the set is published as.
 func (self *extenderDnsRecordSet) recordType() string {
-	if self.ipVersion == 6 {
+	switch self.ipVersion {
+	case 6:
 		return route53.RRTypeAaaa
+	case 4:
+		return route53.RRTypeA
+	default:
+		return route53.RRTypeTxt
 	}
-	return route53.RRTypeA
 }
+
+// extenderDnsRecordSigner produces the TXT value of one extender: the base64
+// of its freshly signed gossip message. false when the extender has nothing to
+// sign for, which drops it from the TXT set without dropping its addresses.
+type extenderDnsRecordSigner func(extenderId server.Id) (string, bool)
+
+// The record types this publisher owns under the record name.
+var extenderDnsRecordTypes = []string{route53.RRTypeA, route53.RRTypeAaaa, route53.RRTypeTxt}
 
 // Applies one tick's desired state to the record.
 //
@@ -165,8 +188,45 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		model.GetActiveNetworkExtenderDnsAddresses(ctx),
 		extenderDnsSampleCount(config),
 		extenderDnsRandom(),
+		newExtenderDnsRecordSigner(ctx, config),
 	)
 	return publisher.publish(ctx, recordName, extenderDnsTtl(config), desiredSets)
+}
+
+// newExtenderDnsRecordSigner signs a fresh record per extender for the TXT
+// sets, with the same root key and the same record shape as the drip, so a
+// record fetched from dns is indistinguishable from one fetched from gossip.
+//
+// Without a root key there are no TXT sets and the tick says so once; the
+// address sets are still published, since an operator that cannot sign is
+// exactly as it was before TXT existed rather than worse.
+func newExtenderDnsRecordSigner(
+	ctx context.Context,
+	config *controller.ExtenderConfig,
+) extenderDnsRecordSigner {
+	rootPrivateKey, err := config.RootPrivateKey()
+	if err != nil {
+		glog.Errorf("[extenderpublish]no root key, dns txt records are not published: %s\n", err)
+		return func(server.Id) (string, bool) { return "", false }
+	}
+	return func(extenderId server.Id) (string, bool) {
+		extender, addresses := model.GetActiveNetworkExtenderForRecord(ctx, extenderId)
+		if extender == nil {
+			return "", false
+		}
+		_, message, err := controller.SignExtenderRecord(
+			config,
+			rootPrivateKey,
+			extender,
+			addresses,
+			server.NowUtc(),
+		)
+		if err != nil {
+			glog.Errorf("[extenderpublish]dns txt record for %s not signed: %s\n", extenderId, err)
+			return "", false
+		}
+		return base64.StdEncoding.EncodeToString(message), true
+	}
 }
 
 // Addresses per set, with the default for an unset or nonsense value.
@@ -209,10 +269,14 @@ func sampleExtenderDnsRecordSets(
 	addresses []*model.NetworkExtenderDnsAddress,
 	sampleCount int,
 	random *mathrand.Rand,
+	signRecord extenderDnsRecordSigner,
 ) []*extenderDnsRecordSet {
 	poolIps := map[extenderDnsPool][]string{}
+	// which extender an address belongs to, for the TXT set of its location
+	ipExtenderIds := map[string]server.Id{}
 	for _, address := range addresses {
 		ip := address.Ip.String()
+		ipExtenderIds[ip] = address.ExtenderId
 		globalPool := extenderDnsPool{ipVersion: address.IpVersion}
 		poolIps[globalPool] = append(poolIps[globalPool], ip)
 		// an extender whose country has no continent -- unset, or a code the
@@ -268,6 +332,58 @@ func sampleExtenderDnsRecordSets(
 			ipVersion: ipVersion,
 			ips:       sample(globalIps, nil),
 		})
+	}
+
+	// One TXT set per location the address sets answer for, carrying the
+	// signed record of every extender behind those addresses. Built from the
+	// sampled sets rather than the pools so a client is vouched for exactly
+	// the addresses it was answered with, and each extender once however many
+	// of its addresses were drawn.
+	if signRecord != nil {
+		locationExtenderIds := map[string][]server.Id{}
+		locationOrder := []string{}
+		for _, desiredSet := range desiredSets {
+			location := desiredSet.continentCode
+			if _, ok := locationExtenderIds[location]; !ok {
+				locationOrder = append(locationOrder, location)
+			}
+			for _, ip := range desiredSet.ips {
+				extenderId, ok := ipExtenderIds[ip]
+				if !ok || slices.Contains(locationExtenderIds[location], extenderId) {
+					continue
+				}
+				locationExtenderIds[location] = append(locationExtenderIds[location], extenderId)
+			}
+		}
+		// sign each extender once, however many locations answer with it;
+		// a refusal is remembered too, so an extender the signer has nothing
+		// for costs one lookup per tick rather than one per location
+		type signedRecord struct {
+			record string
+			ok     bool
+		}
+		signed := map[server.Id]signedRecord{}
+		for _, location := range locationOrder {
+			records := []string{}
+			for _, extenderId := range locationExtenderIds[location] {
+				entry, seen := signed[extenderId]
+				if !seen {
+					entry.record, entry.ok = signRecord(extenderId)
+					signed[extenderId] = entry
+				}
+				if !entry.ok {
+					continue
+				}
+				records = append(records, entry.record)
+			}
+			if len(records) == 0 {
+				continue
+			}
+			desiredSets = append(desiredSets, &extenderDnsRecordSet{
+				continentCode: location,
+				records:       records,
+			})
+		}
 	}
 	return desiredSets
 }
@@ -584,7 +700,7 @@ func (self *route53ExtenderDnsPublisher) listRecordSets(
 					return false
 				}
 				recordType := aws.StringValue(recordSet.Type)
-				if recordType != route53.RRTypeA && recordType != route53.RRTypeAaaa {
+				if !slices.Contains(extenderDnsRecordTypes, recordType) {
 					continue
 				}
 				setIdentifier := aws.StringValue(recordSet.SetIdentifier)
@@ -632,6 +748,11 @@ func extenderDnsResourceRecordSet(
 			Value: aws.String(ip),
 		})
 	}
+	for _, record := range desiredSet.records {
+		resourceRecords = append(resourceRecords, &route53.ResourceRecord{
+			Value: aws.String(extenderDnsTxtValue(record)),
+		})
+	}
 	return &route53.ResourceRecordSet{
 		Name:            aws.String(name),
 		Type:            aws.String(desiredSet.recordType()),
@@ -640,4 +761,24 @@ func extenderDnsResourceRecordSet(
 		GeoLocation:     geoLocation,
 		ResourceRecords: resourceRecords,
 	}
+}
+
+// extenderDnsTxtMaxStringLength is the longest character string one TXT
+// record may carry (RFC 1035); a longer value is several strings, which a
+// resolver joins.
+const extenderDnsTxtMaxStringLength = 255
+
+// extenderDnsTxtValue is the Route 53 form of one TXT value: quoted, split into
+// strings no longer than the wire allows. A signed record is base64, which
+// contains neither a quote nor a backslash, so no escaping is needed and none
+// is done -- a value that needed it would be a bug upstream, not a case to
+// handle here.
+func extenderDnsTxtValue(value string) string {
+	strs := []string{}
+	for len(value) > extenderDnsTxtMaxStringLength {
+		strs = append(strs, fmt.Sprintf("%q", value[:extenderDnsTxtMaxStringLength]))
+		value = value[extenderDnsTxtMaxStringLength:]
+	}
+	strs = append(strs, fmt.Sprintf("%q", value))
+	return strings.Join(strs, " ")
 }

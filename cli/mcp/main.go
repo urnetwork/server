@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"github.com/urnetwork/server"
 	"os/signal"
 	"syscall"
 
@@ -16,6 +17,12 @@ var (
 )
 
 func main() {
+	// Address scrubbing for everything this process writes to stdout and
+	// stderr, installed before anything can log. A failure here is not fatal:
+	// it degrades to the previous unscrubbed behavior rather than losing
+	// logging entirely. See server.ScrubProcessLogs.
+	server.ScrubProcessLogs()
+
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()

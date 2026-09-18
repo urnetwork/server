@@ -48,14 +48,16 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		got  string
 		want string
 	}{
-		"baseline count branch": {alert.Baseline, "five active client backends"},
-		"baseline age branch":   {alert.Baseline, "more than one minute"},
-		"sample attribution":    {alert.Evidence, sample},
-		"pid attribution":       {alert.Evidence, "pid=8123"},
-		"query attribution":     {alert.Evidence, "query_id=9911"},
-		"client attribution":    {alert.Evidence, "client_owner=worker-synthetic"},
-		"read mechanism":        {alert.Mechanism, "relation data page"},
-		"bounded action":        {alert.Action, "Do not cancel one bounded read"},
+		"baseline count branch":  {alert.Baseline, "five active client backends"},
+		"baseline age branch":    {alert.Baseline, "more than one minute"},
+		"sample attribution":     {alert.Evidence, sample},
+		"pid attribution":        {alert.Evidence, "pid=8123"},
+		"query attribution":      {alert.Evidence, "query_id=9911"},
+		"client attribution":     {alert.Evidence, "client_owner=worker-synthetic"},
+		"read mechanism":         {alert.Mechanism, "relation data page"},
+		"bounded action":         {alert.Action, "Do not cancel one bounded read"},
+		"family recurrence":      {alert.Context, "not persistence of the same backend"},
+		"wait-family blind spot": {alert.Context, "changes wait family"},
 	} {
 		if !strings.Contains(check.got, check.want) {
 			t.Fatalf("%s missing %q: %q", name, check.want, check.got)

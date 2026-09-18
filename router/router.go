@@ -30,6 +30,9 @@ type Route struct {
 	id       string
 	captures bool
 	index    int
+	// the body policy of a route that streams its body on every front, lb or
+	// not (NewStreamingRoute); nil streams only on the lb's mark
+	streaming *StreamingBody
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
@@ -44,6 +47,16 @@ func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 	}
 }
 
+// NewStreamingRoute is a route whose request body streams from the client
+// on every front, with its own StreamingBody policy. The pattern syntax is
+// the one a warp `streamable_paths` entry uses, so the lb entry for the
+// route is this pattern.
+func NewStreamingRoute(method string, pattern string, handler http.HandlerFunc, streaming StreamingBody) *Route {
+	route := NewRoute(method, pattern, handler)
+	route.streaming = &streaming
+	return route
+}
+
 func (self *Route) String() string {
 	return self.id
 }
@@ -56,6 +69,8 @@ type Router struct {
 	trie    *routeTrie
 	stats   *RouterStats
 	metrics *httpMetrics
+	// the policy for a request the lb marks as streamed (StreamingBody)
+	streaming StreamingBody
 }
 
 func NewRouter(ctx context.Context, routes []*Route) *Router {
@@ -66,6 +81,14 @@ func NewRouter(ctx context.Context, routes []*Route) *Router {
 		stats:   NewRouterStats(ctx, 60*time.Second),
 		metrics: defaultHttpMetrics,
 	}
+}
+
+// SetStreamingBody sets the policy applied to a request whose body the lb
+// streams (RequestBufferingHeader). The zero policy only drains a body the
+// handler left unread after an early response; a service sets deadlines
+// that match its HttpServerOptions.
+func (self *Router) SetStreamingBody(streaming StreamingBody) {
+	self.streaming = streaming
 }
 
 // ServeHTTP matches the request via the trie, then dispatches. Only routes with
@@ -92,6 +115,9 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	observation, writer := beginHttpRequest(self.metrics, route.id, w, r)
+
+	// set once the route streams its body; the recover below drains it too
+	var body *streamingBody
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -121,6 +147,12 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				defer recover()
 				http.Error(writer, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
 			}()
+			if body != nil && !observation.writer.hijacked {
+				func() {
+					defer recover()
+					body.drain()
+				}()
+			}
 			observation.finish("panic")
 			return
 		}
@@ -138,10 +170,18 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req = r.WithContext(context.WithValue(r.Context(), pathValuesKey{}, pathValues))
 	}
 
+	if policy, ok := self.streamingPolicy(route, req); ok {
+		body = newStreamingBody(req.Body, writer, policy)
+		req.Body = body
+	}
+
 	startTime := time.Now()
 	route.handler(writer, req)
 	endTime := time.Now()
 	self.stats.Success(route.id, endTime.Sub(startTime))
+	if body != nil && !observation.writer.hijacked {
+		body.drain()
+	}
 }
 
 // FlushStats logs the current stats buckets immediately. Called at drain end

@@ -132,7 +132,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender.country_location_id", requiredVersion: 672, rowColumn: 83},
 	{name: "contract_extender.create_time", requiredVersion: 673, rowColumn: 84},
 	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
-	{name: "wallet auth challenge address/time deadline index", requiredVersion: 675, rowColumn: 86},
+	{name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", requiredVersion: 675, rowColumn: 86},
 	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
 	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, rowColumn: 88},
 }

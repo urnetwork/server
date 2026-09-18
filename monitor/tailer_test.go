@@ -1050,6 +1050,10 @@ func TestStandingTailPreCursorReductionIsDocumented(t *testing.T) {
 		"Distinct records at the cursor timestamp",
 		"remain visible",
 		"never replay suppressed contents",
+		"resolved Warpctl executable",
+		"d857872c4cae8e4768ed2314fdb53fc96b4fdbdb",
+		"false-positive qualifier",
+		"false-negative qualifier",
 	} {
 		if !strings.Contains(catalog, required) {
 			t.Errorf("pre-cursor catalog guidance omits %q", required)
@@ -1826,6 +1830,82 @@ func TestStandingTailAttributesDirectDroppedEntriesToAffectedService(t *testing.
 	}
 	if !strings.Contains(finding.observed, "rate=1/min") {
 		t.Fatalf("direct dropped_entries observation = %q, want one loss response", finding.observed)
+	}
+}
+
+func TestStandingTailCountsIdenticalDroppedEntryResponsesAcrossWindows(t *testing.T) {
+	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	tailer := newLogTailer("fixture-service", nil)
+	tailer.clock = func() time.Time { return now }
+	line := `[warpctl][loki-tail-dropped-entries] service=fixture-service count=2`
+
+	for window := 1; window <= 2; window++ {
+		tailer.ingestStanding(line, true, true)
+		finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-entries")
+		if finding.healthy || !strings.Contains(finding.observed, "rate=1/min") {
+			t.Fatalf("window %d lost a distinct identical response: %+v", window, finding)
+		}
+		now = now.Add(time.Minute)
+	}
+}
+
+func TestStandingTailReconciliationDeduplicatesDroppedEntryReplay(t *testing.T) {
+	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	tailer := newLogTailer("fixture-service", nil)
+	tailer.clock = func() time.Time { return now }
+	line := `[warpctl][loki-tail-dropped-entries] service=fixture-service count=2`
+
+	tailer.ingestStanding(line, false, true)
+	if finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-entries"); finding.healthy {
+		t.Fatalf("first reconciliation occurrence was lost: %+v", finding)
+	}
+	now = now.Add(time.Minute)
+	tailer.ingestStanding(line, false, true)
+	if finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-entries"); !finding.healthy {
+		t.Fatalf("reconciliation replay was counted twice: %+v", finding)
+	}
+}
+
+func TestStandingTailDroppedEntrySummaryRequiresExactPrivateSchema(t *testing.T) {
+	for _, line := range []string{
+		`[warpctl][loki-tail-dropped-entries] service=fixture-service count=0`,
+		`[warpctl][loki-tail-dropped-entries] service=fixture-service count=2 error=fixture-sensitive-suffix`,
+		`[warpctl][loki-tail-dropped-entries] service=fixture-service count=fixture-sensitive-suffix`,
+		`[warpctl][loki-tail-dropped-entries]error=fixture-sensitive-suffix`,
+	} {
+		t.Run(line, func(t *testing.T) {
+			tailer := newLogTailer("fixture-service", nil)
+			tailer.ingestStanding(line, true, true)
+			if count := tailer.classCounts["loki-tail-dropped-entries"]; count != 0 {
+				t.Fatalf("invalid summary count = %d, want 0", count)
+			}
+			if _, retained := tailer.classSamples["loki-tail-dropped-entries"]; retained {
+				t.Fatal("invalid summary retained a typed sample")
+			}
+			if sample := tailer.classSamples["loki-tail-dropped-entries-unobservable"]; sample != "[warpctl][loki-tail-dropped-entries] invalid_schema" {
+				t.Fatalf("invalid summary visibility sample = %q", sample)
+			}
+			for _, sample := range tailer.novelSamples {
+				if strings.Contains(sample, "fixture-sensitive-suffix") {
+					t.Fatalf("invalid summary suffix reached novel sample %q", sample)
+				}
+			}
+			findings := tailer.drainWindow()
+			for _, finding := range findings {
+				if finding.class == "loki-tail-dropped-entries" {
+					t.Fatalf("invalid summary emitted a loss or false-healthy sibling: %+v", finding)
+				}
+			}
+			if finding := findingByClass(t, findings, "loki-tail-dropped-entries-unobservable"); finding.healthy {
+				t.Fatalf("invalid summary did not produce visibility finding: %+v", finding)
+			}
+			for _, finding := range findings {
+				rendered := finding.symptom + finding.baseline + finding.observed + finding.mechanism + finding.evidence + finding.context + finding.action + finding.verify
+				if strings.Contains(rendered, "fixture-sensitive-suffix") {
+					t.Fatalf("invalid summary suffix reached finding: %+v", finding)
+				}
+			}
+		})
 	}
 }
 

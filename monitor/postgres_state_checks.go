@@ -68,6 +68,7 @@ func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			baseline: "active 2–6 healthy; real active backends were ~6 even during past incidents (1.3)",
 			observed: fmt.Sprintf("active=%d idle_in_tx=%d total_client=%d", active, idleInTx, totalClient),
 			evidence: evidence,
+			context:  pgStateBatteryFrameContext(evidence),
 			playbook: "SIGNALS.md 5.8",
 		})
 	} else {
@@ -77,6 +78,9 @@ func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 
 	// idle-in-tx (warn): count > 100 or oldest > 30 min (SIGNALS.md §7 / 1.3 / 5.6)
 	if idleInTx > 100 || oldestIdleS > 30*60 {
+		evidence := self.batteries.broken("idle-in-tx", func() string {
+			return idleTxBattery(ctx, env)
+		})
 		findings = append(findings, finding{
 			probeId: "pg/idle-in-tx", tier: tierWarn,
 			class: "idle-in-tx", target: target, sustain: 2,
@@ -84,13 +88,11 @@ func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			mechanism: "The count and oldest age can have different owners. A bounded close cohort can put many workers briefly between statements while one payment planner or leaked transaction supplies the old xact; tx-scoped Redis latency is supported only when the same grouped query shape also remains continuously idle.",
 			baseline:  "idle_in_tx < 30 healthy (2 when healthy); above 100 requires query-shape and continuous-idle attribution before calling it Redis leakage (1.3)",
 			observed:  fmt.Sprintf("idle_in_tx=%d oldest_xact_s=%d active=%d", idleInTx, oldestIdleS, active),
-			evidence: self.batteries.broken("idle-in-tx", func() string {
-				return idleTxBattery(ctx, env)
-			}),
-			context:  "The explicit oldest line uses state_change for continuous idle time; the summary age uses xact_start because that is the MVCC-horizon risk. The following grouped shapes are ordered by backend count and need not contain the singleton oldest transaction.",
-			action:   "Attribute the explicit oldest transaction separately from the high-count shapes. For the subsidy payment planner, follow the Payout canary and transaction-local idle-timeout fix; for young per-contract closers, follow open-contract drain. Do not mass-terminate the pool.",
-			verify:   "The oldest owner reaches its bounded outcome, continuously idle ages return below one minute, and the idle-in-transaction count falls below 100 without canceling healthy close workers.",
-			playbook: "SIGNALS.md 5.6",
+			evidence:  evidence,
+			context:   "The explicit oldest line uses state_change for continuous idle time; the summary age uses xact_start because that is the MVCC-horizon risk. The following grouped shapes are ordered by backend count and need not contain the singleton oldest transaction. " + pgStateBatteryFrameContext(evidence),
+			action:    "Attribute the explicit oldest transaction separately from the high-count shapes. For the subsidy payment planner, follow the Payout canary and transaction-local idle-timeout fix; for young per-contract closers, follow open-contract drain. Do not mass-terminate the pool.",
+			verify:    "The oldest owner reaches its bounded outcome, continuously idle ages return below one minute, and the idle-in-transaction count falls below 100 without canceling healthy close workers.",
+			playbook:  "SIGNALS.md 5.6",
 		})
 	} else {
 		self.batteries.healthy("idle-in-tx")
@@ -118,6 +120,14 @@ func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 
 	return findings, nil
+}
+
+func pgStateBatteryFrameContext(evidence string) string {
+	frame := "The state summary and diagnostic battery are separate snapshots. Grouped top-N counts, waits, and statement deltas are attribution context, not an arithmetic partition of the observed total; an empty statement delta is unknown rather than healthy."
+	if strings.Contains(evidence, "battery collected once at trip") {
+		return "The cached battery was collected on the first failing tick and precedes this later sustained state summary. " + frame
+	}
+	return "In a one-shot run, the battery begins after the state summary and may span a bounded delta interval. " + frame
 }
 
 // activeBattery groups active backends by query_id (SIGNALS.md 5.8 step 1) —

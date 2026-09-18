@@ -121,6 +121,35 @@ type NetworkExtenderDnsAddress struct {
 	CountryCode string
 }
 
+// GetActiveNetworkExtenderForRecord loads what a record of one extender is
+// built from: the extender and its active addresses. Nil when the extender is
+// gone, inactive, or has no active address, which are the states nothing
+// should be signing for.
+//
+// Read only. The drip's PublishNetworkExtenderRecord loads the same two things
+// and then writes a publish row; the dns publisher signs the same record shape
+// for a TXT set every tick and must not leave a row behind each time.
+func GetActiveNetworkExtenderForRecord(
+	ctx context.Context,
+	extenderId server.Id,
+) (*NetworkExtender, []*NetworkExtenderAddress) {
+	var extender *NetworkExtender
+	var addresses []*NetworkExtenderAddress
+	server.Tx(ctx, func(tx server.PgTx) {
+		extender = getNetworkExtenderInTx(ctx, tx, extenderId)
+		if extender == nil || !extender.Active {
+			extender = nil
+			return
+		}
+		addresses = getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
+		if len(addresses) == 0 {
+			extender = nil
+			addresses = nil
+		}
+	})
+	return extender, addresses
+}
+
 // Builds the serialized gossip message of a record. issueTime is the time the
 // row set was written, which the body must carry so a record is never newer
 // than the state it describes.
