@@ -184,12 +184,16 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		return err
 	}
 
+	addresses := model.GetActiveNetworkExtenderDnsAddresses(ctx)
 	desiredSets := sampleExtenderDnsRecordSets(
-		model.GetActiveNetworkExtenderDnsAddresses(ctx),
+		addresses,
 		extenderDnsSampleCount(config),
 		extenderDnsRandom(),
 		newExtenderDnsRecordSigner(ctx, config),
 	)
+	// what this tick converges the zone to, which is the only record of what
+	// is in dns: the sets are recomputed every tick and never stored
+	observeExtenderDnsSets(desiredSets, addresses)
 	return publisher.publish(ctx, recordName, extenderDnsTtl(config), desiredSets)
 }
 

@@ -1,0 +1,1645 @@
+{
+ "uid": "urnetwork-extenders",
+ "title": "urnetwork / extenders",
+ "tags": [
+  "urnetwork",
+  "extenders"
+ ],
+ "description": "The extender network: population and reachability, what is published in dns, the gossip release queue, and which extenders carry the contract load. Fed by the stats collector (controller/stats_collector.go) and the dns publish tick (taskworker/work/extender_dns_metrics.go).",
+ "editable": false,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "refresh": "5m",
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "timezone": "",
+ "templating": {
+  "list": [
+   {
+    "name": "env",
+    "label": "env",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "warp-mimir"
+    },
+    "query": "label_values(urnetwork_stats_online_extenders, env)",
+    "refresh": 2,
+    "sort": 1
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "population",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "online extenders",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#8b7be6"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "online extenders"
+    }
+   ],
+   "description": "Active extenders with at least one active address \u2014 the population the drip rotates through and the directory publishes. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "ipv4 only",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#3d71d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"ipv4\"})",
+     "refId": "A",
+     "legendFormat": "ipv4 only"
+    }
+   ],
+   "description": "Online extenders reachable only over ipv4."
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "ipv6 only",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#5794f2"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"ipv6\"})",
+     "refId": "A",
+     "legendFormat": "ipv6 only"
+    }
+   ],
+   "description": "Online extenders reachable only over ipv6. The scarce family: the gossip sampler and the dns sets both target an even split, so a small number here is what makes the fallback visible."
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "dual stack",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#73bf69"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"dualstack\"})",
+     "refId": "A",
+     "legendFormat": "dual stack"
+    }
+   ],
+   "description": "Online extenders reachable over both families. These satisfy either side of the sampler's interleave and are the most useful members of the population."
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "countries",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#b877d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "count(max by (country_code) (urnetwork_stats_online_extenders_by_country{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "countries"
+    }
+   ],
+   "description": "Distinct countries with at least one online extender."
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "contracts with an extender (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#ff9830"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_contracts_with_extender_24h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "contracts with an extender (24h)"
+    }
+   ],
+   "description": "Transfer contracts created in the last 24 hours with at least one extender party."
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "population by ip family",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"ipv4\"})",
+     "refId": "A",
+     "legendFormat": "ipv4 only"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"ipv6\"})",
+     "refId": "B",
+     "legendFormat": "ipv6 only"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders_by_ip_family{env=\"$env\",ip_family=\"dualstack\"})",
+     "refId": "C",
+     "legendFormat": "dual stack"
+    }
+   ],
+   "description": "How the population splits by reachability. Both samplers aim for an even number of v4- and v6-reachable extenders and fall back to whatever exists, so a persistent gap here is what limits a v6-only client's choice."
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "online extenders",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "online"
+    }
+   ],
+   "description": "The population over time. A step down without a matching revocation release usually means addresses aged out of probing rather than extenders leaving."
+  },
+  {
+   "id": 10,
+   "type": "row",
+   "title": "dns records",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   },
+   "panels": []
+  },
+  {
+   "id": 11,
+   "type": "stat",
+   "title": "addresses in dns (v4)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#3d71d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_addresses{env=\"$env\",ip_version=\"4\"})",
+     "refId": "A",
+     "legendFormat": "addresses in dns (v4)"
+    }
+   ],
+   "description": "IPv4 addresses the last publish tick wrote across every A set. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 12,
+   "type": "stat",
+   "title": "addresses in dns (v6)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#5794f2"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_addresses{env=\"$env\",ip_version=\"6\"})",
+     "refId": "A",
+     "legendFormat": "addresses in dns (v6)"
+    }
+   ],
+   "description": "IPv6 addresses the last publish tick wrote across every AAAA set."
+  },
+  {
+   "id": 13,
+   "type": "stat",
+   "title": "extenders in dns",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#73bf69"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_extenders{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "extenders in dns"
+    }
+   ],
+   "description": "Distinct extenders reachable through the addresses the last tick published. Lower than the population: each set is a rotating sample, not the whole pool."
+  },
+  {
+   "id": 14,
+   "type": "stat",
+   "title": "signed TXT records",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#ff9830"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_txt_records{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "signed TXT records"
+    }
+   ],
+   "description": "Signed extender records published across all TXT sets. Zero means the operator has no root key and only address sets were written \u2014 a client can then bootstrap addresses but cannot verify them."
+  },
+  {
+   "id": 15,
+   "type": "stat",
+   "title": "A sets",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#b877d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_sets{env=\"$env\",record_type=\"A\"})",
+     "refId": "A",
+     "legendFormat": "A sets"
+    }
+   ],
+   "description": "A record sets published \u2014 one per continent with ipv4 addresses, plus the global default."
+  },
+  {
+   "id": 16,
+   "type": "stat",
+   "title": "AAAA sets",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 15
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#b877d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_sets{env=\"$env\",record_type=\"AAAA\"})",
+     "refId": "A",
+     "legendFormat": "AAAA sets"
+    }
+   ],
+   "description": "AAAA record sets published. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
+  },
+  {
+   "id": 17,
+   "type": "timeseries",
+   "title": "addresses published by family",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 20
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_addresses{env=\"$env\",ip_version=\"4\"})",
+     "refId": "A",
+     "legendFormat": "ipv4"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_addresses{env=\"$env\",ip_version=\"6\"})",
+     "refId": "B",
+     "legendFormat": "ipv6"
+    }
+   ],
+   "description": "What each tick actually wrote. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns \u2014 the database can only say what was eligible."
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "record sets by type",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 20
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_sets{env=\"$env\",record_type=\"A\"})",
+     "refId": "A",
+     "legendFormat": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_sets{env=\"$env\",record_type=\"AAAA\"})",
+     "refId": "B",
+     "legendFormat": "AAAA"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_taskworker_extender_dns_sets{env=\"$env\",record_type=\"TXT\"})",
+     "refId": "C",
+     "legendFormat": "TXT"
+    }
+   ],
+   "description": "Sets published per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means signing stopped."
+  },
+  {
+   "id": 19,
+   "type": "row",
+   "title": "gossip network",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 28
+   },
+   "panels": []
+  },
+  {
+   "id": 20,
+   "type": "stat",
+   "title": "pending records",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#ff9830"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_pending{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "pending records"
+    }
+   ],
+   "description": "Extender records written but not yet released to the gossip network. Should sit near zero; a count that does not fall means releases are not reaching the network while activations keep writing."
+  },
+  {
+   "id": 21,
+   "type": "stat",
+   "title": "pending revocations",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f2495c"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_pending{env=\"$env\",kind=\"revocation\"})",
+     "refId": "A",
+     "legendFormat": "pending revocations"
+    }
+   ],
+   "description": "Revocations written but not yet released. These matter more than records: until one lands, clients keep trusting a withdrawn extender."
+  },
+  {
+   "id": 22,
+   "type": "stat",
+   "title": "oldest pending",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f2495c"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_oldest_pending_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "oldest pending"
+    }
+   ],
+   "description": "Age of the oldest unreleased message of any kind. Climbing steadily is the clearest sign the publisher is stuck \u2014 the pending count alone can look healthy while one message sits forever."
+  },
+  {
+   "id": 23,
+   "type": "stat",
+   "title": "records released (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#73bf69"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_released_24h{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "records released (24h)"
+    }
+   ],
+   "description": "Extender records released to the gossip network in the last 24 hours, including the drip re-releasing the same extender."
+  },
+  {
+   "id": 24,
+   "type": "stat",
+   "title": "revocations released (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#73bf69"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_released_24h{env=\"$env\",kind=\"revocation\"})",
+     "refId": "A",
+     "legendFormat": "revocations released (24h)"
+    }
+   ],
+   "description": "Revocations released in the last 24 hours."
+  },
+  {
+   "id": 25,
+   "type": "stat",
+   "title": "extenders released (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 29
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#8b7be6"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_extenders_24h{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "extenders released (24h)"
+    }
+   ],
+   "description": "Distinct extenders behind those record releases. Much lower than the release count means the drip is re-announcing a few extenders rather than the network learning new ones."
+  },
+  {
+   "id": 26,
+   "type": "timeseries",
+   "title": "release queue depth",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 34
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_pending{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "records pending"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_pending{env=\"$env\",kind=\"revocation\"})",
+     "refId": "B",
+     "legendFormat": "revocations pending"
+    }
+   ],
+   "description": "The gossip release backlog. Rows are written by activation, by a probe that loses an extender's last address, and by the drip; they are drained by the gossip publisher."
+  },
+  {
+   "id": 27,
+   "type": "timeseries",
+   "title": "oldest pending message",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 34
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_oldest_pending_seconds{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "records"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_oldest_pending_seconds{env=\"$env\",kind=\"revocation\"})",
+     "refId": "B",
+     "legendFormat": "revocations"
+    }
+   ],
+   "description": "Age of the oldest unreleased message per kind. A sawtooth is normal \u2014 it resets each time the queue drains. A ramp that never resets is a stuck publisher."
+  },
+  {
+   "id": 28,
+   "type": "timeseries",
+   "title": "released to the network (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 34
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_released_24h{env=\"$env\",kind=\"record\"})",
+     "refId": "A",
+     "legendFormat": "records"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_released_24h{env=\"$env\",kind=\"revocation\"})",
+     "refId": "B",
+     "legendFormat": "revocations"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_gossip_extenders_24h{env=\"$env\",kind=\"record\"})",
+     "refId": "C",
+     "legendFormat": "distinct extenders"
+    }
+   ],
+   "description": "What the network learned over the trailing 24 hours. The gap between records and distinct extenders is drip re-announcement."
+  },
+  {
+   "id": 29,
+   "type": "row",
+   "title": "popularity",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 42
+   },
+   "panels": []
+  },
+  {
+   "id": 30,
+   "type": "table",
+   "title": "busiest extenders",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 43
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "displayName": "Value",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_contracts_total{env=\"$env\"}[$__range])))",
+     "legendFormat": "{{extender_id}}",
+     "format": "table",
+     "instant": true,
+     "range": false,
+     "editorMode": "code",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     }
+    }
+   ],
+   "description": "Contracts carried per extender over the dashboard's time range, most first, top 20. Derived from a single per-extender counter accumulated from closed hour buckets, so the same metric answers any range without a new gauge; widen the time picker to rank over a week. sum by extender_id merges a redeploy's overlapping processes, and increase() handles the counter reset a restart causes."
+  },
+  {
+   "id": 31,
+   "type": "timeseries",
+   "title": "contract load per extender",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 43
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_contracts_total{env=\"$env\"}[1h])))",
+     "refId": "A",
+     "legendFormat": "{{extender_id}}"
+    }
+   ],
+   "description": "Contracts per hour for the twenty busiest extenders, as a time series. This is the view the leaderboard cannot give: whether load is concentrated on a few extenders or spread, and whether that changes over the day. Each line is one extender; a fleet where everyone carries a similar load and one where three carry everything are visibly different here."
+  }
+ ]
+}

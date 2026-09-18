@@ -71,7 +71,7 @@ clients to ignore unknown fields.
 Consumers updated for the removed keys:
 
 - `mmm/ur.io/api/bringyour.yml`, `connect/api/bringyour.yml` (canonical spec
-  embedded into the ur.io docs page), `web/web2/ur.xyz/astro/public/openapi.yml`
+  embedded into the ur.io docs page), `web/ur.xyz/astro/public/openapi.yml`
   — `StatsResult` schema fields removed; `mmm/ur.io/react/src/data/openapi.js`
   regenerated (`react/scripts/generate-docs2.mjs`) and
   `mmm/ur.io/api/build/api.html` rebuilt (redocly).
@@ -293,4 +293,4 @@ export overwrites the blob. Exploded form:
 - consumer repos (removed-key cleanup): `connect/api/bringyour.yml`,
   `mmm/ur.io/api/bringyour.yml` (+ regenerated `react/src/data/openapi.js`,
   `api/build/api.html`), `mmm/ur.io/examples/web/web/bringyour.com/stats.js`,
-  `web/web/bringyour.com/stats.js`, `web/web2/ur.xyz/astro/public/openapi.yml`
+  `web/web/bringyour.com/stats.js`, `web/ur.xyz/astro/public/openapi.yml`

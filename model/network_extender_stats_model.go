@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -101,6 +102,138 @@ func CountExtendersByCountry(ctx context.Context) []ExtenderCountryCount {
 				} else {
 					count.Country = count.CountryCode
 				}
+				counts = append(counts, count)
+			}
+		})
+	})
+	return counts
+}
+
+// ExtenderGossipPublishCount is the state of the gossip release queue for one
+// publish kind (see NetworkExtenderPublishKind*).
+//
+// Pending rows are what the gossip publisher has not drained yet, so the pair
+// (pending, oldest pending) is the queue's health: a pending count that does
+// not fall, or an oldest age that keeps climbing, means releases are not
+// reaching the network even though activations are still writing rows.
+type ExtenderGossipPublishCount struct {
+	Kind int
+	// Pending is rows with no published_time.
+	Pending int64
+	// OldestPendingSeconds is the age of the oldest pending row, 0 when none.
+	OldestPendingSeconds float64
+	// Released24h is rows published in the trailing 24 hours.
+	Released24h int64
+	// Extenders24h is the distinct extenders behind Released24h. A single
+	// extender re-released repeatedly by the drip inflates the row count
+	// without widening what the network actually learned, so the two are
+	// reported separately.
+	Extenders24h int64
+}
+
+// CountExtenderGossipPublish returns the gossip release queue per kind.
+//
+// Every known kind is returned even when it has no rows, so a kind that has
+// gone quiet is a zero rather than an absent series -- the same rule the ip
+// family gauges follow (M4).
+func CountExtenderGossipPublish(ctx context.Context, now time.Time) []ExtenderGossipPublishCount {
+	counts := map[int]*ExtenderGossipPublishCount{}
+	for _, kind := range []int{
+		NetworkExtenderPublishKindRecord,
+		NetworkExtenderPublishKindRevocation,
+	} {
+		counts[kind] = &ExtenderGossipPublishCount{Kind: kind}
+	}
+
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				kind,
+				COUNT(*) FILTER (WHERE published_time IS NULL),
+				COALESCE(
+					EXTRACT(EPOCH FROM ($1 - MIN(create_time) FILTER (WHERE published_time IS NULL))),
+					0
+				),
+				COUNT(*) FILTER (WHERE $2 <= published_time),
+				COUNT(DISTINCT extender_id) FILTER (WHERE $2 <= published_time)
+			FROM network_extender_publish
+			GROUP BY kind
+			`,
+			now.UTC(),
+			now.UTC().Add(-24*time.Hour),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var count ExtenderGossipPublishCount
+				server.Raise(result.Scan(
+					&count.Kind,
+					&count.Pending,
+					&count.OldestPendingSeconds,
+					&count.Released24h,
+					&count.Extenders24h,
+				))
+				if known, ok := counts[count.Kind]; ok {
+					*known = count
+				}
+			}
+		})
+	})
+
+	ordered := []ExtenderGossipPublishCount{}
+	for _, kind := range []int{
+		NetworkExtenderPublishKindRecord,
+		NetworkExtenderPublishKindRevocation,
+	} {
+		ordered = append(ordered, *counts[kind])
+	}
+	return ordered
+}
+
+// ExtenderHourContractCount is one extender's contracts in one hour bucket of
+// create_time.
+type ExtenderHourContractCount struct {
+	ExtenderId server.Id
+	Contracts  int64
+}
+
+// CountExtenderContractsByHour returns the contracts each extender carried in
+// the hour beginning at hourStart.
+//
+// One grouped query over a closed hour, which is all the counter needs: a
+// complete bucket never changes, so it is read once and never rescanned. That
+// is what makes a per-extender time series affordable -- the alternative, a
+// cumulative lifetime count refreshed every few minutes, rescans the whole
+// table forever.
+//
+// Contracts are counted distinct: one contract names an extender once per
+// party, so a contract with the same extender on both ends must not count
+// twice.
+func CountExtenderContractsByHour(ctx context.Context, hourStart time.Time) []ExtenderHourContractCount {
+	counts := []ExtenderHourContractCount{}
+	hourStart = hourStart.UTC().Truncate(time.Hour)
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				extender_id,
+				COUNT(DISTINCT contract_id)
+			FROM contract_extender
+			WHERE $1 <= create_time AND create_time < $2
+			GROUP BY extender_id
+			`,
+			hourStart,
+			hourStart.Add(time.Hour),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var count ExtenderHourContractCount
+				server.Raise(result.Scan(
+					&count.ExtenderId,
+					&count.Contracts,
+				))
 				counts = append(counts, count)
 			}
 		})
