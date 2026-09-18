@@ -562,6 +562,14 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 			"table_name = 'wallet_auth_challenge_attempt'",
 			"index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'",
 			"definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'",
+			"SELECT count(*) = 7 FROM (VALUES ('latency_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('client_id', 'uuid', 'NO')",
+			"('rtt_ms', 'integer', 'NO'), ('probe_time', 'timestamp without time zone', 'NO'), ('create_time', 'timestamp without time zone', 'NO')",
+			"('p', 'PRIMARY KEY (latency_id)')",
+			"('u', 'UNIQUE (extender_id, client_id, probe_nonce)')",
+			"index_name = 'network_extender_latency_create_time'",
+			"definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'",
+			"index_name = 'network_extender_latency_extender_id_create_time'",
+			"definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'",
 		} {
 			if !strings.Contains(normalized, want) {
 				t.Fatalf("recent migration query lost %q:\n%s", want, query)

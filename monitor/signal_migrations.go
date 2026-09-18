@@ -136,6 +136,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
 	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, removedVersion: 678, rowColumn: 88},
 	{name: "competition legacy/shared-control ranking policy", requiredVersion: 678, rowColumn: 89},
+	{name: "network_extender_latency attestation table and identity key", requiredVersion: 679, rowColumn: 90},
+	{name: "network_extender_latency_create_time retention index", requiredVersion: 680, rowColumn: 91},
+	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1137,6 +1140,59 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           AND pg_get_functiondef(
 		               'public.competition_round_baseline_insert_guard()'::regprocedure
 		           ) LIKE '%state = ''running'' AND attempt_count >= NEW.source_attempt%'
+		       ),
+		       (
+		           to_regclass('public.network_extender_latency') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 7
+		               FROM (VALUES
+		                   ('latency_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('probe_nonce', 'bytea', 'NO'),
+		                   ('rtt_ms', 'integer', 'NO'),
+		                   ('probe_time', 'timestamp without time zone', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_latency'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('p', 'PRIMARY KEY (latency_id)'),
+		                   ('u', 'UNIQUE (extender_id, client_id, probe_nonce)')
+		               ) AS expected(constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = 'network_extender_latency'
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_latency'
+		             AND index_name = 'network_extender_latency_create_time'
+		             AND definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_latency'
+		             AND index_name = 'network_extender_latency_extender_id_create_time'
+		             AND definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       )
 		FROM version;
 	`)

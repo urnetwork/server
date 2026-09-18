@@ -11248,6 +11248,10 @@ This is the version-to-artifact contract checked by the probe:
 | 675 | exact valid/ready `(client_address_hash, attempt_time)` `wallet_auth_challenge_attempt_client_address_hash_attempt_time` index |
 | 676 | `competition_round_baseline` exact column shape plus enabled source and append-only guards |
 | 677 | candidate-review guard orders eligible submissions by absolute raw score, submission time, and job id |
+| 678 | candidate-review and baseline guards preserve the legacy/shared-control ranking discriminator |
+| 679 | `network_extender_latency` attestation table with its exact columns, primary key, and replay-identity key |
+| 680 | exact valid/ready `network_extender_latency_create_time` retention index |
+| 681 | exact valid/ready `network_extender_latency_extender_id_create_time` Extender lookup index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -11291,6 +11295,13 @@ remain distinguishable from a missing migration without rewriting history.
 Code that activates, publishes, attributes, or pays Extenders must remain
 behind version 668 and all seven artifact checks; never hand-create one table
 or column after advancing the numeric head.
+
+Versions 679–681 append verified Extender latency attestations. The table's
+replay key is `(extender_id, client_id, probe_nonce)` and the two exact,
+valid/ready btree indexes bound retention sweeps and per-Extender reads. A
+numeric head at or above one of these versions is coherent only when the
+corresponding typed relation or index contract is present; never reconstruct
+the attestation table or its indexes manually after a failed migration.
 
 The 2026-09-14 detector audit found that a same-name ordered index could pass
 column-substring checks with a different access method or expression. The
