@@ -122,6 +122,41 @@ func TestHMACCutoverSignalSyntheticNeedsBehavioralControl(t *testing.T) {
 	}
 }
 
+func TestHMACCutoverSignalSyntheticControlDegradationDoesNotClaimRecovery(t *testing.T) {
+	// The legacy cohort independently meets its dark threshold, but the
+	// compatible control is one observation below 50%. Current causal
+	// attribution must fail closed without implying that an earlier causal
+	// sample recovered.
+	row := Row{"t", "86400", "1000", "300", "20", "200", "500", "100", "100", "0", "100", "51", "49"}
+	alerts, err := NewHMACCutoverSignal().Run(
+		context.Background(), syntheticSettings(syntheticHMACCutoverSource(row)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want one readiness warning: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "contract-hmac-readiness")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("severity = %s, want warn", alert.Severity)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"compatible_ok=49",
+		"fails closed to readiness",
+		"cannot retroactively negate an earlier behaviorally confirmed incompatibility",
+		"PAGE-to-WARN class reassignment is not recovery",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("control-degradation alert missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "reject each newly created contract") {
+		t.Fatalf("insufficient current control was given the causal diagnosis:\n%s", markdown)
+	}
+}
+
 func TestHMACCutoverSignalSyntheticPrecutoverRisk(t *testing.T) {
 	row := Row{"f", "-86400", "40", "25", "4", "5", "10", "0", "0", "0", "0", "0", "0"}
 	alerts, err := NewHMACCutoverSignal().Run(

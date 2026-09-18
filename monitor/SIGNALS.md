@@ -7043,6 +7043,17 @@ endpoints, contracts, and failure text never leave PostgreSQL.
   never treated as compatible, and claimed legacy metadata alone is never
   reported as proof of the live process version.
 
+If a later compatible control falls below the causal threshold, the current
+sample fails closed from `contract-hmac-incompatible` PAGE to
+`contract-hmac-readiness` WARN. That class reassignment is not a severity
+downgrade of one Alert identity, does not prove receiver recovery, and cannot
+retroactively negate an earlier behaviorally confirmed incompatibility.
+Diagnose the compatible-cohort degradation as a separate boundary while
+retaining the prior HMAC incident until its full closure gate passes. This
+prevents a shared capacity or reachability regression from hiding an already
+proved legacy-protocol failure without weakening the current-sample causal
+threshold.
+
 Closure requires an explicit security/availability decision:
 
 1. **Secure containment:** upgrade legacy-only receivers or quarantine the

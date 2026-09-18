@@ -264,7 +264,7 @@ func hmacCutoverReadinessFinding(snapshot hmacCutoverSnapshot) finding {
 		baseline:  "The legacy-claim count reaches zero before the cutoff, or complete current behavior proves compatibility through the exact signer boundary.",
 		observed:  hmacCutoverObserved(snapshot),
 		evidence:  "Only aggregate claimed-version classes, distinct legacy-network count, and current verdict counts leave PostgreSQL. Descriptions and provider/network identities remain private.",
-		context:   "Unknown metadata is not treated as compatible. Conversely, a claimed old version is not by itself proof that the live process still runs old code; the dark cohort and compatible control supply that discriminator.",
+		context:   "Unknown metadata is not treated as compatible. Conversely, a claimed old version is not by itself proof that the live process still runs old code; the dark cohort and compatible control supply that discriminator. A current compatible control below the causal threshold fails closed to readiness and cannot retroactively negate an earlier behaviorally confirmed incompatibility; a PAGE-to-WARN class reassignment is not recovery.",
 		action:    "Complete §2.19 coverage and compare current legacy and compatible cohorts. Before activating standard signing, upgrade or quarantine the legacy cohort and prove capacity. After activation, use the explicit secure-versus-compatibility decision in this section; do not infer readiness from the calendar or silently alter signing behavior.",
 		verify:    "The claimed legacy cohort reaches zero or gains complete behaviorally verified compatibility, the compatible control remains healthy, and one full blackhole refresh finishes within its verdict lifetime.",
 		playbook:  "SIGNALS.md §2.24, §2.19, and §2.23",
