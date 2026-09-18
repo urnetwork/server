@@ -7872,4 +7872,132 @@ var migrations = []any{
 		CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time
 		ON wallet_auth_challenge_attempt (client_address_hash, attempt_time)
 	`),
+
+	// One exact scorer-owned control is frozen on the first complete measured
+	// attempt in each competition round. Later jobs authenticate these bytes and
+	// skip incumbent execution, so absolute candidate latency is comparable
+	// across the epoch. Append after every published migration; never move this
+	// into the historical competition block above.
+	newSqlMigration(`
+		CREATE TABLE competition_round_baseline (
+			round_id uuid PRIMARY KEY REFERENCES competition_round(round_id),
+			baseline_json bytea NOT NULL CHECK (
+				octet_length(baseline_json) BETWEEN 1 AND 1048576
+			),
+			baseline_sha256 char(64) NOT NULL CHECK (
+				baseline_sha256 ~ '^[0-9a-f]{64}$'
+			),
+			source_job_id uuid NOT NULL REFERENCES competition_job(job_id),
+			source_attempt integer NOT NULL CHECK (source_attempt > 0),
+			source_artifact_manifest_sha256 char(64) NOT NULL CHECK (
+				source_artifact_manifest_sha256 ~ '^[0-9a-f]{64}$'
+			),
+			base_sha char(40) NOT NULL CHECK (base_sha ~ '^[0-9a-f]{40}$'),
+			providers_sha256 char(64) NOT NULL CHECK (providers_sha256 ~ '^[0-9a-f]{64}$'),
+			evaluator_image_digest varchar(71) NOT NULL CHECK (
+				evaluator_image_digest ~ '^sha256:[0-9a-f]{64}$'
+			),
+			scorer_version varchar(64) NOT NULL,
+			hardware_id varchar(128) NOT NULL,
+			host_qualification_sha256 char(64) NOT NULL CHECK (
+				host_qualification_sha256 ~ '^[0-9a-f]{64}$'
+			),
+			created_at timestamp NOT NULL
+		);
+
+		CREATE FUNCTION competition_round_baseline_insert_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_baseline_insert_guard$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM competition_job
+				WHERE job_id = NEW.source_job_id AND round_id = NEW.round_id
+				  AND attempt_count >= NEW.source_attempt
+			) THEN
+				RAISE EXCEPTION 'competition round baseline source does not belong to its round attempt';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_baseline_insert_guard$;
+
+		CREATE TRIGGER competition_round_baseline_source_guard
+		BEFORE INSERT ON competition_round_baseline
+		FOR EACH ROW EXECUTE FUNCTION competition_round_baseline_insert_guard();
+
+		CREATE TRIGGER competition_round_baseline_append_only
+		BEFORE UPDATE OR DELETE ON competition_round_baseline
+		FOR EACH ROW EXECUTE FUNCTION competition_append_only_guard();
+	`),
+
+	// A shared baseline makes normalized score a display transformation of the
+	// same control for every job. Make the database honesty-review order state
+	// the actual competition rule directly: lowest absolute candidate latency,
+	// then deterministic admission identity.
+	newSqlMigration(`
+		CREATE OR REPLACE FUNCTION competition_candidate_review_insert_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_candidate_review_gate$
+		DECLARE
+			epoch_round competition_round%ROWTYPE;
+			expected_rank bigint;
+			unresolved_better bigint;
+		BEGIN
+			SELECT * INTO epoch_round
+			FROM competition_round
+			WHERE round_id = NEW.round_id;
+			IF NOT FOUND OR epoch_round.canceled OR epoch_round.finalized_at IS NOT NULL OR
+			   NEW.reviewed_at < epoch_round.closes_at OR EXISTS (
+				SELECT 1 FROM competition_job
+				WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+			) OR EXISTS (
+				SELECT 1 FROM competition_candidate_review
+				WHERE round_id = NEW.round_id AND decision = 'approved'
+			) THEN
+				RAISE EXCEPTION 'competition epoch is not ready for candidate review';
+			END IF;
+
+			WITH eligible AS (
+				SELECT job_id,
+				       row_number() OVER (
+				           ORDER BY (score_json->>'raw_score')::numeric ASC,
+				                    submitted_at, job_id
+				       ) AS candidate_rank
+				FROM competition_job
+				WHERE round_id = NEW.round_id AND state = 'succeeded'
+				  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+				  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+				  AND jsonb_typeof(score_json->'gates') = 'object'
+				  AND score_json->'gates' <> '{}'::jsonb
+				  AND NOT EXISTS (
+				      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+				      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+				  )
+			)
+			SELECT candidate.candidate_rank,
+			       count(better.job_id) FILTER (
+			           WHERE NOT EXISTS (
+			               SELECT 1 FROM competition_candidate_review AS prior_review
+			               WHERE prior_review.round_id = NEW.round_id
+			                 AND prior_review.job_id = better.job_id
+			                 AND prior_review.decision = 'rejected'
+			           )
+			       )
+			INTO expected_rank, unresolved_better
+			FROM eligible AS candidate
+			LEFT JOIN eligible AS better ON better.candidate_rank < candidate.candidate_rank
+			WHERE candidate.job_id = NEW.job_id
+			GROUP BY candidate.candidate_rank;
+
+			IF expected_rank IS NULL OR NEW.candidate_rank <> expected_rank THEN
+				RAISE EXCEPTION 'competition review job is not an eligible ranked candidate';
+			END IF;
+			IF unresolved_better <> 0 THEN
+				RAISE EXCEPTION 'competition review skipped a higher-ranked candidate';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_candidate_review_gate$;
+	`),
 }

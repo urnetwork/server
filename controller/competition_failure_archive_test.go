@@ -46,10 +46,13 @@ func (self *failureArchiveTestArchive) ArchiveAttempt(ctx context.Context, _ *Se
 }
 
 // Constructs a fully authenticated synthetic job with a pinned local shell fixture.
-func failureArchiveEvaluatorFixture(t *testing.T, body func(*queuedJob) string) (*Settings, *queuedJob, *failureArchiveTestArchive) {
+func failureArchiveEvaluatorFixture(t *testing.T, body func(*Settings, *queuedJob) string) (*Settings, *queuedJob, *failureArchiveTestArchive) {
 	t.Helper()
 	settings := validSettings()
 	settings.ArtifactRoot = t.TempDir()
+	if err := os.Chmod(settings.ArtifactRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	settings.ConfigLocalDirectory = t.TempDir()
 	settings.VaultLocalDirectory = t.TempDir()
 	var err error
@@ -81,7 +84,7 @@ func failureArchiveEvaluatorFixture(t *testing.T, body func(*queuedJob) string) 
 		Patch: patch, AttemptCount: 1, Round: *round,
 	}
 	settings.EvaluatorCommand = filepath.Join(t.TempDir(), "synthetic-evaluator.sh")
-	if err := os.WriteFile(settings.EvaluatorCommand, []byte("#!/bin/sh\nset -eu\n"+body(job)), 0o700); err != nil {
+	if err := os.WriteFile(settings.EvaluatorCommand, []byte("#!/bin/sh\nset -eu\n"+body(settings, job)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	settings.EvaluatorCommandSha256, _, err = hashRegularFile(settings.EvaluatorCommand)
@@ -168,7 +171,7 @@ func failureArchiveOutcomeFailure(t *testing.T, outcome EvaluationOutcome) *Comp
 
 // A nonzero evaluator exit must retain its original failure plus sanitized evidence.
 func TestCommandEvaluatorPreservesOriginalFailureAfterFailureEvidenceArchive(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + "exit 17\n"
 	})
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -209,7 +212,7 @@ func TestCommandEvaluatorArchivesSanitizedEvidenceAfterCanceledRun(t *testing.T)
 		t.Fatal(err)
 	}
 	defer barrier.Close()
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + failureArchiveStageScript(t, job, nil) +
 			"trap 'exit 143' TERM\nprintf x > " + failureArchiveShellQuote(barrierPath) + "\nwhile :; do :; done\n"
 	})
@@ -249,7 +252,7 @@ func TestCommandEvaluatorArchivesSanitizedEvidenceAfterCanceledRun(t *testing.T)
 
 // Retention failure supersedes the run error so missing evidence cannot look retained.
 func TestCommandEvaluatorSurfacesFailureEvidenceArchiveFailure(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + "exit 17\n"
 	})
 	archive.archiveErr = errors.New("synthetic archive failure")
@@ -261,7 +264,7 @@ func TestCommandEvaluatorSurfacesFailureEvidenceArchiveFailure(t *testing.T) {
 
 // Partial launch failures still archive controller-owned diagnostics and fixed artifacts.
 func TestCommandEvaluatorArchivesMinimalFailureWithoutFailureManifest(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(*queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(*Settings, *queuedJob) string {
 		return "printf '%s\\n' 'synthetic early evaluator failure' >&2\nexit 17\n"
 	})
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -278,7 +281,7 @@ func TestCommandEvaluatorArchivesMinimalFailureWithoutFailureManifest(t *testing
 
 // Invalid present manifests must never fall back to trusting arbitrary attempt files.
 func TestCommandEvaluatorRejectsUnauthenticatedFailureManifest(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, func(manifest map[string]any) {
 			manifest["job_id"] = server.NewId().String()
 		}) + "exit 17\n"
@@ -291,7 +294,7 @@ func TestCommandEvaluatorRejectsUnauthenticatedFailureManifest(t *testing.T) {
 
 // The partial-stage exception takes effect only after authenticated retention succeeds.
 func TestCommandEvaluatorClassifiesCandidateRunFailureAfterArchive(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + failureArchiveStageScript(t, job, nil) + "exit 1\n"
 	})
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -321,7 +324,7 @@ func TestCommandEvaluatorClassifiesCandidateRunFailureAfterArchive(t *testing.T)
 
 // A sidecar without the sanitizer proof cannot replace an infrastructure failure.
 func TestCommandEvaluatorIgnoresStageFailureWithoutSanitizedManifest(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveStageScript(t, job, nil) + "exit 17\n"
 	})
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -337,7 +340,7 @@ func TestCommandEvaluatorIgnoresStageFailureWithoutSanitizedManifest(t *testing.
 
 // A completed command with no full result cannot use a stale partial-stage sidecar.
 func TestCommandEvaluatorDoesNotClassifyStageFailureAfterZeroExit(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + failureArchiveStageScript(t, job, nil) + "exit 0\n"
 	})
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -348,7 +351,7 @@ func TestCommandEvaluatorDoesNotClassifyStageFailureAfterZeroExit(t *testing.T) 
 
 // An archive failure prevents even a valid candidate sidecar from becoming submission blame.
 func TestCommandEvaluatorDoesNotClassifyStageFailureWhenArchiveFails(t *testing.T) {
-	settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 		return failureArchiveEvidenceScript(t, job, nil) + failureArchiveStageScript(t, job, nil) + "exit 1\n"
 	})
 	archive.archiveErr = errors.New("synthetic failed stage retention")
@@ -385,7 +388,7 @@ func TestCommandEvaluatorRejectsUnauthenticatedStageFailure(t *testing.T) {
 		{name: "error unknown field", mutate: func(value map[string]any) { value["error"].(map[string]any)["readiness"] = nil }},
 	}
 	for _, testCase := range cases {
-		settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+		settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
 			return failureArchiveEvidenceScript(t, job, nil) + failureArchiveStageScript(t, job, testCase.mutate) + "exit 1\n"
 		})
 		outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
@@ -413,7 +416,7 @@ func TestCommandEvaluatorArchivesPostRunValidationFailures(t *testing.T) {
 		{name: "seal", code: "artifact_seal_failed"},
 	}
 	for _, testCase := range cases {
-		settings, job, archive := failureArchiveEvaluatorFixture(t, func(job *queuedJob) string {
+		settings, job, archive := failureArchiveEvaluatorFixture(t, func(settings *Settings, job *queuedJob) string {
 			result := evaluatorResult{
 				Schema: 1, JobId: job.JobId.String(),
 				EvalError: &CompetitionError{Kind: "submission", Code: "candidate_build_failed", Message: "synthetic candidate build failed"},
@@ -437,11 +440,24 @@ func TestCommandEvaluatorArchivesPostRunValidationFailures(t *testing.T) {
 			case "security":
 				result.Security.CleanupComplete = false
 			case "seal":
-				value := "{}\n"
-				digest := sha256.Sum256([]byte(value))
-				for _, path := range []string{"submission-error.json", "evaluation.complete.json"} {
-					result.Artifacts = append(result.Artifacts, evaluationArtifact{Path: path, Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(value))})
-					extra += "printf '%s' " + failureArchiveShellQuote(value) + " > " + failureArchiveShellQuote(path) + "\n"
+				rawScores := make([]float64, settings.EvaluationPolicy.Replicates)
+				for i := range rawScores {
+					rawScores[i] = 100 + float64(i%3) - 1
+				}
+				baseline := testRoundBaseline(t, settings, &job.Round, rawScores)
+				for _, artifact := range []struct {
+					path  string
+					value []byte
+				}{
+					{path: "baseline.json", value: baseline},
+					{path: "submission-error.json", value: []byte("{}\n")},
+					{path: "evaluation.complete.json", value: []byte("{}\n")},
+				} {
+					digest := sha256.Sum256(artifact.value)
+					result.Artifacts = append(result.Artifacts, evaluationArtifact{
+						Path: artifact.path, Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(artifact.value)),
+					})
+					extra += "printf '%s' " + failureArchiveShellQuote(string(artifact.value)) + " > " + failureArchiveShellQuote(artifact.path) + "\n"
 				}
 				extra += "ln -s worker-request.json untrusted-link\n"
 			}

@@ -20,7 +20,9 @@ package main
 //   compare   decide whether run set A is statistically better than B
 //   score-baseline
 //             validate trusted same-round baseline artifacts and write the
-//             signed-manifest payload consumed by score
+//             authenticated manifest payload consumed by score
+//   score-progress
+//             compare completed candidate live metrics to the frozen control
 //   score     validate and score a complete candidate artifact bundle
 //   source-check
 //             verify one frozen source epoch against the measured repositories
@@ -71,6 +73,7 @@ Usage:
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
+  sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
@@ -166,7 +169,7 @@ Options:
   --out-dir=<dir>        Directory for measured replicate artifacts [default: baseline-runs].
   --a=<paths>            Side A run artifact(s), comma-separated.
   --b=<paths>            Side B run artifact(s), comma-separated.
-  --baseline=<path>      Compare noise floor, or signed score baseline manifest (score).
+  --baseline=<path>      Compare noise floor, or authenticated score baseline manifest (score).
   --round-id=<id>        Competition round id bound into a score baseline manifest.
   --takeover-margin=<m>  Frozen fractional improvement required for takeover.
   --stderr=<paths>       Comma-separated candidate stderr artifacts (score).
@@ -207,6 +210,8 @@ Options:
 		runCompare(opts)
 	case optBool(opts, "score-baseline"):
 		runScoreBaseline(opts)
+	case optBool(opts, "score-progress"):
+		runScoreProgress(opts)
 	case optBool(opts, "score"):
 		runScore(opts)
 	case optBool(opts, "source-check"):

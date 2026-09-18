@@ -33,7 +33,10 @@ still needed to activate the competition through Apex.
   leaderboard is public.
 - UR's epoch-specific improvement margin and one-sided Welch significance test
   replace the ordinary one-percent Apex solo takeover rule. Epoch 1 starts at a
-  16.1% margin; every evaluation records its variance and significance result.
+  16.1% margin. One authenticated nine-run control is frozen per epoch; every
+  candidate contributes nine independent runs and records its variance,
+  shared-control digest, and significance result. Ranking uses absolute raw
+  latency; normalized score is display-only.
 - A statistically significant submission is only a review candidate. The first
   honest significant candidate wins; if none remains, there is no winner and
   the source commits and threshold carry forward.

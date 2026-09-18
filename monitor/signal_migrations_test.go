@@ -93,6 +93,18 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"network_client_connection_client_id_connected_extender_id",
 			"contract_extender",
 			"dns_ports",
+			"wallet_auth_challenge_attempt_client_address_hash_attempt_time",
+			walletAuthChallengeAttemptAddressTimeIndexDefinition,
+			"competition_round_baseline",
+			"competition_round_baseline_insert_guard",
+			"competition_round_baseline_source_guard",
+			"competition_round_baseline_append_only",
+			"FOREIGN KEY (source_job_id) REFERENCES competition_job(job_id)",
+			"actual.tgenabled <> 'D'",
+			"competition_candidate_review_insert_guard",
+			"ORDER BY (score_json->>''raw_score'')::numeric ASC",
+			"submitted_at, job_id",
+			"NOT LIKE '%normalized_score%'",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)

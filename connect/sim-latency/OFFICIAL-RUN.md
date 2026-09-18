@@ -255,9 +255,9 @@ or begin/end identity. Never infer false from an absent file.
 
 ## Aggregate and score
 
-The trusted evaluator first runs the frozen odd number of independently reset
-same-round baseline jobs, then supplies their comma-separated artifacts to the
-pinned builder:
+Once per epoch, the trusted evaluator runs the frozen odd number of
+independently reset control jobs before it invokes any submitted build, then
+supplies their comma-separated artifacts to the pinned builder:
 
 ```text
 APEX_ROUND_ID
@@ -278,12 +278,15 @@ APEX_BASELINE_MANIFEST
 The builder validates every artifact with the same production parsers used for
 candidates and fails unless all baseline runs have distinct evaluation ids,
 the exact same workload contract, and clean success, path-integrity,
-matchmaking, stability, and resource evidence. The control plane then signs
-and authenticates `APEX_BASELINE_MANIFEST` and publishes its digest.
+matchmaking, stability, and resource evidence. The control plane then freezes
+the exact `APEX_BASELINE_MANIFEST` bytes and SHA-256 in the append-only round
+baseline row after durable attempt retention. A terminal candidate build
+failure does not discard an already completed control.
 
-That manifest fixes the candidate replicate count. Run exactly that many
-independently reset candidate jobs. The worker supplies their comma-separated
-artifact paths in replicate order:
+That one manifest fixes the candidate replicate count for the whole epoch.
+Every later attempt authenticates and materializes those same bytes and skips
+control execution. Run exactly that many independently reset candidate jobs.
+The worker supplies their comma-separated artifact paths in replicate order:
 
 ```text
 APEX_BASELINE_SHA256
@@ -300,9 +303,10 @@ Each `APEX_CANDIDATE_SAMPLES` entry is the exact `stats_root` recorded in its
 replicate sidecar (the per-instance root containing `findproviders2/`), not the
 parent `site/stats` directory or an unrelated export.
 
-The worker verifies the baseline manifest's detached control-plane signature
-before setting `APEX_BASELINE_SHA256`; the runner re-hashes the file before
-both scoring and bundle finalization.
+The worker verifies the baseline manifest's append-only PostgreSQL provenance,
+retained source-attempt manifest, and exact SHA-256 before setting
+`APEX_BASELINE_SHA256`; the runner re-hashes the file before both scoring and
+bundle finalization.
 
 Then run:
 
@@ -317,7 +321,8 @@ granting a new candidate noise draw. Every successful score also records the
 baseline and candidate run-level sample variances, observed improvement,
 one-sided Welch p-value, current minimum, and supported next-epoch threshold.
 A takeover requires the raw-score margin, `p <= 0.05`, G1–G6, and a supported
-next-epoch recommendation.
+next-epoch recommendation. The leaderboard and honesty-review queue order by
+absolute candidate median raw latency; normalized score is display-only.
 
 ## Immutable bundle and checksums
 
@@ -357,7 +362,9 @@ the dataset with `baseline/verify.sh`; do not substitute ignored host run
 directories for the versioned evidence.
 
 Each source epoch still requires an authenticated evaluator image, source
-ledger match, fresh hidden workload, promoted R=9 same-round baseline, and
-passing readiness. Macrocosmos adapter/staging/registry acceptance and signed
+ledger match, fresh hidden workload, one append-only R=9 score baseline, and
+passing readiness. The separately promoted host-readiness rebaseline must name
+the production round but is not allowed to replace the score control.
+Macrocosmos adapter/staging/registry acceptance and signed
 public handoff artifacts remain external launch gates and must not be
 represented by a locally fabricated checkbox or report.

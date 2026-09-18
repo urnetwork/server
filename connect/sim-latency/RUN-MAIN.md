@@ -61,8 +61,10 @@ For epoch 1, optionally set `SIM_LATENCY_FIRST_OPENS_AT` to an RFC3339 instant.
 Every round is exactly seven days and uses an end-exclusive admission window.
 Later rounds open after the previous epoch drains, is reviewed, and is promoted.
 The frozen default `SIM_LATENCY_PREPARATION_SECONDS=57600` reserves the 16-hour
-same-round baseline interval; changing it requires a reviewed season-policy
-change before launch.
+same-round host-readiness interval; changing it requires a reviewed
+season-policy change before launch. This readiness rebaseline is not the
+scoring control. The worker establishes the epoch's one immutable nine-run
+`baseline.json` before it builds the first accepted submission.
 
 Run launch preflight and retain its passing JSON before the first epoch. Then:
 
@@ -94,8 +96,8 @@ no `evaluation_status` leaves legacy `completed` outcome-neutral. Neither the
 new failure signal nor staging cancellation publishes an epoch early; capture
 the finalized polling/leaderboard reconciliation separately.
 
-Staging still produces the candidate's authenticated same-round baseline and
-score bundle, but it does not require the separately promoted host rebaseline
+Staging uses the same append-only one-baseline-per-round score bundle as
+production, but it does not require the separately promoted host-readiness
 identity used as a production launch gate. Production retains that exact-round
 requirement. A staging worker may bootstrap a newly pinned evaluator from the
 complete prior root-owned containment record when only the frozen

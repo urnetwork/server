@@ -103,6 +103,8 @@ func newScoreFixture(t *testing.T, options scoreFixtureOptions) *scoreFixture {
 	if options.rowCount < failures {
 		failures = options.rowCount
 	}
+	successCount := max(1, options.rowCount-failures)
+	throughput := float64(options.bytesPerRow) / (options.totalMs / 1000)
 	fixture.runStats = &RunStats{
 		Schema:             runStatsSchema,
 		Kind:               runStatsKind,
@@ -133,7 +135,12 @@ func newScoreFixture(t *testing.T, options scoreFixtureOptions) *scoreFixture {
 		Rows:               options.rowCount,
 		RowsInWindow:       options.rowCount,
 		Failures:           failures,
-		Metrics:            map[string]MetricSummary{},
+		Metrics: map[string]MetricSummary{
+			"ttfb_p50_ms":                {Value: 10, N: successCount},
+			"ttfb_p95_ms":                {Value: 10, N: successCount},
+			"throughput_p50_bytes_per_s": {Value: throughput, N: successCount},
+			"throughput_p95_bytes_per_s": {Value: throughput, N: successCount},
+		},
 	}
 
 	var csv strings.Builder
@@ -226,6 +233,12 @@ func newScoreFixture(t *testing.T, options scoreFixtureOptions) *scoreFixture {
 			FindProvidersLoadP95Ms:          10,
 			FindProvidersPoolP05:            100,
 			FindProvidersSampleSpanFraction: minimumFindProvidersSampleSpanFraction,
+			LiveMetrics: map[string]MetricSummary{
+				"ttfb_p50_ms":                {Value: 10, N: 100},
+				"ttfb_p95_ms":                {Value: 10, N: 100},
+				"throughput_p50_bytes_per_s": {Value: 1000, N: 100},
+				"throughput_p95_bytes_per_s": {Value: 1000, N: 100},
+			},
 		}},
 	)
 	writeScoreJSON(t, fixture.baseline, fixture.baselineData)
@@ -306,8 +319,17 @@ func baselineInputsFromFixture(fixture *scoreFixture) ScoreBaselineInputs {
 	}
 }
 
+// Official controls always include the large-transfer tier needed by both
+// throughput telemetry series.
+func baselineScoreFixtureOptions() scoreFixtureOptions {
+	options := defaultScoreFixtureOptions()
+	options.bytesPerRow = throughputMinBytes
+	options.accountingBytes = int64(options.rowCount) * options.bytesPerRow
+	return options
+}
+
 func TestBuildScoreBaselineUsesOfficialArtifactValidation(t *testing.T) {
-	fixture := newScoreFixture(t, defaultScoreFixtureOptions())
+	fixture := newScoreFixture(t, baselineScoreFixtureOptions())
 	baseline, err := BuildScoreBaseline(baselineInputsFromFixture(fixture))
 	if err != nil {
 		t.Fatal(err)
@@ -317,10 +339,13 @@ func TestBuildScoreBaselineUsesOfficialArtifactValidation(t *testing.T) {
 	}
 	replicate := baseline.Replicates[0]
 	if replicate.RawScore != 100 || replicate.SuccessRate != 1 ||
-		replicate.RequestCount != 100 || replicate.ReceivedBytes != 10_000 ||
+		replicate.RequestCount != 100 || replicate.ReceivedBytes != 100*throughputMinBytes ||
 		replicate.FindProvidersLoadP95Ms != 10 || replicate.FindProvidersPoolP05 != 100 ||
 		replicate.FindProvidersSampleSpanFraction != minimumFindProvidersSampleSpanFraction {
 		t.Fatalf("unexpected baseline diagnostics: %+v", replicate)
+	}
+	if err := validateScoreLiveMetrics(replicate.LiveMetrics); err != nil {
+		t.Fatalf("generated baseline omitted authenticated live metrics: %v", err)
 	}
 
 	writeScoreJSON(t, fixture.baseline, baseline)
@@ -330,8 +355,27 @@ func TestBuildScoreBaselineUsesOfficialArtifactValidation(t *testing.T) {
 	}
 }
 
+// A scorer-owned control must not freeze telemetry copied from a manifest
+// when the underlying measured rows say something else.
+func TestBuildScoreBaselineRejectsForgedLiveMetric(t *testing.T) {
+	fixture := newScoreFixture(t, baselineScoreFixtureOptions())
+	fixture.runStats.Metrics["ttfb_p95_ms"] = MetricSummary{Value: 11, N: 100}
+	manifestPath := scoreSidecarForCSV(fixture.run)
+	if err := writeRunStats(manifestPath, fixture.runStats); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFinalMarker(fixture.marker, manifestPath, fixture.runStats); err != nil {
+		t.Fatal(err)
+	}
+	_, err := BuildScoreBaseline(baselineInputsFromFixture(fixture))
+	var coded *scoreCodedError
+	if !errors.As(err, &coded) || coded.code != "manifest_csv_mismatch" {
+		t.Fatalf("forged live metric was not rejected: %v", err)
+	}
+}
+
 func TestBuildScoreBaselineRejectsEvenReplicateCount(t *testing.T) {
-	fixture := newScoreFixture(t, defaultScoreFixtureOptions())
+	fixture := newScoreFixture(t, baselineScoreFixtureOptions())
 	inputs := baselineInputsFromFixture(fixture)
 	inputs.Runs = append(inputs.Runs, fixture.run)
 	inputs.Stderr = append(inputs.Stderr, fixture.stderr)
@@ -345,7 +389,7 @@ func TestBuildScoreBaselineRejectsEvenReplicateCount(t *testing.T) {
 }
 
 func TestBuildScoreBaselineRejectsUnhealthyBaseline(t *testing.T) {
-	options := defaultScoreFixtureOptions()
+	options := baselineScoreFixtureOptions()
 	options.failures = 4
 	fixture := newScoreFixture(t, options)
 	if _, err := BuildScoreBaseline(baselineInputsFromFixture(fixture)); err == nil || !strings.Contains(err.Error(), "97% success floor") {
@@ -354,7 +398,7 @@ func TestBuildScoreBaselineRejectsUnhealthyBaseline(t *testing.T) {
 }
 
 func TestBuildScoreBaselineReportsSanitizedStabilityFindings(t *testing.T) {
-	options := defaultScoreFixtureOptions()
+	options := baselineScoreFixtureOptions()
 	options.stderrExtra = "panic: private diagnostic payload\nUnexpected error: private recovery payload\n"
 	fixture := newScoreFixture(t, options)
 
@@ -376,7 +420,7 @@ func TestBuildScoreBaselineReportsSanitizedStabilityFindings(t *testing.T) {
 }
 
 func TestBuildScoreBaselineRejectsPrewindowMatchmakingSample(t *testing.T) {
-	options := defaultScoreFixtureOptions()
+	options := baselineScoreFixtureOptions()
 	options.sampleOffsetMs = -1
 	fixture := newScoreFixture(t, options)
 	if _, err := BuildScoreBaseline(baselineInputsFromFixture(fixture)); err == nil ||
@@ -386,7 +430,7 @@ func TestBuildScoreBaselineRejectsPrewindowMatchmakingSample(t *testing.T) {
 }
 
 func TestBuildScoreBaselineRejectsIncompleteMatchmakingWindow(t *testing.T) {
-	options := defaultScoreFixtureOptions()
+	options := baselineScoreFixtureOptions()
 	options.sampleEndOffsetMs = 600
 	fixture := newScoreFixture(t, options)
 	if _, err := BuildScoreBaseline(baselineInputsFromFixture(fixture)); err == nil ||

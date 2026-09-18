@@ -24,8 +24,9 @@ The same schema currently caps each production sandbox at four CPUs and 4 GiB,
 and caps player/referee timeouts at 7,200 seconds. The sim-latency evaluator
 requires a qualified 12-CPU/128-GB host class, approximately 13 GiB for the
 simulator at the present frontier point, dedicated PostgreSQL and Redis in the
-same resource boundary, and a paired multi-replicate baseline/candidate job.
-Those requirements do not fit the standard public sandbox contract.
+same resource boundary, one authenticated nine-run control per epoch, and nine
+fresh runs for each candidate. Those requirements do not fit the standard
+public sandbox contract.
 
 The season contract accepts an unbounded number of $20 USD submissions for
 seven days and evaluates them immediately through one Redis-list FIFO backed by

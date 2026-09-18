@@ -988,6 +988,7 @@ func validateRuntimeImageDigest(value string) (string, error) {
 const (
 	maxSelfCheckBytes       = 1 * 1024 * 1024
 	maxEvaluatorResultBytes = 8 * 1024 * 1024
+	maxRoundBaselineBytes   = 1 * 1024 * 1024
 	processTermGrace        = 10 * time.Second
 )
 
@@ -1013,6 +1014,8 @@ type evaluatorRequest struct {
 	RoundSeedHex         string           `json:"round_seed_hex"`
 	ProvidersPath        string           `json:"providers_path"`
 	ProvidersSha256      string           `json:"providers_sha256"`
+	RoundBaselinePath    string           `json:"round_baseline_path"`
+	RoundBaselineSha256  string           `json:"round_baseline_sha256"`
 	PatchPath            string           `json:"patch_path"`
 	PatchSha256          string           `json:"patch_sha256"`
 	ArtifactDirectory    string           `json:"artifact_directory"`
@@ -1020,6 +1023,40 @@ type evaluatorRequest struct {
 	VaultLocalDirectory  string           `json:"vault_local_directory"`
 	PatchPolicy          PatchPolicy      `json:"patch_policy"`
 	EvaluationPolicy     EvaluationPolicy `json:"evaluation_policy"`
+}
+
+// This is the strict subset of baseline.json independently authenticated by
+// the worker before it freezes or redistributes the scorer-owned document.
+type roundBaselineManifest struct {
+	ScoreSchema      int                      `json:"score_schema"`
+	Kind             string                   `json:"kind"`
+	ScorerVersion    string                   `json:"scorer_version"`
+	RoundId          string                   `json:"round_id"`
+	ConfigSha256     string                   `json:"config_sha256"`
+	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
+	RunFlags         map[string]string        `json:"run_flags"`
+	TakeoverMargin   float64                  `json:"takeover_margin"`
+	Replicates       []roundBaselineReplicate `json:"replicates"`
+}
+
+// Carries the recomputed score inputs and public live telemetry for one
+// trusted control run.
+type roundBaselineReplicate struct {
+	RawScore                        float64                               `json:"raw_score"`
+	SuccessRate                     float64                               `json:"success_rate"`
+	RequestCount                    int64                                 `json:"request_count"`
+	ReceivedBytes                   int64                                 `json:"received_bytes"`
+	FindProvidersLoadP95Ms          float64                               `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64                               `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64                               `json:"findproviders_sample_span_fraction"`
+	LiveMetrics                     map[string]roundBaselineMetricSummary `json:"live_metrics"`
+}
+
+// Carries one public metric and its within-run uncertainty.
+type roundBaselineMetricSummary struct {
+	Value   float64 `json:"value"`
+	N       int     `json:"n"`
+	BlockSe float64 `json:"block_se,omitempty"`
 }
 
 type evaluatorResult struct {
@@ -1174,6 +1211,18 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	if err != nil {
 		return infrastructureFailure("artifact_create_failed", "round workload artifact could not be written")
 	}
+	if job.RoundBaseline != nil {
+		if err := validateRoundBaselineRecord(settings, &job.Round, job.RoundBaseline); err != nil {
+			return infrastructureFailure("round_baseline_mismatch", "frozen round baseline failed authentication")
+		}
+		if err := writeExclusiveFile(
+			filepath.Join(attemptDir, "round-baseline.json"),
+			job.RoundBaseline.Json,
+			0400,
+		); err != nil {
+			return infrastructureFailure("artifact_create_failed", "frozen round baseline could not be materialized")
+		}
+	}
 	if err := writeExclusiveFile(patchPath, job.Patch, 0400); err != nil {
 		return infrastructureFailure("artifact_create_failed", "canonical patch artifact could not be written")
 	}
@@ -1251,6 +1300,29 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	if err != nil {
 		return infrastructureFailure("artifact_authentication_failed", "retained evaluator artifacts failed authentication")
 	}
+	var roundBaselineJson []byte
+	var roundBaselineSha256 string
+	roundBaselineJson, err = readRegularFile(filepath.Join(attemptDir, "baseline.json"), maxRoundBaselineBytes)
+	if err != nil {
+		return infrastructureFailure("round_baseline_missing", "evaluator did not return its authenticated round baseline")
+	}
+	roundBaselineSha256, err = validateRoundBaselineJson(settings, &job.Round, roundBaselineJson)
+	if err != nil {
+		clear(roundBaselineJson)
+		return infrastructureFailure("round_baseline_invalid", "evaluator returned an invalid round baseline")
+	}
+	if job.RoundBaseline != nil &&
+		(job.RoundBaseline.Sha256 != roundBaselineSha256 || !bytes.Equal(job.RoundBaseline.Json, roundBaselineJson)) {
+		clear(roundBaselineJson)
+		return infrastructureFailure("round_baseline_changed", "evaluator changed the frozen round baseline")
+	}
+	if result.Score != nil {
+		baselineSha256, ok := result.Score.Diagnostics["baseline_sha256"].(string)
+		if !ok || baselineSha256 != roundBaselineSha256 {
+			clear(roundBaselineJson)
+			return infrastructureFailure("score_baseline_mismatch", "score does not identify the frozen round baseline")
+		}
+	}
 	resultHash := sha256.Sum256(resultBytes)
 	requestHash, _, requestHashErr := hashRegularFile(requestPath)
 	patchHash, _, patchHashErr := hashRegularFile(patchPath)
@@ -1290,12 +1362,19 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	}
 	return EvaluationOutcome{
 		Score: result.Score, Error: result.EvalError,
-		ArtifactManifest: archivedManifest,
+		ArtifactManifest: archivedManifest, RoundBaselineJson: roundBaselineJson,
+		RoundBaselineSha256: roundBaselineSha256,
 	}
 }
 
 // Build the complete immutable handoff from the claimed queue row.
 func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir, patchPath, providersPath string) evaluatorRequest {
+	roundBaselinePath := ""
+	roundBaselineSha256 := ""
+	if job.RoundBaseline != nil {
+		roundBaselinePath = filepath.Join(attemptDir, "round-baseline.json")
+		roundBaselineSha256 = job.RoundBaseline.Sha256
+	}
 	return evaluatorRequest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		SourceEpoch: evaluationSourceEpoch(&job.Round),
@@ -1305,12 +1384,101 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
 		PatchSha256:   job.PatchSha256,
 		ProvidersPath: providersPath, ProvidersSha256: job.Round.ProvidersSha256,
+		RoundBaselinePath: roundBaselinePath, RoundBaselineSha256: roundBaselineSha256,
 		ArtifactDirectory:    attemptDir,
 		ConfigLocalDirectory: settings.ConfigLocalDirectory,
 		VaultLocalDirectory:  settings.VaultLocalDirectory,
 		PatchPolicy:          settings.PatchPolicy,
 		EvaluationPolicy:     settings.EvaluationPolicy,
 	}
+}
+
+// This fixed allowlist prevents a scorer document from smuggling an expanded
+// telemetry surface through the control-plane database.
+var roundBaselineLiveMetrics = map[string]bool{
+	"ttfb_p50_ms":                true,
+	"ttfb_p95_ms":                true,
+	"throughput_p50_bytes_per_s": true,
+	"throughput_p95_bytes_per_s": true,
+}
+
+// Verifies the exact scorer document and returns the digest that becomes the
+// immutable round control identity.
+func validateRoundBaselineJson(settings *Settings, round *roundRecord, content []byte) (string, error) {
+	if settings == nil || round == nil || len(content) == 0 || maxRoundBaselineBytes < len(content) {
+		return "", errors.New("round baseline is empty, oversized, or unbound")
+	}
+	manifest := &roundBaselineManifest{}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(manifest); err != nil {
+		return "", err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", errors.New("round baseline contains trailing data")
+	}
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil {
+		return "", err
+	}
+	if manifest.ScoreSchema != ScoreSchema || manifest.Kind != "sim-latency-score-baseline" ||
+		manifest.ScorerVersion != ScorerVersion || manifest.RoundId != round.RoundId.String() ||
+		manifest.ConfigSha256 != round.ProvidersSha256 ||
+		manifest.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
+		manifest.TakeoverMargin != settings.EvaluationPolicy.TakeoverMargin ||
+		len(manifest.RunFlags) == 0 || len(manifest.Replicates) != settings.EvaluationPolicy.Replicates ||
+		policy.EvaluationPolicy.RequestTimeoutMs != manifest.RequestTimeoutMs ||
+		policy.EvaluationPolicy.TakeoverMargin != manifest.TakeoverMargin {
+		return "", errors.New("round baseline identity does not match the frozen round")
+	}
+	finite := func(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+	finitePositive := func(value float64) bool { return finite(value) && 0 < value }
+	finiteNonnegative := func(value float64) bool { return finite(value) && 0 <= value }
+	for _, replicate := range manifest.Replicates {
+		if !finitePositive(replicate.RawScore) ||
+			float64(manifest.RequestTimeoutMs) < replicate.RawScore ||
+			!finite(replicate.SuccessRate) || replicate.SuccessRate < 0.97 || 1 < replicate.SuccessRate ||
+			replicate.RequestCount <= 0 || replicate.ReceivedBytes <= 0 ||
+			!finiteNonnegative(replicate.FindProvidersLoadP95Ms) ||
+			!finitePositive(replicate.FindProvidersPoolP05) ||
+			!finite(replicate.FindProvidersSampleSpanFraction) ||
+			replicate.FindProvidersSampleSpanFraction < 0.90 || 1 < replicate.FindProvidersSampleSpanFraction ||
+			len(replicate.LiveMetrics) != len(roundBaselineLiveMetrics) {
+			return "", errors.New("round baseline replicate is invalid")
+		}
+		for name, metric := range replicate.LiveMetrics {
+			if !roundBaselineLiveMetrics[name] || !finiteNonnegative(metric.Value) ||
+				metric.N <= 0 || !finiteNonnegative(metric.BlockSe) {
+				return "", errors.New("round baseline live metric is invalid")
+			}
+		}
+	}
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// Binds stored bytes to the exact source, workload, evaluator, and qualified
+// hardware identities required by the current worker.
+func validateRoundBaselineRecord(settings *Settings, round *roundRecord, baseline *roundBaselineRecord) error {
+	if baseline == nil || baseline.RoundId != round.RoundId ||
+		!sha256Pattern.MatchString(baseline.Sha256) ||
+		baseline.BaseSha != settings.BaseSha || baseline.ProvidersSha256 != round.ProvidersSha256 ||
+		baseline.EvaluatorImageDigest != settings.EvaluatorImageDigest ||
+		baseline.ScorerVersion != ScorerVersion ||
+		baseline.HardwareId != settings.EvaluationPolicy.HardwareId ||
+		baseline.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
+		baseline.SourceJobId == (server.Id{}) || baseline.SourceAttempt <= 0 ||
+		!sha256Pattern.MatchString(baseline.SourceArtifactManifestSha256) || baseline.CreatedAt.IsZero() {
+		return errors.New("round baseline record identity is invalid")
+	}
+	digest, err := validateRoundBaselineJson(settings, round, baseline.Json)
+	if err != nil {
+		return err
+	}
+	if digest != baseline.Sha256 {
+		return errors.New("round baseline record digest does not match its bytes")
+	}
+	return nil
 }
 
 // Staging rounds always exercise the frozen season baseline, regardless of
@@ -1499,7 +1667,7 @@ func authenticateArtifacts(root string, declared []evaluationArtifact) ([]evalua
 func authenticateResultArtifacts(root string, declared []evaluationArtifact, evalError *CompetitionError) ([]evaluationArtifact, error) {
 	if evalError != nil && evalError.Kind == "submission" && evalError.Code == "candidate_build_failed" {
 		return authenticateArtifactsRequired(root, declared, map[string]bool{
-			"submission-error.json": false, "evaluation.complete.json": false,
+			"baseline.json": false, "submission-error.json": false, "evaluation.complete.json": false,
 		})
 	}
 	return authenticateArtifacts(root, declared)
@@ -4290,8 +4458,7 @@ const nextCandidateReviewSql = `
 	WITH eligible AS (
 		SELECT job_id, patch_sha256, patch_bytes, submitted_at, score_json,
 		       CAST(row_number() OVER (
-		           ORDER BY (score_json->>'normalized_score')::numeric DESC,
-		                    (score_json->>'raw_score')::numeric ASC,
+		           ORDER BY (score_json->>'raw_score')::numeric ASC,
 		                    submitted_at, job_id
 		       ) AS integer) AS candidate_rank
 		FROM competition_job
@@ -4696,8 +4863,7 @@ func (self PostgresStore) Leaderboards(
 					  ON review.round_id = job.round_id AND review.job_id = job.job_id
 					WHERE job.round_id = $1 AND job.state = 'succeeded'
 					GROUP BY job.job_id, review.decision
-					ORDER BY (job.score_json->>'normalized_score')::numeric DESC,
-					         (job.score_json->>'raw_score')::numeric ASC,
+					ORDER BY (job.score_json->>'raw_score')::numeric ASC,
 					         job.submitted_at, job.job_id
 				`, board.RoundId)
 				server.WithPgResult(jobRows, jobsErr, func() {
@@ -4896,6 +5062,27 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 	return job, nil
 }
 
+// Reads the append-only round control without accepting partial identities.
+func scanRoundBaseline(row pgx.Row) (*roundBaselineRecord, error) {
+	baseline := &roundBaselineRecord{}
+	err := row.Scan(
+		&baseline.RoundId,
+		&baseline.Json,
+		&baseline.Sha256,
+		&baseline.SourceJobId,
+		&baseline.SourceAttempt,
+		&baseline.SourceArtifactManifestSha256,
+		&baseline.BaseSha,
+		&baseline.ProvidersSha256,
+		&baseline.EvaluatorImageDigest,
+		&baseline.ScorerVersion,
+		&baseline.HardwareId,
+		&baseline.HostQualificationSha256,
+		&baseline.CreatedAt,
+	)
+	return baseline, err
+}
+
 func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId server.Id, principal *Principal) (job *queuedJob, err error) {
 	var stateErr error
 	err = captureDatabaseError(func() {
@@ -5087,6 +5274,19 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				return
 			}
 			server.Raise(scanErr)
+			baseline, baselineErr := scanRoundBaseline(tx.QueryRow(ctx, `
+				SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+				       source_attempt, source_artifact_manifest_sha256, base_sha,
+				       providers_sha256, evaluator_image_digest, scorer_version,
+				       hardware_id, host_qualification_sha256, created_at
+				FROM competition_round_baseline WHERE round_id = $1
+			`, job.RoundId))
+			if baselineErr == nil {
+				server.Raise(validateRoundBaselineRecord(settings, &job.Round, baseline))
+				job.RoundBaseline = baseline
+			} else if !errors.Is(baselineErr, pgx.ErrNoRows) {
+				server.Raise(baselineErr)
+			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),
 					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1,
@@ -5153,9 +5353,11 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 }
 
 type EvaluationOutcome struct {
-	Score            *ScoreResult
-	Error            *CompetitionError
-	ArtifactManifest json.RawMessage
+	Score               *ScoreResult
+	Error               *CompetitionError
+	ArtifactManifest    json.RawMessage
+	RoundBaselineJson   []byte
+	RoundBaselineSha256 string
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -5180,12 +5382,21 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			var state, owner string
 			var attempts int
 			var apiImageDigest, workerImageDigest string
+			var roundId server.Id
+			var providersSha256 string
+			var policyJson []byte
 			var startedAt time.Time
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
-				       api_image_digest, COALESCE(worker_image_digest, ''), started_at
-				FROM competition_job WHERE job_id = $1 FOR UPDATE
-			`, jobId).Scan(&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt))
+				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,
+				       job.round_id, round.providers_sha256, round.policy_json
+				FROM competition_job AS job
+				JOIN competition_round AS round ON round.round_id = job.round_id
+				WHERE job.job_id = $1 FOR UPDATE OF job
+			`, jobId).Scan(
+				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt,
+				&roundId, &providersSha256, &policyJson,
+			))
 			if state != "running" || owner != workerId {
 				leaseLost = true
 				return
@@ -5205,12 +5416,63 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			}
 			manifestJson := []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
+			manifestSha256 := ""
 			if len(manifestJson) != 0 {
 				if !json.Valid(manifestJson) {
 					panic(errors.New("artifact manifest is invalid JSON"))
 				}
 				h := sha256.Sum256(manifestJson)
-				manifestHash = hex.EncodeToString(h[:])
+				manifestSha256 = hex.EncodeToString(h[:])
+				manifestHash = manifestSha256
+			}
+			if len(outcome.RoundBaselineJson) != 0 || outcome.RoundBaselineSha256 != "" {
+				if len(outcome.RoundBaselineJson) == 0 || !sha256Pattern.MatchString(outcome.RoundBaselineSha256) ||
+					manifestSha256 == "" {
+					panic(errors.New("round baseline outcome identity is incomplete"))
+				}
+				round := &roundRecord{
+					RoundResult: RoundResult{
+						RoundId: roundId, ProvidersSha256: providersSha256,
+					},
+					PolicyJson: policyJson,
+				}
+				baselineSha256, baselineErr := validateRoundBaselineJson(settings, round, outcome.RoundBaselineJson)
+				server.Raise(baselineErr)
+				if baselineSha256 != outcome.RoundBaselineSha256 {
+					panic(errors.New("round baseline outcome digest does not match its bytes"))
+				}
+				insertResult, insertErr := tx.Exec(ctx, `
+					INSERT INTO competition_round_baseline (
+						round_id, baseline_json, baseline_sha256, source_job_id,
+						source_attempt, source_artifact_manifest_sha256, base_sha,
+						providers_sha256, evaluator_image_digest, scorer_version,
+						hardware_id, host_qualification_sha256, created_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+					ON CONFLICT (round_id) DO NOTHING
+				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
+					manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
+					ScorerVersion, settings.EvaluationPolicy.HardwareId,
+					settings.EvaluationPolicy.HostQualificationSha256, now)
+				server.Raise(insertErr)
+				if insertResult.RowsAffected() == 1 {
+					appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
+						"round_id": roundId.String(), "baseline_sha256": baselineSha256,
+						"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
+					})
+				}
+				storedBaseline, storedErr := scanRoundBaseline(tx.QueryRow(ctx, `
+					SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+					       source_attempt, source_artifact_manifest_sha256, base_sha,
+					       providers_sha256, evaluator_image_digest, scorer_version,
+					       hardware_id, host_qualification_sha256, created_at
+					FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
+				`, roundId))
+				server.Raise(storedErr)
+				server.Raise(validateRoundBaselineRecord(settings, round, storedBaseline))
+				if storedBaseline.Sha256 != baselineSha256 ||
+					!bytes.Equal(storedBaseline.Json, outcome.RoundBaselineJson) {
+					panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
+				}
 			}
 			if retryableInfrastructure && retryBudgetAvailable {
 				retry = true
@@ -5417,6 +5679,24 @@ type roundRecord struct {
 	Canceled       bool
 }
 
+// This append-only row binds the exact round control bytes to the source job,
+// retained attempt, frozen source, evaluator, and qualified host identities.
+type roundBaselineRecord struct {
+	RoundId                      server.Id
+	Json                         []byte
+	Sha256                       string
+	SourceJobId                  server.Id
+	SourceAttempt                int
+	SourceArtifactManifestSha256 string
+	BaseSha                      string
+	ProvidersSha256              string
+	EvaluatorImageDigest         string
+	ScorerVersion                string
+	HardwareId                   string
+	HostQualificationSha256      string
+	CreatedAt                    time.Time
+}
+
 type queuedJob struct {
 	ScoreJobResult
 	Patch          []byte
@@ -5425,6 +5705,7 @@ type queuedJob struct {
 	LeaseOwner     string
 	LeaseExpiresAt *time.Time
 	Round          roundRecord
+	RoundBaseline  *roundBaselineRecord
 }
 
 type HostSelfCheck struct {
@@ -5596,6 +5877,17 @@ func (self *Worker) Run(ctx context.Context) error {
 			if err := self.evaluateOne(ctx, job, hostCheck); err != nil {
 				return err
 			}
+			fresh, checkErr := self.selfCheck(ctx)
+			if checkErr != nil {
+				if fresh.HostId != "" {
+					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
+				}
+				return fmt.Errorf("competition evaluator lost self-check after job: %w", checkErr)
+			}
+			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+				return fmt.Errorf("refresh evaluator host after job: %w", err)
+			}
+			hostCheck = fresh
 			continue
 		}
 		select {

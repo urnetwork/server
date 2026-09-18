@@ -254,7 +254,7 @@ request_path="$(realpath -e "$request_path")"
 artifact_dir="$(dirname "$request_path")"
 [ "$result_path" = "$artifact_dir/worker-result.json" ] || die "result path is outside the attempt directory"
 
-readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
+readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_baseline_path","round_baseline_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
 readonly patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
 readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
 jq -e \
@@ -279,6 +279,8 @@ worker_control_image="$(jq -er '.worker_image_digest' "$request_path")"
 scorer_version="$(jq -er '.scorer_version' "$request_path")"
 providers_path="$(jq -er '.providers_path' "$request_path")"
 providers_sha256="$(jq -er '.providers_sha256' "$request_path")"
+round_baseline_path="$(jq -er '.round_baseline_path' "$request_path")"
+round_baseline_sha256="$(jq -er '.round_baseline_sha256' "$request_path")"
 patch_path="$(jq -er '.patch_path' "$request_path")"
 patch_sha256="$(jq -er '.patch_sha256' "$request_path")"
 request_artifact_dir="$(jq -er '.artifact_directory' "$request_path")"
@@ -313,6 +315,16 @@ attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print s
 [ -f "$providers_path" ] && [ ! -L "$providers_path" ] || die "providers file is missing or unsafe"
 [ "$(file_bytes "$providers_path")" -le "$MAX_PROVIDERS_BYTES" ] || die "providers file is oversized"
 [ "$(sha256_file "$providers_path")" = "$providers_sha256" ] || die "providers file hash mismatch"
+if [ -n "$round_baseline_path" ] || [ -n "$round_baseline_sha256" ]; then
+    [ "$round_baseline_path" = "$artifact_dir/round-baseline.json" ] ||
+        die "round baseline path identity mismatch"
+    [[ "$round_baseline_sha256" =~ ^[0-9a-f]{64}$ ]] || die "round baseline SHA-256 is invalid"
+    [ -f "$round_baseline_path" ] && [ ! -L "$round_baseline_path" ] ||
+        die "round baseline is missing or unsafe"
+    [ "$(file_bytes "$round_baseline_path")" -le "$MAX_REQUEST_BYTES" ] || die "round baseline is oversized"
+    [ "$(sha256_file "$round_baseline_path")" = "$round_baseline_sha256" ] ||
+        die "round baseline hash mismatch"
+fi
 jq -e '.round_seed_hex | type == "string" and test("^[0-9a-f]{64}$")' "$request_path" >/dev/null ||
     die "hidden round seed is malformed"
 
@@ -744,7 +756,7 @@ write_evidence_manifest() {
 
 emit_candidate_build_failure() {
     local build_log="$1"
-    write_evaluation_progress failed 0 0
+    write_evaluation_progress failed "$replicates" 0
     if [ -f "$build_log" ] && [ "$MAX_BUILD_LOG_BYTES" -lt "$(file_bytes "$build_log")" ]; then
         tail -c "$MAX_BUILD_LOG_BYTES" "$build_log" > "$build_log.tail"
         mv "$build_log.tail" "$build_log"
@@ -771,6 +783,7 @@ emit_candidate_build_failure() {
     jq -n --arg job_id "$job_id" --arg round_id "$round_id" --argjson attempt "$attempt" \
         --arg base_image_id "$base_image_id" --arg patch_sha256 "$patch_sha256" \
         --arg providers_sha256 "$providers_sha256" \
+        --arg baseline_sha256 "$baseline_sha256" \
         --arg submission_error_sha256 "$(sha256_file "$submission_error")" \
         --arg evidence_manifest_sha256 "$(sha256_file "$evidence_manifest")" \
         '{schema:1,kind:"sim-latency-worker-evaluation-complete",job_id:$job_id,
@@ -778,15 +791,15 @@ emit_candidate_build_failure() {
           candidate_image_id:null,patch_sha256:$patch_sha256,
           providers_sha256:$providers_sha256,cleanup_complete:true,
           terminal_error:"candidate_build_failed",
-          artifacts:{submission_error:$submission_error_sha256,
+          artifacts:{baseline:$baseline_sha256,submission_error:$submission_error_sha256,
             evidence_manifest:$evidence_manifest_sha256}}' > "$complete_path"
     chmod 0400 "$complete_path"
-    sync -d "$submission_error" "$evidence_manifest" "$complete_path"
+    sync -d "$artifact_dir/baseline.json" "$submission_error" "$evidence_manifest" "$complete_path"
     sync "$artifact_dir"
 
     local artifact_records=()
     local relative path
-    for relative in submission-error.json evaluation-progress.json evaluation.complete.json evidence-manifest.json; do
+    for relative in baseline.json submission-error.json evaluation-progress.json evaluation.complete.json evidence-manifest.json; do
         path="$artifact_dir/$relative"
         artifact_records+=("$(jq -cn --arg path "$relative" --arg sha256 "$(sha256_file "$path")" \
             --argjson bytes "$(file_bytes "$path")" '{path:$path,sha256:$sha256,bytes:$bytes}')")
@@ -959,21 +972,38 @@ run_live_comparison() {
     compare_cgroup="urnetwork-evaluation-${job_id//-/}-live-${ordinal}.slice"
     compare_cgroup="${compare_cgroup:0:95}.slice"
     compare_cgroup="${compare_cgroup/.slice.slice/.slice}"
-    comparison="$(sudo -n docker run --rm --name "$compare_name" \
-        --network none --read-only --user 65532:65532 \
-        --cpuset-cpus "$cpuset" \
-        --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
-        --pids-limit "$SCORER_PIDS_LIMIT" --cgroup-parent "$compare_cgroup" \
-        --cap-drop ALL --security-opt no-new-privileges:true \
-        --label "com.urnetwork.competition.job-id=$job_id" \
-        --label 'com.urnetwork.competition.stage=live-progress' \
-        --label "com.urnetwork.competition.round-id=$round_id" \
-        --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-        --entrypoint /opt/urnetwork/bin/sim-latency \
-        "$base_image_id" compare \
-        --a "$(join_csv "${candidate_manifests[@]}")" \
-        --b "$(join_csv "${baseline_manifests[@]}")" \
-        --p 0.05 --json)" || die "candidate-$ordinal live comparison failed"
+    if [ -n "$round_baseline_path" ]; then
+        comparison="$(sudo -n docker run --rm --name "$compare_name" \
+            --network none --read-only --user 65532:65532 \
+            --cpuset-cpus "$cpuset" \
+            --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
+            --pids-limit "$SCORER_PIDS_LIMIT" --cgroup-parent "$compare_cgroup" \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --label "com.urnetwork.competition.job-id=$job_id" \
+            --label 'com.urnetwork.competition.stage=live-progress' \
+            --label "com.urnetwork.competition.round-id=$round_id" \
+            --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
+            --entrypoint /opt/urnetwork/bin/sim-latency \
+            "$base_image_id" score-progress \
+            --run "$(join_csv "${candidate_manifests[@]}")" \
+            --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
+    else
+        comparison="$(sudo -n docker run --rm --name "$compare_name" \
+            --network none --read-only --user 65532:65532 \
+            --cpuset-cpus "$cpuset" \
+            --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
+            --pids-limit "$SCORER_PIDS_LIMIT" --cgroup-parent "$compare_cgroup" \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --label "com.urnetwork.competition.job-id=$job_id" \
+            --label 'com.urnetwork.competition.stage=live-progress' \
+            --label "com.urnetwork.competition.round-id=$round_id" \
+            --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
+            --entrypoint /opt/urnetwork/bin/sim-latency \
+            "$base_image_id" compare \
+            --a "$(join_csv "${candidate_manifests[@]}")" \
+            --b "$(join_csv "${baseline_manifests[@]}")" \
+            --p 0.05 --json)" || die "candidate-$ordinal live comparison failed"
+    fi
     jq -e \
         '.alpha == 0.05 and (.metrics | type == "array") and
          ([.metrics[] | select(.name == "ttfb_p50_ms" or
@@ -1376,7 +1406,12 @@ run_stage() {
     log "$stage_token complete"
 }
 
-write_evaluation_progress building 0 0
+# Build submitted code only after the trusted round baseline has been measured
+# or authenticated. Keeping this as a function lets the first round evaluation
+# establish its control before any untrusted compiler workload can perturb the
+# host used to measure that control.
+build_candidate() {
+write_evaluation_progress building "$replicates" 0
 log "building authenticated candidate image offline"
 candidate_build_json="$work_dir/candidate-build.json"
 candidate_build_log="$work_dir/candidate-build.log"
@@ -1454,19 +1489,52 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     "$(git -C "$baseline_source_root/server" rev-parse HEAD:connect/sim-latency)" ] ||
     die "candidate changed the protected sim-latency source tree"
 write_source_evidence false
-seal_evaluation_source "$baseline_source_root" "$base_sha" ""
 seal_evaluation_source "$candidate_source_root" "$candidate_sha" "$patch_sha256"
+}
 
-for ((i = 1; i <= replicates; i++)); do
-    run_stage baseline "$i" "$base_image_id" "$base_sha" "$base_simulator_sha256" "$EMPTY_PATCH_SHA256"
-done
-for ((i = 1; i <= replicates; i++)); do
-    run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
-done
-write_evaluation_progress scoring "$replicates" "$replicates"
+seal_evaluation_source "$baseline_source_root" "$base_sha" ""
+
+if [ -n "$round_baseline_path" ]; then
+    jq -e --arg round_id "$round_id" --arg providers_sha256 "$providers_sha256" \
+        --arg scorer_version "$scorer_version" --argjson replicates "$replicates" \
+        --argjson request_timeout_ms "$request_timeout_ms" \
+        --argjson takeover_margin "$takeover_margin" \
+        '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
+         .scorer_version == $scorer_version and .round_id == $round_id and
+         .config_sha256 == $providers_sha256 and
+         .request_timeout_ms == $request_timeout_ms and
+         .takeover_margin == $takeover_margin and
+         (.replicates | type == "array" and length == $replicates) and
+         all(.replicates[];
+           (.live_metrics | type == "object" and
+            (keys | sort) == ["throughput_p50_bytes_per_s","throughput_p95_bytes_per_s","ttfb_p50_ms","ttfb_p95_ms"] and
+            all(.[]; .value >= 0 and .n > 0 and (.block_se // 0) >= 0)))' \
+        "$round_baseline_path" >/dev/null || die "frozen round baseline contract mismatch"
+    sudo -n install -o "$worker_uid" -g "$worker_gid" -m 0400 \
+        "$round_baseline_path" "$artifact_dir/baseline.json"
+    sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
+        "$artifact_dir/baseline.json" "$work_dir/scorer-input/baseline.json"
+    baseline_sha256="$(sha256_file "$artifact_dir/baseline.json")"
+    [ "$baseline_sha256" = "$round_baseline_sha256" ] || die "materialized round baseline hash mismatch"
+    while IFS= read -r progress_record; do
+        progress_records+=("$progress_record")
+    done < <(jq -c '
+        .replicates | to_entries[] as $replicate |
+        $replicate.value.live_metrics | to_entries[] |
+        {role:"baseline",replicate:($replicate.key + 1),metric:.key,
+         quantile:(if (.key | contains("_p50_")) then "p50" else "p95" end),
+         value:.value.value,p_improvement:null,p_regression:null,significance:"baseline"}' \
+        "$artifact_dir/baseline.json")
+    write_evaluation_progress baseline "$replicates" 0
+else
+    for ((i = 1; i <= replicates; i++)); do
+        run_stage baseline "$i" "$base_image_id" "$base_sha" "$base_simulator_sha256" "$EMPTY_PATCH_SHA256"
+    done
+fi
 
 score_runner_env="$work_dir/scorer.env"
 score_compose_env="$work_dir/scorer-compose.env"
+if [ -z "$round_baseline_path" ]; then
 stage_db_admin_password="$(new_secret)"
 stage_db_password="$(new_secret)"
 stage_redis_password="$(new_secret)"
@@ -1524,10 +1592,24 @@ sudo -n install -o "$worker_uid" -g "$worker_gid" -m 0400 \
 sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
     "$artifact_dir/baseline.json" "$work_dir/scorer-input/baseline.json"
 baseline_sha256="$(sha256_file "$artifact_dir/baseline.json")"
+fi
+
+# Nothing from trusted baseline scoring is needed while building the
+# submission. Removing the ephemeral environment also keeps its one-time
+# backing-service credentials out of a terminal build-failure archive.
+rm -f -- "$score_runner_env" "$score_compose_env"
+build_candidate
+for ((i = 1; i <= replicates; i++)); do
+    run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
+done
+write_evaluation_progress scoring "$replicates" "$replicates"
 
 # Rebuild the scorer environment for candidate scoring; no baseline path was
 # ever mounted into a candidate runner.
-chmod 0600 "$score_runner_env"
+stage_db_admin_password="$(new_secret)"
+stage_db_password="$(new_secret)"
+stage_redis_password="$(new_secret)"
+[ ! -e "$score_runner_env" ] || chmod 0600 "$score_runner_env"
 write_runner_env "$score_runner_env" "score-${job_id:0:8}" "$base_sha" "$base_simulator_sha256" "$base_image_id" "$EMPTY_PATCH_SHA256"
 sed -i 's|^APEX_PROVIDERS_FILE=.*|APEX_PROVIDERS_FILE=/artifacts/providers.yml|' "$score_runner_env"
 chmod 0600 "$score_runner_env"

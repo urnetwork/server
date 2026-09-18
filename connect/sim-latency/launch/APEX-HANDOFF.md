@@ -27,11 +27,12 @@ do not consume another noise draw. One score job has a three-hour hard execution
 limit; the adapter must therefore be asynchronous and tolerate an unbounded
 post-close grading window.
 A continuously available host supplies 56 full worst-case three-hour slots
-during a seven-day admission window. The first complete 18-replicate staging
-pass reached scoring in about 2 hours 33 minutes, or roughly 65 theoretical
-slots before scoring and operational overhead. These are planning capacities,
-not admission caps; excess accepted work remains queued through post-close
-grading.
+during a seven-day admission window. The first job also establishes the one
+nine-run epoch control; every later job runs only nine candidate replicates.
+At the observed staging rate, later jobs are projected around 1 hour 16 minutes,
+or roughly 130 theoretical slots before build, scoring, transition, and
+recovery overhead. These are planning capacities, not admission caps; excess
+accepted work remains queued through post-close grading.
 
 Before production epoch 1, the API can expose a staging era with sequential
 `staging_round` epochs beginning at zero. Its submissions are fee-free and use
@@ -111,10 +112,10 @@ Epoch 4's image and historical results remain unchanged; the next epoch is not
 yet ready to announce.
 
 A winner must be placeable,
-`takeover_eligible`, and pass every G1-G6 gate. Ordering is normalized score
-descending, raw score ascending, submission time, then job id. Statistical
-eligibility only enters the review queue; it does not establish that a patch is
-honest. Public rows use
+`takeover_eligible`, and pass every G1-G6 gate. Ordering is absolute raw score
+ascending, submission time, then job id; normalized score is display-only.
+Statistical eligibility only enters the review queue; it does not establish
+that a patch is honest. Public rows use
 job and patch identities rather than bearer-token principal names; the adapter
 may associate those job ids with Apex identities in its own publication layer.
 

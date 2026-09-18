@@ -81,6 +81,7 @@
   },
   "diagnostics": {
     "round_id": "round-1",
+    "baseline_sha256": "ab9ced855e8bf5e96bfd69703e467456c00b478fb85236b378f79007fb6eb98d",
     "replicate_count": 1,
     "request_timeout_ms": 1000,
     "takeover_margin": 0.01,

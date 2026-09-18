@@ -36,21 +36,31 @@ const resourceReportKind = "sim-latency-resource-report"
 const scoreResultMaxInputBytes = 128 << 20
 const minimumFindProvidersSampleSpanFraction = 0.90
 
+// These public telemetry series are sufficient for embargo-safe live progress
+// without exposing the hidden score or workload.
+var scoreLiveMetricNames = []string{
+	"ttfb_p50_ms",
+	"ttfb_p95_ms",
+	"throughput_p50_bytes_per_s",
+	"throughput_p95_bytes_per_s",
+}
+
 // ScoreBaselineReplicate contains trusted same-round baseline diagnostics for
 // one replicate. The scorer recomputes every aggregate from these values.
 type ScoreBaselineReplicate struct {
-	RawScore                        float64 `json:"raw_score"`
-	SuccessRate                     float64 `json:"success_rate"`
-	RequestCount                    int64   `json:"request_count"`
-	ReceivedBytes                   int64   `json:"received_bytes"`
-	FindProvidersLoadP95Ms          float64 `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05            float64 `json:"findproviders_pool_p05"`
-	FindProvidersSampleSpanFraction float64 `json:"findproviders_sample_span_fraction"`
+	RawScore                        float64                  `json:"raw_score"`
+	SuccessRate                     float64                  `json:"success_rate"`
+	RequestCount                    int64                    `json:"request_count"`
+	ReceivedBytes                   int64                    `json:"received_bytes"`
+	FindProvidersLoadP95Ms          float64                  `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64                  `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64                  `json:"findproviders_sample_span_fraction"`
+	LiveMetrics                     map[string]MetricSummary `json:"live_metrics,omitempty"`
 }
 
-// ScoreBaselineManifest is the signed, hidden-seed round contract consumed by
-// score. Replicates and takeover margin are deliberately data, not CLI knobs:
-// they are frozen once for a round after calibration.
+// ScoreBaselineManifest is the authenticated hidden-seed round contract
+// consumed by score. Replicates and takeover margin are deliberately data,
+// not CLI knobs: they are frozen once for a round after calibration.
 type ScoreBaselineManifest struct {
 	ScoreSchema      int                      `json:"score_schema"`
 	Kind             string                   `json:"kind"`
@@ -156,6 +166,7 @@ type ScoreAggregateDiagnostics struct {
 
 type ScoreDiagnostics struct {
 	RoundId                  string                      `json:"round_id,omitempty"`
+	BaselineSha256           string                      `json:"baseline_sha256,omitempty"`
 	ReplicateCount           int                         `json:"replicate_count,omitempty"`
 	RequestTimeoutMs         int64                       `json:"request_timeout_ms,omitempty"`
 	TakeoverMargin           float64                     `json:"takeover_margin,omitempty"`
@@ -212,6 +223,7 @@ func infrastructureScore(err error) *ScoreResult {
 
 type candidateReplicate struct {
 	diagnostics ScoreReplicateDiagnostics
+	liveMetrics map[string]MetricSummary
 	stabilityOK bool
 	resourcesOK bool
 }
@@ -223,7 +235,7 @@ type baselineAggregate struct {
 // Score evaluates a complete candidate bundle. It never returns a Go error:
 // all failures are represented by the versioned, typed result document.
 func Score(inputs ScoreInputs) *ScoreResult {
-	baseline, err := readScoreBaseline(inputs.BaselineManifest)
+	baseline, baselineSha256, err := readScoreBaseline(inputs.BaselineManifest)
 	if err != nil {
 		return infrastructureScore(err)
 	}
@@ -242,6 +254,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 			inputs.ResourceReports[i],
 			inputs.Markers[i],
 			baseline,
+			false,
 		)
 		if err != nil {
 			return infrastructureScore(err)
@@ -263,6 +276,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 
 	diagnostics := ScoreDiagnostics{
 		RoundId:                baseline.RoundId,
+		BaselineSha256:         baselineSha256,
 		ReplicateCount:         len(replicates),
 		RequestTimeoutMs:       baseline.RequestTimeoutMs,
 		TakeoverMargin:         baseline.TakeoverMargin,
@@ -370,6 +384,7 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 			inputs.ResourceReports[i],
 			inputs.Markers[i],
 			contract,
+			true,
 		)
 		if err != nil {
 			return nil, err
@@ -413,6 +428,7 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 			FindProvidersLoadP95Ms:          diagnostic.FindProvidersLoadP95Ms,
 			FindProvidersPoolP05:            diagnostic.FindProvidersPoolP05,
 			FindProvidersSampleSpanFraction: diagnostic.FindProvidersSampleSpanFraction,
+			LiveMetrics:                     replicate.liveMetrics,
 		})
 	}
 	contract.Replicates = replicates
@@ -441,7 +457,7 @@ func validateInputCardinality(inputs ScoreInputs, want int) error {
 		if count.n != want {
 			return scoreError(
 				"replicate_count_mismatch",
-				"candidate %s count is %d; signed baseline requires %d",
+				"candidate %s count is %d; authenticated baseline requires %d",
 				count.name,
 				count.n,
 				want,
@@ -451,15 +467,20 @@ func validateInputCardinality(inputs ScoreInputs, want int) error {
 	return nil
 }
 
-func readScoreBaseline(path string) (*ScoreBaselineManifest, error) {
+func readScoreBaseline(path string) (*ScoreBaselineManifest, string, error) {
+	content, err := readBoundedFile(path, "baseline manifest")
+	if err != nil {
+		return nil, "", err
+	}
 	var baseline ScoreBaselineManifest
-	if err := decodeStrictJSON(path, &baseline, "baseline manifest"); err != nil {
-		return nil, err
+	if err := decodeStrictJSONBytes(content, &baseline, "baseline manifest"); err != nil {
+		return nil, "", err
 	}
 	if err := validateScoreBaseline(&baseline); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &baseline, nil
+	digest := sha256.Sum256(content)
+	return &baseline, hex.EncodeToString(digest[:]), nil
 }
 
 func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
@@ -499,8 +520,92 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 			1 < replicate.FindProvidersSampleSpanFraction {
 			return scoreError("invalid_baseline", "baseline replicate contains an invalid or non-finite diagnostic")
 		}
+		if replicate.LiveMetrics != nil {
+			if err := validateScoreLiveMetrics(replicate.LiveMetrics); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// The frozen baseline carries the four public live-telemetry series so later
+// candidates can be compared without rerunning or exposing the control.
+// Requires the complete fixed telemetry surface before it can be frozen into
+// a round control.
+func validateScoreLiveMetrics(metrics map[string]MetricSummary) error {
+	if len(metrics) != len(scoreLiveMetricNames) {
+		return scoreError("invalid_baseline", "baseline live metrics are incomplete")
+	}
+	for _, name := range scoreLiveMetricNames {
+		metric, ok := metrics[name]
+		if !ok || !finiteNonnegative(metric.Value) || metric.N <= 0 ||
+			!finiteNonnegative(metric.BlockSe) {
+			return scoreError("invalid_baseline", "baseline live metric %s is invalid", name)
+		}
+	}
+	return nil
+}
+
+// Copies the fixed telemetry surface out of an authenticated run manifest.
+func scoreLiveMetrics(runStats *RunStats) (map[string]MetricSummary, error) {
+	metrics := make(map[string]MetricSummary, len(scoreLiveMetricNames))
+	for _, name := range scoreLiveMetricNames {
+		metric, ok := runStats.Metrics[name]
+		if !ok {
+			return nil, scoreError("missing_artifact", "run manifest omits live metric %s", name)
+		}
+		metrics[name] = metric
+	}
+	if err := validateScoreLiveMetrics(metrics); err != nil {
+		return nil, err
+	}
+	return metrics, nil
+}
+
+// Recomputes public telemetry from the measured rows and authenticates any
+// manifest values before carrying their block standard errors into baseline.
+func scoreLiveMetricsFromRows(runStats *RunStats, rows []resultRow) (map[string]MetricSummary, error) {
+	var recordedMetrics map[string]MetricSummary
+	if len(runStats.Metrics) != 0 {
+		var err error
+		recordedMetrics, err = scoreLiveMetrics(runStats)
+		if err != nil {
+			return nil, err
+		}
+	}
+	measuredRows := make([]resultRow, 0, len(rows))
+	for _, row := range rows {
+		if runStats.MeasureStartMs <= row.tStartMs && row.tStartMs < runStats.MeasureEndMs {
+			measuredRows = append(measuredRows, row)
+		}
+	}
+	wanted := make(map[string]bool, len(scoreLiveMetricNames))
+	for _, name := range scoreLiveMetricNames {
+		wanted[name] = true
+	}
+	metrics := make(map[string]MetricSummary, len(scoreLiveMetricNames))
+	for _, definition := range metricDefs() {
+		if !wanted[definition.name] {
+			continue
+		}
+		value, n, ok := definition.compute(measuredRows, runStats.windowSeconds())
+		if !ok {
+			return nil, scoreError("missing_artifact", "measured run has no live metric %s", definition.name)
+		}
+		metric := MetricSummary{Value: value, N: n}
+		if recorded, present := recordedMetrics[definition.name]; present {
+			if recorded.Value != value || recorded.N != n || !finiteNonnegative(recorded.BlockSe) {
+				return nil, scoreError("manifest_csv_mismatch", "run live metric %s does not match its results", definition.name)
+			}
+			metric.BlockSe = recorded.BlockSe
+		}
+		metrics[definition.name] = metric
+	}
+	if err := validateScoreLiveMetrics(metrics); err != nil {
+		return nil, err
+	}
+	return metrics, nil
 }
 
 func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
@@ -710,6 +815,7 @@ func scoreReplicate(
 	resourcePath string,
 	markerPath string,
 	baseline *ScoreBaselineManifest,
+	captureLiveMetrics bool,
 ) (candidateReplicate, error) {
 	var out candidateReplicate
 	// Read the trusted cgroup/process report first. It lets a crash/OOM remain a
@@ -736,7 +842,6 @@ func scoreReplicate(
 	if err := validateRunContract(runStats, baseline); err != nil {
 		return out, err
 	}
-
 	// A runner-recorded incomplete state is a candidate stability fault, not a
 	// placeable partial score. Missing/malformed artifacts on an allegedly
 	// complete run remain infrastructure errors below.
@@ -785,6 +890,12 @@ func scoreReplicate(
 		runStats.RowsInWindow != int(rowMetrics.RequestCount) ||
 		runStats.Failures != rowMetrics.Failures {
 		return out, scoreError("manifest_csv_mismatch", "run manifest totals do not match the results CSV")
+	}
+	if captureLiveMetrics {
+		out.liveMetrics, err = scoreLiveMetricsFromRows(runStats, rows)
+		if err != nil {
+			return out, err
+		}
 	}
 
 	var accounting AccountingSnapshot
@@ -885,13 +996,13 @@ func validateRunContract(runStats *RunStats, baseline *ScoreBaselineManifest) er
 		return scoreError("incomplete_run_manifest", "run manifest omits a mandatory scorer input path or stats identity")
 	}
 	if runStats.ConfigSha256 != baseline.ConfigSha256 {
-		return scoreError("workload_mismatch", "candidate providers SHA-256 does not match the signed baseline")
+		return scoreError("workload_mismatch", "candidate providers SHA-256 does not match the authenticated baseline")
 	}
 	if runStats.RequestTimeoutMs != baseline.RequestTimeoutMs {
-		return scoreError("timeout_mismatch", "candidate request timeout does not match the signed baseline")
+		return scoreError("timeout_mismatch", "candidate request timeout does not match the authenticated baseline")
 	}
 	if !reflect.DeepEqual(runStats.Flags, baseline.RunFlags) {
-		return scoreError("run_flags_mismatch", "candidate run flags do not match the signed baseline")
+		return scoreError("run_flags_mismatch", "candidate run flags do not match the authenticated baseline")
 	}
 	if runStats.MeasureEndMs <= runStats.MeasureStartMs {
 		return scoreError("invalid_measure_window", "run manifest has an empty measured window")
@@ -1454,6 +1565,51 @@ func runScoreBaseline(opts docopt.Opts) {
 		}
 	}
 	_, _ = os.Stdout.Write(content)
+}
+
+// Produces the embargo-safe live comparison from the immutable round control
+// and the candidate replicates completed so far. Only the four published
+// p50/p95 series are present in the control manifest.
+func runScoreProgress(opts docopt.Opts) {
+	baseline, _, err := readScoreBaseline(optString(opts, "--baseline", ""))
+	if err != nil {
+		fatalf("score progress: %s", err)
+	}
+	baselineRuns := make([]*RunStats, 0, len(baseline.Replicates))
+	for i, replicate := range baseline.Replicates {
+		if err := validateScoreLiveMetrics(replicate.LiveMetrics); err != nil {
+			fatalf("score progress: %s", err)
+		}
+		baselineRuns = append(baselineRuns, &RunStats{
+			Label:            fmt.Sprintf("round-baseline-%02d", i+1),
+			ConfigSha256:     baseline.ConfigSha256,
+			RequestTimeoutMs: baseline.RequestTimeoutMs,
+			Flags:            baseline.RunFlags,
+			Metrics:          replicate.LiveMetrics,
+		})
+	}
+	candidateRuns := []*RunStats{}
+	for _, runPath := range splitPaths(optString(opts, "--run", "")) {
+		runStats, _, err := readOfficialRunSidecar(runPath)
+		if err != nil {
+			fatalf("score progress: %s", err)
+		}
+		if err := validateRunContract(runStats, baseline); err != nil {
+			fatalf("score progress: %s", err)
+		}
+		if _, err := scoreLiveMetrics(runStats); err != nil {
+			fatalf("score progress: %s", err)
+		}
+		if runStats.Label == "" {
+			runStats.Label = runPath
+		}
+		candidateRuns = append(candidateRuns, runStats)
+	}
+	result, err := CompareRuns(candidateRuns, baselineRuns, nil, scoreSignificanceAlpha)
+	if err != nil {
+		fatalf("score progress: %s", err)
+	}
+	printJson(result)
 }
 
 func runScore(opts docopt.Opts) {

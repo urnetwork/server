@@ -303,6 +303,205 @@ func validSettings() *Settings {
 	}
 }
 
+func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, rawScores []float64) []byte {
+	t.Helper()
+	if len(rawScores) != settings.EvaluationPolicy.Replicates {
+		t.Fatalf("baseline raw-score count = %d, want %d", len(rawScores), settings.EvaluationPolicy.Replicates)
+	}
+	replicates := make([]roundBaselineReplicate, 0, len(rawScores))
+	for _, rawScore := range rawScores {
+		replicates = append(replicates, roundBaselineReplicate{
+			RawScore: rawScore, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 1000,
+			FindProvidersLoadP95Ms: 2, FindProvidersPoolP05: 10,
+			FindProvidersSampleSpanFraction: 1,
+			LiveMetrics: map[string]roundBaselineMetricSummary{
+				"ttfb_p50_ms":                {Value: 10, N: 100, BlockSe: 1},
+				"ttfb_p95_ms":                {Value: 20, N: 100, BlockSe: 1},
+				"throughput_p50_bytes_per_s": {Value: 1000, N: 100, BlockSe: 10},
+				"throughput_p95_bytes_per_s": {Value: 2000, N: 100, BlockSe: 10},
+			},
+		})
+	}
+	content, err := json.MarshalIndent(roundBaselineManifest{
+		ScoreSchema: ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: ScorerVersion,
+		RoundId: round.RoundId.String(), ConfigSha256: round.ProvidersSha256,
+		RequestTimeoutMs: settings.EvaluationPolicy.RequestTimeoutMs,
+		RunFlags:         map[string]string{"official": "true"},
+		TakeoverMargin:   settings.EvaluationPolicy.TakeoverMargin, Replicates: replicates,
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(content, '\n')
+}
+
+func TestRoundBaselineAuthenticationBindsEpochAndLiveMetrics(t *testing.T) {
+	settings := validSettings()
+	policyJson, err := policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := &roundRecord{
+		RoundResult: RoundResult{
+			RoundId: server.NewId(), ProvidersSha256: strings.Repeat("c", 64),
+		},
+		PolicyJson: policyJson,
+	}
+	content := testRoundBaseline(t, settings, round, []float64{100, 101, 99})
+	digest, err := validateRoundBaselineJson(settings, round, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(content)
+	if digest != hex.EncodeToString(expected[:]) {
+		t.Fatalf("baseline digest = %q", digest)
+	}
+
+	foreign := *round
+	foreign.RoundId = server.NewId()
+	if _, err := validateRoundBaselineJson(settings, &foreign, content); err == nil {
+		t.Fatal("baseline accepted for a foreign round")
+	}
+	var malformed map[string]any
+	if err := json.Unmarshal(content, &malformed); err != nil {
+		t.Fatal(err)
+	}
+	replicates := malformed["replicates"].([]any)
+	delete(replicates[0].(map[string]any)["live_metrics"].(map[string]any), "ttfb_p95_ms")
+	missingMetric, err := json.Marshal(malformed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRoundBaselineJson(settings, round, missingMetric); err == nil {
+		t.Fatal("baseline with incomplete live metrics was accepted")
+	}
+}
+
+func TestEvaluatorRequestDistributesOnlyAuthenticatedRoundBaseline(t *testing.T) {
+	settings := validSettings()
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), PatchSha256: strings.Repeat("a", 64),
+			EvaluatorImageDigest: settings.EvaluatorImageDigest,
+			ApiImageDigest:       testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+		},
+		AttemptCount:  1,
+		Round:         roundRecord{RoundResult: RoundResult{Epoch: 1}},
+		RoundBaseline: &roundBaselineRecord{Sha256: strings.Repeat("b", 64)},
+	}
+	request := evaluatorRequestForJob(
+		settings, job, strings.Repeat("c", 64), "/attempt",
+		"/attempt/canonical.patch", "/attempt/providers.yml",
+	)
+	if request.RoundBaselinePath != "/attempt/round-baseline.json" ||
+		request.RoundBaselineSha256 != job.RoundBaseline.Sha256 {
+		t.Fatalf("round baseline request = %q, %q", request.RoundBaselinePath, request.RoundBaselineSha256)
+	}
+	job.RoundBaseline = nil
+	request = evaluatorRequestForJob(
+		settings, job, strings.Repeat("c", 64), "/attempt",
+		"/attempt/canonical.patch", "/attempt/providers.yml",
+	)
+	if request.RoundBaselinePath != "" || request.RoundBaselineSha256 != "" {
+		t.Fatal("unfrozen round request invented a baseline identity")
+	}
+}
+
+func TestCompetitionRoundBaselineFreezesOnceAndIsReused(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := validSettings()
+		settings.CompetitionId += "-shared-baseline"
+		settings.ArtifactRoot = t.TempDir()
+		currentTime := server.NowUtc().Truncate(time.Second)
+		settings.SeasonEndsAt = currentTime.Add(60 * 24 * time.Hour)
+		settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+		store := PostgresStore{now: func() time.Time { return currentTime }}
+		listKey, memberKey := competitionFifoKeys(settings)
+		server.Redis(ctx, func(client server.RedisClient) {
+			server.Raise(client.Del(ctx, listKey, memberKey).Err())
+		})
+		t.Cleanup(func() {
+			server.Redis(context.Background(), func(client server.RedisClient) {
+				_ = client.Del(context.Background(), listKey, memberKey).Err()
+			})
+		})
+
+		round, err := store.CreateStagingRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: currentTime, ClosesAt: currentTime.Add(time.Hour), RevealAt: currentTime.Add(time.Hour),
+		}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs := make([]*queuedJob, 0, 2)
+		for _, name := range []string{"shared-baseline-a", "shared-baseline-b"} {
+			patch, patchErr := ValidateAndCanonicalizePatch(testPatch(name), settings.PatchPolicy)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			job, cacheHit, enqueueErr := store.Enqueue(
+				ctx, settings, round.RoundId, patch, "miner-"+name, testApiImageDigest(),
+			)
+			if enqueueErr != nil || cacheHit {
+				t.Fatalf("enqueue %s: hit=%t error=%v", name, cacheHit, enqueueErr)
+			}
+			jobs = append(jobs, job)
+		}
+
+		first, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || first == nil || first.JobId != jobs[0].JobId || first.RoundBaseline != nil {
+			t.Fatalf("first claim = %#v, %v", first, err)
+		}
+		baselineJson := testRoundBaseline(t, settings, &first.Round, []float64{100, 101, 99})
+		baselineDigest := sha256.Sum256(baselineJson)
+		baselineSha256 := hex.EncodeToString(baselineDigest[:])
+		outcome := EvaluationOutcome{
+			Error:               submissionError("run_unstable", "synthetic candidate instability"),
+			ArtifactManifest:    json.RawMessage(`{"schema":1}`),
+			RoundBaselineJson:   baselineJson,
+			RoundBaselineSha256: baselineSha256,
+		}
+		if retry, err := store.Complete(ctx, settings, "worker-a", first.JobId, outcome); err != nil || retry {
+			t.Fatalf("freeze baseline: retry=%t error=%v", retry, err)
+		}
+
+		second, err := store.Claim(ctx, settings, "worker-a", testWorkerImageDigest())
+		if err != nil || second == nil || second.JobId != jobs[1].JobId || second.RoundBaseline == nil {
+			t.Fatalf("second claim = %#v, %v", second, err)
+		}
+		if second.RoundBaseline.Sha256 != baselineSha256 || !bytes.Equal(second.RoundBaseline.Json, baselineJson) ||
+			second.RoundBaseline.SourceJobId != first.JobId || second.RoundBaseline.SourceAttempt != first.AttemptCount {
+			t.Fatalf("reused baseline = %#v", second.RoundBaseline)
+		}
+
+		changedJson := testRoundBaseline(t, settings, &second.Round, []float64{110, 111, 109})
+		changedDigest := sha256.Sum256(changedJson)
+		changedOutcome := outcome
+		changedOutcome.RoundBaselineJson = changedJson
+		changedOutcome.RoundBaselineSha256 = hex.EncodeToString(changedDigest[:])
+		if _, err := store.Complete(ctx, settings, "worker-a", second.JobId, changedOutcome); err == nil ||
+			!strings.Contains(err.Error(), "conflicts with the immutable round baseline") {
+			t.Fatalf("changed baseline completion error = %v", err)
+		}
+		if retry, err := store.Complete(ctx, settings, "worker-a", second.JobId, outcome); err != nil || retry {
+			t.Fatalf("complete with frozen baseline: retry=%t error=%v", retry, err)
+		}
+
+		updateErr := captureDatabaseError(func() {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(ctx, `
+					UPDATE competition_round_baseline SET baseline_sha256 = $2 WHERE round_id = $1
+				`, round.RoundId, strings.Repeat("0", 64)))
+			}, server.OptReadWrite())
+		})
+		if updateErr == nil || !strings.Contains(updateErr.Error(), "append-only") {
+			t.Fatalf("round baseline mutation error = %v", updateErr)
+		}
+	})
+}
+
 // The competition archive must not inherit the ordinary stats bucket because
 // that bucket predates object locking and cannot satisfy retained submissions.
 func TestArtifactArchiveDefaultsToDedicatedBucket(t *testing.T) {
@@ -3455,7 +3654,7 @@ func TestSubmissionBuildFailureRequiresOnlyBuildBoundaryEvidence(t *testing.T) {
 func TestAuthenticateSubmissionFailureArtifacts(t *testing.T) {
 	root := t.TempDir()
 	var declared []evaluationArtifact
-	for _, path := range []string{"submission-error.json", "evaluation.complete.json"} {
+	for _, path := range []string{"baseline.json", "submission-error.json", "evaluation.complete.json"} {
 		full := filepath.Join(root, path)
 		if err := os.WriteFile(full, []byte(path+"\n"), 0600); err != nil {
 			t.Fatal(err)
@@ -3470,7 +3669,7 @@ func TestAuthenticateSubmissionFailureArtifacts(t *testing.T) {
 	if _, err := authenticateResultArtifacts(root, declared, evalError); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authenticateResultArtifacts(root, declared[:1], evalError); err == nil {
+	if _, err := authenticateResultArtifacts(root, declared[:2], evalError); err == nil {
 		t.Fatal("submission failure without completion marker was accepted")
 	}
 }
@@ -5402,7 +5601,9 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 		if err != nil || retried3 == nil || retried3.JobId != job3.JobId || retried3.AttemptCount != 2 {
 			t.Fatalf("third retry claim = %#v, %v", retried3, err)
 		}
-		raw3, normalized3 := 101.0, 99.0
+		// Deliberately conflict with the old normalized-score ordering. The
+		// shared round control makes absolute candidate latency authoritative.
+		raw3, normalized3 := 101.0, 200.0
 		_, err = store.Complete(ctx, settings, "worker-b", retried3.JobId, EvaluationOutcome{
 			Score: &ScoreResult{
 				ScoreSchema: 1, RawScore: &raw3, NormalizedScore: &normalized3,

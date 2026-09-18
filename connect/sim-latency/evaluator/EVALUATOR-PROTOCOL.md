@@ -52,15 +52,21 @@ Before any candidate process runs, the pinned evaluator must:
   separately, and read-only; authenticate their policy-pinned sorted-file
   digests before and after each run; never bind their parents or any `main`,
   `all`, or `site` tree;
-- run the pristine baseline image and candidate image in different Compose
-  projects and artifact directories. Both use the authenticated per-round
-  providers file and identical replicate policy. The candidate receives no
-  baseline artifact, scorer output, production credential, Docker socket, or
-  host path beyond its explicit read-only local-leaf/input and writable
-  output;
-- construct `baseline.json` and score in later pristine-base scorer projects
-  with `network_mode: none`, so candidate code never controls the scorer or
-  baseline evidence;
+- before the first submitted build in a round, run the pristine image nine
+  times in separate fresh Compose projects and construct `baseline.json` in a
+  pristine-base, `network_mode: none` scorer project. Atomically freeze the
+  exact bytes and SHA-256 in PostgreSQL after durable attempt retention. A
+  terminal candidate build failure may freeze that already completed control;
+- on every later attempt, authenticate and materialize that exact frozen
+  `baseline.json` instead of running the pristine image again. Run only the
+  candidate in fresh Compose projects with the same authenticated per-round
+  providers file and replicate policy. The candidate receives no baseline
+  artifact, scorer output, production credential, Docker socket, or host path
+  beyond its explicit read-only local-leaf/input and writable output;
+- score in a later pristine-base project with `network_mode: none`, bind the
+  score diagnostics to the epoch-baseline SHA-256, and rank completed
+  candidates by absolute raw latency rather than normalized score, so candidate
+  code never controls either the scorer or control evidence;
 - sample the live runner cgroup while it exists, because a short-lived
   one-shot container's leaf cgroup may disappear immediately after exit;
   authenticate the sample against the resolved container cgroup id;
@@ -180,8 +186,9 @@ host image, BIOS/microcode, kernel, SMT, governor/turbo, NUMA/affinity, IRQ,
 cgroup/sysctl, and backing-service facts. `kernel_release`,
 `microcode_revision`, the `irq_affinity_sha256` and `irq_policy_sha256`
 digests, and every named `checks` entry are mandatory.
-`rebaseline_passed` binds a recent same-round re-baseline on that specific host
-and image. A host may heartbeat as containment-eligible before a round exists;
+`rebaseline_passed` binds a recent same-round host-readiness check on that
+specific host and image. It is not the score's append-only epoch baseline. A
+host may heartbeat as containment-eligible before a round exists;
 round generation ignores this one round-scoped field, while queue admission
 and the worker both require it to name the active round. One fresh, eligible
 row for the season's authoritative host is required.
@@ -263,9 +270,9 @@ hash-consistent adversarial chain containing a parent `/runtime/config` mount
 and proves that no marker is written.
 
 The stronger `connect/sim-latency/evaluator/container/evaluator.sh` gate
-consumes the exact
-worker request, derives the candidate, runs separate baseline/candidate and
-scorer projects, emits the strict result above, and produces a hash manifest
+consumes the exact worker request, authenticates or establishes the one round
+baseline, derives the candidate afterward, runs isolated candidate and scorer
+projects, emits the strict result above, and produces a hash manifest
 for every retained evidence file. Its local end-to-end pass is required before
 host qualification, but likewise cannot replace the official calibration campaign.
 The latest rebuilt-boundary full-scale local execution rechecked the strict builder record,

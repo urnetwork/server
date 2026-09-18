@@ -123,7 +123,7 @@
     <div class="metrics">
       <div class="metric"><strong>43.102 s</strong><span>12-pair calibration baseline mean</span></div>
       <div class="metric"><strong>36.162 s</strong><span>mean × 0.839 significant-better line</span></div>
-      <div class="metric"><strong>R=9</strong><span>median of nine baseline and candidate replicates</span></div>
+      <div class="metric"><strong>R=9</strong><span>one shared epoch control; nine fresh replicates per candidate</span></div>
       <div class="metric"><strong>16.1%</strong><span>epoch-0 calibrated takeover margin</span></div>
     </div>
     <div class="notice">Crossing the plotted line is necessary, not sufficient: a winner must also pass G1–G6 and the run-level one-sided Welch test at p ≤ 0.05. Every score stores both sample variances and its next-epoch margin recommendation.</div>
@@ -157,7 +157,7 @@
 
   <section id="production-staging">
     <div class="section-head">
-      <div><div class="section-index">03 · PRODUCTION STAGING DRAW</div><h2>The final API/worker path reproduced the baseline</h2><p>The terminal staging job ran nine pristine baseline and nine exact no-op candidate replicates. Its same-round baseline median was 39.996 seconds, so this round’s takeover line was 33.557 seconds. The no-op median was 40.476 seconds: placeable, but correctly not takeover-eligible.</p></div>
+      <div><div class="section-index">03 · PRODUCTION STAGING DRAW</div><h2>The final API/worker path reproduced the baseline</h2><p>The terminal staging job ran nine pristine baseline and nine exact no-op candidate replicates. Its same-round baseline median was 39.996 seconds, so this round’s takeover line was 33.557 seconds. The no-op median was 40.476 seconds: placeable, but correctly not takeover-eligible. The production design now freezes that nine-run control once per epoch and reuses its exact authenticated bytes for every later candidate.</p></div>
       <div class="section-kpi">18/18 clean<small>staging measurements</small></div>
     </div>
     <svg viewBox="0 0 1000 350" role="img" aria-label="Nine production staging baseline and no-op measurements with threshold and significant-improvement fringe">
@@ -176,7 +176,7 @@
       <div class="metric"><strong>39.996 s</strong><span>staging same-round baseline median</span></div>
       <div class="metric"><strong>33.557 s</strong><span>staging significant-better threshold</span></div>
       <div class="metric"><strong>40.476 s</strong><span>exact no-op candidate median · 1.201% slower</span></div>
-      <div class="metric"><strong>98.814</strong><span>normalized score · G1–G6 all passed</span></div>
+      <div class="metric"><strong>98.814</strong><span>display-only normalized score · G1–G6 all passed</span></div>
     </div>
     <div class="notice">The 39.996-second value is a production staging observation, not a permanent absolute target. Every live round derives a fresh hidden-seed same-round baseline and applies the percentage recorded for its source epoch. Epoch 1 starts at 16.1%; a significant winner's measured variance determines the next percentage, while a no-winner epoch carries it forward unchanged.</div>
   </section>

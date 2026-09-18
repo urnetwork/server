@@ -44,6 +44,8 @@ type migrationArtifact struct {
 // ordered, or otherwise look-alike index from arming the deadline scheduler.
 const providerEgressHealthDeadlineIndexDefinition = "CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (measured_at, client_id)"
 
+const walletAuthChallengeAttemptAddressTimeIndexDefinition = "CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)"
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -130,6 +132,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender.country_location_id", requiredVersion: 672, rowColumn: 83},
 	{name: "contract_extender.create_time", requiredVersion: 673, rowColumn: 84},
 	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
+	{name: "wallet auth challenge address/time deadline index", requiredVersion: 675, rowColumn: 86},
+	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
+	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, rowColumn: 88},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1013,6 +1018,96 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND definition = 'CREATE INDEX contract_extender_create_time_contract_id ON public.contract_extender USING btree (create_time, contract_id)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'wallet_auth_challenge_attempt'
+		             AND index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'
+		             AND definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.competition_round_baseline') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 13
+		               FROM (VALUES
+		                   ('round_id', 'uuid', 'NO'),
+		                   ('baseline_json', 'bytea', 'NO'),
+		                   ('baseline_sha256', 'character', 'NO'),
+		                   ('source_job_id', 'uuid', 'NO'),
+		                   ('source_attempt', 'integer', 'NO'),
+		                   ('source_artifact_manifest_sha256', 'character', 'NO'),
+		                   ('base_sha', 'character', 'NO'),
+		                   ('providers_sha256', 'character', 'NO'),
+		                   ('evaluator_image_digest', 'character varying', 'NO'),
+		                   ('scorer_version', 'character varying', 'NO'),
+		                   ('hardware_id', 'character varying', 'NO'),
+		                   ('host_qualification_sha256', 'character', 'NO'),
+		                   ('created_at', 'timestamp without time zone', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'competition_round_baseline'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 13
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'competition_round_baseline'
+		           )
+		           AND (
+		               SELECT count(*) = 3
+		               FROM (VALUES
+		                   ('p', 'PRIMARY KEY (round_id)'),
+		                   ('f', 'FOREIGN KEY (round_id) REFERENCES competition_round(round_id)'),
+		                   ('f', 'FOREIGN KEY (source_job_id) REFERENCES competition_job(job_id)')
+		               ) AS expected(constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = 'competition_round_baseline'
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		           AND to_regprocedure('public.competition_round_baseline_insert_guard()') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('competition_round_baseline_source_guard', 'public.competition_round_baseline_insert_guard()'),
+		                   ('competition_round_baseline_append_only', 'public.competition_append_only_guard()')
+		               ) AS expected(trigger_name, function_name)
+		               WHERE EXISTS (
+		                   SELECT 1
+		                   FROM pg_trigger AS actual
+		                   JOIN pg_class AS relation ON relation.oid = actual.tgrelid
+		                   JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		                   WHERE namespace.nspname = 'public'
+		                     AND relation.relname = 'competition_round_baseline'
+		                     AND actual.tgname = expected.trigger_name
+		                     AND actual.tgfoid = expected.function_name::regprocedure
+		                     AND actual.tgenabled <> 'D'
+		                     AND NOT actual.tgisinternal
+		               )
+		           )
+		       ),
+		       (
+		           to_regprocedure('public.competition_candidate_review_insert_guard()') IS NOT NULL
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%ORDER BY (score_json->>''raw_score'')::numeric ASC%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%submitted_at, job_id%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) NOT LIKE '%normalized_score%'
 		       )
 		FROM version;
 	`)

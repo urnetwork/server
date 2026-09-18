@@ -31,7 +31,7 @@ The initial calibrated values are:
 | Workload | 1,800 providers; 200 client identities; 80 arrivals/minute |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
-| Aggregation | median of 9 independently reset runs |
+| Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
 | Initial significant-improvement percentage | 16.1% |
 | Admission | six seven-day epochs; unbounded paid submissions at $20 each |
 | Dispatch | immediate single-job FIFO; Redis list backed by authoritative PostgreSQL |
@@ -77,10 +77,19 @@ programs are retained only under [`old/`](old/README.md).
 
 For each replicate, the raw score is p95 `total_ms` over requests that start in
 the measured window. Failures and incomplete bodies are charged at the frozen
-request-timeout ceiling. Lower is better. The candidate and same-round
-baseline each contribute nine independently reset replicate scores, aggregated
-by median. The displayed normalized score is
-`100 * baseline_median / candidate_median`, clamped to 1–200.
+request-timeout ceiling. Lower is better. Each epoch has exactly one control
+sample of nine independently reset runs. The evaluator measures that control
+before it builds or runs the first submission, freezes the exact
+`baseline.json` bytes and SHA-256 in the append-only
+`competition_round_baseline` row, and gives every later evaluation those same
+authenticated bytes. Each candidate contributes nine separately reset runs.
+
+The competition ranks candidates by their absolute median raw score ascending,
+then submission time and job id. The displayed normalized score remains
+`100 * baseline_median / candidate_median`, clamped to 1–200, but it is only a
+presentation of the shared control and is not a ranking input. After the first
+control is frozen, an ordinary submission runs only the nine candidate
+replicates rather than another nine control replicates.
 
 A score is placeable only when all G1–G6 correctness, volume, path-integrity,
 matchmaking, stability, and resource gates pass. A placeable submission is
@@ -91,11 +100,15 @@ takeover-eligible only when all of these are also true:
 2. a one-sided Welch test over the run-level raw scores has `p <= 0.05`; and
 3. the winning variance supports a next-epoch threshold in `(0%, 50%]`.
 
-Every successful score records the baseline and candidate means, sample
-variances, observed improvement, current margin, minimum statistically
-significant improvement, required improvement, Welch statistic/degrees of
-freedom/p-value, and the recommended next-epoch margin. This is part of the
-immutable evaluation result, not a post-hoc leaderboard calculation.
+Every successful score records the exact baseline SHA-256, baseline and
+candidate means, sample variances, observed improvement, current margin,
+minimum statistically significant improvement, required improvement, Welch
+statistic/degrees of freedom/p-value, and the recommended next-epoch margin.
+The one-sided Welch test is recalculated for each candidate using the shared
+nine-run control and that candidate's nine independent runs; reusing the
+control does not turn requests within a run into independent observations.
+This is part of the immutable evaluation result, not a post-hoc leaderboard
+calculation.
 
 Epoch 1 begins from source epoch 0's calibrated 16.1% requirement. Statistical
 eligibility places a submission into the ranked honesty-review queue; it does
@@ -273,9 +286,10 @@ Local `compare` reports rich TTFB, throughput, failure, and goodput diagnostics;
 it is not the official winner decision. Requests within one run are correlated,
 so comparisons use independently reset runs as the statistical unit.
 
-The trusted evaluator builds a same-round manifest from the exact nine baseline
-artifact sets, then supplies that signed manifest and nine candidate artifact
-sets to `score`:
+The trusted evaluator builds the round manifest once from the exact nine
+control artifact sets. The worker stores its exact bytes and digest before it
+can distribute that same manifest with each set of nine candidate artifacts to
+`score`:
 
 ```bash
 sim-latency score-baseline \
@@ -302,6 +316,10 @@ Re-scoring the same authenticated bundle is byte-deterministic.
   a fresh encrypted CSPRNG epoch seed and revealed only after finalization.
 - Every replicate starts from fresh PostgreSQL and Redis state. Reusing
   reliability history makes runs dependent and invalidates the variance model.
+- The worker reruns the complete host self-check after every job. Any change to
+  the qualified hardware, kernel/microcode, CPU policy, evaluator image, local
+  leaves, workload, or scorer identity stops the queue; it never silently
+  redraws the epoch control to accommodate drift.
 - `FindProviders2` stats must cover at least the frozen fraction of the measured
   window and join to the exact workload identities.
 - Candidate networking is internal-only; scoring runs with no network.

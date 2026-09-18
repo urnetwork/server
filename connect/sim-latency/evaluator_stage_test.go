@@ -37,6 +37,38 @@ func evaluatorShellFunction(t *testing.T, name string) string {
 	return string(script[start+1 : start+1+end+3])
 }
 
+// The epoch control must finish before a submitted build can heat, exhaust,
+// or otherwise perturb the dedicated measurement host.
+func TestEvaluatorMeasuresRoundBaselineBeforeCandidateBuild(t *testing.T) {
+	scriptBytes, err := os.ReadFile(filepath.Join("evaluator", "container", "evaluator.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	baselineSeal := strings.Index(script, "\nseal_evaluation_source \"$baseline_source_root\" \"$base_sha\" \"\"\n")
+	baselineRun := strings.Index(script, "\n        run_stage baseline \"$i\"")
+	buildCall := strings.Index(script, "\nrm -f -- \"$score_runner_env\" \"$score_compose_env\"\nbuild_candidate\n")
+	candidateRun := strings.Index(script, "\n    run_stage candidate \"$i\"")
+	if baselineSeal < 0 || baselineRun < 0 || buildCall < 0 || candidateRun < 0 {
+		t.Fatalf("evaluator is missing a required baseline/build stage marker")
+	}
+	if !(baselineSeal < baselineRun && baselineRun < buildCall && buildCall < candidateRun) {
+		t.Fatalf(
+			"unsafe evaluator order: baseline seal=%d baseline run=%d build=%d candidate run=%d",
+			baselineSeal,
+			baselineRun,
+			buildCall,
+			candidateRun,
+		)
+	}
+	if !strings.Contains(
+		script,
+		"for relative in baseline.json submission-error.json evaluation-progress.json evaluation.complete.json evidence-manifest.json; do",
+	) {
+		t.Fatal("terminal candidate build failure does not retain the completed round baseline")
+	}
+}
+
 // Controls only synthetic Docker/cgroup observations; no daemon, mounts, live
 // credentials or production services are reachable through the command stub.
 type evaluatorStageFixture struct {

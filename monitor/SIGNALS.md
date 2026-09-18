@@ -11002,6 +11002,9 @@ This is the version-to-artifact contract checked by the probe:
 | 672 | nullable, no-default UUID `network_extender.country_location_id` |
 | 673 | required timestamp `contract_extender.create_time` with `now()` default |
 | 674 | exact valid/ready `(create_time, contract_id)` `contract_extender_create_time_contract_id` index |
+| 675 | exact valid/ready `(client_address_hash, attempt_time)` wallet-challenge limiter index |
+| 676 | `competition_round_baseline` exact column shape plus enabled source and append-only guards |
+| 677 | candidate-review guard orders eligible submissions by absolute raw score, submission time, and job id |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -11080,6 +11083,14 @@ monitor checks each append's exact type, nullability, default, and index
 definition/readiness rather than accepting a same-name object. Current
 Extender location/contract readers require head 674 and all six additional
 artifact checks; these do not renumber or replace the earlier appends.
+
+Version 675 makes the wallet-challenge address limiter independent of source
+ports and requires the exact valid/ready address-time index. Versions 676–677
+freeze one append-only scorer control per competition round and replace the
+historical normalized-score review order with absolute candidate raw latency.
+The monitor proves the baseline table shape, both enabled protection triggers,
+and a review function that contains the raw-score order and no normalized-score
+term; a numeric migration head alone is not sufficient evidence.
 
 The first live exact-identity probe exposed a separate detector-only failure:
 it selected `migration_index::text` and ordered by the unqualified

@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-09-16
-launch_state: staging_epoch_4_open_frozen_db_regression_repair_required_for_epoch_5
+status_date: 2026-09-18
+launch_state: shared_epoch_baseline_implemented_validation_and_evaluator_release_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -24,6 +24,13 @@ season:
   season_ends_at: null
   retain_until: null
   baseline_source_policy: promote_significant_winner_or_carry_forward_unchanged
+  score_baseline_scope: one_append_only_control_per_epoch
+  score_baseline_replicates: 9
+  candidate_replicates_per_submission: 9
+  first_attempt_order: trusted_baseline_before_untrusted_candidate_build
+  later_attempt_order: authenticate_frozen_baseline_then_build_and_run_candidate
+  baseline_failure_policy: freeze_completed_control_even_when_candidate_build_is_terminal
+  host_drift_policy: full_self_check_after_every_job_stop_without_rebaseline_on_mismatch
 
 significance:
   authority: config/main/sim-latency.yml
@@ -31,6 +38,8 @@ significance:
   alpha: 0.05
   initial_improvement_percent: 16.1
   threshold_scope: per_source_epoch
+  control_sample_scope: immutable_round_baseline_shared_by_all_submissions
+  control_identity: exact_baseline_json_sha256_in_every_score
   evaluation_record: means_variances_p_value_and_next_epoch_recommendation
   winner_requirement: placeable_margin_statistical_significance_and_approved_honesty_review
   no_winner_policy: carry_commits_and_threshold_forward_when_none_significant_or_all_rejected
@@ -39,7 +48,8 @@ honesty_review:
   authority: postgres_append_only_competition_candidate_review
   command: sim-latency epoch-review
   environment: main
-  ordering: normalized_score_desc_raw_score_asc_submitted_at_job_id
+  ordering: raw_score_asc_submitted_at_job_id
+  normalized_score_role: display_only
   candidate_materialization: fresh_mode_0700_temp_dir_with_mode_0400_patch_score_and_metadata
   evidence: bounded_json_object_with_sha256_reviewer_reason_and_timestamp
   reject_behavior: advance_to_next_ranked_significant_candidate
@@ -81,6 +91,12 @@ evaluator_release:
   simulator_sha256: fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f
   main_api_config_rollout: live_pin_and_polling_contract_verified_2026_09_15
   accepted_live_staging_score: pending
+  shared_epoch_baseline_release:
+    code_status: implemented
+    validation_status: in_progress
+    deployment_status: new_digest_pinned_image_required
+    database_table: competition_round_baseline
+    immutable_event: round_baseline_frozen
   known_regression:
     incident: launch/STAGING-4-G5-INCIDENT.md
     cause: frozen_source_omitted_qualified_wrapped_database_error_fix
@@ -146,9 +162,9 @@ release_record:
   control_plane_branch: main
   control_plane_commits_are_scoring_inputs: false
   exact_runtime_image_digest_persisted_per_evaluation: true
-  openapi_sha256: aaaaf82658ee7a15256cfd4759f35ffbe8af7f09093468b488d146d8b1cb6a87
-  recorded_by: local_staging_repair
-  recorded_at: 2026-09-14T18:44:02Z
+  openapi_sha256: 23bd0e979338308dfbe60d513c7bce9f430290908a965a2e9a17398a80dd92ce
+  recorded_by: shared_epoch_baseline_contract
+  recorded_at: 2026-09-18T05:27:56Z
 
 validation:
   completed_at: 2026-08-29T04:37:06Z

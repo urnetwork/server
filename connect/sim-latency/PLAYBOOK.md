@@ -48,7 +48,7 @@ Read these first:
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
 | Simulator / scorer | `fcadc7f736e26e23f5c6eb4867713f528728fdf9193a40616c80d5ccb1963a7f`; includes the required significance record. Measured product code is unchanged by the scorer repair. |
 | Workload | 1,800 providers; 200 clients; 80 arrivals/min; quality window 2; 4 exchange hosts; 4 shards |
-| Measurement | 180 seconds; impairment on; median of `R=9` |
+| Measurement | 180 seconds; impairment on; one immutable epoch control at `R=9`, then `R=9` fresh candidate runs per submission |
 | Takeover rule | Epoch 1 starts at `candidate <= same-round baseline * 0.839`; every epoch also requires G1–G6 and one-sided Welch `p <= 0.05`. The source ledger supplies later percentages. |
 | Epoch lifecycle | six epochs; exactly seven days of admission; immediate FIFO evaluation; accepted backlog drains past close; worker seals and exits; ranked significant candidates remain embargoed until the honesty-review harness approves the first honest candidate or rejects the list; only then do results reveal and the external loop promote/create the next epoch |
 | Winner promotion | Round N evaluates source epoch N-1. The first honesty-approved significant winner's score variance sets source epoch N's threshold. With no significant candidate or after all are rejected, `--no-winner` carries commits and threshold forward unchanged. Promotion is bound to the approved database job, patch digest, and entire score document; the config ledger is always pushed last. |
@@ -461,18 +461,26 @@ Operate with these expectations:
 - `closes_at` rejects only new admissions. Every queued/running job continues
   to a terminal result, so the grading interval can extend arbitrarily past
   the seven-day window as paid submissions require;
-- one job may legitimately remain active for about 2.5 hours and is terminated
-  as failed at the three-hour submission-wide execution deadline;
-- a continuously available host therefore has 56 full three-hour evaluation
-  slots in a seven-day admission window. The first complete 18-replicate
-  staging pass reached scoring in about 2 hours 33 minutes, a theoretical
-  ceiling near 65 slots before scoring, transition, and recovery overhead;
-  admission remains unbounded, so excess work extends the private grading
-  interval after close rather than being dropped;
+- the first full job may legitimately remain active for about 2.5 hours because
+  it establishes the epoch's nine-run control before its nine candidate runs.
+  Later jobs skip the control and are expected to consume roughly half that
+  measurement time. Every job is still terminated as failed at the three-hour
+  submission-wide execution deadline;
+- the first complete 18-replicate staging pass reached scoring in about 2 hours
+  33 minutes. Reusing its control makes later nine-replicate jobs approximately
+  1 hour 16 minutes at the same observed rate, for a rough theoretical ceiling
+  near 130 candidates per uninterrupted week before build, scoring,
+  transition, and recovery overhead. The three-hour deadline still gives a
+  conservative lower bound of 56 worst-case slots. Admission remains
+  unbounded, so excess work extends the private grading interval after close
+  rather than being dropped;
 - infrastructure failures retry under the same job/cache identity, up to
   three attempts within that same three-hour deadline;
 - structural/build/submission errors are terminal and do not get noise redraws;
-- baseline and candidate each run nine repetitions with distinct fresh stores;
+- the first complete attempt measures nine control repetitions before any
+  submitted build; PostgreSQL freezes its exact `baseline.json` bytes and
+  SHA-256. Every candidate runs nine repetitions with distinct fresh stores
+  against that same control, and later attempts never rerun it;
 - every candidate build and run is offline/default-deny;
 - accounting, resources, score, completion, and failure artifacts are retained
   and sealed; and
@@ -481,10 +489,12 @@ Operate with these expectations:
   supported next-epoch threshold, and therefore `takeover_eligible: true`;
 - statistical eligibility creates a ranked review candidate, not a winner. The
   first candidate that receives an append-only `approved` honesty review is the
-  winner; `rejected` candidates are discarded and the next rank is presented;
+  winner; `rejected` candidates are discarded and the next rank is presented.
+  Ranking is absolute candidate median latency ascending; normalized score is
+  display-only;
 - every successful result preserves baseline and candidate means and sample
-  variances, the observed and required improvement percentages, p-value, and
-  recommended next-epoch margin.
+  variances, the epoch-baseline SHA-256, observed and required improvement
+  percentages, p-value, and recommended next-epoch margin.
 
 When the final accepted job becomes terminal after admission closes, the worker
 seals the ranked significant-candidate set and exits successfully. It does not
@@ -520,6 +530,12 @@ Monitor at least:
 - `/var/lib/urnetwork/competition` bytes, inodes, immutable modes, and retention;
 - Docker objects with `com.urnetwork.competition.job-id` labels; and
 - drift in host, command, image, local-leaf, workload, and scorer hashes.
+
+The worker performs the complete host self-check again after every completed
+job and before the next claim. Any identity or policy drift stops the queue; it
+does not redraw the round control. The separate promoted `rebaseline_passed`
+host marker remains a production readiness gate and must not be confused with
+the append-only score baseline.
 
 Install `server/grafana/dashboards/competition.json` through the normal Grafana
 dashboard sync and `warp/grafana/alerting/competition.yml` through Grafana file
