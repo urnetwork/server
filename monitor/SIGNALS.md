@@ -1330,6 +1330,26 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
 
+On 2026-09-18, the bounded API correlation for a generic five-per-minute
+`panic` PAGE retained six goroutine-stack records that were neither literal
+`panic:` lines nor structured `ErrorJson` records. Its privacy-reduced
+projection established `runtime error: nil pointer dereference`, with the
+affected paths being auth-code login and provider-location lookup; no SQLSTATE,
+deadline, Redis, or transaction-cleanup marker was present. The shared cause
+was JSON `null`: Go accepts it while unmarshalling into a typed pointer, then
+the generic input wrapper dispatched the typed nil to implementations that
+immediately dereferenced it. Reject the trimmed root JSON literal `null` with
+HTTP 400 before every input implementation is invoked. Keep this under generic
+`panic`, rather than inventing an owner/class from arbitrary goroutine dumps:
+unstructured stack frames can be secondary goroutines from one panic and are
+not safe ownership proof. The deterministic wrapper regression must prove a
+whitespace-padded `null` never calls a pointer implementation and a concrete
+object still dispatches normally. After API artifact convergence, require ten
+minutes below the unchanged generic threshold with fresh tail coverage. An
+unknown aggregate owner is therefore neither a false positive nor healthy; use
+one bounded, redacted stack correlation to establish a mechanism, and treat
+absence of structured ownership as an explicit attribution limitation.
+
 The following machine classifier names share the playbooks already specified
 below and in §4; retaining their exact identifiers makes implementation and
 ledger crosswalks deterministic:
