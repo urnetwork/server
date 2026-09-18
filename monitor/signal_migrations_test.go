@@ -105,6 +105,12 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"ORDER BY (score_json->>''raw_score'')::numeric ASC",
 			"submitted_at, job_id",
 			"NOT LIKE '%normalized_score%'",
+			"ORDER BY CASE WHEN NOT EXISTS (",
+			"FROM competition_round_baseline WHERE round_id = NEW.round_id",
+			"THEN (score_json->>''normalized_score'')::numeric END DESC",
+			"competition round baseline cannot replace legacy ranking policy",
+			"competition round baseline cannot be attached after finalization or cancellation",
+			"state = ''running'' AND attempt_count >= NEW.source_attempt",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -490,6 +496,9 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	if byVersion[616][0].removedVersion != 621 || byVersion[618][0].removedVersion != 622 {
 		t.Fatalf("superseded index lifetimes are not pinned: v616=%+v v618=%+v", byVersion[616][0], byVersion[618][0])
 	}
+	if byVersion[677][0].removedVersion != 678 {
+		t.Fatalf("raw-only review ordering lifetime is not pinned: %+v", byVersion[677][0])
+	}
 	// The appended IPv6 artifacts must interrogate their actual relation,
 	// type, nullability and legacy default; catalog labels alone are not proof.
 	head := server.MigrationCount()
@@ -599,6 +608,52 @@ func TestMigrationsSignalPreservesBehindGateAtCoherentVersion627(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("version-627 deployment gate missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+// A coherent 677 is behind, not drifted; 678 requires conditional legacy/raw
+// ordering and must stop requiring the superseded raw-only function body.
+func TestMigrationsSignalRankingCompatibilityArtifactLifetime(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		missing bool
+	}{
+		{version: 677, missing: false},
+		{version: 678, missing: false},
+		{version: 678, missing: true},
+	} {
+		row := syntheticMigrationArtifactRow(test.version)
+		for _, artifact := range migrationArtifacts {
+			if artifact.requiredVersion == 677 && test.version >= 678 ||
+				artifact.requiredVersion == 678 && (test.version < 678 || test.missing) {
+				row[artifact.rowColumn] = "f"
+			}
+		}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(test.version), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantAlerts := 0
+		if test.version < server.MigrationCount() {
+			wantAlerts++
+			requireAlertClass(t, alerts, "migration-behind")
+		}
+		if test.missing {
+			wantAlerts++
+			alert := requireAlertClass(t, alerts, "migration-schema-drift")
+			if !strings.Contains(alert.Markdown(), "competition legacy/shared-control ranking policy@v678") {
+				t.Fatalf("missing compatibility guard was not identified: %s", alert.Markdown())
+			}
+		}
+		if len(alerts) != wantAlerts {
+			t.Fatalf("version %d missing=%t: alerts=%+v, want %d", test.version, test.missing, alerts, wantAlerts)
 		}
 	}
 }

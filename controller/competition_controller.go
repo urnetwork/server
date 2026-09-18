@@ -4454,11 +4454,16 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 	return round, err
 }
 
+// A persisted shared control makes raw latency comparable across submissions.
+// Legacy rounds without that control retain their original normalized order.
 const nextCandidateReviewSql = `
 	WITH eligible AS (
 		SELECT job_id, patch_sha256, patch_bytes, submitted_at, score_json,
 		       CAST(row_number() OVER (
-		           ORDER BY (score_json->>'raw_score')::numeric ASC,
+		           ORDER BY CASE WHEN NOT EXISTS (
+		                        SELECT 1 FROM competition_round_baseline WHERE round_id = $1
+		                    ) THEN (score_json->>'normalized_score')::numeric END DESC,
+		                    (score_json->>'raw_score')::numeric ASC,
 		                    submitted_at, job_id
 		       ) AS integer) AS candidate_rank
 		FROM competition_job
@@ -4863,7 +4868,10 @@ func (self PostgresStore) Leaderboards(
 					  ON review.round_id = job.round_id AND review.job_id = job.job_id
 					WHERE job.round_id = $1 AND job.state = 'succeeded'
 					GROUP BY job.job_id, review.decision
-					ORDER BY (job.score_json->>'raw_score')::numeric ASC,
+					ORDER BY CASE WHEN NOT EXISTS (
+					             SELECT 1 FROM competition_round_baseline WHERE round_id = $1
+					         ) THEN (job.score_json->>'normalized_score')::numeric END DESC,
+					         (job.score_json->>'raw_score')::numeric ASC,
 					         job.submitted_at, job.job_id
 				`, board.RoundId)
 				server.WithPgResult(jobRows, jobsErr, func() {
@@ -5424,6 +5432,12 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				h := sha256.Sum256(manifestJson)
 				manifestSha256 = hex.EncodeToString(h[:])
 				manifestHash = manifestSha256
+			}
+			// Every new scored result freezes its shared control atomically.
+			// Absence of that append-only row identifies legacy ranking policy.
+			if outcome.Score != nil && outcome.Error == nil &&
+				(len(outcome.RoundBaselineJson) == 0 || outcome.RoundBaselineSha256 == "") {
+				panic(errors.New("scored competition outcome requires its round baseline"))
 			}
 			if len(outcome.RoundBaselineJson) != 0 || outcome.RoundBaselineSha256 != "" {
 				if len(outcome.RoundBaselineJson) == 0 || !sha256Pattern.MatchString(outcome.RoundBaselineSha256) ||

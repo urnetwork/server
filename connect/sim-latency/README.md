@@ -91,6 +91,10 @@ presentation of the shared control and is not a ranking input. After the first
 control is frozen, an ordinary submission runs only the nine candidate
 replicates rather than another nine control replicates.
 
+Historical epochs without an immutable shared control retain their original
+per-job baseline samples and normalized-score-first ranking. The new policy
+does not rewrite an already-published leaderboard.
+
 A score is placeable only when all G1–G6 correctness, volume, path-integrity,
 matchmaking, stability, and resource gates pass. A placeable submission is
 takeover-eligible only when all of these are also true:
