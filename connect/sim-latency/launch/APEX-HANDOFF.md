@@ -94,26 +94,32 @@ only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private
 review report.
 
-Staging epoch 4 is open, verified on 2026-09-15 at 14:56 UTC:
+Staging epoch 4 is finalized, verified on 2026-09-18:
 `round_id=01a0a58b-9a3e-2e43-f612-0034ff7296ff`,
 `opens_at=2026-09-15T14:56:00Z`, `closes_at=2026-09-17T14:56:00Z`.
-The singleton evaluator is running, and this round freezes the corrected
-significance-capable evaluator. Macrocosmos can submit using its existing
-staging token. Accepted live scoring and finalized entries still need to be
-observed; this is not a claim that the downstream path has already passed.
+Its staging-inclusive leaderboard has four entries; Macrocosmos reported that
+its downstream path worked end to end. This closed round no longer accepts
+submissions, and its worker has exited. The next staging round requires the
+new API/migrations, source checkpoint, and evaluator configuration to be
+deployed first; do not announce epoch 5 as open from a local build alone.
 
 Update, 2026-09-16: a comment-only job completed all 18 replicates but failed
 G5 on a startup database recovery. Its frozen source omitted a wrapped-error
 fix already present on `main`; see the
 [G5 incident record](STAGING-4-G5-INCIDENT.md). The runtime repair and exact-source
 regression gate passed independent tests, including three full sim-latency
-suite runs. The new epoch-5 image and live scoring proof remain pending.
+suite runs. The [epoch-5 release](STAGING-5-RELEASE.md) also switches to one
+immutable shared baseline and absolute-latency ranking. Its rollout and live
+scoring proof remain pending.
 Epoch 4's image and historical results remain unchanged; the next epoch is not
 yet ready to announce.
 
 A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is absolute raw score
 ascending, submission time, then job id; normalized score is display-only.
+Historical per-job-control epochs, including staging epoch 4, keep their
+original normalized-score-first ranking. Rollout does not retroactively reorder
+those published results.
 Statistical eligibility only enters the review queue; it does not establish
 that a patch is honest. Public rows use
 job and patch identities rather than bearer-token principal names; the adapter
@@ -130,7 +136,7 @@ external-evaluator field; Macrocosmos has approved this deliberate exception.
 Candidate patches are structurally validated and built offline into one
 content-addressed image per canonical patch. Runtime has default-deny external
 networking, ten evaluation CPUs, bounded memory/PIDs/logs, fresh PostgreSQL and
-Redis, and only direct read-only `config/local` and `vault/local` mounts. Two
+Redis, and direct read-only `config/local` and `vault/local` configuration mounts. Two
 management CPUs and reserved memory remain outside candidate limits so the
 trusted runner can terminate CPU or memory bombs and remove exact labeled
 containers and networks.
