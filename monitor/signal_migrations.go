@@ -134,7 +134,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "contract_extender_create_time_contract_id", requiredVersion: 674, rowColumn: 85},
 	{name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", requiredVersion: 675, rowColumn: 86},
 	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
-	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, rowColumn: 88},
+	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, removedVersion: 678, rowColumn: 88},
+	{name: "competition legacy/shared-control ranking policy", requiredVersion: 678, rowColumn: 89},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1108,6 +1109,34 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           AND pg_get_functiondef(
 		               'public.competition_candidate_review_insert_guard()'::regprocedure
 		           ) NOT LIKE '%normalized_score%'
+		       ),
+		       (
+		           to_regprocedure('public.competition_candidate_review_insert_guard()') IS NOT NULL
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%ORDER BY CASE WHEN NOT EXISTS (%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%FROM competition_round_baseline WHERE round_id = NEW.round_id%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%THEN (score_json->>''normalized_score'')::numeric END DESC%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%(score_json->>''raw_score'')::numeric ASC%'
+		           AND pg_get_functiondef(
+		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		           ) LIKE '%submitted_at, job_id%'
+		           AND to_regprocedure('public.competition_round_baseline_insert_guard()') IS NOT NULL
+		           AND pg_get_functiondef(
+		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		           ) LIKE '%competition round baseline cannot be attached after finalization or cancellation%'
+		           AND pg_get_functiondef(
+		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		           ) LIKE '%competition round baseline cannot replace legacy ranking policy%'
+		           AND pg_get_functiondef(
+		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		           ) LIKE '%state = ''running'' AND attempt_count >= NEW.source_attempt%'
 		       )
 		FROM version;
 	`)

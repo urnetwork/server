@@ -29,6 +29,38 @@ func canceledCircleRetryRestoreMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "restore_canceled_circle_retries")
 }
 
+// The raw-only review function is published history. Compatibility must append
+// after it, so databases that already applied 677 still install the correction.
+func TestCompetitionRankingCompatibilityMigrationAppendsAfterSharedBaseline(t *testing.T) {
+	baselineIndex := sqlMigrationIndex(t, "CREATE TABLE competition_round_baseline")
+	compatibilityIndex := sqlMigrationIndex(t, "competition round baseline cannot replace legacy ranking policy")
+	if baselineIndex != 675 || compatibilityIndex != 677 {
+		t.Fatalf("baseline/compatibility migration indices = %d/%d, want 675/677", baselineIndex, compatibilityIndex)
+	}
+	rawMigration, ok := migrations[676].(*SqlMigration)
+	if !ok || !strings.Contains(rawMigration.sql, "ORDER BY (score_json->>'raw_score')::numeric ASC") ||
+		strings.Contains(rawMigration.sql, "normalized_score") {
+		t.Fatal("published migration 677 was changed instead of superseded")
+	}
+	compatibility, ok := migrations[compatibilityIndex].(*SqlMigration)
+	if !ok {
+		t.Fatalf("ranking compatibility migration is %T, want *SqlMigration", migrations[compatibilityIndex])
+	}
+	normalized := strings.Join(strings.Fields(compatibility.sql), " ")
+	for _, marker := range []string{
+		"CREATE OR REPLACE FUNCTION competition_candidate_review_insert_guard()",
+		"ORDER BY CASE WHEN NOT EXISTS ( SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id ) THEN (score_json->>'normalized_score')::numeric END DESC, (score_json->>'raw_score')::numeric ASC, submitted_at, job_id",
+		"CREATE OR REPLACE FUNCTION competition_round_baseline_insert_guard()",
+		"canceled OR finalized_at IS NOT NULL",
+		"IF NOT EXISTS ( SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id ) AND EXISTS ( SELECT 1 FROM competition_job WHERE round_id = NEW.round_id AND state = 'succeeded' )",
+		"state = 'running' AND attempt_count >= NEW.source_attempt",
+	} {
+		if !strings.Contains(normalized, marker) {
+			t.Errorf("ranking compatibility migration lost %q", marker)
+		}
+	}
+}
+
 func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }

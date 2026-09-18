@@ -335,6 +335,34 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 	return append(content, '\n')
 }
 
+// Mirrors the production evaluator's baseline-bearing outcome; callers that
+// model historical per-job controls must insert those legacy records explicitly.
+func testSharedBaselineOutcome(t testing.TB, settings *Settings, job *queuedJob, outcome EvaluationOutcome) EvaluationOutcome {
+	t.Helper()
+	if job.RoundBaseline != nil {
+		outcome.RoundBaselineJson = job.RoundBaseline.Json
+		outcome.RoundBaselineSha256 = job.RoundBaseline.Sha256
+	} else {
+		rawScores := make([]float64, settings.EvaluationPolicy.Replicates)
+		for index := range rawScores {
+			rawScores[index] = 100 + float64(index%3) - 1
+		}
+		outcome.RoundBaselineJson = testRoundBaseline(t, settings, &job.Round, rawScores)
+		digest := sha256.Sum256(outcome.RoundBaselineJson)
+		outcome.RoundBaselineSha256 = hex.EncodeToString(digest[:])
+	}
+	if len(outcome.ArtifactManifest) == 0 {
+		outcome.ArtifactManifest = json.RawMessage(`{"schema":1,"synthetic":true}`)
+	}
+	if outcome.Score != nil {
+		if outcome.Score.Diagnostics == nil {
+			outcome.Score.Diagnostics = map[string]any{}
+		}
+		outcome.Score.Diagnostics["baseline_sha256"] = outcome.RoundBaselineSha256
+	}
+	return outcome
+}
+
 func TestRoundBaselineAuthenticationBindsEpochAndLiveMetrics(t *testing.T) {
 	settings := validSettings()
 	policyJson, err := policySnapshot(settings)
@@ -5196,14 +5224,14 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 			t.Fatalf("staging claim = %#v, %v", claimed, err)
 		}
 		raw, normalized := 100.0, 100.0
-		_, err = store.Complete(ctx, settings, "staging-worker", claimed.JobId, EvaluationOutcome{
+		_, err = store.Complete(ctx, settings, "staging-worker", claimed.JobId, testSharedBaselineOutcome(t, settings, claimed, EvaluationOutcome{
 			Score: &ScoreResult{
 				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
 				Placeable: true, TakeoverEligible: true,
 				Gates:        map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
 				Significance: testScoreSignificance(true),
 			},
-		})
+		}))
 		if err != nil {
 			t.Fatalf("complete staging evaluation: %v", err)
 		}
@@ -5543,10 +5571,10 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 			t.Fatalf("heartbeat: %s", err)
 		}
 		raw, normalized := 100.0, 100.0
-		_, err = store.Complete(ctx, settings, "worker-a", claimed1.JobId, EvaluationOutcome{
+		_, err = store.Complete(ctx, settings, "worker-a", claimed1.JobId, testSharedBaselineOutcome(t, settings, claimed1, EvaluationOutcome{
 			Score:            &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, TakeoverEligible: true, Gates: map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}}, Significance: testScoreSignificance(true)},
 			ArtifactManifest: []byte(`{"schema":1,"test":true}`),
-		})
+		}))
 		if err != nil {
 			t.Fatalf("complete first: %s", err)
 		}
@@ -5604,7 +5632,7 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 		// Deliberately conflict with the old normalized-score ordering. The
 		// shared round control makes absolute candidate latency authoritative.
 		raw3, normalized3 := 101.0, 200.0
-		_, err = store.Complete(ctx, settings, "worker-b", retried3.JobId, EvaluationOutcome{
+		_, err = store.Complete(ctx, settings, "worker-b", retried3.JobId, testSharedBaselineOutcome(t, settings, retried3, EvaluationOutcome{
 			Score: &ScoreResult{
 				ScoreSchema: 1, RawScore: &raw3, NormalizedScore: &normalized3,
 				Placeable: true, TakeoverEligible: true,
@@ -5612,7 +5640,7 @@ func TestCompetitionFullLifecycleQueueCacheHonestyPromotionAndNextEpoch(t *testi
 				Significance: testScoreSignificance(true),
 			},
 			ArtifactManifest: []byte(`{"schema":1,"attempt":2}`),
-		})
+		}))
 		if err != nil {
 			t.Fatalf("complete retried submission: %s", err)
 		}
@@ -5855,14 +5883,14 @@ func TestCompetitionFullLifecycleNoWinnerCarryForward(t *testing.T) {
 			t.Fatalf("immediate claim = %#v, %v", claimed, err)
 		}
 		raw, normalized := 95.0, 105.0
-		_, err = store.Complete(ctx, settings, "worker-a", job.JobId, EvaluationOutcome{
+		_, err = store.Complete(ctx, settings, "worker-a", job.JobId, testSharedBaselineOutcome(t, settings, claimed, EvaluationOutcome{
 			Score: &ScoreResult{
 				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
 				Placeable: true, TakeoverEligible: false,
 				Gates:        map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
 				Significance: testScoreSignificance(false),
 			},
-		})
+		}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5913,14 +5941,14 @@ func TestCompetitionFullLifecycleNoWinnerCarryForward(t *testing.T) {
 			t.Fatalf("significant claim = %#v, %v", claimed, err)
 		}
 		raw, normalized = 70, 142.857
-		_, err = store.Complete(ctx, settings, "worker-a", significantJob.JobId, EvaluationOutcome{
+		_, err = store.Complete(ctx, settings, "worker-a", significantJob.JobId, testSharedBaselineOutcome(t, settings, claimed, EvaluationOutcome{
 			Score: &ScoreResult{
 				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
 				Placeable: true, TakeoverEligible: true,
 				Gates:        map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
 				Significance: testScoreSignificance(true),
 			},
-		})
+		}))
 		if err != nil {
 			t.Fatal(err)
 		}

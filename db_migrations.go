@@ -8000,4 +8000,106 @@ var migrations = []any{
 		END
 		$competition_candidate_review_gate$;
 	`),
+
+	// Baseline presence is the immutable ranking-policy discriminator. Preserve
+	// legacy normalized ordering and prevent a shared control from being added
+	// retroactively to scored legacy history or a terminal round.
+	newSqlMigration(`
+		CREATE OR REPLACE FUNCTION competition_round_baseline_insert_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_baseline_insert_guard$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM competition_round
+				WHERE round_id = NEW.round_id AND (canceled OR finalized_at IS NOT NULL)
+			) THEN
+				RAISE EXCEPTION 'competition round baseline cannot be attached after finalization or cancellation';
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id
+			) AND EXISTS (
+				SELECT 1 FROM competition_job WHERE round_id = NEW.round_id AND state = 'succeeded'
+			) THEN
+				RAISE EXCEPTION 'competition round baseline cannot replace legacy ranking policy';
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM competition_job
+				WHERE job_id = NEW.source_job_id AND round_id = NEW.round_id
+				  AND state = 'running' AND attempt_count >= NEW.source_attempt
+			) THEN
+				RAISE EXCEPTION 'competition round baseline source does not belong to its round attempt';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_baseline_insert_guard$;
+
+		CREATE OR REPLACE FUNCTION competition_candidate_review_insert_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_candidate_review_gate$
+		DECLARE
+			epoch_round competition_round%ROWTYPE;
+			expected_rank bigint;
+			unresolved_better bigint;
+		BEGIN
+			SELECT * INTO epoch_round
+			FROM competition_round
+			WHERE round_id = NEW.round_id;
+			IF NOT FOUND OR epoch_round.canceled OR epoch_round.finalized_at IS NOT NULL OR
+			   NEW.reviewed_at < epoch_round.closes_at OR EXISTS (
+				SELECT 1 FROM competition_job
+				WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+			) OR EXISTS (
+				SELECT 1 FROM competition_candidate_review
+				WHERE round_id = NEW.round_id AND decision = 'approved'
+			) THEN
+				RAISE EXCEPTION 'competition epoch is not ready for candidate review';
+			END IF;
+
+			WITH eligible AS (
+				SELECT job_id,
+				       row_number() OVER (
+				           ORDER BY CASE WHEN NOT EXISTS (
+				                        SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id
+				                    ) THEN (score_json->>'normalized_score')::numeric END DESC,
+				                    (score_json->>'raw_score')::numeric ASC,
+				                    submitted_at, job_id
+				       ) AS candidate_rank
+				FROM competition_job
+				WHERE round_id = NEW.round_id AND state = 'succeeded'
+				  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+				  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+				  AND jsonb_typeof(score_json->'gates') = 'object'
+				  AND score_json->'gates' <> '{}'::jsonb
+				  AND NOT EXISTS (
+				      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+				      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+				  )
+			)
+			SELECT candidate.candidate_rank,
+			       count(better.job_id) FILTER (
+			           WHERE NOT EXISTS (
+				               SELECT 1 FROM competition_candidate_review AS prior_review
+				               WHERE prior_review.round_id = NEW.round_id
+				                 AND prior_review.job_id = better.job_id
+				                 AND prior_review.decision = 'rejected'
+			           )
+			       )
+			INTO expected_rank, unresolved_better
+			FROM eligible AS candidate
+			LEFT JOIN eligible AS better ON better.candidate_rank < candidate.candidate_rank
+			WHERE candidate.job_id = NEW.job_id
+			GROUP BY candidate.candidate_rank;
+
+			IF expected_rank IS NULL OR NEW.candidate_rank <> expected_rank THEN
+				RAISE EXCEPTION 'competition review job is not an eligible ranked candidate';
+			END IF;
+			IF unresolved_better <> 0 THEN
+				RAISE EXCEPTION 'competition review skipped a higher-ranked candidate';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_candidate_review_gate$;
+	`),
 }
