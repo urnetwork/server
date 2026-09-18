@@ -134,6 +134,7 @@ func registry() []specEndpoint {
 		// Response is a polymorphic interface{}, so it stays unchecked (nil).
 		{"POST", "/verify", rt(controller.VerifyArgs{}), nil},
 		{"GET", "/key/{clientId}", nil, rt(controller.GetClientKeyResult{})},
+		{"GET", "/key/{clientId}/history", nil, rt(controller.GetClientKeyHistoryResult{})},
 		{"GET", "/hello", nil, rt(controller.HelloResult{})},
 
 		{"POST", "/account/api-key", rt(model.CreateApiKeyArgs{}), rt(model.CreateApiKeyResult{})},

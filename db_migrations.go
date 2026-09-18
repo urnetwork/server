@@ -8102,4 +8102,32 @@ var migrations = []any{
 		END
 		$competition_candidate_review_gate$;
 	`),
+
+	// The latency attestations providers make to extenders
+	// (connect/DESIGNNOTES4.md §3): one row per attestation the operator
+	// verified, keyed so a replayed report is a no-op. The create_time index
+	// is the retention sweep; the (extender_id, create_time) index is the per
+	// extender read.
+	newSqlMigration(`
+		CREATE TABLE network_extender_latency (
+			latency_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			probe_nonce bytea NOT NULL,
+			rtt_ms int NOT NULL,
+			probe_time timestamp NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (latency_id),
+			UNIQUE (extender_id, client_id, probe_nonce)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_latency_create_time
+		ON network_extender_latency (create_time)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_latency_extender_id_create_time
+		ON network_extender_latency (extender_id, create_time)
+	`),
 }
