@@ -181,6 +181,10 @@ type NetworkExtenderActivation struct {
 	Carriers    []string
 	// the dns ports that passed their probe on this address (L2)
 	DnsPorts []int
+	// the privacy-preserving hash of the activating address, kept with the
+	// activation history the way a connection keeps it (M1); nil when the
+	// address could not be read
+	ClientAddressHash []byte
 	// the location the activating address resolved to (M1), already created in
 	// the location table by the caller. Each field is nil when the lookup did
 	// not reach that granularity; all four nil is a lookup that failed, which
@@ -550,6 +554,9 @@ func ActivateNetworkExtender(
 			joinExtenderDnsPorts(activation.DnsPorts),
 			issueTime,
 		))
+
+		// the history row: where this activation came from, as of now (M1)
+		insertNetworkExtenderActivationInTx(ctx, tx, extenderId, activation, issueTime)
 
 		extender := &NetworkExtender{
 			ExtenderId:      extenderId,

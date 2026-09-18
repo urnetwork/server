@@ -41,6 +41,9 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"gossip staleness":      "urnetwork_stats_extender_gossip_oldest_pending_seconds",
 		"released to gossip":    "urnetwork_stats_extender_gossip_released_24h",
 		"popularity":            "urnetwork_stats_extender_contracts_total",
+		"provider pings":        "urnetwork_stats_extender_provider_pings_total",
+		"providers measuring":   "urnetwork_stats_extender_ping_providers_24h",
+		"extenders pinged":      "urnetwork_stats_extender_pinged_extenders_24h",
 	} {
 		found := false
 		for _, expression := range expressions {
@@ -76,23 +79,34 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 	}
 }
 
-// The contracts counter is the one metric that names extenders. Every panel
-// reading it must cap with topk, so a dashboard never renders one line per
-// extender in an open population, and must read it through increase(): it is a
-// counter fed from closed hour buckets, and a raw value is the process-lifetime
-// total, which a restart resets.
+// The contracts counter and the provider pings counter are the only metrics
+// that name extenders. Every panel reading either must cap with topk, so a
+// dashboard never renders one line per extender in an open population, and
+// must read it through increase(): both are counters fed from closed hour
+// buckets, and a raw value is the process-lifetime total, which a restart
+// resets.
 func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 	dashboard := readTestDashboard(t, "extenders.json")
 
+	perExtenderCounters := []string{
+		"urnetwork_stats_extender_contracts_total",
+		"urnetwork_stats_extender_provider_pings_total",
+	}
 	for _, panel := range dashboard.Panels {
 		for _, target := range panel.Targets {
 			if !strings.Contains(target.Expr, "extender_id") {
 				continue
 			}
-			// the only source of an extender_id series is the per-extender
-			// counter, and every use of it must be capped with topk so a
+			// the only sources of an extender_id series are the per-extender
+			// counters, and every use of one must be capped with topk so a
 			// panel never renders one line per extender in the fleet
-			if !strings.Contains(target.Expr, "urnetwork_stats_extender_contracts_total") {
+			fromCounter := false
+			for _, counter := range perExtenderCounters {
+				if strings.Contains(target.Expr, counter) {
+					fromCounter = true
+				}
+			}
+			if !fromCounter {
 				t.Errorf("panel %q groups by extender_id from an unexpected source: %q",
 					panel.Title, target.Expr)
 			}
@@ -102,7 +116,7 @@ func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 			}
 			// a counter is read through increase(), never as a raw value
 			if !strings.Contains(target.Expr, "increase(") {
-				t.Errorf("panel %q reads the contracts counter without increase(): %q",
+				t.Errorf("panel %q reads a per-extender counter without increase(): %q",
 					panel.Title, target.Expr)
 			}
 			if panel.Description == "" {

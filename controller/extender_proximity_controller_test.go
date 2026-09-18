@@ -170,6 +170,19 @@ func TestExtenderLatencyReportStoresWhatVerifies(t *testing.T) {
 		connect.AssertEqual(t, result.Accepted, 1)
 		connect.AssertEqual(t, len(model.GetNetworkExtenderLatencies(ctx, extender.ExtenderId, time.Time{})), 2)
 
+		// the dashboard's window and hour bucket see both
+		pings := model.CountExtenderProviderPings(ctx, server.NowUtc())
+		connect.AssertEqual(t, pings.Pings24h, int64(2))
+		connect.AssertEqual(t, pings.Providers24h, int64(1))
+		connect.AssertEqual(t, pings.Extenders24h, int64(1))
+		hourCounts := model.CountExtenderProviderPingsByHour(ctx, server.NowUtc().Truncate(time.Hour))
+		connect.AssertEqual(t, len(hourCounts), 1)
+		connect.AssertEqual(t, hourCounts[0].ExtenderId, extender.ExtenderId)
+		connect.AssertEqual(t, hourCounts[0].Pings, int64(2))
+		if counts := model.CountExtenderProviderPingsByHour(ctx, server.NowUtc().Add(-2*time.Hour)); len(counts) != 0 {
+			t.Fatalf("an empty hour counted %v", counts)
+		}
+
 		// the sweep removes what is older than its cut
 		connect.AssertEqual(t, model.RemoveOldNetworkExtenderLatencies(ctx, server.NowUtc().Add(-time.Hour)), 0)
 		connect.AssertEqual(t, model.RemoveOldNetworkExtenderLatencies(ctx, server.NowUtc().Add(time.Hour)), 2)

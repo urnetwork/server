@@ -8130,4 +8130,31 @@ var migrations = []any{
 		CREATE INDEX network_extender_latency_extender_id_create_time
 		ON network_extender_latency (extender_id, create_time)
 	`),
+
+	// The location an extender activated from, one row per activation
+	// (connect/EXTENDER.md M1), kept the way a provider's connection keeps
+	// its own: the privacy-preserving address hash and the city, region and
+	// country the activating address resolved to. The columns on
+	// network_extender are the latest activation; this is the history, which
+	// is what a provider latency attestation is later placed against.
+	newSqlMigration(`
+		CREATE TABLE network_extender_activation (
+			activation_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			activate_time timestamp NOT NULL,
+			ip_version int NOT NULL,
+			client_address_hash bytea NULL,
+			country_code varchar NOT NULL DEFAULT '',
+			location_id uuid NULL,
+			city_location_id uuid NULL,
+			region_location_id uuid NULL,
+			country_location_id uuid NULL,
+
+			PRIMARY KEY (activation_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_activation_extender_id_activate_time
+		ON network_extender_activation (extender_id, activate_time)
+	`),
 }

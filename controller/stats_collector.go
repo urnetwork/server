@@ -336,6 +336,29 @@ var statsExtenderContractsCounter = newStatsCounterVec(
 	"extender_id",
 )
 
+// The provider latency attestations the operator accepted
+// (connect/DESIGNNOTES4.md §3), read only by the extenders dashboard. The
+// window gauges are bounded; the per-extender counter has the same shape,
+// cost and reset behaviour as the contracts counter above, and is fed from
+// the same closed hour buckets.
+var statsExtenderProviderPings24hGauge = newStatsGauge(
+	"extender_provider_pings_24h",
+	"Provider latency attestations accepted in the last 24 hours",
+)
+var statsExtenderPingProviders24hGauge = newStatsGauge(
+	"extender_ping_providers_24h",
+	"Distinct providers whose latency attestations were accepted in the last 24 hours",
+)
+var statsExtenderPingedExtenders24hGauge = newStatsGauge(
+	"extender_pinged_extenders_24h",
+	"Distinct extenders with an accepted latency attestation in the last 24 hours",
+)
+var statsExtenderProviderPingsCounter = newStatsCounterVec(
+	"extender_provider_pings_total",
+	"Provider latency attestations accepted for each extender, accumulated from closed hour buckets",
+	"extender_id",
+)
+
 // statsCounterVec is a labeled monotonic counter with the same lazy
 // registration as the gauges. Unlike a gauge vec it is never replaced: a
 // counter's whole contract is that a series only ever goes up, so a label that
@@ -368,15 +391,42 @@ func (self *statsCounterVec) add(value float64, labelValues ...string) {
 	self.counter.WithLabelValues(labelValues...).Add(value)
 }
 
-// statsExtenderContractsSettle is how long an hour must have been over before
-// its contracts are counted. An insert whose transaction opened before the
-// hour turned commits with a create_time inside it, so counting the instant
-// the hour ends can miss it -- and for a counter a miss is permanent, since
-// the hour is never revisited.
-const statsExtenderContractsSettle = 1 * time.Minute
+// statsHourBucketSettle is how long an hour must have been over before its
+// rows are counted. An insert whose transaction opened before the hour turned
+// commits with a create_time inside it, so counting the instant the hour ends
+// can miss it -- and for a counter a miss is permanent, since the hour is
+// never revisited.
+const statsHourBucketSettle = 1 * time.Minute
 
-// statsExtenderContractsMaxCatchup bounds how far back one refresh will walk.
-const statsExtenderContractsMaxCatchup = 24 * time.Hour
+// statsHourBucketMaxCatchup bounds how far back one refresh will walk.
+const statsHourBucketMaxCatchup = 24 * time.Hour
+
+// statsClosedHour is the newest hour that has closed and settled by `now`.
+func statsClosedHour(now time.Time) time.Time {
+	currentHour := now.UTC().Truncate(time.Hour)
+	if now.UTC().Sub(currentHour) < statsHourBucketSettle {
+		// the hour that just ended has not settled; nothing new is countable
+		return currentHour.Add(-time.Hour)
+	}
+	return currentHour
+}
+
+// statsClosedHoursSince lists the hours after `last` that have closed and
+// settled by `now`, oldest first, so each is counted exactly once. The walk
+// is bounded: a collector that was down for a week does not issue a week of
+// queries in one refresh, the gap is lost rather than the refresh stalling,
+// and a counter gap reads as a flat line rather than a false spike.
+func statsClosedHoursSince(last time.Time, now time.Time) []time.Time {
+	closedHour := statsClosedHour(now)
+	if oldest := closedHour.Add(-statsHourBucketMaxCatchup); last.Before(oldest) {
+		last = oldest
+	}
+	hours := []time.Time{}
+	for hour := last.Add(time.Hour); !hour.After(closedHour); hour = hour.Add(time.Hour) {
+		hours = append(hours, hour)
+	}
+	return hours
+}
 
 // the ip family label values, in publication order. every family gauge
 // publishes all three on every refresh, so a family with no members is a zero
@@ -615,7 +665,13 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	statsExtenderGossipReleased24hGauge.replace(released)
 	statsExtenderGossipExtenders24hGauge.replace(releasedExtenders)
 
+	pings := model.CountExtenderProviderPings(ctx, now)
+	statsExtenderProviderPings24hGauge.set(float64(pings.Pings24h))
+	statsExtenderPingProviders24hGauge.set(float64(pings.Providers24h))
+	statsExtenderPingedExtenders24hGauge.set(float64(pings.Extenders24h))
+
 	statsRefreshExtenderContracts(ctx, now)
+	statsRefreshExtenderPings(ctx, now)
 }
 
 // statsExtenderContractsHour is the last closed hour already added to the
@@ -632,35 +688,44 @@ var statsExtenderContractsHour time.Time
 // which for a counter is not a small error -- it compounds, and `increase()`
 // would report several times the real number.
 func statsRefreshExtenderContracts(ctx context.Context, now time.Time) {
-	// an hour may be counted once it has been over long enough that an insert
-	// whose transaction opened before the turn has committed; the contract
-	// hour buckets settle on the same rule
-	currentHour := now.UTC().Truncate(time.Hour)
-	if now.UTC().Sub(currentHour) < statsExtenderContractsSettle {
-		// the hour that just ended has not settled; nothing new is countable
-		currentHour = currentHour.Add(-time.Hour)
-	}
 	if statsExtenderContractsHour.IsZero() {
 		// seed without backfilling
-		statsExtenderContractsHour = currentHour
+		statsExtenderContractsHour = statsClosedHour(now)
 		return
 	}
-	// bound the catch-up so a collector that was down for a week does not
-	// issue a week of queries in one refresh; the gap is lost rather than the
-	// refresh stalling, and a counter gap reads as a flat line rather than a
-	// false spike
-	oldest := currentHour.Add(-statsExtenderContractsMaxCatchup)
-	if statsExtenderContractsHour.Before(oldest) {
-		statsExtenderContractsHour = oldest
-	}
-	for hour := statsExtenderContractsHour.Add(time.Hour); !hour.After(currentHour); hour = hour.Add(time.Hour) {
+	for _, hour := range statsClosedHoursSince(statsExtenderContractsHour, now) {
 		for _, count := range model.CountExtenderContractsByHour(ctx, hour) {
 			statsExtenderContractsCounter.add(
 				float64(count.Contracts),
 				count.ExtenderId.String(),
 			)
 		}
+		// advanced per hour, so a refresh that raises part way resumes at
+		// the first hour it did not finish rather than recounting
 		statsExtenderContractsHour = hour
+	}
+}
+
+// statsExtenderPingsHour is the counter cursor of the provider pings, kept
+// separately from the contracts cursor so the two counters seed and resume
+// independently.
+var statsExtenderPingsHour time.Time
+
+// statsRefreshExtenderPings adds every hour that closed since the last refresh
+// to the per-extender pings counter, on the same rules as the contracts.
+func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
+	if statsExtenderPingsHour.IsZero() {
+		statsExtenderPingsHour = statsClosedHour(now)
+		return
+	}
+	for _, hour := range statsClosedHoursSince(statsExtenderPingsHour, now) {
+		for _, count := range model.CountExtenderProviderPingsByHour(ctx, hour) {
+			statsExtenderProviderPingsCounter.add(
+				float64(count.Pings),
+				count.ExtenderId.String(),
+			)
+		}
+		statsExtenderPingsHour = hour
 	}
 }
 

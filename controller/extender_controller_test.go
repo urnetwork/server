@@ -157,6 +157,55 @@ func TestExtenderActivateStoresAndSignsPerFamily(t *testing.T) {
 	})
 }
 
+// Every activation appends a history row with where it came from (M1): the
+// family, the privacy-preserving hash of the activating address, and the
+// location it resolved to -- none for loopback, which the mmdb cannot place.
+// A second activation is a second row, not an overwrite.
+func TestExtenderActivateRecordsTheActivationHistory(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+
+		for i := range 2 {
+			result, err := ExtenderActivate(fixture.activateArgs(), clientSession)
+			if err != nil {
+				t.Fatalf("activation %d: %v", i, err)
+			}
+			if !result.Activated {
+				t.Fatalf("activation %d was refused: %s", i, result.Error)
+			}
+		}
+
+		extenderId := testExtenderIdForKey(ctx, t, fixture.publicKey)
+		activations := model.GetNetworkExtenderActivations(ctx, extenderId, time.Time{})
+		connect.AssertEqual(t, len(activations), 2)
+		expectedHash, err := server.ClientIpHash("127.0.0.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, activation := range activations {
+			connect.AssertEqual(t, activation.ExtenderId, extenderId)
+			connect.AssertEqual(t, activation.IpVersion, 4)
+			if !slices.Equal(activation.ClientAddressHash, expectedHash[:]) {
+				t.Fatalf("activation hash = %x, expected the hash of the loopback address", activation.ClientAddressHash)
+			}
+			connect.AssertEqual(t, activation.CountryCode, "")
+			if activation.LocationId != nil || activation.CityLocationId != nil ||
+				activation.RegionLocationId != nil || activation.CountryLocationId != nil {
+				t.Fatalf("loopback resolved to a location: %+v", activation)
+			}
+			if activation.ActivateTime.IsZero() {
+				t.Fatal("the activation carries no time")
+			}
+		}
+		if activations[1].ActivateTime.Before(activations[0].ActivateTime) {
+			t.Fatal("the history is not in activation order")
+		}
+	})
+}
+
 // The extender id of one identity key, read back through the sample reader so
 // the test never needs the id the handler kept to itself.
 func testExtenderIdForKey(
