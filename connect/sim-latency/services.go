@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,8 @@ type Services struct {
 
 	httpServers []*http.Server
 	exchanges   []*connectserver.Exchange
+	handlers    []*connectserver.ConnectHandler
+	handlerIds  []server.Id
 	wg          sync.WaitGroup
 	closeOnce   sync.Once
 	errLock     sync.Mutex
@@ -119,6 +122,11 @@ func DefaultServicesConfig() *ServicesConfig {
 // prevents warm-up from permanently bypassing contract validation.
 func newSimulationExchangeSettings(servicesConfig *ServicesConfig) *connectserver.ExchangeSettings {
 	settings := connectserver.DefaultExchangeSettings()
+	// SimProvider and SimClient explicitly select H1. These hosts share one
+	// process, so production UDP ports would collide without carrying traffic.
+	settings.ListenH3Port = 0
+	settings.ListenDnsPort = 0
+	settings.ListenDnsCompatibilityPorts = nil
 	// run the real per-connection latency + speed tests so scores reflect
 	// the simulated conditions
 	settings.ConnectionTestConfig = connectserver.DefaultTestConfig()
@@ -140,8 +148,11 @@ func newSimulationExchangeSettings(servicesConfig *ServicesConfig) *connectserve
 
 // NewServices stands up the exchanges, connect handlers, api server, and the
 // pipeline loop. It blocks until every listener is reachable.
-func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services, error) {
+func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (services *Services, returnErr error) {
 	if err := validateServicesConfig(servicesConfig); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	serviceCtx, cancel := context.WithCancel(ctx)
@@ -161,6 +172,20 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		wsPorts: map[int]bool{},
 		cancel:  cancel,
 	}
+	// Constructors below can raise database or TLS errors after earlier hosts
+	// have started. Retain ownership until every listener is ready.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if err, ok := recovered.(error); ok {
+				returnErr = fmt.Errorf("start simulation services: %w", err)
+			} else {
+				returnErr = fmt.Errorf("start simulation services: %v", recovered)
+			}
+		}
+		if services == nil {
+			returnErr = errors.Join(returnErr, self.Close())
+		}
+	}()
 
 	for i := 0; i < servicesConfig.HostCount; i += 1 {
 		wsPort := servicesConfig.WsPortBase + i
@@ -179,7 +204,7 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		)
 		self.exchanges = append(self.exchanges, exchange)
 
-		connectHandler := connectserver.NewConnectHandler(serviceCtx, server.NewId(), exchange, &settings.ConnectHandlerSettings)
+		connectHandler := self.newConnectHandler(serviceCtx, exchange, &settings.ConnectHandlerSettings)
 		connectRoutes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", connectHandler.Connect),
@@ -189,7 +214,9 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 			Handler: router.NewRouter(serviceCtx, connectRoutes),
 		}
 		self.httpServers = append(self.httpServers, httpServer)
-		self.serve(httpServer)
+		if err := self.serve(httpServer); err != nil {
+			return nil, err
+		}
 
 		self.wsUrls = append(self.wsUrls, fmt.Sprintf("ws://127.0.0.1:%d", wsPort))
 		self.wsPorts[wsPort] = true
@@ -200,11 +227,23 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		Handler: router.NewRouter(serviceCtx, api.Routes()),
 	}
 	self.httpServers = append(self.httpServers, apiServer)
-	self.serve(apiServer)
+	if err := self.serve(apiServer); err != nil {
+		return nil, err
+	}
 	self.apiUrl = fmt.Sprintf("http://127.0.0.1:%d", servicesConfig.ApiPort)
 
+	self.wg.Add(1)
+	go func() {
+		defer self.wg.Done()
+		ticker := time.NewTicker(min(5*time.Second, model.NetworkClientHandlerHeartbeatTimeout/2))
+		defer ticker.Stop()
+		self.runHandlerHeartbeats(serviceCtx, ticker.C, model.HeartbeatNetworkClientHandler)
+	}()
+
 	if err := self.waitReachable(serviceCtx, servicesConfig); err != nil {
-		self.Close()
+		return nil, err
+	}
+	if err := serviceCtx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -224,6 +263,53 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 	return self, nil
 }
 
+// Mirrors ConnectRouter's production registration before the first connection.
+// The services owner retains even a partially initialized host for cleanup.
+func (self *Services) newConnectHandler(
+	ctx context.Context,
+	exchange *connectserver.Exchange,
+	settings *connectserver.ConnectHandlerSettings,
+) *connectserver.ConnectHandler {
+	handlerId := model.CreateNetworkClientHandler(ctx)
+	self.handlerIds = append(self.handlerIds, handlerId)
+	handler := connectserver.NewConnectHandler(ctx, handlerId, exchange, settings)
+	self.handlers = append(self.handlers, handler)
+	return handler
+}
+
+// Uses the production heartbeat operation and cadence, but joins this worker
+// before deleting owned registrations. An explicit tick source lets tests
+// force refresh and shutdown ordering without waiting for wall-clock expiry.
+func (self *Services) runHandlerHeartbeats(
+	ctx context.Context,
+	ticks <-chan time.Time,
+	heartbeat func(context.Context, server.Id) error,
+) {
+	server.HandleError(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-ticks:
+				if !ok || ctx.Err() != nil {
+					return
+				}
+			}
+			for _, handlerId := range self.handlerIds {
+				if ctx.Err() != nil {
+					return
+				}
+				server.Raise(heartbeat(ctx, handlerId))
+			}
+		}
+	}, func(err error) {
+		if ctx.Err() == nil {
+			self.recordError(fmt.Errorf("simulation handler heartbeat: %w", err))
+			self.cancel()
+		}
+	})
+}
+
 func validateServicesConfig(config *ServicesConfig) error {
 	if config == nil {
 		return errors.New("nil services config")
@@ -241,14 +327,22 @@ func validateServicesConfig(config *ServicesConfig) error {
 	return nil
 }
 
-func (self *Services) serve(httpServer *http.Server) {
+// Binds synchronously so another process's successful /status cannot make a
+// failed simulator listener appear ready. The worker owns the bound listener.
+func (self *Services) serve(httpServer *http.Server) error {
+	listener, err := net.Listen("tcp", httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listen for simulation HTTP service: %w", err)
+	}
 	self.wg.Add(1)
 	go func() {
 		defer self.wg.Done()
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			self.recordError(err)
+			self.cancel()
 		}
 	}()
+	return nil
 }
 
 func (self *Services) recordError(err error) {
@@ -338,11 +432,21 @@ func (self *Services) ApiUrl() string        { return self.apiUrl }
 func (self *Services) WsUrls() []string      { return self.wsUrls }
 func (self *Services) WsPorts() map[int]bool { return self.wsPorts }
 
+// Cancels and joins all owned work before withdrawing handler registrations.
 func (self *Services) Close() error {
+	return self.closeWithWorkerJoin(self.wg.Wait)
+}
+
+// Keeps the join itself injectable so shutdown ordering can be tested at the
+// exact boundary, without racing a database query against cleanup.
+func (self *Services) closeWithWorkerJoin(joinWorkers func()) error {
 	self.closeOnce.Do(func() {
 		self.cancel()
 		drainCtx, cancel := context.WithTimeout(context.Background(), servicesDrainTimeout)
 		defer cancel()
+		for _, handler := range self.handlers {
+			handler.Close()
+		}
 		for _, httpServer := range self.httpServers {
 			if err := httpServer.Shutdown(drainCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				self.recordError(fmt.Errorf("HTTP shutdown: %w", err))
@@ -354,13 +458,37 @@ func (self *Services) Close() error {
 		for _, exchange := range self.exchanges {
 			exchange.Close()
 		}
+		for i, handler := range self.handlers {
+			if !handler.WaitForIdle(drainCtx) {
+				self.recordError(fmt.Errorf("connect handler %d did not drain within %s", i, servicesDrainTimeout))
+			}
+		}
 		for i, exchange := range self.exchanges {
 			if !exchange.WaitForIdle(drainCtx) {
 				self.recordError(fmt.Errorf("exchange %d did not drain within %s", i, servicesDrainTimeout))
 			}
 		}
+		joinWorkers()
+		if len(self.handlerIds) != 0 {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), servicesDrainTimeout)
+			defer cleanupCancel()
+			server.HandleError(func() {
+				server.Tx(cleanupCtx, func(tx server.PgTx) {
+					// As in handler expiry, keep history but withdraw any connection
+					// whose asynchronous announce had not yet persisted its close.
+					server.RaisePgResult(tx.Exec(cleanupCtx, `
+						UPDATE network_client_connection SET connected = false, disconnect_time = $2
+						WHERE handler_id = ANY($1) AND connected = true
+					`, self.handlerIds, server.NowUtc()))
+					server.RaisePgResult(tx.Exec(cleanupCtx, `
+						DELETE FROM network_client_handler WHERE handler_id = ANY($1)
+					`, self.handlerIds))
+				})
+			}, func(err error) {
+				self.recordError(fmt.Errorf("simulation handler cleanup: %w", err))
+			})
+		}
 	})
-	self.wg.Wait()
 	self.errLock.Lock()
 	defer self.errLock.Unlock()
 	return self.runErr
