@@ -25,8 +25,22 @@ var prewarmedDevicesGauge = prometheus.NewGauge(
 	},
 )
 
+// devicesActiveGauge is the installed devices with client activity inside the
+// activity window, which is what "active proxy devices" means on the proxy
+// dashboard: a device that exists but has moved nothing recently is live,
+// not active. Refreshed on the activity flush cadence.
+var devicesActiveGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "devices_active",
+		Help:      "Installed proxy devices with client activity inside the activity window",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(prewarmedDevicesGauge)
+	prometheus.MustRegister(devicesActiveGauge)
 }
 
 // StartActivityFlusher periodically records this instance's recently active
@@ -44,6 +58,8 @@ func StartActivityFlusher(
 	proxyHost := server.RequireHost()
 	block := server.RequireBlock()
 	updateProxyDeviceMemoryGauges(proxyDeviceManager.DeviceMemoryUsage())
+	// nothing has been active yet; a zero is truer than an absent series
+	devicesActiveGauge.Set(0)
 
 	go server.HandleError(func() {
 		for {
@@ -59,6 +75,7 @@ func StartActivityFlusher(
 			// active since the previous flush is (re)recorded
 			window := 2 * settings.ActivityFlushTimeout
 			proxyIds := proxyDeviceManager.ActiveProxyIds(window)
+			devicesActiveGauge.Set(float64(len(proxyIds)))
 			if len(proxyIds) == 0 {
 				continue
 			}
