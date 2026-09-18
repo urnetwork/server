@@ -45,6 +45,8 @@ type sourceRepositories struct {
 	Goidenticons  sourceRepository `yaml:"goidenticons"`
 	Userwireguard sourceRepository `yaml:"userwireguard"`
 	Sn            sourceRepository `yaml:"sn"`
+	OperatorProxy sourceRepository `yaml:"operator-proxy"`
+	Warp          sourceRepository `yaml:"warp"`
 }
 
 // sourceRepositoryNames returns every repository copied into and built by the
@@ -59,20 +61,24 @@ func sourceRepositoryNames() []string {
 		"goidenticons",
 		"userwireguard",
 		"sn",
+		"operator-proxy",
+		"warp",
 	}
 }
 
 // commits returns the complete evaluation-source identity for one epoch.
 func (self sourceRepositories) commits() map[string]string {
 	return map[string]string{
-		"server":        self.Server.Commit,
-		"connect":       self.Connect.Commit,
-		"sdk":           self.Sdk.Commit,
-		"proxy":         self.Proxy.Commit,
-		"glog":          self.Glog.Commit,
-		"goidenticons":  self.Goidenticons.Commit,
-		"userwireguard": self.Userwireguard.Commit,
-		"sn":            self.Sn.Commit,
+		"server":         self.Server.Commit,
+		"connect":        self.Connect.Commit,
+		"sdk":            self.Sdk.Commit,
+		"proxy":          self.Proxy.Commit,
+		"glog":           self.Glog.Commit,
+		"goidenticons":   self.Goidenticons.Commit,
+		"userwireguard":  self.Userwireguard.Commit,
+		"sn":             self.Sn.Commit,
+		"operator-proxy": self.OperatorProxy.Commit,
+		"warp":           self.Warp.Commit,
 	}
 }
 

@@ -128,7 +128,7 @@ source_identity="$source_root/.evaluation-source.json"
 }
 jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
     --arg source_lock_sha256 "$source_lock_sha256" \
-    --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn"]' \
+    --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' \
     '. as $identity |
      .schema == 1 and .kind == "sim-latency-evaluation-source" and
      .temporary == true and .base_image_id == $base_image_id and
@@ -142,7 +142,7 @@ jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
         printf 'evaluation source identity does not match the base image\n' >&2
         exit 1
     }
-for repository in server connect sdk proxy glog goidenticons userwireguard sn; do
+for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do
     repository_root="$source_root/$repository"
     [ -d "$repository_root/.git" ] && [ ! -L "$repository_root" ] || {
         printf 'evaluation source repository is missing or unsafe: %s\n' "$repository" >&2

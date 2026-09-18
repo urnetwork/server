@@ -121,8 +121,14 @@ verify_staging_source() {
     local record
     record=$("$(sim_binary)" staging-source-check --epoch=0 \
         --source-config="$source_config" --repos-root="$workspace_root")
-    jq -e '.schema == 1 and .epoch == 0 and .branch == "sim-latency-staging" and
-        (.repositories | type == "object" and length == 8)' <<<"$record" >/dev/null ||
+    jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' '
+        . as $record |
+        .schema == 1 and .epoch == 0 and .branch == "sim-latency-staging" and
+        (.repositories | type == "object") and
+        ((.repositories | keys) == ($repositories | sort)) and
+        ($repositories | all(. as $repository |
+            $record.repositories[$repository] | type == "string" and test("^[0-9a-f]{40}$")))
+        ' <<<"$record" >/dev/null ||
         fail "staging source check returned an invalid identity"
     write_evidence "staging-source.json" "$record"
 }

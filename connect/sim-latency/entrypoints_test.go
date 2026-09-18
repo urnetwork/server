@@ -47,6 +47,9 @@ type launchPlaybook struct {
 		Ordering            string `yaml:"ordering"`
 		NormalizedScoreRole string `yaml:"normalized_score_role"`
 	} `yaml:"honesty_review"`
+	EvaluationSource struct {
+		Repositories []string `yaml:"repositories"`
+	} `yaml:"evaluation_source"`
 	Checklist []struct {
 		Id     string `yaml:"id"`
 		Status string `yaml:"status"`
@@ -242,11 +245,19 @@ func TestRunMainAdvancesAndExplicitlyReplacesStagingRounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		binaryPath := filepath.Join(t.TempDir(), "sim-latency")
+		sourceRecordBytes, err := json.Marshal(sourceRecord{
+			Schema:       1,
+			Epoch:        0,
+			Branch:       stagingEvaluationSourceBranch,
+			Repositories: sourceTestCommits(strings.Repeat("a", 40)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		binaryFixture := `#!/usr/bin/env bash
 set -euo pipefail
 [[ ${1:-} == staging-source-check ]]
-printf '%s\n' '{"schema":1,"epoch":0,"branch":"sim-latency-staging","repositories":{"server":"a","connect":"b","sdk":"c","proxy":"d","glog":"e","goidenticons":"f","userwireguard":"g","sn":"h"}}'
-`
+printf '%s\n' '` + string(sourceRecordBytes) + "'\n"
 		if err := os.WriteFile(binaryPath, []byte(binaryFixture), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -313,6 +324,9 @@ func TestLaunchPlaybookFreezesWeeklySixEpochContract(t *testing.T) {
 	if playbook.HonestyReview.Ordering != "raw_score_asc_submitted_at_job_id" ||
 		playbook.HonestyReview.NormalizedScoreRole != "display_only" {
 		t.Fatalf("launch ranking policy is not frozen: %+v", playbook.HonestyReview)
+	}
+	if strings.Join(playbook.EvaluationSource.Repositories, " ") != strings.Join(sourceRepositoryNames(), " ") {
+		t.Fatalf("playbook source repositories = %v, want %v", playbook.EvaluationSource.Repositories, sourceRepositoryNames())
 	}
 	statuses := map[string]string{}
 	for _, item := range playbook.Checklist {

@@ -321,6 +321,8 @@ func sourceRepositoriesFromCommits(repositoryCommits map[string]string) sourceRe
 		Goidenticons:  sourceRepository{Commit: repositoryCommits["goidenticons"]},
 		Userwireguard: sourceRepository{Commit: repositoryCommits["userwireguard"]},
 		Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
+		OperatorProxy: sourceRepository{Commit: repositoryCommits["operator-proxy"]},
+		Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
 	}
 }
 

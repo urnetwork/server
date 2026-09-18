@@ -3,8 +3,8 @@
 `run-main.sh` is the fail-closed agent harness for the six-epoch competition.
 It drives the continuously deployed main API and one-shot worker while keeping
 the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
-`glog`, `goidenticons`, `userwireguard`, and `sn`—isolated in temporary
-clones. Every repository is pinned per epoch on its `sim-latency` branch.
+`glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`—isolated
+in temporary clones. Every repository is pinned per epoch on its `sim-latency` branch.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
@@ -33,20 +33,28 @@ the worker is run from this host. Set an exact control-plane image identity in
 `WARP_IMAGE_DIGEST`; this is recorded per evaluation but is not a scoring input.
 
 Every epoch checkpoint in `config/main/sim-latency.yml` must list exactly these
-eight repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
-`goidenticons`, `userwireguard`, and `sn`. Each commit must be reachable from
-that repository's remote `sim-latency` branch, and the active epoch commit must
+ten repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`. Each commit
+must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
 Before staging, each repository must also expose a `sim-latency-staging` branch
-whose head exactly equals its epoch-zero commit. The harness verifies all eight
+whose head exactly equals its epoch-zero commit. The harness verifies all ten
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
 the name used for pre-production coordination while retaining the exact frozen
 baseline source content and evaluator protocol. A reviewed evaluator repair is
 a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
+
+The current server module graph requires `operator-proxy` and `warp` in addition
+to the earlier eight repositories. Current tools reject incomplete checkpoints
+and source locks; they never infer the two missing commits. Prepare a reviewed
+complete checkpoint, matching remote aliases, and a new evaluator image at the
+drained release boundary. Preserve old eight-repository images, locks, baseline
+artifacts, and round evidence as historical records; do not rewrite them to
+claim the new source identity.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -114,7 +122,7 @@ on `main`. Pulling the API/worker cannot repair such an evaluator.
 
 For the approved epoch-5 repair, Astra max owns the source pull/merge and release
 review; Terra medium owns independent regression and image validation. Require
-the relevant tests to exist and pass in the image build, review all eight
+the relevant tests to exist and pass in the image build, review all ten
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
 while epoch 4 is open or draining. After it finalizes, verify the replacement
@@ -202,7 +210,7 @@ with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
-patch, clones all eight locked repositories into a new temporary directory,
+patch, clones all ten locked repositories into a new temporary directory,
 checks out the frozen `sim-latency` branch heads, applies the winner to the
 evaluated server surface, verifies every dependency and the protected runner
 tree are unchanged, pushes changed source branches, and pushes the config ledger

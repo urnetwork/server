@@ -41,8 +41,8 @@ still needed to activate the competition through Apex.
   honest significant candidate wins; if none remains, there is no winner and
   the source commits and threshold carry forward.
 - Every epoch locks the `sim-latency` branches of `server`, `connect`, `sdk`,
-  `proxy`, `glog`, `goidenticons`, `userwireguard`, and `sn`. A winning canonical
-  patch changes only the evaluated server-tree surface; unchanged repository
+  `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and
+  `warp`. A winning canonical patch changes only the evaluated server-tree surface; unchanged repository
   commits carry forward. The main API and worker remain continuously maintained
   control-plane services.
 

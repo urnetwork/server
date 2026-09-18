@@ -69,6 +69,8 @@ evaluation_source:
     - goidenticons
     - userwireguard
     - sn
+    - operator-proxy
+    - warp
   canonical_patch_repository: server
   round_source_epoch_offset: -1
   promotion_command: sim-latency promote

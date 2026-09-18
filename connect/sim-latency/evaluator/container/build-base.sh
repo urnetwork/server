@@ -89,7 +89,7 @@ install -m 0555 "$SCRIPT_DIR/entrypoint.sh" "$build_context/evaluator/entrypoint
 install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_context/evaluator/official-run.sh"
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
-readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)
+readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)
 declare -A revisions
 
 source_record=""
@@ -112,7 +112,7 @@ if [ "$include_worktree" = false ]; then
     fi
     jq -e \
         --argjson epoch "$source_epoch" \
-        --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn"]' \
+        --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' \
         '.schema == 1 and .epoch == $epoch and .branch == "sim-latency" and
          (.significant_improvement_percent | type == "number" and . > 0 and . <= 50) and
          (($record.repositories | keys) == ($repositories | sort)) and
@@ -183,11 +183,14 @@ jq -n \
     --arg goidenticons "${revisions[goidenticons]}" \
     --arg userwireguard "${revisions[userwireguard]}" \
     --arg sn "${revisions[sn]}" \
+    --arg operator_proxy "${revisions[operator-proxy]}" \
+    --arg warp "${revisions[warp]}" \
     --argjson development_snapshot "$include_worktree" \
     '{schema: 1, development_snapshot: $development_snapshot,
       repositories: {server: $server, connect: $connect, proxy: $proxy,
       sdk: $sdk, glog: $glog, goidenticons: $goidenticons,
-      userwireguard: $userwireguard, sn: $sn}}' \
+      userwireguard: $userwireguard, sn: $sn,
+      "operator-proxy": $operator_proxy, warp: $warp}}' \
     > "$build_context/source-lock.json"
 
 base_sha="${revisions[server]}"

@@ -64,7 +64,7 @@ the release evidence:
 4. successful structural validation and offline vet/compile for all three
    reference patches;
 5. a clean source lock across `server`, `connect`, `sdk`, `proxy`, `glog`,
-   `goidenticons`, `userwireguard`, and `sn`.
+   `goidenticons`, `userwireguard`, `sn`, `operator-proxy`, and `warp`.
 
 `TestExamplePatchPolicyMatchesReviewedSurface` fails if the literal surface is
 widened or if protected local/all configuration and vault paths become

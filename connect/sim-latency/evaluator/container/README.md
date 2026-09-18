@@ -26,8 +26,8 @@ trusted baseline and scorer continue to execute from the pristine base image.
 
 For every evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
-and `sn` repositories out of that authenticated base image into a bounded
-temporary directory. It checks out a local
+`sn`, `operator-proxy`, and `warp` repositories out of that authenticated base
+image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
 changing any host repository checkout. Baseline and candidate have distinct
 trees; the builder applies the canonical patch only to the candidate tree.

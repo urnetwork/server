@@ -123,9 +123,9 @@ source commits and percentage carry forward unchanged.
 
 The complete local-module graph that can affect the measured product is frozen
 by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
-`userwireguard`, and `sn`, all on branch `sim-latency`. The first four are the
-product roots, the next three are their reachable UR dependencies, and `sn` is
-also a server dependency and evaluator build input. The trusted API and worker
+`userwireguard`, `sn`, `operator-proxy`, and `warp`, all on branch `sim-latency`.
+The first four are the product roots; the remaining six are required local
+dependencies and evaluator build inputs. The trusted API and worker
 continue on `main`; they record their runtime image digests per evaluation but
 their source commits are not scoring inputs.
 
@@ -176,7 +176,7 @@ Only after review finalizes the epoch does the external control loop run one of:
 ./run-local-main.sh promote --epoch N --no-winner
 ```
 
-Promotion creates one temporary root and clones all eight locked repositories
+Promotion creates one temporary root and clones all ten locked repositories
 into it. It checks out each `sim-latency` branch at the prior epoch, applies and
 commits the winner to the evaluated server surface, verifies every dependency
 remains unchanged, pushes changed source branches first, and activates the new
@@ -204,7 +204,7 @@ With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and
 `./run-main.sh advance-staging` closes admission, evaluates every accepted FIFO
 submission through finalization and reveal, then creates the next open epoch.
-Its source preflight requires all eight remote `sim-latency-staging` branches
+Its source preflight requires all ten remote `sim-latency-staging` branches
 to exactly alias the frozen epoch-zero commits. `staging-worker` remains the
 natural-window variant. `staging --replace-current` is an explicit reset that
 refuses to run while an evaluation is active. Committing production epoch 1

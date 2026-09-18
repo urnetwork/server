@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,6 +81,8 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 					Goidenticons:  sourceRepository{Commit: repositoryCommits["goidenticons"]},
 					Userwireguard: sourceRepository{Commit: repositoryCommits["userwireguard"]},
 					Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
+					OperatorProxy: sourceRepository{Commit: repositoryCommits["operator-proxy"]},
+					Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
 				},
 			}},
 		},
@@ -286,7 +289,7 @@ func TestSourceManifestRejectsMissingRepositoryCommit(t *testing.T) {
 }
 
 func TestSourceManifestRejectsMissingDependencyCommits(t *testing.T) {
-	for _, repository := range []string{"glog", "goidenticons", "userwireguard", "sn"} {
+	for _, repository := range []string{"glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"} {
 		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
 		repositoryCommits[repository] = ""
 		err := validateSourceManifest(sourceTestManifest(repositoryCommits))
@@ -319,10 +322,30 @@ func TestEvaluatorSourceLockRequiresCompleteRepositorySet(t *testing.T) {
 	}
 }
 
+// Reject extra names even when one has replaced a missing required dependency.
+func TestEvaluatorSourceLockRejectsUnexpectedRepositories(t *testing.T) {
+	for _, omittedRepository := range []string{"", "operator-proxy", "warp"} {
+		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
+		delete(repositoryCommits, omittedRepository)
+		repositoryCommits["unexpected"] = strings.Repeat("b", 40)
+		lockBytes, err := json.Marshal(evaluatorSourceLock{Schema: 1, Repositories: repositoryCommits})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lockPath := filepath.Join(t.TempDir(), "source-lock.json")
+		if err := os.WriteFile(lockPath, lockBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadEvaluatorSourceLock(lockPath); err == nil {
+			t.Errorf("unexpected repository accepted with omitted repository %q", omittedRepository)
+		}
+	}
+}
+
 func TestSourceRepositoriesFromCommitsPreservesCompleteRepositorySet(t *testing.T) {
 	repositoryCommits := map[string]string{}
 	for index, repository := range sourceRepositoryNames() {
-		repositoryCommits[repository] = strings.Repeat(string(rune('1'+index)), 40)
+		repositoryCommits[repository] = fmt.Sprintf("%040x", index+1)
 	}
 	got := sourceRepositoriesFromCommits(repositoryCommits).commits()
 	if len(got) != len(repositoryCommits) {

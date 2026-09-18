@@ -9,7 +9,7 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
 
-readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)
+readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)
 
 base_image=""
 destination=""
@@ -110,7 +110,7 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
     printf 'evaluator source lock digest mismatch\n' >&2
     exit 1
 }
-jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn"]' '
+jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","operator-proxy","warp"]' '
     type == "object" and .schema == 1 and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and
@@ -158,11 +158,14 @@ jq -nS \
     --arg goidenticons "$(git -C "$destination/goidenticons" rev-parse HEAD)" \
     --arg userwireguard "$(git -C "$destination/userwireguard" rev-parse HEAD)" \
     --arg sn "$(git -C "$destination/sn" rev-parse HEAD)" \
+    --arg operator_proxy "$(git -C "$destination/operator-proxy" rev-parse HEAD)" \
+    --arg warp "$(git -C "$destination/warp" rev-parse HEAD)" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
       branch:"sim-latency",source_lock_sha256:$source_lock_sha256,
       repositories:{server:$server,connect:$connect,sdk:$sdk,proxy:$proxy,
-        glog:$glog,goidenticons:$goidenticons,userwireguard:$userwireguard,sn:$sn},
+        glog:$glog,goidenticons:$goidenticons,userwireguard:$userwireguard,sn:$sn,
+        "operator-proxy":$operator_proxy,warp:$warp},
       candidate_patch_sha256:null}' > "$identity_path"
 chmod 0400 "$identity_path"
 rm -f -- "$source_lock_path"

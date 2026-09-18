@@ -662,7 +662,8 @@ and prior percentage unchanged, and is rejected unless the round finalized
 without a winner.
 
 The command creates one additional temporary root and freshly clones `server`,
-`connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, and `sn`.
+`connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`,
+`operator-proxy`, and `warp`.
 It checks out every `sim-latency` branch at the prior epoch commit, applies the
 winner only to the evaluated server-tree surface, and verifies all dependency
 commits remain unchanged. The long-lived local checkouts are discovery-only

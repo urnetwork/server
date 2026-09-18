@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,7 +150,7 @@ func TestHandoffManifestAuthenticatesEveryLocalInput(t *testing.T) {
 	temporaryRoot := t.TempDir()
 	commits := map[string]string{}
 	for index, repositoryName := range sourceRepositoryNames() {
-		commits[repositoryName] = strings.Repeat(string(rune('1'+index)), 40)
+		commits[repositoryName] = fmt.Sprintf("%040x", index+1)
 	}
 	sourcePath := filepath.Join(temporaryRoot, "sim-latency.yml")
 	writeSourceTestManifest(t, sourcePath, sourceTestManifest(commits))
