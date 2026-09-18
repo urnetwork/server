@@ -288,6 +288,9 @@ type stripeReconcileTestEnv struct {
 	fullInvoices   map[string]map[string]any
 	failList       bool
 	statusRequests atomic.Int64
+	// Overrides exercise invalid, partial, and failed destination lookups.
+	checkoutResponse any
+	checkoutStatus   int
 
 	testServer *httptest.Server
 }
@@ -318,6 +321,18 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(invoice)
+	})
+	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if env.checkoutStatus != 0 {
+			http.Error(w, "synthetic checkout lookup failure", env.checkoutStatus)
+			return
+		}
+		response := env.checkoutResponse
+		if response == nil {
+			response = map[string]any{"data": []any{}, "has_more": false}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	})
 	env.testServer = httptest.NewServer(mux)
 

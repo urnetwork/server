@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -569,18 +570,31 @@ type StripeInvoiceExpanded struct {
 	} `json:"subscription"`
 }
 
-func stripeHandleInvoicePaid(
-	invoice *StripeEventInvoiceObject,
+// Complete destination reads found no account. This is distinct from a named
+// account's deletion and from incomplete provider or database observations.
+var errStripeInvoiceDestinationUnresolved = errors.New("stripe invoice destination unresolved")
+
+// Read-only input shared by real credits and reconciliation dry runs.
+type stripeInvoiceCredit struct {
+	networkId      server.Id
+	subscriptionId string
+	startTime      time.Time
+	endTime        time.Time
+	emailFallback  bool
+	customerEmail  string
+}
+
+// Resolves the existing metadata, checkout-reference, then legacy-email order.
+// A nil result means a non-subscription invoice, not an unresolved destination.
+func stripeResolveInvoiceCredit(
+	invoiceId string,
 	clientSession *session.ClientSession,
-) (*StripeWebhookResult, error) {
+) (*stripeInvoiceCredit, error) {
 
-	invoiceId := invoice.Id
-	total := invoice.Total
-
-	url := fmt.Sprintf("%s/v1/invoices/%s?expand[]=subscription&expand[]=customer", stripeApiBaseUrl, invoiceId)
+	invoiceUrl := fmt.Sprintf("%s/v1/invoices/%s?expand[]=subscription&expand[]=customer", stripeApiBaseUrl, url.PathEscape(invoiceId))
 	fullInvoice, err := server.HttpGetRequireStatusOk[*StripeInvoiceExpanded](
 		clientSession.Ctx,
-		url,
+		invoiceUrl,
 		func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
 		},
@@ -589,6 +603,9 @@ func stripeHandleInvoicePaid(
 	if err != nil {
 		glog.Errorf("Failed to fetch invoice details: %v", err)
 		return nil, fmt.Errorf("failed to fetch invoice details: %v", err)
+	}
+	if fullInvoice == nil {
+		return nil, errors.New("missing expanded Stripe invoice")
 	}
 
 	var subscriptionId string
@@ -627,12 +644,12 @@ func stripeHandleInvoicePaid(
 
 	if !isSubscription {
 		glog.Infof("Invoice is not for a subscription")
-		return &StripeWebhookResult{}, nil
+		return nil, nil
 	}
 
 	if subscriptionId == "" {
 		glog.Infof("Invoice does not have a subscription in its line items")
-		return &StripeWebhookResult{}, nil
+		return nil, nil
 	}
 
 	var networkId *server.Id
@@ -674,28 +691,42 @@ func stripeHandleInvoicePaid(
 		// guess (see below).
 
 		// Get the checkout session using the subscription ID
-		url = fmt.Sprintf("%s/v1/checkout/sessions?subscription=%s", stripeApiBaseUrl, subscriptionId)
-		sessionsResp, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		sessionsUrl := fmt.Sprintf("%s/v1/checkout/sessions?subscription=%s&limit=100", stripeApiBaseUrl, url.QueryEscape(subscriptionId))
+		type checkoutSessionList struct {
+			Data []*struct {
+				Id                string  `json:"id"`
+				ClientReferenceId *string `json:"client_reference_id"`
+			} `json:"data"`
+			HasMore *bool `json:"has_more"`
+		}
+		sessionsResp, err := server.HttpGetRequireStatusOk[*checkoutSessionList](
 			clientSession.Ctx,
-			url,
+			sessionsUrl,
 			func(header http.Header) {
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
 			},
-			server.ResponseJsonObject[map[string]interface{}],
+			server.ResponseJsonObject[*checkoutSessionList],
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
 		}
 
-		if dataArray, ok := sessionsResp["data"].([]interface{}); ok && len(dataArray) > 0 {
-			if session, ok := dataArray[0].(map[string]interface{}); ok {
-				if clientRefId, ok := session["client_reference_id"].(string); ok {
-					id, err := server.ParseId(clientRefId)
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse id err=%v id=%s", err, clientRefId)
-					}
-					networkId = &id
+		if sessionsResp == nil || sessionsResp.Data == nil || sessionsResp.HasMore == nil || *sessionsResp.HasMore {
+			return nil, errors.New("incomplete Stripe checkout session destination evidence")
+		}
+		for _, checkout := range sessionsResp.Data {
+			if checkout == nil || checkout.Id == "" {
+				return nil, errors.New("missing Stripe checkout session destination evidence")
+			}
+			if checkout.ClientReferenceId != nil && *checkout.ClientReferenceId != "" {
+				id, err := server.ParseId(*checkout.ClientReferenceId)
+				if err != nil {
+					return nil, fmt.Errorf("invalid Stripe checkout session destination: %w", err)
 				}
+				if networkId != nil && *networkId != id {
+					return nil, errors.New("conflicting Stripe checkout session destinations")
+				}
+				networkId = &id
 			}
 		}
 	}
@@ -731,23 +762,52 @@ func stripeHandleInvoicePaid(
 
 	}
 
-	feeFraction := 0.3
-	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(total) / 100.0)
-
-	startTime := time.Unix(periodStart, 0)
-	endTime := time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod)
-
 	if networkId == nil {
-		return nil, fmt.Errorf("could not find network for invoice %s", invoiceId)
+		// Only complete expanded identities can prove a legacy invoice has no
+		// owner. Missing expansion fields are schema failures to retry instead.
+		if fullInvoice.Subscription == nil || fullInvoice.Subscription.ID != subscriptionId ||
+			fullInvoice.Customer == nil || fullInvoice.Customer.Id == "" {
+			return nil, errors.New("incomplete Stripe invoice destination evidence")
+		}
+		return nil, fmt.Errorf("%w for invoice %s", errStripeInvoiceDestinationUnresolved, invoiceId)
 	}
+	credit := &stripeInvoiceCredit{
+		networkId:      *networkId,
+		subscriptionId: subscriptionId,
+		startTime:      time.Unix(periodStart, 0),
+		endTime:        time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod),
+		emailFallback:  emailFallback,
+	}
+	if emailFallback {
+		credit.customerEmail = fullInvoice.Customer.Email
+	}
+	return credit, nil
+}
+
+// Credits through the same lifecycle and invoice ledger gate for webhook and
+// reconciliation delivery. Destination reads are shared with dry-run reports.
+func stripeHandleInvoicePaid(
+	invoice *StripeEventInvoiceObject,
+	clientSession *session.ClientSession,
+) (*StripeWebhookResult, error) {
+	credit, err := stripeResolveInvoiceCredit(invoice.Id, clientSession)
+	if err != nil {
+		return nil, err
+	}
+	if credit == nil {
+		return &StripeWebhookResult{}, nil
+	}
+	invoiceId := invoice.Id
+	feeFraction := 0.3
+	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
 
 	credited, err := stripeCreditInvoicePaid(
 		clientSession.Ctx,
-		*networkId,
+		credit.networkId,
 		invoiceId,
 		netRevenue,
-		startTime,
-		endTime,
+		credit.startTime,
+		credit.endTime,
 	)
 	if err != nil {
 		glog.Infof("Error processing invoice paid: %v", err)
@@ -758,17 +818,17 @@ func stripeHandleInvoicePaid(
 	// is an operator-visible audit row. Only on an actual credit -- a
 	// redelivery of an already-credited invoice re-resolves the email but must
 	// not inflate the count. The audit write must never fail the credit.
-	if credited && emailFallback {
+	if credited && credit.emailFallback {
 		if eventErr := model.AddPaymentReconciliationEvent(clientSession.Ctx, &model.PaymentReconciliationEvent{
 			RunId:     server.NewId(),
 			Store:     model.SubscriptionMarketStripe,
-			NetworkId: networkId,
+			NetworkId: &credit.networkId,
 			Action:    model.PaymentReconcileActionEmailFallback,
 			Evidence:  invoiceId,
 			Details: map[string]any{
-				"subscription":   subscriptionId,
+				"subscription":   credit.subscriptionId,
 				"resolution":     "customer_email",
-				"customer_email": fullInvoice.Customer.Email,
+				"customer_email": credit.customerEmail,
 			},
 		}); eventErr != nil {
 			glog.Errorf("[sub]invoice %s: could not record email_fallback event: %s\n", invoiceId, eventErr)

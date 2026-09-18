@@ -31,9 +31,9 @@ const (
 	PaymentReconcileActionSkippedStore           = "skipped_store"
 	PaymentReconcileActionHeartbeat              = "heartbeat"
 	PaymentReconcileActionError                  = "error"
-	// Stripe listed a paid invoice whose destination was deleted before the
-	// ledger-gated credit. This is a durable operator-disposition event, not a
-	// provider/listing error and not a successful credit.
+	// Stripe listed a paid invoice whose destination is deleted or unresolved
+	// after complete authority reads. This is a durable operator-disposition
+	// event, not a provider/listing error and not a successful credit.
 	PaymentReconcileActionCreditUnfulfillable = "credit_unfulfillable"
 )
 

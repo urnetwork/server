@@ -93,6 +93,50 @@ func TestPaymentReconciliationFindsPerStoreSkipErrorAndStaleWatermark(t *testing
 	}
 }
 
+// Successful scheduling and sibling stores cannot identify which Stripe stage
+// prevented its watermark from advancing, including old terminal handling.
+func TestPaymentReconciliationStalledStripeCreditPreservesStageUncertainty(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "432000", "0", "6", "600", "1", "0", "0"},
+		},
+		nil,
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("stalled Stripe alerts = %d, want only store-error and watermark-stale: %+v", len(alerts), alerts)
+	}
+	requireAlertClass(t, alerts, "payment-reconciliation-store-error")
+	requireAlertClass(t, alerts, "payment-reconciliation-watermark-stale")
+	for _, alert := range alerts {
+		if alert.Target != "stripe" || alert.Severity != SeverityPage {
+			t.Fatalf("stalled Stripe misclassified as another store or severity: %+v", alert)
+		}
+		rendered := alert.Markdown()
+		for _, expected := range []string{
+			"listing may already have succeeded",
+			"per-invoice credit",
+			"executing Taskworker source",
+			"both destination_deleted and destination_unresolved",
+			"mandatory audit persistence",
+		} {
+			if !strings.Contains(rendered, expected) {
+				t.Errorf("stalled Stripe %s omits %q:\n%s", alert.Class, expected, rendered)
+			}
+		}
+		if strings.Contains(rendered, "proves the authoritative listing is not completing") {
+			t.Errorf("stalled Stripe %s incorrectly attributes an aggregate to provider listing:\n%s", alert.Class, rendered)
+		}
+		requireAlertOmits(t, alert, "in_synthetic_private_2099", "synthetic-account-id", "synthetic-provider-token")
+	}
+}
+
 func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
 	catalogBytes, err := os.ReadFile("SIGNALS.md")
 	if err != nil {
@@ -117,6 +161,9 @@ func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
 		"audit append is the only retained handle",
 		"keeps the watermark fixed",
 		"Successfully completed repair audit inserts remain best effort",
+		"`destination_unresolved`",
+		"Missing or malformed authority data",
+		"Incomplete checkout pagination",
 	} {
 		if !strings.Contains(section, expected) {
 			t.Errorf("SIGNALS.md §2.21 omits %q", expected)
@@ -227,7 +274,7 @@ func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
 	requireAlertOmits(t, alert, "synthetic-run-id", "synthetic-account-id", "synthetic-transaction-id")
 }
 
-func TestPaymentReconciliationSurfacesDeletedStripeDestinationOncePerEvidence(t *testing.T) {
+func TestPaymentReconciliationSurfacesUnfulfillableStripeDestinationOncePerEvidence(t *testing.T) {
 	source := paymentReconciliationSourceWithUnfulfillable(
 		[]Row{
 			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
@@ -254,6 +301,9 @@ func TestPaymentReconciliationSurfacesDeletedStripeDestinationOncePerEvidence(t 
 		"1 paid invoice destination(s)",
 		"distinct_evidence_24h=1 observations_24h=3 distinct_runs_24h=3",
 		"deleted before the ledger-gated credit",
+		"legacy-email resolution found no destination",
+		"incomplete pages",
+		"destination_unresolved",
 		"not a provider-listing failure",
 		"does not pin the store watermark",
 		"explicit authorized disposition",
@@ -273,7 +323,8 @@ func TestPaymentReconciliationSurfacesDeletedStripeDestinationOncePerEvidence(t 
 		"synthetic-provider-token",
 	)
 	if !strings.Contains(paymentReconciliationUnfulfillableQuery, "count(DISTINCT evidence)") ||
-		!strings.Contains(paymentReconciliationUnfulfillableQuery, "action = 'credit_unfulfillable'") {
+		!strings.Contains(paymentReconciliationUnfulfillableQuery, "action = 'credit_unfulfillable'") ||
+		!strings.Contains(paymentReconciliationUnfulfillableQuery, "COALESCE(details::jsonb ->> 'reason', '') NOT IN ('destination_deleted', 'destination_unresolved')") {
 		t.Fatal("unfulfillable query does not aggregate distinct terminal evidence")
 	}
 }

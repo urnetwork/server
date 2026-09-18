@@ -6560,6 +6560,18 @@ more in three hours. Authentication, provider availability, schema validation,
 budget exhaustion, and local persistence are separate discriminators; never
 advance a watermark merely to clear the alert.
 
+False-positive and false-negative qualifiers: a stale source age proves that
+the store has not recorded a successful complete pass; it does not identify
+the failed stage. Provider listing may have succeeded while per-invoice credit
+or terminal-audit persistence failed. A current global heartbeat, one clean
+recurring task, and fresh sibling-store watermarks do not establish Stripe
+health. Conversely, a stale Stripe watermark alone does not establish Stripe
+downtime, missing credentials, stopped scheduling, or a Grafana exporter
+failure. Join the same-window store/leg/reason counts to the executing
+Taskworker source before choosing the remedy. Keep provider objects, customer
+identities, stored error text, and credential values in restricted evidence;
+the probe exposes only aggregate counts and ages.
+
 `payment-reconciliation-repair` warns on every real `credited`/`ended`/
 `entitlement_repaired` repair whose run also emitted a reconciliation
 heartbeat. `entitlement_repaired` means the provider affirmatively reported an
@@ -6585,17 +6597,24 @@ transaction IDs, evidence, details, or credential values.
 
 `payment-reconciliation-credit-unfulfillable` is PAGE when at least one
 distinct provider evidence value identifies a paid Stripe invoice whose
-metadata destination was deleted before the ledger-gated credit obtained its
-lifecycle lock. That exact terminal condition writes `credit_unfulfillable`,
-not `error`: it consumes no `stripe_invoice` row, renewal, or balance and does
-not pin the Stripe watermark or suppress genuine provider, schema, transport,
-or database failures. Dry runs perform the same destination-existence check
-without mutation, but the monitor excludes their rows. Repeated hourly overlap
+destination is no longer creditable. `destination_deleted` means an explicit
+metadata or checkout destination was absent when the ledger-gated credit
+obtained its lifecycle lock. `destination_unresolved` means complete expanded
+invoice and checkout-session reads, followed by the existing legacy-email
+lookup where present, found no intended account. These exact terminal
+conditions write `credit_unfulfillable`, not `error`: each consumes no
+`stripe_invoice` row, renewal, or balance and does not pin the Stripe watermark
+or suppress genuine provider, schema, transport, or database failures. Missing
+or malformed authority data is not proof of an unresolved destination.
+Incomplete checkout pagination and conflicting checkout references remain
+errors and retain the watermark. Dry runs use the same read-only destination
+resolution and existence check, but the monitor excludes their rows. Repeated hourly overlap
 may audit the same evidence again, so the alert counts distinct evidence while
 retaining total observations and distinct runs. Finance and operations must
 explicitly disposition each payment from the restricted audit trail. Never
-recreate or retarget a deleted network, credit another owner, insert a ledger
-row, consume the evidence, or force a watermark from this aggregate. A later
+recreate or retarget a deleted network, guess an unresolved recipient, credit
+another owner, insert a ledger row, consume the evidence, or force a watermark
+from this aggregate. A later
 watermark advance, repeat observation, or alert aging out is not disposition
 proof. The alert never returns evidence, run/network/account IDs, details, or
 credentials.
@@ -6619,6 +6638,56 @@ deterministic real-run test requires two overlap passes to retain the audit,
 advance the natural watermark, and write no ledger/renewal/balance. Its dry-run
 control distinguishes a deleted destination from a live sibling and preserves
 all no-write and no-watermark semantics.
+
+The bounded 2026-09-18 discriminator found 16 Stripe credit errors in eight
+hours: eight deleted-destination failures and eight legacy destination lookup
+failures that completed without an account. These are event counts, not
+distinct payment counts. The hourly task continued,
+but each run's per-store errors prevented Stripe's last-success timestamp from
+advancing; the dashboard's 4.63-day source age therefore did not imply that
+the task had stopped. Source already classified the deleted-network sentinel
+as terminal, while the no-match legacy path still returned a generic error.
+Both source completeness and the deployed Taskworker generation must be
+verified before claiming recovery. The narrow extension uses a typed
+unresolved-destination error, retains mandatory terminal audit persistence,
+and makes dry-run destination resolution agree with real runs. Deterministic
+tests reproduce the stalled watermark, require natural advancement with
+durable evidence and no credit, and require audit failure, malformed or partial
+provider responses, invalid destinations, and HTTP failures to keep the
+watermark fixed. A terminal observation requires finance/operations
+disposition; reclassifying it does not settle or refund the payment.
+
+The rollout discriminator in that same audit was a fully converged but stale
+Taskworker artifact: each of two blocks returned the same deployed version
+`2026.9.14+1046068620` in all 20 samples. Its mapped build source `c2fa1d2b`
+predated `09b6edbd`, which added the deleted-destination terminal branch, and
+the observed credit errors retained the pre-correction classification. All
+eight processes exposed fresh source metrics with one digest and embedded
+revision `36a13c81`; `modified=true` qualifies exact source attribution and
+does not imply a build-policy fault. Convergence alone was therefore
+insufficient. Verify the executing artifact contains **both**
+`destination_deleted` and `destination_unresolved` classifications, the
+complete read-only resolution guards, and mandatory terminal-audit
+persistence. The current probe has no runtime capability gauge for these
+branches: absent `credit_unfulfillable` rows cannot distinguish old code from
+no terminal invoices, and a release label by itself does not prove capability.
+Use the existing `payment-reconciliation-store-error` and
+`payment-reconciliation-watermark-stale` findings until source/execution
+evidence establishes that discriminator; do not infer a new failure class
+from silence.
+
+This correction requires a Taskworker build containing both terminal branches
+and a refreshed monitor binary that accepts both audited reasons. It requires
+no database migration, Vault change, or Grafana deployment. After every
+Taskworker block has the correction, require two natural hourly runs with an
+advancing Stripe watermark, zero new Stripe skips/errors, and durable
+`credit_unfulfillable` evidence for any still-uncreditable invoice; keep true
+provider, schema, transport, budget, and audit-write failures blocking.
+Historical store errors still count until they leave the full three-hour
+window. Terminal invoice observations remain a separate finance/operations
+issue even after freshness recovers: repeated overlap observations are not
+new payments, and neither a fresh watermark nor expiration of the 24-hour
+alert window proves disposition.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
@@ -6702,8 +6771,9 @@ Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
 to `signal_payment_reconciliation.go` and
 `signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy
 four-store run, a store skipped behind a healthy heartbeat, repeated provider
-errors, missing/stale watermarks, a dead singleton chain, safety-net repairs,
-deleted-destination terminal audits in real and dry-run paths, distinct-evidence
+errors, missing/stale watermarks, a healthy task with stalled Stripe credit
+and no terminal-capability evidence, a dead singleton chain, safety-net repairs,
+deleted and unresolved destination terminal audits in real and dry-run paths, distinct-evidence
 aggregation, strict aggregate validation, privacy boundaries, and detailed
 Markdown.
 
@@ -10186,7 +10256,7 @@ traceable; their owning numbered sections remain the full contracts.
 | `mimir-child-missing` | §11.18 `mimir-index` | An expected active Mimir child is absent from the exact-process index view; require the complete active child set. |
 | `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
 | `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
-| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
+| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination or complete legacy resolution finds no recipient; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
 | `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
 | `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |

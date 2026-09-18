@@ -73,7 +73,7 @@ func newStripeRefundTestEnv(t testing.TB) *stripeRefundTestEnv {
 		if sessions == nil {
 			sessions = []map[string]any{}
 		}
-		writeJson(w, map[string]any{"data": sessions})
+		writeJson(w, map[string]any{"data": sessions, "has_more": false})
 	})
 	mux.HandleFunc("GET /v1/invoices/{invoiceId}", func(w http.ResponseWriter, r *http.Request) {
 		invoice, ok := env.fullInvoices[r.PathValue("invoiceId")]
