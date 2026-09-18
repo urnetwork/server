@@ -225,7 +225,7 @@ func fetchData(client *http.Client, baseUrl string, byteCount model.ByteCount) e
 	}
 	n, err := io.Copy(io.Discard, resp.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %d/%d response bytes: %w", n, byteCount, err)
 	}
 	if model.ByteCount(n) != byteCount {
 		return fmt.Errorf("short body %d < %d", n, byteCount)
