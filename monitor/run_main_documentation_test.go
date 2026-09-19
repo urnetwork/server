@@ -197,3 +197,19 @@ func TestRunMainRequiresRetainedReconciliationReceipts(t *testing.T) {
 		}
 	}
 }
+
+func TestRunMainPromotesCompleteMarkdownDespiteProbeFailure(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"monitor_exit=0",
+		"|| monitor_exit=$?",
+		"monitor's probe exit status",
+		"complete report can contain a `monitor/visibility` Alert",
+		"rg -qx '<!-- monitor-alerts-complete -->'",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md lost completed-output promotion contract %q", required)
+		}
+	}
+}

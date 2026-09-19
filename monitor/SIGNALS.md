@@ -7606,6 +7606,11 @@ not hide an independently provable audit/other-metric finding. Observed series
 and publisher counts are not full desired-inventory coverage attestations;
 fresh transport does not prove fresh database collection.
 
+When the exact route has no source series at the pinned evaluation time, render
+the fixed `observation-metric-unavailable` class rather than the generic
+unclassified observer error. This is a false-negative discriminator: absent
+route evidence is not zero traffic, a healthy control, or a signup outage.
+
 The 2026-09-16 06:30:34Z privacy-reviewed negative control did **not** show a
 current global signup outage: the published total was 1,016,192, increased by
 47 in one hour and 187 in six hours, and eight fresh publishers agreed. Route
@@ -14324,8 +14329,11 @@ counter deltas over the exact elapsed interval. For Mimir 3.1.1's global
 strategy, the effective local refill rate is the configured global ingestion
 rate divided by the healthy distributor count. Emit
 `mimir-distributor-skew` after two consecutive complete one-minute comparisons
-only when at least one child exceeds that local share while the sum of all
-attempted child rates remains below the global budget. If fleet attempted load
+only when at least one child exceeds that local share, its exact host-local
+reducer reports at least one non-loopback front connection, and the sum of all
+attempted child rates remains below the global budget. A loopback-only overload
+is a local-work discriminator, not proof of remote publisher concentration or
+authorization to reconnect publishers. If fleet attempted load
 itself reaches the global limit, do not call the incident balance-only: §11.20a
 owns affirmative loss, and optimization plus hardware or an explicit capacity
 decision may be required. Attempted minus accepted is an upper bound on loss,
@@ -20682,6 +20690,16 @@ count, span, age, and timestamp gaps independently. A stepped `query_range`
 or the canonical target's 15-second subquery can reuse source points and is
 not a census of distinct native scrapes. Missing `up` or process-start series
 are unavailable controls, never healthy zeros.
+
+Implementation qualifier: when an otherwise parseable pinned response has
+fewer than 200 raw-best or trusted-target samples, emit the per-node
+`cannot-observe` state `generation_state=metrics-insufficient-history`. Do not
+return only a generic probe error: that would make a complete snapshot appear
+unsealed even though its exact missing-history discriminator is known. Retain
+generic probe failure for malformed, stale, mixed-identity, or unpinned
+responses, and keep partial-host qualification intact. The deterministic
+all-qualified short-history test in `signal_subtensor_convergence_test.go`
+guards this false-negative boundary.
 
 Generation qualification is separate from count and freshness. The exact
 configured `container_name` must return complete `container_started`, image,

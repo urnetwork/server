@@ -169,6 +169,7 @@ func TestClassifyObservationErrorNeverReturnsRawText(t *testing.T) {
 		{"http access", errors.New("service returned HTTP 401"), observationErrorClassAccessDenied},
 		{"command", errors.New("exit status 1: " + hostile), observationErrorClassCommandFailed},
 		{"response", errors.New("decode synthetic response: " + hostile), observationErrorClassInvalidResponse},
+		{"signup route metrics unavailable", &signupRouteMetricsUnavailableError{}, observationErrorClassMetricUnavailable},
 		{"unknown", errors.New(hostile), observationErrorClassUnclassified},
 	}
 	for _, test := range tests {

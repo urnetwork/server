@@ -242,20 +242,28 @@ monitor_snapshot_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.snapsho
 go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_snapshot_dir/monitor"
 test -x "$monitor_snapshot_dir/monitor"
+monitor_exit=0
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -output "$monitor_snapshot_dir/alerts.partial.md" \
-  2>"$monitor_snapshot_dir/stderr.log" \
-  && rg -qx '<!-- monitor-alerts-complete -->' "$monitor_snapshot_dir/alerts.partial.md" \
-  && mv "$monitor_snapshot_dir/alerts.partial.md" "$monitor_snapshot_dir/alerts.md"
+  2>"$monitor_snapshot_dir/stderr.log" || monitor_exit=$?
+if rg -qx '<!-- monitor-alerts-complete -->' "$monitor_snapshot_dir/alerts.partial.md"; then
+  mv "$monitor_snapshot_dir/alerts.partial.md" "$monitor_snapshot_dir/alerts.md"
+else
+  printf '%s\n' 'monitor output was incomplete; retaining alerts.partial.md' >&2
+  monitor_exit=1
+fi
+test "$monitor_exit" -eq 0
 ```
 
 `-once` runs selected signals serially, emits every current violation, bypasses
 sustain gating, and exits nonzero on probe failure. Preserve stdout and stderr
 even then: visibility alerts retain findings and stderr distinguishes an
 observation-path failure. The command promotes `alerts.md` only after a
-successful complete write and the terminal completion marker; a remaining
-`alerts.partial.md` is incomplete evidence and must never be parsed as a
-snapshot. Label this a snapshot, not a page.
+successful complete write and the terminal completion marker, independently of
+the monitor's probe exit status; a complete report can contain a
+`monitor/visibility` Alert while the command correctly exits nonzero. A
+remaining `alerts.partial.md` is incomplete evidence and must never be parsed
+as a snapshot. Label this a snapshot, not a page.
 
 Start full one-shot snapshots no more often than once every 15 minutes. Record
 the actual monitor execution start in UTC and calculate the next eligible start

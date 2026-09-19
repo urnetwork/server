@@ -199,6 +199,30 @@ func TestMimirBalanceSignalDoesNotMisclassifyAggregateCapacity(t *testing.T) {
 	}
 }
 
+// The balance class owns persistent remote-write placement. A loopback-only
+// overload can be a local query/maintenance cohort, but cannot establish a
+// remote publisher routing fault or justify reconnecting remote shippers.
+func TestMimirBalanceSignalDoesNotMisclassifyLoopbackOnlyOverload(t *testing.T) {
+	stateDir := t.TempDir()
+	signal := NewMimirBalanceSignal()
+	start := time.Date(2032, 3, 4, 6, 17, 0, 0, time.UTC)
+	processStart := "1956793200.5"
+	base := map[string]mimirBalanceSyntheticTotals{
+		"metrics-a.invalid": {samples: 100000, received: 100000, requests: 1000},
+		"metrics-b.invalid": {samples: 200000, received: 200000, requests: 2000},
+		"metrics-c.invalid": {samples: 300000, received: 300000, requests: 3000},
+	}
+	runMimirBalanceSynthetic(t, signal, stateDir, start, mimirBalanceSyntheticFleet(processStart, base, nil, nil))
+	deltas := map[string]mimirBalanceSyntheticTotals{
+		"metrics-a.invalid": {samples: 24000, received: 18000, requests: 120},
+		"metrics-b.invalid": {samples: 15000, received: 15000, requests: 60},
+		"metrics-c.invalid": {samples: 12000, received: 12000, requests: 30},
+	}
+	if alerts := runMimirBalanceSynthetic(t, signal, stateDir, start.Add(time.Minute), mimirBalanceSyntheticFleet(processStart, base, deltas, nil)); len(alerts) != 0 {
+		t.Fatalf("loopback-only overload was mislabeled as remote publisher skew: %+v", alerts)
+	}
+}
+
 func TestMimirBalanceSignalPersistsBaselineAcrossWatcherReplacement(t *testing.T) {
 	stateDir := t.TempDir()
 	start := time.Date(2032, 3, 4, 7, 8, 0, 0, time.UTC)
@@ -219,7 +243,7 @@ func TestMimirBalanceSignalPersistsBaselineAcrossWatcherReplacement(t *testing.T
 	}
 	alerts := runMimirBalanceSynthetic(
 		t, NewMimirBalanceSignal(), stateDir, start.Add(time.Minute),
-		mimirBalanceSyntheticFleet(processStart, base, deltas, nil),
+		mimirBalanceSyntheticFleet(processStart, base, deltas, map[string]int64{"metrics-a.invalid": 1}),
 	)
 	requireAlertClass(t, alerts, "mimir-distributor-skew")
 }

@@ -48,6 +48,15 @@ type signupDurableSnapshot struct {
 	createdSixHours, createdGuarded int64
 }
 
+// signupRouteMetricsUnavailableError is a bounded, semantic observation
+// result: the exact route has no source series at the pinned evaluation time.
+// It is not proof of zero traffic or a signup outage.
+type signupRouteMetricsUnavailableError struct{}
+
+func (*signupRouteMetricsUnavailableError) Error() string {
+	return "signup route metrics are unavailable"
+}
+
 func parseSignupDurableSnapshot(rows []pgRow, now time.Time) (signupDurableSnapshot, error) {
 	if len(rows) != 1 || len(rows[0]) != 7 {
 		return signupDurableSnapshot{}, fmt.Errorf("signup durable query returned an invalid aggregate shape")
@@ -160,7 +169,10 @@ func parseSignupMetrics(raw string, at time.Time, demand bool) (map[string]float
 		return nil, fmt.Errorf("signup metric source samples are stale")
 	}
 	if demand {
-		if values["series"] < 1 || values["samples"] < 2 || values["resets"] != 0 ||
+		if values["series"] < 1 {
+			return nil, &signupRouteMetricsUnavailableError{}
+		}
+		if values["samples"] < 2 || values["resets"] != 0 ||
 			values["series"] != math.Trunc(values["series"]) || values["samples"] != math.Trunc(values["samples"]) ||
 			values["successes"]+values["server_errors"] > values["requests"]+1e-6 {
 			return nil, fmt.Errorf("signup demand is absent, reset, or contradictory")

@@ -118,18 +118,19 @@ func representativeTaskErrorClass(taskName, rawValue string, classCount int, cla
 }
 
 const (
-	observationErrorClassTimeout          = "observation-timeout"
-	observationErrorClassCanceled         = "observation-canceled"
-	observationErrorClassUnreachable      = "observation-unreachable"
-	observationErrorClassCounterReset     = "observation-counter-reset"
-	observationErrorClassContractMismatch = "observation-contract-mismatch"
-	observationErrorClassStateUnavailable = "observation-state-unavailable"
-	observationErrorClassBoundExceeded    = "observation-bound-exceeded"
-	observationErrorClassInvalidResponse  = "observation-invalid-response"
-	observationErrorClassAccessDenied     = "observation-access-denied"
-	observationErrorClassCommandFailed    = "observation-command-failed"
-	observationErrorClassSSHExit255       = "observation-ssh-exit-255"
-	observationErrorClassUnclassified     = "observation-unclassified"
+	observationErrorClassTimeout           = "observation-timeout"
+	observationErrorClassCanceled          = "observation-canceled"
+	observationErrorClassUnreachable       = "observation-unreachable"
+	observationErrorClassCounterReset      = "observation-counter-reset"
+	observationErrorClassContractMismatch  = "observation-contract-mismatch"
+	observationErrorClassStateUnavailable  = "observation-state-unavailable"
+	observationErrorClassBoundExceeded     = "observation-bound-exceeded"
+	observationErrorClassInvalidResponse   = "observation-invalid-response"
+	observationErrorClassMetricUnavailable = "observation-metric-unavailable"
+	observationErrorClassAccessDenied      = "observation-access-denied"
+	observationErrorClassCommandFailed     = "observation-command-failed"
+	observationErrorClassSSHExit255        = "observation-ssh-exit-255"
+	observationErrorClassUnclassified      = "observation-unclassified"
 )
 
 // SIGNALS.md §1.7 shared observation taxonomy and observer-route coverage gap.
@@ -152,6 +153,10 @@ func classifyObservationError(err error) string {
 	var exitFailure *exec.ExitError
 	sshExit255 := errors.As(err, &sshFailure) && errors.As(sshFailure, &exitFailure) && exitFailure.ExitCode() == 255
 	var unreachable *unreachableError
+	var signupRouteMetricsUnavailable *signupRouteMetricsUnavailableError
+	if errors.As(err, &signupRouteMetricsUnavailable) {
+		return observationErrorClassMetricUnavailable
+	}
 	if errors.As(err, &unreachable) {
 		if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
 			return observationErrorClassTimeout

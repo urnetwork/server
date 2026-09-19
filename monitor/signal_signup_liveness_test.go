@@ -126,6 +126,20 @@ func TestSignupLivenessNoDemandOrExpectedRefusalsRemainUnproven(t *testing.T) {
 	}
 }
 
+func TestSignupLivenessMissingRouteSeriesHasFixedObservationClass(t *testing.T) {
+	demand := signupTestDemand()
+	demand["series"], demand["samples"] = 0, 0
+	alerts, err := runSignupWindowTest(t, 0, 0, 0, 1, 0, signupTestMetrics(t, demand), signupTestMetrics(t, signupTestTotals()))
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("missing route series alerts=%d err=%v", len(alerts), err)
+	}
+	alert := requireAlertClass(t, alerts, "cannot-observe")
+	if alert.Target != "signup-liveness/route-demand" || alert.Observed != "error_class="+observationErrorClassMetricUnavailable {
+		t.Fatalf("missing route-series class=%q target=%q observed=%q", alert.Class, alert.Target, alert.Observed)
+	}
+	requireAlertOmits(t, alert, "signup-metrics-synthetic", "network-create", "all signup is broken")
+}
+
 func TestSignupLivenessSuccessContradictionHasNoVolumeFloor(t *testing.T) {
 	for _, successes := range []float64{0.001, 1, 19.999, 64.28} {
 		demand := signupTestDemand()

@@ -441,6 +441,7 @@ func assessMimirBalance(
 func mimirBalanceIsSkewed(assessment mimirBalanceAssessment) bool {
 	return assessment.directComplete && assessment.rateComplete &&
 		0 < assessment.overloadedInstances &&
+		0 < assessment.overloadedRemoteConnections &&
 		assessment.fleetAttemptedRate < assessment.ingestionRateMinimum
 }
 
