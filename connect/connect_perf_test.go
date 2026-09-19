@@ -392,10 +392,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	destinationB := connect.Id(peerB.clientId)
 
 	send := func(client *connect.Client, destination connect.Id, frame *protocol.Frame, ackCallback func(error), opts ...any) {
-		_, err := client.SendWithTimeoutDetailed(frame, destination, ackCallback, -1, opts...)
-		if err != nil && !server.IsDoneError(err) {
-			panic(fmt.Errorf("send error = %v", err))
-		}
+		connectserver.TestingSendConnectFrame(client, frame, destination, ackCallback, opts...)
 	}
 
 	echoOpts := []any{}
