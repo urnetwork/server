@@ -5993,6 +5993,18 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   has no corresponding health row; it is not described as expired evidence.
   Preserve the open first-attempt-versus-retry SLA decision rather than calling
   this complete scheduler fairness.
+
+  False-positive/false-negative qualifier: the fairness reducer's
+  `attempt_due` predicate already excludes a provider with a recorded attempt
+  inside `ProviderEgressProbeAttemptBackoff`. Therefore an expired row that is
+  still counted as `due` is not explained by the ordinary six-hour retry
+  deferral; do not shorten the global backoff merely to clear that PAGE. First
+  establish selection and post-call submission intervals, then distinguish an
+  unselected deadline head from a selected probe whose attempt/health report
+  did not persist. Conversely, aggregate gross attempts or a healthy sibling
+  shard cannot prove either interval for the expired category. Missing interval
+  metrics remain `egress-admission-unobservable`, never evidence of fixed-pass
+  scheduler behavior or a zero submission rate.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
   durable tasks are absent, or the exact migration-657 deadline index is not
   valid and ready. TLS-schema or task absence stops the dependent activity
@@ -10280,6 +10292,7 @@ Tier-0 (page):
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | connect-resident-ingress-capability-unobservable | Mimir process metrics | §8.15 executable-owned lazy resident-forward-ingress gauge joined to each newest fresh Connect process | any configured newest Connect generation is absent/unselectable, lacks the gauge, or reports a value other than exactly one; immediate | fleet counts only; provenance remains independent |
 | connect-resident-cost-unobservable | Mimir process metrics | §8.15 identity-free resident count joined to each newest fresh Connect process | absent/stale, duplicate, invalid, or unselectable newest-generation denominator; immediate WARN | fixed fleet counts; zero residents is valid with undefined ratios; raw runtime PAGE is independent |
+| egress-scheduler-capability-unobservable | Mimir process metrics | §2.19/§8.15 API executable-owned earliest-deadline scheduler gauge joined to each newest fresh API process | absent/unselectable, missing, or non-one gauge; immediate WARN | fixed fleet counts only; unknown does not prove legacy scheduler behavior or clear deadline-prefix findings |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
 | dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
@@ -12343,6 +12356,20 @@ thresholds. A real zero count remains `resident_count=0` with ratios explicitly
 `undefined`: nonzero retained process state must not disappear or become zero
 cost through division by an empty population.
 
+For a capability-proven runaway, also join the identity-free
+`urnetwork_connect_resident_callback_workers`,
+`urnetwork_connect_resident_forward_workers`, and
+`urnetwork_connect_resident_forward_idle_watchers` gauges on that same tuple.
+They are live aggregate goroutine owners only: they contain no client,
+destination, network, transport, or queue label.  When all three are unique,
+fresh, finite nonnegative integer samples, retain their counts and
+per-resident ratios plus `resident_unattributed_goroutines` (the process total
+less these explicitly owned workers).  A high owned sum supports the
+resident/forward lifecycle as a contributor; a high unattributed remainder
+keeps the call-site boundary open.  Missing, stale, malformed, or duplicated
+ownership gauges are explicitly `missing`, `invalid`, or `mixed`, never
+treated as zero and never used to clear the independent raw runtime PAGE.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
@@ -12354,6 +12381,16 @@ arbitrary instance-name ordering. A draining generation retains its own raw
 PAGE and its own resident evidence (or explicit unavailable ratio), without
 making a valid replacement's capability fail. No device or customer labels
 are added to the producer or copied into Markdown evidence.
+
+Provider-egress §2.19 additionally exports the identity-free API executable
+capability `urnetwork_egress_due_edf_enabled=1`. It certifies only that urgent
+present-location and health heads are merged by earliest absolute deadline
+before unlocated work. `egress-scheduler-capability-unobservable` WARNs when
+any newest API identity is absent, unselectable, missing the gauge, or reports
+a value other than one. Missing capability is an artifact/metric-delivery
+unknown, not proof of legacy fixed-pass precedence. This visibility signal does
+not clear or replace the PostgreSQL deadline-prefix, outcome, migration, or
+Taskworker signals that prove actual egress recovery.
 
 Do **not** select only the newest start time. A current and draining generation
 of the same block both consume host capacity, and the old generation is often
@@ -12467,8 +12504,9 @@ an aggregate-equivalent inflated-per-resident counterexample; cover missing,
 stale, duplicate, wrong-generation/service, malformed and invalid denominators;
 preserve zero-resident nonzero process state and draining-generation PAGEs;
 and pin freshness, equal-start ambiguity, and Markdown privacy. The owning
-Connect regressions pin the executable gauge at one and both diagnostic gauges
-as single unlabeled gauges. Behavioral Go gates remain required before rollout.
+Connect regressions pin the executable capability and all aggregate
+resident-ownership gauges as single unlabeled gauges. Behavioral Go gates
+remain required before rollout.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 

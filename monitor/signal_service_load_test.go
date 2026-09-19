@@ -11,22 +11,26 @@ import (
 )
 
 type serviceLoadFixture struct {
-	host               string
-	service            string
-	block              string
-	instance           string
-	rss                float64
-	heap               float64
-	objects            float64
-	goroutines         float64
-	start              float64
-	cpu                float64
-	allocation         float64
-	gc                 float64
-	age                time.Duration
-	omit               string
-	lazyForwardIngress *float64
-	residentCount      *float64
+	host                string
+	service             string
+	block               string
+	instance            string
+	rss                 float64
+	heap                float64
+	objects             float64
+	goroutines          float64
+	start               float64
+	cpu                 float64
+	allocation          float64
+	gc                  float64
+	age                 time.Duration
+	omit                string
+	lazyForwardIngress  *float64
+	residentCount       *float64
+	callbackWorkers     *float64
+	forwardWorkers      *float64
+	forwardIdleWatchers *float64
+	egressDueEDF        *float64
 }
 
 func serviceLoadFixtureJSON(t testing.TB, now time.Time, hostCores map[string]float64, fixtures ...serviceLoadFixture) string {
@@ -53,6 +57,18 @@ func serviceLoadFixtureJSON(t testing.TB, now time.Time, hostCores map[string]fl
 		}
 		if fixture.residentCount != nil {
 			metrics["resident_clients"] = *fixture.residentCount
+		}
+		if fixture.callbackWorkers != nil {
+			metrics["resident_callback_workers"] = *fixture.callbackWorkers
+		}
+		if fixture.forwardWorkers != nil {
+			metrics["resident_forward_workers"] = *fixture.forwardWorkers
+		}
+		if fixture.forwardIdleWatchers != nil {
+			metrics["resident_forward_idle_watchers"] = *fixture.forwardIdleWatchers
+		}
+		if fixture.egressDueEDF != nil {
+			metrics["egress_due_edf"] = *fixture.egressDueEDF
 		}
 		for metric, value := range metrics {
 			if metric == fixture.omit {
@@ -193,12 +209,34 @@ func TestServiceLoadQueryIncludesConnectLazyForwardCapability(t *testing.T) {
 		!strings.Contains(query, `monitor_metric","lazy_forward_ingress"`) ||
 		!strings.Contains(query, `timestamp(urnetwork_connect_resident_clients{env="synthetic",job="connect"}) >= time() - 90`) ||
 		!strings.Contains(query, `monitor_metric","resident_clients"`) ||
-		strings.Count(query, `timestamp(`) != 11 || strings.Count(query, `>= time() - 90`) != 11 {
+		strings.Count(query, `timestamp(`) != 14 || strings.Count(query, `>= time() - 90`) != 14 {
 		t.Fatalf("service-load query does not retain the exact fresh Connect capability: %s", query)
+	}
+	for _, metric := range []string{
+		"urnetwork_connect_resident_callback_workers",
+		"urnetwork_connect_resident_forward_workers",
+		"urnetwork_connect_resident_forward_idle_watchers",
+	} {
+		if !strings.Contains(query, `timestamp(`+metric+`{env="synthetic",job="connect"}) >= time() - 90`) {
+			t.Fatalf("service-load query omits fresh Connect ownership metric %s: %s", metric, query)
+		}
 	}
 	withoutConnect := serviceLoadQuery("synthetic", []string{"relay"})
 	if strings.Contains(withoutConnect, "resident_lazy_forward_ingress_enabled") || strings.Contains(withoutConnect, "urnetwork_connect_resident_clients") {
 		t.Fatal("service-load queried a Connect-only capability without a configured Connect service")
+	}
+}
+
+func TestServiceLoadQueryIncludesAPIEgressSchedulerCapability(t *testing.T) {
+	query := serviceLoadQuery("synthetic", []string{"api"})
+	if !strings.Contains(query, `timestamp(urnetwork_egress_due_edf_enabled{env="synthetic",job="api"}) >= time() - 90`) ||
+		!strings.Contains(query, `"monitor_metric","egress_due_edf"`) ||
+		strings.Count(query, `timestamp(`) != 10 || strings.Count(query, `>= time() - 90`) != 10 {
+		t.Fatalf("service-load query does not retain the fresh API egress scheduler capability: %s", query)
+	}
+	withoutAPI := serviceLoadQuery("synthetic", []string{"relay"})
+	if strings.Contains(withoutAPI, "egress_due_edf_enabled") {
+		t.Fatal("service-load queried the API-only egress scheduler capability without a configured API service")
 	}
 }
 
@@ -258,6 +296,38 @@ func TestServiceLoadConnectLazyForwardCapabilityAndRunawayDiagnosis(t *testing.T
 	for _, want := range []string{"resident_lazy_forward_ingress_capability=enabled", "bounded aggregate profile", "remaining resident"} {
 		if !strings.Contains(runaway.Markdown(), want) {
 			t.Fatalf("capability-proven diagnosis omitted %q: %s", want, runaway.Markdown())
+		}
+	}
+}
+
+func TestServiceLoadAPIEgressSchedulerCapability(t *testing.T) {
+	now := time.Date(2026, 9, 19, 19, 45, 0, 0, time.UTC)
+	capability := 1.0
+	run := func(value *float64) Alerts {
+		t.Helper()
+		payload := serviceLoadFixtureJSON(t, now, map[string]float64{"compute-a.example.test": 72}, serviceLoadFixture{
+			host: "compute-a.example.test", service: "api", block: "g1", instance: "current",
+			rss: 2 << 30, heap: 1 << 30, objects: 1_000_000, goroutines: 10_000,
+			start: float64(now.Add(-time.Hour).Unix()), cpu: 0.2, allocation: 1 << 20, gc: 0.01, egressDueEDF: value,
+		})
+		settings := serviceLoadSettings(t, now, payload)
+		settings.LogServices = []string{"api"}
+		alerts, err := NewServiceLoadSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alerts
+	}
+	missing := run(nil)
+	alert := requireAlertClass(t, missing, "egress-scheduler-capability-unobservable")
+	for _, want := range []string{"newest_api_processes=1 capability_enabled=0 capability_missing=1", "not proof of legacy behavior", "deadline-prefix slack"} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("missing API scheduler capability alert omitted %q: %s", want, alert.Markdown())
+		}
+	}
+	for _, alert := range run(&capability) {
+		if alert.Class == "egress-scheduler-capability-unobservable" {
+			t.Fatalf("proven API scheduler capability remained unobservable: %+v", alert)
 		}
 	}
 }
@@ -349,6 +419,35 @@ func TestServiceLoadResidentCostPopulationAndInflatedCounterexample(t *testing.T
 		}
 		if !strings.Contains(alert.Markdown(), want) || !strings.Contains(alert.Markdown(), "do not isolate resident allocations") {
 			t.Fatalf("missing descriptive exact-process cost evidence %q: %s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestServiceLoadConnectResidentWorkerOwnershipEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 19, 19, 30, 0, 0, time.UTC)
+	enabled, residents := 1.0, 20_000.0
+	callbackWorkers, forwardWorkers, idleWatchers := 180_000.0, 150_000.0, 150_000.0
+	payload := serviceLoadFixtureJSON(t, now, map[string]float64{"compute-a.example.test": 72}, serviceLoadFixture{
+		host: "compute-a.example.test", service: "connect", block: "g1", instance: "current",
+		rss: 40 << 30, heap: 30 << 30, objects: 4_000_000, goroutines: 600_000,
+		start: float64(now.Add(-time.Hour).Unix()), cpu: 8, lazyForwardIngress: &enabled, residentCount: &residents,
+		callbackWorkers: &callbackWorkers, forwardWorkers: &forwardWorkers, forwardIdleWatchers: &idleWatchers,
+	})
+	settings := serviceLoadSettings(t, now, payload)
+	settings.LogServices = []string{"connect"}
+	alerts, err := NewServiceLoadSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runaway := requireAlertClass(t, alerts, "service-runtime-runaway")
+	for _, want := range []string{
+		"resident_callback_workers_status=available resident_callback_workers=180000 resident_callback_workers_per_resident=9.000",
+		"resident_forward_workers_status=available resident_forward_workers=150000 resident_forward_workers_per_resident=7.500",
+		"resident_forward_idle_watchers_status=available resident_forward_idle_watchers=150000 resident_forward_idle_watchers_per_resident=7.500",
+		"resident_owned_worker_goroutines=480000 resident_unattributed_goroutines=120000",
+	} {
+		if !strings.Contains(runaway.Observed, want) {
+			t.Fatalf("runaway evidence omitted %q: %s", want, runaway.Observed)
 		}
 	}
 }

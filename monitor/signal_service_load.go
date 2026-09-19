@@ -59,26 +59,31 @@ const (
 	serviceLoadMetricAllocation
 	serviceLoadMetricGC
 	serviceLoadMetricLazyForwardIngress
+	serviceLoadMetricEgressDueEDF
 	serviceLoadMetricRawAll = serviceLoadMetricRSS | serviceLoadMetricHeap |
 		serviceLoadMetricObjects | serviceLoadMetricGoroutines | serviceLoadMetricStart
 )
 
 type serviceLoadMetrics struct {
-	host               string
-	service            string
-	block              string
-	instance           string
-	rss                float64
-	heap               float64
-	objects            float64
-	goroutines         float64
-	start              float64
-	cpu                float64
-	allocation         float64
-	gc                 float64
-	lazyForwardIngress float64
-	residents          *serviceLoadResidentSample
-	mask               uint16
+	host                string
+	service             string
+	block               string
+	instance            string
+	rss                 float64
+	heap                float64
+	objects             float64
+	goroutines          float64
+	start               float64
+	cpu                 float64
+	allocation          float64
+	gc                  float64
+	lazyForwardIngress  float64
+	egressDueEDF        float64
+	residents           *serviceLoadResidentSample
+	callbackWorkers     *serviceLoadResidentSample
+	forwardWorkers      *serviceLoadResidentSample
+	forwardIdleWatchers *serviceLoadResidentSample
+	mask                uint16
 }
 
 type serviceLoadResidentSample struct {
@@ -159,6 +164,9 @@ func serviceLoadQuery(environment string, services []string) string {
 		}{
 			{metric: "urnetwork_connect_resident_lazy_forward_ingress_enabled", name: "lazy_forward_ingress"},
 			{metric: "urnetwork_connect_resident_clients", name: "resident_clients"},
+			{metric: "urnetwork_connect_resident_callback_workers", name: "resident_callback_workers"},
+			{metric: "urnetwork_connect_resident_forward_workers", name: "resident_forward_workers"},
+			{metric: "urnetwork_connect_resident_forward_idle_watchers", name: "resident_forward_idle_watchers"},
 		} {
 			selector := fmt.Sprintf(`%s{env=%s,job="connect"}`, metric.metric, env)
 			fresh := fmt.Sprintf(
@@ -173,6 +181,19 @@ func serviceLoadQuery(environment string, services []string) string {
 				strconv.Quote(metric.name),
 			))
 		}
+	}
+	if len(services) == 0 || slices.Contains(services, "api") {
+		selector := fmt.Sprintf(`urnetwork_egress_due_edf_enabled{env=%s,job="api"}`, env)
+		fresh := fmt.Sprintf(
+			`(%s and (timestamp(%s) >= time() - %d))`,
+			selector,
+			selector,
+			freshness,
+		)
+		parts = append(parts, fmt.Sprintf(
+			`label_replace(%s,"monitor_metric","egress_due_edf","job",".*")`,
+			fresh,
+		))
 	}
 	nodeSelector := fmt.Sprintf(`node_cpu_seconds_total{env=%s,job="node"}`, env)
 	freshNodeCPU := fmt.Sprintf(
@@ -256,11 +277,14 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	now := env.now().UTC()
 	processes := map[string]*serviceLoadMetrics{}
 	residentSamples := map[string]*serviceLoadResidentSample{}
+	callbackWorkerSamples := map[string]*serviceLoadResidentSample{}
+	forwardWorkerSamples := map[string]*serviceLoadResidentSample{}
+	forwardIdleWatcherSamples := map[string]*serviceLoadResidentSample{}
 	hostCores := map[string]float64{}
 	invalidSeries := 0
 	for _, series := range response.Data.Result {
 		metric := series.Metric["monitor_metric"]
-		residentMetric := metric == "resident_clients"
+		residentMetric := metric == "resident_clients" || metric == "resident_callback_workers" || metric == "resident_forward_workers" || metric == "resident_forward_idle_watchers"
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil && !residentMetric {
 			return nil, fmt.Errorf("service load: parse fixed metric sample: %w", err)
@@ -297,10 +321,21 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 				invalidSeries++
 				continue
 			}
-			sample := residentSamples[key]
+			var samples map[string]*serviceLoadResidentSample
+			switch metric {
+			case "resident_clients":
+				samples = residentSamples
+			case "resident_callback_workers":
+				samples = callbackWorkerSamples
+			case "resident_forward_workers":
+				samples = forwardWorkerSamples
+			case "resident_forward_idle_watchers":
+				samples = forwardIdleWatcherSamples
+			}
+			sample := samples[key]
 			if sample == nil {
 				sample = &serviceLoadResidentSample{}
-				residentSamples[key] = sample
+				samples[key] = sample
 			}
 			sample.count++
 			sample.value = value
@@ -341,12 +376,18 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		case "lazy_forward_ingress":
 			process.lazyForwardIngress = value
 			process.mask |= serviceLoadMetricLazyForwardIngress
+		case "egress_due_edf":
+			process.egressDueEDF = value
+			process.mask |= serviceLoadMetricEgressDueEDF
 		}
 	}
 	// Optional population telemetry must never create a phantom process or
 	// suppress a resource PAGE when its denominator is absent or malformed.
 	for key, process := range processes {
 		process.residents = residentSamples[key]
+		process.callbackWorkers = callbackWorkerSamples[key]
+		process.forwardWorkers = forwardWorkerSamples[key]
+		process.forwardIdleWatchers = forwardIdleWatcherSamples[key]
 	}
 
 	if len(processes) == 0 {
@@ -370,6 +411,7 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		findings = append(findings, healthyFinding("runtime/service-runaway", tierWarn, "service-runtime-metrics-invalid", "managed-services"))
 	}
 	findings = append(findings, serviceLoadConnectCapabilityFinding(processes, expectedServices["connect"]))
+	findings = append(findings, serviceLoadEgressSchedulerCapabilityFinding(processes, expectedServices["api"]))
 	findings = append(findings, serviceLoadConnectResidentCostFinding(processes, expectedServices["connect"]))
 
 	overlaps := map[string]int{}
@@ -462,11 +504,15 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 }
 
 func serviceLoadNewestConnectProcesses(processes map[string]*serviceLoadMetrics) (map[string]*serviceLoadMetrics, int) {
+	return serviceLoadNewestProcesses(processes, "connect")
+}
+
+func serviceLoadNewestProcesses(processes map[string]*serviceLoadMetrics, serviceName string) (map[string]*serviceLoadMetrics, int) {
 	newest := map[string]*serviceLoadMetrics{}
 	ambiguous := map[string]bool{}
 	unselectable := 0
 	for _, process := range processes {
-		if process.service != "connect" || process.mask&serviceLoadMetricRSS == 0 {
+		if process.service != serviceName || process.mask&serviceLoadMetricRSS == 0 {
 			continue
 		}
 		if process.mask&serviceLoadMetricStart == 0 || process.start <= 0 {
@@ -489,6 +535,37 @@ func serviceLoadNewestConnectProcesses(processes map[string]*serviceLoadMetrics)
 		}
 	}
 	return newest, unselectable
+}
+
+func serviceLoadEgressSchedulerCapabilityFinding(processes map[string]*serviceLoadMetrics, expected bool) finding {
+	newest, unselectable := serviceLoadNewestProcesses(processes, "api")
+	enabled, missing, invalid := 0, 0, 0
+	for _, process := range newest {
+		switch {
+		case process.mask&serviceLoadMetricEgressDueEDF == 0:
+			missing++
+		case process.egressDueEDF != 1:
+			invalid++
+		default:
+			enabled++
+		}
+	}
+	if (!expected || len(newest) != 0) && missing == 0 && invalid == 0 && unselectable == 0 {
+		return healthyFinding("runtime/service-runaway", tierWarn, "egress-scheduler-capability-unobservable", "api-fleet")
+	}
+	return finding{
+		probeId: "runtime/service-runaway", tier: tierWarn,
+		class: "egress-scheduler-capability-unobservable", target: "api-fleet", sustain: 1,
+		symptom:   "The newest API fleet cannot prove the provider-egress deadline scheduler capability.",
+		mechanism: "A stale provider-evidence deadline can be missed when an older API retains fixed queue precedence. The executable-owned gauge proves only the corrected earliest-deadline-before-unlocated selection path; a missing gauge is an unknown artifact or metric-delivery boundary, not proof of legacy behavior.",
+		baseline:  "Every newest fresh API process reports urnetwork_egress_due_edf_enabled=1 on its exact process identity.",
+		observed:  fmt.Sprintf("newest_api_processes=%d capability_enabled=%d capability_missing=%d capability_invalid=%d generation_unselectable=%d", len(newest), enabled, missing, invalid, unselectable),
+		evidence:  "Only fixed fleet counts leave the Mimir join. Source revision, modified state, and image digest remain independently governed by §8.12; no provider, task, endpoint, or queue identity is exposed.",
+		context:   "This does not prove that current capacity can meet every deadline or that a particular due row was selected. The database fairness and task outcome signals remain the closure evidence.",
+		action:    "Use §8.12 to prove the newest API artifact and metric delivery. Deploy the API artifact containing the bounded earliest-deadline provider-egress scheduler only where this capability is absent because the artifact predates it; otherwise repair telemetry. Do not change lane weights, task rows, or evidence lifetimes solely to clear this visibility boundary.",
+		verify:    "For two consecutive scrapes every newest API identity reports capability=1 with valid provenance; independently require the egress fairness signal to clear expired rows and retain nonnegative deadline-prefix slack.",
+		playbook:  "SIGNALS.md §2.19 and §8.15",
+	}
 }
 
 func serviceLoadConnectCapabilityFinding(processes map[string]*serviceLoadMetrics, expected bool) finding {
@@ -543,12 +620,54 @@ func serviceLoadResidentCostEvidence(process *serviceLoadMetrics) string {
 	switch status {
 	case "available":
 		count := process.residents.value
-		return fmt.Sprintf("resident_count_status=available resident_count=%.0f rss_bytes_per_resident=%.2f heap_bytes_per_resident=%.2f goroutines_per_resident=%.3f", count, process.rss/count, process.heap/count, process.goroutines/count)
+		return fmt.Sprintf("resident_count_status=available resident_count=%.0f rss_bytes_per_resident=%.2f heap_bytes_per_resident=%.2f goroutines_per_resident=%.3f%s", count, process.rss/count, process.heap/count, process.goroutines/count, serviceLoadResidentWorkerEvidence(process, count))
 	case "zero":
 		return "resident_count_status=zero resident_count=0 resident_cost_ratios=undefined"
 	default:
 		return "resident_count_status=" + status + " resident_cost_ratios=unobservable"
 	}
+}
+
+// serviceLoadResidentWorkerEvidence retains only aggregate, identity-free
+// worker ownership.  The three gauges are deliberately optional while an
+// older artifact rolls out; an absent gauge must remain unknown rather than
+// being folded into an invented zero or a false attribution of every Go
+// goroutine to Resident.
+func serviceLoadResidentWorkerEvidence(process *serviceLoadMetrics, residentCount float64) string {
+	type workerSample struct {
+		name   string
+		sample *serviceLoadResidentSample
+	}
+	workers := []workerSample{
+		{name: "resident_callback_workers", sample: process.callbackWorkers},
+		{name: "resident_forward_workers", sample: process.forwardWorkers},
+		{name: "resident_forward_idle_watchers", sample: process.forwardIdleWatchers},
+	}
+	values := make([]float64, 0, len(workers))
+	parts := make([]string, 0, len(workers)+2)
+	for _, worker := range workers {
+		status := "missing"
+		if worker.sample != nil {
+			switch {
+			case worker.sample.invalid:
+				status = "invalid"
+			case worker.sample.count != 1:
+				status = "mixed"
+			default:
+				status = "available"
+				values = append(values, worker.sample.value)
+			}
+		}
+		parts = append(parts, fmt.Sprintf(" %s_status=%s", worker.name, status))
+		if status == "available" {
+			parts = append(parts, fmt.Sprintf(" %s=%.0f %s_per_resident=%.3f", worker.name, worker.sample.value, worker.name, worker.sample.value/residentCount))
+		}
+	}
+	if len(values) == len(workers) {
+		owned := values[0] + values[1] + values[2]
+		parts = append(parts, fmt.Sprintf(" resident_owned_worker_goroutines=%.0f resident_unattributed_goroutines=%.0f", owned, process.goroutines-owned))
+	}
+	return strings.Join(parts, "")
 }
 
 func serviceLoadConnectResidentCostFinding(processes map[string]*serviceLoadMetrics, expected bool) finding {

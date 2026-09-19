@@ -13,6 +13,7 @@ type providerEgressDueCollectors struct {
 	selected *prometheus.CounterVec
 	requests prometheus.Counter
 	enabled  prometheus.Gauge
+	edf      prometheus.Gauge
 }
 
 var providerEgressDueLaneLabels = [model.ProviderEgressDueLaneCount]string{
@@ -37,6 +38,10 @@ func newProviderEgressDueCollectors(registerer prometheus.Registerer) *providerE
 			Name: "urnetwork_egress_due_observation_enabled",
 			Help: "Executable-owned capability for identity-free due selected-return observations",
 		}),
+		edf: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "urnetwork_egress_due_edf_enabled",
+			Help: "Whether the API executable selects urgent provider-egress lanes by earliest absolute deadline before unlocated work",
+		}),
 	}
 	for _, lane := range providerEgressDueLaneLabels {
 		for _, expired := range []string{"false", "true"} {
@@ -44,7 +49,8 @@ func newProviderEgressDueCollectors(registerer prometheus.Registerer) *providerE
 		}
 	}
 	collectors.enabled.Set(1)
-	registerer.MustRegister(collectors.selected, collectors.requests, collectors.enabled)
+	collectors.edf.Set(1)
+	registerer.MustRegister(collectors.selected, collectors.requests, collectors.enabled, collectors.edf)
 	return collectors
 }
 

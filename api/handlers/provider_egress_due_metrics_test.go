@@ -17,8 +17,8 @@ func TestProviderEgressDueMetricsFixedSeriesAndSelectedCounts(t *testing.T) {
 	if count := testutil.CollectAndCount(metrics.selected); count != 8 {
 		t.Fatalf("idle selected series = %d, want all eight", count)
 	}
-	if testutil.ToFloat64(metrics.enabled) != 1 || testutil.ToFloat64(metrics.requests) != 0 {
-		t.Fatal("capability and request visibility must be separate from selected counts")
+	if testutil.ToFloat64(metrics.enabled) != 1 || testutil.ToFloat64(metrics.edf) != 1 || testutil.ToFloat64(metrics.requests) != 0 {
+		t.Fatal("capabilities and request visibility must be separate from selected counts")
 	}
 	metrics.observe(model.ProviderEgressDueDiagnostics{})
 	diagnostics := model.ProviderEgressDueDiagnostics{}
@@ -32,7 +32,17 @@ func TestProviderEgressDueMetricsFixedSeriesAndSelectedCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantFamilies := map[string]bool{
+		"urnetwork_egress_due_selected_total":      false,
+		"urnetwork_egress_due_requests_total":      false,
+		"urnetwork_egress_due_observation_enabled": false,
+		"urnetwork_egress_due_edf_enabled":         false,
+	}
 	for _, family := range families {
+		if _, ok := wantFamilies[family.GetName()]; !ok {
+			t.Fatalf("unexpected provider-egress metric family %q", family.GetName())
+		}
+		wantFamilies[family.GetName()] = true
 		for _, metric := range family.Metric {
 			if family.GetName() != "urnetwork_egress_due_selected_total" {
 				if len(metric.Label) != 0 {
@@ -63,6 +73,11 @@ func TestProviderEgressDueMetricsFixedSeriesAndSelectedCounts(t *testing.T) {
 			if metric.Counter.GetValue() != float64(want) {
 				t.Fatal("selected count includes an unselected lane or wrong expiry")
 			}
+		}
+	}
+	for name, seen := range wantFamilies {
+		if !seen {
+			t.Fatalf("missing provider-egress metric family %q", name)
 		}
 	}
 }
