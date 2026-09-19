@@ -94,14 +94,31 @@ only. Production rows identify
 approved, rejected, and unreviewed honesty status without exposing the private
 review report.
 
-Staging epoch 4 is finalized, verified on 2026-09-18:
+Staging epoch 5 is open, verified at `2026-09-19T09:57:30Z`:
+`round_id=01a0b913-c344-27f3-cb64-338dbddc8b07`,
+`opens_at=2026-09-19T09:57:00Z`, `closes_at=2026-09-21T09:57:00Z`.
+API version `2026.9.18+1049819730` repeatedly advertises source
+`807b473c927d1ae09a03276bb9758afb715fac9e` and evaluator
+`sha256:b0c07cf45c30adb483ee5c215b7426b2e098c0b35c7cf4c4abcb0166cb43a87e`.
+The migration audit reaches 683 with the shared-control and historical-ranking
+guards present. The singleton worker started after successful staging
+preflight and remains active with zero restarts; authenticated staging host
+refreshes continued through `2026-09-19T09:57:19Z`.
+Repeated API checks at `2026-09-19T09:59:31Z` matched this state, and an
+authenticated public-TLS metrics query verified a fresh worker heartbeat.
+This is a fee-free 48-hour staging round using source epoch zero, not a
+production epoch. Follow the [release record](STAGING-5-RELEASE.md) for worker
+identities and verification; no successful shared-control result is claimed yet.
+The staging winner remains null after finalization; this deployment does not
+enable a named staging winner or production promotion.
+
+Staging epoch 4 remains finalized:
 `round_id=01a0a58b-9a3e-2e43-f612-0034ff7296ff`,
 `opens_at=2026-09-15T14:56:00Z`, `closes_at=2026-09-17T14:56:00Z`.
 Its staging-inclusive leaderboard has four entries; Macrocosmos reported that
 its downstream path worked end to end. This closed round no longer accepts
-submissions, and its worker has exited. The next staging round requires the
-new API/migrations, source checkpoint, and evaluator configuration to be
-deployed first; do not announce epoch 5 as open from a local build alone.
+submissions, and its worker has exited. Its immutable release policy and
+published results are preserved alongside the new epoch-5 deployment.
 
 Update, 2026-09-16: a comment-only job completed all 18 replicates but failed
 G5 on a startup database recovery. Its frozen source omitted a wrapped-error
@@ -109,10 +126,10 @@ fix already present on `main`; see the
 [G5 incident record](STAGING-4-G5-INCIDENT.md). The runtime repair and exact-source
 regression gate passed independent tests, including three full sim-latency
 suite runs. The [epoch-5 release](STAGING-5-RELEASE.md) also switches to one
-immutable shared baseline and absolute-latency ranking. Its rollout and live
-scoring proof remain pending.
-Epoch 4's image and historical results remain unchanged; the next epoch is not
-yet ready to announce.
+immutable shared baseline and absolute-latency ranking. Its API/config rollout
+is verified; successful live shared-control scoring remains pending.
+Epoch 4's image and historical results remain unchanged. Exact-image production
+qualification and the production launch approvals are still pending.
 
 A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is absolute raw score

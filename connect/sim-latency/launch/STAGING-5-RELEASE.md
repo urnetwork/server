@@ -1,10 +1,13 @@
 # Staging epoch 5 release
 
-Prepared on 2026-09-18. The shared-baseline, simulator-lifecycle, and timing-
+Prepared on 2026-09-18; staging deployment verified on 2026-09-19. The
+shared-baseline, simulator-lifecycle, and timing-
 serialization fixes are built into the installed image below; independent Go,
 control-plane compatibility, clean-image offline build gates, and full Docker
-smoke passed. This release is ready for staging API/config deployment, not yet
-live. Do not announce a new open round from this local release record.
+smoke passed. The API/config release is deployed, staging epoch 5 is open,
+and its singleton worker is running after staging preflight with authenticated
+host refreshes. Live shared-control scoring and exact-image production
+qualification remain unproven.
 
 ## Frozen evaluator
 
@@ -52,6 +55,70 @@ Epoch 4 finalized at `2026-09-17T14:56:00.946063Z` with four leaderboard
 entries. Macrocosmos confirmed its downstream path worked. Its source,
 stored scores, and published ranking remain historical evidence, not a
 measurement of this new evaluator.
+Its public `providers.yml` reveal succeeded under the deployed API on
+2026-09-19, with SHA-256
+`3f3829a588e4c024459e2c4c653be8244e2e515c56da645e3c6447b9c1d99fae`.
+
+## Staging deployment record
+
+The public API reports version `2026.9.18+1049819730`; repeated
+`/competition/info` checks match the frozen source and evaluator image above.
+Read-only database verification found migration audit maximum 683, the
+`competition_round_baseline` table, and both legacy/shared-ranking guards.
+No earlier staging jobs were queued or running before the new round was created.
+
+The API returned HTTP 201 for staging epoch 5, round
+`01a0b913-c344-27f3-cb64-338dbddc8b07`, initially `scheduled` with opening
+`2026-09-19T09:57:00Z`, close `2026-09-21T09:57:00Z`, and the same reveal
+timestamp. Results remain embargoed until close and backlog drain. This
+48-hour staging window does not alter the seven-day production contract.
+No production round was created.
+
+| Worker identity | Verified value |
+|---|---|
+| Server main commit | `07b210bc76f15c714d2de8484153e407bbf65808` |
+| Worker image | `sha256:07d6caa778715a1e104fdf661eaaf68f3c13b1ca2b0e4dee2cb0246d45c6dcae` |
+| Local image tag | `urnetwork/competitionworker:staging-07b210bc76f1` |
+| Installed binary | `/usr/local/libexec/urnetwork/competition-worker-07d6caa7/competitionworker`, root:root mode 0555 |
+| Binary SHA-256 | `f5fed5489bc49a37e60300efcfdf0541fb2c8b6f5c0f7d0feb5bd0592ef59ecd` |
+| Singleton service | `urnetwork-sim-latency-staging-epoch-5.service` |
+| Start time | `2026-09-19T09:53:30Z` |
+| Invocation | `ae75d48be35948189dea302ab747d6f8` |
+| Initial process | PID 3449082, management CPUs `20,22`, `OOMScoreAdjust=-900`, restart-on-failure, zero observed restarts |
+
+Independent worker version/image proof and staging preflight passed; preflight
+took two seconds. Evidence log SHA-256 values are
+`e915831831edada6a1b111f564d3b8d1d16693450f7bde71a9336a3939e6d4e2`
+and `be0021cca91d5bbe68d40b61bb4c618995d6dfeddf48692eb41b77fd1be12431`.
+Creation and source-check artifacts are retained under
+`/tmp/urnetwork-staging5-launch.tNf1cYJO`; the creation response SHA-256 is
+`374edcae7f66581d6aced00196e959793a4f61bc1ee45eadfe7e2a17006b32a9`.
+At `2026-09-19T09:57:30Z`, `/competition/info` reported this round `open`
+with unchanged source/image and admission timestamps. The worker remained
+active/running with the same PID/invocation and zero restarts; authenticated
+staging host refreshes continued through `2026-09-19T09:57:19Z`.
+Three further API checks at `2026-09-19T09:59:31Z` matched the open round,
+schedule, and source/image. The shared baseline count was zero while awaiting
+the first submission; a successful shared-control score is not claimed.
+Staging retains the existing null-winner policy after close and drain; shared
+baseline scoring does not name or promote a staging winner.
+
+Redis remote cluster ports again refused connections on September 19. The
+worker used the supported authoritative PostgreSQL FIFO fallback; this degraded
+dispatch path does not block staging admission. At `2026-09-19T09:58:17Z`,
+an authenticated public-TLS Grafana/Prometheus query returned HTTP 200 with
+epoch 5, staging 1, queue/backlog zero, and heartbeat age 25.955 seconds
+(below the 30-second stale threshold), for `host=sille`, `env=main`,
+`service=sim`. Source-info metrics matched the exact worker image/revision.
+Response SHA-256:
+`9eeab8f1dd3975d96d1c63be412bc79e014f6cb9c70289401ea557ac1572378a`;
+verification metadata SHA-256:
+`d2df1abfa95e22f4d2d0d5f3e5689029b080c0ce852a95244f6f4c36e13ec3d8`.
+A read-only database check at `2026-09-19T09:58:11Z` found the host heartbeat
+at `2026-09-19T09:57:59Z`, age 11.897 seconds. The metrics forwarder is active
+but transient; no reboot persistence or endpoint failover is claimed.
+The retained containment checker authorizes only the staging exception;
+strict exact-image production qualification remains pending.
 
 ## Validation and deployment order
 
@@ -120,7 +187,7 @@ run the same offline vet surface as candidate builds. A deterministic contract
 test protects that gate. An earlier bare-image-ID smoke invocation failed
 before evaluation; smoke now uses the ID-verified named tag.
 
-Deployment sequence:
+Deployment sequence (steps 1–3 completed on September 19):
 
 1. Deploy the final server `main` API and run all migrations, including the
    append-only round-baseline and historical-ranking compatibility migrations
