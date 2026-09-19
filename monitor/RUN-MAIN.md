@@ -243,14 +243,19 @@ go build -o "$monitor_snapshot_dir/monitor" ./cli/monitor
 chmod 700 "$monitor_snapshot_dir/monitor"
 test -x "$monitor_snapshot_dir/monitor"
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
-  >"$monitor_snapshot_dir/alerts.md" \
-  2>"$monitor_snapshot_dir/stderr.log"
+  -output "$monitor_snapshot_dir/alerts.partial.md" \
+  2>"$monitor_snapshot_dir/stderr.log" \
+  && rg -qx '<!-- monitor-alerts-complete -->' "$monitor_snapshot_dir/alerts.partial.md" \
+  && mv "$monitor_snapshot_dir/alerts.partial.md" "$monitor_snapshot_dir/alerts.md"
 ```
 
 `-once` runs selected signals serially, emits every current violation, bypasses
 sustain gating, and exits nonzero on probe failure. Preserve stdout and stderr
 even then: visibility alerts retain findings and stderr distinguishes an
-observation-path failure. Label this a snapshot, not a page.
+observation-path failure. The command promotes `alerts.md` only after a
+successful complete write and the terminal completion marker; a remaining
+`alerts.partial.md` is incomplete evidence and must never be parsed as a
+snapshot. Label this a snapshot, not a page.
 
 Start full one-shot snapshots no more often than once every 15 minutes. Record
 the actual monitor execution start in UTC and calculate the next eligible start
@@ -271,12 +276,14 @@ closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
 ```sh
 WARP_ENV=main "$monitor_snapshot_dir/monitor" -mode overlay -once \
   -include-signal edge-ipv6 -include-signal 20.2 \
-  -format jsonl >"$monitor_snapshot_dir/alerts.jsonl"
+  -format jsonl -output "$monitor_snapshot_dir/alerts.partial.jsonl" \
+  && mv "$monitor_snapshot_dir/alerts.partial.jsonl" "$monitor_snapshot_dir/alerts.jsonl"
 ```
 
 `-format markdown` is the default. `-format jsonl` writes one complete alert
 object per line in deterministic severity/identity order; a healthy JSONL
-snapshot is an empty file.
+snapshot is an empty file. As with Markdown, parse only the promoted
+`alerts.jsonl`; a remaining `alerts.partial.jsonl` is not a valid snapshot.
 
 ## Start the authoritative continuous watcher
 

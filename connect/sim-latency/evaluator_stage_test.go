@@ -96,6 +96,7 @@ func runEvaluatorStageFixture(t *testing.T, fixture evaluatorStageFixture) (stri
 	if fixture.attempt == 0 {
 		fixture.attempt = 1
 	}
+	// Share this synthetic identity with the shell instead of requiring GNU hashing.
 	attemptDigest := sha256.Sum256([]byte(syntheticJobId + ":" + strconv.Itoa(fixture.attempt)))
 	attemptToken := hex.EncodeToString(attemptDigest[:16])
 	project := "urnetwork-eval-" + attemptToken + "-" + fixture.role + "-01"
@@ -142,12 +143,14 @@ func runEvaluatorStageFixture(t *testing.T, fixture evaluatorStageFixture) (stri
 	const dependencies = `
 set -Eeuo pipefail
 umask 077
+# Force the missing GNU dependency on every host, including Linux.
+sha256sum() { printf 'fixture sha256sum is unavailable\n' >&2; return 127; }
 artifact_dir="$FIXTURE_ROOT"
 work_dir="$artifact_dir/.evidence-runtime"
 job_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 round_id=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
 attempt="$FIXTURE_ATTEMPT"
-attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print substr($1, 1, 32)}')"
+attempt_token="$FIXTURE_ATTEMPT_TOKEN"
 cpuset=20,22
 config_local_directory=/synthetic/config/local
 vault_local_directory=/synthetic/vault/local
@@ -171,6 +174,25 @@ authenticate_local_mounts() { :; }
 write_runner_env() { :; }
 write_compose_env() { :; }
 sha256_file() { printf '%064d' 0; }
+date() {
+    [ "$#" -eq 2 ] && [ "$2" = +%s%3N ] || die "unexpected date dependency: $*"
+    case "$1" in
+        --date=2026-01-01T00:00:00Z) printf '1767225600000\n' ;;
+        --date=2026-01-01T00:00:01Z) printf '1767225601000\n' ;;
+        *) die "unexpected synthetic timestamp: $1" ;;
+    esac
+}
+sync() {
+    if [ "$#" -eq 1 ] && [ "$1" = "$artifact_dir" ]; then
+        return 0
+    fi
+    [ "$#" -gt 1 ] && [ "$1" = -d ] || die "unexpected sync dependency: $*"
+    shift
+    local path
+    for path in "$@"; do
+        [ -f "$path" ] || die "sync target missing: $path"
+    done
+}
 compose_with() {
     local last="${!#}"
     case " $* " in
@@ -209,7 +231,8 @@ sudo() {
     shift
     case "$1" in
         chown) return 0 ;;
-        chmod|test|jq|install|sync) command "$@"; return ;;
+        sync) "$@"; return ;;
+        chmod|test|jq|install) command "$@"; return ;;
         docker) shift ;;
         *) printf 'unexpected sudo dependency: %s\n' "$*" >&2; exit 97 ;;
     esac
@@ -261,6 +284,7 @@ sudo() {
 		"FIXTURE_REDIS_OOM_KILLS=" + strconv.Itoa(fixture.redisOomKills),
 		"FIXTURE_MISSING_OOM_COUNTER=" + fixture.missingOomCounter,
 		"FIXTURE_ATTEMPT=" + strconv.Itoa(fixture.attempt),
+		"FIXTURE_ATTEMPT_TOKEN=" + attemptToken,
 	}
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
@@ -437,6 +461,10 @@ func TestEvaluatorResourceReportUsesObservedState(t *testing.T) {
 	}
 	if !report.Complete || report.ExitCode != 0 || report.OomKilled || report.HardKilled || report.LimitEscape || report.MeasurementMissing {
 		t.Fatalf("healthy resource report flags: %s", data)
+	}
+	measurementStart := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if report.MeasurementStartMs != measurementStart.UnixMilli() || report.MeasurementEndMs != measurementStart.Add(time.Second).UnixMilli() {
+		t.Fatalf("resource report lost the synthetic runner timestamps: %s", data)
 	}
 	root, output, err = runEvaluatorStageFixture(t, evaluatorStageFixture{oomKills: 1})
 	if err == nil {
