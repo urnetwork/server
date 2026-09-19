@@ -252,6 +252,16 @@ sustain gating, and exits nonzero on probe failure. Preserve stdout and stderr
 even then: visibility alerts retain findings and stderr distinguishes an
 observation-path failure. Label this a snapshot, not a page.
 
+Start full one-shot snapshots no more often than once every 15 minutes. Record
+the actual monitor execution start in UTC and calculate the next eligible start
+from that timestamp, not from completion. A common delayed shell pattern uses
+`sleep ...; exec monitor ...`; `exec` retains the shell PID and its process
+start time, so `ps etime` includes the delay and cannot prove that the monitor
+started early. Use the first monitor stderr timestamp (or a separately recorded
+post-`exec` UTC timestamp) to prove the actual start. Do not launch a second
+snapshot while an existing one is live; preserve its bounded evidence and
+investigate its active child/stage before calling it stalled.
+
 `monitor -list-signals` lists selector values without loading the environment,
 Vault, or settings. After required full coverage, use focused reruns by
 repeating `-include-signal` with a key, number, or probe ID. Include and exclude
