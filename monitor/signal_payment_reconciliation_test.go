@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -152,6 +153,7 @@ func TestPaymentReconciliationCatalogNamesWatermarkClass(t *testing.T) {
 	for _, expected := range []string{
 		"`payment-reconciliation-watermark-stale`",
 		"`payment-reconciliation-credit-unfulfillable`",
+		"`payment-reconciliation-credit-unfulfillable-invalid`",
 		"more than three hours old",
 		"more than six hours old or absent",
 		"never force the watermark forward",
@@ -329,18 +331,55 @@ func TestPaymentReconciliationSurfacesUnfulfillableStripeDestinationOncePerEvide
 	}
 }
 
+func TestPaymentReconciliationKeepsInvalidUnfulfillableDispositionObservable(t *testing.T) {
+	source := paymentReconciliationSourceWithUnfulfillable(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		nil,
+		[]Row{{"1", "3", "3", "1", "120"}},
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("invalid disposition alerts = %d, want 1: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-credit-unfulfillable-invalid")
+	if alert.Target != "stripe" || alert.Severity != SeverityPage ||
+		!strings.Contains(alert.Markdown(), "invalid_observations_24h=1") {
+		t.Fatalf("invalid disposition alert=%+v", alert)
+	}
+}
+
 func TestPaymentReconciliationRejectsMalformedUnfulfillableAggregate(t *testing.T) {
 	for _, rows := range [][]pgRow{
 		nil,
 		{{"0", "0", "0", "0", "0"}},
-		{{"1", "3", "3", "1", "120"}},
 		{{"4", "3", "1", "0", "120"}},
 		{{"1", "3", "4", "0", "120"}},
+		{{"1", "3", "3", "4", "120"}},
 		{{"1", "3", "3", "0", "-1"}},
 	} {
 		if finding, err := paymentReconciliationUnfulfillableFinding(rows); err == nil || finding != nil {
 			t.Fatalf("malformed unfulfillable aggregate accepted: rows=%v finding=%+v", rows, finding)
 		}
+	}
+}
+
+func TestPaymentReconciliationPagesInvalidUnfulfillableDisposition(t *testing.T) {
+	finding, err := paymentReconciliationUnfulfillableFinding([]pgRow{{"1", "3", "3", "1", "120"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding == nil || finding.class != "payment-reconciliation-credit-unfulfillable-invalid" || finding.tier != tierPage ||
+		!strings.Contains(finding.observed, "invalid_observations_24h=1") ||
+		strings.Contains(fmt.Sprintf("%+v", finding), "synthetic") {
+		t.Fatalf("invalid disposition finding=%+v", finding)
 	}
 }
 

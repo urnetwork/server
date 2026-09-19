@@ -364,7 +364,20 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 		}
 		return nil, nil
 	}
-	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid != 0 || latestAge < 0 {
+	if invalid != 0 && distinctEvidence <= observations && distinctRuns <= observations && invalid <= observations && latestAge >= 0 {
+		return &finding{
+			probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable-invalid", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
+			symptom:   fmt.Sprintf("Stripe reconciliation recorded %d credit-unfulfillable event(s) with an invalid terminal disposition", invalid),
+			mechanism: "A credit_unfulfillable event is terminal only when it has provider evidence plus a destination_deleted or destination_unresolved credit-leg disposition. Other details may be historical incompatible events or a writer-contract regression. They are not safe payment dispositions and cannot be silently treated as uncreditable destinations.",
+			baseline:  "Zero invalid non-dry-run credit_unfulfillable events; terminal records have provider evidence and an audited deleted or unresolved destination reason.",
+			observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable invalid_observations_24h=%d distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", invalid, distinctEvidence, observations, distinctRuns, latestAge),
+			evidence:  "Only aggregate validation counts and latest age are selected. Event details, provider evidence, run IDs, network IDs, accounts, and credentials remain in the restricted audit store.",
+			action:    "Use the restricted audit trail to classify each invalid event as a historical schema/version mismatch or a current writer regression. Repair the writer or record an explicit authorized finance disposition; do not infer destination_deleted, retarget a payment, consume its evidence, or force the Stripe watermark.",
+			verify:    "New Taskworker runs write only complete terminal dispositions, the invalid aggregate reaches zero through two natural hourly runs, and each historical payment has an explicit authorized restricted-audit disposition.",
+			playbook:  "SIGNALS.md §2.21",
+		}, nil
+	}
+	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid > observations || latestAge < 0 {
 		return nil, fmt.Errorf("payment reconciliation unfulfillable returned an invalid nonempty aggregate")
 	}
 	return &finding{

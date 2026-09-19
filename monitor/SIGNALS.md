@@ -6631,6 +6631,18 @@ conditions write `credit_unfulfillable`, not `error`: each consumes no
 `stripe_invoice` row, renewal, or balance and does not pin the Stripe watermark
 or suppress genuine provider, schema, transport, or database failures. Missing
 or malformed authority data is not proof of an unresolved destination.
+`payment-reconciliation-credit-unfulfillable-invalid` is a separate PAGE when
+the bounded aggregate finds a record without provider evidence, an audited
+`destination_deleted`/`destination_unresolved` reason, or the `credit` leg.
+It is a historical writer-contract or audit-data problem, not an authorized
+terminal disposition and not a reason to suppress the reconciliation signal.
+**False-positive qualifier:** this aggregate cannot identify a current Stripe
+provider failure, a destination, or whether the invalid record predates the
+current writer; inspect only the restricted audit trail before assigning cause.
+**False-negative qualifier:** a zero aggregate covers only the bounded 24-hour
+non-dry-run event window and cannot prove that the Taskworker writer artifact
+has the terminal-disposition capability. Require deployed-source convergence
+and two natural reconciliation runs before claiming repair.
 Incomplete checkout pagination and conflicting checkout references remain
 errors and retain the watermark. Dry runs use the same read-only destination
 resolution and existence check, but the monitor excludes their rows. Repeated hourly overlap
@@ -10385,6 +10397,7 @@ traceable; their owning numbered sections remain the full contracts.
 | `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
 | `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
 | `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination or complete legacy resolution finds no recipient; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
+| `payment-reconciliation-credit-unfulfillable-invalid` | §2.21 `payment-reconciliation` | A purported terminal Stripe credit disposition lacks its required bounded evidence/reason/leg contract; classify it through restricted audit evidence and repair the writer or record an explicit authorized disposition. |
 | `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
 | `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |
@@ -10870,6 +10883,10 @@ the general replacement-policy drift still warns. The 401-record sentinel
 retains both affirmative branch evidence and a truncation visibility finding;
 failed/partial/malformed selection is unknown, not zero. Exact iterator loss
 remains its own §11.14 PAGE; no rotation count claims how many records were lost.
+Missing bounded-retention evidence is a `cannot-observe` visibility event with
+`error_class=observation-state-unavailable`; a capped census instead has
+`error_class=observation-bound-exceeded`. Neither class is a healthy zero or
+proof of a retention-rotation defect.
 
 `journal-buffer-short` WARNs only after both the
 host and the current journald activation have been live for 70 minutes, when a
