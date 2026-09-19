@@ -419,6 +419,9 @@ func TestEvaluatorRunFailureClassificationIsFailClosed(t *testing.T) {
 		{name: "inconsistent counters", fixture: evaluatorStageFixture{exitCode: 137, oomKills: 1, postgresOomKills: 2}},
 		{name: "unattributed docker oom", fixture: evaluatorStageFixture{exitCode: 137, mutateInspection: func(containers []map[string]any) { containers[0]["State"].(map[string]any)["OOMKilled"] = true }}},
 		{name: "container replacement", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Id"] = "synthetic-other-runner" }}},
+		{name: "missing runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { delete(containers[0], "Mounts") }}},
+		{name: "null runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Mounts"] = nil }}},
+		{name: "empty runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Mounts"] = []map[string]any{} }}},
 	}
 	for _, c := range cases {
 		root, output, err := runEvaluatorStageFixture(t, c.fixture)
@@ -510,7 +513,8 @@ sleep() { exit 0; }
 
 // A terminal sidecar is invalidated if trusted cleanup cannot prove zero
 // labeled containers and networks; sanitized infrastructure evidence may still
-// be retained, but the controller must not treat the candidate as completed.
+// be retained before bounded unmount, but the controller must not treat the
+// candidate as completed.
 func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -532,6 +536,19 @@ func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 	}
 	for _, c := range cases {
 		root := t.TempDir()
+		eventsPath := filepath.Join(root, "cleanup-events")
+		retainerPath := filepath.Join(root, "retain-failure-evidence.sh")
+		retainer := `#!/bin/bash
+set -eu
+[ "$1" = "$FIXTURE_MOUNT_PATH" ]
+[ "$2" = "$FIXTURE_ROOT/failed-evidence" ]
+[ "$FAILURE_EXIT_CODE" = 1 ]
+[ "$FAILURE_EVALUATOR_LINE" = 42 ]
+printf 'retain\n' >> "$FIXTURE_EVENTS"
+`
+		if err := os.WriteFile(retainerPath, []byte(retainer), 0700); err != nil {
+			t.Fatal(err)
+		}
 		path := filepath.Join(root, "evaluator-failure.json")
 		if err := os.WriteFile(path, []byte("synthetic terminal marker"), 0400); err != nil {
 			t.Fatal(err)
@@ -547,7 +564,8 @@ func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 artifact_dir="$FIXTURE_ROOT"
 active_work_mount="$FIXTURE_MOUNT_PATH"
 fixture_mounted="$FIXTURE_MOUNT"
-RETAIN_FAILURE_EVIDENCE=/missing-synthetic-retainer
+RETAIN_FAILURE_EVIDENCE="$FIXTURE_RETAINER"
+failure_line=42
 job_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 worker_uid=0
 worker_gid=0
@@ -561,11 +579,15 @@ rmdir() {
 sudo() {
     [ "$1" = -n ] || exit 96
     shift
+    local bounded=false
     if [ "$1" = timeout ]; then
         [ "$2" = --signal=TERM ] && [ "$3" = --kill-after=1s ] && [ "$4" = 3s ] || exit 97
         shift 4
+        bounded=true
     fi
     if [ "$1" = umount ]; then
+        [ "$bounded" = true ] || exit 97
+        printf 'umount\n' >> "$FIXTURE_EVENTS"
         [ "$FIXTURE_UNMOUNT_FAILURE" != true ] || return 1
         fixture_mounted=false
         return 0
@@ -590,6 +612,7 @@ sudo() {
 			"FIXTURE_MOUNT_PATH=" + mountPath, "FIXTURE_MOUNT=" + strconv.FormatBool(c.mount),
 			"FIXTURE_UNMOUNT_FAILURE=" + strconv.FormatBool(c.unmountFailure),
 			"FIXTURE_REMOVE_FAILURE=" + strconv.FormatBool(c.removeFailure),
+			"FIXTURE_RETAINER=" + retainerPath, "FIXTURE_EVENTS=" + eventsPath,
 		}
 		output, err := command.CombinedOutput()
 		if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 1 {
@@ -598,6 +621,14 @@ sudo() {
 		_, statErr := os.Lstat(path)
 		if c.terminal && statErr != nil || !c.terminal && !os.IsNotExist(statErr) {
 			t.Errorf("%s sidecar presence = %v, terminal=%t: %s", c.name, statErr, c.terminal, output)
+		}
+		events, eventsErr := os.ReadFile(eventsPath)
+		if c.mount {
+			if eventsErr != nil || string(events) != "retain\numount\n" {
+				t.Errorf("%s retention/unmount order = %q, error=%v: %s", c.name, events, eventsErr, output)
+			}
+		} else if !os.IsNotExist(eventsErr) {
+			t.Errorf("%s cleanup touched absent evidence mount: %q, error=%v", c.name, events, eventsErr)
 		}
 	}
 }
