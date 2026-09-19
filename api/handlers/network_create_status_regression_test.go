@@ -226,6 +226,8 @@ func TestNetworkCreateUnclassifiedFailureRemainsServerError(t *testing.T) {
 	}
 }
 
+// Malformed submissions leave every admitted auth attempt available; correcting
+// the shape at the refusal threshold still returns the ordinary rate limit.
 func TestNetworkCreateMalformedAuthShapesDoNotConsumeAttempts(t *testing.T) {
 	userAuth := "signup-shape@example.invalid"
 	password, token := "synthetic-password-not-a-secret", "synthetic-provider-token"
@@ -265,13 +267,15 @@ func TestNetworkCreateMalformedAuthShapesDoNotConsumeAttempts(t *testing.T) {
 			}
 			clientSession := session.NewLocalClientSession(ctx, statusTestClientAddress, nil)
 			defer clientSession.Cancel()
-			for i := 0; i < model.AttemptFailedCountThreshold; i++ {
+			// Auth attempts count the current submission before comparing with
+			// the threshold, so only threshold-1 attempts are admitted.
+			for attempt := 1; attempt < model.AttemptFailedCountThreshold; attempt++ {
 				if _, allow := model.UserAuthAttempt(args.UserAuth, clientSession); !allow {
-					t.Fatalf("%s spent auth budget before a valid attempt", test.name)
+					t.Fatalf("%s spent auth budget: attempt %d was refused before threshold %d", test.name, attempt, model.AttemptFailedCountThreshold)
 				}
 			}
-			// Correcting the shape must preserve the existing exhausted-budget
-			// 429/Retry-After path. The synthetic token never reaches verification.
+			// The corrected request is exactly the threshold attempt. Its
+			// 429/Retry-After refusal keeps the synthetic token from verification.
 			if args.UserAuth != nil {
 				args.Password = &password
 			} else {
@@ -290,6 +294,8 @@ func TestNetworkCreateMalformedAuthShapesDoNotConsumeAttempts(t *testing.T) {
 	}
 }
 
+// Orphan credentials preserve both independent budgets: seedphrase creation
+// admits its daily limit, while auth attempts refuse at their threshold.
 func TestNetworkCreateOrphanCredentialsDoNotCreateSeedphraseOrConsumeBudget(t *testing.T) {
 	password, google := "synthetic-password-not-a-secret", string(model.AuthTypeGoogle)
 	for _, test := range []struct {
@@ -328,9 +334,11 @@ func TestNetworkCreateOrphanCredentialsDoNotCreateSeedphraseOrConsumeBudget(t *t
 					t.Fatal("orphan credentials consumed the seedphrase creation budget")
 				}
 			}
-			for i := 0; i < model.AttemptFailedCountThreshold; i++ {
-				if _, allow := model.UserAuthAttempt(nil, clientSession); !allow {
-					t.Fatal("orphan credentials consumed the shared authentication budget")
+			for attempt := 1; attempt <= model.AttemptFailedCountThreshold; attempt++ {
+				_, allow := model.UserAuthAttempt(nil, clientSession)
+				wantAllow := attempt < model.AttemptFailedCountThreshold
+				if allow != wantAllow {
+					t.Fatalf("%s auth attempt %d allow = %t, want %t at threshold %d", test.name, attempt, allow, wantAllow, model.AttemptFailedCountThreshold)
 				}
 			}
 			w = httptest.NewRecorder()
