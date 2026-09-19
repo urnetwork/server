@@ -30,7 +30,7 @@ func TestPublishedMigrationMonitorExtenderArtifacts(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tx.Rollback(ctx)
-				checkExtenderMigrationMonitor(t, ctx, tx, version, nil)
+				checkPublishedMigrationMonitor(t, ctx, tx, version, nil)
 			}, server.OptReadOnly(), server.OptNoRetry())
 		}
 
@@ -122,19 +122,20 @@ func TestPublishedMigrationMonitorExtenderArtifacts(t *testing.T) {
 				if _, err := tx.Exec(ctx, fault.sql); err != nil {
 					t.Fatalf("apply %s: %v", fault.name, err)
 				}
-				checkExtenderMigrationMonitor(t, ctx, tx, server.MigrationCount(), fault.missing)
+				checkPublishedMigrationMonitor(t, ctx, tx, server.MigrationCount(), fault.missing)
 			}, server.OptReadWrite(), server.OptNoRetry())
 		}
 
 		// Every schema fault above is rolled back, including dependent indexes.
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			checkExtenderMigrationMonitor(t, ctx, tx, server.MigrationCount(), nil)
+			checkPublishedMigrationMonitor(t, ctx, tx, server.MigrationCount(), nil)
 		}, server.OptReadOnly(), server.OptNoRetry())
 	})
 }
 
-// Checks every extender artifact and the exact dependent-fault set at this head.
-func checkExtenderMigrationMonitor(t testing.TB, ctx context.Context, tx server.PgTx, version int, missing []int) {
+// Checks every extender artifact and the exact dependent-fault set at this head,
+// returning the live artifact row for additional version-specific assertions.
+func checkPublishedMigrationMonitor(t testing.TB, ctx context.Context, tx server.PgTx, version int, missing []int) monitor.Row {
 	t.Helper()
 	source := &extenderMigrationMonitorSource{tx: tx}
 	alerts, err := monitor.NewMigrationsSignal().Run(ctx, monitor.SignalSettings{
@@ -193,6 +194,7 @@ func checkExtenderMigrationMonitor(t testing.TB, ctx context.Context, tx server.
 			t.Fatalf("unexpected migration alert: %s", alert.Markdown())
 		}
 	}
+	return source.artifacts
 }
 
 type extenderMigrationMonitorSource struct {

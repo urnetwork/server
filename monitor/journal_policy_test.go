@@ -205,6 +205,53 @@ func TestJournalRetentionUnknownBuildCannotResolveUnsafeBranch(t *testing.T) {
 	}
 }
 
+func TestJournalRetentionVisibilityPreservesEvidenceClass(t *testing.T) {
+	base := journalBufferSample{
+		journalVacuumPolicyState:      "valid",
+		journalVacuumRuntimeState:     "complete",
+		journalRetentionBuild:         "known-fixed",
+		journalRetentionRotationState: "complete",
+	}
+	for _, tc := range []struct {
+		name   string
+		sample journalBufferSample
+		want   string
+	}{
+		{
+			name: "missing evidence",
+			sample: func() journalBufferSample {
+				s := base
+				s.journalRetentionRotationState = "unavailable"
+				return s
+			}(),
+			want: observationErrorClassStateUnavailable,
+		},
+		{
+			name: "capped census",
+			sample: func() journalBufferSample {
+				s := base
+				s.journalRetentionRotationState = "truncated"
+				return s
+			}(),
+			want: observationErrorClassBoundExceeded,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := evaluateJournalAgePolicy("synthetic-edge", tc.sample, false, true)
+			var visibility *finding
+			for i := range findings {
+				if findings[i].class == "cannot-observe" && strings.HasSuffix(findings[i].target, "/journal-retention-rotation") {
+					visibility = &findings[i]
+					break
+				}
+			}
+			if visibility == nil || !strings.Contains(visibility.observed, "error_class="+tc.want) {
+				t.Fatalf("visibility=%+v; want error_class=%s", visibility, tc.want)
+			}
+		})
+	}
+}
+
 func TestJournalAgePolicyMalformedMetadataCannotLeakOrCertifyHealth(t *testing.T) {
 	for _, overrides := range []map[string]string{
 		{"journal_vacuum_runtime_state": "private-secret"},

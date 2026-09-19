@@ -78,6 +78,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -281,6 +282,152 @@ var statsDisputes24hGauge = newStatsGauge(
 	"Transfer contracts created in the last 24 hours that are disputed",
 )
 
+// the extender gauges are internal and are read only by
+// grafana/dashboards/extenders.json.
+//
+// every label here is a bounded enum or a fixed rank, so the series count does
+// not grow with the extender population -- which is open, so a label carrying
+// an extender id per series would be unbounded. the one gauge that does name
+// extenders is the leaderboard, and it is capped at statsExtenderTopContracts.
+var statsExtenderGossipPendingGauge = newStatsGaugeVec(
+	"extender_gossip_pending",
+	"Extender gossip messages written but not yet released to the network, per kind",
+	"kind",
+)
+var statsExtenderGossipOldestPendingGauge = newStatsGaugeVec(
+	"extender_gossip_oldest_pending_seconds",
+	"Age of the oldest unreleased extender gossip message, per kind",
+	"kind",
+)
+var statsExtenderGossipReleased24hGauge = newStatsGaugeVec(
+	"extender_gossip_released_24h",
+	"Extender gossip messages released to the network in the last 24 hours, per kind",
+	"kind",
+)
+var statsExtenderGossipExtenders24hGauge = newStatsGaugeVec(
+	"extender_gossip_extenders_24h",
+	"Distinct extenders behind the gossip messages released in the last 24 hours, per kind",
+	"kind",
+)
+
+// statsExtenderContractsCounter is the one metric that names extenders, and it
+// is a COUNTER rather than a windowed gauge on purpose.
+//
+// Prometheus already stores history, so a monotonic per-extender total gives
+// every past window for free: the leaderboard is
+// `topk(20, increase(...[24h]))`, the load distribution is
+// `count(increase(...[24h]) > 10)`, and either can be re-asked over any range
+// without a new metric. Publishing a 24h gauge instead would have frozen the
+// window into the exporter.
+//
+// It is fed from closed hour buckets, so the accumulation is one grouped query
+// per hour rather than a cumulative rescan on every refresh.
+//
+// The cost, stated plainly: one series per extender that has carried a
+// contract, which unlike the other stats gauges is not a bounded enum. It is
+// bounded in practice by the extender population and, per process, by the fact
+// that a counter series lives only as long as the process. A restart resets it
+// to zero, which is exactly what prometheus counter-reset detection is for --
+// and `grafana.go` already gives each process its own instance label so a
+// redeploy's overlapping processes never share a series.
+var statsExtenderContractsCounter = newStatsCounterVec(
+	"extender_contracts_total",
+	"Contracts carried by each extender, accumulated from closed hour buckets",
+	"extender_id",
+)
+
+// The provider latency attestations the operator accepted
+// (connect/DESIGNNOTES4.md §3), read only by the extenders dashboard. The
+// window gauges are bounded; the per-extender counter has the same shape,
+// cost and reset behaviour as the contracts counter above, and is fed from
+// the same closed hour buckets.
+var statsExtenderProviderPings24hGauge = newStatsGauge(
+	"extender_provider_pings_24h",
+	"Provider latency attestations accepted in the last 24 hours",
+)
+var statsExtenderPingProviders24hGauge = newStatsGauge(
+	"extender_ping_providers_24h",
+	"Distinct providers whose latency attestations were accepted in the last 24 hours",
+)
+var statsExtenderPingedExtenders24hGauge = newStatsGauge(
+	"extender_pinged_extenders_24h",
+	"Distinct extenders with an accepted latency attestation in the last 24 hours",
+)
+var statsExtenderProviderPingsCounter = newStatsCounterVec(
+	"extender_provider_pings_total",
+	"Provider latency attestations accepted for each extender, accumulated from closed hour buckets",
+	"extender_id",
+)
+
+// statsCounterVec is a labeled monotonic counter with the same lazy
+// registration as the gauges. Unlike a gauge vec it is never replaced: a
+// counter's whole contract is that a series only ever goes up, so a label that
+// stops being fed keeps its last total and goes stale rather than resetting.
+type statsCounterVec struct {
+	counter    *prometheus.CounterVec
+	registered sync.Once
+}
+
+func newStatsCounterVec(name string, help string, labelNames ...string) *statsCounterVec {
+	return &statsCounterVec{
+		counter: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "urnetwork",
+			Subsystem: "stats",
+			Name:      name,
+			Help:      help,
+		}, labelNames),
+	}
+}
+
+func (self *statsCounterVec) add(value float64, labelValues ...string) {
+	if value < 0 {
+		// a counter cannot go down, and a negative here would mean the source
+		// query changed shape rather than that work was undone
+		return
+	}
+	self.registered.Do(func() {
+		prometheus.MustRegister(self.counter)
+	})
+	self.counter.WithLabelValues(labelValues...).Add(value)
+}
+
+// statsHourBucketSettle is how long an hour must have been over before its
+// rows are counted. An insert whose transaction opened before the hour turned
+// commits with a create_time inside it, so counting the instant the hour ends
+// can miss it -- and for a counter a miss is permanent, since the hour is
+// never revisited.
+const statsHourBucketSettle = 1 * time.Minute
+
+// statsHourBucketMaxCatchup bounds how far back one refresh will walk.
+const statsHourBucketMaxCatchup = 24 * time.Hour
+
+// statsClosedHour is the newest hour that has closed and settled by `now`.
+func statsClosedHour(now time.Time) time.Time {
+	currentHour := now.UTC().Truncate(time.Hour)
+	if now.UTC().Sub(currentHour) < statsHourBucketSettle {
+		// the hour that just ended has not settled; nothing new is countable
+		return currentHour.Add(-time.Hour)
+	}
+	return currentHour
+}
+
+// statsClosedHoursSince lists the hours after `last` that have closed and
+// settled by `now`, oldest first, so each is counted exactly once. The walk
+// is bounded: a collector that was down for a week does not issue a week of
+// queries in one refresh, the gap is lost rather than the refresh stalling,
+// and a counter gap reads as a flat line rather than a false spike.
+func statsClosedHoursSince(last time.Time, now time.Time) []time.Time {
+	closedHour := statsClosedHour(now)
+	if oldest := closedHour.Add(-statsHourBucketMaxCatchup); last.Before(oldest) {
+		last = oldest
+	}
+	hours := []time.Time{}
+	for hour := last.Add(time.Hour); !hour.After(closedHour); hour = hour.Add(time.Hour) {
+		hours = append(hours, hour)
+	}
+	return hours
+}
+
 // the ip family label values, in publication order. every family gauge
 // publishes all three on every refresh, so a family with no members is a zero
 // rather than an absent series (M4)
@@ -450,6 +597,9 @@ func statsRefreshDb(ctx context.Context) {
 		extendersDualstack,
 	))
 
+	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
+	statsRefreshExtenders(ctx, now)
+
 	// the contract gauges, each open now and over the trailing 24 hours (M3)
 	contracts := model.CountContracts(ctx, now)
 	statsOpenContractsGauge.set(float64(contracts.OpenContracts))
@@ -468,6 +618,114 @@ func statsRefreshDb(ctx context.Context) {
 	model.SetBlockUsersSnapshot(ctx, blockNumber, users)
 	if prevUsers, ok := model.GetBlockUsersSnapshot(ctx, blockNumber-1); ok {
 		statsPrevBlockUsersGauge.set(float64(prevUsers))
+	}
+}
+
+// statsRefreshExtenders publishes the gossip release queue and the contract
+// leaderboard.
+//
+// The leaderboard is replaced whole on every refresh rather than updated in
+// place: an extender that falls out of the top N must stop publishing, or its
+// last value would sit there forever looking current. `replace` already does
+// that for a gauge vec, which is why the rank is a label rather than a series
+// per extender.
+func statsRefreshExtenders(ctx context.Context, now time.Time) {
+	gossipKindNames := map[int]string{
+		model.NetworkExtenderPublishKindRecord:     "record",
+		model.NetworkExtenderPublishKindRevocation: "revocation",
+	}
+	pending := []statsLabeledValue{}
+	oldestPending := []statsLabeledValue{}
+	released := []statsLabeledValue{}
+	releasedExtenders := []statsLabeledValue{}
+	for _, count := range model.CountExtenderGossipPublish(ctx, now) {
+		kind, ok := gossipKindNames[count.Kind]
+		if !ok {
+			continue
+		}
+		pending = append(pending, statsLabeledValue{
+			labelValues: []string{kind},
+			value:       float64(count.Pending),
+		})
+		oldestPending = append(oldestPending, statsLabeledValue{
+			labelValues: []string{kind},
+			value:       count.OldestPendingSeconds,
+		})
+		released = append(released, statsLabeledValue{
+			labelValues: []string{kind},
+			value:       float64(count.Released24h),
+		})
+		releasedExtenders = append(releasedExtenders, statsLabeledValue{
+			labelValues: []string{kind},
+			value:       float64(count.Extenders24h),
+		})
+	}
+	statsExtenderGossipPendingGauge.replace(pending)
+	statsExtenderGossipOldestPendingGauge.replace(oldestPending)
+	statsExtenderGossipReleased24hGauge.replace(released)
+	statsExtenderGossipExtenders24hGauge.replace(releasedExtenders)
+
+	pings := model.CountExtenderProviderPings(ctx, now)
+	statsExtenderProviderPings24hGauge.set(float64(pings.Pings24h))
+	statsExtenderPingProviders24hGauge.set(float64(pings.Providers24h))
+	statsExtenderPingedExtenders24hGauge.set(float64(pings.Extenders24h))
+
+	statsRefreshExtenderContracts(ctx, now)
+	statsRefreshExtenderPings(ctx, now)
+}
+
+// statsExtenderContractsHour is the last closed hour already added to the
+// counter. Zero until the first refresh, which seeds it without backfilling:
+// a counter that starts at zero and grows from now is correct, and backfilling
+// would invent a step increase that never happened.
+var statsExtenderContractsHour time.Time
+
+// statsRefreshExtenderContracts adds every hour that closed since the last
+// refresh to the per-extender counter.
+//
+// Only closed hours are counted, and each exactly once. Counting the current
+// partial hour would mean adding the same contracts again on the next refresh,
+// which for a counter is not a small error -- it compounds, and `increase()`
+// would report several times the real number.
+func statsRefreshExtenderContracts(ctx context.Context, now time.Time) {
+	if statsExtenderContractsHour.IsZero() {
+		// seed without backfilling
+		statsExtenderContractsHour = statsClosedHour(now)
+		return
+	}
+	for _, hour := range statsClosedHoursSince(statsExtenderContractsHour, now) {
+		for _, count := range model.CountExtenderContractsByHour(ctx, hour) {
+			statsExtenderContractsCounter.add(
+				float64(count.Contracts),
+				count.ExtenderId.String(),
+			)
+		}
+		// advanced per hour, so a refresh that raises part way resumes at
+		// the first hour it did not finish rather than recounting
+		statsExtenderContractsHour = hour
+	}
+}
+
+// statsExtenderPingsHour is the counter cursor of the provider pings, kept
+// separately from the contracts cursor so the two counters seed and resume
+// independently.
+var statsExtenderPingsHour time.Time
+
+// statsRefreshExtenderPings adds every hour that closed since the last refresh
+// to the per-extender pings counter, on the same rules as the contracts.
+func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
+	if statsExtenderPingsHour.IsZero() {
+		statsExtenderPingsHour = statsClosedHour(now)
+		return
+	}
+	for _, hour := range statsClosedHoursSince(statsExtenderPingsHour, now) {
+		for _, count := range model.CountExtenderProviderPingsByHour(ctx, hour) {
+			statsExtenderProviderPingsCounter.add(
+				float64(count.Pings),
+				count.ExtenderId.String(),
+			)
+		}
+		statsExtenderPingsHour = hour
 	}
 }
 

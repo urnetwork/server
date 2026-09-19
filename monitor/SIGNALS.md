@@ -532,6 +532,28 @@ WHERE function_name LIKE '%UpdateClient%'
   preserve the existing key and reconcile before another submission. Neither
   a matching destination phrase nor a current source base proves successful
   reset or unchanged account configuration. Never clear rows or keys manually.
+- The 2026-09-18 Main `AdvancePayment` investigation established the current
+  operations/configuration split with a bounded read-only primary query. Of
+  1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
+  nonterminal with its existing idempotency key and without a processor record
+  or chain hash, so they are source-wallet liquidity work, not a stuck-worker
+  or retry-reset defect. Thirty-eight rows had fresh claims; changing parked
+  and claim counts therefore describe scheduler state, not recovery. The two
+  `processor-invalid-destination` rows were also nonterminal and unpinned, and
+  selected current active, owned MATIC wallets whose address shape was not a
+  valid EVM address. That independently establishes an account-wallet
+  configuration fault, not a generic processor outage. The current selected
+  wallet is not evidence of source liquidity, and a stored rejection alone is
+  not evidence that a reset succeeded; retain both checks. One logical
+  provider attempt can emit two diagnostic lines, so line rate is not a task
+  count. Finance must verify/fund the exact source network/token wallet (or
+  authorize a payout pause), and the account owner/operator must submit the
+  valid intended destination through the supported account API. Do not deploy,
+  restart, replay, clear idempotency, accelerate retries, or retarget a pinned
+  payout to address either class. After authorized corrections, require an
+  independent 90-minute natural-retry window plus ingestion delay, intended
+  successful transfers without duplicates, and no new admission failures or
+  rate limits before closing both cohorts.
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -1330,6 +1352,26 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
 
+On 2026-09-18, the bounded API correlation for a generic five-per-minute
+`panic` PAGE retained six goroutine-stack records that were neither literal
+`panic:` lines nor structured `ErrorJson` records. Its privacy-reduced
+projection established `runtime error: nil pointer dereference`, with the
+affected paths being auth-code login and provider-location lookup; no SQLSTATE,
+deadline, Redis, or transaction-cleanup marker was present. The shared cause
+was JSON `null`: Go accepts it while unmarshalling into a typed pointer, then
+the generic input wrapper dispatched the typed nil to implementations that
+immediately dereferenced it. Reject the trimmed root JSON literal `null` with
+HTTP 400 before every input implementation is invoked. Keep this under generic
+`panic`, rather than inventing an owner/class from arbitrary goroutine dumps:
+unstructured stack frames can be secondary goroutines from one panic and are
+not safe ownership proof. The deterministic wrapper regression must prove a
+whitespace-padded `null` never calls a pointer implementation and a concrete
+object still dispatches normally. After API artifact convergence, require ten
+minutes below the unchanged generic threshold with fresh tail coverage. An
+unknown aggregate owner is therefore neither a false positive nor healthy; use
+one bounded, redacted stack correlation to establish a mechanism, and treat
+absence of structured ownership as an explicit attribution limitation.
+
 The following machine classifier names share the playbooks already specified
 below and in §4; retaining their exact identifiers makes implementation and
 ledger crosswalks deterministic:
@@ -1345,7 +1387,10 @@ ledger crosswalks deterministic:
   `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
   reason-specific successors to the legacy sender class in §14.6. They keep
   admission, encryption readiness, lifecycle closure, and unknown errors
-  causally separate.
+  causally separate. Newer `not-admitted` diagnostics also retain the local
+  refusal gate, signal kind and reset flag. Its service aggregate remains
+  alertable so splitting a burst across those finite groups cannot hide it;
+  old mode/reason-only lines explicitly leave the gate unobserved.
 
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
@@ -2276,6 +2321,15 @@ retain precedence. Parent cancellation remains watcher lifecycle rather than
 an SSH failure, including cancellation while waiting for a shared command slot;
 the per-command deadline retains its timeout classification.
 
+Every monitor SSH command is noninteractive, identity-confined, and pinned to
+the operator-provisioned trust state: `BatchMode=yes`, `IdentitiesOnly=yes`,
+`StrictHostKeyChecking=yes`, and `UpdateHostKeys=no`. The transport uses only
+the selected inventory identity paths and never accepts a new host key or
+rewrites trust state while observing production. An unknown or changed host
+key, or an unusable selected identity, is a `cannot-observe` result. Legitimate
+host-key rotation is operator-owned and must be preprovisioned in the
+monitor's known-hosts state before observation resumes.
+
 Status 255 is deliberately **not a transport diagnosis**: OpenSSH can return it
 for connection/authentication failures or propagate the remote command's own
 status 255. This field alone proves neither a failed VPN nor a remote service
@@ -2285,6 +2339,14 @@ visibility; shared-cause correlation does not suppress or replace them. Only
 fixed classes enter these Alerts, never SSH stderr, connection addresses,
 credentials, or raw route/session output. Healthy sibling results remain
 visible, and unknown targets remain unknown.
+
+FALSE POSITIVE QUALIFIER: strict SSH failure can mean missing local trust,
+an identity available only through an agent, or a legitimate key rotation
+that has not been preprovisioned while the host and service remain healthy.
+FALSE NEGATIVE QUALIFIER: successful SSH proves only authentication to the
+locally trusted key for the selected address. It does not prove inventory or
+source completeness, establish the original key's trust, or make a successful
+remote command a service-health result.
 
 ACTION: first distinguish SSH transport/authentication from the remote
 command's status. Before attributing a local overlay failure, correlate
@@ -6523,6 +6585,18 @@ more in three hours. Authentication, provider availability, schema validation,
 budget exhaustion, and local persistence are separate discriminators; never
 advance a watermark merely to clear the alert.
 
+False-positive and false-negative qualifiers: a stale source age proves that
+the store has not recorded a successful complete pass; it does not identify
+the failed stage. Provider listing may have succeeded while per-invoice credit
+or terminal-audit persistence failed. A current global heartbeat, one clean
+recurring task, and fresh sibling-store watermarks do not establish Stripe
+health. Conversely, a stale Stripe watermark alone does not establish Stripe
+downtime, missing credentials, stopped scheduling, or a Grafana exporter
+failure. Join the same-window store/leg/reason counts to the executing
+Taskworker source before choosing the remedy. Keep provider objects, customer
+identities, stored error text, and credential values in restricted evidence;
+the probe exposes only aggregate counts and ages.
+
 `payment-reconciliation-repair` warns on every real `credited`/`ended`/
 `entitlement_repaired` repair whose run also emitted a reconciliation
 heartbeat. `entitlement_repaired` means the provider affirmatively reported an
@@ -6548,17 +6622,36 @@ transaction IDs, evidence, details, or credential values.
 
 `payment-reconciliation-credit-unfulfillable` is PAGE when at least one
 distinct provider evidence value identifies a paid Stripe invoice whose
-metadata destination was deleted before the ledger-gated credit obtained its
-lifecycle lock. That exact terminal condition writes `credit_unfulfillable`,
-not `error`: it consumes no `stripe_invoice` row, renewal, or balance and does
-not pin the Stripe watermark or suppress genuine provider, schema, transport,
-or database failures. Dry runs perform the same destination-existence check
-without mutation, but the monitor excludes their rows. Repeated hourly overlap
+destination is no longer creditable. `destination_deleted` means an explicit
+metadata or checkout destination was absent when the ledger-gated credit
+obtained its lifecycle lock. `destination_unresolved` means complete expanded
+invoice and checkout-session reads, followed by the existing legacy-email
+lookup where present, found no intended account. These exact terminal
+conditions write `credit_unfulfillable`, not `error`: each consumes no
+`stripe_invoice` row, renewal, or balance and does not pin the Stripe watermark
+or suppress genuine provider, schema, transport, or database failures. Missing
+or malformed authority data is not proof of an unresolved destination.
+`payment-reconciliation-credit-unfulfillable-invalid` is a separate PAGE when
+the bounded aggregate finds a record without provider evidence, an audited
+`destination_deleted`/`destination_unresolved` reason, or the `credit` leg.
+It is a historical writer-contract or audit-data problem, not an authorized
+terminal disposition and not a reason to suppress the reconciliation signal.
+**False-positive qualifier:** this aggregate cannot identify a current Stripe
+provider failure, a destination, or whether the invalid record predates the
+current writer; inspect only the restricted audit trail before assigning cause.
+**False-negative qualifier:** a zero aggregate covers only the bounded 24-hour
+non-dry-run event window and cannot prove that the Taskworker writer artifact
+has the terminal-disposition capability. Require deployed-source convergence
+and two natural reconciliation runs before claiming repair.
+Incomplete checkout pagination and conflicting checkout references remain
+errors and retain the watermark. Dry runs use the same read-only destination
+resolution and existence check, but the monitor excludes their rows. Repeated hourly overlap
 may audit the same evidence again, so the alert counts distinct evidence while
 retaining total observations and distinct runs. Finance and operations must
 explicitly disposition each payment from the restricted audit trail. Never
-recreate or retarget a deleted network, credit another owner, insert a ledger
-row, consume the evidence, or force a watermark from this aggregate. A later
+recreate or retarget a deleted network, guess an unresolved recipient, credit
+another owner, insert a ledger row, consume the evidence, or force a watermark
+from this aggregate. A later
 watermark advance, repeat observation, or alert aging out is not disposition
 proof. The alert never returns evidence, run/network/account IDs, details, or
 credentials.
@@ -6582,6 +6675,56 @@ deterministic real-run test requires two overlap passes to retain the audit,
 advance the natural watermark, and write no ledger/renewal/balance. Its dry-run
 control distinguishes a deleted destination from a live sibling and preserves
 all no-write and no-watermark semantics.
+
+The bounded 2026-09-18 discriminator found 16 Stripe credit errors in eight
+hours: eight deleted-destination failures and eight legacy destination lookup
+failures that completed without an account. These are event counts, not
+distinct payment counts. The hourly task continued,
+but each run's per-store errors prevented Stripe's last-success timestamp from
+advancing; the dashboard's 4.63-day source age therefore did not imply that
+the task had stopped. Source already classified the deleted-network sentinel
+as terminal, while the no-match legacy path still returned a generic error.
+Both source completeness and the deployed Taskworker generation must be
+verified before claiming recovery. The narrow extension uses a typed
+unresolved-destination error, retains mandatory terminal audit persistence,
+and makes dry-run destination resolution agree with real runs. Deterministic
+tests reproduce the stalled watermark, require natural advancement with
+durable evidence and no credit, and require audit failure, malformed or partial
+provider responses, invalid destinations, and HTTP failures to keep the
+watermark fixed. A terminal observation requires finance/operations
+disposition; reclassifying it does not settle or refund the payment.
+
+The rollout discriminator in that same audit was a fully converged but stale
+Taskworker artifact: each of two blocks returned the same deployed version
+`2026.9.14+1046068620` in all 20 samples. Its mapped build source `c2fa1d2b`
+predated `09b6edbd`, which added the deleted-destination terminal branch, and
+the observed credit errors retained the pre-correction classification. All
+eight processes exposed fresh source metrics with one digest and embedded
+revision `36a13c81`; `modified=true` qualifies exact source attribution and
+does not imply a build-policy fault. Convergence alone was therefore
+insufficient. Verify the executing artifact contains **both**
+`destination_deleted` and `destination_unresolved` classifications, the
+complete read-only resolution guards, and mandatory terminal-audit
+persistence. The current probe has no runtime capability gauge for these
+branches: absent `credit_unfulfillable` rows cannot distinguish old code from
+no terminal invoices, and a release label by itself does not prove capability.
+Use the existing `payment-reconciliation-store-error` and
+`payment-reconciliation-watermark-stale` findings until source/execution
+evidence establishes that discriminator; do not infer a new failure class
+from silence.
+
+This correction requires a Taskworker build containing both terminal branches
+and a refreshed monitor binary that accepts both audited reasons. It requires
+no database migration, Vault change, or Grafana deployment. After every
+Taskworker block has the correction, require two natural hourly runs with an
+advancing Stripe watermark, zero new Stripe skips/errors, and durable
+`credit_unfulfillable` evidence for any still-uncreditable invoice; keep true
+provider, schema, transport, budget, and audit-write failures blocking.
+Historical store errors still count until they leave the full three-hour
+window. Terminal invoice observations remain a separate finance/operations
+issue even after freshness recovers: repeated overlap observations are not
+new payments, and neither a fresh watermark nor expiration of the 24-hour
+alert window proves disposition.
 
 The 2026-09-08 Main audit demonstrated why per-store state is mandatory. The
 global task was healthy (22 completions in 24 hours and a current heartbeat),
@@ -6665,8 +6808,9 @@ Implementation convention: SIGNALS.md §2.21 (`payment-reconciliation`) maps
 to `signal_payment_reconciliation.go` and
 `signal_payment_reconciliation_test.go`. Synthetic tests cover a healthy
 four-store run, a store skipped behind a healthy heartbeat, repeated provider
-errors, missing/stale watermarks, a dead singleton chain, safety-net repairs,
-deleted-destination terminal audits in real and dry-run paths, distinct-evidence
+errors, missing/stale watermarks, a healthy task with stalled Stripe credit
+and no terminal-capability evidence, a dead singleton chain, safety-net repairs,
+deleted and unresolved destination terminal audits in real and dry-run paths, distinct-evidence
 aggregation, strict aggregate validation, privacy boundaries, and detailed
 Markdown.
 
@@ -7025,6 +7169,17 @@ endpoints, contracts, and failure text never leave PostgreSQL.
   compatible control is insufficient for the causal page. Unknown metadata is
   never treated as compatible, and claimed legacy metadata alone is never
   reported as proof of the live process version.
+
+If a later compatible control falls below the causal threshold, the current
+sample fails closed from `contract-hmac-incompatible` PAGE to
+`contract-hmac-readiness` WARN. That class reassignment is not a severity
+downgrade of one Alert identity, does not prove receiver recovery, and cannot
+retroactively negate an earlier behaviorally confirmed incompatibility.
+Diagnose the compatible-cohort degradation as a separate boundary while
+retaining the prior HMAC incident until its full closure gate passes. This
+prevents a shared capacity or reachability regression from hiding an already
+proved legacy-protocol failure without weakening the current-sample causal
+threshold.
 
 Closure requires an explicit security/availability decision:
 
@@ -8185,7 +8340,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `redis-latencystats-source-drift` | At least one configured Redis process reports live `latency-tracking=yes`. The persistent template may already say `no`; `state: started` does not mutate the setting of an existing process, and that node can recreate the unused metric family on later commands. | Run `cardinality` (§11.20d), then the reviewed Redis convergence playbook that updates both the persistent file and each live process with idempotent `CONFIG SET`, without restarting Redis. Require every node to report `no` on two fresh runs; wait for ordinary staleness/compaction before judging the Mimir series count. |
 | `redis-latencystats-source-unobservable` | The bounded host-local reducer cannot return one exact `latency-tracking` state for every configured Redis node. A zero Mimir family count while this source census is incomplete is unknown, not proof of durable disablement. | Restore loopback `redis-cli CONFIG GET` reachability and the fixed reduction. Do not infer a missing value, restart Redis, or substitute query absence for source state. Require all configured nodes observed as `no` on two fresh runs. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
-| `[family]dial tag=doh ... err=...i/o timeout` or `[egress]dial tag=doh ... err=...i/o timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and multiple diagnostic forms can describe one attempt, so line rate is neither an attempt count nor a logical failure denominator. A bare `err=i/o timeout` in this exact producer shape has no endpoint attribution. | Preserve PAGE at 10 lines/minute, with one fixed `doh-attempt` frame and a fixed sample omitting endpoints, domains, and correlation identifiers. Correlate the original process path, same-window host/TCP controls, and final logical query outcomes. A success-only callback and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
+| `[family]dial tag=doh ... err=...i/o timeout`, `[egress]dial tag=doh ... err=...i/o timeout`, or exact `observable=v1 ... result=timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and legacy diagnostic forms can describe one attempt twice, so line rate is neither an attempt count nor a logical failure denominator. Legacy path/family/outcome remain unknown. New finite `path`, `attempted_family`, `resolver_owner`, `resolver_scope`, and `resolver_outcome` tokens identify only the initiating resolver call; a detached losing HTTP dial may report `answer` after that call returned successfully. | Preserve PAGE at 10 lines/minute and the single `doh-attempt` frame. The bounded sample retains only validated finite tokens and omits endpoints, domains, and correlation identifiers. Correlate the original process path, same-window controls, and fresh same-process `[doh]resolver` cumulative outcome snapshots; see §5.2 for scope and Taskworker measurement qualifiers. Pending/unknown outcomes and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
+| DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
 | otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 lines/minute and the existing emitter-service/endpoint identity. Resolve the exact target and original source path; compare same-window process, listener, TCP, and resource evidence. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls, and ten minutes below threshold. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
@@ -8225,7 +8381,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | legacy `[signal]send failed -><destination>` from `transport_p2p_webrtc.go` (`signal-send-unclassified`) | The emitting service hosts Connect's signaling sender, but its legacy boolean-only call discarded the detailed result. The line cannot distinguish bounded admission refusal, required-encryption refusal, client/generation/sequence closure, or another send error. A Taskworker selector identifies the host process, not an owning task or a Taskworker implementation defect; the September 10 record cited as historical Taskworker ancestry was later corrected to Connect and must not be reused as ancestry for this event. The retained sample omits the destination. | At 20/min WARN, prove the embedded Connect input under §8.12 and deploy the structured, identity-free diagnostic before choosing a behavioral correction. Do not infer pressure, lifecycle, transport failure, or the effect of a later Connect commit from the legacy line. Require this class to disappear on every relevant artifact and the reason-specific class to remain below 20/min for ten minutes under comparable traffic. See §14.6. |
-| `[signal]send failed mode=<sender|receive-reply> reason=<not-admitted|encryption-not-ready|canceled-or-closed|other>` (`signal-send-*`) | Current Connect preserves the detailed enqueue boundary without retaining destinations or raw errors. `not-admitted` is a false result with no error; on `receive-reply` it is the intentional zero-wait callback boundary, while `sender` requires its own wait-budget audit. `encryption-not-ready` is the typed required-encryption gate. `canceled-or-closed` deliberately groups the transfer layer's untyped client, generation, sequence, and capability `Done` outcomes. `other` is a privacy-safe fallback and not a transport diagnosis. | Each reason is a separate 20/min WARN class and mode is its bounded frame. Correlate only the matching control: send admission and negotiation recovery; encryption/session establishment; or exact drain/generation/sequence lifecycle. Reproduce `other` locally before adding a stable typed reason. Never block a receive callback, bypass encryption, enlarge a queue, log a raw error/destination, or restart a stable service from one class alone. Require the class below 20/min for ten minutes and retain deterministic zero-wait, typed-error, cancellation, and pooled-buffer ownership tests. See §14.6. |
+| `[signal]send failed mode=<sender|receive-reply> reason=<not-admitted|encryption-not-ready|canceled-or-closed|other>` (`signal-send-*`), optionally followed by the exact `boundary=... kind=... reset=...` diagnostic schema | `not-admitted` is a false result with no error; on `receive-reply` it is the intentional zero-wait callback policy. Old mode/reason-only records cannot identify the refusal gate. New `boundary` distinguishes reliable resend capacity, Pack admission, final queue handoff and loopback; `kind` and `reset` describe only the refused local frame. `encryption-not-ready` is the typed encryption gate; `canceled-or-closed` groups untyped `Done` outcomes; `other` preserves unexpected errors without raw text. | Each reason is a separate 20/min WARN class. Admission keeps both its service aggregate and finite diagnostic groups, so mixed gates cannot hide a burst. A Pack refusal can reflect fairness rather than exhausted total capacity; a final handoff can be a zero-buffer rendezvous rather than a full Pack budget. A refused answer or candidate is not proved recovered by offer replay. Correlate the exact gate and signal kind with negotiation completion or usable exchange fallback; require ten comparable minutes below threshold and the independent recovery control after every emitting service and the monitor contain the diagnostic. Never block receive callbacks, bypass encryption, enlarge queues, log identities/SDP/raw errors, or restart from this line alone. See §14.6 for the exact schema and closure qualifiers. |
 | `[rel] event=window_stall ... failed=0` (`window-stall`), `[rel] event=window_failed ... after=<milliseconds>` (`window-stall-terminal`), or compatibility `window_stall ... failed=1` | Connect emits `window_stall failed=0` when the bounded reason changes while a provider window is still trying. `failOutcome` instead emits one authoritative `window_failed` after the second zero-provider deadline and then calls `SetStallStatus` directly. That dispatch does not itself produce `window_stall failed=1`, but a later reason change can publish that compatibility transition while the failed latch remains set. The class rate intentionally counts both diagnostic lines; `failed_window_events` separately counts exact-replay-deduplicated authoritative events. Compatibility-only evidence keeps the alert but renders that cardinality unknown. The 2026-09-08 watcher initially mislabeled a 26/min `failed=0` shape as `novel`, and the 2026-09-09 watcher missed real `window_failed` lines while waiting for `failed=1`; the exact classes now preserve both states, while malformed fields remain novel schema drift. | Branch on the bounded reason and correlate the same window with provider progress plus explicit transport/framer/reachability, provider-response, rate-limit, or authentication evidence. Do not infer incident size from the diagnostic line rate, terminal impact from `failed=0`, or a root cause from `window_failed` or compatible `failed=1` alone. Do not restart Taskworker or deploy a transport change from these lines. Require nonterminal churn below 20/min and no terminal event for ten minutes under comparable traffic, with provider windows reaching their configured minimum. |
 | `[multi]window enumerate error timeout = generator call canceled` or `[multi]create client args error = generator call canceled` (`window-generator-canceled`) | The exact text is artifact- and context-dependent; it does not prove that the owning window was canceled. On Connect with legacy log-before-context ordering, a population paired with nonterminal `platform-unreachable` stalls is consistent with ordinary teardown being falsely recorded as a platform error. Fixed Connect suppresses only an error observed after authoritative outer cancellation, so recurrence on a proved fixed artifact establishes that an inner generator returned the identical text while the outer context was live at the guard. Exact `generator call abandoned after ...` and every other suffix remain separate hung-call/live-error evidence. | At 20/min WARN, prove the emitting artifact's recorded Connect build input under §8.12. Deploy the context-ordering fix only to a proved pre-fix Taskworker; on a proved fixed artifact, diagnose the preserved live inner error. Treat a paired `window-stall` as the same causal boundary, not a second failure. Never infer ancestry from a release label/module tag or restart from the line alone. For a pre-fix rollout, require zero cancellation-correlated exact lines and paired stalls for ten minutes through comparable teardown, while deterministic live-context exact errors and other genuine errors remain visible. See §14.6. |
 | `[rel] event=evaluation_budget_exhausted ...` (`window-evaluation-budget`) | One or more initial provider pings remained unresolved at the owning pass's safety boundary. On pre-fix Connect, one `WindowExpandTimeout` deadline incorrectly bounded both candidate acquisition and already-started pings: `effective_min < ping_timeout` directly proves that the acquisition phase clipped the configured evaluation budget. Connect `b11d722` or later ends acquisition at `expand_timeout`, retains the same pass through each full `PingTimeout`, and reserves this event for the later acquisition-plus-ping safety envelope. `candidates` is the pass-owned cleanup count; `observed_max` is elapsed wall time. Lifecycle cancellation, evaluation-epoch rebuild, and window retirement do not emit it. The event identifies the budget owner, not why the receiver stayed silent, and its line rate is neither candidate nor failed-window cardinality. | At 20/min WARN, prove the emitting Connect input and branch on `effective_min` versus `ping_timeout`. For the clipped pre-fix shape, rebuild the emitting Connect-bearing artifact with `b11d722` or later; do not lengthen either timeout as a legacy-HMAC remedy. On corrected source, diagnose a full acquisition-plus-ping expiry at the timer, callback, or scheduler boundary. Preserve pass ownership, no-overlap/no-late-admission cleanup, and exactly-once accounting. Correlate §2.24 HMAC compatibility, provider response, carrier/framer/auth/rate-limit evidence, and terminal state independently. After complete convergence require zero clipped events for ten minutes, ordinary unanswered candidates retiring only after their full ping budget, and provider addition or recovery; retain deterministic acquisition-edge, full-budget, terminal-boundary, and lifecycle-cancellation barriers. See §14.6. |
@@ -8338,6 +8494,108 @@ complete logical-query success/failure denominator was available. The evidence
 established failed resolver legs, not a Redis failure or a measured user-facing
 DNS outage. Neither transient public-path degradation nor an earlier
 process-local delay was independently resolved by those later controls.
+
+On 2026-09-18, a bounded Main Proxy interval also contained the distinct
+`[family]dial tag=doh ... err=address family not supported by protocol`
+signature alongside bare `i/o timeout` legs and successful dials. Source
+inspection found that hosted Proxy devices set their TUN MTU to the 1100-byte
+packet contract, below the 1280-byte IPv6 minimum, while that TUN's resolver
+still inherited both remote DoH families. IPv6 legs therefore failed locally
+with `EAFNOSUPPORT` before contacting a resolver. This is a resolver capability
+mismatch, not evidence of IPv6 router loss or a public resolver outage.
+Taskworker's fixed-provider tunnels use the dual-stack default MTU; do not
+transfer the Proxy-only MTU diagnosis to them from a shared log producer.
+
+The owning correction is in Connect `Tun.buildDohCache`: copy the effective
+resolver settings and omit unsupported remote IPv6 DoH/plain-DNS targets for
+an IPv4-only TUN. Preserve the caller's lists and explicit family preference,
+all local host-side fallback targets, and dual-stack TUN behavior. An explicit
+IPv6-only remote choice on an IPv4-only TUN must fail without substituting a
+different resolver or enabling local DNS. `TestTunDohQueryHonorsTunnelFamilies`
+and `TestTunDohForwardHonorsTunnelFamilies` exercise the real cache fanout;
+custom-settings/reload and local-IPv6-answer controls guard the adjacent paths.
+Build Proxy against the corrected Connect checkout and verify actual artifact
+convergence before starting the observation window.
+
+**False-positive qualifier:** `EAFNOSUPPORT` is not an `i/o timeout` and must
+not enter the `doh-dial-timeout` count. A logged process `policy=force4` does
+not prove an attempted packet was IPv4: literal resolver addresses and
+custom/tunnel dial paths have independent capabilities. **False-negative
+qualifier:** eliminating unsupported-family legs does not establish recovery
+of timed-out usable-family legs or user DNS queries. Retain the timeout PAGE
+and its ten-minute gate independently; successful dial legs and aggregate
+egress-health results cannot correlate each timeout to a final DNS outcome.
+Require zero new unsupported-family DoH attempts on the corrected IPv4-only
+path, successful synthetic IPv4 resolution, unchanged dual-stack/custom
+resolver controls, and fresh original-path observations. Downstream DNS
+failure attribution remains unknown without a final-query outcome boundary.
+
+**Bounded DoH provenance:** newer Connect producers emit
+`[family]dial tag=doh observable=v1 path=<host|caller|tun|unknown>
+attempted_family=<4|6|unknown> result=<finite-result>
+resolver_owner=<host|caller|tun|unknown> resolver_scope=<address|forward|oneshot|unknown>
+resolver_outcome=<pending|answer|authoritative_empty|stale|failed|canceled|timeout|unknown>`.
+The attempted family comes from the literal dial input even when no socket was
+created. A hostname remains unknown; policy, record type, and another successful
+socket do not substitute for this evidence. Only the owning `Tun` marks a path as
+`tun`; arbitrary supplied dialers and proxy dialers remain `caller`. No endpoint,
+query name, provider id, credential, payload, or correlation id is emitted in
+these fields. Local fallback is `path=host` even when `resolver_owner=tun` names
+the resolver's configured remote ownership.
+Fixed sanitized legacy error suffixes, including `err=i/o timeout` and
+`err=connect: connection refused`, keep older monitors' existing alerts working
+through rollout. They contain no original error text; a newer parser rejects a
+suffix that disagrees with the finite result.
+
+An identity-free atomic result follows the initiating resolver call through
+HTTP Transport's detached dial context. A losing dial can therefore time out
+with `resolver_outcome=answer` after the full resolver returned successfully.
+`pending` means it had not returned when this diagnostic was sampled; it must
+not be retrospectively joined to a different success line. Warm-up and older
+producers without that result boundary remain `unknown`. A pooled connection
+can later serve unrelated calls, so this provenance describes the initiator,
+not every later consumer of that connection.
+
+`[doh]resolver observable=v1 owner_path=... scope=... answer=...
+authoritative_empty=... stale=... failed=... canceled=... timeout=...` records
+fixed-cardinality process-local cumulative counters, sampled at most once per
+five seconds per ownership/scope. Every completed `QueryResult`, `Forward`, and
+one-shot resolver call updates one outcome, including failures and cancellations.
+Address scope includes cache
+hits and coalesced waiters; `forward` means a usable opaque DNS response, not
+necessarily address records; `oneshot` can request multiple names and counts one
+call. The complete cache result includes configured fallbacks and stale serving.
+An empty authoritative answer is not a resolver transport failure. Counter
+snapshots are observation records, not a repeated new error when an old failure
+total remains nonzero; the monitor must not turn them into `novel` alerts.
+Finite `result=refused` dials retain the existing `connection-refused` threshold,
+and `result=error` retains the unknown-error novelty safety net. Cancellation and
+unsupported-family observations must not be miscounted as dial timeouts.
+
+**False-positive qualifiers:** a terminal answer on a detached losing dial
+rules out failure of that initiating resolver call, not the dial timeout itself
+or a service-wide incident. Taskworker can resolve through a selected provider's
+dual-stack measurement TUN; a Taskworker-emitted timeout does not establish
+failure of its host/control-plane DNS, nor the Proxy-only IPv4 TUN MTU mismatch.
+Prove the task and path from the deployed source and same-window evidence.
+`answer`, authoritative empty, and stale answers must remain distinct; canceled
+calls may be intentional teardown. Keep the existing attempt PAGE independent.
+
+**False-negative qualifiers and closure:** legacy and pending outcomes remain
+unknown. A success-only callback, a later host socket control, a single sample,
+or a quiet sampled interval cannot measure the logical failure rate. Compare
+fresh complete counter snapshots from the same process, accounting for process
+replacement and counter reset; require a positive observed workload and review
+failure, timeout, cancellation, and stale deltas alongside answers. These are
+resolver-call counts, not user-request or individual-name counts, and missing
+snapshots are missing visibility. First verify producer artifact convergence,
+then require ten fresh minutes below the unchanged 10/min attempt PAGE and
+healthy controls on the actual host/caller/TUN path. Claim user recovery only
+with independent final-call or end-to-end success. Deterministic tests force a
+real HTTP Transport's losing dial to return after a winning full-cache answer,
+cover fallback/stale terminal results, preserve legacy unknowns, and retain the
+Taskworker measurement qualifier; no DNS deadline, hedge, policy, retry, or
+resolver choice changes are part of this diagnostic correction.
 
 ### 5.3 CLUSTERDOWN
 `CLUSTER NODES | grep fail` names the dead/unreachable node(s). With no
@@ -10138,7 +10396,8 @@ traceable; their owning numbered sections remain the full contracts.
 | `mimir-child-missing` | §11.18 `mimir-index` | An expected active Mimir child is absent from the exact-process index view; require the complete active child set. |
 | `mimir-index-unobservable` | §11.18 `mimir-index` | A child index/store-gateway field is unavailable or malformed; restore complete parseable exact-process observations before evaluating freshness. |
 | `nonexpiring-key-skew` | §3.3c `redis-nonexpiring` | One Redis node carries a disproportionate non-expiring key cohort; classify owned families and require the fleet distribution to return in band. |
-| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
+| `payment-reconciliation-credit-unfulfillable` | §2.21 `payment-reconciliation` | A paid Stripe invoice names a deleted destination or complete legacy resolution finds no recipient; preserve the unconsumed payment for explicit finance/operations disposition without pinning the whole store watermark. |
+| `payment-reconciliation-credit-unfulfillable-invalid` | §2.21 `payment-reconciliation` | A purported terminal Stripe credit disposition lacks its required bounded evidence/reason/leg contract; classify it through restricted audit evidence and repair the writer or record an explicit authorized disposition. |
 | `payment-reconciliation-stale` | §2.21 `payment-reconciliation` | Paying-account reconciliation has no sufficiently recent successful authority pass; restore the task and prove current authoritative state. |
 | `payment-reconciliation-task` | §2.21 `payment-reconciliation` | The reconciliation task itself is missing, parked, failing, or overdue; require healthy recurring completion before clearing downstream subscription drift. |
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |
@@ -10624,6 +10883,10 @@ the general replacement-policy drift still warns. The 401-record sentinel
 retains both affirmative branch evidence and a truncation visibility finding;
 failed/partial/malformed selection is unknown, not zero. Exact iterator loss
 remains its own §11.14 PAGE; no rotation count claims how many records were lost.
+Missing bounded-retention evidence is a `cannot-observe` visibility event with
+`error_class=observation-state-unavailable`; a capped census instead has
+`error_class=observation-bound-exceeded`. Neither class is a healthy zero or
+proof of a retention-rotation defect.
 
 `journal-buffer-short` WARNs only after both the
 host and the current journald activation have been live for 70 minutes, when a
@@ -11200,6 +11463,12 @@ This is the version-to-artifact contract checked by the probe:
 | 675 | exact valid/ready `(client_address_hash, attempt_time)` `wallet_auth_challenge_attempt_client_address_hash_attempt_time` index |
 | 676 | `competition_round_baseline` exact column shape plus enabled source and append-only guards |
 | 677 | candidate-review guard orders eligible submissions by absolute raw score, submission time, and job id |
+| 678 | candidate-review and baseline guards preserve the legacy/shared-control ranking discriminator |
+| 679 | `network_extender_latency` attestation table with its exact columns, primary key, and replay-identity key |
+| 680 | exact valid/ready `network_extender_latency_create_time` retention index |
+| 681 | exact valid/ready `network_extender_latency_extender_id_create_time` Extender lookup index |
+| 682 | `network_extender_activation` history table with exact column types, nullability, defaults, and activation primary key |
+| 683 | exact valid/ready `network_extender_activation_extender_id_activate_time` history lookup index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -11243,6 +11512,28 @@ remain distinguishable from a missing migration without rewriting history.
 Code that activates, publishes, attributes, or pays Extenders must remain
 behind version 668 and all seven artifact checks; never hand-create one table
 or column after advancing the numeric head.
+
+Versions 679–681 append verified Extender latency attestations. The table's
+replay key is `(extender_id, client_id, probe_nonce)` and the two exact,
+valid/ready btree indexes bound retention sweeps and per-Extender reads. A
+numeric head at or above one of these versions is coherent only when the
+corresponding typed relation or index contract is present; never reconstruct
+the attestation table or its indexes manually after a failed migration.
+
+Versions 682–683 append Extender activation history and its
+`(extender_id, activate_time)` lookup index. The history preserves an optional
+address hash and independently nullable location UUIDs, an integer IP version,
+an explicit activation timestamp, and the empty country-code default. A
+same-name table with missing columns, different types/nullability/defaults, or
+a different primary key is schema drift once version 682 is recorded. The
+version-683 index must have its exact nonpartial btree definition and be valid
+and ready. False-positive qualifier: absent artifacts before their published
+version are a pending-migration gate, not drift. False-negative qualifier: a
+numeric head or a matching relation/index name cannot clear these checks.
+Local fixtures execute the emitted table guard over synthetic catalog rows;
+coverage of every version through the code head must fail if a future append
+omits its monitor contract. This detector coverage gap alone does not prove
+that the corresponding production schema is absent.
 
 The 2026-09-14 detector audit found that a same-name ordered index could pass
 column-substring checks with a different access method or expression. The
@@ -17467,22 +17758,64 @@ that change unreliable-flight and acknowledgement behavior were absent from
 that artifact, but the legacy line cannot prove that either change would have
 prevented these sends.
 
-Current Connect calls `SendWithTimeoutDetailed` without changing timeout,
-options, sequencing, or pooled-message ownership. It logs only the fixed mode
+Current Connect uses the same detailed Client send path without changing
+timeout, options, sequencing, public false/nil results, or pooled-message
+ownership. The original structured diagnostic retained only fixed mode
 (`sender` or `receive-reply`) and reason. `not-admitted` is the no-error refusal;
-for a receive reply it identifies the required zero-wait boundary, not a bug in
-that nonblocking policy. `encryption-not-ready` preserves the typed entry-gate
-error. `canceled-or-closed` deliberately groups the transfer layer's still-
-untyped client, generation, sequence, and capability closure results. `other`
-retains an unexpected result without copying raw error text into logs. The
-monitor keeps the exact legacy shape as `signal-send-unclassified`, separates
-the four structured reasons and mode frames, and leaves malformed modes,
-reasons, or field order in generic novelty. Verification requires all relevant
-artifacts to stop emitting the legacy form, each reason-specific class below
-20/min for ten minutes under comparable traffic, and the causal control for
-the observed reason. Never block the shared receive callback, enlarge an
-admission queue, bypass encryption, or restart a stable Taskworker from the
-legacy count alone.
+for a receive reply it identifies the required zero-wait policy, not which
+gate refused or a bug in that policy. `encryption-not-ready` preserves the
+typed entry-gate error. `canceled-or-closed` deliberately groups the transfer
+layer's still-untyped client, generation, sequence, and capability closure
+results. `other` retains an unexpected result without raw error text.
+
+The additional exact suffix is `boundary=<unknown|loopback|resend-capacity|pack-admission|queue-handoff> kind=<none|offer|answer|candidate|waiting|mixed|unknown> reset=<true|false|unknown>`.
+The gate is recorded synchronously at the actual false/nil return, before
+ownership can transfer; it is not guessed from queue lengths after the send.
+Non-admission error reasons carry `boundary=unknown`. The kind/reset decoder
+reads at most 64 KiB and classifies only batches of at most 64 signal values;
+larger, malformed, wrong-type or unrecognized frames cannot leak payloads into
+the fixed vocabulary. No
+destination, stream/generation identifier, SDP, ICE candidate, raw error,
+address or free-form label is retained. This adds observation, not a retry or
+queue policy.
+
+| Refusal gate | Evidence established | False-positive discriminator / required control |
+| --- | --- | --- |
+| `pack-admission` | The fixed pre-sequence count/fairness gate refused the offer. | Fairness may reserve a slot even when total capacity is not exhausted. Inspect the effective admission policy; this alone does not prove host memory/CPU or remote failure. |
+| `resend-capacity` | Reliable resend capacity was unavailable before count admission. | A count slot can still be free. Inspect the resend/delivery/acknowledgement control; do not infer that enlarging the Pack queue helps. |
+| `queue-handoff` | Earlier gates passed, but the final channel offer refused. | A configured zero-buffer rendezvous with no ready consumer has this result without a full Pack budget. Verify effective sequence buffer and consumer progress. |
+| `loopback` | The local Client queue refused a self-directed frame. | This is not a remote transport result. Confirm local queue/consumer state. |
+| `unknown`, or mode/reason-only schema (`boundary=unobserved` in the monitor frame) | No exact gate is established. | Do not borrow the gate or kind from another process or artifact. `kind=unknown` can reflect the bounded decoder, not necessarily malformed signaling. |
+
+**Recovery and false-negative qualifiers:** `kind=offer` may replay when
+`WaitingForSdpOffer` arrives. A passive peer already holding an offer ignores
+its duplicate; a refused answer is therefore not proved replayed by that
+duplicate. Candidate flush clears its local buffer before sending, so a
+refused candidate is not proved regenerated either. An outer P2P generation
+timeout/reconnect or a usable exchange route can still recover service. This
+asymmetry alone does not establish an outage or justify changing negotiation;
+correlate the exact kind with independent negotiation completion, fresh
+generation recovery or demonstrated exchange fallback. `reset=true` describes
+only the local frame, not an observed remote restart. Accepted sends do not
+prove remote delivery, and a quiet interval without comparable traffic does
+not prove recovery.
+
+The monitor retains the exact oldest shape as `signal-send-unclassified`,
+accepts both structured versions, groups the new admission suffix by its
+finite fields, and keeps the admission class's service aggregate so several
+sub-threshold groups cannot hide a threshold-crossing burst. Partial, unknown
+or misordered fields and extra trailing text remain generic novelty; an
+admission gate attached to a non-admission error reason is also rejected.
+Every emitting service must contain the diagnostic Connect input and the
+monitor must contain its parser before the gate is considered observable.
+Closure requires the oldest form to disappear, ten minutes of fresh
+comparable traffic with the aggregate and each reason/group below 20/min, and
+the independent recovery control for the observed kind. Preserve deterministic
+resend-capacity, full Pack-admission and zero-buffer handoff tests, public
+false/nil compatibility, zero-wait callbacks, exact pooled ownership and
+mixed-group aggregate coverage. Never block the shared receive callback,
+enlarge admission queues, bypass encryption, or restart a stable Taskworker
+from a refusal count alone.
 
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
@@ -20655,6 +20988,11 @@ unavailable, interrupted, malformed, or incomplete identity work is unknown.
 Keep independently observed identity faults when only the public-request
 command fails. Invalid or absent durations cannot establish a sub-second
 refusal, LB admission candidate, or all-target observer failure.
+Preserve the native identity-command error through the shared finite
+`error_class` vocabulary: SSH status 255, command failure, timeout, access
+denial, and invalid response must remain distinguishable. Never replace them
+with a generic error or render raw stderr or malformed identity output. The
+identity target remains unknown even when its public HTTPS request succeeds.
 
 An authoritative parent cancellation returns `ctx.Err()` without manufacturing
 findings or starting later host work. Pre-cancelled execution makes no source
@@ -20759,18 +21097,51 @@ dead-first DNAT target from that unknown observation, controller activity, or
 an unbounded log search.
 
 Run the monitor-local route lookup before the exact probes and again after an
-all-target immediate failure. When either lookup proves no route and every
-configured target has curl exit 7, no remote address, and a sub-second result,
+all-target pre-HTTP connection-failure cohort. Every target must have complete
+native evidence with HTTP `000` and either curl exit 7 with no peer and a
+sub-second result, or curl exit 28 (including TLS timeouts retaining the exact
+peer selected before route loss). When either lookup proves no route,
 collapse the cohort into one WARN
 `monitor/visibility|ipv6-observer-route-unavailable|monitor-host/edge-ipv6|`.
-Do not emit a per-edge reset from that sample. Continue collecting each host's
+Do not infer per-edge reset or ingress timeout from that sample. The route
+observations bound public coverage as unknown; they do not prove every
+failure has one cause or that the edges recovered. Continue collecting each host's
 identity, self-SNI HTTPS, source route, and bound-egress controls: those retain
-known host-local state, but do not prove externally routed ingress. If the
+known host-local state, but do not prove externally routed ingress. Preserve
+independently established identity drift, source-route drift, and LB admission
+faults even when public observation is unavailable. If the
 route command is unavailable or ambiguous rather than affirmatively route-less,
-keep each immediate target as `cannot-observe`; do not guess reset causality.
-Any successful exact IPv6 request disproves an all-target observer outage for
-that sample, and ordinary per-edge refusal, timeout, policy-route, upstream,
-and HTTP classifications remain active.
+keep each cohort target as `cannot-observe`; do not guess reset or timeout
+causality. Any successful exact IPv6 request, received HTTP response (including
+a later timeout), malformed native observation, or different failure shape
+prevents this all-target attribution. Preserve the independently observed
+per-target classes and visibility gaps in those mixed cohorts.
+
+The 2026-09-18 recurrence exposed the TLS-timeout variant. The observer's
+stored-router lifetime reached zero at 23:11:11.954Z, its IPv6 network state
+disappeared at 23:11:11.991Z, and the snapshot recorded eight exact-peer TLS
+timeouts at 23:11:17Z. IPv6 state returned at 23:13:35.759Z. A standing watcher
+sample at 23:13:30Z independently recorded route absence with all eight host
+identities, local HTTPS, exact source routes, and bound egress controls healthy.
+The old immediate-exit-7-only gate missed timeouts after TCP peer selection.
+The snapshot also discarded all eight identity-command error classes; their
+original failure stage cannot be reconstructed from its generic warnings.
+Direct revalidation at 23:21Z found all eight identities healthy and 24/24
+externally pinned IPv6 HTTP 200 responses, with IPv4 and unrelated IPv6 controls
+healthy. This is recovery evidence, not proof of the underlying RA repair.
+
+**False-positive qualifiers:** a common timeout cohort alone does not prove
+observer failure; affirmative route absence is required. A peer address does
+not prove the route stayed available through TLS. Before/after route samples
+bound observation coverage but cannot assign the exact packet-loss instant or
+erase an independently observed host defect. **False-negative qualifiers:**
+missing route evidence or a failed identity collector must remain unknown;
+healthy local self-probes cannot clear external ingress. The native request
+shape, finite identity error class, and misleading-but-healthy/partial-evidence
+controls are covered synthetically. Closure still requires the operational RA
+discriminator and 30-minute stable-route window below, plus three consecutive
+five-minute externally routed exact-edge samples; the monitor correction alone
+does not repair the workstation, router, or edge network.
 
 The 2026-09-08 LB recovery exposed an adjacent observer-classification defect.
 After a clean dual-stack sample, the monitor workstation temporarily lost its

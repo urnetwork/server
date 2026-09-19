@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -261,6 +262,16 @@ func wrapWithInput[T any, R any](
 			glog.Infof("[h]request decoding error %s\n", err)
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// json.Unmarshal accepts the JSON literal null for pointer, map, slice, and
+	// interface inputs. Passing that typed nil to an implementation makes an
+	// otherwise client-controlled malformed request look like an application
+	// nil-pointer panic. No input wrapper has a meaningful null-body contract:
+	// require a concrete JSON value before dispatching any implementation.
+	if bytes.Equal(bytes.TrimSpace(bodyBytes), []byte("null")) {
+		http.Error(w, "request body must not be null", http.StatusBadRequest)
 		return
 	}
 

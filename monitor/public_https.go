@@ -84,8 +84,8 @@ func ipv6ObserverRouteFinding(scope string, observed string) finding {
 	return finding{
 		probeId: "monitor/visibility", tier: tierWarn,
 		class: "ipv6-observer-route-unavailable", target: "monitor-host/" + scope, sustain: 1,
-		symptom:   "The monitor host had no usable IPv6 route while every configured " + scope + " observation failed with the same no-route shape",
-		mechanism: "A common monitor-side IPv6 route loss makes every exact edge look unreachable before a packet can leave the observer. It cannot prove a per-edge reset, public-ingress failure, or certificate state; host-local self-ingress remains a separate observation and does not replace externally routed coverage.",
+		symptom:   "The monitor host had no usable IPv6 route during the bounded cohort in which every configured " + scope + " observation failed before an HTTP response",
+		mechanism: "The monitor-local route lookup proves IPv6 observation loss before or after the failed request cohort. Route loss can prevent connection or interrupt TLS after a peer was selected. This bounds public coverage as unknown; it does not prove that every failure shares that cause or establish per-edge reset, public-ingress failure, or certificate state. Host-local self-ingress remains a separate observation and does not replace externally routed coverage.",
 		baseline:  "The monitor has a usable IPv6 route, an unrelated external IPv6 control is reachable, and every configured exact edge is observed independently.",
 		observed:  observed,
 		evidence:  "Only fixed-cardinality route state and aggregate target/control counts are retained. Raw route output, TLS errors, configured addresses, and endpoint identifiers are omitted.",

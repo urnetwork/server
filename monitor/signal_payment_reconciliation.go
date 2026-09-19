@@ -81,7 +81,7 @@ SELECT count(DISTINCT evidence)::bigint,
        count(*) FILTER (
            WHERE evidence IS NULL
               OR btrim(evidence) = ''
-              OR (details::jsonb ->> 'reason') IS DISTINCT FROM 'destination_deleted'
+              OR COALESCE(details::jsonb ->> 'reason', '') NOT IN ('destination_deleted', 'destination_unresolved')
               OR (details::jsonb ->> 'leg') IS DISTINCT FROM 'credit'
        )::bigint,
        COALESCE(extract(epoch FROM now() - max(event_time))::bigint, -1)
@@ -252,34 +252,42 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 			if state.errors >= 2 {
 				tier = tierPage
 			}
-			findings = append(findings, finding{
+			storeErrorFinding := finding{
 				probeId: "pg/payment-reconciliation", tier: tier, class: "payment-reconciliation-store-error", target: state.store, sustain: 1,
 				symptom:   fmt.Sprintf("Payment reconciliation recorded %d %s store error(s) in three hours", state.errors, state.store),
-				mechanism: "The store adapter failed or panicked while listing or validating authoritative state. The run continues to other stores and still emits a heartbeat, but this store's watermark cannot safely advance.",
+				mechanism: "The store recorded failures while listing, validating, applying, or persisting authoritative state. Provider listing may already have succeeded before a per-invoice credit or audit-write failure. The aggregate does not identify the failed stage. The run continues to other stores and still emits a heartbeat, but this store's watermark cannot safely advance.",
 				baseline:  "Zero non-dry-run reconciliation error events for every store.",
 				observed:  fmt.Sprintf("store=%s error_events_3h=%d watermark_age_seconds=%d", state.store, state.errors, state.watermarkAge),
 				evidence:  "Only store-level counts and ages are selected. Provider responses, stored error details, credentials, accounts, and transaction identifiers are excluded.",
 				action:    "Inspect the bounded taskworker error for this store, then distinguish authentication, provider availability, schema validation, and local persistence. Fix the cause without advancing the watermark or bypassing idempotency.",
 				verify:    "A complete error-free run advances this store's watermark and no new error event appears through two hourly runs.",
 				playbook:  "SIGNALS.md §2.21",
-			})
+			}
+			if state.store == "stripe" {
+				storeErrorFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; deploy the correction if missing. Absent credit_unfulfillable events alone do not prove either capability or a clean payment cohort. Keep malformed or incomplete provider data, transport failures, and audit-write failures as errors."
+			}
+			findings = append(findings, storeErrorFinding)
 		}
 		if state.watermarkAge < 0 || time.Duration(state.watermarkAge)*time.Second > paymentReconciliationWatermarkWarnAge {
 			tier := tierWarn
 			if state.watermarkAge < 0 || time.Duration(state.watermarkAge)*time.Second > paymentReconciliationWatermarkPageAge {
 				tier = tierPage
 			}
-			findings = append(findings, finding{
+			watermarkFinding := finding{
 				probeId: "pg/payment-reconciliation", tier: tier, class: "payment-reconciliation-watermark-stale", target: state.store, sustain: 1,
 				symptom:   fmt.Sprintf("The %s payment-reconciliation watermark is missing or stale", state.store),
-				mechanism: "A watermark advances only after that store completes within its API budget without error. A stale value proves the authoritative listing is not completing even when the global heartbeat remains current.",
+				mechanism: "A watermark advances only after that store completes within its API budget without error. A stale value means no successful complete pass was recorded; provider listing may already have succeeded before a per-invoice credit, validation, or persistence failure. It does not identify the failed stage, and the global heartbeat may remain current.",
 				baseline:  "Every expected store watermark is at most three hours old; six hours is page severity.",
 				observed:  fmt.Sprintf("store=%s watermark_age_seconds=%d latest_store_event_age_seconds=%d", state.store, state.watermarkAge, state.latestEventAge),
 				evidence:  "Only store-level timestamps reduced to ages are selected; no provider cursor, evidence, account, transaction, or credential value is returned.",
 				action:    "Use same-window skipped/error events and taskworker diagnostics to find the failing store stage. Restore credentials or adapter correctness and retain the overlap lookback; never force the watermark forward.",
 				verify:    "The store completes naturally, advances its watermark, and remains within three hours with zero skip/error events through two hourly runs.",
 				playbook:  "SIGNALS.md §2.21",
-			})
+			}
+			if state.store == "stripe" {
+				watermarkFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; converge the corrected Taskworker artifact if absent. A healthy heartbeat, fresh sibling stores, or no credit_unfulfillable events does not prove Stripe completion."
+			}
+			findings = append(findings, watermarkFinding)
 		}
 	}
 	return findings
@@ -356,17 +364,30 @@ func paymentReconciliationUnfulfillableFinding(rows []pgRow) (*finding, error) {
 		}
 		return nil, nil
 	}
-	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid != 0 || latestAge < 0 {
+	if invalid != 0 && distinctEvidence <= observations && distinctRuns <= observations && invalid <= observations && latestAge >= 0 {
+		return &finding{
+			probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable-invalid", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
+			symptom:   fmt.Sprintf("Stripe reconciliation recorded %d credit-unfulfillable event(s) with an invalid terminal disposition", invalid),
+			mechanism: "A credit_unfulfillable event is terminal only when it has provider evidence plus a destination_deleted or destination_unresolved credit-leg disposition. Other details may be historical incompatible events or a writer-contract regression. They are not safe payment dispositions and cannot be silently treated as uncreditable destinations.",
+			baseline:  "Zero invalid non-dry-run credit_unfulfillable events; terminal records have provider evidence and an audited deleted or unresolved destination reason.",
+			observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable invalid_observations_24h=%d distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", invalid, distinctEvidence, observations, distinctRuns, latestAge),
+			evidence:  "Only aggregate validation counts and latest age are selected. Event details, provider evidence, run IDs, network IDs, accounts, and credentials remain in the restricted audit store.",
+			action:    "Use the restricted audit trail to classify each invalid event as a historical schema/version mismatch or a current writer regression. Repair the writer or record an explicit authorized finance disposition; do not infer destination_deleted, retarget a payment, consume its evidence, or force the Stripe watermark.",
+			verify:    "New Taskworker runs write only complete terminal dispositions, the invalid aggregate reaches zero through two natural hourly runs, and each historical payment has an explicit authorized restricted-audit disposition.",
+			playbook:  "SIGNALS.md §2.21",
+		}, nil
+	}
+	if distinctEvidence == 0 || distinctEvidence > observations || distinctRuns == 0 || distinctRuns > observations || invalid > observations || latestAge < 0 {
 		return nil, fmt.Errorf("payment reconciliation unfulfillable returned an invalid nonempty aggregate")
 	}
 	return &finding{
 		probeId: "pg/payment-reconciliation", tier: tierPage, class: "payment-reconciliation-credit-unfulfillable", target: "stripe", frame: "action=credit_unfulfillable", sustain: 1,
 		symptom:   fmt.Sprintf("Stripe reconciliation found %d paid invoice destination(s) that can no longer be credited", distinctEvidence),
-		mechanism: "Stripe listed a paid subscription invoice, but the network named by its subscription metadata had been deleted before the ledger-gated credit obtained its lifecycle lock. The controller refused the Stripe ledger, renewal, and balance writes; this terminal business exception is not a provider-listing failure and does not pin the store watermark.",
+		mechanism: "Stripe listed a paid subscription invoice whose destination was deleted before the ledger-gated credit, or whose complete metadata, checkout-reference, and legacy-email resolution found no destination. The controller refused the Stripe ledger, renewal, and balance writes; this terminal business exception is not a provider-listing failure and does not pin the store watermark. Missing or malformed authority data, incomplete pages, conflicting destination references, and provider or database failures remain errors that pin the watermark.",
 		baseline:  "Zero non-dry-run credit_unfulfillable events. Every paid invoice either credits its original live destination exactly once or receives an explicit authorized finance/operations disposition.",
 		observed:  fmt.Sprintf("store=stripe action=credit_unfulfillable distinct_evidence_24h=%d observations_24h=%d distinct_runs_24h=%d latest_age_seconds=%d", distinctEvidence, observations, distinctRuns, latestAge),
-		evidence:  "The aggregate returns only distinct-evidence, observation, and run counts plus latest age. Provider evidence, run IDs, deleted network IDs, accounts, details, and credentials remain in the restricted audit store.",
-		action:    "Have authorized finance and operations staff disposition each exact provider payment from the restricted audit trail. Do not recreate or retarget the deleted network, credit another owner, insert a stripe_invoice row, consume the payment evidence, or force the Stripe watermark.",
+		evidence:  "The aggregate validates destination_deleted or destination_unresolved reasons and returns only distinct-evidence, observation, and run counts plus latest age. Provider evidence, run IDs, network IDs, accounts, details, and credentials remain in the restricted audit store.",
+		action:    "Have authorized finance and operations staff disposition each exact provider payment from the restricted audit trail and its destination_deleted or destination_unresolved reason. Do not recreate or retarget the deleted network, guess an unresolved recipient, credit another owner, insert a stripe_invoice row, consume the payment evidence, or force the Stripe watermark.",
 		verify:    "The provider payment has an explicit authorized disposition and no compensating credit was assigned to another network. A later watermark advance, repeated overlap audit, or alert aging out is not disposition proof.",
 		playbook:  "SIGNALS.md §2.21",
 	}, nil

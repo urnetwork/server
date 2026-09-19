@@ -23,8 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urnetwork/warp/services"
-
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -45,11 +43,10 @@ type LimitsSettings struct {
 	SweepTimeout time.Duration
 }
 
-// Loads the `default_rate_limit` block of the environment's services.yml
-// through the warp services package, which parses the same document warpctl
-// renders the nginx limits from. A missing file or block falls back to the
-// warp default, which is what nginx applies to a block that declares no rate
-// limit of its own.
+// Loads the `default_rate_limit` block of the environment's services.yml,
+// the same document warpctl renders the nginx limits from (ServicesConfig).
+// A missing file or block falls back to the warp default, which is what
+// nginx applies to a block that declares no rate limit of its own.
 //
 // Alt never reads `WARP_LIMIT_EXCLUDE_SUBNETS`: the exclusions are the
 // parsed block's, so alt and nginx exempt exactly the same addresses.
@@ -57,12 +54,12 @@ func DefaultLimitsSettings() *LimitsSettings {
 	rateLimit, err := loadDefaultRateLimit()
 	if err != nil {
 		glog.Infof("[alt]no services.yml default rate limit (%s). Using the warp default.\n", err)
-		rateLimit = services.DefaultRateLimit()
+		rateLimit = DefaultRateLimit()
 	}
 	return LimitsSettingsFromRateLimit(rateLimit)
 }
 
-func loadDefaultRateLimit() (*services.RateLimit, error) {
+func loadDefaultRateLimit() (*RateLimit, error) {
 	servicesConfig, err := LoadServicesConfig()
 	if err != nil {
 		return nil, err
@@ -78,7 +75,7 @@ func loadDefaultRateLimit() (*services.RateLimit, error) {
 // leaves that directive out entirely. An unparseable exclusion is invalid
 // infrastructure configuration and panics at startup, as it does for the
 // shared caller-ip exclusions.
-func LimitsSettingsFromRateLimit(rateLimit *services.RateLimit) *LimitsSettings {
+func LimitsSettingsFromRateLimit(rateLimit *RateLimit) *LimitsSettings {
 	settings := &LimitsSettings{
 		Burst:           rateLimit.Burst,
 		NetConnections:  rateLimit.NetConnections,

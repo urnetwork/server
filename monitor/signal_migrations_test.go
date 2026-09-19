@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -562,6 +563,21 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 			"table_name = 'wallet_auth_challenge_attempt'",
 			"index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'",
 			"definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'",
+			"SELECT count(*) = 7 FROM (VALUES ('latency_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('client_id', 'uuid', 'NO')",
+			"('rtt_ms', 'integer', 'NO'), ('probe_time', 'timestamp without time zone', 'NO'), ('create_time', 'timestamp without time zone', 'NO')",
+			"('p', 'PRIMARY KEY (latency_id)')",
+			"('u', 'UNIQUE (extender_id, client_id, probe_nonce)')",
+			"index_name = 'network_extender_latency_create_time'",
+			"definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'",
+			"index_name = 'network_extender_latency_extender_id_create_time'",
+			"definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'",
+			"SELECT count(*) = 10 FROM (VALUES ('activation_id', 'uuid', 'NO', NULL), ('extender_id', 'uuid', 'NO', NULL)",
+			"('activate_time', 'timestamp without time zone', 'NO', NULL), ('ip_version', 'integer', 'NO', NULL)",
+			"('client_address_hash', 'bytea', 'YES', NULL)",
+			"('country_code', 'character varying', 'NO', quote_literal('') || '::character varying')",
+			"actual.column_default IS NOT DISTINCT FROM expected.column_default",
+			"definition = 'PRIMARY KEY (activation_id)'",
+			"definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'",
 		} {
 			if !strings.Contains(normalized, want) {
 				t.Fatalf("recent migration query lost %q:\n%s", want, query)
@@ -572,6 +588,171 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
 		t.Fatalf("complete recent migration artifact catalog is not coherent: %+v, %v", alerts, err)
 	}
+}
+
+func TestMigrationsSignalActivationArtifactsRespectPublishedVersion(t *testing.T) {
+	for _, version := range []int{681, 682, 683} {
+		row := syntheticMigrationArtifactRow(version)
+		for _, artifact := range migrationArtifacts {
+			if version < artifact.requiredVersion {
+				row[artifact.rowColumn] = "f"
+			}
+		}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(version), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantAlerts := 0
+		if version < server.MigrationCount() {
+			wantAlerts = 1
+			requireAlertClass(t, alerts, "migration-behind")
+		}
+		if len(alerts) != wantAlerts {
+			t.Fatalf("coherent version %d produced unpublished-artifact drift: %+v", version, alerts)
+		}
+	}
+}
+
+// Exercise the production SQL with synthetic catalog rows, without applying a
+// migration or modifying a database. Missing/incompatible schema must reach
+// the ordinary alert reducer; matching names alone cannot establish health.
+func TestMigrationsSignalActivationHistoryExecutesExactSchemaGuard(t *testing.T) {
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("activation-history query fixtures require the attested local test environment")
+	}
+	type columnObservation struct {
+		Name     string  `json:"column_name"`
+		Kind     string  `json:"data_type"`
+		Nullable string  `json:"is_nullable"`
+		Default  *string `json:"column_default"`
+		Width    *int    `json:"character_maximum_length"`
+	}
+	emptyDefault := "''::character varying"
+	columns := []columnObservation{
+		{Name: "activation_id", Kind: "uuid", Nullable: "NO"},
+		{Name: "extender_id", Kind: "uuid", Nullable: "NO"},
+		{Name: "activate_time", Kind: "timestamp without time zone", Nullable: "NO"},
+		{Name: "ip_version", Kind: "integer", Nullable: "NO"},
+		{Name: "client_address_hash", Kind: "bytea", Nullable: "YES"},
+		{Name: "country_code", Kind: "character varying", Nullable: "NO", Default: &emptyDefault},
+		{Name: "location_id", Kind: "uuid", Nullable: "YES"},
+		{Name: "city_location_id", Kind: "uuid", Nullable: "YES"},
+		{Name: "region_location_id", Kind: "uuid", Nullable: "YES"},
+		{Name: "country_location_id", Kind: "uuid", Nullable: "YES"},
+	}
+	head := server.MigrationCount()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	server.Db(ctx, func(conn server.PgConn) {
+		faults := []string{"healthy", "missing table", "wrong schema", "wrong table", "missing key", "wrong key", "invalid key", "bounded country"}
+		for _, column := range columns {
+			for _, fault := range []string{"missing", "type", "nullability", "default"} {
+				faults = append(faults, column.Name+"/"+fault)
+			}
+		}
+		for _, fault := range faults {
+			observed := append([]columnObservation(nil), columns...)
+			for i := range observed {
+				switch fault {
+				case observed[i].Name + "/missing":
+					observed[i].Name = "synthetic_unrelated_column"
+				case observed[i].Name + "/type":
+					observed[i].Kind = "text"
+				case observed[i].Name + "/nullability":
+					if observed[i].Nullable == "YES" {
+						observed[i].Nullable = "NO"
+					} else {
+						observed[i].Nullable = "YES"
+					}
+				case observed[i].Name + "/default":
+					if observed[i].Default != nil {
+						observed[i].Default = nil
+					} else {
+						changedDefault := "synthetic_default()"
+						observed[i].Default = &changedDefault
+					}
+				}
+				if fault == "bounded country" && observed[i].Name == "country_code" {
+					width := 2
+					observed[i].Width = &width
+				}
+			}
+			encoded, err := json.Marshal(observed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schema, table, key := "public", "network_extender_activation", "PRIMARY KEY (activation_id)"
+			if fault == "wrong schema" {
+				schema = "synthetic_other_schema"
+			}
+			if fault == "wrong table" {
+				table = "synthetic_other_table"
+			}
+			if fault == "wrong key" {
+				key = "PRIMARY KEY (activation_id, extender_id)"
+			}
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(head), nil
+				}
+				normalized := strings.Join(strings.Fields(query), " ")
+				marker := "to_regclass('public.network_extender_activation') IS NOT NULL"
+				start := strings.Index(normalized, marker)
+				if start < 0 {
+					t.Fatal("migration 682 has no activation-history schema query")
+				}
+				guard, _, ok := strings.Cut(normalized[start:], " ), EXISTS ( SELECT 1 FROM index_artifact WHERE table_name = 'network_extender_activation'")
+				if !ok {
+					t.Fatal("activation-history schema query has no following lookup-index boundary")
+				}
+				guard = strings.ReplaceAll(guard, "information_schema.columns", "observed_column")
+				guard = strings.ReplaceAll(guard, marker, "$1::boolean")
+				var admitted bool
+				err := conn.QueryRow(ctx, `
+					WITH observed_column AS (
+						SELECT $3::text AS table_schema, $4::text AS table_name, actual.*
+						FROM jsonb_to_recordset($2::jsonb) AS actual(
+							column_name text, data_type text, is_nullable text,
+							column_default text, character_maximum_length integer
+						)
+					), constraint_artifact AS (
+						SELECT $4::text AS table_name, 'p'::text AS constraint_type,
+						       $5::text AS definition, $6::boolean AS validated
+						WHERE $7::boolean
+					)
+					SELECT `+guard,
+					fault != "missing table", string(encoded), schema, table, key,
+					fault != "invalid key", fault != "missing key",
+				).Scan(&admitted)
+				if err != nil {
+					return nil, err
+				}
+				row := syntheticMigrationArtifactRow(head)
+				row[93] = fmt.Sprint(admitted)
+				return []Row{row}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+			if err != nil {
+				t.Fatalf("%s: %v", fault, err)
+			}
+			if fault == "healthy" {
+				if len(alerts) != 0 {
+					t.Fatalf("healthy activation schema: %s", alerts.ToMarkdown())
+				}
+			} else {
+				alert := requireAlertClass(t, alerts, "migration-schema-drift")
+				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "network_extender_activation history table and identity key@v682") {
+					t.Fatalf("%s: lost activation-history schema gate: %s", fault, alerts.ToMarkdown())
+				}
+			}
+		}
+	}, server.OptReadOnly(), server.OptNoRetry())
 }
 
 func TestMigrationsSignalPreservesBehindGateAtCoherentVersion627(t *testing.T) {
@@ -745,6 +926,7 @@ func TestMigrationsSignalRejectsLookalikePlainOrderedIndexes(t *testing.T) {
 		{version: 666, table: "network_client_connection", name: "network_client_connection_client_id_connected_extender_id", keys: "(client_id, connected, extender_id)"},
 		{version: 674, table: "contract_extender", name: "contract_extender_create_time_contract_id", keys: "(create_time, contract_id)"},
 		{version: 675, table: "wallet_auth_challenge_attempt", name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", keys: "(client_address_hash, attempt_time)"},
+		{version: 683, table: "network_extender_activation", name: "network_extender_activation_extender_id_activate_time", keys: "(extender_id, activate_time)"},
 		{version: 614, table: "st_epoch", name: "st_epoch_status", keys: "(deployment_key, status, epoch)", grouped: true},
 		{version: 614, table: "st_publish", name: "st_publish_epoch_kind", keys: "(deployment_key, epoch, kind, create_time)", grouped: true},
 		{version: 614, table: "st_event", name: "st_event_kind_block", keys: "(deployment_key, kind, block_number, log_index)", grouped: true},

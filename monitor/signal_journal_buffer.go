@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -709,12 +710,19 @@ func evaluateJournalAgePolicy(target string, sample journalBufferSample, retenti
 		})
 	} else if !retentionKnown || sample.journalRetentionRotationState != "complete" ||
 		(retentionEnabled && sample.journalRetentionBuild == "unverified") {
-		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", fmt.Errorf("journal retention implementation or bounded rotation evidence unavailable")))
+		// Keep a missing bounded census distinct from an output cap. Both
+		// prevent a health assertion, but a capped census proves that the
+		// observation budget—not host state—was exhausted.
+		reason := "durable state unavailable for journal retention implementation or bounded rotation evidence"
+		if sample.journalRetentionRotationState == "truncated" {
+			reason = "identity bound exceeded by journal retention-rotation census"
+		}
+		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", errors.New(reason)))
 	} else {
 		findings = append(findings, healthyFinding("host/journal-buffer", tierPage, "journal-buffer-retention-rotation", target))
 	}
 	if sample.journalRetentionRotationState == "truncated" || (knownUnsafe && sample.journalRetentionRotationState == "unavailable") {
-		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", fmt.Errorf("bounded journal retention-rotation census %s", sample.journalRetentionRotationState)))
+		findings = append(findings, cannotObserveFinding(target+"/journal-retention-rotation", errors.New("identity bound exceeded by journal retention-rotation census")))
 	}
 	return findings
 }

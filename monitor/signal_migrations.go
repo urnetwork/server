@@ -136,9 +136,17 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
 	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, removedVersion: 678, rowColumn: 88},
 	{name: "competition legacy/shared-control ranking policy", requiredVersion: 678, rowColumn: 89},
+	{name: "network_extender_latency attestation table and identity key", requiredVersion: 679, rowColumn: 90},
+	{name: "network_extender_latency_create_time retention index", requiredVersion: 680, rowColumn: 91},
+	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
+	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
+	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	// Every artifact is queried before its version is checked. Nullable catalog
+	// lookups keep future or missing functions from aborting schema inspection;
+	// an existence conjunct cannot protect a strict regprocedure cast.
 	rows, err := env.runner.pg(ctx, `
 		WITH version AS (
 			SELECT coalesce(max(end_version_number), 0)::int AS value
@@ -1092,7 +1100,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                   WHERE namespace.nspname = 'public'
 		                     AND relation.relname = 'competition_round_baseline'
 		                     AND actual.tgname = expected.trigger_name
-		                     AND actual.tgfoid = expected.function_name::regprocedure
+		                     AND actual.tgfoid = to_regprocedure(expected.function_name)
 		                     AND actual.tgenabled <> 'D'
 		                     AND NOT actual.tgisinternal
 		               )
@@ -1101,42 +1109,138 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       (
 		           to_regprocedure('public.competition_candidate_review_insert_guard()') IS NOT NULL
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%ORDER BY (score_json->>''raw_score'')::numeric ASC%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%submitted_at, job_id%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) NOT LIKE '%normalized_score%'
 		       ),
 		       (
 		           to_regprocedure('public.competition_candidate_review_insert_guard()') IS NOT NULL
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%ORDER BY CASE WHEN NOT EXISTS (%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%FROM competition_round_baseline WHERE round_id = NEW.round_id%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%THEN (score_json->>''normalized_score'')::numeric END DESC%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%(score_json->>''raw_score'')::numeric ASC%'
 		           AND pg_get_functiondef(
-		               'public.competition_candidate_review_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_candidate_review_insert_guard()')
 		           ) LIKE '%submitted_at, job_id%'
 		           AND to_regprocedure('public.competition_round_baseline_insert_guard()') IS NOT NULL
 		           AND pg_get_functiondef(
-		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_round_baseline_insert_guard()')
 		           ) LIKE '%competition round baseline cannot be attached after finalization or cancellation%'
 		           AND pg_get_functiondef(
-		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_round_baseline_insert_guard()')
 		           ) LIKE '%competition round baseline cannot replace legacy ranking policy%'
 		           AND pg_get_functiondef(
-		               'public.competition_round_baseline_insert_guard()'::regprocedure
+		               to_regprocedure('public.competition_round_baseline_insert_guard()')
 		           ) LIKE '%state = ''running'' AND attempt_count >= NEW.source_attempt%'
+		       ),
+		       (
+		           to_regclass('public.network_extender_latency') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 7
+		               FROM (VALUES
+		                   ('latency_id', 'uuid', 'NO'),
+		                   ('extender_id', 'uuid', 'NO'),
+		                   ('client_id', 'uuid', 'NO'),
+		                   ('probe_nonce', 'bytea', 'NO'),
+		                   ('rtt_ms', 'integer', 'NO'),
+		                   ('probe_time', 'timestamp without time zone', 'NO'),
+		                   ('create_time', 'timestamp without time zone', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_latency'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('p', 'PRIMARY KEY (latency_id)'),
+		                   ('u', 'UNIQUE (extender_id, client_id, probe_nonce)')
+		               ) AS expected(constraint_type, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM constraint_artifact AS actual
+		                   WHERE actual.table_name = 'network_extender_latency'
+		                     AND actual.constraint_type = expected.constraint_type
+		                     AND actual.definition = expected.definition
+		                     AND actual.validated
+		               )
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_latency'
+		             AND index_name = 'network_extender_latency_create_time'
+		             AND definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_latency'
+		             AND index_name = 'network_extender_latency_extender_id_create_time'
+		             AND definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.network_extender_activation') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 10
+		               FROM (VALUES
+		                   ('activation_id', 'uuid', 'NO', NULL),
+		                   ('extender_id', 'uuid', 'NO', NULL),
+		                   ('activate_time', 'timestamp without time zone', 'NO', NULL),
+		                   ('ip_version', 'integer', 'NO', NULL),
+		                   ('client_address_hash', 'bytea', 'YES', NULL),
+		                   ('country_code', 'character varying', 'NO', quote_literal('') || '::character varying'),
+		                   ('location_id', 'uuid', 'YES', NULL),
+		                   ('city_location_id', 'uuid', 'YES', NULL),
+		                   ('region_location_id', 'uuid', 'YES', NULL),
+		                   ('country_location_id', 'uuid', 'YES', NULL)
+		               ) AS expected(column_name, data_type, is_nullable, column_default)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_activation'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		                     AND actual.column_default IS NOT DISTINCT FROM expected.column_default
+		                     AND actual.character_maximum_length IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_activation'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (activation_id)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_activation'
+		             AND index_name = 'network_extender_activation_extender_id_activate_time'
+		             AND definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
 		       )
 		FROM version;
 	`)

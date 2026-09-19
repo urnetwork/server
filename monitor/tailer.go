@@ -225,7 +225,9 @@ var (
 	)
 	signalSendStructuredRe = regexp.MustCompile(
 		`\[transport_p2p_webrtc\.go:[0-9]+\](\[signal\]send failed mode=(sender|receive-reply) ` +
-			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other))[[:space:]]*$`,
+			`reason=(not-admitted|encryption-not-ready|canceled-or-closed|other)` +
+			`(?: boundary=(unknown|loopback|resend-capacity|pack-admission|queue-handoff)` +
+			` kind=(none|offer|answer|candidate|waiting|mixed|unknown) reset=(true|false|unknown))?)[[:space:]]*$`,
 	)
 	onboardingPostPrimaryCanceledRe = regexp.MustCompile(
 		`\[onboarding\](app open attribution|campaign enrollment|client context|connect\.day write) ` +
@@ -330,9 +332,15 @@ func mimirRejectedLogGroup(line string) string {
 }
 
 func signalSendStructuredReasonRe(reason string) *regexp.Regexp {
+	boundaries := "unknown"
+	if reason == "not-admitted" {
+		boundaries += "|loopback|resend-capacity|pack-admission|queue-handoff"
+	}
 	return regexp.MustCompile(
 		`\[transport_p2p_webrtc\.go:[0-9]+\]\[signal\]send failed ` +
-			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) + `[[:space:]]*$`,
+			`mode=(?:sender|receive-reply) reason=` + regexp.QuoteMeta(reason) +
+			`(?: boundary=(?:` + boundaries + `)` +
+			` kind=(?:none|offer|answer|candidate|waiting|mixed|unknown) reset=(?:true|false|unknown))?[[:space:]]*$`,
 	)
 }
 
@@ -342,10 +350,10 @@ func signalSendLegacyLogSample(string) string {
 	return "[signal]send failed (legacy destination omitted; result unavailable)"
 }
 
-// Retains only the fixed mode/reason suffix from current Connect output.
+// Retains only fixed diagnostic fields, including both deployed schema versions.
 func signalSendStructuredLogSample(line string) string {
 	match := signalSendStructuredRe.FindStringSubmatch(line)
-	if len(match) != 4 {
+	if len(match) != 7 {
 		return "[signal]send failed (malformed structured result omitted)"
 	}
 	return match[1]
@@ -353,10 +361,24 @@ func signalSendStructuredLogSample(line string) string {
 
 func signalSendLogMode(line string) string {
 	match := signalSendStructuredRe.FindStringSubmatch(line)
-	if len(match) != 4 {
+	if len(match) != 7 {
 		return "unknown"
 	}
 	return match[2]
+}
+
+// Legacy mode-only evidence cannot identify an admission gate. New finite
+// groups retain the gate and payload kind; the class also keeps its aggregate
+// so splitting a mixed burst never hides the original service-level threshold.
+func signalSendLogAdmission(line string) string {
+	match := signalSendStructuredRe.FindStringSubmatch(line)
+	if len(match) != 7 {
+		return "unknown"
+	}
+	if match[4] == "" {
+		return match[2] + "/boundary=unobserved"
+	}
+	return match[2] + "/boundary=" + match[4] + "/kind=" + match[5] + "/reset=" + match[6]
 }
 
 func onboardingPostPrimaryCanceledStage(line string) string {
@@ -508,18 +530,36 @@ var logClasses = []logClass{
 	},
 	// A resolver fanout leg is not a logical lookup outcome. Keep this before
 	// generic TCP timeouts, including the endpoint-free timeout form.
-	{name: "doh-dial-timeout", re: regexp.MustCompile(`\[(?:family|egress)\]dial tag=doh[[:space:]][^\r\n]*\berr=(?:dial tcp(?:4|6)? [^[:space:]\r\n]+: )?i/o timeout(?:$|[[:space:]])`),
-		sample: func(string) string {
-			return "DoH resolver dial attempt: i/o timeout (endpoint and correlation metadata omitted)"
+	{name: "doh-dial-timeout", re: regexp.MustCompile(`\[(?:family|egress)\]dial tag=doh[[:space:]][^\r\n]*(?:\berr=(?:dial tcp(?:4|6)? [^[:space:]\r\n]+: )?i/o timeout(?:$|[[:space:]])|\bobservable=v1[^\r\n]*\bresult=timeout(?:$|[[:space:]]))`),
+		match: func(line string) bool {
+			return !strings.Contains(line, "[family]dial tag=doh observable=") || dohDialTimeoutObserved(line)
 		},
+		sample:        dohDialTimeoutSample,
 		groupBy:       func(string) string { return "doh-attempt" },
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §5.2",
-		meaning:   "an outgoing DoH resolver dial attempt timed out; the logical DNS outcome is unknown",
+		meaning:   "an outgoing DoH resolver dial attempt timed out; absent terminal provenance the logical DNS outcome is unknown",
 		mechanism: "The resolver races endpoint attempts and can return a usable answer from another leg. These per-target throttled diagnostic lines count neither unique attempts nor failed logical DNS queries; endpoint-free timeouts cannot identify a particular public resolver.",
-		context:   "This is not evidence of a Redis event-loop wedge, a host outage, or a failed user request. Later host TCP success does not prove that the earlier process path was healthy, and a success-only DoH result callback cannot supply a logical failure denominator. Fixed samples and a single doh-attempt frame omit endpoints, queried domains, and correlation identifiers.",
-		action:    "Correlate the emitting process and original path with bounded same-window TCP, resource, and resolver controls. Distinguish endpoint attempts from the final logical DNS result; if that result is unavailable, retain impact as unknown rather than asserting either an outage or successful fallback. Do not restart Redis, change resolver policy, lengthen timeouts, or suppress the alert from an individual fanout-leg failure.",
-		verify:    "Require this diagnostic class below its unchanged 10/min PAGE threshold for 10 minutes with fresh observation coverage and healthy original-path controls. Claim user-facing DNS recovery only with an independent final-query or end-to-end outcome; endpoint TCP success and quiet sampled logs alone do not establish it.",
+		context:   "This is not evidence of a Redis event-loop wedge, a host outage, or a failed user request. Later host TCP success does not prove that the earlier process path was healthy, and a success-only DoH result callback cannot supply a logical failure denominator. New finite provenance distinguishes host/caller/tun and the attempted literal family. A detached losing HTTP hedge may time out after its initiating resolver call answered; pending and legacy unknown do not establish either outcome. Taskworker can be measuring a selected provider through a dual-stack TUN; its emitter alone does not establish task control-plane DNS failure or the Proxy-only MTU defect. Fixed samples and a single doh-attempt frame omit endpoints, queried domains, and correlation identifiers.",
+		action:    "Correlate the emitting process and original path with bounded same-window TCP, resource, and resolver controls. Distinguish endpoint attempts from the final logical DNS result; if that result is unavailable, retain impact as unknown rather than asserting either an outage or successful fallback. Compare fresh same-process [doh]resolver cumulative snapshots for complete resolver-call outcomes; owner_path names configured remote ownership, while local fallback dials can still use path=host. Cache calls, waiters, raw forwarding and multi-name one-shot calls are not a user-request denominator. Do not restart Redis, change resolver policy, lengthen timeouts, or suppress the alert from an individual fanout-leg failure.",
+		verify:    "Require this diagnostic class below its unchanged 10/min PAGE threshold for 10 minutes with fresh observation coverage and healthy original-path controls. Verify the deployed producer exposes path, attempted_family and resolver_outcome; use fresh same-process counter deltas including failures, cancellations and stale answers. Claim user-facing DNS recovery only with an independent final-query or end-to-end outcome; endpoint TCP success and quiet sampled logs alone do not establish it.",
 	},
+	{name: "doh-observation-schema", re: regexp.MustCompile(`\[(?:family|doh)\](?:dial tag=doh|resolver) observable=`),
+		match: func(line string) bool {
+			return parseDohDialObservation(line) == nil && !dohResolverObserved(line)
+		},
+		sample: func(string) string {
+			return "DoH observation schema is unknown or malformed (all fields and outer identity omitted)"
+		},
+		groupBy:       func(string) string { return "doh-observation-schema" },
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4 and §5.2",
+		meaning:   "DoH provenance cannot be read with the monitor's known schema",
+		mechanism: "A DoH observation has an unknown version, a malformed enum/counter, or extra fields. None of its path, family, outcome, or counter values can be trusted.",
+		context:   "This is an observation gap, not proof that a resolver or user request failed. Discard all fields rather than retaining identities or silently treating the record as healthy.",
+		action:    "Compare the deployed producer and monitor schema, preserve the unknown state, and add a bounded parser and deterministic sanitized fixture for a verified new schema.",
+		verify:    "Current producer records parse with exact finite fields, synthetic malformed records retain this visibility warning, and ten fresh minutes contain no schema gap alongside positive original-path resolver workload.",
+	},
+	{name: "doh-dial-observation", re: dohDialObservationRe, match: dohDialInformational, metricOnly: true},
+	{name: "doh-resolver-observation", re: dohResolverObservationRe, match: dohResolverObserved, metricOnly: true},
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
 		sample: func(string) string {
 			return "outgoing TCP dial: i/o timeout (correlation metadata and other fields omitted)"
@@ -531,7 +571,10 @@ var logClasses = []logClass{
 		action:    "Resolve the exact target and original source path, then compare bounded same-window process, listener, TCP, and resource evidence. Use §5.2 only for an identified Redis node with a corroborating local PING hang and accept-path evidence. Do not restart an inferred service before attribution and authorization.",
 		verify:    "The original source path reaches the intended target, its owning health signal remains healthy, and this class stays below threshold for 10 minutes through the relevant lifecycle. Later reachability alone does not establish the earlier cause.",
 	},
-	{name: "connection-refused", re: regexp.MustCompile(`connect: connection refused`),
+	{name: "connection-refused", re: regexp.MustCompile(`connect: connection refused|\[family\]dial tag=doh observable=v1 [^\r\n]* result=refused `),
+		match: func(line string) bool {
+			return !strings.Contains(line, "[family]dial tag=doh observable=") || parseDohDialObservation(line) != nil
+		},
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4",
 		meaning:   "an otherwise-unclassified TCP target had no accepting listener at the attempted address and instant",
 		mechanism: "TCP returned an active refusal, which distinguishes an absent/nonmatching listener from a silent SYN drop but does not identify the target service, namespace, exit cause, or rollout state. Service-specific signatures earlier in this taxonomy take precedence.",
@@ -922,14 +965,15 @@ var logClasses = []logClass{
 		redactIDs: true,
 	},
 	{name: "signal-send-not-admitted", re: signalSendStructuredReasonRe("not-admitted"),
-		sample:        signalSendStructuredLogSample,
-		groupBy:       signalSendLogMode,
-		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
-		meaning:   "the Connect signaling send returned false without an error; mode identifies whether this was the receive-reply zero-wait boundary or the ordinary sender path",
-		mechanism: "A receive-reply send deliberately offers into bounded admission with timeout zero so one peer cannot block the shared receive callback. A full admission boundary therefore refuses that reply and leaves retry machinery to recover it. Sender mode does not use that zero-wait policy and requires a separate send-budget audit.",
-		context:   "This result identifies admission refusal, not CPU, memory, transport, or provider failure. Correlate it with the exact mode, send-admission controls, negotiation retry/recovery, and artifact ancestry. A burst distributed across processes is not by itself proof that their resources are saturated.",
-		action:    "For receive-reply mode, inspect bounded send-admission pressure and retry recovery without changing the nonblocking callback contract. For sender mode, verify its effective wait and owning generation. Prove any proposed queue, lane, or carrier correction with a deterministic admission test; do not block the receive path or enlarge a queue from this log alone.",
-		verify:    "The class stays below 20/min for ten minutes under comparable signaling traffic, refused receive replies recover through ordinary negotiation retry, and deterministic full-admission tests retain zero-wait callback behavior and exact pooled-frame return.",
+		sample:             signalSendStructuredLogSample,
+		groupBy:            signalSendLogAdmission,
+		aggregateWithGroup: true,
+		rateThreshold:      novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",
+		meaning:   "the Connect signaling send returned false without an error; mode identifies the receive-reply zero-wait policy, and newer artifacts retain the exact local refusal gate and signal kind",
+		mechanism: "boundary=pack-admission means the fixed pre-sequence count/fairness gate refused; resend-capacity means reliable resend capacity was unavailable before that gate; queue-handoff means the final channel offer refused after passing the earlier gates, including a zero-buffer rendezvous without a ready consumer; loopback is the client's own queue. Old mode/reason-only lines leave the boundary unobserved. None of these is a remote delivery result.",
+		context:   "A finite kind identifies offer, answer, candidate, waiting, none, mixed, or unknown; reset describes only the local frame's generation-reset flag. Unknown can mean a malformed, oversized, or unrecognized frame, not a proved protocol error. Pack refusal does not prove total capacity exhausted because fairness also reserves capacity; queue-handoff does not prove a full Pack budget. Distributed counts do not prove CPU, memory, provider failure, or successful fallback. The aggregate threshold is retained across diagnostic groups.",
+		action:    "For receive-reply mode, correlate the exact gate with its effective buffer/count or resend policy and the identified kind's negotiation recovery. An offer may replay on WaitingForSdpOffer; a refused answer is not replayed merely by a duplicate offer, and a refused candidate is not proved regenerated after its local flush. Verify fresh-generation reconnect or usable exchange fallback where replay is absent. For sender mode, audit its own wait budget and generation. Preserve zero-wait callbacks, encryption, and queue bounds; do not restart from this line alone.",
+		verify:    "Deploy the diagnostic Connect input into every emitting service and refresh the monitor parser. Require fresh comparable traffic for ten minutes with the aggregate and each group below 20/min, plus independent negotiation success or usable exchange fallback for the refused signal kind. Quiet or accepted sends alone do not prove remote delivery. Deterministic tests must force resend-capacity, Pack-admission, and final-handoff refusals, retain public false/nil results and zero-wait replies, and return each pooled frame exactly once.",
 		redactIDs: true,
 	},
 	{name: "signal-send-encryption-not-ready", re: signalSendStructuredReasonRe("encryption-not-ready"),

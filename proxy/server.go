@@ -131,6 +131,11 @@ func DefaultProxySettings() *ProxySettings {
 		WgHandoffInitiatePace:    5 * time.Second,
 		// must outlive WgHandoffPollTimeout with margin (see the field comment)
 		WgHandoffRequestTtl: 20 * time.Minute,
+
+		// the device's own key lifetime: a client with traffic re-handshakes
+		// every two minutes and a silent one lets its keys expire at three
+		WgSessionWindow:        3 * time.Minute,
+		WgSessionSampleTimeout: 15 * time.Second,
 	}
 }
 
@@ -227,6 +232,13 @@ type ProxySettings struct {
 	// host drain — keep it > WgHandoffPollTimeout with margin; default
 	// 20min) and the drain-end export itself.
 	WgHandoffRequestTtl time.Duration
+
+	// WireGuard session metrics (wg_sessions.go, the proxy dashboard). A peer
+	// is in session while its newest completed handshake is inside
+	// WgSessionWindow; the peer table is sampled every WgSessionSampleTimeout.
+	// <= 0 on either disables the sampling.
+	WgSessionWindow        time.Duration
+	WgSessionSampleTimeout time.Duration
 }
 
 type socks5Server struct {
@@ -652,6 +664,7 @@ func NewWgServer(
 	}
 
 	go s.runRuntimeMetrics()
+	go server.HandleError(s.runSessionMetrics, cancel)
 	go server.HandleError(s.run, cancel)
 
 	return s

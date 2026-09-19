@@ -98,6 +98,9 @@ func registry() []specEndpoint {
 		{"GET", "/network/reliability", nil, rt(controller.GetNetworkReliabilityResult{})},
 		{"GET", "/network/user", nil, rt(controller.GetNetworkUserResult{})},
 		{"POST", "/network/user/update", rt(controller.UpdateNetworkNameArgs{}), rt(controller.UpdateNetworkNameResult{})},
+		{"POST", "/network/extender-activate", rt(controller.ExtenderActivateArgs{}), rt(controller.ExtenderActivateResult{})},
+		{"GET", "/network/extender-hint", nil, rt(controller.ExtenderHintResult{})},
+		{"POST", "/network/extender-latency", rt(controller.ExtenderLatencyReportArgs{}), rt(controller.ExtenderLatencyReportResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},
@@ -134,6 +137,7 @@ func registry() []specEndpoint {
 		// Response is a polymorphic interface{}, so it stays unchecked (nil).
 		{"POST", "/verify", rt(controller.VerifyArgs{}), nil},
 		{"GET", "/key/{clientId}", nil, rt(controller.GetClientKeyResult{})},
+		{"GET", "/key/{clientId}/history", nil, rt(controller.GetClientKeyHistoryResult{})},
 		{"GET", "/hello", nil, rt(controller.HelloResult{})},
 
 		{"POST", "/account/api-key", rt(model.CreateApiKeyArgs{}), rt(model.CreateApiKeyResult{})},

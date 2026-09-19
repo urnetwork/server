@@ -27,6 +27,10 @@ const (
 	serviceLoadHostCPUFraction             = 0.0625
 	serviceLoadLazyForwardCommit           = "2425b71e71bff58448b6e26c84a0188871364409"
 	serviceLoadLazyForwardCapabilityCommit = "7ed9a3065bb2e62653d0681b26527f56fb4001fe"
+	// A service-load vector has a fixed metric set and bounded identities.  Do
+	// not permit one unhealthy Mimir response to retain an unbounded body in
+	// the serial monitor runner before JSON validation.
+	serviceLoadResponseMaxBytes = 4 << 20
 )
 
 // Signal service-load implements SIGNALS.md §8.15. It attributes a saturated
@@ -222,7 +226,7 @@ func (serviceLoadProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		env.runner,
 		metricHosts,
 		nil,
-		"curl -fsS --max-time 15 '"+queryURL+"'",
+		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(serviceLoadResponseMaxBytes)+" '"+queryURL+"'",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("service load: query Mimir through service gateways: %w", err)

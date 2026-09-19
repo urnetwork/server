@@ -2,50 +2,1138 @@
   "uid": "urnetwork-proxy",
   "title": "urnetwork / proxy",
   "description": "Authenticated Proxy service deep dive. HTTP and SOCKS traffic is measured at the client-facing relay boundary; WireGuard traffic is measured at the provider-device boundary. Device, peer, session, and cache values are aggregate capacity signals and never carry customer identity. Library event totals and several WireGuard gauges are cumulative for one process generation, so rate panels tolerate restarts. Missing or stale telemetry remains no-data.",
-  "tags": ["urnetwork"],
+  "tags": [
+    "urnetwork"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "30s",
-  "time": {"from": "now-3h", "to": "now"},
-  "templating": {"list": [
-    {"name": "env", "label": "env", "type": "query", "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "query": "label_values(urnetwork_proxy_ready, env)", "refresh": 2, "sort": 1},
-    {"name": "block", "label": "block", "type": "query", "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "query": "label_values(urnetwork_proxy_ready{env=\"$env\"}, block)", "refresh": 2, "sort": 1, "multi": true, "includeAll": true},
-    {"name": "host", "label": "host", "type": "query", "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "query": "label_values(urnetwork_proxy_ready{env=\"$env\",block=~\"$block\"}, host)", "refresh": 2, "sort": 1, "multi": true, "includeAll": true}
-  ]},
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_proxy_ready, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "block",
+        "label": "block",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_proxy_ready{env=\"$env\"}, block)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_proxy_ready{env=\"$env\",block=~\"$block\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
   "panels": [
-    {"id": 1, "type": "stat", "title": "ready instances", "description": "Instances whose initial peer synchronization completed and which are not draining.", "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_ready{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "instant": true, "range": false}]},
-    {"id": 2, "type": "stat", "title": "drain connections remaining", "description": "HTTP and SOCKS connections remaining in the active bounded drain. An absent series is not a completed drain.", "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_drain_active_remaining{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "instant": true, "range": false}]},
-    {"id": 3, "type": "stat", "title": "HTTP / SOCKS admissions / s", "description": "Successful dials and bounded authentication or dial failures. WireGuard has a separate packet admission view.", "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "instant": true, "range": false}]},
-    {"id": 4, "type": "stat", "title": "active relay work", "description": "Successfully dialed upstream sessions plus current in-flight ingress work. These overlap and must not be treated as distinct users.", "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "upstream sessions", "instant": true, "range": false}, {"refId": "B", "expr": "sum(urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "ingress work", "instant": true, "range": false}]},
-
-    {"id": 5, "type": "timeseries", "title": "admissions by protocol and outcome", "description": "Finite outcomes are admitted, unauthorized, and dial_failed; no address or credential is retained.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol, outcome) (rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{protocol}} {{outcome}}"}]},
-    {"id": 6, "type": "timeseries", "title": "session closes by outcome", "description": "Completed upstream sessions and bounded read/write terminal failures by HTTP or SOCKS.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol, outcome) (rate(urnetwork_proxy_sessions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{protocol}} {{outcome}}"}]},
-    {"id": 7, "type": "timeseries", "title": "client-boundary relay bytes / s", "description": "HTTP/SOCKS body and tunnel bytes on the upstream relay connection: client_to_destination is Write; destination_to_client is Read.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol, direction) (rate(urnetwork_proxy_session_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{protocol}} {{direction}}"}]},
-    {"id": 8, "type": "timeseries", "title": "mean session duration", "description": "Rate-derived mean completed HTTP/SOCKS upstream-session duration by finite protocol.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol) (rate(urnetwork_proxy_session_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum by (protocol) (rate(urnetwork_proxy_session_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "mean {{protocol}}"}]},
-    {"id": 9, "type": "timeseries", "title": "fresh one-minute maximum session duration", "description": "Exact process maxima only while their paired close timestamp is within 120 seconds; no closes or stale publication remains no-data.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "max by (protocol) (urnetwork_proxy_session_interval_max_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} and on (env, service, block, host, instance, protocol) (urnetwork_proxy_session_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} > time() - 120 and urnetwork_proxy_session_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} < time() + 30))", "legendFormat": "{{protocol}}"}]},
-    {"id": 10, "type": "timeseries", "title": "bounded HTTP / SOCKS library events / s", "description": "Fixed library reasons expose dial, framing, relay, body-limit, upgrade, and UDP-association behavior without request or destination labels.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol, reason) (rate(urnetwork_proxy_ingress_events_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{protocol}} {{reason}}"}]},
-
-    {"id": 11, "type": "timeseries", "title": "HTTP / SOCKS ingress work", "description": "Current connections, requests, tunnels, or UDP associations reported by each ingress implementation.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (protocol) (urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "{{protocol}}"}, {"refId": "B", "expr": "sum by (protocol) (urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "dialed {{protocol}}"}]},
-    {"id": 12, "type": "timeseries", "title": "WireGuard packets / s by direction and outcome", "description": "Inner packets offered at the aggregate provider-device boundary; delivered and dropped stay distinct.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (direction, outcome) (rate(urnetwork_proxy_wireguard_packets_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{direction}} {{outcome}}"}]},
-    {"id": 13, "type": "timeseries", "title": "WireGuard bytes / s by direction and outcome", "description": "Inner-packet bytes at the provider-device boundary; transport framing is excluded.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (direction, outcome) (rate(urnetwork_proxy_wireguard_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{direction}} {{outcome}}"}]},
-    {"id": 14, "type": "timeseries", "title": "WireGuard queue drops and receiver failures / s", "description": "Process-generation cumulative gauges sampled from the device. Rates distinguish peer-queue drops, decryption-queue drops, and unexpected receive-routine exits.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(urnetwork_proxy_wg_inbound_peer_queue_drop_packets{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "peer queue drops"}, {"refId": "B", "expr": "sum(rate(urnetwork_proxy_wg_inbound_decryption_queue_drop_packets{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "decryption queue drops"}, {"refId": "C", "expr": "sum(rate(urnetwork_proxy_wg_receive_routine_failures{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "receiver failures"}]},
-
-    {"id": 15, "type": "timeseries", "title": "aggregate devices, peers, prewarm, and lifecycle", "description": "Fleet capacity and deployment continuity without device or customer labels. lifecycle join must be 1 per serving instance.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 45}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "live devices"}, {"refId": "B", "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "WireGuard peers"}, {"refId": "C", "expr": "sum(urnetwork_proxy_prewarmed_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "prewarmed"}, {"refId": "D", "expr": "min(urnetwork_proxy_lifecycle_join_enabled{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "minimum lifecycle join"}]},
-    {"id": 16, "type": "timeseries", "title": "device memory target, tracked use, and admission budget", "description": "Aggregate DeviceLocal steady-state target and tracked live use alongside the process admission budget and its fixed per-device reservations. Compare with process RSS for untracked runtime and pool memory.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 45}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_device_memory_target_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "target bytes"}, {"refId": "B", "expr": "sum(urnetwork_proxy_device_memory_tracked_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "tracked used bytes"}, {"refId": "C", "expr": "sum(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "admission budget bytes"}, {"refId": "D", "expr": "sum(urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "reserved admission bytes"}]},
-    {"id": 17, "type": "timeseries", "title": "platform transport byte capacity", "description": "Aggregate private carrier byte budget, acquired bytes, and bytes waiting for H1 admission.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 53}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_platform_transport_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "budget"}, {"refId": "B", "expr": "sum(urnetwork_proxy_platform_transport_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "used"}, {"refId": "C", "expr": "sum(urnetwork_proxy_platform_transports_pending_h1_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "pending H1"}]},
-    {"id": 18, "type": "timeseries", "title": "platform transport count capacity", "description": "Aggregate private carrier slots, pending H1 admission, and sampled same-device preemptions. Sustained slot-full pending and recent preemptions suggest the connect#211 loop; sample-time state does not prove the slot state at each preemption.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 53}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_platform_transports_max{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "maximum"}, {"refId": "B", "expr": "sum(urnetwork_proxy_platform_transports_used{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "used"}, {"refId": "C", "expr": "sum(urnetwork_proxy_platform_transports_pending_h1{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "pending H1"}, {"refId": "D", "expr": "sum(urnetwork_proxy_platform_transport_slot_full_pending_h1_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "slot-full pending devices"}, {"refId": "E", "expr": "sum(rate(urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "slot-full H3 preemptions/s"}, {"refId": "F", "expr": "sum(rate(urnetwork_proxy_platform_transport_h3_preemptions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "all H3 preemptions/s"}]},
-
-    {"id": 19, "type": "timeseries", "title": "WireGuard return backpressure", "description": "Packets that waited for bounded receive-queue capacity plus mean and p95 wait duration.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 61}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "packets/s"}, {"refId": "B", "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "mean seconds"}, {"refId": "C", "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_proxy_wireguard_return_backpressure_seconds_bucket{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))", "legendFormat": "p95 seconds"}]},
-    {"id": 20, "type": "timeseries", "title": "caller-lock cache occupancy", "description": "Bounded aggregate cache entries and hard capacity; no address or proxy credential is exported.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 61}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(urnetwork_proxy_lock_cache_entries{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "entries"}, {"refId": "B", "expr": "sum(urnetwork_proxy_lock_cache_capacity{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "capacity"}]},
-    {"id": 21, "type": "timeseries", "title": "caller-lock cache activity / s", "description": "Cache hits, misses, expirations, and hard-bound evictions without caller labels.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 69}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(urnetwork_proxy_lock_cache_hits_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "hits"}, {"refId": "B", "expr": "sum(rate(urnetwork_proxy_lock_cache_misses_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "misses"}, {"refId": "C", "expr": "sum(rate(urnetwork_proxy_lock_cache_expirations_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "expirations"}, {"refId": "D", "expr": "sum(rate(urnetwork_proxy_lock_cache_evictions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "evictions"}]},
-    {"id": 22, "type": "timeseries", "title": "control and device-RPC HTTP outcomes", "description": "Bounded configured control routes include status, warmup, and the hosted device RPC lifecycle. Hijacked sessions retain route outcome and duration without path labels.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 69}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (route, status, outcome) (rate(urnetwork_http_requests_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{route}} {{status}} {{outcome}}"}]},
-
-    {"id": 23, "type": "timeseries", "title": "control and device-RPC bytes and inflight", "description": "HTTP body bytes exclude bytes sent after a WebSocket hijack; in-flight route duration remains the RPC session control. Absence is not interpreted as zero traffic.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 77}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (route) (rate(urnetwork_http_request_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "request bytes/s {{route}}"}, {"refId": "B", "expr": "sum by (route) (rate(urnetwork_http_response_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "response bytes/s {{route}}"}, {"refId": "C", "expr": "sum by (route) (urnetwork_http_requests_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "inflight {{route}}"}]},
-    {"id": 24, "type": "timeseries", "title": "control and device-RPC mean / fresh max", "description": "Mean configured-route duration plus the exact process maximum while its paired observation is fresh. A hosted WebSocket's duration covers its served session after hijack.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 77}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (route) (rate(urnetwork_http_request_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum by (route) (rate(urnetwork_http_request_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "mean {{route}}"}, {"refId": "B", "expr": "max by (route) (urnetwork_http_request_interval_max_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} and on (env, service, block, host, instance, route) (urnetwork_http_request_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} > time() - 120 and urnetwork_http_request_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} < time() + 30))", "legendFormat": "fresh max {{route}}"}]},
-    {"id": 25, "type": "timeseries", "title": "control-plane database and Redis pressure", "description": "Initialized PostgreSQL pools and Redis connections used by proxy synchronization, authorization, warmup, and device control.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 85}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum by (pool, state) (urnetwork_pg_pool_connections{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "PG {{pool}} {{state}}"}, {"refId": "B", "expr": "sum(urnetwork_redis_pool_total_conns{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "Redis total"}, {"refId": "C", "expr": "sum(rate(urnetwork_redis_pool_timeouts_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "Redis timeouts/s"}]},
-    {"id": 26, "type": "timeseries", "title": "process CPU, memory, goroutines, and file descriptors", "description": "Proxy process saturation controls by selected deployment block and host.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 85}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(process_cpu_seconds_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "CPU cores"}, {"refId": "B", "expr": "sum(process_resident_memory_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "RSS bytes"}, {"refId": "C", "expr": "sum(go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "goroutines"}, {"refId": "D", "expr": "sum(process_open_fds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "open fds"}]},
-
-    {"id": 27, "type": "timeseries", "title": "device memory admission refusals / s", "description": "Device opens refused at the aggregate process memory ceiling. Existing devices remain installed; sustained refusals with a saturated budget require more per-process or hardware capacity after validating actual memory headroom.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 93}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "sum(rate(urnetwork_proxy_device_admission_refused_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "refused opens/s"}]},
-    {"id": 28, "type": "timeseries", "title": "device admission budget saturation by process", "description": "Reserved device targets divided by the configured aggregate budget for each process generation. A positive refusal counter is authoritative; a near-ceiling ratio is context because a remainder smaller than one complete reservation can refuse admission below 1. Zero or missing budget denotes disabled or unavailable admission telemetry and must not be read as spare capacity.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 93}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "targets": [{"refId": "A", "expr": "max by (block, host, instance) (urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} / clamp_min(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}, 1))", "legendFormat": "{{host}} {{block}} {{instance}}"}]}
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "ready instances",
+      "description": "Instances whose initial peer synchronization completed and which are not draining.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_ready{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "drain connections remaining",
+      "description": "HTTP and SOCKS connections remaining in the active bounded drain. An absent series is not a completed drain.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_drain_active_remaining{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "HTTP / SOCKS admissions / s",
+      "description": "Successful dials and bounded authentication or dial failures. WireGuard has a separate packet admission view.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "active relay work",
+      "description": "Successfully dialed upstream sessions plus current in-flight ingress work. These overlap and must not be treated as distinct users.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "upstream sessions",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "ingress work",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "WireGuard sessions",
+      "description": "Peers whose newest completed handshake is inside the three minute session window, beside every peer registered on the devices. WireGuard has no session teardown: a client with traffic re-handshakes every two minutes and a silent one lets its keys expire at three, so in-session is the honest count of clients actually using the tunnel right now, and the gap to registered peers is clients configured but idle.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_wg_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "in session",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "registered peers",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "SOCKS sessions",
+      "description": "Successfully dialed SOCKS upstream sessions not yet closed, beside the SOCKS ingress work in flight (connections, tunnels and UDP associations as the library reports them). The two overlap and must not be added.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"})",
+          "legendFormat": "dialed sessions",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"})",
+          "legendFormat": "ingress work",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "proxy devices",
+      "description": "Embedded provider devices installed on the fleet (live), those with client activity inside the activity window (active), and those pre-warmed at startup from the recent-activity set. Live minus active is idle capacity waiting on its idle timeout; a replacement instance shows pre-warmed rising before active does.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "live",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_devices_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "active",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_prewarmed_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "prewarmed",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "new sessions / s",
+      "description": "Sessions begun per second: WireGuard by a peer's first handshake after having none inside the window, SOCKS by an admitted upstream dial. Reset-aware rates over the selected interval.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_wg_sessions_started_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "WireGuard",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\",outcome=\"admitted\"}[$__rate_interval]))",
+          "legendFormat": "SOCKS",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "WireGuard sessions and peers",
+      "description": "Peers in session against the registered peer table, with sessions started and ended per second. A session ends when a whole window passes with no new handshake or the peer is removed from the device, so an ended rate that tracks the started rate is churn, and a started rate with a flat in-session count is clients that connect and go quiet at once.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_wg_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "in session"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "registered peers"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_proxy_wg_sessions_started_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "started / s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(urnetwork_proxy_wg_sessions_ended_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "ended / s"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "SOCKS sessions",
+      "description": "SOCKS upstream sessions open and ingress work in flight, with sessions opened per second and closed per second by terminal outcome. Closes dominated by read or write errors point at the upstream side of the relay, not at SOCKS clients.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"})",
+          "legendFormat": "dialed sessions"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"})",
+          "legendFormat": "ingress work"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\",outcome=\"admitted\"}[$__rate_interval]))",
+          "legendFormat": "opened / s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (outcome) (rate(urnetwork_proxy_sessions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"}[$__rate_interval]))",
+          "legendFormat": "closed / s {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "mean WireGuard and SOCKS session duration",
+      "description": "Mean duration of the sessions that ended in each interval, as sum over count of the duration summaries (no histogram buckets, so no cardinality cost). A WireGuard duration is first completed handshake to last, which understates a session by up to one rekey interval; a SOCKS duration is dial to close. Nothing renders in an interval with no ended session.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_wg_session_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum(rate(urnetwork_proxy_wg_session_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "WireGuard"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_proxy_session_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"}[$__rate_interval])) / sum(rate(urnetwork_proxy_session_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",protocol=\"socks\"}[$__rate_interval]))",
+          "legendFormat": "SOCKS"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "proxy devices",
+      "description": "Installed embedded devices over time: live, active inside the activity window, and pre-warmed. Active is refreshed on the activity flush cadence, so it lags a burst of new clients by up to a minute. Missing or stale telemetry remains no-data rather than zero.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "live"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_devices_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "active"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_prewarmed_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "prewarmed"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "admissions by protocol and outcome",
+      "description": "Finite outcomes are admitted, unauthorized, and dial_failed; no address or credential is retained.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol, outcome) (rate(urnetwork_proxy_ingress_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{protocol}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "session closes by outcome",
+      "description": "Completed upstream sessions and bounded read/write terminal failures by HTTP or SOCKS.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol, outcome) (rate(urnetwork_proxy_sessions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{protocol}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "client-boundary relay bytes / s",
+      "description": "HTTP/SOCKS body and tunnel bytes on the upstream relay connection: client_to_destination is Write; destination_to_client is Read.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol, direction) (rate(urnetwork_proxy_session_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{protocol}} {{direction}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "mean session duration",
+      "description": "Rate-derived mean completed HTTP/SOCKS upstream-session duration by finite protocol.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol) (rate(urnetwork_proxy_session_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum by (protocol) (rate(urnetwork_proxy_session_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "mean {{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "fresh one-minute maximum session duration",
+      "description": "Exact process maxima only while their paired close timestamp is within 120 seconds; no closes or stale publication remains no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (protocol) (urnetwork_proxy_session_interval_max_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} and on (env, service, block, host, instance, protocol) (urnetwork_proxy_session_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} > time() - 120 and urnetwork_proxy_session_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} < time() + 30))",
+          "legendFormat": "{{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "bounded HTTP / SOCKS library events / s",
+      "description": "Fixed library reasons expose dial, framing, relay, body-limit, upgrade, and UDP-association behavior without request or destination labels.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol, reason) (rate(urnetwork_proxy_ingress_events_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{protocol}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "HTTP / SOCKS ingress work",
+      "description": "Current connections, requests, tunnels, or UDP associations reported by each ingress implementation.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (protocol) (urnetwork_proxy_ingress_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{protocol}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (protocol) (urnetwork_proxy_sessions_active{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "dialed {{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "WireGuard packets / s by direction and outcome",
+      "description": "Inner packets offered at the aggregate provider-device boundary; delivered and dropped stay distinct.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (direction, outcome) (rate(urnetwork_proxy_wireguard_packets_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{direction}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "WireGuard bytes / s by direction and outcome",
+      "description": "Inner-packet bytes at the provider-device boundary; transport framing is excluded.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (direction, outcome) (rate(urnetwork_proxy_wireguard_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{direction}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "WireGuard queue drops and receiver failures / s",
+      "description": "Process-generation cumulative gauges sampled from the device. Rates distinguish peer-queue drops, decryption-queue drops, and unexpected receive-routine exits.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_wg_inbound_peer_queue_drop_packets{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "peer queue drops"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_proxy_wg_inbound_decryption_queue_drop_packets{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "decryption queue drops"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_proxy_wg_receive_routine_failures{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "receiver failures"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "aggregate devices, peers, prewarm, and lifecycle",
+      "description": "Fleet capacity and deployment continuity without device or customer labels. lifecycle join must be 1 per serving instance.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "live devices"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "WireGuard peers"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_prewarmed_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "prewarmed"
+        },
+        {
+          "refId": "D",
+          "expr": "min(urnetwork_proxy_lifecycle_join_enabled{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "minimum lifecycle join"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "device memory target, tracked use, and admission budget",
+      "description": "Aggregate DeviceLocal steady-state target and tracked live use alongside the process admission budget and its fixed per-device reservations. Compare with process RSS for untracked runtime and pool memory.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_device_memory_target_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "target bytes"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_device_memory_tracked_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "tracked used bytes"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "admission budget bytes"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "reserved admission bytes"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "platform transport byte capacity",
+      "description": "Aggregate private carrier byte budget, acquired bytes, and bytes waiting for H1 admission.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_platform_transport_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "budget"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_platform_transport_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_platform_transports_pending_h1_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "pending H1"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "platform transport count capacity",
+      "description": "Aggregate private carrier slots, pending H1 admission, and sampled same-device preemptions. Sustained slot-full pending and recent preemptions suggest the connect#211 loop; sample-time state does not prove the slot state at each preemption.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_platform_transports_max{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "maximum"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_platform_transports_used{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(urnetwork_proxy_platform_transports_pending_h1{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "pending H1"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(urnetwork_proxy_platform_transport_slot_full_pending_h1_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "slot-full pending devices"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(urnetwork_proxy_platform_transport_slot_full_pending_h1_h3_preemptions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "slot-full H3 preemptions/s"
+        },
+        {
+          "refId": "F",
+          "expr": "sum(rate(urnetwork_proxy_platform_transport_h3_preemptions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "all H3 preemptions/s"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "WireGuard return backpressure",
+      "description": "Packets that waited for bounded receive-queue capacity plus mean and p95 wait duration.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "packets/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "mean seconds"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_proxy_wireguard_return_backpressure_seconds_bucket{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p95 seconds"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "caller-lock cache occupancy",
+      "description": "Bounded aggregate cache entries and hard capacity; no address or proxy credential is exported.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(urnetwork_proxy_lock_cache_entries{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "entries"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_proxy_lock_cache_capacity{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "capacity"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "caller-lock cache activity / s",
+      "description": "Cache hits, misses, expirations, and hard-bound evictions without caller labels.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_hits_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "hits"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_misses_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "misses"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_expirations_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "expirations"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_evictions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "evictions"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "control and device-RPC HTTP outcomes",
+      "description": "Bounded configured control routes include status, warmup, and the hosted device RPC lifecycle. Hijacked sessions retain route outcome and duration without path labels.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, status, outcome) (rate(urnetwork_http_requests_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{route}} {{status}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "control and device-RPC bytes and inflight",
+      "description": "HTTP body bytes exclude bytes sent after a WebSocket hijack; in-flight route duration remains the RPC session control. Absence is not interpreted as zero traffic.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (rate(urnetwork_http_request_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "request bytes/s {{route}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (route) (rate(urnetwork_http_response_bytes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "response bytes/s {{route}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (route) (urnetwork_http_requests_inflight{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "inflight {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "control and device-RPC mean / fresh max",
+      "description": "Mean configured-route duration plus the exact process maximum while its paired observation is fresh. A hosted WebSocket's duration covers its served session after hijack.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (rate(urnetwork_http_request_duration_seconds_sum{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) / sum by (route) (rate(urnetwork_http_request_duration_seconds_count{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "mean {{route}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (route) (urnetwork_http_request_interval_max_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} and on (env, service, block, host, instance, route) (urnetwork_http_request_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} > time() - 120 and urnetwork_http_request_interval_max_timestamp_seconds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} < time() + 30))",
+          "legendFormat": "fresh max {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "control-plane database and Redis pressure",
+      "description": "Initialized PostgreSQL pools and Redis connections used by proxy synchronization, authorization, warmup, and device control.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 106
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pool, state) (urnetwork_pg_pool_connections{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "PG {{pool}} {{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(urnetwork_redis_pool_total_conns{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "Redis total"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_redis_pool_timeouts_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "Redis timeouts/s"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "process CPU, memory, goroutines, and file descriptors",
+      "description": "Proxy process saturation controls by selected deployment block and host.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 106
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(process_cpu_seconds_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "CPU cores"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(process_resident_memory_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "RSS bytes"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(go_goroutines{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "goroutines"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(process_open_fds{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "open fds"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "device memory admission refusals / s",
+      "description": "Device opens refused at the aggregate process memory ceiling. Existing devices remain installed; sustained refusals with a saturated budget require more per-process or hardware capacity after validating actual memory headroom.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 114
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_proxy_device_admission_refused_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "refused opens/s"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "device admission budget saturation by process",
+      "description": "Reserved device targets divided by the configured aggregate budget for each process generation. A positive refusal counter is authoritative; a near-ceiling ratio is context because a remainder smaller than one complete reservation can refuse admission below 1. Zero or missing budget denotes disabled or unavailable admission telemetry and must not be read as spare capacity.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 114
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance) (urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} / clamp_min(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}, 1))",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    }
   ]
 }

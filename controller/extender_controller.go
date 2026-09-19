@@ -188,17 +188,20 @@ func SignExtenderRecord(
 	}
 	slices.Sort(dnsPorts)
 	record, err := connect.SignExtenderRecord(rootPrivateKey, &protocol.ExtenderRecordBody{
-		PublicKey:    extender.PublicKey,
-		Addresses:    recordAddresses,
-		TcpPort:      uint32(extender.TcpPort),
-		UdpPort:      uint32(extender.UdpPort),
-		DnsPort:      uint32(extender.DnsPort),
-		DnsPorts:     dnsPorts,
-		DnsTld:       extender.DnsTld,
-		CountryCode:  extender.CountryCode,
-		IssueTimeMs:  uint64(issueTime.UnixMilli()),
-		ExpireTimeMs: uint64(issueTime.Add(ExtenderRecordExpireTimeout).UnixMilli()),
-		NetworkHost:  config.NetworkHost,
+		PublicKey:   extender.PublicKey,
+		Addresses:   recordAddresses,
+		TcpPort:     uint32(extender.TcpPort),
+		UdpPort:     uint32(extender.UdpPort),
+		DnsPort:     uint32(extender.DnsPort),
+		DnsPorts:    dnsPorts,
+		DnsTld:      extender.DnsTld,
+		CountryCode: extender.CountryCode,
+		// the same mapping the geo dns sets use, so "close" means one thing
+		// on both paths (connect/DESIGNNOTES4.md §2)
+		ContinentCode: model.ContinentCodeForCountry(extender.CountryCode),
+		IssueTimeMs:   uint64(issueTime.UnixMilli()),
+		ExpireTimeMs:  uint64(issueTime.Add(ExtenderRecordExpireTimeout).UnixMilli()),
+		NetworkHost:   config.NetworkHost,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -505,6 +508,14 @@ func ExtenderActivate(
 		glog.Infof("[extender]no location for the activating address: %s\n", err)
 	}
 
+	// the privacy-preserving address key, kept with the activation history the
+	// way a connection keeps it (M1); an address that cannot be read stores
+	// none rather than failing a probe that passed
+	var clientAddressHash []byte
+	if hash, _, err := clientSession.ClientAddressHashPort(); err == nil {
+		clientAddressHash = hash[:]
+	}
+
 	var record *protocol.ExtenderRecord
 	var expireTime time.Time
 	activated := model.ActivateNetworkExtender(
@@ -522,6 +533,8 @@ func ExtenderActivate(
 			Ip:          clientIp,
 			Carriers:    carriers,
 			DnsPorts:    activeDnsPorts,
+
+			ClientAddressHash: clientAddressHash,
 		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,

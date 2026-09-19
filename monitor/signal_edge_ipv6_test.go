@@ -3,8 +3,10 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -465,6 +467,227 @@ func TestEdgeIPv6SignalSyntheticObserverRoutePreservesRealReset(t *testing.T) {
 	}
 	if len(alerts) != 1 || alerts[0].Class != "edge-ipv6-reset" {
 		t.Fatalf("routed refusal alerts = %+v, want the genuine reset", alerts)
+	}
+}
+
+// A route can disappear during connection establishment, leaving a TLS timeout with
+// a peer address rather than the immediate, peer-less curl exit 7 shape.
+func TestEdgeIpv6SignalObserverRouteLossDuringTls(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		routes     []string
+		allTimeout bool
+	}{
+		{name: "lost during requests", routes: []string{"interface: synthetic0\n", "not in table\n"}},
+		{name: "recovered during host controls", routes: []string{"not in table\n", "interface: synthetic0\n"}},
+		{name: "absent throughout", routes: []string{"not in table\n", "not in table\n"}},
+		{name: "all requests retained peers", routes: []string{"interface: synthetic0\n", "not in table\n"}, allTimeout: true},
+	} {
+		settings, routeCalls := edgeObserverTlsSettings(test.routes)
+		identityErr := &sshCommandError{err: fmt.Errorf("synthetic-private-identity-detail: %w", edgeCommandExitError(255))}
+		source := settings.Source.(*syntheticSource)
+		localFn := source.localFn
+		source.localFn = func(name string, args ...string) (string, error) {
+			if test.allTimeout && name == "curl" && strings.Contains(strings.Join(args, " "), "[2001:db8:50::3]") {
+				return edgeHTTPFixture("000", "28", "2001:db8:50::3", "3.002"), edgeCommandExitError(28)
+			}
+			return localFn(name, args...)
+		}
+		hostFn := source.hostFn
+		source.hostFn = func(host HostSettings, command string) (string, error) {
+			if strings.Contains(command, edgeIPv6IdentityMarker) && strings.Contains(command, "2001:db8:50::1") {
+				return "", identityErr
+			}
+			return hostFn(host, command)
+		}
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if *routeCalls != 2 || len(alerts) != 2 {
+			t.Fatalf("%s: route calls=%d alerts=%d, want before/after control and route/identity visibility", test.name, *routeCalls, len(alerts))
+		}
+		observer := requireAlertClass(t, alerts, "ipv6-observer-route-unavailable")
+		if observer.Severity != SeverityWarn || observer.Target != "monitor-host/edge-ipv6" {
+			t.Fatalf("%s: wrong observer identity or severity", test.name)
+		}
+		immediate, timeouts := 1, 2
+		if test.allTimeout {
+			immediate, timeouts = 0, 3
+		}
+		for _, want := range []string{"configured_targets=3", fmt.Sprintf("immediate_connect_failures=%d", immediate), fmt.Sprintf("connect_timeouts=%d", timeouts), "identity_healthy=2", "local_self_https_healthy=3", "source_route_exact=3", "source_egress_exact=3"} {
+			if !strings.Contains(observer.Observed, want) {
+				t.Errorf("%s: observer summary lacks %s", test.name, want)
+			}
+		}
+		identity := requireAlertClass(t, alerts, "cannot-observe")
+		if !strings.HasSuffix(identity.Target, "/public0/identity") || identity.Observed != "error_class=observation-ssh-exit-255" {
+			t.Errorf("%s: identity transport class was lost", test.name)
+		}
+		for _, alert := range alerts {
+			requireAlertOmits(t, alert, "synthetic-private-identity-detail", "not in table", "SSL connection timeout", "2001:db8:50::")
+		}
+	}
+}
+
+func TestEdgeIpv6ObserverTlsFailureControls(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		routes        []string
+		changedOutput string
+		changedExit   int
+		identityDrift bool
+		routeMismatch bool
+		wantClasses   map[string]int
+	}{
+		{name: "route available", routes: []string{"interface: synthetic0\n", "interface: synthetic0\n"}, wantClasses: map[string]int{"edge-ipv6-upstream-drop": 2, "edge-ipv6-reset": 1}},
+		{name: "route unavailable", routes: []string{"unparseable synthetic route\n", "unparseable synthetic route\n"}, wantClasses: map[string]int{"cannot-observe": 3}},
+		{name: "healthy sibling", changedOutput: edgeHTTPFixture("200", "0", "2001:db8:50::1", "0.080"), wantClasses: map[string]int{"edge-ipv6-upstream-drop": 1, "edge-ipv6-reset": 1}},
+		{name: "HTTP response", changedOutput: edgeHTTPFixture("503", "0", "2001:db8:50::1", "0.080"), wantClasses: map[string]int{"edge-ipv6-http": 1, "edge-ipv6-upstream-drop": 1, "edge-ipv6-reset": 1}},
+		{name: "timeout after response", changedOutput: edgeHTTPFixture("200", "28", "2001:db8:50::1", "3.000"), changedExit: 28, wantClasses: map[string]int{"edge-ipv6-http": 1, "edge-ipv6-upstream-drop": 1, "edge-ipv6-reset": 1}},
+		{name: "malformed native result", changedOutput: "monitor_http_code=000\nmonitor_exitcode=28\n", changedExit: 28, wantClasses: map[string]int{"cannot-observe": 1, "edge-ipv6-upstream-drop": 1, "edge-ipv6-reset": 1}},
+		{name: "independent identity drift", identityDrift: true, wantClasses: map[string]int{"edge-ipv6-identity-drift": 1, "ipv6-observer-route-unavailable": 1}},
+		{name: "independent source-route drift", routeMismatch: true, wantClasses: map[string]int{"edge-ipv6-policy-route": 1, "ipv6-observer-route-unavailable": 1}},
+	} {
+		routes := test.routes
+		if routes == nil {
+			routes = []string{"not in table\n", "not in table\n"}
+		}
+		settings, _ := edgeObserverTlsSettings(routes)
+		source := settings.Source.(*syntheticSource)
+		localFn, hostFn := source.localFn, source.hostFn
+		source.localFn = func(name string, args ...string) (string, error) {
+			if test.changedOutput != "" && name == "curl" && strings.Contains(strings.Join(args, " "), "[2001:db8:50::1]") {
+				return test.changedOutput, edgeCommandExitError(test.changedExit)
+			}
+			return localFn(name, args...)
+		}
+		source.hostFn = func(host HostSettings, command string) (string, error) {
+			if test.identityDrift && strings.Contains(command, edgeIPv6IdentityMarker) && strings.Contains(command, "2001:db8:50::1") {
+				return "operstate=up\nconfigured_present=0\nunit_active=active\n", nil
+			}
+			output, err := hostFn(host, command)
+			if test.routeMismatch && strings.Contains(command, edgeIPv6EgressMarker) && strings.Contains(command, "2001:db8:50::1") {
+				output = strings.ReplaceAll(output, "route_device=public0", "route_device=management0")
+			}
+			return output, err
+		}
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		classes := map[string]int{}
+		for _, alert := range alerts {
+			classes[alert.Class]++
+		}
+		if !reflect.DeepEqual(classes, test.wantClasses) {
+			t.Errorf("%s: classes=%v want=%v", test.name, classes, test.wantClasses)
+		}
+	}
+}
+
+func TestEdgeIpv6ObserverRouteLossPreservesIndependentAdmissionFault(t *testing.T) {
+	settings, _ := edgeObserverTlsSettings([]string{"not in table\n", "not in table\n"})
+	source := settings.Source.(*syntheticSource)
+	hostFn := source.hostFn
+	source.hostFn = func(host HostSettings, command string) (string, error) {
+		if strings.Contains(command, edgeIPv6AdmissionMarker) {
+			return "lb_observation_status=1\nlb_listener_count=0\nlb_map_hash_error_count=1\n", nil
+		}
+		output, err := hostFn(host, command)
+		if strings.Contains(command, edgeIPv6EgressMarker) && strings.Contains(command, "2001:db8:50::3") {
+			output = strings.ReplaceAll(output, "self_http_code=200\nself_exitcode=0\nself_probe_status=0", "self_http_code=000\nself_exitcode=7\nself_probe_status=7")
+		}
+		return output, err
+	}
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("alerts=%d err=%v, want observer visibility plus the independently observed admission fault", len(alerts), err)
+	}
+	requireAlertClass(t, alerts, "ipv6-observer-route-unavailable")
+	requireAlertClass(t, alerts, "edge-lb-config-rejected")
+}
+
+// The synthetic source joins each configured tuple to its own host controls.
+// Two requests time out with selected peers; one fails without a selected peer.
+func edgeObserverTlsSettings(routes []string) (SignalSettings, *int) {
+	routeCalls := new(int)
+	source := &syntheticSource{
+		localFn: func(name string, args ...string) (string, error) {
+			if name == "/sbin/route" {
+				index := min(*routeCalls, len(routes)-1)
+				*routeCalls++
+				return routes[index], nil
+			}
+			for index := 1; index <= 3; index++ {
+				address := fmt.Sprintf("2001:db8:50::%d", index)
+				if strings.Contains(strings.Join(args, " "), "["+address+"]") {
+					if index == 3 {
+						return edgeHTTPFixture("000", "7", "", "0.0001"), edgeCommandExitError(7)
+					}
+					return "curl: (28) SSL connection timeout\n" + edgeHTTPFixture("000", "28", address, "3.002"), edgeCommandExitError(28)
+				}
+			}
+			return "", errors.New("unexpected synthetic public target")
+		},
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, edgeIPv6IdentityMarker) {
+				return "operstate=up\nconfigured_present=1\nunit_active=active\n", nil
+			}
+			for index := 1; index <= 3; index++ {
+				address := fmt.Sprintf("2001:db8:50::%d", index)
+				if strings.Contains(command, address) {
+					return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\nself_time_total=0.080\nroute_device=public" + strconv.Itoa(index-1) + "\nroute_source=" + address + "\nroute_status=0\nsource_egress=" + address + "\nsource_egress_status=0\n", nil
+				}
+			}
+			return "", errors.New("unexpected synthetic host command")
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "synthetic-edge.example.test"}}
+	for index := 1; index <= 3; index++ {
+		settings.Hosts[0].EdgeIPv6 = append(settings.Hosts[0].EdgeIPv6, EdgeIPv6InterfaceSettings{Interface: "public" + strconv.Itoa(index-1), Address: fmt.Sprintf("2001:db8:50::%d", index), ProbeHostname: "api-v6.example.test"})
+	}
+	return settings, routeCalls
+}
+
+func TestEdgeIpv6IdentityFailureRetainsPrivateSafeClass(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		output string
+		err    error
+		want   string
+	}{
+		{name: "ssh exit", err: &sshCommandError{err: fmt.Errorf("private synthetic text: %w", edgeCommandExitError(255))}, want: "observation-ssh-exit-255"},
+		{name: "remote command", err: &sshCommandError{err: edgeCommandExitError(24)}, want: "observation-command-failed"},
+		{name: "child timeout", err: context.DeadlineExceeded, want: "observation-timeout"},
+		{name: "access denied", err: errors.New("permission denied private synthetic text"), want: "observation-access-denied"},
+		{name: "malformed output", output: "private synthetic text\n", want: "observation-invalid-response"},
+		{name: "partial output", output: "operstate=up\n", want: "observation-invalid-response"},
+		{name: "absent output", want: "observation-invalid-response"},
+	} {
+		settings := edgeObservationSettings(edgeHTTPFixture("200", "0", "2001:db8::41", "0.080"), nil, test.output, test.err)
+		alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s: alerts=%d err=%v", test.name, len(alerts), err)
+		}
+		if alerts[0].Class != "cannot-observe" || alerts[0].Observed != "error_class="+test.want {
+			t.Errorf("%s: class=%s observed=%s", test.name, alerts[0].Class, alerts[0].Observed)
+		}
+		requireAlertOmits(t, alerts[0], "private synthetic text", "exit status", "permission denied")
+	}
+}
+
+func TestEdgeIpv6MalformedIdentityCannotLeakIntoCompanionPathAlert(t *testing.T) {
+	settings := edgeObservationSettings(edgeHTTPFixture("000", "28", "2001:db8::41", "3.002"), edgeCommandExitError(28), "private synthetic malformed identity\n", nil)
+	alerts, err := NewEdgeIPv6Signal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("alerts=%d err=%v, want identity visibility plus the observed routed timeout", len(alerts), err)
+	}
+	requireAlertClass(t, alerts, "cannot-observe")
+	requireAlertClass(t, alerts, "edge-ipv6-timeout")
+	for _, alert := range alerts {
+		requireAlertOmits(t, alert, "private synthetic malformed identity")
 	}
 }
 

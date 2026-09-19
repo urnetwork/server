@@ -348,8 +348,10 @@ func (self *runner) sshArgs(target, remoteCmd string, connectTimeout time.Durati
 func (self *runner) sshArgsWithKeys(target, remoteCmd string, connectTimeout time.Duration, keyPaths []string) []string {
 	sshArgs := []string{
 		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(connectTimeout.Seconds())),
-		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UpdateHostKeys=no",
 	}
 	for _, keyPath := range keyPaths {
 		if strings.TrimSpace(keyPath) != "" {

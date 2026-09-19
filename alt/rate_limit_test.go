@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/warp/services"
-
 	"github.com/urnetwork/server"
 )
 
@@ -266,7 +264,7 @@ func TestLimitsSweepDiscardsIdleAddressState(t *testing.T) {
 func TestLimitsSettingsFromRateLimit(t *testing.T) {
 	cases := []struct {
 		name              string
-		rateLimit         *services.RateLimit
+		rateLimit         *RateLimit
 		requestsPerSecond float64
 		burst             int
 		netConnections    int
@@ -274,7 +272,7 @@ func TestLimitsSettingsFromRateLimit(t *testing.T) {
 	}{
 		{
 			name:              "requests per minute wins",
-			rateLimit:         &services.RateLimit{RequestsPerMinute: 120, RequestsPerSecond: 99, Burst: 3, NetConnections: 4},
+			rateLimit:         &RateLimit{RequestsPerMinute: 120, RequestsPerSecond: 99, Burst: 3, NetConnections: 4},
 			requestsPerSecond: 2,
 			burst:             3,
 			netConnections:    4,
@@ -282,19 +280,19 @@ func TestLimitsSettingsFromRateLimit(t *testing.T) {
 		},
 		{
 			name:              "requests per second when there is no minute rate",
-			rateLimit:         &services.RateLimit{RequestsPerSecond: 5},
+			rateLimit:         &RateLimit{RequestsPerSecond: 5},
 			requestsPerSecond: 5,
 			excludePrefixes:   []netip.Prefix{},
 		},
 		{
 			name:            "no rate at all leaves the bucket out",
-			rateLimit:       &services.RateLimit{NetConnections: 2},
+			rateLimit:       &RateLimit{NetConnections: 2},
 			netConnections:  2,
 			excludePrefixes: []netip.Prefix{},
 		},
 		{
 			name:      "the exclusions are the block's own",
-			rateLimit: &services.RateLimit{ExcludeSubnets: []string{"192.0.2.0/24", "2001:db8::/32"}},
+			rateLimit: &RateLimit{ExcludeSubnets: []string{"192.0.2.0/24", "2001:db8::/32"}},
 			excludePrefixes: []netip.Prefix{
 				netip.MustParsePrefix("192.0.2.0/24"),
 				netip.MustParsePrefix("2001:db8::/32"),

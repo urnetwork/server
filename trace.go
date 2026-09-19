@@ -39,10 +39,10 @@ func IsDoneError(r any) bool {
 		if cause := errors.Unwrap(v); cause != nil {
 			return IsDoneError(cause)
 		}
-		// Connect still returns fresh exact "Done" errors at shutdown.
-		return errors.Is(v, context.Canceled) || errors.Is(v, DbContextDoneError) || v.Error() == "Done"
+		// Connect's client and sequence shutdown paths use both spellings.
+		return errors.Is(v, context.Canceled) || errors.Is(v, DbContextDoneError) || v.Error() == "Done" || v.Error() == "Done."
 	case string:
-		return v == "Done"
+		return v == "Done" || v == "Done."
 	default:
 		return false
 	}

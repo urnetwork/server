@@ -481,22 +481,41 @@ func (self *paymentReconcileRun) record(
 }
 
 // recordCreditUnfulfillable is the narrow exception to record's best-effort
-// contract. This event is the only durable handle for a paid invoice that the
-// lifecycle lock refused to credit. If it is not persisted, count a store
+// contract. This event is the only durable handle for a paid invoice whose
+// destination is deleted or unresolved. If it is not persisted, count a store
 // error so the watermark stays fixed and the ordinary overlap retries it.
 // Completed credits/ends/metadata repairs retain their existing best-effort
 // audit behavior: their durable business writes must not be re-executed merely
 // because the secondary audit insert failed.
-func (self *paymentReconcileRun) recordCreditUnfulfillable(store string, evidence string) {
+func (self *paymentReconcileRun) recordCreditUnfulfillable(store string, evidence string, reason string) {
 	if !self.record(
 		store,
 		model.PaymentReconcileActionCreditUnfulfillable,
 		nil,
 		evidence,
-		map[string]any{"reason": "destination_deleted", "leg": "credit"},
+		map[string]any{"reason": reason, "leg": "credit"},
 	) {
 		self.errors += 1
 		self.storeResult(store).Errors += 1
+	}
+}
+
+// Terminal destination exceptions retain durable disposition evidence. All
+// provider, schema, and local persistence failures continue to block progress.
+func (self *paymentReconcileRun) recordStripeCreditError(evidence string, err error) {
+	switch {
+	case errors.Is(err, model.ErrPaymentNetworkNotFound):
+		self.recordCreditUnfulfillable(model.SubscriptionMarketStripe, evidence, "destination_deleted")
+	case errors.Is(err, errStripeInvoiceDestinationUnresolved):
+		self.recordCreditUnfulfillable(model.SubscriptionMarketStripe, evidence, "destination_unresolved")
+	default:
+		self.record(
+			model.SubscriptionMarketStripe,
+			model.PaymentReconcileActionError,
+			nil,
+			evidence,
+			map[string]any{"error": err.Error(), "leg": "credit"},
+		)
 	}
 }
 
@@ -926,58 +945,30 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				return false, nil
 			}
 			if run.dryRun {
-				// resolve where the credit WOULD land without crediting: the
-				// expanded invoice's subscription metadata names the network
-				// for server-created checkouts (the first source the real
-				// credit path reads). The deeper fallbacks (checkout-session
-				// client reference, customer email) stay with the credit
-				// path, so a dry-run line can show no network id where a real
-				// run would still resolve one.
-				fullInvoice, err := server.HttpGetRequireStatusOk[*stripeReconcileInvoiceExpanded](
-					ctx,
-					fmt.Sprintf(
-						"%s/v1/invoices/%s?expand[]=subscription",
-						stripeApiBaseUrl,
-						url.PathEscape(invoice.Id),
-					),
-					func(header http.Header) {
-						header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-					},
-					server.ResponseJsonObject[*stripeReconcileInvoiceExpanded],
-				)
+				credit, err := stripeResolveInvoiceCredit(invoice.Id, run.clientSession)
 				if err != nil {
-					run.record(
-						store,
-						model.PaymentReconcileActionError,
-						nil,
-						invoice.Id,
-						map[string]any{"error": err.Error(), "leg": "credit"},
-					)
+					run.recordStripeCreditError(invoice.Id, err)
 					continue
 				}
-				if fullInvoice.Subscription == nil {
+				if credit == nil {
 					// a non-subscription invoice -- the real run would do nothing
 					continue
 				}
-				var networkId *server.Id
-				if id, err := server.ParseId(fullInvoice.Subscription.Metadata["network_id"]); err == nil {
-					networkId = &id
-				}
-				if networkId != nil && !model.NetworkExists(ctx, *networkId) {
+				if !model.NetworkExists(ctx, credit.networkId) {
 					// Match the real credit's lifecycle-lock refusal without
 					// consuming its ledger or pretending a different destination
 					// would receive the paid invoice.
-					run.recordCreditUnfulfillable(store, invoice.Id)
+					run.recordCreditUnfulfillable(store, invoice.Id, "destination_deleted")
 					continue
 				}
 				run.record(
 					store,
 					model.PaymentReconcileActionWouldCredit,
-					networkId,
+					&credit.networkId,
 					invoice.Id,
 					map[string]any{
 						"total":        invoice.Total,
-						"subscription": fullInvoice.Subscription.Id,
+						"subscription": credit.subscriptionId,
 					},
 				)
 				continue
@@ -986,21 +977,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			// stripe_invoice ledger gate, so a racing late webhook delivery for
 			// the same invoice credits exactly once between the two of them
 			if _, err := stripeHandleInvoicePaid(invoice, run.clientSession); err != nil {
-				if errors.Is(err, model.ErrPaymentNetworkNotFound) {
-					// The paid invoice is real, but the named destination no
-					// longer exists. Keep that terminal business exception
-					// durable without classing it as an adapter failure that pins
-					// the entire Stripe listing watermark.
-					run.recordCreditUnfulfillable(store, invoice.Id)
-					continue
-				}
-				run.record(
-					store,
-					model.PaymentReconcileActionError,
-					nil,
-					invoice.Id,
-					map[string]any{"error": err.Error(), "leg": "credit"},
-				)
+				run.recordStripeCreditError(invoice.Id, err)
 				continue
 			}
 			if networkId, credited := model.GetStripeInvoiceNetworkId(ctx, invoice.Id); credited {

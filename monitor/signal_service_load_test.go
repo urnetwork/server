@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,9 @@ func serviceLoadSettings(t testing.TB, now time.Time, payload string) SignalSett
 			!strings.Contains(command, "go_goroutines") || !strings.Contains(command, "process_cpu_seconds_total") ||
 			!strings.Contains(command, "node_cpu_seconds_total") {
 			t.Fatalf("unexpected service-load command on %s: %s", host.Name, command)
+		}
+		if !strings.Contains(command, "--max-filesize "+strconv.Itoa(serviceLoadResponseMaxBytes)) {
+			t.Fatalf("service-load command does not bound the Mimir response: %s", command)
 		}
 		return payload, nil
 	}}

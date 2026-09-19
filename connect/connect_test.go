@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
-	// "sync"
 	"encoding/hex"
 	mathrand "math/rand"
 	"runtime"
@@ -801,6 +801,7 @@ func testConnect(
 		// go transportB.Run(clientB.RouteManager())
 	}
 
+	var senderWaitGroup sync.WaitGroup
 	cleanupComplete := false
 	cleanup := func() {
 		if cleanupComplete {
@@ -811,6 +812,18 @@ func testConnect(
 		defer closeCancel()
 		clientA.Close()
 		clientB.Close()
+		// Closing clients releases blocked sends. Join their callers before
+		// the test environment can unwind or release its pooled resources.
+		sendersDone := make(chan struct{})
+		go func() {
+			senderWaitGroup.Wait()
+			close(sendersDone)
+		}()
+		select {
+		case <-sendersDone:
+		case <-closeCtx.Done():
+			t.Errorf("join burst senders: %v", closeCtx.Err())
+		}
 		if err := clientA.CloseAndWait(closeCtx); err != nil {
 			t.Errorf("join client A: %v", err)
 		}
@@ -831,6 +844,25 @@ func testConnect(
 		}
 	}
 	defer cleanup()
+
+	// Capture protocol state before cleanup cancels the client and turns an
+	// establishment or delivery stall into an uninformative shutdown error.
+	failProgress := func(phase string) {
+		encryptionStates := func(client *connect.Client) []connect.PeerEncryptionState {
+			var states []connect.PeerEncryptionState
+			for _, state := range client.EncryptionSessionManager().PeerEncryptionStates() {
+				states = append(states, *state)
+			}
+			return states
+		}
+		statsA := clientA.DestinationSendStats(connect.Id(clientIdB))
+		statsB := clientB.DestinationSendStats(connect.Id(clientIdA))
+		t.Logf("client A encryption=%+v; sequences=%d writes=%d resends=%d",
+			encryptionStates(clientA), statsA.SequenceCount, statsA.WriteCount, statsA.ResendWriteCount)
+		t.Logf("client B encryption=%+v; sequences=%d writes=%d resends=%d",
+			encryptionStates(clientB), statsB.SequenceCount, statsB.WriteCount, statsB.ResendWriteCount)
+		t.Fatalf("%s stalled after %s", phase, progressTimeout)
+	}
 
 	if err := waitForTestConnectPlatformTransport(ctx, transportAs, progressTimeout); err != nil {
 		t.Fatalf("client A initial platform transport: %v", err)
@@ -1041,7 +1073,9 @@ func testConnect(
 					}
 				}
 
+				senderWaitGroup.Add(1)
 				go func() {
+					defer senderWaitGroup.Done()
 					for i := 0; i < burstSize; i += 1 {
 						if 0 < i && i == burstSize/2 {
 							fmt.Printf("pause\n")
@@ -1061,7 +1095,8 @@ func testConnect(
 							if err != nil {
 								panic(err)
 							}
-							_, err = clientA.SendWithTimeoutDetailed(
+							if !TestingSendConnectFrame(
+								clientA,
 								frame,
 								connect.Id(clientIdB),
 								func(err error) {
@@ -1069,11 +1104,9 @@ func testConnect(
 										panic(err)
 									}
 								},
-								-1,
 								connect.NoAck(),
-							)
-							if err != nil && !server.IsDoneError(err) {
-								panic(fmt.Errorf("Could not send = %v", err))
+							) {
+								return
 							}
 						}
 						frame, err := connect.ToFrame(&protocol.SimpleMessage{
@@ -1084,7 +1117,8 @@ func testConnect(
 						if err != nil {
 							panic(err)
 						}
-						_, err = clientA.SendWithTimeoutDetailed(
+						if !TestingSendConnectFrame(
+							clientA,
 							frame,
 							connect.Id(clientIdB),
 							func(err error) {
@@ -1094,10 +1128,8 @@ func testConnect(
 									panic(errors.New("Ack overflow."))
 								}
 							},
-							-1,
-						)
-						if err != nil && !server.IsDoneError(err) {
-							panic(fmt.Errorf("Could not send = %v", err))
+						) {
+							return
 						}
 					}
 				}()
@@ -1120,8 +1152,7 @@ func testConnect(
 							}
 						}
 					case <-time.After(progressTimeout):
-						// printAllStacks()
-						panic(errors.New("Timeout."))
+						failProgress("A->B receive")
 					}
 				}
 				endTime := time.Now().Add(1 * time.Second)
@@ -1154,8 +1185,7 @@ func testConnect(
 					case err := <-ackA:
 						connect.AssertEqual(t, err, nil)
 					case <-time.After(progressTimeout):
-						// printAllStacks()
-						panic(errors.New("Timeout."))
+						failProgress("A->B acknowledgement")
 					}
 				}
 				select {
@@ -1217,7 +1247,9 @@ func testConnect(
 					}
 				}
 
+				senderWaitGroup.Add(1)
 				go func() {
+					defer senderWaitGroup.Done()
 					for i := 0; i < burstSize; i += 1 {
 						if 0 < i && i == burstSize/2 {
 							fmt.Printf("pause\n")
@@ -1244,7 +1276,8 @@ func testConnect(
 							if err != nil {
 								panic(err)
 							}
-							_, err = clientB.SendWithTimeoutDetailed(
+							if !TestingSendConnectFrame(
+								clientB,
 								frame,
 								connect.Id(clientIdA),
 								func(err error) {
@@ -1252,11 +1285,9 @@ func testConnect(
 										panic(err)
 									}
 								},
-								-1,
 								opts...,
-							)
-							if err != nil && !server.IsDoneError(err) {
-								panic(fmt.Errorf("Could not send = %v", err))
+							) {
+								return
 							}
 						}
 						opts := []any{}
@@ -1271,7 +1302,8 @@ func testConnect(
 						if err != nil {
 							panic(err)
 						}
-						_, err = clientB.SendWithTimeoutDetailed(
+						if !TestingSendConnectFrame(
+							clientB,
 							frame,
 							connect.Id(clientIdA),
 							func(err error) {
@@ -1281,11 +1313,9 @@ func testConnect(
 									panic(errors.New("Ack overflow."))
 								}
 							},
-							-1,
 							opts...,
-						)
-						if err != nil && !server.IsDoneError(err) {
-							panic(fmt.Errorf("Could not send = %v", err))
+						) {
+							return
 						}
 					}
 				}()
@@ -1310,8 +1340,7 @@ func testConnect(
 							}
 						}
 					case <-time.After(progressTimeout):
-						// printAllStacks()
-						panic(errors.New("Timeout."))
+						failProgress("B->A receive")
 					}
 				}
 				endTime = time.Now().Add(1 * time.Second)
@@ -1344,8 +1373,7 @@ func testConnect(
 					case err := <-ackB:
 						connect.AssertEqual(t, err, nil)
 					case <-time.After(progressTimeout):
-						// printAllStacks()
-						panic(errors.New("Timeout."))
+						failProgress("B->A acknowledgement")
 					}
 				}
 				select {
