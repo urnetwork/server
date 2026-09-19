@@ -692,10 +692,23 @@ func (self *liveP2pRoute) measureDirect(packetCount int) (workloadResult, error)
 		return workloadResult{}, err
 	}
 	after := self.source.stats.Snapshot()
-	if after.FastSendMessageCount <= before.FastSendMessageCount || after.FastFallbackCount != 0 {
-		return workloadResult{}, fmt.Errorf("direct fast P2P counters before=%+v after=%+v", before, after)
+	if err := verifyLiveP2pDirectInterval(before, after); err != nil {
+		return workloadResult{}, err
 	}
 	return result, nil
+}
+
+// A live route keeps the same counters across outages and reconnections.
+// Verify only carrier activity inside the current measurement interval.
+func verifyLiveP2pDirectInterval(
+	before clientconnect.P2pDataPlaneStatsSnapshot,
+	after clientconnect.P2pDataPlaneStatsSnapshot,
+) error {
+	if after.FastSendMessageCount <= before.FastSendMessageCount ||
+		after.FastFallbackCount != before.FastFallbackCount {
+		return fmt.Errorf("direct fast P2P counters before=%+v after=%+v", before, after)
+	}
+	return nil
 }
 
 // A scheduled multi-axis impairment is applied during one real exchange H3
