@@ -14429,6 +14429,11 @@ drift independently of missing traffic.
 Inactive/unobservable processes and zero owned connections do not clear a
 prior connection incident; they emit visibility findings instead. An exact
 alias file with unobservable running route inputs cannot clear placement drift.
+When the bounded reducer completed but the active Fluent Bit generation, its
+owned socket evidence, or a live connection is absent, that visibility finding
+uses the fixed `error_class=observation-state-unavailable`. This is neither a
+healthy zero nor an unclassified transport/parser failure; restore the missing
+runtime evidence before interpreting placement or reconnecting a publisher.
 
 First compare active `services.yml` Grafana membership with the owning Xops
 `grafana_lan_hosts` source and explicit publisher preferences. Correct a source
@@ -15793,6 +15798,12 @@ WHERE available_block <= extract(epoch from now()) AND run_at <= now();
   PERSISTING target-not-found on one build = a task type shipped without its
   target registration — a code bug, page it (it no longer hides behind the
   1h backoff).
+  The registration audit must compare both halves of every recurring chain:
+  `InitTasks` scheduling and `InitTaskWorker` target admission. On 2026-09-19,
+  `RemoveOldExtenderLatencies` was scheduled but omitted from the production
+  worker registry, producing a permanently retried target-not-found row. A
+  test must prove the target is registered and its exact run-once key is armed;
+  scheduling a function alone is not evidence it can be claimed.
 
 ## 13. Api drain (deploy) — APIDRAIN1
 
@@ -19973,6 +19984,15 @@ update must clear the runtime-ahead page while leaving lag/progress alerts
 truthful. At eventual convergence, direct and gateway RPC must both report the
 then-current independently verified runtime.
 
+On 2026-09-19, the current archive and lightnode both reported spec 467 while
+the checked-in `vault/main/monitor.yml` inventory still pinned 458. The
+reviewed Xops Snow runtime configuration and its deterministic playbook test
+already pinned 467 for the same chain/genesis/runtime/EVM tuple. Updating the
+stale monitor pin cleared `subtensor-identity` locally without changing node
+software or historical-node progress. The Vault generation still must be
+deployed before Main is declared clear; a local monitor result is configuration
+validation, not evidence that every host has received the generation.
+
 On 2026-09-05, the same testfinney chain retained the exact genesis, runtime
 name, transaction version 1 and EVM identity above while advancing to spec 454
 between blocks 7,934,386
@@ -20261,6 +20281,12 @@ the independently typed unit, RPC, gateway, identity, peer-count, and head
 progress observations continue. A whole-host parse failure hides healthy core
 checks and is itself a monitor defect. None of these observations authorizes a
 restart, database reset, reserved-peer policy change, or deployment.
+The visibility class is diagnostic: an absent or unsupported version is
+`error_class=observation-contract-mismatch`, which calls for the reviewed
+helper contract; malformed peer-log aggregate fields are
+`error_class=observation-invalid-response`, which calls for reducer/helper
+validation. Neither class proves a peer outage, and neither may be collapsed
+into an unclassified transport error.
 
 A later 2026-09-10 control held the lightnode at zero peers from 18:48:00
 through 19:04:15 CDT. Its queued imports fell from 1,792 to zero while the head

@@ -334,6 +334,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderPublishPost,
 		),
 		task.NewTaskTargetWithPost(
+			work.RemoveOldExtenderLatencies,
+			work.RemoveOldExtenderLatenciesPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.RemoveExpiredBulkClientRemovalQuota,
 			work.RemoveExpiredBulkClientRemovalQuotaPost,
 		),

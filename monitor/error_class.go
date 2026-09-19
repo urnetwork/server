@@ -27,6 +27,15 @@ const (
 	taskErrorClassUnclassified                  = "unclassified"
 )
 
+// observationStateUnavailableError marks a reducer that completed, but could
+// not prove the required live state. It deliberately carries no raw host or
+// process details: those do not belong in Alert output.
+type observationStateUnavailableError struct{}
+
+func (*observationStateUnavailableError) Error() string {
+	return "required observation state is unavailable"
+}
+
 var taskDeadlineTimeoutPattern = regexp.MustCompile(`(?i)^timeout(?:\s+\[[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\])?$`)
 
 // classifyTaskError reduces task-owned or dependency-owned error text to a
@@ -154,8 +163,12 @@ func classifyObservationError(err error) string {
 	sshExit255 := errors.As(err, &sshFailure) && errors.As(sshFailure, &exitFailure) && exitFailure.ExitCode() == 255
 	var unreachable *unreachableError
 	var signupRouteMetricsUnavailable *signupRouteMetricsUnavailableError
+	var stateUnavailable *observationStateUnavailableError
 	if errors.As(err, &signupRouteMetricsUnavailable) {
 		return observationErrorClassMetricUnavailable
+	}
+	if errors.As(err, &stateUnavailable) {
+		return observationErrorClassStateUnavailable
 	}
 	if errors.As(err, &unreachable) {
 		if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
@@ -168,7 +181,9 @@ func classifyObservationError(err error) string {
 		return observationErrorClassCounterReset
 	case strings.Contains(lower, "observation contract") ||
 		strings.Contains(lower, "source contract") ||
-		strings.Contains(lower, "counter descriptor is unavailable"):
+		strings.Contains(lower, "counter descriptor is unavailable") ||
+		strings.Contains(lower, "unsupported peer diagnostics") ||
+		strings.Contains(lower, "peer diagnostics are absent"):
 		return observationErrorClassContractMismatch
 	case strings.Contains(lower, "durable state") &&
 		(strings.Contains(lower, "unreadable") || strings.Contains(lower, "unavailable")):
@@ -193,7 +208,8 @@ func classifyObservationError(err error) string {
 	case strings.Contains(lower, "parse") ||
 		strings.Contains(lower, "decode") ||
 		strings.Contains(lower, "invalid response") ||
-		strings.Contains(lower, "unexpected response"):
+		strings.Contains(lower, "unexpected response") ||
+		strings.HasPrefix(lower, "peer log "):
 		return observationErrorClassInvalidResponse
 	default:
 		return observationErrorClassUnclassified

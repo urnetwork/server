@@ -12,7 +12,8 @@ import (
 
 // The extender task chains (connect/EXTENDER.md C3, C4).
 
-// Both extender tasks are registered with the worker and armed by InitTasks.
+// Both extender data producers and their retention task are registered with
+// the worker and armed by InitTasks.
 //
 // The two halves fail in different silent ways, which is why both are pinned
 // here. A chain that is armed with no registered target is reaped as a removed
@@ -28,6 +29,7 @@ func TestInitTasksArmsTheExtenderChains(t *testing.T) {
 		for _, functionName := range []string{
 			"github.com/urnetwork/server/taskworker/work.ExtenderProbe",
 			"github.com/urnetwork/server/taskworker/work.ExtenderPublish",
+			"github.com/urnetwork/server/taskworker/work.RemoveOldExtenderLatencies",
 		} {
 			if !taskWorker.HasTarget(functionName) {
 				t.Fatalf("%s is not a registered task target", functionName)
@@ -50,7 +52,7 @@ func TestInitTasksArmsTheExtenderChains(t *testing.T) {
 			})
 			return
 		}
-		for _, runOnceKey := range []string{"extender_probe", "extender_publish"} {
+		for _, runOnceKey := range []string{"extender_probe", "extender_publish", "remove_old_extender_latencies"} {
 			if count := countForRunOnceKey(runOnceKey); count != 1 {
 				t.Fatalf("%s is armed %d times, want once", runOnceKey, count)
 			}
@@ -59,7 +61,7 @@ func TestInitTasksArmsTheExtenderChains(t *testing.T) {
 		// a second start does not arm a second chain, since the run once key is
 		// what keeps one chain per task
 		InitTasks(ctx)
-		for _, runOnceKey := range []string{"extender_probe", "extender_publish"} {
+		for _, runOnceKey := range []string{"extender_probe", "extender_publish", "remove_old_extender_latencies"} {
 			if count := countForRunOnceKey(runOnceKey); count != 1 {
 				t.Fatalf("%s is armed %d times after a second start, want once", runOnceKey, count)
 			}
