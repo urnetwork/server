@@ -335,6 +335,7 @@ func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
 		markdown := alert.Markdown()
 		for _, want := range []string{
 			"rate=10/min", "logical DNS outcome is unknown",
+			"path=unknown attempted_family=unknown resolver_outcome=unknown",
 			"count neither unique attempts nor failed logical DNS queries",
 			"success-only DoH result callback", "Do not restart Redis",
 			"independent final-query or end-to-end outcome", "10 minutes",
@@ -357,6 +358,118 @@ func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
 				t.Errorf("%s: resolver attempt fell through to %s", testCase.name, other.Class)
 			}
 		}
+	}
+}
+
+// A losing transport dial can complete after its initiating resolver call has
+// answered. Keep the timeout page and terminal discriminator independently.
+func TestDohDialTimeoutRetainsFiniteTerminalProvenance(t *testing.T) {
+	tailer := newLogTailer("proxy", nil)
+	line := "[synthetic-host.example][proxy][synthetic-block][cid:private-fixture] " +
+		"[family]dial tag=doh observable=v1 path=tun attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=answer err=i/o timeout"
+	for range 10 {
+		tailer.classify(line)
+	}
+	finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout")
+	if finding.healthy || finding.tier != tierPage || finding.frame != "doh-attempt" {
+		t.Fatal("finite provenance weakened or split the timeout page")
+	}
+	for _, want := range []string{"path=tun", "attempted_family=6", "resolver_outcome=answer"} {
+		if !strings.Contains(finding.evidence, want) {
+			t.Errorf("bounded sample omitted %s: %s", want, finding.evidence)
+		}
+	}
+	if !strings.Contains(finding.context, "detached losing HTTP hedge") || !strings.Contains(finding.context, "pending and legacy unknown") {
+		t.Fatal("terminal result guidance lost its ordering or unknown qualifier")
+	}
+	for _, private := range []string{"synthetic-host.example", "synthetic-block", "private-fixture", "cid:"} {
+		if strings.Contains(finding.evidence, private) {
+			t.Fatal("outer identity entered bounded DoH evidence")
+		}
+	}
+}
+
+// Taskworker also measures selected remote providers. A TUN timeout in that
+// service does not establish its control-plane DNS failed or inherit Proxy MTU.
+func TestDohDialTimeoutTaskworkerMeasurementQualifier(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for range 10 {
+		tailer.classify("[family]dial tag=doh observable=v1 path=tun attempted_family=4 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=pending")
+	}
+	finding := findingByClass(t, tailer.drainWindow(), "doh-dial-timeout")
+	if finding.healthy || finding.target != "taskworker" {
+		t.Fatal("taskworker timeout page was dropped or attributed to another service")
+	}
+	for _, want := range []string{"measuring a selected provider", "dual-stack TUN", "does not establish task control-plane DNS failure", "Proxy-only MTU defect"} {
+		if !strings.Contains(finding.context, want) {
+			t.Errorf("taskworker context omitted %q", want)
+		}
+	}
+	if !strings.Contains(finding.evidence, "resolver_outcome=pending") || !strings.Contains(finding.action, "Cache calls, waiters, raw forwarding and multi-name one-shot calls") {
+		t.Fatal("pending outcome or resolver-call denominator qualifier was lost")
+	}
+}
+
+// Exact counter records are observations, not a new error each time a nonzero
+// cumulative failure total is sampled. Malformed provenance cannot be trusted.
+func TestDohObservationsDoNotManufactureTimeouts(t *testing.T) {
+	tailer := newLogTailer("proxy", nil)
+	for _, result := range []string{"success", "canceled", "unsupported_family", "refused", "error"} {
+		for range 10 {
+			tailer.classify("[family]dial tag=doh observable=v1 path=caller attempted_family=unknown result=" + result + " resolver_owner=unknown resolver_scope=unknown resolver_outcome=unknown")
+		}
+	}
+	for range 10 {
+		tailer.classify("[doh]resolver observable=v1 owner_path=tun scope=address answer=100 authoritative_empty=2 stale=3 failed=4 canceled=5 timeout=6")
+	}
+	findings := tailer.drainWindow()
+	if finding := findingByClass(t, findings, "doh-dial-timeout"); !finding.healthy {
+		t.Fatal("a different terminal kind became a timeout")
+	}
+	for _, finding := range findings {
+		if !finding.healthy && finding.class == "novel" {
+			t.Fatal("finite observations became novel errors")
+		}
+	}
+	for _, malformed := range []string{
+		"[family]dial tag=doh observable=v1 path=private.example attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=answer",
+		"[family]dial tag=doh observable=v1 path=tun attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=answer query=private.example",
+		"[family]dial tag=doh observable=v1 path=tun attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=arbitrary",
+		"[family]dial tag=doh observable=v2 path=tun attempted_family=6 result=timeout resolver_owner=tun resolver_scope=address resolver_outcome=answer",
+		"[doh]resolver observable=v1 owner_path=tun scope=address answer=99999999999999999999 authoritative_empty=2 stale=3 failed=4 canceled=5 timeout=6",
+		"[family]dial tag=doh observable=v1 path=tun attempted_family=6 result=success resolver_owner=tun resolver_scope=address resolver_outcome=answer err=i/o timeout",
+	} {
+		if dohDialTimeoutObserved(malformed) {
+			t.Fatal("malformed or unbounded fields became trusted provenance")
+		}
+		if strings.Contains(dohDialTimeoutSample(malformed), "private.example") {
+			t.Fatal("malformed schema copied identity into fallback sample")
+		}
+		invalid := newLogTailer("proxy", nil)
+		invalid.classify(malformed)
+		finding := findingByClass(t, invalid.drainWindow(), "doh-observation-schema")
+		if finding.healthy || finding.tier != tierWarn || strings.Contains(finding.evidence, "private.example") {
+			t.Fatal("malformed provenance lost its private visibility warning")
+		}
+	}
+}
+
+// Sanitizing the DoH error must preserve the existing refusal page and the
+// unknown-error safety net rather than silently classifying failures as metrics.
+func TestDohNonTimeoutFailuresRetainAlertPaths(t *testing.T) {
+	refused := newLogTailer("proxy", nil)
+	for range 10 {
+		refused.classify("[family]dial tag=doh observable=v1 path=tun attempted_family=4 result=refused resolver_owner=tun resolver_scope=address resolver_outcome=pending")
+	}
+	if finding := findingByClass(t, refused.drainWindow(), "connection-refused"); finding.healthy || finding.tier != tierPage {
+		t.Fatal("finite refusal lost its existing ten-line page")
+	}
+	unknown := newLogTailer("proxy", nil)
+	for range novelRateThreshold {
+		unknown.classify("[family]dial tag=doh observable=v1 path=caller attempted_family=unknown result=error resolver_owner=unknown resolver_scope=unknown resolver_outcome=unknown")
+	}
+	if finding := findingByClass(t, unknown.drainWindow(), "novel"); finding.healthy {
+		t.Fatal("finite unknown error lost the novelty safety net")
 	}
 }
 
@@ -418,6 +531,7 @@ func TestDohDialTimeoutDoesNotCaptureOtherDialOwners(t *testing.T) {
 	for _, line := range []string{
 		"[family]dial tag=doh net=tcp family=4 policy=force4 demoted=none local=192.0.2.80:12345",
 		"[family]dial tag=doh net=tcp err=context canceled",
+		"[family]dial tag=doh net=tcp family=? policy=force4 demoted=none err=address family not supported by protocol",
 		"[family]dial tag=doh net=tcp err=dial tcp 192.0.2.80:443: connect: connection refused",
 		"err=i/o timeout",
 	} {

@@ -8328,7 +8328,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `redis-latencystats-source-drift` | At least one configured Redis process reports live `latency-tracking=yes`. The persistent template may already say `no`; `state: started` does not mutate the setting of an existing process, and that node can recreate the unused metric family on later commands. | Run `cardinality` (§11.20d), then the reviewed Redis convergence playbook that updates both the persistent file and each live process with idempotent `CONFIG SET`, without restarting Redis. Require every node to report `no` on two fresh runs; wait for ordinary staleness/compaction before judging the Mimir series count. |
 | `redis-latencystats-source-unobservable` | The bounded host-local reducer cannot return one exact `latency-tracking` state for every configured Redis node. A zero Mimir family count while this source census is incomplete is unknown, not proof of durable disablement. | Restore loopback `redis-cli CONFIG GET` reachability and the fixed reduction. Do not infer a missing value, restart Redis, or substitute query absence for source state. Require all configured nodes observed as `no` on two fresh runs. |
 | `Stats push error (Post "http://<local-mimir>/api/v1/push": ... connect: connection refused)` (`grafana-mimir-push-refused`) | A Grafana ingestion front accepted a metrics push while its own generation's co-located Mimir listener was unavailable. The fixed sample and `local-mimir-push` frame omit the rotating loopback endpoint. This is not Redis §5.2; the rate is rejected samples, not failed parents or incidents. Two proven lifecycle mechanisms share this exact symptom: a pre-`6544fe1` retiring generation can stop its child before its front drains, and a candidate can join the stable SO_REUSEPORT publisher pool before its own child is ready. | Match the emitting parent and child generation, source line, child start/readiness or shutdown/SIGTERM, HTTP-front bind/drain, and rollout boundary; use §11.21. `6544fe1` repairs shutdown ordering only. A startup emission from that artifact still requires the post-`6544fe1` publisher-readiness gate. Outside replacement, inspect exact child restart, bind, and OOM evidence. Never restart Redis from this signature. Require an artifact containing both lifecycle fixes on every block, zero recurrence through a controlled rollout plus 10 steady minutes, healthy direct children/fronts, and no new §11.20 ingestion gap. |
-| `[family]dial tag=doh ... err=...i/o timeout` or `[egress]dial tag=doh ... err=...i/o timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and multiple diagnostic forms can describe one attempt, so line rate is neither an attempt count nor a logical failure denominator. A bare `err=i/o timeout` in this exact producer shape has no endpoint attribution. | Preserve PAGE at 10 lines/minute, with one fixed `doh-attempt` frame and a fixed sample omitting endpoints, domains, and correlation identifiers. Correlate the original process path, same-window host/TCP controls, and final logical query outcomes. A success-only callback and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
+| `[family]dial tag=doh ... err=...i/o timeout`, `[egress]dial tag=doh ... err=...i/o timeout`, or exact `observable=v1 ... result=timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and legacy diagnostic forms can describe one attempt twice, so line rate is neither an attempt count nor a logical failure denominator. Legacy path/family/outcome remain unknown. New finite `path`, `attempted_family`, `resolver_owner`, `resolver_scope`, and `resolver_outcome` tokens identify only the initiating resolver call; a detached losing HTTP dial may report `answer` after that call returned successfully. | Preserve PAGE at 10 lines/minute and the single `doh-attempt` frame. The bounded sample retains only validated finite tokens and omits endpoints, domains, and correlation identifiers. Correlate the original process path, same-window controls, and fresh same-process `[doh]resolver` cumulative outcome snapshots; see §5.2 for scope and Taskworker measurement qualifiers. Pending/unknown outcomes and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
+| DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
 | otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 lines/minute and the existing emitter-service/endpoint identity. Resolve the exact target and original source path; compare same-window process, listener, TCP, and resource evidence. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls, and ten minutes below threshold. |
 | otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
@@ -8481,6 +8482,108 @@ complete logical-query success/failure denominator was available. The evidence
 established failed resolver legs, not a Redis failure or a measured user-facing
 DNS outage. Neither transient public-path degradation nor an earlier
 process-local delay was independently resolved by those later controls.
+
+On 2026-09-18, a bounded Main Proxy interval also contained the distinct
+`[family]dial tag=doh ... err=address family not supported by protocol`
+signature alongside bare `i/o timeout` legs and successful dials. Source
+inspection found that hosted Proxy devices set their TUN MTU to the 1100-byte
+packet contract, below the 1280-byte IPv6 minimum, while that TUN's resolver
+still inherited both remote DoH families. IPv6 legs therefore failed locally
+with `EAFNOSUPPORT` before contacting a resolver. This is a resolver capability
+mismatch, not evidence of IPv6 router loss or a public resolver outage.
+Taskworker's fixed-provider tunnels use the dual-stack default MTU; do not
+transfer the Proxy-only MTU diagnosis to them from a shared log producer.
+
+The owning correction is in Connect `Tun.buildDohCache`: copy the effective
+resolver settings and omit unsupported remote IPv6 DoH/plain-DNS targets for
+an IPv4-only TUN. Preserve the caller's lists and explicit family preference,
+all local host-side fallback targets, and dual-stack TUN behavior. An explicit
+IPv6-only remote choice on an IPv4-only TUN must fail without substituting a
+different resolver or enabling local DNS. `TestTunDohQueryHonorsTunnelFamilies`
+and `TestTunDohForwardHonorsTunnelFamilies` exercise the real cache fanout;
+custom-settings/reload and local-IPv6-answer controls guard the adjacent paths.
+Build Proxy against the corrected Connect checkout and verify actual artifact
+convergence before starting the observation window.
+
+**False-positive qualifier:** `EAFNOSUPPORT` is not an `i/o timeout` and must
+not enter the `doh-dial-timeout` count. A logged process `policy=force4` does
+not prove an attempted packet was IPv4: literal resolver addresses and
+custom/tunnel dial paths have independent capabilities. **False-negative
+qualifier:** eliminating unsupported-family legs does not establish recovery
+of timed-out usable-family legs or user DNS queries. Retain the timeout PAGE
+and its ten-minute gate independently; successful dial legs and aggregate
+egress-health results cannot correlate each timeout to a final DNS outcome.
+Require zero new unsupported-family DoH attempts on the corrected IPv4-only
+path, successful synthetic IPv4 resolution, unchanged dual-stack/custom
+resolver controls, and fresh original-path observations. Downstream DNS
+failure attribution remains unknown without a final-query outcome boundary.
+
+**Bounded DoH provenance:** newer Connect producers emit
+`[family]dial tag=doh observable=v1 path=<host|caller|tun|unknown>
+attempted_family=<4|6|unknown> result=<finite-result>
+resolver_owner=<host|caller|tun|unknown> resolver_scope=<address|forward|oneshot|unknown>
+resolver_outcome=<pending|answer|authoritative_empty|stale|failed|canceled|timeout|unknown>`.
+The attempted family comes from the literal dial input even when no socket was
+created. A hostname remains unknown; policy, record type, and another successful
+socket do not substitute for this evidence. Only the owning `Tun` marks a path as
+`tun`; arbitrary supplied dialers and proxy dialers remain `caller`. No endpoint,
+query name, provider id, credential, payload, or correlation id is emitted in
+these fields. Local fallback is `path=host` even when `resolver_owner=tun` names
+the resolver's configured remote ownership.
+Fixed sanitized legacy error suffixes, including `err=i/o timeout` and
+`err=connect: connection refused`, keep older monitors' existing alerts working
+through rollout. They contain no original error text; a newer parser rejects a
+suffix that disagrees with the finite result.
+
+An identity-free atomic result follows the initiating resolver call through
+HTTP Transport's detached dial context. A losing dial can therefore time out
+with `resolver_outcome=answer` after the full resolver returned successfully.
+`pending` means it had not returned when this diagnostic was sampled; it must
+not be retrospectively joined to a different success line. Warm-up and older
+producers without that result boundary remain `unknown`. A pooled connection
+can later serve unrelated calls, so this provenance describes the initiator,
+not every later consumer of that connection.
+
+`[doh]resolver observable=v1 owner_path=... scope=... answer=...
+authoritative_empty=... stale=... failed=... canceled=... timeout=...` records
+fixed-cardinality process-local cumulative counters, sampled at most once per
+five seconds per ownership/scope. Every completed `QueryResult`, `Forward`, and
+one-shot resolver call updates one outcome, including failures and cancellations.
+Address scope includes cache
+hits and coalesced waiters; `forward` means a usable opaque DNS response, not
+necessarily address records; `oneshot` can request multiple names and counts one
+call. The complete cache result includes configured fallbacks and stale serving.
+An empty authoritative answer is not a resolver transport failure. Counter
+snapshots are observation records, not a repeated new error when an old failure
+total remains nonzero; the monitor must not turn them into `novel` alerts.
+Finite `result=refused` dials retain the existing `connection-refused` threshold,
+and `result=error` retains the unknown-error novelty safety net. Cancellation and
+unsupported-family observations must not be miscounted as dial timeouts.
+
+**False-positive qualifiers:** a terminal answer on a detached losing dial
+rules out failure of that initiating resolver call, not the dial timeout itself
+or a service-wide incident. Taskworker can resolve through a selected provider's
+dual-stack measurement TUN; a Taskworker-emitted timeout does not establish
+failure of its host/control-plane DNS, nor the Proxy-only IPv4 TUN MTU mismatch.
+Prove the task and path from the deployed source and same-window evidence.
+`answer`, authoritative empty, and stale answers must remain distinct; canceled
+calls may be intentional teardown. Keep the existing attempt PAGE independent.
+
+**False-negative qualifiers and closure:** legacy and pending outcomes remain
+unknown. A success-only callback, a later host socket control, a single sample,
+or a quiet sampled interval cannot measure the logical failure rate. Compare
+fresh complete counter snapshots from the same process, accounting for process
+replacement and counter reset; require a positive observed workload and review
+failure, timeout, cancellation, and stale deltas alongside answers. These are
+resolver-call counts, not user-request or individual-name counts, and missing
+snapshots are missing visibility. First verify producer artifact convergence,
+then require ten fresh minutes below the unchanged 10/min attempt PAGE and
+healthy controls on the actual host/caller/TUN path. Claim user recovery only
+with independent final-call or end-to-end success. Deterministic tests force a
+real HTTP Transport's losing dial to return after a winning full-cache answer,
+cover fallback/stale terminal results, preserve legacy unknowns, and retain the
+Taskworker measurement qualifier; no DNS deadline, hedge, policy, retry, or
+resolver choice changes are part of this diagnostic correction.
 
 ### 5.3 CLUSTERDOWN
 `CLUSTER NODES | grep fail` names the dead/unreachable node(s). With no
@@ -11347,6 +11450,8 @@ This is the version-to-artifact contract checked by the probe:
 | 679 | `network_extender_latency` attestation table with its exact columns, primary key, and replay-identity key |
 | 680 | exact valid/ready `network_extender_latency_create_time` retention index |
 | 681 | exact valid/ready `network_extender_latency_extender_id_create_time` Extender lookup index |
+| 682 | `network_extender_activation` history table with exact column types, nullability, defaults, and activation primary key |
+| 683 | exact valid/ready `network_extender_activation_extender_id_activate_time` history lookup index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -11397,6 +11502,21 @@ valid/ready btree indexes bound retention sweeps and per-Extender reads. A
 numeric head at or above one of these versions is coherent only when the
 corresponding typed relation or index contract is present; never reconstruct
 the attestation table or its indexes manually after a failed migration.
+
+Versions 682–683 append Extender activation history and its
+`(extender_id, activate_time)` lookup index. The history preserves an optional
+address hash and independently nullable location UUIDs, an integer IP version,
+an explicit activation timestamp, and the empty country-code default. A
+same-name table with missing columns, different types/nullability/defaults, or
+a different primary key is schema drift once version 682 is recorded. The
+version-683 index must have its exact nonpartial btree definition and be valid
+and ready. False-positive qualifier: absent artifacts before their published
+version are a pending-migration gate, not drift. False-negative qualifier: a
+numeric head or a matching relation/index name cannot clear these checks.
+Local fixtures execute the emitted table guard over synthetic catalog rows;
+coverage of every version through the code head must fail if a future append
+omits its monitor contract. This detector coverage gap alone does not prove
+that the corresponding production schema is absent.
 
 The 2026-09-14 detector audit found that a same-name ordered index could pass
 column-substring checks with a different access method or expression. The
@@ -20851,6 +20971,11 @@ unavailable, interrupted, malformed, or incomplete identity work is unknown.
 Keep independently observed identity faults when only the public-request
 command fails. Invalid or absent durations cannot establish a sub-second
 refusal, LB admission candidate, or all-target observer failure.
+Preserve the native identity-command error through the shared finite
+`error_class` vocabulary: SSH status 255, command failure, timeout, access
+denial, and invalid response must remain distinguishable. Never replace them
+with a generic error or render raw stderr or malformed identity output. The
+identity target remains unknown even when its public HTTPS request succeeds.
 
 An authoritative parent cancellation returns `ctx.Err()` without manufacturing
 findings or starting later host work. Pre-cancelled execution makes no source
@@ -20955,18 +21080,51 @@ dead-first DNAT target from that unknown observation, controller activity, or
 an unbounded log search.
 
 Run the monitor-local route lookup before the exact probes and again after an
-all-target immediate failure. When either lookup proves no route and every
-configured target has curl exit 7, no remote address, and a sub-second result,
+all-target pre-HTTP connection-failure cohort. Every target must have complete
+native evidence with HTTP `000` and either curl exit 7 with no peer and a
+sub-second result, or curl exit 28 (including TLS timeouts retaining the exact
+peer selected before route loss). When either lookup proves no route,
 collapse the cohort into one WARN
 `monitor/visibility|ipv6-observer-route-unavailable|monitor-host/edge-ipv6|`.
-Do not emit a per-edge reset from that sample. Continue collecting each host's
+Do not infer per-edge reset or ingress timeout from that sample. The route
+observations bound public coverage as unknown; they do not prove every
+failure has one cause or that the edges recovered. Continue collecting each host's
 identity, self-SNI HTTPS, source route, and bound-egress controls: those retain
-known host-local state, but do not prove externally routed ingress. If the
+known host-local state, but do not prove externally routed ingress. Preserve
+independently established identity drift, source-route drift, and LB admission
+faults even when public observation is unavailable. If the
 route command is unavailable or ambiguous rather than affirmatively route-less,
-keep each immediate target as `cannot-observe`; do not guess reset causality.
-Any successful exact IPv6 request disproves an all-target observer outage for
-that sample, and ordinary per-edge refusal, timeout, policy-route, upstream,
-and HTTP classifications remain active.
+keep each cohort target as `cannot-observe`; do not guess reset or timeout
+causality. Any successful exact IPv6 request, received HTTP response (including
+a later timeout), malformed native observation, or different failure shape
+prevents this all-target attribution. Preserve the independently observed
+per-target classes and visibility gaps in those mixed cohorts.
+
+The 2026-09-18 recurrence exposed the TLS-timeout variant. The observer's
+stored-router lifetime reached zero at 23:11:11.954Z, its IPv6 network state
+disappeared at 23:11:11.991Z, and the snapshot recorded eight exact-peer TLS
+timeouts at 23:11:17Z. IPv6 state returned at 23:13:35.759Z. A standing watcher
+sample at 23:13:30Z independently recorded route absence with all eight host
+identities, local HTTPS, exact source routes, and bound egress controls healthy.
+The old immediate-exit-7-only gate missed timeouts after TCP peer selection.
+The snapshot also discarded all eight identity-command error classes; their
+original failure stage cannot be reconstructed from its generic warnings.
+Direct revalidation at 23:21Z found all eight identities healthy and 24/24
+externally pinned IPv6 HTTP 200 responses, with IPv4 and unrelated IPv6 controls
+healthy. This is recovery evidence, not proof of the underlying RA repair.
+
+**False-positive qualifiers:** a common timeout cohort alone does not prove
+observer failure; affirmative route absence is required. A peer address does
+not prove the route stayed available through TLS. Before/after route samples
+bound observation coverage but cannot assign the exact packet-loss instant or
+erase an independently observed host defect. **False-negative qualifiers:**
+missing route evidence or a failed identity collector must remain unknown;
+healthy local self-probes cannot clear external ingress. The native request
+shape, finite identity error class, and misleading-but-healthy/partial-evidence
+controls are covered synthetically. Closure still requires the operational RA
+discriminator and 30-minute stable-route window below, plus three consecutive
+five-minute externally routed exact-edge samples; the monitor correction alone
+does not repair the workstation, router, or edge network.
 
 The 2026-09-08 LB recovery exposed an adjacent observer-classification defect.
 After a clean dual-stack sample, the monitor workstation temporarily lost its

@@ -139,6 +139,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender_latency attestation table and identity key", requiredVersion: 679, rowColumn: 90},
 	{name: "network_extender_latency_create_time retention index", requiredVersion: 680, rowColumn: 91},
 	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
+	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
+	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1191,6 +1193,49 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           WHERE table_name = 'network_extender_latency'
 		             AND index_name = 'network_extender_latency_extender_id_create_time'
 		             AND definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.network_extender_activation') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 10
+		               FROM (VALUES
+		                   ('activation_id', 'uuid', 'NO', NULL),
+		                   ('extender_id', 'uuid', 'NO', NULL),
+		                   ('activate_time', 'timestamp without time zone', 'NO', NULL),
+		                   ('ip_version', 'integer', 'NO', NULL),
+		                   ('client_address_hash', 'bytea', 'YES', NULL),
+		                   ('country_code', 'character varying', 'NO', quote_literal('') || '::character varying'),
+		                   ('location_id', 'uuid', 'YES', NULL),
+		                   ('city_location_id', 'uuid', 'YES', NULL),
+		                   ('region_location_id', 'uuid', 'YES', NULL),
+		                   ('country_location_id', 'uuid', 'YES', NULL)
+		               ) AS expected(column_name, data_type, is_nullable, column_default)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_extender_activation'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		                     AND actual.column_default IS NOT DISTINCT FROM expected.column_default
+		                     AND actual.character_maximum_length IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_extender_activation'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (activation_id)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_extender_activation'
+		             AND index_name = 'network_extender_activation_extender_id_activate_time'
+		             AND definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       )
