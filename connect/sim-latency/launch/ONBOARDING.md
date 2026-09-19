@@ -32,11 +32,19 @@ Before production epoch 1, `GET /competition/info` may expose the current
 multiple sequential epochs. A response carrying `staging: true` is fee-free
 and follows the production admission, cache, FIFO, isolated evaluation,
 scoring, embargo, and authenticated polling paths against frozen source epoch
-zero. After close and complete drain, it finalizes automatically with no winner
-and makes each job's score or typed failure visible through its status URL.
+zero. After admission closes and every accepted job is terminal, it finalizes
+automatically and makes each job's score or typed failure visible through its
+status URL. The highest-ranked placeable, statistically significant candidate
+passing every gate is the named staging winner; if none qualifies, there is
+no winner. Staging never pauses for honesty review.
 `GET /competition/leaderboard?include_staging=true` also publishes a clearly
-marked, null-winner staging entry for exact adapter-path testing. It does not
-create a production leaderboard row, candidate review, or promotion.
+marked staging epoch with the same `winner_job_id` and winning entry for
+adapter-path testing. Every staging entry has `honesty_review: not_reviewed`,
+including a winner: this is not an honesty or safety approval. It does not
+create a production leaderboard row, candidate review, or promotion, and does
+not change source epoch zero or its threshold. Historical finalized results
+are preserved. The named-winner control-plane follow-up is not yet deployed;
+see the dated [epoch-5 release record](STAGING-5-RELEASE.md).
 
 UR creates or retrieves each identity with `run-main.sh staging`, then uses
 `run-main.sh advance-staging` to stop admission, drain all accepted work,
@@ -145,8 +153,8 @@ display-only. Placeability requires every correctness, traffic-volume,
 path-integrity, matchmaking, stability, and resource gate to pass. Takeover
 also requires the epoch margin and a one-sided Welch result at `p <= 0.05`.
 
-Statistical eligibility enters the private honesty-review ranking; it does not
-guarantee a win. A dishonest or unsafe candidate is rejected and review moves
+In production, statistical eligibility enters the private honesty-review
+ranking; it does not guarantee a win. A dishonest or unsafe candidate is rejected and review moves
 to the next ranked significant candidate. If none remains, the epoch has no
 winner and the incumbent code and threshold carry forward unchanged.
 

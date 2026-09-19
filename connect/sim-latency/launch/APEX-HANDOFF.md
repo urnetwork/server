@@ -37,12 +37,17 @@ accepted work remains queued through post-close grading.
 Before production epoch 1, the API can expose a staging era with sequential
 `staging_round` epochs beginning at zero. Its submissions are fee-free and use
 the real retention, cache, FIFO, evaluator, scoring, embargo, and polling paths
-against frozen source epoch zero. A staging round automatically finalizes with
-no winner after close and drain, then publishes each score or typed failure at
-the immutable job status URL. Its finalized result is also available through
+against frozen source epoch zero. After admission closes and the FIFO drains,
+a staging round automatically names its highest-ranked placeable, statistically
+significant candidate passing every gate, or no winner if none qualifies, then
+publishes each score or typed failure at the immutable job status URL. Its
+finalized result is also available through
 the opt-in `GET /competition/leaderboard?include_staging=true` view with
-`staging: true` and a null winner. It never enters production ranking, honesty
-review, promotion, or the default production leaderboard. The first production-round commit
+`staging: true`, the same `winner_job_id`, and a matching winning entry. All
+staging entries retain `honesty_review: not_reviewed`, including the winner;
+this does not attest honesty or safety. Staging never enters production ranking,
+honesty review, source promotion, or the default production leaderboard, and
+never changes the source-epoch-zero threshold. The first production-round commit
 ends the era and atomically cancels queued staging work; it refuses to race a
 running evaluation. The adapter must prefer `active_round` once present and
 persist the returned `staging` boolean.
@@ -109,8 +114,11 @@ authenticated public-TLS metrics query verified a fresh worker heartbeat.
 This is a fee-free 48-hour staging round using source epoch zero, not a
 production epoch. Follow the [release record](STAGING-5-RELEASE.md) for worker
 identities and verification; no successful shared-control result is claimed yet.
-The staging winner remains null after finalization; this deployment does not
-enable a named staging winner or production promotion.
+The worker installed at this September 19 opening still enforced the historical
+null-winner policy. The automatic named-staging-winner control-plane follow-up
+described above is not yet deployed; it requires a reviewed API/migration/worker
+rollout, not an evaluator rebuild or source promotion. No live named winner is
+claimed by this opening record.
 
 Staging epoch 4 remains finalized:
 `round_id=01a0a58b-9a3e-2e43-f612-0034ff7296ff`,
@@ -137,8 +145,8 @@ ascending, submission time, then job id; normalized score is display-only.
 Historical per-job-control epochs, including staging epoch 4, keep their
 original normalized-score-first ranking. Rollout does not retroactively reorder
 those published results.
-Statistical eligibility only enters the review queue; it does not establish
-that a patch is honest. Public rows use
+In production, statistical eligibility only enters the review queue; it does
+not establish that a patch is honest. Public rows use
 job and patch identities rather than bearer-token principal names; the adapter
 may associate those job ids with Apex identities in its own publication layer.
 

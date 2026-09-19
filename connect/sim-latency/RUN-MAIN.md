@@ -24,6 +24,10 @@ materialized patch and score evidence before invoking this harness. Terra must
 not approve candidates, merge branches, or push source/config refs. These roles
 apply to all six epochs and must survive an agent handoff.
 
+Candidate honesty review and source promotion apply only to production.
+Staging automatically names the highest-ranked eligible significant candidate
+after close and drain, without a human-review pause or source promotion.
+
 ## Before starting
 
 The main environment must contain the reviewed `competition.yml` config and
@@ -48,13 +52,19 @@ baseline source content and evaluator protocol. A reviewed evaluator repair is
 a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
-The current server module graph requires `operator-proxy` and `warp` in addition
+The frozen evaluator module graph requires `operator-proxy` and `warp` in addition
 to the earlier eight repositories. Current tools reject incomplete checkpoints
 and source locks; they never infer the two missing commits. Prepare a reviewed
 complete checkpoint, matching remote aliases, and a new evaluator image at the
 drained release boundary. Preserve old eight-repository images, locks, baseline
 artifacts, and round evidence as historical records; do not rewrite them to
 claim the new source identity.
+
+The continuously deployed main control-plane graph can later remove a module
+without changing that frozen evaluator checkpoint. Current-main coverage checks
+must still reject newly required unpinned local repositories, but cannot shrink
+an existing lock. Source loading, shell validators, image copies, and the epoch
+ledger continue to require the exact frozen ten-repository set, including Warp.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -87,11 +97,18 @@ epoch zero. `staging` creates a 48-hour round by default, or returns the current
 scheduled/open/grading round. Share its `round_id` with the Apex integration.
 Fee-free staging patches traverse the real FIFO, isolation, evaluation,
 scoring, embargo, and authenticated polling paths. Every staging epoch uses
-frozen source epoch zero and automatically finalizes with no winner once it
-closes and the worker drains all accepted jobs. The default leaderboard remains
-production-only; its `include_staging=true` view publishes the finalized
-staging epoch with `staging: true` and a null winner for adapter conformance.
-It creates no honesty-review, promotion, or production-winner state.
+frozen source epoch zero and automatically finalizes once admission closes and
+the worker drains all accepted jobs. It names the highest-ranked placeable,
+statistically significant candidate passing every gate, or no winner if none
+qualifies. The default leaderboard remains production-only; its
+`include_staging=true` view publishes the finalized staging epoch with
+`staging: true`, its `winner_job_id`, and a matching winning entry. Staging
+entries, including the winner, retain `honesty_review: not_reviewed`. This
+creates no honesty-review, promotion, or production-winner state; a named
+staging winner is not an honesty or safety approval. Historical finalized
+results are unchanged. The automatic named-winner follow-up is not yet
+deployed; the [release record](launch/STAGING-5-RELEASE.md) retains the actual
+epoch-5 opening worker identity and policy.
 
 For the polling proof, record both compatibility `state` and additive
 `evaluation_status`. Before publication, `state` remains `completed` for both
@@ -145,9 +162,10 @@ attestation.
 admission without rewriting the published schedule or canceling accepted work.
 Before closing, it runs a root-owned evaluator/database preflight; a failure
 therefore leaves the round open and retryable. It then runs the worker until
-every FIFO submission is terminal, finalizes and reveals the round with no
-winner, and creates the next open staging epoch. The command returns only after
-the next `round_id` is ready to share. `staging-worker`
+every FIFO submission is terminal, finalizes and reveals the round with its
+automatic eligible winner or no winner, and creates the next open staging
+epoch. It never exits 20 for staging review or invokes source promotion.
+The command returns only after the next `round_id` is ready to share. `staging-worker`
 remains available when the original admission window should run to its natural
 end. Set `SIM_LATENCY_STAGING_WINDOW_SECONDS` to 60 through 604800 seconds when
 a different test window is needed. `staging --replace-current` explicitly
@@ -171,6 +189,9 @@ hours) and exits. Results remain embargoed until all jobs are terminal and the
 review process finalizes the epoch.
 
 ## Mandatory candidate review
+
+This section and its commands apply only to production epochs 1 through 6.
+They must not be used to review or promote a staging result.
 
 Exit status 20 means the harness has materialized the next ranked significant
 candidate in a private mode-0700 temporary directory. Inspect `candidate.json`,

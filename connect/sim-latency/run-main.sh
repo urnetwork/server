@@ -47,8 +47,10 @@ Optional environment:
   SIM_LATENCY_STAGING_WINDOW_SECONDS
                                     staging admission window; default 172800
 
-Exit 20 means an authenticated significant candidate is waiting for the
-mandatory honesty and safety review documented in RUN-MAIN.md.
+Exit 20 means a production candidate is waiting for the mandatory honesty and
+safety review documented in RUN-MAIN.md. Staging automatically names an eligible
+significant winner (or no winner) after close and drain; it never pauses for
+honesty review or promotes source.
 EOF
 }
 

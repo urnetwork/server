@@ -4358,9 +4358,9 @@ func (self PostgresStore) CloseStagingRound(
 	return round, err
 }
 
-// Publishes a drained staging epoch without winner selection or source
-// promotion. An unfinished round is returned unchanged so the worker can keep
-// polling without treating ordinary admission time as an error.
+// Publishes a drained staging epoch with its highest-ranked statistically
+// eligible job, without honesty review or source promotion. An unfinished
+// round is returned unchanged while admission or queued evaluation continues.
 func (self PostgresStore) FinalizeStagingRound(
 	ctx context.Context,
 	settings *Settings,
@@ -4388,8 +4388,11 @@ func (self PostgresStore) FinalizeStagingRound(
 				return
 			}
 			server.Raise(scanErr)
-			if round.FinalizedAt != nil ||
-				(round.AdmissionClosedAt == nil && now.Before(round.ClosesAt)) {
+			closedAt := round.ClosesAt
+			if round.AdmissionClosedAt != nil {
+				closedAt = *round.AdmissionClosedAt
+			}
+			if round.FinalizedAt != nil || now.Before(closedAt) {
 				return
 			}
 			var active int
@@ -4400,17 +4403,20 @@ func (self PostgresStore) FinalizeStagingRound(
 			if active != 0 {
 				return
 			}
+			var winnerJobId *server.Id
+			server.Raise(tx.QueryRow(ctx, stagingWinnerSql, round.RoundId).Scan(&winnerJobId))
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_round
 				SET admission_closed_at = COALESCE(admission_closed_at, closes_at),
-					finalized_at = $2, winner_job_id = NULL
+					finalized_at = $2, winner_job_id = $3
 				WHERE round_id = $1
-			`, round.RoundId, now))
+			`, round.RoundId, now, winnerJobId))
 			if round.AdmissionClosedAt == nil {
 				admissionClosedAt := round.ClosesAt
 				round.AdmissionClosedAt = &admissionClosedAt
 			}
 			round.FinalizedAt = &now
+			round.WinnerJobId = winnerJobId
 			finalized = true
 		})
 	})
@@ -4453,6 +4459,29 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 	}
 	return round, err
 }
+
+// Staging names the best statistically eligible job without creating review
+// records. Shared controls use absolute latency; legacy rounds retain their
+// normalized ranking. The scalar subquery returns NULL when none is eligible.
+const stagingWinnerSql = `
+	SELECT (
+		SELECT job_id FROM competition_job
+		WHERE round_id = $1 AND state = 'succeeded'
+		  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+		  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+		  AND jsonb_typeof(score_json->'gates') = 'object'
+		  AND score_json->'gates' <> '{}'::jsonb
+		  AND NOT EXISTS (
+		      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+		      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+		  )
+		ORDER BY CASE WHEN NOT EXISTS (
+		             SELECT 1 FROM competition_round_baseline WHERE round_id = $1
+		         ) THEN (score_json->>'normalized_score')::numeric END DESC,
+		         (score_json->>'raw_score')::numeric ASC, submitted_at, job_id
+		LIMIT 1
+	)
+`
 
 // A persisted shared control makes raw latency comparable across submissions.
 // Legacy rounds without that control retain their original normalized order.
@@ -4849,9 +4878,6 @@ func (self PostgresStore) Leaderboards(
 					))
 					board.CompetitionId = settings.CompetitionId
 					board.Status = "finalized"
-					if board.Staging {
-						board.WinnerJobId = nil
-					}
 					board.Entries = []LeaderboardEntry{}
 					result.Epochs = append(result.Epochs, board)
 				}
@@ -5979,8 +6005,8 @@ func (self *Worker) selfCheck(ctx context.Context) (HostSelfCheck, error) {
 
 // Seals the one round owned by this process after admission closes and the
 // immediate FIFO drains, including work that extends beyond closes_at.
-// Staging publishes without winner selection; production leaves a significant
-// candidate embargoed for the operator-controlled honesty review gate.
+// Staging names its best eligible job automatically; production leaves a
+// significant candidate embargoed for the operator-controlled honesty gate.
 func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 	latest, err := self.store.CurrentRound(ctx, self.settings)
 	if err != nil {
@@ -6006,10 +6032,15 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 		if latest.FinalizedAt == nil {
 			return false, nil
 		}
+		winner := "none"
+		if latest.WinnerJobId != nil {
+			winner = latest.WinnerJobId.String()
+		}
 		glog.Infof(
-			"[competition]staging epoch %d finalized round=%s winner=none\n",
+			"[competition]staging epoch %d finalized round=%s winner=%s\n",
 			latest.Epoch,
 			latest.RoundId,
+			winner,
 		)
 		return true, nil
 	}
@@ -6668,8 +6699,71 @@ func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobRe
 	})
 }
 
-// ReconcileLeaderboard publishes results only from an atomically finalized
-// epoch and authenticates every returned job and patch identity.
+// Authenticates winner consistency without interpreting normalized versus raw
+// historical ranking. Entries already carry the server's frozen order. Old
+// no-winner staging boards remain valid even when they contain eligible scores.
+func validateApexLeaderboard(leaderboard LeaderboardResult) error {
+	if leaderboard.Status != "finalized" || leaderboard.RoundId == (server.Id{}) || leaderboard.FinalizedAt.IsZero() {
+		return errors.New("Apex reconciliation received a non-finalized leaderboard")
+	}
+	winnerCount := 0
+	var firstEligibleJobId *server.Id
+	for _, entry := range leaderboard.Entries {
+		if err := validateScore(&entry.Score); err != nil {
+			return fmt.Errorf("Apex reconciliation received an invalid leaderboard score: %w", err)
+		}
+		eligible := entry.Score.Placeable && entry.Score.TakeoverEligible &&
+			entry.Score.Significance.StatisticallySignificant &&
+			entry.Score.Significance.RecommendedNextEpochTakeoverMarginSupported && len(entry.Score.Gates) != 0
+		for _, gate := range entry.Score.Gates {
+			eligible = eligible && gate.Passed
+		}
+		if eligible && firstEligibleJobId == nil {
+			jobId := entry.JobId
+			firstEligibleJobId = &jobId
+		}
+		matchesWinner := leaderboard.WinnerJobId != nil && *leaderboard.WinnerJobId == entry.JobId
+		if entry.Winner != matchesWinner {
+			return errors.New("Apex reconciliation received inconsistent leaderboard winner identities")
+		}
+		if leaderboard.Staging {
+			if entry.HonestyReview != "not_reviewed" {
+				return errors.New("Apex reconciliation received staging honesty-review state")
+			}
+		} else {
+			switch entry.HonestyReview {
+			case "approved":
+				if !entry.Winner {
+					return errors.New("Apex reconciliation received an approved non-winner")
+				}
+			case "not_reviewed", "rejected":
+			default:
+				return errors.New("Apex reconciliation received an invalid honesty-review state")
+			}
+			if entry.Winner && entry.HonestyReview != "approved" {
+				return errors.New("Apex reconciliation received an unapproved production winner")
+			}
+		}
+		if entry.Winner {
+			if !eligible {
+				return errors.New("Apex reconciliation received an ineligible winner")
+			}
+			winnerCount++
+		}
+	}
+	if leaderboard.WinnerJobId != nil {
+		if winnerCount != 1 {
+			return errors.New("Apex reconciliation received a winner missing its unique leaderboard entry")
+		}
+		if leaderboard.Staging && (firstEligibleJobId == nil || *firstEligibleJobId != *leaderboard.WinnerJobId) {
+			return errors.New("Apex reconciliation received a staging winner behind an eligible candidate")
+		}
+	}
+	return nil
+}
+
+// Publishes only internally consistent finalized results, then authenticates
+// every returned job, patch, and staging admission identity before persisting.
 func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeaderboardResult, now time.Time) error {
 	return self.update(func(state *apexAdapterState) error {
 		byJobId := map[server.Id]*ApexAdapterRecord{}
@@ -6681,11 +6775,8 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 		}
 		seenJobIds := map[server.Id]bool{}
 		for _, leaderboard := range leaderboards.Epochs {
-			if leaderboard.Status != "finalized" || leaderboard.RoundId == (server.Id{}) || leaderboard.FinalizedAt.IsZero() {
-				return errors.New("Apex reconciliation received a non-finalized leaderboard")
-			}
-			if leaderboard.Staging && leaderboard.WinnerJobId != nil {
-				return errors.New("Apex reconciliation received a staging winner")
+			if err := validateApexLeaderboard(leaderboard); err != nil {
+				return err
 			}
 			for _, entry := range leaderboard.Entries {
 				if seenJobIds[entry.JobId] {
@@ -6701,12 +6792,6 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 				}
 				if record.Staging != leaderboard.Staging {
 					return errors.New("leaderboard changed the staging admission identity")
-				}
-				if leaderboard.Staging && (entry.Winner || entry.HonestyReview != "not_reviewed") {
-					return errors.New("Apex reconciliation received staging winner-review state")
-				}
-				if entry.Score.ScoreSchema != ScoreSchema || entry.Score.Significance == nil {
-					return errors.New("leaderboard score is missing its statistical record")
 				}
 				if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
 					return errors.New("leaderboard score contradicts the terminal evaluation status")

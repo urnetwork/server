@@ -1,5 +1,5 @@
-// Keeps the active evaluator's source graph aligned with required local Go
-// modules, shell validators, image contents, and disposable source identities.
+// Keeps the frozen evaluator's exact repository protocol consistent across
+// consumers while allowing the main control-plane module graph to evolve.
 package main
 
 import (
@@ -15,28 +15,12 @@ import (
 	"testing"
 )
 
-// Reading go.mod as JSON is local and network-free; a new required replacement
-// must not silently escape the source lock even when every consumer agrees.
-func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
-	command := exec.Command("go", "mod", "edit", "-json", filepath.Join("..", "..", "go.mod"))
-	moduleBytes, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	type moduleVersion struct {
-		Path    string
-		Version string
-	}
-	var module struct {
-		Module  moduleVersion
-		Require []moduleVersion
-		Replace []struct {
-			Old moduleVersion
-			New moduleVersion
-		}
-	}
+// Reads the network-free `go mod edit -json` shape without treating a moving
+// main checkout as authority to remove repositories from an existing lock.
+func requiredLocalSourceRepositories(moduleBytes []byte) ([]string, error) {
+	var module sourceModuleGraphFixture
 	if err := json.Unmarshal(moduleBytes, &module); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	requiredVersions := map[string]string{}
 	for _, requirement := range module.Require {
@@ -51,15 +35,127 @@ func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
 		}
 		repository := filepath.Base(replacement.New.Path)
 		if replacement.New.Path != "../"+repository {
-			t.Fatalf("required local module %s is outside the sibling-repository layout: %s", replacement.Old.Path, replacement.New.Path)
+			return nil, fmt.Errorf("required local module %s is outside the sibling-repository layout: %s", replacement.Old.Path, replacement.New.Path)
 		}
 		repositoryNames = append(repositoryNames, repository)
 	}
 	slices.Sort(repositoryNames)
-	lockedRepositoryNames := sourceRepositoryNames()
-	slices.Sort(lockedRepositoryNames)
-	if !slices.Equal(repositoryNames, lockedRepositoryNames) {
-		t.Fatalf("locked repositories = %v, required local modules = %v", lockedRepositoryNames, repositoryNames)
+	return repositoryNames, nil
+}
+
+// Main can shed a dependency that the frozen evaluator still needs. A newly
+// required unpinned local repository must nevertheless fail closed.
+func requireLocalSourceRepositoryCoverage(moduleBytes []byte, lockedRepositoryNames []string) error {
+	repositoryNames, err := requiredLocalSourceRepositories(moduleBytes)
+	if err != nil {
+		return err
+	}
+	for _, repository := range repositoryNames {
+		if !slices.Contains(lockedRepositoryNames, repository) {
+			return fmt.Errorf("required local repository %s is absent from frozen source repositories %v", repository, lockedRepositoryNames)
+		}
+	}
+	return nil
+}
+
+// A real local module read catches newly required dependencies. The exact
+// evaluator graph comes from the source protocol/checkpoint, not current main.
+func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
+	command := exec.Command("go", "mod", "edit", "-json", filepath.Join("..", "..", "go.mod"))
+	moduleBytes, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireLocalSourceRepositoryCoverage(moduleBytes, sourceRepositoryNames()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This independent fixture prevents a removed main dependency from silently
+// shrinking every serializer, validator, image copy, and source ledger together.
+func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "operator-proxy", "warp"}
+	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
+		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
+	}
+}
+
+// Synthetic module inputs contain no checkout paths, remote Git, or network
+// resolution; they exercise required/local/versioned replacement semantics.
+type sourceModuleVersionFixture struct {
+	Path    string
+	Version string
+}
+
+type sourceModuleReplacementFixture struct {
+	Old sourceModuleVersionFixture
+	New sourceModuleVersionFixture
+}
+
+type sourceModuleGraphFixture struct {
+	Module  sourceModuleVersionFixture
+	Require []sourceModuleVersionFixture
+	Replace []sourceModuleReplacementFixture
+}
+
+func sourceModuleGraphBytes(t *testing.T, repositories []string) []byte {
+	t.Helper()
+	module := sourceModuleGraphFixture{Module: sourceModuleVersionFixture{Path: "module.example/server"}}
+	for _, repository := range repositories {
+		if repository == "server" {
+			continue
+		}
+		dependency := sourceModuleVersionFixture{Path: "module.example/" + repository, Version: "v0.0.0"}
+		module.Require = append(module.Require, dependency)
+		module.Replace = append(module.Replace, sourceModuleReplacementFixture{
+			Old: dependency, New: sourceModuleVersionFixture{Path: "../" + repository},
+		})
+	}
+	encoded, err := json.Marshal(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+// Removing Warp on main must not change the ten-repository evaluator lock.
+func TestSourceRepositoryCoverageRetainsFrozenDependencyRemovedFromMain(t *testing.T) {
+	locked := sourceRepositoryNames()
+	frozen := slices.Clone(locked)
+	currentMain := slices.DeleteFunc(slices.Clone(locked), func(repository string) bool { return repository == "warp" })
+	for _, graph := range [][]string{frozen, currentMain} {
+		if err := requireLocalSourceRepositoryCoverage(sourceModuleGraphBytes(t, graph), locked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(locked, frozen) || !slices.Contains(locked, "warp") {
+		t.Fatalf("main module inspection changed the frozen lock: %v", locked)
+	}
+}
+
+func TestSourceRepositoryCoverageRejectsNewUnpinnedDependency(t *testing.T) {
+	locked := sourceRepositoryNames()
+	required := append(slices.Clone(locked), "synthetic-new-dependency")
+	err := requireLocalSourceRepositoryCoverage(sourceModuleGraphBytes(t, required), locked)
+	if err == nil || !strings.Contains(err.Error(), "synthetic-new-dependency is absent") {
+		t.Fatalf("new unpinned local module accepted: %v", err)
+	}
+}
+
+func TestSourceRepositoryCoverageRetainsSiblingLayoutBoundary(t *testing.T) {
+	var module sourceModuleGraphFixture
+	if err := json.Unmarshal(sourceModuleGraphBytes(t, []string{"server", "connect"}), &module); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../../connect", "/synthetic/connect", "../connect/nested"} {
+		module.Replace[0].New.Path = path
+		encoded, err := json.Marshal(module)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := requireLocalSourceRepositoryCoverage(encoded, sourceRepositoryNames()); err == nil || !strings.Contains(err.Error(), "outside the sibling-repository layout") {
+			t.Fatalf("non-sibling module %q accepted: %v", path, err)
+		}
 	}
 }
 

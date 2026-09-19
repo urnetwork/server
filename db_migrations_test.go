@@ -61,6 +61,54 @@ func TestCompetitionRankingCompatibilityMigrationAppendsAfterSharedBaseline(t *t
 	}
 }
 
+// Automatic staging winner selection supersedes the forced-null rule without
+// moving applied migrations or changing production's ordered review policy.
+func TestCompetitionStagingWinnerMigrationAppendsWithoutChangingReviewPolicy(t *testing.T) {
+	index := sqlMigrationIndex(t, "expected_staging_winner uuid")
+	if index != 683 {
+		t.Fatalf("automatic staging winner migration index = %d, want 683", index)
+	}
+	migration := migrations[index].(*SqlMigration)
+	normalized := strings.Join(strings.Fields(migration.sql), " ")
+	for _, marker := range []string{
+		"CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()",
+		"NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL",
+		"state IN ('queued', 'running')",
+		"IF NEW.staging = true THEN SELECT job_id INTO expected_staging_winner",
+		"round_id = NEW.round_id AND state = 'succeeded'",
+		`score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb`,
+		`score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb`,
+		"score_json->'gates' <> '{}'::jsonb",
+		"WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)",
+		"ORDER BY CASE WHEN NOT EXISTS ( SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id ) THEN (score_json->>'normalized_score')::numeric END DESC, (score_json->>'raw_score')::numeric ASC, submitted_at, job_id LIMIT 1",
+		"NEW.winner_job_id IS DISTINCT FROM expected_staging_winner",
+	} {
+		if !strings.Contains(normalized, marker) {
+			t.Errorf("staging winner migration lost %q", marker)
+		}
+	}
+	for _, forbidden := range []string{"DROP TRIGGER", "DROP FUNCTION", "UPDATE competition_round", "CREATE OR REPLACE FUNCTION competition_candidate_review_insert_guard"} {
+		if strings.Contains(migration.sql, forbidden) {
+			t.Errorf("staging winner migration unexpectedly contains %q", forbidden)
+		}
+	}
+	old := migrations[651].(*SqlMigration)
+	if !strings.Contains(old.sql, "competition staging round cannot select a winner") {
+		t.Fatal("applied migration 652's forced-null rule was edited instead of superseded")
+	}
+	productionGate := func(sql string) string {
+		_, body, found := strings.Cut(sql, "IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (")
+		if !found {
+			t.Fatal("production honesty gate is missing")
+		}
+		body, _, _ = strings.Cut(body, "$competition_round_honesty_review_gate$;")
+		return strings.Join(strings.Fields(body), " ")
+	}
+	if productionGate(old.sql) != productionGate(migration.sql) {
+		t.Fatal("automatic staging winner migration changed production's approval/unresolved-candidate gate")
+	}
+}
+
 func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }

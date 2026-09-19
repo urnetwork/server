@@ -4076,7 +4076,8 @@ func TestApexAdapterReconcileStagingOptsIntoFinalizedEpochs(t *testing.T) {
 	}
 }
 
-func TestApexAdapterReconciliationRejectsStagingWinner(t *testing.T) {
+// A named winner must have exactly one matching eligible leaderboard entry.
+func TestApexAdapterReconciliationRejectsMissingStagingWinner(t *testing.T) {
 	storeDirectory := t.TempDir()
 	if err := os.Chmod(storeDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -4099,7 +4100,7 @@ func TestApexAdapterReconciliationRejectsStagingWinner(t *testing.T) {
 			Entries:       []LeaderboardEntry{},
 		}},
 	}, time.Date(2026, time.August, 29, 2, 1, 0, 0, time.UTC))
-	if err == nil || !strings.Contains(err.Error(), "staging winner") {
+	if err == nil || !strings.Contains(err.Error(), "winner missing") {
 		t.Fatalf("staging winner reconciliation error = %v", err)
 	}
 }
@@ -4230,7 +4231,7 @@ func TestApexAdapterConformance(t *testing.T) {
 				t.Error("public leaderboard received a bearer token")
 			}
 			rawScores := []float64{90, 95}
-			normalizedScores := []float64{0.90, 0.85}
+			normalizedScores := []float64{110, 105}
 			entries := make([]LeaderboardEntry, len(jobIds))
 			for i, jobId := range jobIds {
 				entries[i] = LeaderboardEntry{
@@ -4242,7 +4243,7 @@ func TestApexAdapterConformance(t *testing.T) {
 						if i == 0 {
 							return "approved"
 						}
-						return "not_selected"
+						return "not_reviewed"
 					}(),
 					Score: ScoreResult{
 						ScoreSchema:      ScoreSchema,
@@ -4250,10 +4251,8 @@ func TestApexAdapterConformance(t *testing.T) {
 						NormalizedScore:  &normalizedScores[i],
 						Placeable:        true,
 						TakeoverEligible: true,
-						Significance: &ScoreSignificance{
-							Method:                   "welch_t",
-							StatisticallySignificant: true,
-						},
+						Gates:            map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
+						Significance:     testScoreSignificance(true),
 					},
 				}
 			}
@@ -5204,6 +5203,9 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err != nil || hit || job == nil {
 			t.Fatalf("staging enqueue = %#v, hit=%t, err=%v", job, hit, err)
 		}
+		if unfinished, err := store.FinalizeStagingRound(ctx, settings, first.Epoch); err != nil || unfinished.FinalizedAt != nil {
+			t.Fatalf("open staging epoch finalized = %#v, %v", unfinished, err)
+		}
 		closed, err := store.CloseStagingRound(ctx, settings)
 		if err != nil || closed.RoundId != first.RoundId || closed.Status != "grading" ||
 			closed.AdmissionClosedAt == nil || !closed.AdmissionClosedAt.Equal(currentTime) ||
@@ -5219,9 +5221,15 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err != nil || preserved.State != "queued" || preserved.EvalError != nil {
 			t.Fatalf("staging close changed queued job = %#v, %v", preserved, err)
 		}
+		if unfinished, err := store.FinalizeStagingRound(ctx, settings, first.Epoch); err != nil || unfinished.FinalizedAt != nil {
+			t.Fatalf("queued staging epoch finalized = %#v, %v", unfinished, err)
+		}
 		claimed, err := store.Claim(ctx, settings, "staging-worker", testWorkerImageDigest())
 		if err != nil || claimed == nil || claimed.JobId != job.JobId || !claimed.Staging {
 			t.Fatalf("staging claim = %#v, %v", claimed, err)
+		}
+		if unfinished, err := store.FinalizeStagingRound(ctx, settings, first.Epoch); err != nil || unfinished.FinalizedAt != nil {
+			t.Fatalf("running staging epoch finalized = %#v, %v", unfinished, err)
 		}
 		raw, normalized := 100.0, 100.0
 		_, err = store.Complete(ctx, settings, "staging-worker", claimed.JobId, testSharedBaselineOutcome(t, settings, claimed, EvaluationOutcome{
@@ -5235,11 +5243,19 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err != nil {
 			t.Fatalf("complete staging evaluation: %v", err)
 		}
+		service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+		embargoed, embargoStatus, embargoError := service.GetScore(ctx, job.JobId, &Principal{Id: "macrocosmos-stage", Role: "submitter"})
+		if embargoError != nil || embargoStatus != http.StatusOK || embargoed.Score != nil || embargoed.State != "completed" {
+			t.Fatalf("staging result escaped finalization embargo = %#v, %d, %#v", embargoed, embargoStatus, embargoError)
+		}
+		if boards, err := store.Leaderboards(ctx, settings, true); err != nil || len(boards.Epochs) != 0 {
+			t.Fatalf("unfinalized staging leaderboard = %#v, %v", boards, err)
+		}
 		finalized, err := store.FinalizeStagingRound(ctx, settings, first.Epoch)
-		if err != nil || finalized.FinalizedAt == nil || finalized.WinnerJobId != nil || finalized.Status != "finalized" {
+		if err != nil || finalized.FinalizedAt == nil || finalized.WinnerJobId == nil ||
+			*finalized.WinnerJobId != job.JobId || finalized.Status != "finalized" {
 			t.Fatalf("finalized staging epoch = %#v, %v", finalized, err)
 		}
-		service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
 		visible, status, evalError := service.GetScore(
 			ctx,
 			job.JobId,
@@ -5268,9 +5284,9 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		stagingBoard := stagingLeaderboards.Epochs[0]
 		if !stagingBoard.Staging || stagingBoard.RoundId != first.RoundId ||
 			stagingBoard.Epoch != first.Epoch || stagingBoard.Status != "finalized" ||
-			stagingBoard.WinnerJobId != nil || len(stagingBoard.Entries) != 1 ||
+			stagingBoard.WinnerJobId == nil || *stagingBoard.WinnerJobId != job.JobId || len(stagingBoard.Entries) != 1 ||
 			stagingBoard.Entries[0].JobId != job.JobId ||
-			stagingBoard.Entries[0].Winner ||
+			!stagingBoard.Entries[0].Winner ||
 			stagingBoard.Entries[0].HonestyReview != "not_reviewed" {
 			t.Fatalf("published staging leaderboard = %#v", stagingBoard)
 		}
@@ -5282,7 +5298,7 @@ func TestCompetitionStagingEraEvaluatesFinalizesAndAdvances(t *testing.T) {
 		if err := json.Unmarshal(encodedBoard, &wireBoard); err != nil {
 			t.Fatal(err)
 		}
-		if winnerJobId, present := wireBoard["winner_job_id"]; !present || winnerJobId != nil {
+		if winnerJobId, present := wireBoard["winner_job_id"]; !present || winnerJobId != job.JobId.String() {
 			t.Fatalf("staging winner_job_id = %#v, present=%t", winnerJobId, present)
 		}
 

@@ -1,3 +1,4 @@
+// Checks the published migration identities and the schema each live head requires.
 package monitor
 
 import (
@@ -45,6 +46,112 @@ type migrationArtifact struct {
 const providerEgressHealthDeadlineIndexDefinition = "CREATE INDEX provider_egress_health_measured_at_client_id ON public.provider_egress_health USING btree (measured_at, client_id)"
 
 const walletAuthChallengeAttemptAddressTimeIndexDefinition = "CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)"
+
+// Pin the operative trigger events and complete normalized bodies: staging names
+// its best eligible job automatically, while production still requires review.
+const competitionStagingWinnerArtifactQuery = `(
+	NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			('competition_candidate_review', 'competition_staging_candidate_review_blocked', 'competition_staging_candidate_review_guard', 7, ARRAY[]::text[]),
+			('competition_round', 'competition_round_honesty_reviewed', 'competition_round_honesty_review_guard', 19, ARRAY['finalized_at', 'winner_job_id']::text[])
+		) AS expected(table_name, trigger_name, function_name, trigger_type, update_columns)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM competition_trigger_artifact AS actual
+			JOIN competition_function_artifact AS guard ON guard.function_oid = actual.function_oid
+			WHERE actual.table_name = expected.table_name
+			  AND actual.trigger_name = expected.trigger_name
+			  AND guard.function_name = expected.function_name
+			  AND actual.trigger_type = expected.trigger_type
+			  AND actual.update_columns = expected.update_columns
+			  AND actual.enabled AND actual.unconditional
+		)
+	)
+	AND NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			('competition_staging_candidate_review_guard', $staging_review_body$
+				BEGIN
+					IF EXISTS (
+						SELECT 1 FROM competition_round
+						WHERE round_id = NEW.round_id AND staging = true
+					) THEN
+						RAISE EXCEPTION 'competition staging round cannot enter candidate review';
+					END IF;
+					RETURN NEW;
+				END
+			$staging_review_body$),
+			('competition_round_honesty_review_guard', $staging_winner_body$
+				DECLARE
+					expected_staging_winner uuid;
+				BEGIN
+					IF NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL THEN
+						IF EXISTS (
+							SELECT 1 FROM competition_job
+							WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+						) THEN
+							RAISE EXCEPTION 'competition epoch still has active evaluations';
+						END IF;
+						IF NEW.staging = true THEN
+							SELECT job_id INTO expected_staging_winner
+							FROM competition_job
+							WHERE round_id = NEW.round_id AND state = 'succeeded'
+							  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+							  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+							  AND jsonb_typeof(score_json->'gates') = 'object'
+							  AND score_json->'gates' <> '{}'::jsonb
+							  AND NOT EXISTS (
+							      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+							      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+							  )
+							ORDER BY CASE WHEN NOT EXISTS (
+							             SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id
+							         ) THEN (score_json->>'normalized_score')::numeric END DESC,
+							         (score_json->>'raw_score')::numeric ASC, submitted_at, job_id
+							LIMIT 1;
+							IF NEW.winner_job_id IS DISTINCT FROM expected_staging_winner THEN
+								RAISE EXCEPTION 'competition staging winner is not the highest-ranked eligible job';
+							END IF;
+							RETURN NEW;
+						END IF;
+						IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+							SELECT 1 FROM competition_candidate_review
+							WHERE round_id = NEW.round_id AND job_id = NEW.winner_job_id
+							  AND decision = 'approved'
+						) THEN
+							RAISE EXCEPTION 'competition winner has not passed honesty review';
+						END IF;
+						IF NEW.winner_job_id IS NULL AND EXISTS (
+							SELECT 1
+							FROM competition_job AS candidate
+							WHERE candidate.round_id = NEW.round_id AND candidate.state = 'succeeded'
+							  AND candidate.score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+							  AND candidate.score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+							  AND jsonb_typeof(candidate.score_json->'gates') = 'object'
+							  AND candidate.score_json->'gates' <> '{}'::jsonb
+							  AND NOT EXISTS (
+							      SELECT 1 FROM jsonb_each(candidate.score_json->'gates') AS gate
+							      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+							  )
+							  AND NOT EXISTS (
+							      SELECT 1 FROM competition_candidate_review AS review
+							      WHERE review.round_id = NEW.round_id
+							        AND review.job_id = candidate.job_id
+							        AND review.decision = 'rejected'
+							  )
+						) THEN
+							RAISE EXCEPTION 'competition epoch has an unresolved significant candidate';
+						END IF;
+					END IF;
+					RETURN NEW;
+				END
+			$staging_winner_body$)
+		) AS expected(function_name, definition)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM competition_function_artifact AS actual
+			WHERE actual.function_name = expected.function_name
+			  AND actual.definition = btrim(regexp_replace(expected.definition, '[[:space:]]+', ' ', 'g'))
+		)
+	)
+)`
 
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
@@ -141,6 +248,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
 	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
 	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
+	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, rowColumn: 95},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -180,6 +288,41 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			JOIN pg_class AS relation ON relation.oid = constraint_record.conrelid
 			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 			WHERE namespace.nspname = 'public'
+		), competition_function_artifact AS (
+			SELECT expected.function_name,
+			       function_record.oid AS function_oid,
+			       btrim(regexp_replace(
+			           function_record.prosrc,
+			           '[[:space:]]+', ' ', 'g'
+			       )) AS definition
+			FROM (VALUES
+			    ('competition_staging_candidate_review_guard'),
+			    ('competition_round_honesty_review_guard')
+			) AS expected(function_name)
+			JOIN pg_proc AS function_record
+			  ON function_record.oid = to_regprocedure('public.' || expected.function_name || '()')
+			WHERE function_record.prokind = 'f'
+			  AND function_record.prorettype = 'pg_catalog.trigger'::regtype
+		), competition_trigger_artifact AS (
+			SELECT relation.relname::text AS table_name,
+			       trigger_record.tgname::text AS trigger_name,
+			       trigger_record.tgfoid AS function_oid,
+			       trigger_record.tgtype::int AS trigger_type,
+			       trigger_record.tgenabled = 'O' AS enabled,
+			       trigger_record.tgqual IS NULL AS unconditional,
+			       ARRAY(
+			           SELECT attribute_record.attname::text
+			           FROM pg_attribute AS attribute_record
+			           WHERE attribute_record.attrelid = relation.oid
+			             AND attribute_record.attnum = ANY(trigger_record.tgattr)
+			           ORDER BY attribute_record.attname
+			       ) AS update_columns
+			FROM pg_trigger AS trigger_record
+			JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
+			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'public'
+			  AND relation.relname IN ('competition_candidate_review', 'competition_round')
+			  AND NOT trigger_record.tgisinternal
 		)
 		SELECT version.value,
 		       to_regclass('public.competition_round') IS NOT NULL,
@@ -1241,7 +1384,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
-		       )
+		       ),
+		       `+competitionStagingWinnerArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

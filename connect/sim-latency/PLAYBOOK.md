@@ -9,6 +9,23 @@ singleton worker running with authenticated host refreshes; live scoring proof p
 
 Launch-control validation: **staging release deployed; production qualification and external launch actions pending**
 
+Automatic named staging winners are a control-plane follow-up, not yet
+deployed. After close and FIFO drain, staging selects the highest-ranked
+placeable, statistically significant candidate passing every gate, or no
+winner. There is no staging honesty review or review pause; all staging rows
+remain `honesty_review: not_reviewed`. Naming a winner neither approves its
+honesty/safety nor promotes source, config, thresholds, or a production winner.
+Production retains mandatory review. Historical finalized results stay intact.
+
+Rollout remains pending: deploy the current migration runner (`bringyourctl`
+or `competitiondbinit`) and apply migration 684 before new API readiness or
+worker startup, then deploy the main API built with the updated `sn` contract
+and rebuild/deploy the competition worker on sille. Refresh the monitor CLI
+separately to observe the new migration guard. None of these requires an
+evaluator image rebuild, scoring-baseline reset, config-updater rollout, or
+frozen-source change. The currently recorded worker still forces a null
+staging winner until that control-plane rollout occurs.
+
 Deployment model: one authoritative 12-physical-core host; 10 evaluation cores,
 2 management cores; one content-addressed image per canonical submission patch.
 
@@ -79,7 +96,8 @@ guards. No earlier staging jobs were queued or running before creation.
 At `2026-09-19T09:57:30Z`, staging epoch 5 is open as round
 `01a0b913-c344-27f3-cb64-338dbddc8b07`, opened at
 `2026-09-19T09:57:00Z`. Admission closes at `2026-09-21T09:57:00Z`;
-reveal waits for that timestamp and backlog drain. This is a 48-hour staging window,
+reveal waits for admission close and backlog drain; an explicit early staging
+close can precede the scheduled reveal. This is a 48-hour staging window,
 not the seven-day production cadence. The singleton service
 `urnetwork-sim-latency-staging-epoch-5.service` started at
 `2026-09-19T09:53:30Z` after independent staging preflight passed. Its
@@ -90,8 +108,9 @@ authenticated staging host refreshes continued through `2026-09-19T09:57:19Z`.
 Three further API checks at `2026-09-19T09:59:31Z` agreed on the open round,
 schedule, and source/image. No production round has been created. The shared
 baseline count is zero while the worker awaits the first submission; successful
-shared-control scoring remains unproven. Staging still finalizes with no named
-winner; the shared baseline does not change that policy.
+shared-control scoring remains unproven. The worker installed at this opening
+still enforced null staging winners. The automatic named-winner follow-up above
+has not been deployed and does not change the frozen evaluator or baseline.
 
 Staging epoch 4 remains finalized as round
 `01a0a58b-9a3e-2e43-f612-0034ff7296ff`, from `2026-09-15T14:56:00Z` through
@@ -193,7 +212,7 @@ has an owner and a recorded value.
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
-| Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; its default view contains finalized production epochs, while `include_staging=true` adds clearly marked null-winner staging epochs for adapter conformance. Production rows expose approved/rejected/not-reviewed disposition. Ranked significant candidates require append-only operator honesty review, and promotion is database-bound to the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise staging reconciliation, reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
+| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. The staging follow-up (rollout pending) adds an automatic eligible winner or null through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `launch/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally

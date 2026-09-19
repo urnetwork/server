@@ -114,9 +114,10 @@ control does not turn requests within a run into independent observations.
 This is part of the immutable evaluation result, not a post-hoc leaderboard
 calculation.
 
-Epoch 1 begins from source epoch 0's calibrated 16.1% requirement. Statistical
-eligibility places a submission into the ranked honesty-review queue; it does
-not by itself make the submission a winner. When an epoch has an approved
+Production epoch 1 begins from source epoch 0's calibrated 16.1% requirement.
+Production statistical eligibility places a submission into the ranked
+honesty-review queue; it does not by itself make the submission a winner.
+When an epoch has an approved
 winner, its authenticated `score.json` sets the next source epoch's
 percentage to the scorer's recommendation, which never weakens the incumbent
 margin. If no submission is statistically significant, or every significant
@@ -144,8 +145,8 @@ prepared disposable repository root:
   source-check --epoch 0 --repos-root /tmp/evaluation-source --json
 ```
 
-After round N closes and every evaluation is terminal, the worker exits with
-any significant results still embargoed. The trusted agent harness enumerates
+After production round N closes and every evaluation is terminal, the worker
+exits with any significant results still embargoed. The trusted agent harness enumerates
 the exact ranked candidate into a fresh mode-0700 directory:
 
 ```bash
@@ -197,12 +198,18 @@ number of sequential staging epochs numbered from zero. Each staging epoch
 uses the same authenticated submission, immutable MinIO retention, canonical
 patch cache, Redis FIFO, isolated evaluator, scoring, embargo, and poll-result
 publication paths as production. It is fee-free, always evaluates against the
-frozen source epoch 0, and finalizes automatically with no winner after its
-window closes and all accepted work drains. The default production leaderboard
+frozen source epoch 0, and finalizes automatically after admission closes and
+all accepted work drains. The highest-ranked placeable, statistically
+significant candidate passing every gate becomes the named staging winner;
+if none qualifies, `winner_job_id` is null. The default production leaderboard
 excludes staging; `GET /competition/leaderboard?include_staging=true` exposes
-finalized staging rows with `staging: true` and `winner_job_id: null` so the
-Apex adapter can exercise its production reconciliation path. Staging never
-creates honesty-review candidates, source promotion, or a production winner.
+the same winner identity in the finalized staging round and its winning entry.
+Staging has no honesty-review pause or review records: even its winner is
+`honesty_review: not_reviewed`. A named staging winner is not an honesty or
+safety approval and never promotes source, changes the significance threshold,
+or creates a production winner. Previously finalized staging results remain
+unchanged. This control-plane follow-up is not yet deployed; see the dated
+[epoch-5 release record](launch/STAGING-5-RELEASE.md).
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and

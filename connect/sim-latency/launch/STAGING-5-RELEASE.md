@@ -100,8 +100,10 @@ staging host refreshes continued through `2026-09-19T09:57:19Z`.
 Three further API checks at `2026-09-19T09:59:31Z` matched the open round,
 schedule, and source/image. The shared baseline count was zero while awaiting
 the first submission; a successful shared-control score is not claimed.
-Staging retains the existing null-winner policy after close and drain; shared
-baseline scoring does not name or promote a staging winner.
+At this September 19 opening, the installed worker retained the null-winner
+policy after close and drain; shared-baseline scoring alone did not name or
+promote a staging winner. This is the historical opening policy, not a claim
+that the follow-up below has been deployed.
 
 Redis remote cluster ports again refused connections on September 19. The
 worker used the supported authoritative PostgreSQL FIFO fallback; this degraded
@@ -206,3 +208,32 @@ Staging retains the prior authenticated containment checker and qualification
 record. This is deliberately not exact-image production qualification. Do not
 promote it to a public production round without the production host/baseline
 qualification and remaining launch approvals in `PLAYBOOK.md`.
+
+## Automatic staging winners: control-plane follow-up, not deployed
+
+The September 19 follow-up changes staging finalization, not the frozen
+evaluator: after actual admission close and complete FIFO drain, the worker
+automatically names the highest-ranked placeable, statistically significant
+candidate passing all gates. If none qualifies, the winner remains null.
+There is no staging honesty-review step or review record. Even the winner
+remains `honesty_review: not_reviewed`; a named result is not an honesty or
+safety approval. `advance-staging` finalizes and creates the next staging round
+without a review pause, and never promotes source, config, or the threshold.
+Production retains its ordered honesty-review and approved-promotion boundary.
+
+This follow-up requires separate reviewed deployment and live verification;
+it has not changed the opening worker recorded above. Apply migration 684
+with current `bringyourctl` or `competitiondbinit` before new API readiness or
+worker startup. Deploy the main API built with the updated `sn` contract, then
+rebuild/deploy only the competition worker on sille. Refresh the monitor CLI
+separately to observe the migration-684 guard; it is not a scoring dependency.
+No config-updater rollout or scoring-baseline reset is needed.
+The pending follow-up OpenAPI file is version `2026.9.19`, SHA-256
+`63bd9640b900da35c5fa597d3c076a8ff47bd616208931cef686342e9807cd26`.
+This is separate from the historical shared-baseline release's OpenAPI digest;
+neither digest is silently substituted for the other.
+Historical finalized rounds, including epoch 4, are not rewritten. Source
+`807b473c927d1ae09a03276bb9758afb715fac9e`, evaluator image `b0c07cf4…`, source
+epoch zero, statistical thresholds, and the shared-baseline protocol remain
+unchanged. No evaluator rebuild, source-alias update, config rollover, round
+mutation, or worker restart is part of this implementation record.

@@ -134,15 +134,22 @@ func TestCompetitionLegacyFinalizedLeaderboardRetainsNormalizedOrdering(t *testi
 		fixture := newCompetitionRankingFixture(t, true)
 		fixture.completeJobs(t, false)
 		fixture.now = fixture.round.ClosesAt.Add(time.Second)
-		if _, err := fixture.store.FinalizeStagingRound(context.Background(), fixture.settings, fixture.round.Epoch); err != nil {
-			t.Fatal(err)
-		}
+		// Reproduce the old deployed finalizer before installing newer migrations.
+		server.Db(context.Background(), func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(context.Background(), `
+				UPDATE competition_round SET finalized_at = $2, winner_job_id = NULL,
+					admission_closed_at = closes_at WHERE round_id = $1
+			`, fixture.round.RoundId, fixture.now))
+		}, server.OptReadWrite())
 		var original []byte
 		for iteration := range 2 {
 			if iteration == 1 {
 				server.ApplyDbMigrations(context.Background())
 				fixture.settings.BaseSha = strings.Repeat("9", 40)
 				fixture.settings.EvaluatorImageDigest = "sha256:" + strings.Repeat("8", 64)
+				if retained, err := fixture.store.FinalizeStagingRound(context.Background(), fixture.settings, fixture.round.Epoch); err != nil || retained.WinnerJobId != nil {
+					t.Fatalf("historically finalized staging winner changed: %+v, %v", retained, err)
+				}
 			}
 			boards, err := fixture.store.Leaderboards(context.Background(), fixture.settings, true)
 			if err != nil || len(boards.Epochs) != 1 || len(boards.Epochs[0].Entries) != len(fixture.jobs) {

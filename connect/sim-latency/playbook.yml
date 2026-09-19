@@ -45,6 +45,7 @@ significance:
   no_winner_policy: carry_commits_and_threshold_forward_when_none_significant_or_all_rejected
 
 honesty_review:
+  scope: production_only
   authority: postgres_append_only_competition_candidate_review
   command: sim-latency epoch-review
   environment: main
@@ -57,6 +58,26 @@ honesty_review:
   approve_behavior: atomically_finalize_exact_candidate_as_winner
   exhaustion_behavior: atomically_finalize_without_winner
   public_before_finalization: false
+
+staging_winner_policy:
+  deployment: control_plane_follow_up_not_yet_deployed
+  deployment_order: current_migration_runner_apply_684_then_main_api_then_competition_worker
+  api_contract: updated_sn_api_competition_yml
+  pending_openapi_sha256: 63bd9640b900da35c5fa597d3c076a8ff47bd616208931cef686342e9807cd26
+  monitor_cli: refresh_separately_for_migration_684_guard
+  evaluator_rebuild: not_required
+  baseline_reset: not_required
+  config_updater_rollout: not_required
+  finalization: automatic_after_admission_close_and_fifo_drain
+  selection: highest_ranked_placeable_significant_candidate_passing_all_gates
+  ordering: raw_score_asc_submitted_at_job_id
+  no_eligible_candidate: null_winner
+  honesty_review: not_reviewed_no_review_rows_or_pause
+  honesty_or_safety_approval: false
+  promotion: never
+  source_epoch: 0
+  threshold: unchanged
+  historical_finalized_results: preserved
 
 evaluation_source:
   manifest: config/main/sim-latency.yml
@@ -210,7 +231,7 @@ staging_deployment:
   successful_shared_control_score: pending
   shared_baseline_count: 0
   shared_baseline_state: awaiting_first_submission
-  winner_policy: no_named_winner_after_close_and_drain
+  opening_worker_winner_policy: historical_null_winner_after_close_and_drain
   finalized_leaderboard: pending
   immutable_policy_matches_live_pin: true
   worker_service: urnetwork-sim-latency-staging-epoch-5.service
@@ -381,7 +402,8 @@ checklist:
   - id: staging_era
     status: epoch_5_open_worker_running_epoch_4_history_preserved_new_shared_control_score_pending
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh
-    lifecycle: fee_free_real_fifo_evaluation_against_source_epoch_zero_auto_finalize_no_winner_opt_in_staging_leaderboard
+    lifecycle: fee_free_source_epoch_zero_auto_finalize_eligible_named_winner_without_review_or_promotion
+    named_winner_rollout: pending_control_plane_deployment
   - id: six_epoch_immediate_fifo_lifecycle
     status: complete
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh

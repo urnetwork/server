@@ -16,10 +16,12 @@ import (
 func main() {
 	usage := `Secure one-epoch sim-latency competition evaluator worker.
 
-The process exits successfully after admission closes and the FIFO drains. A
-statistically significant candidate remains embargoed until the operator's
-honesty-review harness approves it. An external controller performs review,
-promotes an approved winner (or records no winner), and starts the next epoch.
+The process exits successfully after admission closes and the FIFO drains.
+Production significant candidates remain embargoed until the operator's
+honesty-review harness finalizes the epoch; the external controller promotes
+an approved winner (or records no winner) and starts the next epoch.
+Staging automatically finalizes with its highest-ranked eligible significant
+winner, or no winner. It never pauses for honesty review or promotes source.
 
 Usage:
   competitionworker [--worker_id=<id>]
