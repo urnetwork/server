@@ -121,11 +121,13 @@ func startContainedDarwinZombie(t *testing.T) int {
 	}
 }
 
-// Sleeping, stopped, and unknown states must not be mistaken for exited children.
+// Sleeping, stopped, exiting, and unknown states are not completed exits.
+// P_WEXIT can precede descriptor teardown, so only SZOMB proves completion.
 func TestContainedProcessGroupDarwinIgnoresOnlyZombies(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
 		state   int8
+		flags   int32
 		groupId int32
 		running bool
 	}{
@@ -133,12 +135,15 @@ func TestContainedProcessGroupDarwinIgnoresOnlyZombies(t *testing.T) {
 		{name: "runnable", state: 2, groupId: 100, running: true},
 		{name: "sleeping", state: 3, groupId: 100, running: true},
 		{name: "stopped", state: 4, groupId: 100, running: true},
+		{name: "exiting runnable", state: 2, flags: 0x00002000, groupId: 100, running: true},
+		{name: "exiting sleeping", state: 3, flags: 0x00002000, groupId: 100, running: true},
 		{name: "zombie", state: 5, groupId: 100},
+		{name: "exited zombie", state: 5, flags: 0x00002000, groupId: 100},
 		{name: "unknown", state: 0, groupId: 100, running: true},
 		{name: "other group", state: 2, groupId: 101},
 	} {
 		processes := []unix.KinfoProc{{
-			Proc:  unix.ExternProc{P_stat: testCase.state},
+			Proc:  unix.ExternProc{P_stat: testCase.state, P_flag: testCase.flags},
 			Eproc: unix.Eproc{Pgid: testCase.groupId},
 		}}
 		if running := containedDarwinProcessGroupHasLiveMembers(100, processes); running != testCase.running {

@@ -1822,26 +1822,44 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 
 // Reap responsibility can outlive termination; only live members keep the wait active.
 func terminateContainedProcessGroup(processGroupId int) error {
+	control := containedProcessGroupControl{
+		signal:  syscall.Kill,
+		running: containedProcessGroupRunning,
+	}
+	return control.terminate(processGroupId)
+}
+
+// Native signaling and inspection are separate observations of a changing
+// group. Keeping these operations paired permits exact exit-ordering tests
+// without altering the production clock, deadline, or polling interval.
+type containedProcessGroupControl struct {
+	signal  func(int, syscall.Signal) error
+	running func(int) (bool, error)
+}
+
+// The caller owns this group; every signal and inspection keeps that identity.
+// Darwin can refuse signals while an exiting member is not yet a zombie.
+// Keep joining that state within the original deadline, never treating a
+// signal result alone as proof that descriptors and descendants are gone.
+func (self containedProcessGroupControl) terminate(processGroupId int) error {
 	deadline := time.Now().Add(processTermGrace)
 	for {
-		if err := syscall.Kill(-processGroupId, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			if errors.Is(err, syscall.EPERM) {
-				// Darwin rejects signals to zombie-only groups. Forgive that
-				// only after independently proving no live members remain.
-				running, inspectErr := containedProcessGroupRunning(processGroupId)
-				if inspectErr == nil && !running {
-					return nil
-				}
-				err = errors.Join(err, inspectErr)
+		var signalErr error
+		if err := self.signal(-processGroupId, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			signalErr = fmt.Errorf("kill evaluator process group: %w", err)
+			if !errors.Is(err, syscall.EPERM) {
+				return signalErr
 			}
-			return fmt.Errorf("kill evaluator process group: %w", err)
 		}
-		running, err := containedProcessGroupRunning(processGroupId)
-		if err != nil || !running {
-			return err
+		running, inspectErr := self.running(processGroupId)
+		if inspectErr != nil {
+			return errors.Join(signalErr, inspectErr)
+		}
+		if !running {
+			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return errors.New("evaluator process group did not terminate")
+			return errors.Join(signalErr, errors.New("evaluator process group did not terminate"))
 		}
 		// An orphaned zombie may await the host reaper indefinitely. Only
 		// live group members, not kill(pid, 0) alone, keep this wait active.
