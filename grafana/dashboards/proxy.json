@@ -791,7 +791,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "platform transport count capacity",
-      "description": "Aggregate private carrier slots, pending H1 admission, and sampled same-device preemptions. Sustained slot-full pending and recent preemptions suggest the connect#211 loop; sample-time state does not prove the slot state at each preemption.",
+      "description": "Aggregate private carrier slots, pending H1 admission, and sampled same-device preemption rates. Sample-time state does not prove the slot state at each preemption, and legitimate handoffs can temporarily exceed steady-state caps. Use the handoff and provider-window panels below to distinguish known unsatisfied demand from handoff or unknown readiness; totals alone do not prove admission failure.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1132,6 +1132,164 @@
           "refId": "A",
           "expr": "max by (block, host, instance) (urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} / clamp_min(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}, 1))",
           "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "active platform handoff slot allowance",
+      "description": "Current temporary carrier-count allowance owned by active private-budget H1/H3 handoffs, aggregated per process. This is allowance, not acquired carriers or steady-state spare capacity; compare with the private transport budget and used counts. Missing telemetry remains no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 122
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_proxy_platform_transport_active_handoff_transports{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "active platform handoff byte allowance",
+      "description": "Current temporary byte allowance owned by active private-budget H1/H3 handoffs, aggregated per process. This is allowance, not tracked memory use or steady-state spare capacity; compare with acquired carrier bytes and the private byte budget. Missing telemetry remains no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 122
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_proxy_platform_transport_active_handoff_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "slot-full H1 admission context by process",
+      "description": "Instantaneous counts of DeviceLocals with pending H1 admission at a full carrier-count cap. Handoff state is sampled from the same private budget and includes pending or active handoffs. Handoff + unsatisfied is a subset with a known unsatisfied provider window; no handoff + unsatisfied requires that window without a handoff. Window unknown means readiness is unavailable, not failed or healthy. These counts overlap and are not a partition of the total; do not stack or add them. Samples are aggregated per process without device/customer identifiers; missing telemetry remains no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 130
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_proxy_platform_transport_slot_full_pending_h1_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "slot-full total {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "handoff pending/active {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "C",
+          "expr": "urnetwork_proxy_platform_transport_slot_full_pending_h1_handoff_unsatisfied_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "handoff + unsatisfied {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "D",
+          "expr": "urnetwork_proxy_platform_transport_slot_full_pending_h1_demand_unsatisfied_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "no handoff + unsatisfied {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "E",
+          "expr": "urnetwork_proxy_platform_transport_slot_full_pending_h1_window_unknown_devices{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+          "legendFormat": "window unknown {{host}} {{block}} {{instance}}"
         }
       ]
     }
