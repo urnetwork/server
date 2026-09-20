@@ -570,35 +570,6 @@ func waitForPlatformState(
 	}
 }
 
-// A route-count transition proves that a network-change worker retired the
-// old direct route after the caller's generation barrier. Every intervening
-// publication is retained, so a fast 2 -> 1 -> 2 cannot disappear.
-func waitForRouteCountChange(
-	ctx context.Context,
-	observer *clientconnect.TestingMultiRouteWriterRouteStateObserver,
-	barrier clientconnect.TestingMultiRouteWriterRouteState,
-	previousCount int,
-) (clientconnect.TestingMultiRouteWriterRouteState, error) {
-	waitCtx, waitCancel := context.WithTimeout(ctx, 90*time.Second)
-	defer waitCancel()
-	generation := barrier.Generation
-	for {
-		state, err := observer.WaitAfter(waitCtx, generation)
-		if err != nil {
-			return clientconnect.TestingMultiRouteWriterRouteState{}, fmt.Errorf(
-				"route count did not change from %d after generation %d: %w",
-				previousCount,
-				barrier.Generation,
-				err,
-			)
-		}
-		if state.ActiveRouteCount != previousCount {
-			return state, nil
-		}
-		generation = state.Generation
-	}
-}
-
 // A live direct-route fixture retains its platform fallback so path changes
 // can retire and rebuild Pion without replacing either transfer client.
 type liveP2pRoute struct {
@@ -608,6 +579,41 @@ type liveP2pRoute struct {
 	destination        *routeClient
 	writer             clientconnect.MultiRouteWriter
 	routeStateObserver *clientconnect.TestingMultiRouteWriterRouteStateObserver
+}
+
+// A path-change barrier includes both physical endpoint directions as well as
+// the destination writer; platform and P2P workers restart independently.
+type liveP2pRouteState struct {
+	writer      clientconnect.TestingMultiRouteWriterRouteState
+	source      p2pRouteStateTraceSnapshot
+	destination p2pRouteStateTraceSnapshot
+}
+
+// The fixture's single setup goroutine owns both directional trace consumers.
+func (self *liveP2pRoute) routeState() liveP2pRouteState {
+	return liveP2pRouteState{
+		writer:      self.routeStateObserver.Snapshot(),
+		source:      self.source.routeStateTrace.Snapshot(),
+		destination: self.destination.routeStateTrace.Snapshot(),
+	}
+}
+
+// Both endpoints must replace their physical directions, then the current
+// destination writer must expose the end-to-end-ready route. Historical
+// platform count changes prove neither P2P retirement nor current readiness.
+func (self *liveP2pRoute) waitForRebuiltDirectRoute(
+	ctx context.Context,
+	barrier liveP2pRouteState,
+) error {
+	waitCtx, waitCancel := context.WithTimeout(ctx, 90*time.Second)
+	defer waitCancel()
+	if _, err := self.source.routeStateTrace.WaitForRebuiltRoutes(waitCtx, barrier.source); err != nil {
+		return fmt.Errorf("source direct route: %w", err)
+	}
+	if _, err := self.destination.routeStateTrace.WaitForRebuiltRoutes(waitCtx, barrier.destination); err != nil {
+		return fmt.Errorf("destination direct route: %w", err)
+	}
+	return waitForRouteCount(waitCtx, self.routeStateObserver, 2)
 }
 
 // Construction completes signaling and promotion but leaves both carriers up.
@@ -653,15 +659,7 @@ func newLiveP2pRoute(t testing.TB, environment *routeEnvironment) *liveP2pRoute 
 		network.close()
 		t.Fatal(err)
 	}
-	if err := waitForRouteCount(environment.ctx, routeStateObserver, 2); err != nil {
-		routeStateObserver.Close()
-		source.client.RouteManager().CloseMultiRouteWriter(writer)
-		network.close()
-		t.Fatalf("wait for live P2P promotion: %v", err)
-	}
-	source.client.ContractManager().AddNoContractPeer(clientconnect.Id(destination.clientId))
-	destination.client.ContractManager().AddNoContractPeer(clientconnect.Id(source.clientId))
-	return &liveP2pRoute{
+	fixture := &liveP2pRoute{
 		environment:        environment,
 		network:            network,
 		source:             source,
@@ -669,6 +667,15 @@ func newLiveP2pRoute(t testing.TB, environment *routeEnvironment) *liveP2pRoute 
 		writer:             writer,
 		routeStateObserver: routeStateObserver,
 	}
+	if err := fixture.waitForRebuiltDirectRoute(environment.ctx, liveP2pRouteState{}); err != nil {
+		routeStateObserver.Close()
+		source.client.RouteManager().CloseMultiRouteWriter(writer)
+		network.close()
+		t.Fatalf("wait for live P2P promotion: %v", err)
+	}
+	source.client.ContractManager().AddNoContractPeer(clientconnect.Id(destination.clientId))
+	destination.client.ContractManager().AddNoContractPeer(clientconnect.Id(source.clientId))
+	return fixture
 }
 
 // Route-writer ownership ends before the Pion router and clients are closed.
@@ -914,13 +921,12 @@ func TestP2pNetworkChangeFallbackAndRestore(t *testing.T) {
 			)
 		}
 		clientconnect.NetworkChanged()
-		if _, err := waitForRouteCountAfter(
-			ctx,
-			fixture.routeStateObserver,
-			fallbackBarrier,
-			1,
-		); err != nil {
-			t.Fatal(err)
+		withdrawCtx, withdrawCancel := context.WithTimeout(ctx, 90*time.Second)
+		defer withdrawCancel()
+		for _, client := range []*routeClient{fixture.source, fixture.destination} {
+			if _, err := client.routeStateTrace.WaitForNoRoutes(withdrawCtx); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if !waitForPlatformState(ctx, fixture.source.transport, true) ||
 			!waitForPlatformState(ctx, fixture.destination.transport, true) {
@@ -939,20 +945,15 @@ func TestP2pNetworkChangeFallbackAndRestore(t *testing.T) {
 			t.Fatalf("restore direct P2P: %v", err)
 		}
 		restoreTime := time.Now()
-		restoreBarrier := fixture.routeStateObserver.Snapshot()
-		if restoreBarrier.ActiveRouteCount != 1 {
+		restoreBarrier := fixture.routeState()
+		if restoreBarrier.writer.ActiveRouteCount != 1 {
 			t.Fatalf(
 				"network-change restoration started from route state=%+v, want platform only",
 				restoreBarrier,
 			)
 		}
 		clientconnect.NetworkChanged()
-		if _, err := waitForRouteCountAfter(
-			ctx,
-			fixture.routeStateObserver,
-			restoreBarrier,
-			2,
-		); err != nil {
+		if err := fixture.waitForRebuiltDirectRoute(ctx, restoreBarrier); err != nil {
 			t.Fatal(err)
 		}
 		restoreDuration := time.Since(restoreTime)
@@ -996,29 +997,15 @@ func TestP2pAddressMigrationRebuildsDirectRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 		migrationTime := time.Now()
-		migrationBarrier := fixture.routeStateObserver.Snapshot()
-		if migrationBarrier.ActiveRouteCount != 2 {
+		migrationBarrier := fixture.routeState()
+		if migrationBarrier.writer.ActiveRouteCount != 2 {
 			t.Fatalf(
 				"address migration started from route state=%+v, want two live routes",
 				migrationBarrier,
 			)
 		}
 		clientconnect.NetworkChanged()
-		withdrawnState, err := waitForRouteCountChange(
-			ctx,
-			fixture.routeStateObserver,
-			migrationBarrier,
-			2,
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := waitForRouteCountAfter(
-			ctx,
-			fixture.routeStateObserver,
-			withdrawnState,
-			2,
-		); err != nil {
+		if err := fixture.waitForRebuiltDirectRoute(ctx, migrationBarrier); err != nil {
 			t.Fatalf("wait for migrated direct P2P: %v", err)
 		}
 		migrationDuration := time.Since(migrationTime)

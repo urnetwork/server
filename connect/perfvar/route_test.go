@@ -1029,38 +1029,45 @@ func waitForP2pRoute(
 	}
 }
 
-// Route count distinguishes completed P2P promotion from exchange delivery.
-// The observer records every publication, so readiness does not depend on a
-// scheduler tick happening while the desired state remains visible.
+// Current-state readiness and historical transition proofs share the exact
+// production observer; tests may interpose a publication at the wait boundary.
+type routeStateObserver interface {
+	Snapshot() clientconnect.TestingMultiRouteWriterRouteState
+	WaitAfter(context.Context, uint64) (clientconnect.TestingMultiRouteWriterRouteState, error)
+	WaitForActiveRouteCountAfter(context.Context, uint64, int) (clientconnect.TestingMultiRouteWriterRouteState, error)
+}
+
+// Readiness requires the current route count. Exact publications wake this
+// waiter, but a historical promotion already withdrawn cannot admit traffic.
 func waitForRouteCount(
 	ctx context.Context,
-	observer *clientconnect.TestingMultiRouteWriterRouteStateObserver,
+	observer routeStateObserver,
 	routeCount int,
 ) error {
 	waitCtx, waitCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer waitCancel()
-	state := observer.Snapshot()
-	if state.ActiveRouteCount == routeCount {
-		return nil
+	for {
+		state := observer.Snapshot()
+		if state.ActiveRouteCount == routeCount {
+			return nil
+		}
+		if _, err := observer.WaitAfter(waitCtx, state.Generation); err != nil {
+			return fmt.Errorf(
+				"route count=%d generation=%d, expected=%d: %w",
+				state.ActiveRouteCount,
+				state.Generation,
+				routeCount,
+				err,
+			)
+		}
 	}
-	state, err := observer.WaitForActiveRouteCountAfter(waitCtx, state.Generation, routeCount)
-	if err != nil {
-		return fmt.Errorf(
-			"route count=%d generation=%d, expected=%d: %w",
-			observer.Snapshot().ActiveRouteCount,
-			observer.Snapshot().Generation,
-			routeCount,
-			err,
-		)
-	}
-	return nil
 }
 
 // A caller-captured generation makes a post-action route assertion immune to
 // both a stale pre-action match and a fast transition that has since moved on.
 func waitForRouteCountAfter(
 	ctx context.Context,
-	observer *clientconnect.TestingMultiRouteWriterRouteStateObserver,
+	observer routeStateObserver,
 	barrier clientconnect.TestingMultiRouteWriterRouteState,
 	routeCount int,
 ) (clientconnect.TestingMultiRouteWriterRouteState, error) {
