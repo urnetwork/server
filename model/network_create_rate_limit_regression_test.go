@@ -1,3 +1,4 @@
+// Pins account-creation budgets independently of model and transport error text.
 package model
 
 import (
@@ -290,8 +291,11 @@ func TestSeedphraseSignupRefusedForTermsDoesNotConsumeBudget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("terms-not-accepted signup %d returned a transport error: %v", i+1, err)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
-				t.Fatalf("terms-not-accepted signup %d returned %+v, want the AgreeToTerms body error", i+1, result)
+			if result == nil || result.Error == nil {
+				t.Fatalf("terms-not-accepted signup %d returned %+v, want a terms refusal", i+1, result)
+			}
+			if result.Error.Message != AgreeToTerms || result.Error.Error() != "400 "+AgreeToTerms {
+				t.Fatalf("terms-not-accepted signup %d message=%q transport=%q, want plain terms text and its 400 transport", i+1, result.Error.Message, result.Error.Error())
 			}
 		}
 
@@ -356,8 +360,11 @@ func TestEmailSignupValidationMistakesDoNotConsumeTheAuthBudget(t *testing.T) {
 					i+1, err,
 				)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
-				t.Fatalf("terms mistake %d returned %+v, want the AgreeToTerms body error", i+1, result)
+			if result == nil || result.Error == nil {
+				t.Fatalf("terms mistake %d returned %+v, want a terms refusal", i+1, result)
+			}
+			if result.Error.Message != AgreeToTerms || result.Error.Error() != "400 "+AgreeToTerms {
+				t.Fatalf("terms mistake %d message=%q transport=%q, want plain terms text and its 400 transport", i+1, result.Error.Message, result.Error.Error())
 			}
 		}
 
@@ -672,8 +679,11 @@ func TestAbandonedSsoSignupsDoNotSpendTheAddressWideAuthBudget(t *testing.T) {
 					i+1, err,
 				)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
-				t.Fatalf("sso signup %d returned %+v, want the AgreeToTerms body error", i+1, result)
+			if result == nil || result.Error == nil {
+				t.Fatalf("sso signup %d returned %+v, want a terms refusal", i+1, result)
+			}
+			if result.Error.Message != AgreeToTerms || result.Error.Error() != "400 "+AgreeToTerms {
+				t.Fatalf("sso signup %d message=%q transport=%q, want plain terms text and its 400 transport", i+1, result.Error.Message, result.Error.Error())
 			}
 		}
 
