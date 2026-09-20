@@ -270,6 +270,7 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		`archive="redis"`,
 		`archive="github-urnetwork"`,
 		`archive="github-urfoundation"`,
+		`archive="router-config"`,
 	} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("backup archive dashboard is missing %q", required)
@@ -286,10 +287,11 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 	}
 
 	archives := map[int]string{
-		5: `archive="pg"`,
-		6: `archive="redis"`,
-		7: `archive="github-urnetwork"`,
-		8: `archive="github-urfoundation"`,
+		5:  `archive="pg"`,
+		6:  `archive="redis"`,
+		7:  `archive="github-urnetwork"`,
+		8:  `archive="github-urfoundation"`,
+		17: `archive="router-config"`,
 	}
 	for panelID, archiveSelector := range archives {
 		panel := dashboardPanelById(dashboard, panelID)
@@ -314,7 +316,7 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		}
 	}
 
-	for _, panelID := range []int{9, 10, 11, 12} {
+	for _, panelID := range []int{9, 10, 11, 12, 18} {
 		panel := dashboardPanelById(dashboard, panelID)
 		if panel == nil || len(panel.Targets) != 1 ||
 			!strings.Contains(panel.Targets[0].Expr, "topk(1") ||
@@ -351,7 +353,7 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 	}
 	for _, required := range []string{
 		"urnetwork_backup_archive_storage_bytes",
-		`archive=~"pg|redis|code"`,
+		`archive=~"pg|redis|code|router-config"`,
 		"urnetwork_backup_archive_volume_free_bytes",
 	} {
 		if !strings.Contains(storage.Targets[0].Expr+"\n"+storage.Targets[1].Expr, required) {

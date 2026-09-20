@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-backup-archives",
   "title": "urnetwork / backup archives",
-  "description": "Planetoid archive health and storage for PostgreSQL, Redis, and dated urnetwork/urfoundation GitHub organization tarballs. A missing archive signal or newest stored archive older than five days is an error.",
+  "description": "Planetoid archive health and storage for PostgreSQL, Redis, dated urnetwork/urfoundation GitHub organization tarballs and the routers' saved configuration. A missing archive signal or newest stored archive older than five days is an error.",
   "tags": ["urnetwork", "backups", "planetoid"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -22,7 +22,7 @@
       "id": 2,
       "type": "stat",
       "title": "overall archive status",
-      "description": "ERROR when any of the four expected archive signals is missing or its newest complete archive is more than 5 days (432000 seconds) old.",
+      "description": "ERROR when any of the five expected archive signals is missing or its newest complete archive is more than 5 days (432000 seconds) old.",
       "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {
@@ -39,7 +39,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max(max((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) > bool 432000) + (count(max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) < bool 4), 1) or on() vector(1)",
+          "expr": "clamp_max(max((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) > bool 432000) + (count(max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) < bool 5), 1) or on() vector(1)",
           "instant": true,
           "range": false,
           "datasource": {"type": "prometheus", "uid": "warp-mimir"}
@@ -67,7 +67,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (archive) (urnetwork_backup_archive_in_progress{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})",
+          "expr": "max by (archive) (urnetwork_backup_archive_in_progress{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})",
           "legendFormat": "{{archive}}",
           "instant": true,
           "range": false,
@@ -198,11 +198,33 @@
       "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urfoundation\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
+      "id": 17,
+      "type": "stat",
+      "title": "router config freshness",
+      "description": "Fail-closed: missing telemetry and archives older than five days are ERROR.",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"router-config\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "last-known router config archive (historical)",
+      "description": "Newest complete router configuration generation observed in bounded 30-day history. This value may be stale and is not current-storage proof; use the fail-closed freshness status to the left for health.",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [{"refId": "A", "expr": "topk(1, max_over_time(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"router-config\"}[30d])) * 1000", "legendFormat": "{{generation}} (last known; may be stale)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
       "id": 13,
       "type": "timeseries",
       "title": "archive age",
       "description": "Age of each newest complete archive in days. Orange begins at 4 days; red is the 5-day alert boundary.",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {
         "defaults": {
@@ -218,7 +240,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) / 86400",
+          "expr": "(time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) / 86400",
           "legendFormat": "{{archive}}",
           "datasource": {"type": "prometheus", "uid": "warp-mimir"}
         }
@@ -229,15 +251,15 @@
       "type": "row",
       "title": "archive volume storage",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
       "panels": []
     },
     {
       "id": 15,
       "type": "bargauge",
       "title": "archive volume storage breakdown",
-      "description": "Physical bytes used by each archive class plus free bytes remaining on the archive volume. PG and Redis hard-linked retention copies are counted once; code includes dated tarballs and the persistent Git mirror cache.",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 26},
+      "description": "Physical bytes used by each archive class plus free bytes remaining on the archive volume. PG, Redis and router-config hard-linked retention copies are counted once; code includes dated tarballs and the persistent Git mirror cache.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {
         "defaults": {
@@ -263,7 +285,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (archive) (urnetwork_backup_archive_storage_bytes{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|code\"})",
+          "expr": "max by (archive) (urnetwork_backup_archive_storage_bytes{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|code|router-config\"})",
           "legendFormat": "{{archive}}",
           "instant": true,
           "range": false,
