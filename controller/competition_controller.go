@@ -1785,24 +1785,6 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	terminateGroup := func() error {
-		deadline := time.Now().Add(processTermGrace)
-		for {
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				return fmt.Errorf("kill evaluator process group: %w", err)
-			}
-			running, err := containedProcessGroupRunning(cmd.Process.Pid)
-			if err != nil || !running {
-				return err
-			}
-			if !time.Now().Before(deadline) {
-				return errors.New("evaluator process group did not terminate")
-			}
-			// An orphaned zombie may await the host reaper indefinitely. Only
-			// live group members, not kill(pid, 0) alone, keep this wait active.
-			<-time.After(10 * time.Millisecond)
-		}
-	}
 	var waitErr error
 	select {
 	case waitErr = <-done:
@@ -1817,7 +1799,7 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 		}
 		timer.Stop()
 		// A cooperative leader is not proof that its whole group stopped.
-		terminateErr := terminateGroup()
+		terminateErr := terminateContainedProcessGroup(cmd.Process.Pid)
 		if !leaderWaited {
 			waitErr = <-done
 		}
@@ -1825,7 +1807,7 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 	}
 
 	if running, err := containedProcessGroupRunning(cmd.Process.Pid); err != nil || running {
-		terminateErr := terminateGroup()
+		terminateErr := terminateContainedProcessGroup(cmd.Process.Pid)
 		return cmd.ProcessState.ExitCode(), errors.Join(errors.New("evaluator left a descendant process running"), err, terminateErr)
 	}
 	if waitErr != nil {
@@ -1836,6 +1818,35 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 		return -1, waitErr
 	}
 	return 0, nil
+}
+
+// Reap responsibility can outlive termination; only live members keep the wait active.
+func terminateContainedProcessGroup(processGroupId int) error {
+	deadline := time.Now().Add(processTermGrace)
+	for {
+		if err := syscall.Kill(-processGroupId, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			if errors.Is(err, syscall.EPERM) {
+				// Darwin rejects signals to zombie-only groups. Forgive that
+				// only after independently proving no live members remain.
+				running, inspectErr := containedProcessGroupRunning(processGroupId)
+				if inspectErr == nil && !running {
+					return nil
+				}
+				err = errors.Join(err, inspectErr)
+			}
+			return fmt.Errorf("kill evaluator process group: %w", err)
+		}
+		running, err := containedProcessGroupRunning(processGroupId)
+		if err != nil || !running {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return errors.New("evaluator process group did not terminate")
+		}
+		// An orphaned zombie may await the host reaper indefinitely. Only
+		// live group members, not kill(pid, 0) alone, keep this wait active.
+		<-time.After(10 * time.Millisecond)
+	}
 }
 
 func exitStatus(err error) int {
