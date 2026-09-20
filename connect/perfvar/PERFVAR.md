@@ -18,6 +18,13 @@ recovery, live profile changes, direct-to-platform fallback and restoration,
 address migration, one/three/five/nine-hop P2P streams, and two-edge exchange
 routes with an independently conditioned internal link.
 
+An opt-in rolling-upgrade H1 sweep also compares a current, delivery-sized app
+with a current provider and with a legacy fixed-window provider. The legacy
+arm omits receive-window, ACK-compression, and receiver-delay feedback while
+the app keeps bounded active window sizing. This is a compatibility-performance
+guard, not a claim that one source tree reproduces every historical provider
+binary; see `RUN-MAIN.md` for its paired command and adjudication rule.
+
 Measurements and conclusions belong in `MEASUREMENTS.md`. This document defines
 what the harness actually measures, how to run it, and where its interpretation
 must stop.

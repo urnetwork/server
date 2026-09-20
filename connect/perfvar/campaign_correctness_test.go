@@ -6,6 +6,7 @@ package perfvar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -21,7 +22,57 @@ import (
 const (
 	perfvarMobileTcpWindowSweepEnvironment   = "CONNECT_PERFVAR_MOBILE_TCP_WINDOW_SWEEP"
 	perfvarMobilePacketGroupSweepEnvironment = "CONNECT_PERFVAR_MOBILE_PACKET_GROUP_SWEEP"
+	// This is deliberately separate from the generic matrix: it compares a
+	// current app to an older provider, rather than comparing two current
+	// endpoints. New apps encounter this during a rolling provider upgrade.
+	perfvarLegacyProviderSweepEnvironment = "CONNECT_PERFVAR_LEGACY_PROVIDER_SWEEP"
+	perfvarLegacyProviderWindowBudget     = 4 * 1024 * 1024
 )
+
+// configurePerfvarCurrentWindowEndpoint makes the current delivery-sized
+// policy materially active without touching process-global memory policy. The
+// compatibility fixture owns each endpoint and therefore owns these pools.
+func configurePerfvarCurrentWindowEndpoint(settings *clientconnect.ClientSettings) {
+	settings.SendBufferSettings.ResendQueueBudget = clientconnect.NewTransferMemoryBudget(perfvarLegacyProviderWindowBudget)
+	settings.SendBufferSettings.WindowSizing = clientconnect.WindowSizingFromDelivery
+	settings.SendBufferSettings.ApplyWindowSizing()
+	settings.ReceiveBufferSettings.ReceiveQueueBudget = clientconnect.NewTransferMemoryBudget(perfvarLegacyProviderWindowBudget)
+	settings.ReceiveBufferSettings.ReceiveQueueMaxByteCount = perfvarLegacyProviderWindowBudget
+	settings.ReceiveBufferSettings.WindowSizing = clientconnect.WindowSizingFromDelivery
+	settings.ReceiveBufferSettings.ApplyWindowSizing()
+}
+
+// configurePerfvarLegacyProvider leaves the current app untouched but makes
+// the provider wire-compatible with the pre-resize/pre-pacing-feedback
+// generation. ApplyWindowSizing(Constant) does not restore an already grown
+// receive hold, so reset that explicit resource as well.
+func configurePerfvarLegacyProvider(settings *clientconnect.ClientSettings) {
+	configurePerfvarCurrentWindowEndpoint(settings)
+	settings.SendBufferSettings.WindowSizing = clientconnect.WindowSizingConstant
+	settings.SendBufferSettings.ApplyWindowSizing()
+	settings.ReceiveBufferSettings.WindowSizing = clientconnect.WindowSizingConstant
+	settings.ReceiveBufferSettings.ApplyWindowSizing()
+	settings.ReceiveBufferSettings.ReceiveQueueMaxByteCount = clientconnect.MemoryScaledByteCount(
+		2*1024*1024+512*1024,
+		320*1024,
+	)
+	settings.ReceiveBufferSettings.ReceiveQueueBudget = nil
+	settings.ReceiveBufferSettings.SuppressAckTimingAdvertisement = true
+}
+
+// Resolve the campaign's real profile before constructing any TUN. An
+// unchecked missing-map lookup silently creates a zero-MTU server edge and
+// turns a profile typo or incomplete catalog into repeated platform timeouts.
+func perfvarLegacyProviderProfile(seed int64, name string) (networkProfile, error) {
+	profile, ok := allNetworkProfiles(seed)[name]
+	if !ok {
+		return networkProfile{}, fmt.Errorf("legacy-provider sweep profile %q is unknown", name)
+	}
+	if profile.Name != name || carrierTunMtu(profile) <= 0 {
+		return networkProfile{}, fmt.Errorf("legacy-provider sweep profile %q has invalid identity or carrier MTU", name)
+	}
+	return profile, nil
+}
 
 // One opt-in axis record isolates the TCP window from every other mobile
 // surrogate resource and route input.
@@ -48,6 +99,76 @@ type perfvarMobilePacketGroupObservation struct {
 	BridgeBatches        fullTunBridgeBatchObservation `json:"bridge_batches"`
 	CarrierWireByteCount uint64                        `json:"carrier_wire_byte_count"`
 	CarrierDuration      time.Duration                 `json:"carrier_duration_nanoseconds"`
+}
+
+// One record is a complete current-app H1 upload or download against either a
+// current provider or a provider that cannot resize its transfer window and
+// does not provide paced-transfer/window feedback. It intentionally names the
+// provider capability state so ledger comparison cannot mix the two arms.
+type perfvarLegacyProviderObservation struct {
+	RunIndex                        int                           `json:"run_index"`
+	CompatibilityCell               string                        `json:"compatibility_cell"`
+	Seed                            int64                         `json:"seed"`
+	Direction                       perfvarDirection              `json:"direction"`
+	Route                           fullTunRoute                  `json:"route"`
+	Profile                         string                        `json:"profile"`
+	Resource                        perfvarResource               `json:"resource"`
+	PayloadByteCount                int64                         `json:"payload_byte_count"`
+	DeviceSendBudgetByteCount       int                           `json:"device_send_budget_byte_count"`
+	DeviceReceiveBudgetByteCount    int                           `json:"device_receive_budget_byte_count"`
+	ProviderSendBudgetByteCount     int                           `json:"provider_send_budget_byte_count"`
+	ProviderReceiveBudgetByteCount  int                           `json:"provider_receive_budget_byte_count"`
+	ProviderReceiveHoldByteCount    clientconnect.ByteCount       `json:"provider_receive_hold_byte_count"`
+	ProviderGeneration              string                        `json:"provider_generation"`
+	ProviderAdvertisesReceiveWindow bool                          `json:"provider_advertises_receive_window"`
+	ProviderAdvertisesAckTiming     bool                          `json:"provider_advertises_ack_timing"`
+	ProviderWindowSizing            string                        `json:"provider_window_sizing"`
+	UsefulByteCount                 int64                         `json:"useful_byte_count"`
+	Duration                        time.Duration                 `json:"duration_nanoseconds"`
+	GoodputGigabits                 float64                       `json:"goodput_gigabits_per_second"`
+	BridgeBatches                   fullTunBridgeBatchObservation `json:"bridge_batches"`
+	CarrierWireByteCount            uint64                        `json:"carrier_wire_byte_count"`
+	CarrierDuration                 time.Duration                 `json:"carrier_duration_nanoseconds"`
+	Carrier                         perfvarCarrierObservation     `json:"carrier"`
+	SenderWindowByteCount           clientconnect.ByteCount       `json:"sender_window_byte_count"`
+	SenderInitialWindowByteCount    clientconnect.ByteCount       `json:"sender_initial_window_byte_count"`
+	SenderWindowSized               bool                          `json:"sender_window_sized"`
+	SenderWindowServiceSized        bool                          `json:"sender_window_service_sized"`
+	SenderPacingByteRate            clientconnect.ByteCount       `json:"sender_pacing_byte_rate"`
+	Correct                         bool                          `json:"correct"`
+	FailureReason                   string                        `json:"failure_reason,omitempty"`
+}
+
+type perfvarLegacyProviderAggregate struct {
+	ExpectedRunCount int `json:"expected_run_count"`
+	ObservedRunCount int `json:"observed_run_count"`
+	CorrectRunCount  int `json:"correct_run_count"`
+}
+
+// The compatibility arm must change the provider only. This catches a future
+// default change that would turn the sweep into two fixed-window endpoints or
+// leave modern feedback accidentally enabled on the supposed old provider.
+func TestPerfvarLegacyProviderCompatibilitySettings(t *testing.T) {
+	current := clientconnect.DefaultClientSettings()
+	configurePerfvarCurrentWindowEndpoint(current)
+	if !current.SendBufferSettings.WindowSizingActive() ||
+		!current.ReceiveBufferSettings.AdvertiseReceiveWindow ||
+		current.ReceiveBufferSettings.SuppressAckTimingAdvertisement {
+		t.Fatalf("current endpoint did not retain active resize/pacing settings")
+	}
+	legacy := clientconnect.DefaultClientSettings()
+	configurePerfvarLegacyProvider(legacy)
+	if legacy.SendBufferSettings.WindowSizing != clientconnect.WindowSizingConstant ||
+		legacy.SendBufferSettings.WindowSizingActive() ||
+		legacy.ReceiveBufferSettings.WindowSizing != clientconnect.WindowSizingConstant ||
+		legacy.ReceiveBufferSettings.AdvertiseReceiveWindow ||
+		!legacy.ReceiveBufferSettings.SuppressAckTimingAdvertisement ||
+		legacy.ReceiveBufferSettings.ReceiveQueueBudget != nil {
+		t.Fatalf("legacy provider retained current resize/pacing capability")
+	}
+	if want := clientconnect.MemoryScaledByteCount(2*1024*1024+512*1024, 320*1024); legacy.ReceiveBufferSettings.ReceiveQueueMaxByteCount != want {
+		t.Fatalf("legacy provider receive hold=%d, want shipping fixed hold=%d", legacy.ReceiveBufferSettings.ReceiveQueueMaxByteCount, want)
+	}
 }
 
 // One owned fixture gives every route/profile case a hard lifetime and an
@@ -955,6 +1076,187 @@ func TestPerfvarMobilePacketGroupSweep(t *testing.T) {
 					t.Logf("[perfvar-mobile-packet-group] %s", encoded)
 				}
 			}
+		}
+	})
+}
+
+// The first released app version can meet a provider that predates delivery
+// window resizing and the pacing policy which depends on its receiver
+// feedback.  Keep that case separate from a "feature off" experiment: the
+// device remains a current app in both arms and only its provider peer is
+// made legacy.  Five alternating observations per direction are intentionally
+// emitted for the ledger to apply the normal paired regression analysis; this
+// test does not make a host-noisy duration threshold look deterministic.
+func TestPerfvarLegacyProviderCompatibilitySweep(t *testing.T) {
+	if os.Getenv(perfvarLegacyProviderSweepEnvironment) != "1" {
+		return
+	}
+	if perfvarRaceEnabled {
+		t.Fatal("legacy-provider performance measurements must not run with the race detector")
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		const expectedRunCount = 32
+		var attemptErrors []error
+		aggregate := perfvarLegacyProviderAggregate{ExpectedRunCount: expectedRunCount}
+		cases := []struct {
+			name, profileName string
+			payloadByteCount  int64
+			runCount          int
+			requireGrowth     bool
+		}{
+			{name: "cell-legacy-feedback", profileName: cellEdge5mDown1mUpName, payloadByteCount: 1024 * 1024, runCount: 5},
+			{name: "high-bdp-window-growth", profileName: "single-region-1000ms-rtt", payloadByteCount: 8 * 1024 * 1024, runCount: 3, requireGrowth: true},
+		}
+		for _, compatibilityCase := range cases {
+			profile, err := perfvarLegacyProviderProfile(20260919, compatibilityCase.profileName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerProfile, err := perfvarLegacyProviderProfile(20260919, "clean-lan")
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerProfile.SourceNote = "synthetic colocated provider for legacy compatibility comparison"
+			for _, direction := range []perfvarDirection{perfvarDirectionUpload, perfvarDirectionDownload} {
+				for runIndex := 1; runIndex <= compatibilityCase.runCount; runIndex += 1 {
+					legacyFirst := runIndex%2 == 0
+					for _, legacyProvider := range []bool{legacyFirst, !legacyFirst} {
+						resources := mobileTunResourceProfile()
+						var providerGeneration string
+						if legacyProvider {
+							providerGeneration = "legacy-fixed-window"
+						} else {
+							providerGeneration = "current"
+						}
+						record := perfvarLegacyProviderObservation{
+							RunIndex:                        runIndex,
+							Seed:                            20260919,
+							Direction:                       direction,
+							Route:                           fullTunRouteExchangeH1,
+							CompatibilityCell:               compatibilityCase.name,
+							Profile:                         compatibilityCase.profileName,
+							Resource:                        perfvarResourceMobile,
+							PayloadByteCount:                compatibilityCase.payloadByteCount,
+							DeviceSendBudgetByteCount:       perfvarLegacyProviderWindowBudget,
+							DeviceReceiveBudgetByteCount:    perfvarLegacyProviderWindowBudget,
+							ProviderSendBudgetByteCount:     map[bool]int{true: 0, false: perfvarLegacyProviderWindowBudget}[legacyProvider],
+							ProviderReceiveBudgetByteCount:  map[bool]int{true: 0, false: perfvarLegacyProviderWindowBudget}[legacyProvider],
+							ProviderReceiveHoldByteCount:    map[bool]clientconnect.ByteCount{true: clientconnect.MemoryScaledByteCount(2*1024*1024+512*1024, 320*1024), false: perfvarLegacyProviderWindowBudget}[legacyProvider],
+							ProviderGeneration:              providerGeneration,
+							ProviderAdvertisesReceiveWindow: !legacyProvider,
+							ProviderAdvertisesAckTiming:     !legacyProvider,
+							ProviderWindowSizing:            map[bool]string{true: "constant", false: "delivery"}[legacyProvider],
+						}
+						fixture, err := newPerfvarCorrectnessFixtureWithHooks(
+							t,
+							fullTunRouteExchangeH1,
+							profile,
+							profile,
+							providerProfile,
+							resources,
+							5*time.Minute,
+							&fullTunConstructionTestHooks{
+								configureProviderClientSettings: func(settings *clientconnect.ClientSettings) {
+									if legacyProvider {
+										configurePerfvarLegacyProvider(settings)
+									} else {
+										configurePerfvarCurrentWindowEndpoint(settings)
+									}
+								},
+								configureDeviceClientSettings: configurePerfvarCurrentWindowEndpoint,
+							},
+						)
+						if err != nil {
+							record.FailureReason = err.Error()
+							attemptErrors = append(attemptErrors, fmt.Errorf("construct %s run=%d legacy=%t: %w", direction, runIndex, legacyProvider, err))
+						} else {
+							measuredDeviceClient := fixture.path.deviceClient.Load()
+							if measuredDeviceClient == nil {
+								record.FailureReason = "measurement has no generated device client"
+								attemptErrors = append(attemptErrors, fmt.Errorf("%s %s run=%d has no generated device client", compatibilityCase.name, direction, runIndex))
+								fixture.close()
+								encoded, marshalErr := json.Marshal(record)
+								if marshalErr != nil {
+									t.Fatal(marshalErr)
+								}
+								t.Logf("[perfvar-legacy-provider] %s", encoded)
+								aggregate.ObservedRunCount++
+								continue
+							}
+							observation, measureErr := fixture.measure(
+								perfvarWorkloadTCP,
+								direction,
+								func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
+									if direction == perfvarDirectionUpload {
+										return measureFullTunUpload(ctx, path, compatibilityCase.payloadByteCount)
+									}
+									return measureFullTunDownload(ctx, path, compatibilityCase.payloadByteCount)
+								},
+							)
+							if source := fixture.path.providerClient; source != nil {
+								deviceClient := fixture.path.deviceClient.Load()
+								if deviceClient != measuredDeviceClient {
+									measureErr = fmt.Errorf("generated device client changed during measurement")
+								}
+								if direction == perfvarDirectionUpload {
+									source = measuredDeviceClient
+								}
+								if source != nil {
+									destination := measuredDeviceClient.ClientId()
+									if direction == perfvarDirectionUpload {
+										destination = fixture.path.providerClientId
+									}
+									window := source.DestinationSendStats(destination).SendWindow
+									record.SenderWindowByteCount, record.SenderInitialWindowByteCount = window.Window, window.Initial
+									record.SenderWindowSized, record.SenderWindowServiceSized, record.SenderPacingByteRate = window.Sized, window.ServiceSized, window.PacingByteRate
+								}
+							}
+							fixture.close()
+							record.UsefulByteCount, record.Duration, record.GoodputGigabits = observation.Result.UsefulByteCount, observation.Result.Duration, observation.Result.GoodputGigabits
+							record.BridgeBatches, record.CarrierWireByteCount, record.CarrierDuration = observation.Carrier.BridgeBatches, observation.Carrier.WireByteCount, observation.Carrier.Duration
+							record.Carrier = observation.Carrier
+							if measureErr == nil {
+								if invalidReason := perfvarHarnessDropReason(perfvarScenario{}, workloadResult{}, observation.Carrier); invalidReason != "" {
+									measureErr = fmt.Errorf("carrier validity: %s", invalidReason)
+								}
+							}
+							if measureErr != nil {
+								record.FailureReason = measureErr.Error()
+								attemptErrors = append(attemptErrors, fmt.Errorf("measure %s run=%d legacy=%t: %w", direction, runIndex, legacyProvider, measureErr))
+							} else {
+								record.Correct = true
+								if compatibilityCase.requireGrowth && !legacyProvider &&
+									(record.SenderInitialWindowByteCount <= 0 || record.SenderWindowByteCount <= record.SenderInitialWindowByteCount) {
+									record.Correct = false
+									record.FailureReason = "current-provider high-BDP arm did not grow its sender window"
+									attemptErrors = append(attemptErrors, fmt.Errorf("%s %s run=%d did not activate window growth", compatibilityCase.name, direction, runIndex))
+								}
+								if record.Correct {
+									aggregate.CorrectRunCount++
+								}
+							}
+						}
+						encoded, err := json.Marshal(record)
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Logf("[perfvar-legacy-provider] %s", encoded)
+						aggregate.ObservedRunCount++
+					}
+				}
+			}
+		}
+		encoded, err := json.Marshal(aggregate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("[perfvar-legacy-provider-aggregate] %s", encoded)
+		if aggregate.ObservedRunCount != aggregate.ExpectedRunCount {
+			t.Fatalf("legacy-provider record count=%d, want %d", aggregate.ObservedRunCount, aggregate.ExpectedRunCount)
+		}
+		if len(attemptErrors) != 0 {
+			t.Fatal(errors.Join(attemptErrors...))
 		}
 	})
 }
