@@ -89,10 +89,6 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// a provider offering itself as an extender; the handler probes the
 		// caller address back before anything is stored (connect/EXTENDER.md C2)
 		router.NewRoute("POST", "/network/extender-activate", handlers.ExtenderActivate),
-		// the continent a client tries extenders on first, and the provider
-		// latency attestations an extender forwards (connect/DESIGNNOTES4.md)
-		router.NewRoute("GET", "/network/extender-hint", handlers.ExtenderHint),
-		router.NewRoute("POST", "/network/extender-latency", handlers.ExtenderLatencyReport),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
