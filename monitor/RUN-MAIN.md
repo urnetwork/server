@@ -294,8 +294,19 @@ post-`exec` UTC timestamp) to prove the actual start. Do not launch a second
 snapshot while an existing one is live; preserve its bounded evidence and
 investigate its active child/stage before calling it stalled.
 
-`monitor -list-signals` lists selector values without loading the environment,
-Vault, or settings. After required full coverage, use focused reruns by
+`monitor -list-signals` lists selector values without invoking the CLI settings
+loader or running probes; package initialization retains its ordinary settings
+resolution, so synthetic subprocess controls use an empty private `WARP_HOME`.
+A short `-list-signals | wc -l` count is incomplete output evidence, not proof
+of missing registrations. Older monitor entrypoints discarded the asynchronous
+address scrubber's drain function, allowing normal and error exits to truncate
+queued stdout or stderr. The CLI now drains both descriptors before returning
+its exit status to `os.Exit`. Validate the exact tested binary, complete captured
+listing (header plus every registered signal), and terminal status; do not infer
+catalog coverage from a truncated pipeline. Keep one-shot direct-file output
+and its completion-marker validation above.
+
+After required full coverage, use focused reruns by
 repeating `-include-signal` with a key, number, or probe ID. Include and exclude
 selectors are mutually exclusive; empty, unknown, or ambiguous includes fail
 closed. Repeated `-exclude-signal` remains diagnostic and cannot certify health.
@@ -355,6 +366,52 @@ During candidate validation, inspect the executable image of every standing
 `warpctl logs ... -f` child, not only its abbreviated process command, and
 require it to match the recorded watcher-side Warpctl hash. A candidate that
 silently resolves a different copy cannot be promoted.
+
+On macOS, lsof ORs selection options unless `-a` is present: `-p PID -d txt`
+can include every process's text images, not just that PID. Never select an
+image with `head -n1`; an unrelated older watcher can appear first. Retain the
+PID and `txt` association in the raw field output. Before and after reading it,
+confirm the child's parent ownership and process start identity, plus its
+standing `logs ... -f` arguments. A disappeared or replaced child, failed
+command, or missing or ambiguous result is unknown, not proof of either the
+expected or a wrong binary.
+
+For each confirmed child, set `monitor_tail_pid` to its numeric PID and
+`monitor_image_evidence` to a new private file in this run's evidence directory.
+Run this selector in Bash under a bounded command deadline, preserving its exit
+status and raw output:
+
+```sh
+# monitor-warpctl-image-selector
+set -euo pipefail
+umask 077
+test ! -e "$monitor_image_evidence"
+lsof -nP -a -p "$monitor_tail_pid" -d txt -Fpcfn >"$monitor_image_evidence"
+awk -v expected_pid="$monitor_tail_pid" '
+  /^p/ { pid = substr($0, 2); fd = ""; if (pid != expected_pid) invalid = 1; next }
+  /^f/ { fd = substr($0, 2); next }
+  /^n/ && fd == "txt" && substr($0, 2) ~ /\/warpctl$/ {
+    if (pid != expected_pid) invalid = 1
+    images[substr($0, 2)] = 1
+  }
+  END {
+    for (path in images) { image = path; count++ }
+    if (invalid || count != 1) {
+      print "unknown: missing, foreign, or ambiguous executable image" > "/dev/stderr"
+      exit 1
+    }
+    print image
+  }
+' "$monitor_image_evidence"
+```
+
+Only a successful selector plus the unchanged process identity permits hashing
+that exact image and comparing it with the immutable collector manifest. A
+wrapper's `command -v`/hash preflight alone proves intended selection, not the
+loaded child image. Retain the raw PID-scoped evidence alongside the hash; do
+not infer a PATH or launcher defect from an unscoped census. The documentation
+regression executes this selector with synthetic target/decoy records and
+missing, ambiguous, malformed, and command-error controls, never a live census.
 
 Run the final command in a durable attached session. Give the run a stable ID
 and append only to `$BRINGYOUR_HOME/monitor/runs/<run-id>/ledger.jsonl`. Keep

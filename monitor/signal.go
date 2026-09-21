@@ -85,6 +85,11 @@ func alertFromFinding(settings SignalSettings, number, key, name string, f findi
 	if verify == "" {
 		verify = "Re-run this signal and confirm the observed value has returned to the expected baseline."
 	}
+	if f.probeId == "monitor/host-scope" && f.class == "monitor-host-scope-partial" && f.target == "monitor-host-scope" && f.frame == "" {
+		// Shared policy warnings still describe distinct per-probe coverage.
+		// Use the public probe key, never selectors or changing coverage counts.
+		f.frame = key
+	}
 	return Alert{
 		SignalNumber: number,
 		SignalKey:    key,

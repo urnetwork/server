@@ -3845,25 +3845,50 @@ func ForceCloseOpenContractIds(
 		}
 	}
 
-	closeContract := func(tag string, openContract *OpenContract) error {
-		if openContract.dispute {
-			// todo: improve this with better detection of th eroot causes
+	// Claim only a current dispute. Failed settlement must roll back its clear,
+	// leaving the reservation disputed rather than eligible for quarantine.
+	settleDispute := func(tag string, contractId server.Id) {
+		var posts []func() any
+		resolved := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			posts = nil
+			resolved = false
+			changed := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+                    UPDATE transfer_contract
+                    SET dispute = false, close_time = $2
+                    WHERE contract_id = $1 AND dispute AND outcome IS NULL
+                `,
+				contractId,
+				server.NowUtc(),
+			))
+			if changed.RowsAffected() == 0 {
+				return
+			}
+			var err error
+			posts, resolved, err = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+			server.Raise(err)
+			if !resolved {
+				panic(errors.New("contract remained non-final after force-close attempt"))
+			}
+		}, server.TxReadCommitted)
+		if resolved {
 			forceCloseContractCounter.WithLabelValues("dispute_both_sides").Inc()
 			if glog.V(1) {
 				glog.Infof("%ssettle contract dispute: both sides\n", tag)
 			}
-			var posts []func() any
-			var err error
-			server.Tx(ctx, func(tx server.PgTx) {
-				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
-				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
-			}, server.TxReadCommitted)
-			if err != nil {
-				return err
-			}
-			server.RunPosts(ctx, posts...)
+		}
+		server.RunPosts(ctx, posts...)
+	}
 
-		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
+	closeContract := func(tag string, openContract *OpenContract) error {
+		if openContract.dispute {
+			settleDispute(tag, openContract.contractId)
+			return nil
+		}
+
+		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
 			recordForceCloseContract("both sides", tag)
 
@@ -4010,26 +4035,39 @@ func ForceCloseOpenContractIds(
 		}
 	}
 
-	removeFinalizedContractFromStream := func(openContract *OpenContract) error {
+	removeFinalizedContractFromStream := func(tag string, openContract *OpenContract, allowDisputeSettlement bool) error {
 		found := false
 		finalized := false
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-                    SELECT outcome IS NOT NULL
-                    FROM transfer_contract
-                    WHERE contract_id = $1
-                `,
-				openContract.contractId,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					found = true
-					server.Raise(result.Scan(&finalized))
-				}
+		disputed := false
+		readState := func() {
+			found = false
+			finalized = false
+			disputed = false
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+                        SELECT outcome IS NOT NULL, dispute
+                        FROM transfer_contract
+                        WHERE contract_id = $1
+                    `,
+					openContract.contractId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						found = true
+						server.Raise(result.Scan(&finalized, &disputed))
+					}
+				})
 			})
-		})
+		}
+		readState()
+		if allowDisputeSettlement && found && !finalized && disputed {
+			// A successful close can create a dispute after both selection scans.
+			// Resolve once, then re-read; failed closes never enter this path.
+			settleDispute(tag, openContract.contractId)
+			readState()
+		}
 		if !found {
 			return fmt.Errorf("contract disappeared before force-close verification")
 		}
@@ -4082,7 +4120,7 @@ func ForceCloseOpenContractIds(
 						},
 						func() error {
 							return runForceClose(func() error {
-								return removeFinalizedContractFromStream(openContract)
+								return removeFinalizedContractFromStream(tag, openContract, closeErr == nil)
 							})
 						},
 					)

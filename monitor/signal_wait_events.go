@@ -63,7 +63,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		mechanism := waitEventMeaning(wait)
 		action := waitEventAction(wait)
 		clientOwner := privacySafePostgresClientOwner(env.cfg, row.str(8))
-		contextDetail := "The PID, query ID, application, privacy-safe client owner, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query; exact client addresses and CIDRs remain private. Cadence sustain is keyed by database target and wait family, not PID or query identity: consecutive violations prove recurrence of the family condition, not persistence of the same backend. A long-running backend that changes wait family can also reset this signal's per-frame sustain; use active-query history to establish command persistence."
+		contextDetail := "The PID, query ID, application, privacy-safe client owner, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query; exact client addresses and CIDRs remain private. One-shot observations bypass sustain and do not prove recurrence. Cadence sustain is keyed by database target and wait family, not PID or query identity: consecutive violations prove recurrence of the family condition, not persistence of the same backend. A long-running backend that changes wait family can also reset this signal's per-frame sustain; use active-query history to establish command persistence."
 		if wait == "IO:DataFileExtend" && concurrentReindexQuery(row.str(4)) {
 			mechanism = "REINDEX CONCURRENTLY is waiting while PostgreSQL extends the replacement relation on disk. For a very large, high-churn table this makes the maintenance selection itself the load owner; a simultaneous WALInsert/WALWrite cluster is downstream write pressure, not an independent PgBouncer failure."
 			action = "Identify the relation in pg_stat_progress_create_index and check reindex-debris before changing PostgreSQL or PgBouncer. Let the protected in-progress operation reach its configured outcome; prevent the next recurrence by skipping any table too large for the two-hour full-table policy and by cleaning incomplete indexes immediately around every future rebuild."
@@ -112,7 +112,7 @@ func waitEventMeaning(wait string) string {
 	case "IO:DataFileExtend":
 		return "A backend is waiting for PostgreSQL to extend a relation on disk. Attribute the relation and operation before treating the resulting database queue as a pool failure."
 	default:
-		return "An active wait class crossed its count or age boundary and recurred across the cadence; attribute the current backends before remediation."
+		return "An active wait class crossed its count or age boundary in this observation; attribute the current backends before remediation."
 	}
 }
 

@@ -441,6 +441,51 @@ FROM failures GROUP BY task;
   `reschedule_error` even though the same pass removed the finalized stream;
   deploy the convergence handling and do not edit the task row or replay the
   settlement.
+- A separate `CloseExpiredContracts` boundary can create a dispute during the
+  sweep itself: finalizing unequal checkpoint totals leaves `dispute=true` and
+  `outcome IS NULL` after the open/disputed selection scans have completed. The
+  independent terminal check then reports `contract remained non-final after
+  force-close attempt`. The source reproducer
+  `TestForceCloseCheckpointDisputeConvergesInOneSweep` covers both one-checkpoint
+  orientations and both-checkpoint pairs, equal-total healthy controls, actual
+  average settlement, reservation/stream cleanup, and a no-op second sweep.
+  Require its pre-fix failure and post-fix success as source-mechanism evidence;
+  those results do not identify a production task or deployed worker generation.
+
+  The owning model correction uses the existing terminal read as its gate:
+  only a successful original close and a freshly observed, existing,
+  nonfinal/disputed row may enter one atomic dispute settlement, followed by one
+  terminal re-read. Healthy finalized rows add no dispute transaction. Raising
+  settlement errors inside that transaction rolls back the dispute clear;
+  insufficient disputed escrow stays reserved and visible rather than becoming
+  eligible for non-disputed quarantine. Existing malformed non-disputed
+  quarantine is unchanged. Missing/nonfinal rows, typed-settled duplicates with
+  failed verification, mixed errors, cancellation, and cleanup failures remain
+  errors; a failed original close is not retried by terminal verification.
+
+  The bounded 2026-09-21 history observation found this exact nonfinal marker in
+  three retained-error completions; all seven observed completions had completed
+  posts. The later scoped pending check found zero failing rows and one clean
+  key-qualified successor. This confirms a prior verification failure and later
+  point-in-time progress, not the precise checkpoint/dispute cause, a full family
+  census, or sustained recovery. A successful retry copies its earlier error to
+  `finished_task`, so retained text is not a new failure timestamp. Keep generic
+  nonfinal/unclassified and historical-error warnings; do not infer convergence
+  from a missing alert, fresh heartbeat, or successful completion alone.
+
+  Future authorized rollout belongs to every Taskworker generation that can
+  claim this target, including the same target in an operator workload when in
+  scope, not an API-only or monitor-only deployment. After the verified artifact
+  boundary, require a natural retry/successor chain with completed posts, clean
+  fresh successors and no new matching errors through this section's five-minute
+  parked-task window plus ingestion delay and the full natural retry/successor
+  window. Five elapsed minutes alone do not close an unobserved due time, a live
+  claim, a run without an observed terminal/deadline result, or incomplete
+  history. Keep close-duration/open-age and escrow checks independent.
+  Pre-boundary retained errors must stay distinguishable from new attempts.
+  Partial host/generation coverage, capped/empty history, or missing attempt
+  correlation remains unknown. Do not replay/delete task rows, invoke the
+  administrative closer, accelerate retries, or raise deadlines to verify it.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
@@ -1048,11 +1093,11 @@ socket census rather than disclosing its address in monitor output.
   superuser_reserved_connections - reserved_connections`. Every existing
   client backend consumes the admission threshold, including a privileged or
   direct-maintenance owner and the observation session itself.
-- HEALTHY: more than 25% normal-role headroom remains.
+- HEALTHY: both more than 25% normal-role headroom and more than 64 slots remain.
 - WARN: at least 75% of that ceiling is occupied for two consecutive 30-second
   samples. Capacity is not query load: split active, idle, and
   idle-in-transaction owners before assigning a cause.
-- PAGE: at least 90% is occupied, 64 or fewer normal-role slots remain, or the
+- PAGE (independent guards): at least 90% is occupied, 64 or fewer slots remain, or the
   direct observation itself receives `FATAL: sorry, too many clients already`.
   A direct rejection has no numeric snapshot, but it is affirmative server
   capacity evidence rather than a generic monitor visibility failure.
@@ -1085,7 +1130,7 @@ socket census rather than disclosing its address in monitor output.
   database concurrency budget, but it does not replace owner attribution and
   bounded pools.
 - VERIFY: for ten minutes through the workload that triggered the alert,
-  direct 5432 stays observable, ordinary-role headroom remains above 25%,
+  direct 5432 stays observable, headroom remains above 25% with more than 64 slots,
   completed `COMMIT` latency and WAL waits return to their ordinary band, and
   neither `pg-client-capacity` nor `query_wait_timeout` recurs.
 
@@ -1523,6 +1568,23 @@ idle cohorts were recovery turnover, not proof that idle retention initiated
 the exhaustion. The operational gate is to let current index progress finish,
 then deploy the current-main Taskworker fixes `908a8b2c` and `d8392c83`; do
 not tune the 32 pool shards as the first root-cause action.
+
+Fast-exit output is a separate observer boundary. A local 2026-09-21
+`-list-signals` pipeline returned only a prefix of the listing; that count did
+not prove a missing signal registration. The monitor CLI discarded the
+restore function from `server.ScrubProcessLogs`, so normal return and
+`os.Exit(1)` could end the process before its asynchronous stdout/stderr
+readers drained. The CLI-owned lifecycle now prints any command error while
+scrubbing remains active, joins both readers, and only then returns the status
+to the actual exit. Deterministic channel controls cover successful, failed,
+canceled, and scrubber-setup-failed commands; a discarded-restore mutation must
+fail the same ordering check. Real subprocess controls retain complete redacted
+output, including unterminated final lines, and the entrypoint's listing/error
+exit codes. Compare complete output with the exact binary's in-memory registry;
+incomplete output remains unknown, not catalog absence. RUN-MAIN.md retains
+direct-file one-shot completion markers. Abrupt termination and other service
+entrypoints have separate lifecycle owners; this is not a blanket instruction
+to restore descriptors before those services have stopped their producers.
 
 Implementation regression learned 2026-08-30: the standing tailer, restart
 health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
@@ -2265,8 +2327,16 @@ status, never selector values, resource contents, or credentials.
 
 Coverage alerts retain the originating probe number and key, identifying which
 observation lost coverage. Their cross-cutting `monitor-host-scope-partial`
-class and `monitor/host-scope` ID link here; the settings-freshness probe also
-emits the process-wide policy warning under §1.6.
+class and `monitor/host-scope` ID link here; their stable frame is the owning
+probe key. Preserve these per-probe facts rather than collapsing them into one
+row. `blocked_hosts` counts denied hosts within that probe; counts across probe
+frames can overlap and must not be summed as distinct hosts. The
+settings-freshness probe also emits the process-wide policy warning under §1.6
+with its own frame and zero blocked observations. Older artifacts emitted an
+empty shared frame, causing distinct probe facts to collide in exact-identity
+accounting. When comparing across the corrected artifact boundary, use the
+retained origin metadata: the newly separated identities are not new incidents,
+and disappearance of the old shared identity is not restored coverage.
 
 Scope ownership comes from inventory-owned destinations, not external chain
 reference RPCs. Owned Grafana clients also guard redirected requests; injected
@@ -2478,6 +2548,17 @@ also miss waits that begin and end between ticks, and each grouped row retains
 only its oldest query shape; absent/unknown query IDs cannot establish
 continuity. Missing prior samples or incomplete active-query history leave
 persistence unknown, not healthy.
+
+False-positive qualifier for one-shot observations: `Run` and `RunSignal`
+bypass the standing loop's sustain gate. A count-only cluster with a zero-second
+oldest command, or one aged command, therefore proves only the current band
+violation. It does not prove recurrence across cadences or a persistent stall.
+The September 21 one-shot IPC clusters exposed generic mechanism text that
+incorrectly asserted recurrence before the gate had run. The explanation now
+states only the observed boundary and explicitly retains this qualifier. The
+five-backend count guard, one-minute age guard, five-minute cadence, and
+two-consecutive-observation standing gate are unchanged. A healthy observation
+resets that family gate; it does not establish health between observations.
 
 At 06:03Z on 2026-08-31, a read-only one-shot observation found one
 `IO:DataFileRead` waiter at 71s. It cleared before the immediate attribution
@@ -15963,6 +16044,57 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   the test agent beside the daemon in the container-wide cgroup marks the
   agent's sockets too, making its public-egress probe bypass the tunnel and
   turning a green result into a harness false positive.
+
+#### Windows bootstrap capture before provider proof
+
+The Windows source audit confirmed a client-side outage mechanism: the former
+`TunnelController::StartLocked` applied Connecting WFP, capture routes/DNS, and
+Connected WFP before starting its packet pump, while the app could select a
+provider only after `BootstrapSession` received that start reply. A blocked
+bootstrap or empty provider window could therefore take over a working native
+connection. This ordering is source-confirmed; it does not establish the initial
+resolver/platform failure on an affected device or prove regional reachability.
+UDP or IPv6 warmup failures alone do not establish that HTTPS/WSS and the
+network-space DoH paths also failed.
+
+The corrected Windows control contract is v4: the initial `preparing` start
+reply means RPC is usable, capture routes and tunnel DNS are absent, and provider
+selection may proceed. During activation, status may remain `preparing` while
+machine effects are being applied; the explicit routes/DNS fields report those
+facts, and only `up` reports a committed capture transaction.
+Capture requires a positive, unchanged SDK destination generation around an
+exit sample, at least one Added provider, and a currently usable Proven exit
+(not done, quarantined, or warned). Pool `MinSatisfied` and IPv6 availability
+are not prerequisites for a usable IPv4 exit. Callbacks invalidate old proof;
+session cancellation, destination changes, and an eight-second ticket expiry
+prevent stale activation. Physical network changes/resume request a bounded
+SDK re-probe and require qualification newer than that event, conservatively
+accounting for the SDK's truncated probe age. The pump and latest split rules
+are prepared before capture; failed or superseded activation rolls back routes,
+DNS, and policy. An already armed explicit kill switch remains protected;
+the ordinary switch-off bootstrap leaves the native network available.
+
+Client service diagnostics use `stage=bootstrap`, `stage=provider-proof`,
+`stage=packet-pump`, and `stage=capture`, with finite outcomes/reasons, aggregate
+counts, and local generations. `waiting-selection`, `discovery-pending`, and
+`qualification-pending` differ from unavailable/stalled sampling. `active`
+means the capture transaction committed; it is not a promise that every
+destination or address family works. Qualification can be unavailable when
+probe destinations are blocked or probing is disabled, even if some ordinary
+traffic could work; pending capture is conservative in that case. A legacy
+fixed-client shape with no qualified-exit evidence also cannot claim ready.
+
+These are client diagnostics and manual acceptance evidence, not new server
+monitor signals. A healthy server does not prove client DNS or tunnel health.
+Deterministic Windows tests exercise native-effect substitutes, stale callbacks,
+stop/failure rollback, and negative controls for premature capture; they do not
+execute WFP, Wintun, or Windows route/DNS APIs. Runtime validation still requires
+matching v4 Windows app/service artifacts, native build/selftests, and an
+authorized disposable Windows environment: block bootstrap, verify native
+connectivity with the switch off and protection with it armed, then release
+provider proof and verify pump-before-capture, DNS/ordinary traffic, stop,
+reconnect, and network-change behavior. No production deployment or affected
+device recovery is implied by the source change or host-portable tests.
 
 #### Client authentication, routing continuity, and cross-platform validation
 
