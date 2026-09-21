@@ -19,6 +19,10 @@ type NetworkReferralResult struct {
 	BonusPerReferralBytes int64 `json:"bonus_per_referral_bytes"`
 	ReferredBonusBytes    int64 `json:"referred_bonus_bytes"`
 	BonusPeriodSeconds    int64 `json:"bonus_period_seconds"`
+	// HasReferralNetwork distinguishes the incoming referee benefit from the
+	// outgoing-referrer count. A linked referee earns ReferredBonusBytes even
+	// when TotalReferrals is zero.
+	HasReferralNetwork bool `json:"has_referral_network"`
 }
 
 func GetNetworkReferralCode(
@@ -41,6 +45,7 @@ func GetNetworkReferralCode(
 		BonusPerReferralBytes: pro.ReferralBonus,
 		ReferredBonusBytes:    pro.ReferredBonus,
 		BonusPeriodSeconds:    int64(pro.ReferralPeriod / time.Second),
+		HasReferralNetwork:    model.GetReferralNetworkByChildNetworkId(session.Ctx, session.ByJwt.NetworkId) != nil,
 	}, nil
 
 }
