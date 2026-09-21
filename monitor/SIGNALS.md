@@ -22265,6 +22265,32 @@ failures use `provider-api`, and rejected response contracts use
 monitor run remains non-zero. Do not silently disable a configured provider to
 clear one of those failures.
 
+Only the resolver's explicit not-found result establishes that an optional
+reporting credential is absent. An unavailable lookup, non-regular file, or
+dangling link keeps that provider enabled and produces
+`monitor/visibility` / `provider-authentication` with the fixed resource name
+and `is unavailable` reason; a failed read or malformed readable file retains
+the existing `is unreadable or malformed` reason. Paths, filesystem error
+details and credential contents are not copied into those diagnostics. Other
+probes still run. The actual-resolver tests in
+`config_provider_lookup_test.go` cover both providers' absent, regular,
+non-regular, dangling and readable-malformed controls, with public
+`Monitor.Run` and Markdown visibility assertions on the failure paths.
+
+After the dedicated key has loaded, a missing or unavailable shared
+`google.yml` / `apple.yml` app-identity resource is also a visible configured
+provider failure, never an optional-key no-op. Those lookup errors use the
+same fixed resource-name / `is unavailable` diagnostic, without raw paths;
+`config_provider_app_lookup_test.go` exercises the actual resolver and public
+Alert/Markdown/error path for missing, non-regular and dangling resources.
+
+This local visibility failure does not prove a rejected provider key or a
+remote API outage. Conversely, a genuinely absent optional resource remains
+unarmed, not a successful zero-crash observation. Correct the exact local
+lookup/read boundary and reload the monitor settings through the normal
+observer-generation workflow; a readable file alone is not recovery until
+the provider reaches its existing authenticated freshness/data contract.
+
 Both probes persist versioned atomic cursors under
 `StateDir/provider-reports/`, retain an overlapping lookback, and commit state
 only after every response needed by that run has validated. The overlap is
