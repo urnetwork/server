@@ -12,7 +12,8 @@ import (
 
 // The extender task chains (connect/EXTENDER.md C3, C4).
 
-// Both extender tasks are registered with the worker and armed by InitTasks.
+// Both extender data producers are registered with the worker and armed by
+// InitTasks.
 //
 // The two halves fail in different silent ways, which is why both are pinned
 // here. A chain that is armed with no registered target is reaped as a removed

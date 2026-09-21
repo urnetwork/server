@@ -766,9 +766,13 @@ type ProxyDeviceSettings struct {
 	windowIdentityGate               *windowIdentityRestoreGate
 }
 
+// Packet routing can overlap owner-driven teardown. The NAT identity is immutable;
+// peer attachments use stateLock, and concurrent Close calls share one completion.
 type ProxyDevice struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 
 	clientId          server.Id
 	instanceId        server.Id
@@ -808,8 +812,9 @@ type ProxyDevice struct {
 	// one client. natAddr is a per-device address from the same 169.254/16 pool
 	// the app path's tun uses; egress packets are rewritten to it and return
 	// packets are rewritten back. Taken once at construction and returned on
-	// close, which puts the wg path on the same footing as the app path, whose
-	// tun address is per session and never persisted.
+	// close after device callbacks join. Like the app path's tun address, it is
+	// per session and never persisted.
+	// The value stays immutable after construction, even after its lease is returned.
 	//
 	// Invalid when no address was available, which disables the rewrite rather
 	// than dropping traffic: the fallback is the pre-NAT behavior, not an
@@ -827,6 +832,8 @@ type ProxyDevice struct {
 	// Stops a forced-full receive delivery immediately before its blocking
 	// handoff, allowing a deterministic backpressure regression test.
 	receiveBackpressureForTest func()
+	// Replaces the device-worker join with a deterministic lifecycle barrier.
+	closeDeviceLocalForTest func()
 }
 
 func NewProxyDeviceWithDefaults(
@@ -1542,22 +1549,25 @@ func (self *ProxyDevice) Cancel() {
 	self.cancel()
 }
 
+// Called by the owner, never from a receive callback: cancellation stops new
+// traffic, then joins finish before the immutable NAT lease returns exactly once.
 func (self *ProxyDevice) Close() error {
-	if self.cancel != nil {
-		self.cancel()
-	}
-
-	if self.natAddr.IsValid() {
-		connect.ReturnLocalIpv4Address(self.natAddr)
-		self.natAddr = netip.Addr{}
-	}
-
-	if self.deviceLocal != nil {
-		_ = self.deviceLocal.CloseAndWait(context.Background())
-	}
-	var closeErr error
-	if self.tun != nil {
-		closeErr = self.tun.Close()
-	}
-	return closeErr
+	self.closeOnce.Do(func() {
+		if self.cancel != nil {
+			self.cancel()
+		}
+		// No receive state lock may be held while callbacks drain.
+		if self.closeDeviceLocalForTest != nil {
+			self.closeDeviceLocalForTest()
+		} else if self.deviceLocal != nil {
+			_ = self.deviceLocal.CloseAndWait(context.Background())
+		}
+		if self.tun != nil {
+			self.closeErr = self.tun.Close()
+		}
+		if self.natAddr.IsValid() {
+			connect.ReturnLocalIpv4Address(self.natAddr)
+		}
+	})
+	return self.closeErr
 }

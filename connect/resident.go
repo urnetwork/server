@@ -235,6 +235,39 @@ var residentLazyForwardIngressEnabledGauge = prometheus.NewGaugeFunc(
 	func() float64 { return 1 },
 )
 
+// These aggregate ownership gauges make a large Connect runtime attributable
+// without exposing a client, destination, network, or transport identity.
+// They count the goroutines directly owned by Resident callback lanes and
+// exchange-forward loops.  A high total Go goroutine count with low values
+// here points investigation at another owner; high values here quantify the
+// resident/forward contribution before changing capacity or limits.
+var residentCallbackWorkersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_callback_workers",
+		Help:      "Live Resident control and lazy forward-ingress callback workers",
+	},
+)
+
+var residentForwardWorkersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_forward_workers",
+		Help:      "Live Resident destination-forward workers",
+	},
+)
+
+var residentForwardIdleWatchersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_forward_idle_watchers",
+		Help:      "Live Resident destination-forward idle-timeout watchers",
+	},
+)
+
 // drainResidentsRemainingGauge is the drain progress without ssh-ing to find
 // the `docker stop` child: the remaining resident/connection count while the
 // service drains, 0 once the drain completes (CONNECTDRAIN2.md §3.5)
@@ -283,6 +316,9 @@ func init() {
 	prometheus.MustRegister(exchangeActiveConnectionsGauge)
 	prometheus.MustRegister(residentClientsGauge)
 	prometheus.MustRegister(residentLazyForwardIngressEnabledGauge)
+	prometheus.MustRegister(residentCallbackWorkersGauge)
+	prometheus.MustRegister(residentForwardWorkersGauge)
+	prometheus.MustRegister(residentForwardIdleWatchersGauge)
 	prometheus.MustRegister(drainResidentsRemainingGauge)
 	prometheus.MustRegister(drainExcusesWrittenCounter)
 	prometheus.MustRegister(nominationRefusedCounter)
@@ -3513,8 +3549,10 @@ func (self *Resident) startClientCallbackWorkers() {
 	self.forwardIngress = make([]residentForwardIngressShard, shardCount)
 
 	self.callbackWorkers.Add(1)
+	residentCallbackWorkersGauge.Inc()
 	go server.HandleError(func() {
 		defer self.callbackWorkers.Done()
+		defer residentCallbackWorkersGauge.Dec()
 		self.runClientControlIngress()
 	}, self.cancel)
 }
@@ -3567,8 +3605,10 @@ func (self *Resident) startClientForwardIngress(shardIndex int) chan residentFor
 		queue := make(chan residentForwardIngress, shardCapacity)
 		shard.queue = queue
 		self.callbackWorkers.Add(1)
+		residentCallbackWorkersGauge.Inc()
 		go server.HandleError(func() {
 			defer self.callbackWorkers.Done()
+			defer residentCallbackWorkersGauge.Dec()
 			self.runClientForwardIngress(queue)
 		}, self.cancel)
 	})
@@ -3982,7 +4022,9 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			forward.Close()
 			return nil
 		}
+		residentForwardIdleWatchersGauge.Inc()
 		go server.HandleError(func() {
+			defer residentForwardIdleWatchersGauge.Dec()
 			for {
 				if forward.CancelIfIdle() {
 					if glog.V(1) {
@@ -4318,8 +4360,10 @@ func (self *Resident) startForwardWorker(forward *ResidentForward, run func()) b
 		return false
 	}
 	self.forwardWorkers.Add(1)
+	residentForwardWorkersGauge.Inc()
 	go server.HandleError(func() {
 		defer self.forwardWorkers.Done()
+		defer residentForwardWorkersGauge.Dec()
 		run()
 	}, self.cancel)
 	return true

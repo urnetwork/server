@@ -49,7 +49,7 @@ func (self *failureArchiveTestArchive) ArchiveAttempt(ctx context.Context, _ *Se
 func failureArchiveEvaluatorFixture(t *testing.T, body func(*Settings, *queuedJob) string) (*Settings, *queuedJob, *failureArchiveTestArchive) {
 	t.Helper()
 	settings := validSettings()
-	settings.ArtifactRoot = t.TempDir()
+	settings.ArtifactRoot = failureEvidenceTestTempDir(t)
 	if err := os.Chmod(settings.ArtifactRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestCommandEvaluatorArchivesMinimalFailureWithoutFailureManifest(t *testing
 // The controller diagnostic must never replace an existing attempt artifact,
 // even when the existing leaf contains a valid-looking synthetic record.
 func TestWriteControllerFailureArtifactUsesExclusiveDirectoryRelativeCreate(t *testing.T) {
-	root := t.TempDir()
+	root := failureEvidenceTestTempDir(t)
 	path := filepath.Join(root, "controller-failure.json")
 	original := []byte("synthetic preexisting controller diagnostic\n")
 	if err := os.WriteFile(path, original, 0o400); err != nil {
@@ -293,8 +293,8 @@ func TestWriteControllerFailureArtifactUsesExclusiveDirectoryRelativeCreate(t *t
 		AttemptCount:   1,
 	}
 	if _, err := writeControllerFailureArtifact(root, job,
-		infrastructureError("synthetic_failure", "synthetic controller failure")); err == nil {
-		t.Fatal("exclusive controller diagnostic create replaced an existing leaf")
+		infrastructureError("synthetic_failure", "synthetic controller failure")); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("exclusive controller diagnostic create error = %v, want existing leaf", err)
 	}
 	retained, err := os.ReadFile(path)
 	if err != nil {
@@ -382,8 +382,8 @@ func TestCommandEvaluatorDoesNotClassifyStageFailureWhenArchiveFails(t *testing.
 	})
 	archive.archiveErr = errors.New("synthetic failed stage retention")
 	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
-	if outcome.Error == nil || outcome.Error.Kind != "infrastructure" || outcome.Error.Code != "artifact_archive_failed" || len(outcome.ArtifactManifest) != 0 {
-		t.Fatalf("candidate archive failure = %+v", outcome)
+	if outcome.Error == nil || outcome.Error.Kind != "infrastructure" || outcome.Error.Code != "artifact_archive_failed" || len(outcome.ArtifactManifest) != 0 || archive.calls != 1 {
+		t.Fatalf("candidate archive failure = %+v, archive calls = %d", outcome, archive.calls)
 	}
 }
 
@@ -530,7 +530,7 @@ func TestBlobArtifactArchiveAcceptsFailureManifestWithoutWorkerResult(t *testing
 		},
 		AttemptCount: 1,
 	}
-	directory := t.TempDir()
+	directory := failureEvidenceTestTempDir(t)
 	patch := writeArchiveTestFile(t, directory, "canonical.patch", []byte("synthetic patch\n"))
 	stderr := writeArchiveTestFile(t, directory, "worker.stderr.log", []byte("synthetic stderr\n"))
 	diagnostic := writeArchiveTestFile(t, directory, "controller-failure.json", []byte("{\"synthetic\":true}\n"))

@@ -1785,24 +1785,6 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	terminateGroup := func() error {
-		deadline := time.Now().Add(processTermGrace)
-		for {
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				return fmt.Errorf("kill evaluator process group: %w", err)
-			}
-			running, err := containedProcessGroupRunning(cmd.Process.Pid)
-			if err != nil || !running {
-				return err
-			}
-			if !time.Now().Before(deadline) {
-				return errors.New("evaluator process group did not terminate")
-			}
-			// An orphaned zombie may await the host reaper indefinitely. Only
-			// live group members, not kill(pid, 0) alone, keep this wait active.
-			<-time.After(10 * time.Millisecond)
-		}
-	}
 	var waitErr error
 	select {
 	case waitErr = <-done:
@@ -1817,7 +1799,7 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 		}
 		timer.Stop()
 		// A cooperative leader is not proof that its whole group stopped.
-		terminateErr := terminateGroup()
+		terminateErr := terminateContainedProcessGroup(cmd.Process.Pid)
 		if !leaderWaited {
 			waitErr = <-done
 		}
@@ -1825,7 +1807,7 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 	}
 
 	if running, err := containedProcessGroupRunning(cmd.Process.Pid); err != nil || running {
-		terminateErr := terminateGroup()
+		terminateErr := terminateContainedProcessGroup(cmd.Process.Pid)
 		return cmd.ProcessState.ExitCode(), errors.Join(errors.New("evaluator left a descendant process running"), err, terminateErr)
 	}
 	if waitErr != nil {
@@ -1838,46 +1820,51 @@ func runContainedCommand(ctx context.Context, directory, command string, args []
 	return 0, nil
 }
 
-// Read Linux process-group membership without treating zombies awaiting their
-// external reaper as runnable descendants. Missing processes are ordinary races.
-func containedProcessGroupRunning(processGroupId int) (bool, error) {
-	if err := syscall.Kill(-processGroupId, 0); errors.Is(err, syscall.ESRCH) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+// Reap responsibility can outlive termination; only live members keep the wait active.
+func terminateContainedProcessGroup(processGroupId int) error {
+	control := containedProcessGroupControl{
+		signal:  syscall.Kill,
+		running: containedProcessGroupRunning,
 	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false, err
+	return control.terminate(processGroupId)
+}
+
+// Native signaling and inspection are separate observations of a changing
+// group. Keeping these operations paired permits exact exit-ordering tests
+// without altering the production clock, deadline, or polling interval.
+type containedProcessGroupControl struct {
+	signal  func(int, syscall.Signal) error
+	running func(int) (bool, error)
+}
+
+// The caller owns this group; every signal and inspection keeps that identity.
+// Darwin can refuse signals while an exiting member is not yet a zombie.
+// Keep joining that state within the original deadline, never treating a
+// signal result alone as proof that descriptors and descendants are gone.
+func (self containedProcessGroupControl) terminate(processGroupId int) error {
+	deadline := time.Now().Add(processTermGrace)
+	for {
+		var signalErr error
+		if err := self.signal(-processGroupId, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			signalErr = fmt.Errorf("kill evaluator process group: %w", err)
+			if !errors.Is(err, syscall.EPERM) {
+				return signalErr
+			}
+		}
+		running, inspectErr := self.running(processGroupId)
+		if inspectErr != nil {
+			return errors.Join(signalErr, inspectErr)
+		}
+		if !running {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return errors.Join(signalErr, errors.New("evaluator process group did not terminate"))
+		}
+		// An orphaned zombie may await the host reaper indefinitely. Only
+		// live group members, not kill(pid, 0) alone, keep this wait active.
+		<-time.After(10 * time.Millisecond)
 	}
-	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		stat, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		} else if err != nil {
-			return false, err
-		}
-		// The parenthesized command name may itself contain spaces or ')'.
-		end := bytes.LastIndexByte(stat, ')')
-		if end < 0 {
-			return false, errors.New("invalid process status")
-		}
-		fields := strings.Fields(string(stat[end+1:]))
-		if len(fields) < 3 {
-			return false, errors.New("incomplete process status")
-		}
-		groupId, err := strconv.Atoi(fields[2])
-		if err != nil {
-			return false, err
-		}
-		if groupId == processGroupId && fields[0] != "Z" && fields[0] != "X" {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func exitStatus(err error) int {

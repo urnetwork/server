@@ -152,6 +152,8 @@ type fullTunPath struct {
 	deviceStats                  *clientconnect.P2pDataPlaneStats
 	providerProbeTrace           *p2pProbeEventTrace
 	deviceProbeTrace             *p2pProbeEventTrace
+	providerProgressTrace        *perfvarProgressTrace
+	deviceProgressTrace          *perfvarProgressTrace
 	providerSendRoutes           *platformSendRouteController
 	deviceSendRoutes             *platformSendRouteController
 	platformSendRoutes           []*platformSendRouteController
@@ -3689,6 +3691,8 @@ func tryNewFullTunPathWithTopologyHooks(
 		devicePlatformReceiveStats:   &clientconnect.PlatformTransportReceiveStats{},
 		providerH3DatagramStats:      &clientconnect.H3DatagramStats{},
 		deviceH3DatagramStats:        &clientconnect.H3DatagramStats{},
+		providerProgressTrace:        newPerfvarProgressTrace(),
+		deviceProgressTrace:          newPerfvarProgressTrace(),
 	}
 	owner := newFullTunConstructionOwner(path)
 	defer func() {
@@ -3839,6 +3843,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		resources.LogicalDataLaneCount,
 		resources.Features,
 	)
+	path.providerProgressTrace.configure(providerSettings)
 	if hooks != nil && hooks.configureProviderClientSettings != nil {
 		hooks.configureProviderClientSettings(providerSettings)
 	}
@@ -4003,6 +4008,7 @@ func tryNewFullTunPathWithTopologyHooks(
 			resources.LogicalDataLaneCount,
 			resources.Features,
 		)
+		path.deviceProgressTrace.configure(settings)
 		if deviceSendRoutes != nil {
 			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.RouteStateObserver =
 				func(state clientconnect.P2pRouteState) {
@@ -4925,6 +4931,8 @@ func waitForMinimumRouteCount(
 // carriers, and continues through every independent cleanup after an error.
 // It is nil-safe because construction rollback owns a partially built path.
 func (self *fullTunPath) closeAndWait(ctx context.Context) error {
+	self.deviceProgressTrace.dump(self.t, "device")
+	self.providerProgressTrace.dump(self.t, "provider")
 	var closeErr error
 	complete := func(resource fullTunConstructionResource, err error) {
 		if err != nil {

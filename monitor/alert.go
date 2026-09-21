@@ -15,6 +15,12 @@ type Severity string
 const (
 	SeverityPage Severity = "page"
 	SeverityWarn Severity = "warn"
+
+	// markdownCompletionMarker is deliberately a Markdown comment so rendered
+	// alerts remain uncluttered. Snapshot harnesses require this final marker:
+	// a process/output boundary can otherwise truncate a syntactically useful
+	// prefix while reporting success to the writer.
+	markdownCompletionMarker = "<!-- monitor-alerts-complete -->"
 )
 
 // Alert is the structured result of a Signal. Fields intentionally mirror the
@@ -116,23 +122,23 @@ func AlertsMarkdown(alerts []Alert) string {
 	var b strings.Builder
 	b.WriteString("# Monitor alerts\n\n")
 	if len(ordered) == 0 {
-		b.WriteString("No active alerts.\n")
-		return b.String()
-	}
-	fmt.Fprintf(&b, "%d active alert(s).\n\n", len(ordered))
-	for i, alert := range ordered {
-		if i != 0 {
-			b.WriteString("\n---\n\n")
+		b.WriteString("No active alerts.\n\n")
+	} else {
+		fmt.Fprintf(&b, "%d active alert(s).\n\n", len(ordered))
+		for i, alert := range ordered {
+			if i != 0 {
+				b.WriteString("\n---\n\n")
+			}
+			b.WriteString(alert.Markdown())
 		}
-		b.WriteString(alert.Markdown())
 	}
+	b.WriteString("\n" + markdownCompletionMarker + "\n")
 	return b.String()
 }
 
 // WriteAlertsMarkdown writes the same document returned by AlertsMarkdown.
 func WriteAlertsMarkdown(w io.Writer, alerts []Alert) error {
-	_, err := io.WriteString(w, AlertsMarkdown(alerts))
-	return err
+	return writeAlertDocument(w, AlertsMarkdown(alerts))
 }
 
 // WriteAlertsJSONL writes one complete Alert JSON object per line. It sorts a
@@ -140,7 +146,7 @@ func WriteAlertsMarkdown(w io.Writer, alerts []Alert) error {
 // HTML escaping so evidence text is not rewritten, and emits nothing for an
 // empty collection.
 func WriteAlertsJSONL(w io.Writer, alerts []Alert) error {
-	encoder := json.NewEncoder(w)
+	encoder := json.NewEncoder(shortWriteErrorWriter{Writer: w})
 	encoder.SetEscapeHTML(false)
 	for _, alert := range orderedAlerts(alerts) {
 		if err := encoder.Encode(alert); err != nil {
@@ -148,6 +154,35 @@ func WriteAlertsJSONL(w io.Writer, alerts []Alert) error {
 		}
 	}
 	return nil
+}
+
+// writeAlertDocument rejects writers that violate io.Writer's short-write
+// contract by returning a partial count without an error. A monitor snapshot
+// must never look successful after only a prefix of its Markdown was written:
+// its caller uses the returned error to keep the temporary artifact
+// unpromoted.
+func writeAlertDocument(w io.Writer, document string) error {
+	n, err := io.WriteString(w, document)
+	if err != nil {
+		return err
+	}
+	if n != len(document) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// shortWriteErrorWriter extends the same completion contract to JSONL. The
+// standard encoder propagates write errors but cannot itself distinguish a
+// short nil-error Write from a complete record.
+type shortWriteErrorWriter struct{ io.Writer }
+
+func (w shortWriteErrorWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }
 
 func orderedAlerts(alerts []Alert) []Alert {

@@ -73,6 +73,15 @@ func TestNetworkCreate(t *testing.T) {
 		networkReferral := model.GetReferralNetworkByChildNetworkId(ctx, result.Network.NetworkId)
 		connect.AssertEqual(t, networkReferral.Id, referralNetworkId)
 
+		// The referee state is part of the referral-code response so every client
+		// can show its own +3 GiB/day benefit immediately after sign-up, even
+		// before the first daily grant and with zero outgoing referrals.
+		terms, err := GetNetworkReferralCode(session)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, terms.HasReferralNetwork, true)
+		connect.AssertEqual(t, terms.TotalReferrals, 0)
+		connect.AssertEqual(t, terms.ReferredBonusBytes, model.Pro().ReferredBonus)
+
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
 		connect.AssertEqual(t, 1, len(transferBalances))
 		transferBalance := transferBalances[0]

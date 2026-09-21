@@ -96,6 +96,7 @@ func runEvaluatorStageFixture(t *testing.T, fixture evaluatorStageFixture) (stri
 	if fixture.attempt == 0 {
 		fixture.attempt = 1
 	}
+	// Share this synthetic identity with the shell instead of requiring GNU hashing.
 	attemptDigest := sha256.Sum256([]byte(syntheticJobId + ":" + strconv.Itoa(fixture.attempt)))
 	attemptToken := hex.EncodeToString(attemptDigest[:16])
 	project := "urnetwork-eval-" + attemptToken + "-" + fixture.role + "-01"
@@ -142,12 +143,14 @@ func runEvaluatorStageFixture(t *testing.T, fixture evaluatorStageFixture) (stri
 	const dependencies = `
 set -Eeuo pipefail
 umask 077
+# Force the missing GNU dependency on every host, including Linux.
+sha256sum() { printf 'fixture sha256sum is unavailable\n' >&2; return 127; }
 artifact_dir="$FIXTURE_ROOT"
 work_dir="$artifact_dir/.evidence-runtime"
 job_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 round_id=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
 attempt="$FIXTURE_ATTEMPT"
-attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print substr($1, 1, 32)}')"
+attempt_token="$FIXTURE_ATTEMPT_TOKEN"
 cpuset=20,22
 config_local_directory=/synthetic/config/local
 vault_local_directory=/synthetic/vault/local
@@ -171,6 +174,25 @@ authenticate_local_mounts() { :; }
 write_runner_env() { :; }
 write_compose_env() { :; }
 sha256_file() { printf '%064d' 0; }
+date() {
+    [ "$#" -eq 2 ] && [ "$2" = +%s%3N ] || die "unexpected date dependency: $*"
+    case "$1" in
+        --date=2026-01-01T00:00:00Z) printf '1767225600000\n' ;;
+        --date=2026-01-01T00:00:01Z) printf '1767225601000\n' ;;
+        *) die "unexpected synthetic timestamp: $1" ;;
+    esac
+}
+sync() {
+    if [ "$#" -eq 1 ] && [ "$1" = "$artifact_dir" ]; then
+        return 0
+    fi
+    [ "$#" -gt 1 ] && [ "$1" = -d ] || die "unexpected sync dependency: $*"
+    shift
+    local path
+    for path in "$@"; do
+        [ -f "$path" ] || die "sync target missing: $path"
+    done
+}
 compose_with() {
     local last="${!#}"
     case " $* " in
@@ -209,7 +231,8 @@ sudo() {
     shift
     case "$1" in
         chown) return 0 ;;
-        chmod|test|jq|install|sync) command "$@"; return ;;
+        sync) "$@"; return ;;
+        chmod|test|jq|install) command "$@"; return ;;
         docker) shift ;;
         *) printf 'unexpected sudo dependency: %s\n' "$*" >&2; exit 97 ;;
     esac
@@ -261,6 +284,7 @@ sudo() {
 		"FIXTURE_REDIS_OOM_KILLS=" + strconv.Itoa(fixture.redisOomKills),
 		"FIXTURE_MISSING_OOM_COUNTER=" + fixture.missingOomCounter,
 		"FIXTURE_ATTEMPT=" + strconv.Itoa(fixture.attempt),
+		"FIXTURE_ATTEMPT_TOKEN=" + attemptToken,
 	}
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
@@ -395,6 +419,9 @@ func TestEvaluatorRunFailureClassificationIsFailClosed(t *testing.T) {
 		{name: "inconsistent counters", fixture: evaluatorStageFixture{exitCode: 137, oomKills: 1, postgresOomKills: 2}},
 		{name: "unattributed docker oom", fixture: evaluatorStageFixture{exitCode: 137, mutateInspection: func(containers []map[string]any) { containers[0]["State"].(map[string]any)["OOMKilled"] = true }}},
 		{name: "container replacement", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Id"] = "synthetic-other-runner" }}},
+		{name: "missing runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { delete(containers[0], "Mounts") }}},
+		{name: "null runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Mounts"] = nil }}},
+		{name: "empty runner mounts", fixture: evaluatorStageFixture{exitCode: 7, mutateInspection: func(containers []map[string]any) { containers[0]["Mounts"] = []map[string]any{} }}},
 	}
 	for _, c := range cases {
 		root, output, err := runEvaluatorStageFixture(t, c.fixture)
@@ -437,6 +464,10 @@ func TestEvaluatorResourceReportUsesObservedState(t *testing.T) {
 	}
 	if !report.Complete || report.ExitCode != 0 || report.OomKilled || report.HardKilled || report.LimitEscape || report.MeasurementMissing {
 		t.Fatalf("healthy resource report flags: %s", data)
+	}
+	measurementStart := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if report.MeasurementStartMs != measurementStart.UnixMilli() || report.MeasurementEndMs != measurementStart.Add(time.Second).UnixMilli() {
+		t.Fatalf("resource report lost the synthetic runner timestamps: %s", data)
 	}
 	root, output, err = runEvaluatorStageFixture(t, evaluatorStageFixture{oomKills: 1})
 	if err == nil {
@@ -482,7 +513,8 @@ sleep() { exit 0; }
 
 // A terminal sidecar is invalidated if trusted cleanup cannot prove zero
 // labeled containers and networks; sanitized infrastructure evidence may still
-// be retained, but the controller must not treat the candidate as completed.
+// be retained before bounded unmount, but the controller must not treat the
+// candidate as completed.
 func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -504,6 +536,19 @@ func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 	}
 	for _, c := range cases {
 		root := t.TempDir()
+		eventsPath := filepath.Join(root, "cleanup-events")
+		retainerPath := filepath.Join(root, "retain-failure-evidence.sh")
+		retainer := `#!/bin/bash
+set -eu
+[ "$1" = "$FIXTURE_MOUNT_PATH" ]
+[ "$2" = "$FIXTURE_ROOT/failed-evidence" ]
+[ "$FAILURE_EXIT_CODE" = 1 ]
+[ "$FAILURE_EVALUATOR_LINE" = 42 ]
+printf 'retain\n' >> "$FIXTURE_EVENTS"
+`
+		if err := os.WriteFile(retainerPath, []byte(retainer), 0700); err != nil {
+			t.Fatal(err)
+		}
 		path := filepath.Join(root, "evaluator-failure.json")
 		if err := os.WriteFile(path, []byte("synthetic terminal marker"), 0400); err != nil {
 			t.Fatal(err)
@@ -519,7 +564,8 @@ func TestEvaluatorTerminalFailureRequiresVerifiedCleanup(t *testing.T) {
 artifact_dir="$FIXTURE_ROOT"
 active_work_mount="$FIXTURE_MOUNT_PATH"
 fixture_mounted="$FIXTURE_MOUNT"
-RETAIN_FAILURE_EVIDENCE=/missing-synthetic-retainer
+RETAIN_FAILURE_EVIDENCE="$FIXTURE_RETAINER"
+failure_line=42
 job_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 worker_uid=0
 worker_gid=0
@@ -533,11 +579,15 @@ rmdir() {
 sudo() {
     [ "$1" = -n ] || exit 96
     shift
+    local bounded=false
     if [ "$1" = timeout ]; then
         [ "$2" = --signal=TERM ] && [ "$3" = --kill-after=1s ] && [ "$4" = 3s ] || exit 97
         shift 4
+        bounded=true
     fi
     if [ "$1" = umount ]; then
+        [ "$bounded" = true ] || exit 97
+        printf 'umount\n' >> "$FIXTURE_EVENTS"
         [ "$FIXTURE_UNMOUNT_FAILURE" != true ] || return 1
         fixture_mounted=false
         return 0
@@ -562,6 +612,7 @@ sudo() {
 			"FIXTURE_MOUNT_PATH=" + mountPath, "FIXTURE_MOUNT=" + strconv.FormatBool(c.mount),
 			"FIXTURE_UNMOUNT_FAILURE=" + strconv.FormatBool(c.unmountFailure),
 			"FIXTURE_REMOVE_FAILURE=" + strconv.FormatBool(c.removeFailure),
+			"FIXTURE_RETAINER=" + retainerPath, "FIXTURE_EVENTS=" + eventsPath,
 		}
 		output, err := command.CombinedOutput()
 		if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 1 {
@@ -570,6 +621,14 @@ sudo() {
 		_, statErr := os.Lstat(path)
 		if c.terminal && statErr != nil || !c.terminal && !os.IsNotExist(statErr) {
 			t.Errorf("%s sidecar presence = %v, terminal=%t: %s", c.name, statErr, c.terminal, output)
+		}
+		events, eventsErr := os.ReadFile(eventsPath)
+		if c.mount {
+			if eventsErr != nil || string(events) != "retain\numount\n" {
+				t.Errorf("%s retention/unmount order = %q, error=%v: %s", c.name, events, eventsErr, output)
+			}
+		} else if !os.IsNotExist(eventsErr) {
+			t.Errorf("%s cleanup touched absent evidence mount: %q, error=%v", c.name, events, eventsErr)
 		}
 	}
 }

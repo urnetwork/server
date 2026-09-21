@@ -99,8 +99,6 @@ func registry() []specEndpoint {
 		{"GET", "/network/user", nil, rt(controller.GetNetworkUserResult{})},
 		{"POST", "/network/user/update", rt(controller.UpdateNetworkNameArgs{}), rt(controller.UpdateNetworkNameResult{})},
 		{"POST", "/network/extender-activate", rt(controller.ExtenderActivateArgs{}), rt(controller.ExtenderActivateResult{})},
-		{"GET", "/network/extender-hint", nil, rt(controller.ExtenderHintResult{})},
-		{"POST", "/network/extender-latency", rt(controller.ExtenderLatencyReportArgs{}), rt(controller.ExtenderLatencyReportResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},
@@ -632,6 +630,18 @@ func implRouteKeys() map[string]bool {
 		out[method+" "+normalizePath(pattern)] = true
 	}
 	return out
+}
+
+// A removed route must leave the implemented-schema registry even if its Go
+// types survive for another consumer or its planned schema remains published.
+func TestSpecRegistryRoutesImplemented(t *testing.T) {
+	implKeys := implRouteKeys()
+	for _, endpoint := range registry() {
+		key := endpoint.method + " " + normalizePath(endpoint.path)
+		if !implKeys[key] {
+			t.Errorf("registry endpoint %q has no matching implemented route", key)
+		}
+	}
 }
 
 func TestSpecRoutesImplemented(t *testing.T) {

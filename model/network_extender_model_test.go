@@ -1,3 +1,4 @@
+// Pins the extender directory schema, address lifecycle, and publication writes.
 package model
 
 import (
@@ -67,10 +68,9 @@ func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *Network
 	}
 }
 
-// The three tables of C1 exist on a fresh database with the indexes the reads
-// and the upsert depend on. The unique key on public_key is not decoration:
-// the activation upsert is keyed by it, which is what makes a second family
-// add an address instead of creating a second extender.
+// The directory, activation history, and latency attestations exist on a fresh
+// database with their read and upsert indexes. Identity and attestation unique
+// keys keep reactivation and replay from creating duplicate rows.
 func TestExtenderMigrationsApply(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -115,7 +115,9 @@ func TestExtenderMigrationsApply(t *testing.T) {
 
 		wantTables := []string{
 			"network_extender",
+			"network_extender_activation",
 			"network_extender_address",
+			"network_extender_latency",
 			"network_extender_publish",
 		}
 		if !slices.Equal(tables, wantTables) {
@@ -124,8 +126,14 @@ func TestExtenderMigrationsApply(t *testing.T) {
 		for _, wantIndex := range []string{
 			"network_extender_pkey",
 			"network_extender_public_key_key",
+			"network_extender_activation_pkey",
+			"network_extender_activation_extender_id_activate_time",
 			"network_extender_address_pkey",
 			"network_extender_address_active_last_publish_time",
+			"network_extender_latency_pkey",
+			"network_extender_latency_extender_id_client_id_probe_nonce_key",
+			"network_extender_latency_create_time",
+			"network_extender_latency_extender_id_create_time",
 			"network_extender_publish_pkey",
 			"network_extender_publish_published_time_create_time",
 		} {

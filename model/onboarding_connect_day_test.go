@@ -59,14 +59,10 @@ func TestRecordConnectDayPersistsOncePerNetworkUtcDay(t *testing.T) {
 		RecordConnectDay(ctx, clientId, connectAt)
 		RecordConnectDay(ctx, clientId, connectAt.Add(time.Hour))
 		RecordConnectDay(ctx, secondClientId, connectAt.Add(2*time.Hour))
-		if count := connectDayEventCount(t, ctx, networkId); count != 1 {
-			t.Fatalf("same-network same-day connect events = %d, want 1", count)
-		}
+		awaitConnectDayEventCount(t, ctx, networkId, 1)
 
 		RecordConnectDay(ctx, clientId, connectAt.Add(24*time.Hour))
-		if count := connectDayEventCount(t, ctx, networkId); count != 2 {
-			t.Fatalf("two-day connect events = %d, want 2", count)
-		}
+		awaitConnectDayEventCount(t, ctx, networkId, 2)
 	})
 }
 
@@ -92,14 +88,25 @@ func TestRecordConnectDayPersistsOnceAfterCallerCancellation(t *testing.T) {
 		connectAt := time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC)
 		RecordConnectDay(callerCtx, clientId, connectAt)
 		RecordConnectDay(callerCtx, clientId, connectAt.Add(time.Hour))
-
-		if count := connectDayEventCount(t, queryCtx, networkId); count != 1 {
-			t.Fatalf("canceled-parent connect events = %d, want 1", count)
-		}
+		awaitConnectDayEventCount(t, queryCtx, networkId, 1)
 		if connectDaySeen.remember(clientId, ConnectDayStart(connectAt)) {
 			t.Fatal("successful canceled-parent write was forgotten from the daily cache")
 		}
 	})
+}
+
+func awaitConnectDayEventCount(t testing.TB, ctx context.Context, networkId server.Id, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if count := connectDayEventCount(t, ctx, networkId); count == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("connect.day events never reached %d", want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func connectDayEventCount(t testing.TB, ctx context.Context, networkId server.Id) int {

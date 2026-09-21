@@ -81,7 +81,6 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
-		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
 		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)

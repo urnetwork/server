@@ -282,6 +282,35 @@ var connectDaySeen = &connectDayCache{}
 // the connection goroutine indefinitely.
 const connectDayPostCommitTimeout = 10 * time.Second
 
+// Connect traffic can arrive in large cohorts. Keep optional analytics writes
+// off that path and bound their pressure on the operator's PostgreSQL pool.
+const (
+	connectDayWriteQueueSize = 512
+	connectDayWriteWorkers   = 4
+)
+
+type connectDayWriteJob struct {
+	ctx         context.Context
+	clientId    server.Id
+	connectTime time.Time
+	day         time.Time
+}
+
+var connectDayWriteJobs = make(chan connectDayWriteJob, connectDayWriteQueueSize)
+var connectDayWriteWorkersOnce sync.Once
+
+func startConnectDayWriteWorkers() {
+	connectDayWriteWorkersOnce.Do(func() {
+		for range connectDayWriteWorkers {
+			go server.HandleError(func() {
+				for job := range connectDayWriteJobs {
+					recordConnectDayWrite(job)
+				}
+			})
+		}
+	})
+}
+
 // remember returns false when the client's connection for this UTC day is
 // already recorded, true (and remembers it) when it still has to be written.
 func (c *connectDayCache) remember(clientId server.Id, day time.Time) bool {
@@ -317,15 +346,26 @@ func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.
 	if !connectDaySeen.remember(clientId, day) {
 		return
 	}
+	startConnectDayWriteWorkers()
+	job := connectDayWriteJob{ctx: context.WithoutCancel(ctx), clientId: clientId, connectTime: connectTime, day: day}
+	select {
+	case connectDayWriteJobs <- job:
+	default:
+		// No durable write was admitted; a later connection may retry it.
+		connectDaySeen.forget(clientId, day)
+	}
+}
+
+func recordConnectDayWrite(job connectDayWriteJob) {
 	writeCtx, writeCancel := context.WithTimeout(
-		context.WithoutCancel(ctx),
+		job.ctx,
 		connectDayPostCommitTimeout,
 	)
 	defer writeCancel()
 	defer func() {
 		if r := recover(); r != nil {
-			connectDaySeen.forget(clientId, day)
-			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", clientId, r)
+			connectDaySeen.forget(job.clientId, job.day)
+			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", job.clientId, r)
 		}
 	}()
 	server.Tx(writeCtx, func(tx server.PgTx) {
@@ -370,12 +410,12 @@ func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.
 					)
 			`,
 			server.NewId(),
-			clientId,
+			job.clientId,
 			EventConnectDay,
-			connectTime,
+			job.connectTime,
 			server.NowUtc(),
-			day,
-			day.Add(24*time.Hour),
+			job.day,
+			job.day.Add(24*time.Hour),
 		))
 	}, server.TxReadCommitted)
 }

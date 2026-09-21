@@ -1,5 +1,5 @@
 // This file turns the nil-by-default P2P route callback into an exact,
-// nonblocking integration-test event stream for multihop readiness.
+// nonblocking integration-test event stream for P2P readiness and replacement.
 package perfvar
 
 import (
@@ -34,7 +34,7 @@ type p2pRouteStateTraceEvent struct {
 }
 
 // A snapshot reports the exact applied generation and current directional
-// route counts. One setup goroutine owns Snapshot and WaitForMinimumRoutes;
+// route counts. One setup goroutine owns Snapshot and every state wait;
 // transport callbacks may call Observe concurrently and never block.
 type p2pRouteStateTraceSnapshot struct {
 	Generation                  uint64
@@ -42,6 +42,8 @@ type p2pRouteStateTraceSnapshot struct {
 	ActiveReceiveRoutes         int
 	ConnectedTransitionCount    int
 	DisconnectedTransitionCount int
+	DisconnectedSendRoutes      int
+	DisconnectedReceiveRoutes   int
 }
 
 // The pending stack retains every edge while a capacity-one notification may
@@ -56,6 +58,8 @@ type p2pRouteStateTrace struct {
 	generation                  uint64
 	connectedTransitionCount    int
 	disconnectedTransitionCount int
+	disconnectedSendRoutes      int
+	disconnectedReceiveRoutes   int
 }
 
 // Construction allocates test state once; production settings leave the
@@ -113,6 +117,11 @@ func (self *p2pRouteStateTrace) Snapshot() p2pRouteStateTraceSnapshot {
 		} else {
 			if 0 < self.active[key] {
 				self.disconnectedTransitionCount += 1
+				if key.send {
+					self.disconnectedSendRoutes += 1
+				} else {
+					self.disconnectedReceiveRoutes += 1
+				}
 				self.active[key] -= 1
 			}
 			if self.active[key] == 0 {
@@ -125,6 +134,8 @@ func (self *p2pRouteStateTrace) Snapshot() p2pRouteStateTraceSnapshot {
 		Generation:                  self.generation,
 		ConnectedTransitionCount:    self.connectedTransitionCount,
 		DisconnectedTransitionCount: self.disconnectedTransitionCount,
+		DisconnectedSendRoutes:      self.disconnectedSendRoutes,
+		DisconnectedReceiveRoutes:   self.disconnectedReceiveRoutes,
 	}
 	for key, activeRouteCount := range self.active {
 		if key.send {
@@ -143,23 +154,68 @@ func (self *p2pRouteStateTrace) WaitForMinimumRoutes(
 	minimumSendRoutes int,
 	minimumReceiveRoutes int,
 ) (p2pRouteStateTraceSnapshot, error) {
+	snapshot, err := self.waitForState(ctx, func(snapshot p2pRouteStateTraceSnapshot) bool {
+		return minimumSendRoutes <= snapshot.ActiveSendRoutes &&
+			minimumReceiveRoutes <= snapshot.ActiveReceiveRoutes
+	})
+	if err != nil {
+		return snapshot, fmt.Errorf(
+			"P2P routes send=%d/%d receive=%d/%d generation=%d: %w",
+			snapshot.ActiveSendRoutes,
+			minimumSendRoutes,
+			snapshot.ActiveReceiveRoutes,
+			minimumReceiveRoutes,
+			snapshot.Generation,
+			err,
+		)
+	}
+	return snapshot, nil
+}
+
+// Each direction present at the barrier must retire before its replacement
+// is accepted. Platform churn and repeated changes to only one direction do
+// not satisfy the other direction's lifecycle. An initially absent direction
+// needs only to become live, as on restoration after a blackhole.
+func (self *p2pRouteStateTrace) WaitForRebuiltRoutes(
+	ctx context.Context,
+	barrier p2pRouteStateTraceSnapshot,
+) (p2pRouteStateTraceSnapshot, error) {
+	snapshot, err := self.waitForState(ctx, func(snapshot p2pRouteStateTraceSnapshot) bool {
+		return 0 < snapshot.ActiveSendRoutes && 0 < snapshot.ActiveReceiveRoutes &&
+			barrier.DisconnectedSendRoutes+barrier.ActiveSendRoutes <= snapshot.DisconnectedSendRoutes &&
+			barrier.DisconnectedReceiveRoutes+barrier.ActiveReceiveRoutes <= snapshot.DisconnectedReceiveRoutes
+	})
+	if err != nil {
+		return snapshot, fmt.Errorf("P2P replacement barrier=%+v current=%+v: %w", barrier, snapshot, err)
+	}
+	return snapshot, nil
+}
+
+// An outage retires both physical directions, regardless of platform state.
+func (self *p2pRouteStateTrace) WaitForNoRoutes(ctx context.Context) (p2pRouteStateTraceSnapshot, error) {
+	snapshot, err := self.waitForState(ctx, func(snapshot p2pRouteStateTraceSnapshot) bool {
+		return snapshot.ActiveSendRoutes == 0 && snapshot.ActiveReceiveRoutes == 0
+	})
+	if err != nil {
+		return snapshot, fmt.Errorf("P2P withdrawal current=%+v: %w", snapshot, err)
+	}
+	return snapshot, nil
+}
+
+// The single consumer reads current state after every exact callback wake.
+// A buffered wake may coalesce, but the admitted state edges never do.
+func (self *p2pRouteStateTrace) waitForState(
+	ctx context.Context,
+	ready func(p2pRouteStateTraceSnapshot) bool,
+) (p2pRouteStateTraceSnapshot, error) {
 	for {
 		snapshot := self.Snapshot()
-		if minimumSendRoutes <= snapshot.ActiveSendRoutes &&
-			minimumReceiveRoutes <= snapshot.ActiveReceiveRoutes {
+		if ready(snapshot) {
 			return snapshot, nil
 		}
 		select {
 		case <-ctx.Done():
-			return snapshot, fmt.Errorf(
-				"P2P routes send=%d/%d receive=%d/%d generation=%d: %w",
-				snapshot.ActiveSendRoutes,
-				minimumSendRoutes,
-				snapshot.ActiveReceiveRoutes,
-				minimumReceiveRoutes,
-				snapshot.Generation,
-				ctx.Err(),
-			)
+			return snapshot, ctx.Err()
 		case <-self.changed:
 		}
 	}

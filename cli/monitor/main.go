@@ -33,6 +33,7 @@ type monitorOptions struct {
 	listSignals           bool
 	mode                  string
 	format                string
+	output                string
 	keys                  stringFlags
 	includedSignals       stringFlags
 	excludedSignals       stringFlags
@@ -100,8 +101,14 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	defer stop()
 	if opts.once {
 		alerts, runErr := monitor.Run(ctx)
-		if err := writeAlerts(stdout, opts.format, alerts); err != nil {
+		output, closeOutput, err := openAlertOutput(stdout, opts.output)
+		if err != nil {
 			return err
+		}
+		writeErr := writeAlerts(output, opts.format, alerts)
+		closeErr := closeOutput()
+		if writeErr != nil || closeErr != nil {
+			return errors.Join(writeErr, closeErr)
 		}
 		return runErr
 	}
@@ -135,6 +142,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.BoolVar(&opts.listSignals, "list-signals", false, "list registered signal identifiers and exit without loading settings")
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
+	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
@@ -149,7 +157,27 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	if opts.format != alertFormatMarkdown && opts.format != alertFormatJSONL {
 		return monitorOptions{}, fmt.Errorf("monitor: format %q is not supported; use markdown or jsonl", opts.format)
 	}
+	if opts.output != "" && !opts.once {
+		return monitorOptions{}, errors.New("monitor: -output requires -once")
+	}
+	if opts.output != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: -output cannot be used with -list-signals")
+	}
 	return opts, nil
+}
+
+// openAlertOutput lets one-shot monitor output bypass an ambient stdout
+// capture boundary. The caller supplies a private temporary path and promotes
+// it only after validating the terminal Markdown completion marker.
+func openAlertOutput(stdout io.Writer, path string) (io.Writer, func() error, error) {
+	if path == "" {
+		return stdout, func() error { return nil }, nil
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("monitor: open output %q: %w", path, err)
+	}
+	return file, file.Close, nil
 }
 
 func writeSignalList(w io.Writer, signals []servermonitor.Signal) error {

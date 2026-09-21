@@ -8103,6 +8103,8 @@ var migrations = []any{
 		$competition_candidate_review_gate$;
 	`),
 
+	// Keep these published entries at their original indices even when a
+	// feature consumer is removed; activation history and later identities remain.
 	// The latency attestations providers make to extenders
 	// (connect/DESIGNNOTES4.md §3): one row per attestation the operator
 	// verified, keyed so a replayed report is a no-op. The create_time index

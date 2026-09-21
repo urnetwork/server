@@ -90,7 +90,7 @@ install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_conte
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
 readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)
-declare -A revisions
+revision_args=()
 
 source_record=""
 if [ "$include_worktree" = false ]; then
@@ -171,29 +171,18 @@ for repository in "${REPOSITORIES[@]}"; do
         printf 'temporary clone is not clean: %s\n' "$repository" >&2
         exit 1
     }
-    revisions[$repository]="$(git -C "$clone_root" rev-parse HEAD)"
+    clone_revision="$(git -C "$clone_root" rev-parse HEAD)"
+    revision_args+=(--arg "$repository" "$clone_revision")
 done
 
 jq -n \
-    --arg server "${revisions[server]}" \
-    --arg connect "${revisions[connect]}" \
-    --arg proxy "${revisions[proxy]}" \
-    --arg sdk "${revisions[sdk]}" \
-    --arg glog "${revisions[glog]}" \
-    --arg goidenticons "${revisions[goidenticons]}" \
-    --arg userwireguard "${revisions[userwireguard]}" \
-    --arg sn "${revisions[sn]}" \
-    --arg operator_proxy "${revisions[operator-proxy]}" \
-    --arg warp "${revisions[warp]}" \
+    --argjson repositories "$(jq -n "${revision_args[@]}" '$ARGS.named')" \
     --argjson development_snapshot "$include_worktree" \
     '{schema: 1, development_snapshot: $development_snapshot,
-      repositories: {server: $server, connect: $connect, proxy: $proxy,
-      sdk: $sdk, glog: $glog, goidenticons: $goidenticons,
-      userwireguard: $userwireguard, sn: $sn,
-      "operator-proxy": $operator_proxy, warp: $warp}}' \
+      repositories: $repositories}' \
     > "$build_context/source-lock.json"
 
-base_sha="${revisions[server]}"
+base_sha="$(jq -er '.repositories.server' "$build_context/source-lock.json")"
 source_lock_sha256="$(sha256sum "$build_context/source-lock.json" | awk '{print $1}')"
 source_config_sha256="$(sha256sum "$build_context/sim-latency.yml" | awk '{print $1}')"
 if [ -z "$image_tag" ]; then

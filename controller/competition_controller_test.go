@@ -2613,7 +2613,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 		`.Destination == "/runtime/config/local" and .RW == false`,
 		`.Destination == "/runtime/vault/local" and .RW == false`,
 		`[.Mounts[] | select(.Destination | startswith("/runtime"))] | length == 2`,
-		`mounts:[.Mounts[] | {type:.Type,destination:.Destination,rw:.RW}]`,
+		`mounts:[.Mounts[]? | {type:.Type,destination:.Destination,rw:.RW}]`,
 	} {
 		if !strings.Contains(evaluator, required) {
 			t.Errorf("evaluator local-only mount attestation is missing %q", required)
@@ -2667,7 +2667,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildBaseBytes),
-		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)",
+		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)",
 	) {
 		t.Fatal("evaluator base repository allowlist changed; re-audit config/vault exclusion")
 	}
@@ -2930,7 +2930,7 @@ func TestEvaluatorRetainsOnlySanitizedFailureEvidence(t *testing.T) {
 	}
 	evaluator := string(evaluatorBytes)
 	retainCall := strings.Index(evaluator, `"$RETAIN_FAILURE_EVIDENCE" \`)
-	unmountCall := strings.Index(evaluator, `sudo -n umount "$active_work_mount"`)
+	unmountCall := strings.Index(evaluator, `umount "$active_work_mount"`)
 	if retainCall < 0 || unmountCall < 0 || unmountCall < retainCall {
 		t.Fatal("evaluator does not retain failure evidence before unmounting its tmpfs")
 	}
@@ -2940,7 +2940,7 @@ func TestEvaluatorRetainsOnlySanitizedFailureEvidence(t *testing.T) {
 		`baseline_scorer_log="$work_dir/baseline-scorer.log"`,
 		`candidate_scorer_log="$work_dir/candidate-scorer.log"`,
 		`inspect_json="$(sudo -n docker inspect`,
-		`<<<"$inspect_json" > "$inspect_path"`,
+		`write_container_inspection "$inspect_path" <<<"$inspect_json"`,
 		`[ "$scorer_exit" -eq 0 ] || die "baseline scorer exited $scorer_exit"`,
 	} {
 		if !strings.Contains(evaluator, required) {

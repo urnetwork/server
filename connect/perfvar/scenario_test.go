@@ -1229,6 +1229,9 @@ func loadPerfvarHostMetadata() perfvarHostMetadata {
 		RaceEnabled:     perfvarRaceEnabled,
 		MeasurementKind: "userspace-same-host",
 	}
+	if perfvarProgressTraceEnabled() {
+		metadata.MeasurementKind = "diagnostic-transfer-progress"
+	}
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range buildInfo.Settings {
 			switch setting.Key {

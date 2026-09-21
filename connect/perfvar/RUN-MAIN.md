@@ -88,22 +88,24 @@ external blocker is documented with the evidence needed to remove it.
   | `device-b` | `R5CX21FY6ND` | Galaxy S24 Ultra |
 
   Before each PERFVAR, LOWBAR, or MEMSTEADY block, require `adb devices -l` to
-  show both serials in `device` state and no other attached serial. Pass each
+  show both allowlisted serials in `device` state. Ignore every other entry,
+  including unauthorized and offline devices: it is not part of the performance
+  cohort and must never be selected as a substitute. Pass each allowlisted
   serial explicitly to its device process; a missing, unauthorized, or offline
-  serial makes the physical block `INVALID_ENVIRONMENT`. Public measurements
-  use only the opaque roles; serials are retained in the private manifest for
-  reproducibility.
+  allowlisted serial makes the physical block `INVALID_ENVIRONMENT`. Public
+  measurements use only the opaque roles; serials are retained in the private
+  manifest for reproducibility.
 
   A fail-closed preflight is:
 
   ```sh
-  actual=$(adb devices | awk 'NR > 1 && NF {print $1 ":" $2}' | sort)
-  expected=$(printf '%s\n' \
-    '3B161FDJG001KT:device' 'R5CX21FY6ND:device' | sort)
-  test "$(printf '%s\n' "$actual")" = "$(printf '%s\n' "$expected")" || {
-    echo 'authorized Android device set mismatch' >&2
-    exit 1
-  }
+  for serial in 3B161FDJG001KT R5CX21FY6ND; do
+    adb devices | awk -v serial="$serial" \
+      '$1 == serial && $2 == "device" { ok = 1 } END { exit !ok }' || {
+        echo 'allowlisted Android device unavailable' >&2
+        exit 1
+      }
+  done
   ```
 - Do not infer an HTTP status, origin policy, or bot challenge from encrypted
   payloads. Browser-only response metadata is diagnostic and may not be turned
@@ -280,10 +282,13 @@ Correctness runs must explicitly clear measurement/failure-probe variables.
 
 ```sh
 cd "$URN_REG_WORKSPACE/server"
+# Attests the live run-local stack and exports its safe local DB/Redis aliases.
+# Do not replace this with WARP_ENV=local alone.
+source ./test-env.sh
 unset CONNECT_PERFVAR_MEASURE CONNECT_PERFVAR_FAILURE_PROBE
 unset CONNECT_PERFVAR_RESOURCE_HELPER CONNECT_PERFVAR_RESOURCE_HELPER_NAME
-go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0
-go test -race -p=1 ./connect/perfvar -short -parallel=1 -count=1 -timeout=30m
+WARP_ENV=local go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0
+WARP_ENV=local go test -race -p=1 ./connect/perfvar -short -parallel=1 -count=1 -timeout=30m
 ```
 
 For each control/candidate process block, alternate
@@ -296,6 +301,7 @@ runs in completion/failure statistics.
 Run the canonical static low-bar matrix exactly as defined by `PERFVAR.md`:
 
 ```sh
+WARP_ENV=local \
 CONNECT_PERFVAR_MEASURE=1 \
 CONNECT_PERFVAR_SEED=20260810 \
 CONNECT_PERFVAR_ROUTE=exchange-h1,exchange-h3,p2p-fast,p2p-legacy \
@@ -345,6 +351,45 @@ CONNECT_PERFVAR_BYTE_COUNT=33554432 \
 go test ./connect/perfvar -run '^TestPerformanceVariations$' \
   -count=1 -timeout=0 -v
 ```
+
+### Rolling-upgrade compatibility: current app to an older provider
+
+New apps initially encounter providers which do not support delivery-window
+resizing or the paced-transfer policy built from that receiver feedback. Run
+the dedicated H1 comparison in addition to the three matrices. It preserves a
+current app in both arms. It has two cells: five modern/legacy alternating
+pairs in each direction on the mobile 5 Mbit/s down / 1 Mbit/s up profile,
+and three pairs per direction at 100 Mbit/s / one-second RTT. The latter is a
+high-BDP activation guard: a current/current arm must report a grown sender
+window rather than merely carrying a resize setting.
+
+```sh
+CONNECT_PERFVAR_LEGACY_PROVIDER_SWEEP=1 \
+go test ./connect/perfvar -run '^TestPerfvarLegacyProviderCompatibilitySweep$' \
+  -count=1 -timeout=0 -v
+```
+
+Collect every `[perfvar-legacy-provider]` record and the single
+`[perfvar-legacy-provider-aggregate]` separately by direction and provider
+generation. Require all thirty-two planned records, including any failed
+attempts; the aggregate must report thirty-two observed attempts. The
+current-provider arm
+is the compatibility control; the legacy arm is a hard H1 performance guard.
+Apply the normal paired
+five-percent practical-effect and statistical rule from this runbook. A
+correctness failure, an invalid carrier observation, or a regression in either
+direction blocks the app rollout; it may not be averaged into the regular
+current/current static matrix. The record identity distinguishes the synthetic
+4 MiB device pools and current-provider pools from the legacy provider's nil
+pools and fixed receive hold; none are parented under the Android/iOS 24 MiB
+budget or qualify device memory. This models the protocol facts an old provider can
+expose: a fixed transfer window plus no `receive_window_byte_count`,
+ACK-compression, or receiver-delay advertisement. The 1 MiB cell arm is a
+legacy-feedback/pacing compatibility guard; the high-BDP arm has an explicit
+sender-window-growth assertion. Each row retains the full carrier counters and
+is invalid when the normal PERFVAR carrier-drop/queue-refusal validity check
+fails. It does not pretend to measure a different
+server binary or a physical radio.
 
 H1 is the performance primary; H3, DNS-H3,
 and Auto remain compatibility/correctness observations until their planned

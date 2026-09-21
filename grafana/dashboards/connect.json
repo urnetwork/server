@@ -500,6 +500,126 @@
                     "legendFormat": "mean wait"
                 }
             ]
+        },
+        {
+            "id": 19,
+            "type": "row",
+            "title": "resident runtime ownership",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 62
+            }
+        },
+        {
+            "id": 20,
+            "type": "timeseries",
+            "title": "resident workers and process goroutines",
+            "description": "Live instantaneous counts per process: control and lazy forward-ingress callback workers, destination-forward workers, and idle-timeout watchers. These are owned goroutines, not completed work or distinct devices. Compare their contribution with all process goroutines; missing series remain no-data.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 63
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0,
+                    "custom": {
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "urnetwork_connect_resident_callback_workers{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+                    "legendFormat": "callbacks {{host}} {{block}} {{instance}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "urnetwork_connect_resident_forward_workers{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+                    "legendFormat": "destination forwards {{host}} {{block}} {{instance}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "urnetwork_connect_resident_forward_idle_watchers{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+                    "legendFormat": "idle watchers {{host}} {{block}} {{instance}}"
+                },
+                {
+                    "refId": "D",
+                    "expr": "go_goroutines{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+                    "legendFormat": "all goroutines {{host}} {{block}} {{instance}}"
+                }
+            ]
+        },
+        {
+            "id": 21,
+            "type": "timeseries",
+            "title": "lazy resident forward-ingress capability",
+            "description": "Executable capability per process: 1 means forward-ingress queues and workers start on first destination use. This is not traffic or readiness, and one reporting process does not prove fleet-wide rollout. An absent capability remains no-data, not disabled or healthy.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 63
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0,
+                    "max": 1,
+                    "custom": {
+                        "stacking": {
+                            "mode": "none"
+                        }
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "urnetwork_connect_resident_lazy_forward_ingress_enabled{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}",
+                    "legendFormat": "{{host}} {{block}} {{instance}}"
+                }
+            ]
         }
     ]
 }

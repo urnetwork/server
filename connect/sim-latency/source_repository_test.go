@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -225,38 +226,94 @@ func TestEvaluatorBaseCopiesExactlyLockedRepositories(t *testing.T) {
 	}
 }
 
-// Execute the builder's real lock serializer without Docker or remote Git, so
-// adding a name to validators alone cannot hide a missing serialized commit.
+// Execute the builder's real commit collection and lock serializer without
+// Docker, remote Git, or Bash associative arrays, including hyphenated names.
 func TestEvaluatorBaseSourceLockPreservesAllCommits(t *testing.T) {
 	scriptBytes, err := os.ReadFile(filepath.Join("evaluator", "container", "build-base.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := string(scriptBytes)
-	start := strings.Index(script, "\njq -n \\\n    --arg server ")
-	end := strings.Index(script, "\n\nbase_sha=")
-	if start < 0 || end <= start {
-		t.Fatal("base source-lock serializer is missing")
+	initializationStart := strings.Index(script, "\nreadonly REPOSITORIES=(")
+	initializationEnd := strings.Index(script, "\n\nsource_record=")
+	collectionStart := strings.Index(script, "\nfor repository in \"${REPOSITORIES[@]}\"; do\n")
+	collectionEnd := strings.Index(script, "\nsource_lock_sha256=")
+	if initializationStart < 0 || initializationEnd <= initializationStart || collectionStart < initializationEnd || collectionEnd <= collectionStart {
+		t.Fatal("base source-lock collection or serializer is missing")
 	}
+	workspaceRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	prelude := "set -Eeuo pipefail\ninclude_worktree=false\ndeclare -A revisions\n"
 	for index, repository := range sourceRepositoryNames() {
 		commit := fmt.Sprintf("%040x", index+1)
 		repositoryCommits[repository] = commit
-		prelude += fmt.Sprintf("revisions[%s]=%s\n", repository, commit)
+		if err := os.MkdirAll(filepath.Join(workspaceRoot, repository, ".git"), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	buildContext := t.TempDir()
-	command := exec.Command("bash", "-c", prelude+script[start:end])
-	command.Env = append(os.Environ(), "build_context="+buildContext)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("serialize base source lock: %v: %s", err, output)
-	}
-	lock, err := loadEvaluatorSourceLock(filepath.Join(buildContext, "source-lock.json"))
+	recordBytes, err := json.Marshal(sourceRecord{Repositories: repositoryCommits})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !maps.Equal(lock.Repositories, repositoryCommits) {
-		t.Fatalf("base source lock = %v, want %v", lock.Repositories, repositoryCommits)
+	const prelude = `set -Eeuo pipefail
+# Enforce the Bash 3.2 boundary even when the host has a newer Bash.
+declare() {
+    [ "${1:-}" != -A ] || { printf 'fixture associative arrays are unavailable\n' >&2; return 2; }
+    builtin declare "$@"
+}
+overlay_worktree() { :; }
+git() {
+    [ "$1" != init ] || return 0
+    [ "$1" = -C ] || return 91
+    local repository="${2##*/}"
+    shift 2
+    case "$1" in
+        remote)
+            case "$2" in
+                get-url) printf 'file://%s/%s\n' "$WORKSPACE_ROOT" "$repository" ;;
+                add) : ;;
+                *) return 92 ;;
+            esac ;;
+        fetch|checkout|status) : ;;
+        rev-parse)
+            [ "$2" = HEAD ] || return 93
+            jq -er --arg repository "$repository" '.repositories[$repository]' <<<"$source_record" ;;
+        *) printf 'unexpected Git dependency: %s\n' "$*" >&2; return 94 ;;
+    esac
+}
+`
+	body := prelude + script[initializationStart:initializationEnd] + "\n" + script[collectionStart:collectionEnd] + "\nprintf '%s\\n' \"$base_sha\"\n"
+	for _, includeWorktree := range []bool{false, true} {
+		buildContext := t.TempDir()
+		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", body)
+		command.Env = []string{
+			"PATH=" + os.Getenv("PATH"), "LANG=C", "LC_ALL=C",
+			"WORKSPACE_ROOT=" + workspaceRoot, "build_context=" + buildContext,
+			"source_record=" + string(recordBytes), "include_worktree=" + strconv.FormatBool(includeWorktree),
+		}
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("include_worktree=%t: serialize base source lock: %v: %s", includeWorktree, err, output)
+		}
+		if strings.TrimSpace(string(output)) != repositoryCommits["server"] {
+			t.Fatalf("include_worktree=%t: base SHA = %q, want %s", includeWorktree, output, repositoryCommits["server"])
+		}
+		lockPath := filepath.Join(buildContext, "source-lock.json")
+		if !includeWorktree {
+			if _, err := loadEvaluatorSourceLock(lockPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+		lockBytes, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lock evaluatorSourceLock
+		if err := json.Unmarshal(lockBytes, &lock); err != nil {
+			t.Fatal(err)
+		}
+		if lock.Schema != 1 || lock.DevelopmentSnapshot != includeWorktree || !maps.Equal(lock.Repositories, repositoryCommits) {
+			t.Fatalf("include_worktree=%t: base source lock = %s, want commits %v", includeWorktree, lockBytes, repositoryCommits)
+		}
 	}
 }
 

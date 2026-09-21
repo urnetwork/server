@@ -3,11 +3,22 @@ package monitor
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+type shortNilWriter struct{}
+
+func (shortNilWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
 
 func TestAlertMarkdownIsDetailedAndHumanReadable(t *testing.T) {
 	alert := Alert{
@@ -23,6 +34,9 @@ func TestAlertMarkdownIsDetailedAndHumanReadable(t *testing.T) {
 		if !strings.Contains(markdown, want) {
 			t.Errorf("Markdown missing %q:\n%s", want, markdown)
 		}
+	}
+	if !strings.HasSuffix(AlertsMarkdown([]Alert{alert}), markdownCompletionMarker+"\n") {
+		t.Fatalf("alert document lacks terminal completion marker")
 	}
 }
 
@@ -82,5 +96,19 @@ func TestWriteAlertsJSONLEmitsNothingForNoAlerts(t *testing.T) {
 	}
 	if output.Len() != 0 {
 		t.Fatalf("empty JSONL output = %q", output.String())
+	}
+}
+
+func TestAlertWritersRejectShortNilErrorWrites(t *testing.T) {
+	alerts := []Alert{{
+		SignalNumber: "1.1", SignalKey: "synthetic", SignalID: "synthetic/probe", SignalName: "Synthetic",
+		Severity: SeverityWarn, Class: "short-write", Target: "synthetic-target", Environment: "synthetic",
+		ObservedAt: time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC), Symptom: "synthetic output",
+	}}
+	if err := WriteAlertsMarkdown(shortNilWriter{}, alerts); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Markdown short nil-error write = %v, want io.ErrShortWrite", err)
+	}
+	if err := WriteAlertsJSONL(shortNilWriter{}, alerts); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("JSONL short nil-error write = %v, want io.ErrShortWrite", err)
 	}
 }

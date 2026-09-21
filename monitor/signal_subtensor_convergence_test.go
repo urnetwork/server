@@ -141,13 +141,13 @@ func TestSubtensorConvergenceSignalSyntheticAcceptsBoundedETA(t *testing.T) {
 
 func TestSubtensorConvergenceSignalSyntheticTreatsShortHistoryAsUnknown(t *testing.T) {
 	now := time.Date(2026, 9, 3, 6, 35, 0, 0, time.UTC)
-	_, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+	alerts, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
 		lag: 1_400_000, netRate: 0.5, targetRate: 0.08,
 		importRate: 0.58, importSeconds: 1.7,
 		queuedBlocks: 2112, sampleCount: 30, sampleAge: 5,
 	})
-	if err == nil || !strings.Contains(err.Error(), "30 one-hour samples, want at least 200") {
-		t.Fatalf("short-history error = %v", err)
+	if err != nil || len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !strings.Contains(alerts[0].Observed, "generation_state=metrics-insufficient-history") {
+		t.Fatalf("short history must be explicit unknown: alerts=%+v err=%v", alerts, err)
 	}
 }
 
@@ -278,12 +278,12 @@ func runSubtensorConvergenceFixture(t testing.TB, now time.Time, fixture subtens
 
 func TestSubtensorConvergenceRejectsShortCanonicalTargetHistory(t *testing.T) {
 	now := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
-	_, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+	alerts, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
 		lag: 100_000, netRate: 3, targetRate: 0.08, importRate: 3.08, importSeconds: 0.2,
 		sampleCount: 240, sampleAge: 0, targetSamples: 199,
 	})
-	if err == nil || !strings.Contains(err.Error(), "199 trusted target samples") {
-		t.Fatalf("short canonical history error = %v", err)
+	if err != nil || len(alerts) != 1 || alerts[0].Class != "cannot-observe" || !strings.Contains(alerts[0].Observed, "generation_state=metrics-insufficient-history") {
+		t.Fatalf("short canonical history must be explicit unknown: alerts=%+v err=%v", alerts, err)
 	}
 }
 
@@ -651,6 +651,30 @@ func TestSubtensorConvergenceGenerationAcceptsStableCompleteHour(t *testing.T) {
 	}
 }
 
+// An initially qualified generation plus a short metrics history is the exact
+// boundary seen after collector warm-up. It must remain a typed unknown rather
+// than causing the complete monitor snapshot to exit through generic error
+// handling.
+func TestSubtensorConvergenceGenerationTreatsAllQualifiedShortHistoryAsUnknown(t *testing.T) {
+	now := time.Date(2099, 2, 3, 4, 5, 6, 0, time.UTC)
+	settings := subtensorConvergenceGenerationTestSettings(nil, now)
+	fixture := subtensorConvergenceGenerationTestHealthyFixture()
+	fixture.sampleCount, fixture.targetSamples = 69, 69
+	payload := subtensorConvergenceGenerationTestPayload(t, now, settings, fixture)
+	identity := subtensorConvergenceGenerationTestIdentity(t, now.Add(-2*time.Hour))
+	source, capture := subtensorConvergenceGenerationTestTransport(now, payload, func(HostSettings, string, int) string { return identity })
+	settings.Source = source
+	alerts, err := NewSubtensorConvergenceSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 2 || capture.helperCalls != 2 || capture.mimirCalls != 1 {
+		t.Fatalf("all-qualified short history must remain visible: alerts=%d helpers=%d mimir=%d err=%v", len(alerts), capture.helperCalls, capture.mimirCalls, err)
+	}
+	for _, alert := range alerts {
+		if alert.Class != "cannot-observe" || !strings.Contains(alert.Observed, "generation_state=metrics-insufficient-history") {
+			t.Fatalf("short history became %s: %s", alert.Class, alert.Observed)
+		}
+	}
+}
+
 func TestSubtensorConvergenceGenerationPinsAndBoundsSingleBracketedQuery(t *testing.T) {
 	now := time.Date(2099, 2, 3, 4, 5, 6, 0, time.UTC)
 	settings := subtensorConvergenceGenerationTestSettings(nil, now)
@@ -975,7 +999,7 @@ func TestSubtensorConvergenceGenerationPreservesPartialVisibilityOnMetricsFailur
 		alerts, err := NewSubtensorConvergenceSignal().Run(context.Background(), settings)
 		if !test.partial {
 			if !errors.Is(err, test.err) || len(alerts) != 0 {
-				t.Fatalf("existing non-partial transport error changed: alerts=%d", len(alerts))
+				t.Fatalf("non-partial transport error changed: alerts=%d err=%v", len(alerts), err)
 			}
 			continue
 		}
@@ -995,7 +1019,15 @@ func TestSubtensorConvergenceGenerationPreservesPartialVisibilityOnMetricsFailur
 			}
 			requireAlertOmits(t, alert, "synthetic-private-transport", "synthetic-private-payload", "synthetic-private-image", "/synthetic/private/data")
 		}
-		if youngCount != 2 || unavailableCount != 2 || len(settings.Hosts) != 3 {
+		wantYoung := 0
+		// This counter deliberately names only the sibling. In the
+		// all-qualified failure case the primary host also has two
+		// metrics-unobservable alerts, accounted for by the total above.
+		wantUnavailable := 2
+		if test.partial {
+			wantYoung = 2
+		}
+		if youngCount != wantYoung || unavailableCount != wantUnavailable || len(settings.Hosts) != 3 {
 			t.Fatalf("%s: partial visibility attribution changed: young=%d metrics=%d", test.name, youngCount, unavailableCount)
 		}
 	}

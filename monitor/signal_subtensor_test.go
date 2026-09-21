@@ -599,7 +599,7 @@ func TestSubtensorSignalLegacyHelperDoesNotHideCoreNodeHealth(t *testing.T) {
 	}
 	for _, alert := range alerts {
 		if alert.Class != "cannot-observe" || !wantTargets[alert.Target] ||
-			!strings.Contains(alert.Observed, "error_class="+observationErrorClassUnclassified) {
+			!strings.Contains(alert.Observed, "error_class="+observationErrorClassContractMismatch) {
 			t.Fatalf("legacy helper widened or obscured its boundary: %+v", alert)
 		}
 		delete(wantTargets, alert.Target)
@@ -786,30 +786,34 @@ func TestSubtensorSignalKeepsTimestampedProtocolExitCausallyBounded(t *testing.T
 
 func TestSubtensorSignalRejectsIncompleteTimestampedPeerDiagnostics(t *testing.T) {
 	tests := []struct {
-		name   string
-		alter  func(*subtensorPeerDiagnostics)
-		needle string
+		name       string
+		alter      func(*subtensorPeerDiagnostics)
+		needle     string
+		errorClass string
 	}{
 		{
 			name: "old helper",
 			alter: func(diagnostics *subtensorPeerDiagnostics) {
 				diagnostics.Version = 1
 			},
-			needle: "unsupported peer diagnostics version=1",
+			needle:     "unsupported peer diagnostics version=1",
+			errorClass: observationErrorClassContractMismatch,
 		},
 		{
 			name: "missing class",
 			alter: func(diagnostics *subtensorPeerDiagnostics) {
 				delete(diagnostics.Log.Outcomes, subtensorPeerLogSyncEngineTermination)
 			},
-			needle: "classes are incomplete",
+			needle:     "classes are incomplete",
+			errorClass: observationErrorClassInvalidResponse,
 		},
 		{
 			name: "count without timestamps",
 			alter: func(diagnostics *subtensorPeerDiagnostics) {
 				diagnostics.Log.Outcomes[subtensorPeerLogDatabaseOrImport] = subtensorPeerLogOutcome{Count: 1}
 			},
-			needle: "not an explicit UTC timestamp",
+			needle:     "not an explicit UTC timestamp",
+			errorClass: observationErrorClassInvalidResponse,
 		},
 		{
 			name: "reversed outcome",
@@ -818,7 +822,8 @@ func TestSubtensorSignalRejectsIncompleteTimestampedPeerDiagnostics(t *testing.T
 					Count: 1, FirstUTC: "2099-04-05T06:07:11Z", LastUTC: "2099-04-05T06:07:10Z",
 				}
 			},
-			needle: "outside its window",
+			needle:     "outside its window",
+			errorClass: observationErrorClassInvalidResponse,
 		},
 	}
 	for _, test := range tests {
@@ -834,7 +839,7 @@ func TestSubtensorSignalRejectsIncompleteTimestampedPeerDiagnostics(t *testing.T
 				t.Fatal(err)
 			}
 			visibility := requireAlertClass(t, alerts, "cannot-observe")
-			if visibility.Target != "chain.example.test/lightnode/peer-diagnostics" || !strings.Contains(visibility.Observed, "error_class="+observationErrorClassUnclassified) {
+			if visibility.Target != "chain.example.test/lightnode/peer-diagnostics" || !strings.Contains(visibility.Observed, "error_class="+test.errorClass) {
 				t.Fatalf("invalid diagnostics did not fail closed: %+v", visibility)
 			}
 			requireAlertOmits(t, visibility, test.needle)

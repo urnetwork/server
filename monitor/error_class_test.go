@@ -163,12 +163,17 @@ func TestClassifyObservationErrorNeverReturnsRawText(t *testing.T) {
 		{"unreachable timeout", &unreachableError{host: "synthetic-edge-a", err: errors.New("timeout after synthetic duration")}, observationErrorClassTimeout},
 		{"counter reset", errors.New("a monotonic counter decreased within one process generation"), observationErrorClassCounterReset},
 		{"contract", errors.New("installed helper predates this observation contract"), observationErrorClassContractMismatch},
+		{"peer diagnostics version", errors.New("unsupported peer diagnostics version=99"), observationErrorClassContractMismatch},
+		{"peer diagnostics absent", errors.New("versioned peer diagnostics are absent"), observationErrorClassContractMismatch},
 		{"state", errors.New("durable state is unreadable"), observationErrorClassStateUnavailable},
 		{"bound", errors.New("current child identity bound exceeded"), observationErrorClassBoundExceeded},
 		{"access", errors.New("permission denied: " + hostile), observationErrorClassAccessDenied},
 		{"http access", errors.New("service returned HTTP 401"), observationErrorClassAccessDenied},
 		{"command", errors.New("exit status 1: " + hostile), observationErrorClassCommandFailed},
 		{"response", errors.New("decode synthetic response: " + hostile), observationErrorClassInvalidResponse},
+		{"peer aggregate", errors.New("peer log aggregate bounds are invalid"), observationErrorClassInvalidResponse},
+		{"signup route metrics unavailable", &signupRouteMetricsUnavailableError{}, observationErrorClassMetricUnavailable},
+		{"required state unavailable", &observationStateUnavailableError{}, observationErrorClassStateUnavailable},
 		{"unknown", errors.New(hostile), observationErrorClassUnclassified},
 	}
 	for _, test := range tests {

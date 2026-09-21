@@ -16,15 +16,29 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Canonicalizes fresh fixture roots, including Darwin's /var alias, before any
+// intentional links are added. Production readers still reject every link.
+func failureEvidenceTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve failure evidence fixture directory: %v", err)
+	}
+	return directory
+}
+
 // Builds one synthetic sanitizer identity with a known regular-file digest.
 func failureEvidenceAuthenticationFixture(t *testing.T) (string, *queuedJob, map[string]any) {
 	t.Helper()
-	root := t.TempDir()
+	root := failureEvidenceTestTempDir(t)
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{JobId: server.NewId(), RoundId: server.NewId()},
 		AttemptCount:   1,
 	}
 	artifact := writeArchiveTestFile(t, root, "failed-evidence/failure.json", []byte("synthetic sanitized evidence\n"))
+	if err := authenticateFailureArtifact(root, artifact); err != nil {
+		t.Fatalf("authenticate pristine failure evidence fixture: %v", err)
+	}
 	return root, job, map[string]any{
 		"schema": 1, "kind": "sim-latency-failed-evidence-manifest",
 		"job_id": job.JobId.String(), "round_id": job.RoundId.String(),
@@ -60,6 +74,51 @@ func TestFailureEvidenceManifestAuthenticatesExactSanitizedBytes(t *testing.T) {
 		if artifact.Path == "failed-evidence-manifest.json" && artifact.Bytes != int64(len(value)) {
 			t.Fatal("retained manifest size does not describe the decoded bytes")
 		}
+	}
+}
+
+// A synthetic temp-directory alias exercises Darwin's /var boundary on every Unix host.
+func TestFailureEvidenceFixturesResolveTempDirectoryAliases(t *testing.T) {
+	parent, err := os.MkdirTemp("", "synthetic-failure-fixtures-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(parent); err != nil {
+			t.Error(err)
+		}
+	})
+	canonicalParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realDirectory := filepath.Join(canonicalParent, "real")
+	if err := os.Mkdir(realDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(canonicalParent, "alias")
+	if err := os.Symlink(realDirectory, alias); err != nil {
+		t.Fatal(err)
+	}
+	// Set this before the first t.TempDir call so its parent includes the alias.
+	t.Setenv("TMPDIR", alias)
+	root, job, manifest := failureEvidenceAuthenticationFixture(t)
+	writeFailureAuthenticationManifest(t, root, manifest)
+	if _, present, err := authenticateFailedEvidence(root, job); err != nil || !present {
+		t.Errorf("authentication fixture below a temp alias: present = %v, error = %v", present, err)
+	}
+	settings, job, archive := failureArchiveEvaluatorFixture(t, func(_ *Settings, job *queuedJob) string {
+		return failureArchiveEvidenceScript(t, job, nil) + "exit 17\n"
+	})
+	for _, root := range []string{root, settings.ArtifactRoot} {
+		canonicalRoot, err := filepath.EvalSymlinks(root)
+		if err != nil || canonicalRoot != root {
+			t.Errorf("failure fixture root is not canonical: %q, resolved = %q, error = %v", root, canonicalRoot, err)
+		}
+	}
+	outcome := (CommandEvaluator{}).Evaluate(context.Background(), settings, job)
+	if outcome.Error == nil || outcome.Error.Code != "evaluator_exit" || archive.calls != 1 {
+		t.Fatalf("evaluator fixture below a temp alias: outcome = %+v, archive calls = %d", outcome, archive.calls)
 	}
 }
 
@@ -170,10 +229,10 @@ func TestFailureEvidenceManifestRejectsUnsafeArtifacts(t *testing.T) {
 
 // Leaf links, linked parents, hard links, and special files must not cross retention.
 func TestFailureEvidenceManifestRejectsLinksAndSpecialFiles(t *testing.T) {
-	for _, mode := range []string{"symlink", "parent symlink", "root symlink", "hardlink", "directory", "fifo"} {
+	for _, mode := range []string{"symlink", "parent symlink", "root symlink", "ancestor symlink", "hardlink", "directory", "fifo"} {
 		root, job, manifest := failureEvidenceAuthenticationFixture(t)
 		artifact := manifest["artifacts"].([]evaluationArtifact)[0]
-		targetRoot := t.TempDir()
+		targetRoot := failureEvidenceTestTempDir(t)
 		target := writeArchiveTestFile(t, targetRoot, "synthetic-secret.json", []byte("synthetic sanitized evidence\n"))
 		fullPath := filepath.Join(root, filepath.FromSlash(artifact.Path))
 		if err := os.Remove(fullPath); err != nil {
@@ -194,12 +253,19 @@ func TestFailureEvidenceManifestRejectsLinksAndSpecialFiles(t *testing.T) {
 			if err := os.Symlink(targetRoot, filepath.Dir(fullPath)); err != nil {
 				t.Fatal(err)
 			}
-		case "root symlink":
+		case "root symlink", "ancestor symlink":
 			writeArchiveTestFile(t, root, artifact.Path, []byte("synthetic sanitized evidence\n"))
 			writeFailureAuthenticationManifest(t, root, manifest)
-			linkedRoot := filepath.Join(t.TempDir(), "linked-attempt")
-			if err := os.Symlink(root, linkedRoot); err != nil {
+			linkedRoot := filepath.Join(failureEvidenceTestTempDir(t), "linked-attempt")
+			target := root
+			if mode == "ancestor symlink" {
+				target = filepath.Dir(root)
+			}
+			if err := os.Symlink(target, linkedRoot); err != nil {
 				t.Fatal(err)
+			}
+			if mode == "ancestor symlink" {
+				linkedRoot = filepath.Join(linkedRoot, filepath.Base(root))
 			}
 			root = linkedRoot
 		case "hardlink":
@@ -215,7 +281,7 @@ func TestFailureEvidenceManifestRejectsLinksAndSpecialFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if mode != "root symlink" {
+		if mode != "root symlink" && mode != "ancestor symlink" {
 			writeFailureAuthenticationManifest(t, root, manifest)
 		}
 		if _, _, err := authenticateFailedEvidence(root, job); err == nil {
@@ -292,10 +358,13 @@ func TestBlobArtifactArchiveRejectsUnsafeFailureBeforeUploading(t *testing.T) {
 			},
 			AttemptCount: 1,
 		}
-		root := t.TempDir()
+		root := failureEvidenceTestTempDir(t)
 		patch := writeArchiveTestFile(t, root, "canonical.patch", []byte("synthetic patch\n"))
 		stderr := writeArchiveTestFile(t, root, "worker.stderr.log", nil)
 		valid := writeArchiveTestFile(t, root, "controller-failure.json", []byte("synthetic diagnostic\n"))
+		if err := authenticateFailureArchiveArtifacts(root, []evaluationArtifact{patch, stderr, valid}); err != nil {
+			t.Fatalf("authenticate pristine failure archive fixture: %v", err)
+		}
 		invalid := writeArchiveTestFile(t, root, unsafePath, []byte("synthetic must-not-upload\n"))
 		if strings.HasSuffix(unsafePath, "invalid-hash.json") {
 			invalid.Sha256 = strings.Repeat("a", 64)

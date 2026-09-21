@@ -105,6 +105,24 @@ type subtensorConvergenceMetrics struct {
 	mask          int
 }
 
+// subtensorConvergenceInsufficientHistoryError is an expected observation
+// boundary, not a malformed metrics response. A short one-hour history cannot
+// establish convergence, but it can be rendered as an explicit per-host
+// cannot-observe finding without turning a complete monitor report into a
+// generic probe failure.
+type subtensorConvergenceInsufficientHistoryError struct {
+	target  subtensorConvergenceTarget
+	trusted bool
+	got     float64
+}
+
+func (err *subtensorConvergenceInsufficientHistoryError) Error() string {
+	if err.trusted {
+		return fmt.Sprintf("subtensor convergence: %s/%s has %.0f trusted target samples, want at least %d; syncing fallback is not a chain target", err.target.host, err.target.job, err.got, subtensorConvergenceMinSamples)
+	}
+	return fmt.Sprintf("subtensor convergence: %s/%s has %.0f one-hour samples, want at least %d", err.target.host, err.target.job, err.got, subtensorConvergenceMinSamples)
+}
+
 func subtensorConvergenceTargets(hosts []*host) (map[string]subtensorConvergenceTarget, error) {
 	targets := map[string]subtensorConvergenceTarget{}
 	for _, configuredHost := range hosts {
@@ -283,6 +301,16 @@ func (self subtensorConvergenceProbe) check(ctx context.Context, env *probeEnv) 
 	observationFailure := func(err error) ([]finding, error) {
 		if parentErr := ctx.Err(); parentErr != nil {
 			return nil, parentErr
+		}
+		var insufficientHistory *subtensorConvergenceInsufficientHistoryError
+		if errors.As(err, &insufficientHistory) {
+			// A short, otherwise valid history is an explicit unknown for every
+			// generation-qualified target. Do not discard the complete report or
+			// replace it with a generic monitor/visibility failure.
+			for _, target := range activeTargets {
+				hostStateKVs[target.host] = "metrics-insufficient-history"
+			}
+			return visibilityFindings(), nil
 		}
 		if len(hostStateKVs) == 0 {
 			return nil, err
@@ -539,6 +567,14 @@ func subtensorConvergenceGenerationFinding(target subtensorConvergenceTarget, st
 		f.mechanism = "Another host's generation visibility remains independently established, but this node's metrics source was unavailable or incompatible. Missing metrics cannot establish a typed convergence result or healthy recovery."
 		f.evidence += " The pinned metrics observation was not interpretable; private transport and parse details are omitted."
 	}
+	if state == "metrics-insufficient-history" {
+		f.symptom = "The monitor lacks a complete one-hour Subtensor convergence history for this node"
+		f.mechanism = "Generation continuity and metric syntax were established, but fewer than the required raw-best or trusted-target samples make the one-hour slope indeterminate. A short history cannot establish either nonconvergence or healthy recovery."
+		f.evidence += " The sample deficit is retained only as a fixed state; target names, metric payloads, and private source errors are omitted."
+		f.context = "This is expected observation warm-up after a new series or collector gap, not evidence that the node or its source is unavailable."
+		f.action = "Preserve the generation and wait for a complete bounded history; investigate a recurring collector gap separately. Do not restart the node, lower the sample floor, or infer a chain outage from this finding."
+		f.verify = "The exact generation retains fresh stable identity and at least the required raw-best and trusted-target samples over a full one-hour window, then the typed convergence result is available."
+	}
 	return f
 }
 
@@ -654,13 +690,10 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 			)
 		}
 		if metric.sampleCount < subtensorConvergenceMinSamples {
-			return nil, fmt.Errorf(
-				"subtensor convergence: %s/%s has %.0f one-hour samples, want at least %d",
-				target.host, target.job, metric.sampleCount, subtensorConvergenceMinSamples,
-			)
+			return nil, &subtensorConvergenceInsufficientHistoryError{target: target, got: metric.sampleCount}
 		}
 		if metric.targetSamples < subtensorConvergenceMinSamples {
-			return nil, fmt.Errorf("subtensor convergence: %s/%s has %.0f trusted target samples, want at least %d; syncing fallback is not a chain target", target.host, target.job, metric.targetSamples, subtensorConvergenceMinSamples)
+			return nil, &subtensorConvergenceInsufficientHistoryError{target: target, trusted: true, got: metric.targetSamples}
 		}
 		if metric.lag < 0 || metric.targetRate < 0 || metric.importRate < 0 ||
 			metric.importSeconds < 0 || metric.queuedBlocks < 0 ||

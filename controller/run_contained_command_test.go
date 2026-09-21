@@ -1,3 +1,4 @@
+// Exercises process-group cancellation through explicit child readiness and exit barriers.
 package controller
 
 import (
@@ -61,7 +62,7 @@ func runContainedCommandHelper(t *testing.T) bool {
 			}
 			signal.Ignore(syscall.SIGTERM)
 			fmt.Fprintln(connection, "armed")
-			_ = connection.Close()
+			// Keep the descriptor until death so EOF proves termination on every host.
 			select {}
 		default:
 			t.Fatalf("unexpected helper mode %q", mode)
@@ -73,7 +74,7 @@ func runContainedCommandHelper(t *testing.T) bool {
 // A canceled evaluator must terminate every member of its private process
 // group, even when the command leader cooperatively exits before a child that
 // deliberately ignores TERM. The Unix listener is the explicit readiness
-// barrier; the liveness check observes the exact recorded child PID.
+// barrier; its held connection proves the exact child terminated.
 func TestRunContainedCommandCancellationTerminatesDescendant(t *testing.T) {
 	if runContainedCommandHelper(t) {
 		return
@@ -87,16 +88,93 @@ func TestRunContainedCommandCancellationBoundsInheritedPipes(t *testing.T) {
 	testRunContainedCommandCancellation(t, true)
 }
 
-// A readiness handshake proves the descendant ignores TERM before canceling.
-func testRunContainedCommandCancellation(t *testing.T, bufferedOutput bool) {
+// Owns the readiness endpoint independently of the command's working directory.
+func listenContainedCommandHelper(t *testing.T) *net.UnixListener {
 	t.Helper()
+	// Neither a long test name nor a caller-controlled TMPDIR may consume sun_path.
+	directory, err := os.MkdirTemp("/tmp", "ur-cc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Error(err)
+		}
+	})
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{
 		Net:  "unix",
-		Name: filepath.Join(t.TempDir(), "helper.sock"),
+		Name: filepath.Join(directory, "helper.sock"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
+}
+
+// Long caller temp roots must not consume the Unix socket's pathname budget.
+func TestContainedCommandSocketIgnoresLongTempDirectory(t *testing.T) {
+	root, err := os.MkdirTemp("", strings.Repeat("s", len(syscall.RawSockaddrUnix{}.Path)+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("TMPDIR", root)
+	listener := listenContainedCommandHelper(t)
+	if path := listener.Addr().String(); len(syscall.RawSockaddrUnix{}.Path) <= len(path) {
+		t.Fatalf("helper socket exceeds the native path limit: %d bytes", len(path))
+	}
+}
+
+// The exact private group is alive behind a pipe barrier, then absent after reap.
+func TestContainedProcessGroupTracksLiveAndExitedMember(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "printf ready; read release")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.ProcessState == nil {
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+		}
+	}()
+	var ready [5]byte
+	if _, err := io.ReadFull(output, ready[:]); err != nil || string(ready[:]) != "ready" {
+		t.Fatalf("private group readiness = %q, %v", ready, err)
+	}
+	if running, err := containedProcessGroupRunning(command.Process.Pid); err != nil || !running {
+		t.Fatalf("live private process group = %v, %v", running, err)
+	}
+	if _, err := fmt.Fprintln(input, "release"); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if running, err := containedProcessGroupRunning(command.Process.Pid); err != nil || running {
+		t.Fatalf("reaped private process group = %v, %v", running, err)
+	}
+}
+
+// A readiness handshake proves the descendant ignores TERM before canceling.
+func testRunContainedCommandCancellation(t *testing.T, bufferedOutput bool) {
+	t.Helper()
+	listener := listenContainedCommandHelper(t)
 	defer listener.Close()
 	if err := listener.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -136,6 +214,9 @@ func testRunContainedCommandCancellation(t *testing.T, bufferedOutput bool) {
 		t.Fatal(err)
 	}
 	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(4 * processTermGrace)); err != nil {
+		t.Fatal(err)
+	}
 	childPidText, err := bufio.NewReader(connection).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
@@ -160,19 +241,12 @@ func testRunContainedCommandCancellation(t *testing.T, bufferedOutput bool) {
 	case <-time.After(4 * processTermGrace):
 		t.Fatal("contained command did not return after cancellation")
 	}
-	if !errors.Is(result.err, context.Canceled) || result.exitCode != 0 {
+	if !errors.Is(result.err, context.Canceled) || result.err.Error() != context.Canceled.Error() || result.exitCode != 0 {
 		t.Fatalf("canceled command result = (%d, %v), want (0, context canceled)", result.exitCode, result.err)
 	}
-	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(childPid), "stat"))
-	if errors.Is(err, os.ErrNotExist) {
-		return
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
-	if len(fields) == 0 || fields[0] != "Z" && fields[0] != "X" {
-		t.Fatalf("canceled command left TERM-ignoring descendant PID %d running: %s", childPid, stat)
+	var remaining [1]byte
+	if n, err := connection.Read(remaining[:]); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("canceled descendant %d still holds its readiness socket: bytes = %d, error = %v", childPid, n, err)
 	}
 }
 

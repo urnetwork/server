@@ -5993,6 +5993,18 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   has no corresponding health row; it is not described as expired evidence.
   Preserve the open first-attempt-versus-retry SLA decision rather than calling
   this complete scheduler fairness.
+
+  False-positive/false-negative qualifier: the fairness reducer's
+  `attempt_due` predicate already excludes a provider with a recorded attempt
+  inside `ProviderEgressProbeAttemptBackoff`. Therefore an expired row that is
+  still counted as `due` is not explained by the ordinary six-hour retry
+  deferral; do not shorten the global backoff merely to clear that PAGE. First
+  establish selection and post-call submission intervals, then distinguish an
+  unselected deadline head from a selected probe whose attempt/health report
+  did not persist. Conversely, aggregate gross attempts or a healthy sibling
+  shard cannot prove either interval for the expired category. Missing interval
+  metrics remain `egress-admission-unobservable`, never evidence of fixed-pass
+  scheduler behavior or a zero submission rate.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
   durable tasks are absent, or the exact migration-657 deadline index is not
   valid and ready. TLS-schema or task absence stops the dependent activity
@@ -7605,6 +7617,11 @@ responses remain `cannot-observe`. Failure of either metric component does
 not hide an independently provable audit/other-metric finding. Observed series
 and publisher counts are not full desired-inventory coverage attestations;
 fresh transport does not prove fresh database collection.
+
+When the exact route has no source series at the pinned evaluation time, render
+the fixed `observation-metric-unavailable` class rather than the generic
+unclassified observer error. This is a false-negative discriminator: absent
+route evidence is not zero traffic, a healthy control, or a signup outage.
 
 The 2026-09-16 06:30:34Z privacy-reviewed negative control did **not** show a
 current global signup outage: the published total was 1,016,192, increased by
@@ -10275,6 +10292,7 @@ Tier-0 (page):
 | service-runtime-runaway | Mimir process metrics | §8.15 fresh exact host/service/block/instance runtime tuple | 16GiB RSS plus bounded CPU/goroutine/allocation pressure, or a 64GiB/500k-goroutine/1GiB-s hard ceiling for 2 probes | process age, same-block generation count, RSS/heap/objects/goroutines and five-minute CPU/allocation/GC rates |
 | connect-resident-ingress-capability-unobservable | Mimir process metrics | §8.15 executable-owned lazy resident-forward-ingress gauge joined to each newest fresh Connect process | any configured newest Connect generation is absent/unselectable, lacks the gauge, or reports a value other than exactly one; immediate | fleet counts only; provenance remains independent |
 | connect-resident-cost-unobservable | Mimir process metrics | §8.15 identity-free resident count joined to each newest fresh Connect process | absent/stale, duplicate, invalid, or unselectable newest-generation denominator; immediate WARN | fixed fleet counts; zero residents is valid with undefined ratios; raw runtime PAGE is independent |
+| egress-scheduler-capability-unobservable | Mimir process metrics | §2.19/§8.15 API executable-owned earliest-deadline scheduler gauge joined to each newest fresh API process | absent/unselectable, missing, or non-one gauge; immediate WARN | fixed fleet counts only; unknown does not prove legacy scheduler behavior or clear deadline-prefix findings |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature egress-prober children split by lifetime connection history | either branch has at least 20 residuals and is at least 10% of 20 or more mature children for 2 probes | created/mature/connected/retired and aggregate branch counts only |
 | dns-authoritative-rrset / dns-alias-config-invalid | native DNS + monitor config | §18.3 exact direct A/AAAA desired sets across every authority | any concrete authoritative mismatch or invalid armed config; immediate | aggregate authority/response/missing/unexpected/CNAME counts only |
 | hostpower-suspend-policy-unsafe / hostpower-suspend-observed | host | §21.2 configured and live login1 power policy plus current-boot kernel suspend pairs | configured unsafe, destructive live lid/idle action, or live suspend-capable policy immediately; any unmatched or at least five-minute suspend pair | fixed policy/capability enums and aggregate suspend timestamps/duration only |
@@ -12338,6 +12356,20 @@ thresholds. A real zero count remains `resident_count=0` with ratios explicitly
 `undefined`: nonzero retained process state must not disappear or become zero
 cost through division by an empty population.
 
+For a capability-proven runaway, also join the identity-free
+`urnetwork_connect_resident_callback_workers`,
+`urnetwork_connect_resident_forward_workers`, and
+`urnetwork_connect_resident_forward_idle_watchers` gauges on that same tuple.
+They are live aggregate goroutine owners only: they contain no client,
+destination, network, transport, or queue label.  When all three are unique,
+fresh, finite nonnegative integer samples, retain their counts and
+per-resident ratios plus `resident_unattributed_goroutines` (the process total
+less these explicitly owned workers).  A high owned sum supports the
+resident/forward lifecycle as a contributor; a high unattributed remainder
+keeps the call-site boundary open.  Missing, stale, malformed, or duplicated
+ownership gauges are explicitly `missing`, `invalid`, or `mixed`, never
+treated as zero and never used to clear the independent raw runtime PAGE.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
@@ -12349,6 +12381,16 @@ arbitrary instance-name ordering. A draining generation retains its own raw
 PAGE and its own resident evidence (or explicit unavailable ratio), without
 making a valid replacement's capability fail. No device or customer labels
 are added to the producer or copied into Markdown evidence.
+
+Provider-egress §2.19 additionally exports the identity-free API executable
+capability `urnetwork_egress_due_edf_enabled=1`. It certifies only that urgent
+present-location and health heads are merged by earliest absolute deadline
+before unlocated work. `egress-scheduler-capability-unobservable` WARNs when
+any newest API identity is absent, unselectable, missing the gauge, or reports
+a value other than one. Missing capability is an artifact/metric-delivery
+unknown, not proof of legacy fixed-pass precedence. This visibility signal does
+not clear or replace the PostgreSQL deadline-prefix, outcome, migration, or
+Taskworker signals that prove actual egress recovery.
 
 Do **not** select only the newest start time. A current and draining generation
 of the same block both consume host capacity, and the old generation is often
@@ -12462,8 +12504,9 @@ an aggregate-equivalent inflated-per-resident counterexample; cover missing,
 stale, duplicate, wrong-generation/service, malformed and invalid denominators;
 preserve zero-resident nonzero process state and draining-generation PAGEs;
 and pin freshness, equal-start ambiguity, and Markdown privacy. The owning
-Connect regressions pin the executable gauge at one and both diagnostic gauges
-as single unlabeled gauges. Behavioral Go gates remain required before rollout.
+Connect regressions pin the executable capability and all aggregate
+resident-ownership gauges as single unlabeled gauges. Behavioral Go gates
+remain required before rollout.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
@@ -14324,8 +14367,11 @@ counter deltas over the exact elapsed interval. For Mimir 3.1.1's global
 strategy, the effective local refill rate is the configured global ingestion
 rate divided by the healthy distributor count. Emit
 `mimir-distributor-skew` after two consecutive complete one-minute comparisons
-only when at least one child exceeds that local share while the sum of all
-attempted child rates remains below the global budget. If fleet attempted load
+only when at least one child exceeds that local share, its exact host-local
+reducer reports at least one non-loopback front connection, and the sum of all
+attempted child rates remains below the global budget. A loopback-only overload
+is a local-work discriminator, not proof of remote publisher concentration or
+authorization to reconnect publishers. If fleet attempted load
 itself reaches the global limit, do not call the incident balance-only: §11.20a
 owns affirmative loss, and optimization plus hardware or an explicit capacity
 decision may be required. Attempted minus accepted is an upper bound on loss,
@@ -14421,6 +14467,11 @@ drift independently of missing traffic.
 Inactive/unobservable processes and zero owned connections do not clear a
 prior connection incident; they emit visibility findings instead. An exact
 alias file with unobservable running route inputs cannot clear placement drift.
+When the bounded reducer completed but the active Fluent Bit generation, its
+owned socket evidence, or a live connection is absent, that visibility finding
+uses the fixed `error_class=observation-state-unavailable`. This is neither a
+healthy zero nor an unclassified transport/parser failure; restore the missing
+runtime evidence before interpreting placement or reconnecting a publisher.
 
 First compare active `services.yml` Grafana membership with the owning Xops
 `grafana_lan_hosts` source and explicit publisher preferences. Correct a source
@@ -15785,6 +15836,12 @@ WHERE available_block <= extract(epoch from now()) AND run_at <= now();
   PERSISTING target-not-found on one build = a task type shipped without its
   target registration — a code bug, page it (it no longer hides behind the
   1h backoff).
+  The registration audit must compare both halves of every recurring chain:
+  `InitTasks` scheduling and `InitTaskWorker` target admission. On 2026-09-19,
+  `RemoveOldExtenderLatencies` was scheduled but omitted from the production
+  worker registry, producing a permanently retried target-not-found row. A
+  test must prove the target is registered and its exact run-once key is armed;
+  scheduling a function alone is not evidence it can be claimed.
 
 ## 13. Api drain (deploy) — APIDRAIN1
 
@@ -19965,6 +20022,15 @@ update must clear the runtime-ahead page while leaving lag/progress alerts
 truthful. At eventual convergence, direct and gateway RPC must both report the
 then-current independently verified runtime.
 
+On 2026-09-19, the current archive and lightnode both reported spec 467 while
+the checked-in `vault/main/monitor.yml` inventory still pinned 458. The
+reviewed Xops Snow runtime configuration and its deterministic playbook test
+already pinned 467 for the same chain/genesis/runtime/EVM tuple. Updating the
+stale monitor pin cleared `subtensor-identity` locally without changing node
+software or historical-node progress. The Vault generation still must be
+deployed before Main is declared clear; a local monitor result is configuration
+validation, not evidence that every host has received the generation.
+
 On 2026-09-05, the same testfinney chain retained the exact genesis, runtime
 name, transaction version 1 and EVM identity above while advancing to spec 454
 between blocks 7,934,386
@@ -20253,6 +20319,12 @@ the independently typed unit, RPC, gateway, identity, peer-count, and head
 progress observations continue. A whole-host parse failure hides healthy core
 checks and is itself a monitor defect. None of these observations authorizes a
 restart, database reset, reserved-peer policy change, or deployment.
+The visibility class is diagnostic: an absent or unsupported version is
+`error_class=observation-contract-mismatch`, which calls for the reviewed
+helper contract; malformed peer-log aggregate fields are
+`error_class=observation-invalid-response`, which calls for reducer/helper
+validation. Neither class proves a peer outage, and neither may be collapsed
+into an unclassified transport error.
 
 A later 2026-09-10 control held the lightnode at zero peers from 18:48:00
 through 19:04:15 CDT. Its queued imports fell from 1,792 to zero while the head
@@ -20682,6 +20754,16 @@ count, span, age, and timestamp gaps independently. A stepped `query_range`
 or the canonical target's 15-second subquery can reuse source points and is
 not a census of distinct native scrapes. Missing `up` or process-start series
 are unavailable controls, never healthy zeros.
+
+Implementation qualifier: when an otherwise parseable pinned response has
+fewer than 200 raw-best or trusted-target samples, emit the per-node
+`cannot-observe` state `generation_state=metrics-insufficient-history`. Do not
+return only a generic probe error: that would make a complete snapshot appear
+unsealed even though its exact missing-history discriminator is known. Retain
+generic probe failure for malformed, stale, mixed-identity, or unpinned
+responses, and keep partial-host qualification intact. The deterministic
+all-qualified short-history test in `signal_subtensor_convergence_test.go`
+guards this false-negative boundary.
 
 Generation qualification is separate from count and freshness. The exact
 configured `container_name` must return complete `container_started`, image,

@@ -77,12 +77,24 @@ func newTestExtender(
 	mode connect.ExtenderConnectMode,
 ) *testExtender {
 	t.Helper()
+	return newTestExtenderWithBindCheck(ctx, t, mode, nil)
+}
+
+// Runs the optional check at the port handoff boundary, before serving starts.
+func newTestExtenderWithBindCheck(
+	ctx context.Context,
+	t testing.TB,
+	mode connect.ExtenderConnectMode,
+	beforeServe func(port int),
+) *testExtender {
+	t.Helper()
 
 	extender := &testExtender{errors: make(chan error, 64)}
 
-	// Bind the carrier port ourselves so the test knows it before the server
-	// starts, and so a port collision fails here rather than inside the
-	// server's bind loop.
+	// Keep the selected loopback endpoint bound until the extender takes
+	// ownership. Closing a probe before a wildcard rebind loses that address.
+	settings := connectextender.DefaultExtenderSettings()
+	settings.DnsPrivilegedPort = false
 	var port int
 	switch mode {
 	case connect.ExtenderConnectModeTcpTls:
@@ -91,21 +103,30 @@ func newTestExtender(
 			t.Fatalf("extender tcp listener: %v", err)
 		}
 		port = listener.Addr().(*net.TCPAddr).Port
-		if err := listener.Close(); err != nil {
-			t.Fatalf("release extender tcp probe: %v", err)
+		t.Cleanup(func() { listener.Close() })
+		settings.Listen = func(network string, address string) (net.Listener, error) {
+			if network != "tcp" || address != fmt.Sprintf(":%d", port) {
+				return nil, fmt.Errorf("unexpected extender listen %s %s", network, address)
+			}
+			return listener, nil
 		}
-	default:
+	case connect.ExtenderConnectModeQuic, connect.ExtenderConnectModeDns:
 		packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("extender udp listener: %v", err)
 		}
 		port = packetConn.LocalAddr().(*net.UDPAddr).Port
-		if err := packetConn.Close(); err != nil {
-			t.Fatalf("release extender udp probe: %v", err)
+		t.Cleanup(func() { packetConn.Close() })
+		settings.ListenPacket = func(network string, address string) (net.PacketConn, error) {
+			if network != "udp" || address != fmt.Sprintf(":%d", port) {
+				return nil, fmt.Errorf("unexpected extender packet listen %s %s", network, address)
+			}
+			return packetConn, nil
 		}
+	default:
+		t.Fatalf("unsupported extender carrier %q", mode)
 	}
 
-	settings := connectextender.DefaultExtenderSettings()
 	settings.ErrorHandler = func(stage string, err error) {
 		// Recorded, not failed: a client that retries a carrier produces
 		// benign stage errors. The case fails on the forward count and on its
@@ -130,6 +151,9 @@ func newTestExtender(
 	// like it had bypassed the extender when it had in fact gone through it.
 	settings.DialContext = counted
 	settings.DialPacketContext = counted
+	if beforeServe != nil {
+		beforeServe(port)
+	}
 
 	secret := fmt.Sprintf("connect-test-extender-%d", port)
 	extender.server = connectextender.NewExtenderServer(
@@ -143,9 +167,24 @@ func newTestExtender(
 		forwardDialer,
 		settings,
 	)
-	go func() {
-		_ = extender.server.ListenAndServe()
-	}()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- extender.server.ListenAndServe() }()
+	t.Cleanup(func() {
+		extender.server.CloseAndWait()
+		if err := <-serveDone; err != nil {
+			t.Errorf("extender serve: %v", err)
+		}
+	})
+	select {
+	case <-extender.server.Listening():
+	case <-ctx.Done():
+		t.Fatalf("extender startup: %v", ctx.Err())
+	case <-time.After(10 * time.Second):
+		t.Fatal("extender did not finish binding")
+	}
+	if carriers := extender.server.Carriers(); len(carriers) != 1 || carriers[0] != connect.ExtenderCarrierForConnectMode(mode) {
+		t.Fatalf("extender served carriers = %v, errors=%v", carriers, extender.server.ListenErrors())
+	}
 
 	extender.config = &connect.ExtenderConfig{
 		Profile: connect.ExtenderProfile{

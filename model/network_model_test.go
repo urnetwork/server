@@ -1,7 +1,9 @@
+// Exercises network model validation separately from its HTTP error transport.
 package model
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
@@ -10,23 +12,45 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// Every signup method refuses missing terms with plain model/JSON text while
+// preserving the status-bearing error consumed by the HTTP controller.
 func TestNetworkCreateTermsFail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-
-		networkCreate := NetworkCreateArgs{
-			Terms: false,
-		}
-
 		byJwt := jwt.ByJwt{}
-
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
+		defer clientSession.Cancel()
 
-		result, err := NetworkCreate(networkCreate, clientSession)
-		assert.Equal(t, err, nil)
-		// user-caused refusals now carry the router's status prefix, which
-		// RaiseHttpError turns into a 400 and strips from the body
-		assert.Equal(t, result.Error.Message, "400 "+AgreeToTerms)
+		userAuth := "terms-refusal@signup.example"
+		password, token := "synthetic-password-not-a-secret", "synthetic-provider-token"
+		google, apple := string(AuthTypeGoogle), string(AuthTypeApple)
+		for _, testCase := range []struct {
+			name string
+			args NetworkCreateArgs
+		}{
+			{name: "seedphrase", args: NetworkCreateArgs{}},
+			{name: "email", args: NetworkCreateArgs{UserAuth: &userAuth, Password: &password}},
+			{name: "google", args: NetworkCreateArgs{AuthJwt: &token, AuthJwtType: &google}},
+			{name: "apple", args: NetworkCreateArgs{AuthJwt: &token, AuthJwtType: &apple}},
+			{name: "wallet", args: NetworkCreateArgs{WalletAuth: &WalletAuthArgs{}}},
+			{name: "orphan-password", args: NetworkCreateArgs{Password: &password}},
+			{name: "orphan-provider", args: NetworkCreateArgs{AuthJwtType: &google}},
+		} {
+			result, err := NetworkCreate(testCase.args, clientSession)
+			if err != nil || result == nil || result.Error == nil {
+				t.Fatalf("%s terms refusal result=%+v err=%v, want a model error", testCase.name, result, err)
+			}
+			if result.Error.Message != AgreeToTerms || result.Error.Error() != "400 "+AgreeToTerms {
+				t.Fatalf("%s terms refusal message=%q transport=%q, want plain terms text and its 400 transport", testCase.name, result.Error.Message, result.Error.Error())
+			}
+			raw, err := json.Marshal(result.Error)
+			if err != nil || string(raw) != `{"message":"`+AgreeToTerms+`"}` {
+				t.Fatalf("%s terms refusal JSON=%s err=%v, want only the unprefixed message", testCase.name, raw, err)
+			}
+			if result.Network != nil || result.UserAuth != nil || result.Seedphrase != nil || result.VerificationRequired != nil {
+				t.Fatalf("%s terms refusal returned a success payload", testCase.name)
+			}
+		}
 	})
 }
 

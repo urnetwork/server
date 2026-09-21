@@ -677,7 +677,7 @@ func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPubli
 
 	if !sample.fluentBitActive || !sample.processObservable || sample.routeState != "expected" || !sample.connectionsObservable || sample.connectionsTotal == 0 {
 		findings = append(findings, cannotObserveFinding(
-			target+"/connections", fmt.Errorf("active publisher socket ownership or live connection is unobservable"),
+			target+"/connections", &observationStateUnavailableError{},
 		))
 		return findings
 	}

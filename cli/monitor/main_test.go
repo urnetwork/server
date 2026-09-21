@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -233,5 +236,49 @@ func TestWriteAlertsUsesRequestedFormat(t *testing.T) {
 	}
 	if !strings.HasPrefix(jsonl.String(), `{"signal_number":"1.1"`) || !strings.HasSuffix(jsonl.String(), "\n") {
 		t.Fatalf("JSONL output = %q", jsonl.String())
+	}
+}
+
+func TestParseMonitorOptionsRejectsContinuousOutput(t *testing.T) {
+	if _, err := parseMonitorOptions([]string{"-output", "synthetic-alerts.md"}); err == nil || !strings.Contains(err.Error(), "requires -once") {
+		t.Fatalf("continuous output error = %v", err)
+	}
+}
+
+func TestOpenAlertOutputWritesPrivateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alerts.md")
+	output, closeOutput, err := openAlertOutput(&bytes.Buffer{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := servermonitor.Alerts{}
+	for index := 0; index < 96; index++ {
+		alerts = append(alerts, servermonitor.Alert{
+			SignalNumber: "1.1", SignalKey: "synthetic", SignalID: "synthetic/probe", SignalName: "Synthetic",
+			Severity: servermonitor.SeverityWarn, Class: "large-output", Target: fmt.Sprintf("synthetic-target-%d", index), Environment: "synthetic",
+			ObservedAt: time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC), Symptom: "synthetic output",
+			Mechanism: strings.Repeat("synthetic-detail ", 128), Baseline: "complete synthetic output",
+			Observed: "synthetic=true", Action: "verify direct output", Verify: "complete marker remains present",
+		})
+	}
+	if err := writeAlerts(output, alertFormatMarkdown, alerts); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeOutput(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) < 128*1024 || !strings.HasSuffix(string(contents), "<!-- monitor-alerts-complete -->\n") {
+		t.Fatalf("large direct output was incomplete: bytes=%d terminal=%q", len(contents), contents[max(0, len(contents)-64):])
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("output mode = %o, want 600", info.Mode().Perm())
 	}
 }
