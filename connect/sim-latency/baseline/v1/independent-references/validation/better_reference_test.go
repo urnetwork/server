@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
 )
 
 func TestV5ReferenceUpdateActiveContractCacheUsesAuthoritativeSourceSnapshot(t *testing.T) {
