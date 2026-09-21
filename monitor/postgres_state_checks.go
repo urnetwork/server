@@ -14,7 +14,7 @@ import (
 // tier-0 read of pg load and the redis-latency mirror. It emits two signals:
 // active-pileup (page, §7) and idle-in-tx (warn, §7). When either trips it
 // runs the 1.3 / 5.8 escalation batteries — once per trip, not per tick
-// (batteryLatch) — so the ticket names the real query load without the
+// (batteryLatch) — so the ticket retains bounded workload diagnostics without the
 // batteries themselves landing load on the sick target every minute.
 type pgStateProbe struct {
 	batteries *batteryLatch
@@ -129,8 +129,9 @@ func pgStateBatteryFrameContext(evidence string) string {
 	return "In a one-shot run, the battery begins after the state summary and may span a bounded delta interval. " + frame
 }
 
-// activeBattery groups active backends by query_id (SIGNALS.md 5.8 step 1) —
-// if 1–3 shapes own the pile it is a plan problem, not organic load.
+// Groups active backends by query_id (SIGNALS.md 5.8 step 1). Concentration
+// alone does not prove a plan defect. SQL and arbitrary wait labels are
+// withheld before caching; a protected lookup can resolve the numeric IDs.
 func activeBattery(ctx context.Context, env *probeEnv) string {
 	rows, err := env.runner.pg(ctx, `
 		SELECT query_id, count(*) AS backends,
@@ -145,8 +146,27 @@ func activeBattery(ctx context.Context, env *probeEnv) string {
 	}
 	lines := []string{"top active query_ids:"}
 	for _, r := range rows {
-		lines = append(lines, fmt.Sprintf("  qid=%s backends=%s waits=%s :: %s",
-			r.str(0), r.str(1), r.str(2), r.str(3)))
+		if len(r) != 4 {
+			return "active battery failed: error_class=" + observationErrorClassInvalidResponse
+		}
+		queryId := "uncomputed"
+		if r.str(0) != "" {
+			value, err := strconv.ParseInt(r.str(0), 10, 64)
+			if err != nil {
+				return "active battery failed: error_class=" + observationErrorClassInvalidResponse
+			}
+			queryId = strconv.FormatInt(value, 10)
+		}
+		backends, err := strconv.ParseInt(r.str(1), 10, 64)
+		if err != nil || backends < 0 {
+			return "active battery failed: error_class=" + observationErrorClassInvalidResponse
+		}
+		waits := "withheld"
+		if r.str(2) == "-:-" {
+			waits = "none"
+		}
+		lines = append(lines, fmt.Sprintf("  qid=%s backends=%d waits=%s query=withheld",
+			queryId, backends, waits))
 	}
 	return strings.Join(lines, "\n")
 }

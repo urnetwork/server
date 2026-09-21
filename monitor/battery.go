@@ -8,7 +8,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -86,7 +88,8 @@ func (self *batteryLatch) healthy(key string) {
 //
 // Two snapshots are taken 15s apart and diffed here — temp tables are
 // unavailable to a read-only session, and this keeps no backend occupied in
-// between.
+// between. Only validated numeric fields and fixed labels leave this helper;
+// malformed optional evidence does not erase the independent state violation.
 func planWallBattery(ctx context.Context, env *probeEnv) string {
 	parts := []string{}
 
@@ -106,18 +109,35 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 		calls   float64
 		totalMs float64
 	}
-	parseSnap := func(rows []pgRow) (map[string]stmtSnap, map[string]float64) {
+	parseSnap := func(rows []pgRow) (map[string]stmtSnap, map[string]float64, error) {
 		stmtSnaps := map[string]stmtSnap{}
 		idxScans := map[string]float64{}
 		for _, r := range rows {
+			if len(r) != 4 {
+				return nil, nil, fmt.Errorf("invalid response for plan-wall snapshot")
+			}
+			count, countErr := strconv.ParseInt(r.str(2), 10, 64)
+			totalMs, totalErr := strconv.ParseFloat(r.str(3), 64)
+			if countErr != nil || count < 0 || totalErr != nil || totalMs < 0 || math.IsNaN(totalMs) || math.IsInf(totalMs, 0) || math.Trunc(totalMs) != totalMs {
+				return nil, nil, fmt.Errorf("invalid response for plan-wall snapshot")
+			}
 			switch r.str(0) {
 			case "stmt":
-				stmtSnaps[r.str(1)] = stmtSnap{calls: float64(atoiRow(r, 2)), totalMs: float64(atoiRow(r, 3))}
+				queryId, err := strconv.ParseInt(r.str(1), 10, 64)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid response for plan-wall snapshot")
+				}
+				stmtSnaps[strconv.FormatInt(queryId, 10)] = stmtSnap{calls: float64(count), totalMs: totalMs}
 			case "idx":
-				idxScans[r.str(1)] = float64(atoiRow(r, 2))
+				if r.str(1) == "" || totalMs != 0 {
+					return nil, nil, fmt.Errorf("invalid response for plan-wall snapshot")
+				}
+				idxScans[r.str(1)] = float64(count)
+			default:
+				return nil, nil, fmt.Errorf("invalid response for plan-wall snapshot")
 			}
 		}
-		return stmtSnaps, idxScans
+		return stmtSnaps, idxScans, nil
 	}
 
 	rowsA, errA := env.runner.pg(ctx, snapSql)
@@ -127,6 +147,14 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 	case <-time.After(15 * time.Second):
 	}
 	rowsB, errB := env.runner.pg(ctx, snapSql)
+	var stmtSnapsA, stmtSnapsB map[string]stmtSnap
+	var idxScansA, idxScansB map[string]float64
+	if errA == nil {
+		stmtSnapsA, idxScansA, errA = parseSnap(rowsA)
+	}
+	if errB == nil {
+		stmtSnapsB, idxScansB, errB = parseSnap(rowsB)
+	}
 	if errA != nil || errB != nil {
 		if errA != nil {
 			parts = append(parts, "snapshot delta failed: first_error_class="+classifyObservationError(errA))
@@ -135,8 +163,6 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 			parts = append(parts, "snapshot delta failed: second_error_class="+classifyObservationError(errB))
 		}
 	} else {
-		stmtSnapsA, idxScansA := parseSnap(rowsA)
-		stmtSnapsB, idxScansB := parseSnap(rowsB)
 		parts = append(parts, "pg_stat_statements 15s delta (current vs lifetime ms/call):")
 		for queryId, b := range stmtSnapsB {
 			a, ok := stmtSnapsA[queryId]
@@ -165,11 +191,28 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 			indexDeltas = append(indexDeltas, indexDelta{name: name, delta: b - idxScansA[name]})
 		}
 		sort.Slice(indexDeltas, func(i, j int) bool { return indexDeltas[i].delta > indexDeltas[j].delta })
+		// Names identify source-owned roles, not verified index definitions.
+		indexRole := func(name string) string {
+			switch name {
+			case "transfer_contract_unresolved_source_pair_create_time":
+				return "source-pair"
+			case "transfer_contract_unresolved_destination_pair_create_time":
+				return "destination-pair"
+			case "transfer_contract_unresolved_payer_transfer_byte_count":
+				return "payer"
+			case "transfer_contract_pair_open_create_time":
+				return "legacy-pair"
+			case "transfer_contract_open_partial_create_time":
+				return "legacy-open-create-time"
+			default:
+				return "other-name-withheld"
+			}
+		}
 		for i, d := range indexDeltas {
 			if i >= 6 {
 				break
 			}
-			parts = append(parts, fmt.Sprintf("  %s = %.0f", d.name, d.delta))
+			parts = append(parts, fmt.Sprintf("  rank=%d role=%s delta=%.0f", i+1, indexRole(d.name), d.delta))
 		}
 	}
 
@@ -183,13 +226,70 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 	if err != nil {
 		parts = append(parts, "pg_stats check failed: error_class="+classifyObservationError(err))
 	} else if len(rows) > 0 {
-		nDistinct := rows[0].str(0)
-		verdict := "healthy (both values present)"
-		if nDistinct == "1" {
-			verdict = "landmine armed (2.3): use the bounded target-300 column-only ANALYZE procedure for legacy-reader relief; verify the isolated pair/payer predicate-index migration for durable protection"
+		// The selected generated column is Boolean. Multiple rows are ambiguous
+		// because the existing query does not constrain the schema.
+		projectStats := func() string {
+			invalid := "pg_stats check failed: error_class=" + observationErrorClassInvalidResponse
+			if len(rows) != 1 || len(rows[0]) != 3 {
+				return invalid
+			}
+			r := rows[0]
+			nDistinct, err := strconv.ParseFloat(r.str(0), 64)
+			if err != nil || math.IsNaN(nDistinct) || math.IsInf(nDistinct, 0) || nDistinct < -1 || nDistinct > 2 || (nDistinct > 0 && nDistinct != 1 && nDistinct != 2) {
+				return invalid
+			}
+			mcv, frequencies := "unavailable", "unavailable"
+			valueCount := 0
+			switch r.str(1) {
+			case "-":
+				if r.str(2) != "-" {
+					return invalid
+				}
+			case "{}":
+				if r.str(2) != "" {
+					return invalid
+				}
+			case "{f}", "{t}":
+				mcv, valueCount = r.str(1), 1
+			case "{f,t}", "{t,f}":
+				mcv, valueCount = r.str(1), 2
+			default:
+				return invalid
+			}
+			positiveFrequencies, totalFrequency := 0, 0.0
+			if valueCount > 0 {
+				values := strings.Split(r.str(2), ",")
+				if len(values) != valueCount || nDistinct == 0 || (nDistinct == 1 && valueCount != 1) {
+					return invalid
+				}
+				projected := make([]string, len(values))
+				for i, raw := range values {
+					frequency, err := strconv.ParseFloat(raw, 64)
+					if err != nil || math.IsNaN(frequency) || math.IsInf(frequency, 0) || frequency < 0 || frequency > 1 {
+						return invalid
+					}
+					if frequency > 0 {
+						positiveFrequencies++
+					}
+					totalFrequency += frequency
+					projected[i] = strconv.FormatFloat(frequency, 'g', -1, 64)
+				}
+				// pg_stats frequencies are real (float32), so allow rounding at 1.
+				if totalFrequency > 1.000001 {
+					return invalid
+				}
+				frequencies = strings.Join(projected, ",")
+			}
+			verdict := "unknown (Boolean statistics do not establish a complete two-valued sample)"
+			if nDistinct == 2 && valueCount == 2 && positiveFrequencies == 2 {
+				verdict = "both Boolean values present in sampled statistics; plan health unproved"
+			} else if nDistinct == 1 && valueCount == 1 && totalFrequency == 1 {
+				verdict = "single-valued Boolean sample (2.3): confirm the legacy-reader plan before the bounded target-300 column-only ANALYZE procedure; verify the isolated pair/payer predicate-index migration for durable protection"
+			}
+			return fmt.Sprintf("pg_stats transfer_contract.open: n_distinct=%s mcv=%s freqs=%s -> %s",
+				strconv.FormatFloat(nDistinct, 'g', -1, 64), mcv, frequencies, verdict)
 		}
-		parts = append(parts, fmt.Sprintf("pg_stats transfer_contract.open: n_distinct=%s mcv=%s freqs=%s -> %s",
-			nDistinct, rows[0].str(1), rows[0].str(2), verdict))
+		parts = append(parts, projectStats())
 	}
 
 	return strings.Join(parts, "\n")

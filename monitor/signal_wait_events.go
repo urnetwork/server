@@ -63,7 +63,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		mechanism := waitEventMeaning(wait)
 		action := waitEventAction(wait)
 		clientOwner := privacySafePostgresClientOwner(env.cfg, row.str(8))
-		contextDetail := "The PID, query ID, application, privacy-safe client owner, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query; exact client addresses and CIDRs remain private. One-shot observations bypass sustain and do not prove recurrence. Cadence sustain is keyed by database target and wait family, not PID or query identity: consecutive violations prove recurrence of the family condition, not persistence of the same backend. A long-running backend that changes wait family can also reset this signal's per-frame sustain; use active-query history to establish command persistence."
+		contextDetail := "Age is measured from query_start, not entry into a wait event; wait residence is unknown from this snapshot. The PID, query ID, application, privacy-safe client owner, and SQL sample all come from the same oldest waiter in this class. They remain the attribution snapshot even if the command completes before a follow-up pg_stat_activity query; exact client addresses and CIDRs remain private. One-shot observations bypass sustain and do not prove recurrence. Cadence sustain is keyed by database target and wait family, not PID or query identity: consecutive violations prove recurrence of the family condition, not persistence of the same backend. A long-running backend that changes wait family can also reset this signal's per-frame sustain; use active-query history to establish command persistence."
 		if wait == "IO:DataFileExtend" && concurrentReindexQuery(row.str(4)) {
 			mechanism = "REINDEX CONCURRENTLY is waiting while PostgreSQL extends the replacement relation on disk. For a very large, high-churn table this makes the maintenance selection itself the load owner; a simultaneous WALInsert/WALWrite cluster is downstream write pressure, not an independent PgBouncer failure."
 			action = "Identify the relation in pg_stat_progress_create_index and check reindex-debris before changing PostgreSQL or PgBouncer. Let the protected in-progress operation reach its configured outcome; prevent the next recurrence by skipping any table too large for the two-hour full-table policy and by cleaning incomplete indexes immediately around every future rebuild."
@@ -76,14 +76,14 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		findings = append(findings, finding{
 			probeId: "pg/wait-events", tier: tierWarn,
 			class: "wait-event-cluster", target: target, frame: wait, sustain: 2,
-			symptom:   fmt.Sprintf("%s has %s active waiter(s), oldest %ss", wait, row.str(2), row.str(3)),
+			symptom:   fmt.Sprintf("%s has %s active waiter(s), oldest query age %ss", wait, row.str(2), row.str(3)),
 			mechanism: mechanism,
-			baseline:  "No non-ClientRead wait event is shared by five active client backends, and no individual active command remains on one wait event for more than one minute. ClientRead count alone is healthy until its oldest command reaches one minute.",
-			observed:  fmt.Sprintf("wait=%s active=%s oldest_s=%s count_guard=5 age_guard_s=60 oldest_pid=%s oldest_query_id=%s", wait, row.str(2), row.str(3), row.str(5), row.str(6)),
+			baseline:  "No non-ClientRead wait event is shared by five active client backends, and no active command sampled waiting has query age above one minute. ClientRead count alone is healthy until its oldest command reaches one minute; bounded-maintenance exceptions still apply. Query age does not measure wait residence.",
+			observed:  fmt.Sprintf("wait=%s active=%s oldest_s=%s count_guard=5 age_guard_s=60 oldest_pid=%s oldest_query_id=%s age_basis=query_start wait_residence=unknown", wait, row.str(2), row.str(3), row.str(5), row.str(6)),
 			evidence:  fmt.Sprintf("oldest waiter snapshot: pid=%s query_id=%s application=%s client_owner=%s\nsample query: %s", row.str(5), row.str(6), row.str(7), clientOwner, row.str(4)),
 			context:   contextDetail,
 			action:    action,
-			verify:    "Fewer than five active backends share the wait, no individual command remains on it beyond one minute on consecutive samples, and the attributed query completes inside its historical band.",
+			verify:    "The class returns inside its existing count/query-age band on consecutive samples, and the attributed query completes inside its historical band. Continuous wait residence requires separate evidence.",
 			playbook:  "SIGNALS.md §2.2",
 		})
 	}

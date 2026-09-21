@@ -88,7 +88,7 @@ func TestPostgresStateSignalCachedBatteryPrecedesLargerSustainedTotal(t *testing
 			return []Row{{"574", "13", "5", "714"}}, nil
 		case strings.Contains(query, "GROUP BY query_id ORDER BY backends DESC LIMIT 5"):
 			batteryCalls++
-			return []Row{{"synthetic-query", "11", "-:-", "SELECT bounded_fixture"}}, nil
+			return []Row{{"73", "11", "-:-", "SELECT bounded_fixture"}}, nil
 		default:
 			return nil, nil
 		}
@@ -547,7 +547,7 @@ func TestPostgresStatePlanWallErrorsRenderOnlyFixedClasses(t *testing.T) {
 					if wantDelta && !test.empty && !strings.Contains(alert.Evidence, "calls_15s=2 current=30.0ms lifetime=13.3ms") {
 						t.Fatal("successful statement delta changed")
 					}
-					if wantDelta && !test.empty && !strings.Contains(alert.Evidence, "synthetic_pair_index = 3") {
+					if wantDelta && !test.empty && !strings.Contains(alert.Evidence, "rank=1 role=other-name-withheld delta=3") {
 						t.Fatal("successful index delta changed")
 					}
 					wantStats := test.statsErr == nil && !test.empty

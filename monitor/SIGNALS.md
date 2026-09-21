@@ -1033,9 +1033,8 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   a nil error is not classified as a failure. Failed attribution must not erase
   a concrete count/age violation or become whole-probe visibility failure.
   Its class names the observation failure, not the workload cause; an empty
-  later grouping is still not recovery. This privacy boundary covers these
-  diagnostic error paths; successful active/plan-wall samples and general
-  diagnostic row schemas remain outside that review.
+  later grouping is still not recovery. Successful rows have the separate
+  bounded projections below; this is not a general diagnostic redactor.
 - SUCCESSFUL IDLE DIAGNOSTICS: the idle battery withholds SQL and application
   text before evidence enters its trip cache or reusable Alert/Markdown/JSONL
   outputs. Whitespace normalization and truncation are not redaction: the
@@ -1054,8 +1053,33 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   authorized protected lookup with current session/time evidence before action;
   a PID alone is not durable ownership. Numeric validation cannot establish
   source truth or close separate-snapshot, cached-trip, or truncated-grouping
-  attribution gaps. Successful active/plan-wall diagnostics, other SQL-sample
-  paths, and broader malformed-row attribution remain unreviewed here.
+  attribution gaps. Other SQL-sample paths and broader malformed-row
+  attribution remain outside this boundary.
+- SUCCESSFUL ACTIVE / PLAN DIAGNOSTICS: the active battery withholds SQL and
+  arbitrary wait labels before caching or Alert/Markdown/JSONL rendering.
+  Signed 64-bit query IDs, a fixed `uncomputed` marker for a NULL ID, and
+  nonnegative backend counts remain; exact `-:-` becomes `waits=none`, all
+  other wait labels become `withheld`. A malformed projected row yields only
+  a fixed optional `observation-invalid-response` note. Plan-wall snapshots likewise
+  validate signed query IDs, nonnegative integer counters and finite rounded
+  durations. Index labels become fixed source-owned name roles or
+  `other-name-withheld`, retaining ranked numeric deltas, not arbitrary names.
+  A name role does not establish an index's definition, validity, or plan use.
+  Each invalid snapshot retains its first/second component label; independent
+  valid statistics or deltas remain available and the core PAGE is preserved.
+  Empty optional results are still valid, not a healthy workload claim.
+  False-positive qualifier: the actual-render synthetic regression establishes
+  the unguarded path, not real credential exposure. Canonical query IDs and
+  Boolean statistics are numeric/Boolean; arbitrary marker cells test malformed
+  source data, not ordinary secret-bearing PostgreSQL output. Parameterized
+  SQL and harmless custom names are withheld too. False-negative qualifier:
+  minimization reduces attribution; use a separately authorized protected
+  current-session/schema lookup. No query selection, schema scope, cadence,
+  cache, threshold, or counter-reset arithmetic changed. Missing first samples,
+  counter resets/precision, top-N churn, NULL IDs, non-atomic intervals and
+  cached-trip age remain limits; an empty or negative delta is not recovery.
+  The Boolean `pg_stats` projection and its unknown controls are in §5.8.
+  Other SQL-sample and Redis batteries are not certified by this repair.
 - BROKEN: idle_in_tx > 100 requires attribution. Redis latency leaking through
   tx-scoped calls produced 563 during brownouts (2 when healthy), but a bounded
   close cohort can also put many workers briefly between statements. Report
@@ -1063,9 +1087,9 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   transaction; they can have different owners. Oldest transaction age > 30
   min = leaked transaction pinning the vacuum xmin horizon (kills autovacuum
   silently).
-- BROKEN: active > 100 with wait_event '-' (on-CPU) = a query-plan CPU wall,
-  not load (360–390 seen 2026-07-17 vs ~6 healthy; idle-in-tx elevated too but
-  redis was healthy — check 1.4 to disambiguate). pgbouncer kills queued
+- BROKEN: active > 100 with no wait event is a query-plan CPU-wall candidate,
+  not proof of that cause (360–390 seen 2026-07-17 vs ~6 healthy; idle-in-tx
+  elevated too but redis was healthy — check 1.4 to disambiguate). pgbouncer kills queued
   clients with query_wait_timeout while direct 5432 connects fine → 5.8.
 - KEY INSIGHT: pgadmin-style "connection utilization" is NOT query load.
   Real active backends were ~6 even during the worst incidents. Always split
@@ -2605,6 +2629,18 @@ that must be attributed. The rebuilt watcher validated the negative branch:
 a direct production sample again found seven distinct ClientRead PIDs with a
 4ms oldest command, while the wait-events probe emitted no alert.
 
+The emitted `oldest_s` measures query age from `query_start`, not continuous
+wait residence. An aged query can have just entered the sampled wait; this
+collector has no wait-entry timestamp or residence history. The explicit
+`age_basis=query_start`/`wait_residence=unknown` qualifier preserves that
+boundary without changing the count/age query, five-minute cadence, sustain,
+ClientRead exception or identity. False-positive qualifier: neither an aged
+singleton nor a zero-age IPC count burst proves a minute spent waiting or a
+stalled command. False-negative qualifier: separate samples cannot recover
+intervening wait transitions, and rounding hides sub-second query age. Obtain
+bounded same-command history before claiming residence; retain the real
+count/query-age warning and existing family-level recurrence controls.
+
 False-positive qualifier for persistence attribution: cadence sustain is keyed
 by database target and wait family, not PID, query ID, or query start. Two
 consecutive age-guard failures can therefore be two different aged backends in
@@ -3236,6 +3272,26 @@ xids, backend/application name, age, and query, and include
 cleanup just as an idle-in-transaction session does. Autovacuum thresholds are
 hand-tuned per giant table because default scale factors never fire on 600M-row
 tables.
+
+The 160-character horizon SQL sample is not a reliability phase or deployment
+discriminator. Full re-anchor and rolling-enter INSERTs share its observable
+prefix; the rolling `ON CONFLICT` clause occurs later. A reference to running
+state (including its metadata) is only a candidate ownership clue. The source
+regression gives both branches the same truncated sample and preserves the
+debt warning while rejecting a full-anchor or historical-cadence diagnosis.
+Use the existing task-canary/task-overdue full-SQL phase and running-window
+discriminator (§1.2), including the current drained target's distance from
+the re-anchor marker and verified deployed source. Historical full-anchor
+incidents below retain their independently collected evidence; do not assign
+that history to a new prefix-only observation. False-positive qualifier:
+threshold overshoot with an active vacuum is not failed cleanup, and one
+reliability-shaped candidate does not prove which task, phase, old revision or
+write fan-out caused the debt. False-negative qualifier: no companion phase
+alert, a released horizon or partial reclamation cannot prove recovery. Require
+the attributed attempt's bounded outcome, durable marker movement, completed
+vacuum and consecutive below-threshold samples with source coverage. Query,
+threshold, cadence, sustain and identity remain unchanged; this qualification
+does not authorize cancellation, a cadence rollout or extra collection.
 
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
@@ -8832,8 +8888,8 @@ and explains the bounded-closer/Payout split. The withheld-text marker is not
 evidence of secret-bearing work or the same workload persisting. Missing,
 malformed, empty, or cached optional attribution cannot establish recovery or
 identify the current workload owner; preserve the concrete state warning and
-obtain a fresh protected discriminator. The successful-idle privacy correction
-does not certify active/plan-wall samples or other diagnostic paths (§1.3).
+obtain a fresh protected discriminator. The idle projection and the separate
+active/plan-wall projection (§1.3/§5.8) do not certify other diagnostic paths.
 
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
@@ -9235,7 +9291,8 @@ cliff); CloseExpiredContracts 8s → 20-25min with Timeout errors; idle-in-tx
 elevated even though redis is healthy (run 1.4 first to rule redis out).
 1. psql direct to 5432 (never wait on the pgbouncer queue). Group actives by
    pg_stat_activity.query_id — if 1–3 shapes own the pile (186+159 of 360
-   observed), it is a plan problem, not organic load.
+   observed), prioritize a plan discriminator; concentration alone does not
+   distinguish a bad plan from organic concurrency.
 2. Confirm the plan: EXPLAIN (ANALYZE, BUFFERS) one shape with real params —
    the tell is a giant Rows-Removed-by-Filter on the wrong index — plus a 30s
    idx_scan snapshot delta (the intended index sits at 0). Get the CURRENT
@@ -9267,6 +9324,26 @@ elevated even though redis is healthy (run 1.4 first to rule redis out).
    scoped query off the generic open/create-time index. Then require two
    consecutive production samples with single-digit active counts and bounded
    pair calls.
+
+The automatic plan-wall battery uses the existing bounded 15-second snapshots,
+not the longer manual intervals above. Its successful evidence is projected
+before the trip cache (§1.3). For `transfer_contract.open`, accept only one
+complete three-cell row, finite Boolean-compatible `n_distinct`, exact Boolean
+MCV labels and matching finite frequencies in [0,1] whose sum is at most one
+(allowing float rounding). Multiple rows are ambiguous because the unchanged
+query does not select a schema. Malformed/partial/ambiguous rows produce only
+the fixed optional `pg_stats` `observation-invalid-response` note, never a healthy verdict;
+zero rows omit the verdict. NULL/empty MCV data and otherwise valid incomplete
+distributions remain explicitly unknown. A complete two-valued sample reports
+both values observed, not plan health; a complete one-valued sample is a
+legacy-reader discriminator, not permission to ANALYZE or proof of poisoning.
+False-positive qualifier: the canonical generated column is Boolean, so
+synthetic non-Boolean cells demonstrate missing validation rather than real
+credential leakage or a deployed schema collision. False-negative qualifier:
+typed evidence cannot prove source/schema ownership, freshness, a comparable
+counter generation or the selected plan. The existing stats selection and
+delta/reset arithmetic are unchanged; protected current plan/index evidence
+and the core state/rate controls are still required before claiming recovery.
 
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list

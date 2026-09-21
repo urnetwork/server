@@ -177,7 +177,7 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		want string
 	}{
 		"baseline count branch":  {alert.Baseline, "five active client backends"},
-		"baseline age branch":    {alert.Baseline, "more than one minute"},
+		"baseline age branch":    {alert.Baseline, "query age above one minute"},
 		"sample attribution":     {alert.Evidence, sample},
 		"pid attribution":        {alert.Evidence, "pid=8123"},
 		"query attribution":      {alert.Evidence, "query_id=9911"},
