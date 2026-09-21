@@ -379,15 +379,32 @@ esac
 	if err := os.WriteFile(filepath.Join(commandRoot, "sudo"), []byte(sudoFixture), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const gitFixture = `#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$SOURCE_TEST_FAIL_STATUS" == true && "$3" == status ]]; then
+    printf 'synthetic Git status failure\n' >&2
+    exit 128
+fi
+exec "$SOURCE_TEST_REAL_GIT" "$@"
+`
+	if err := os.WriteFile(filepath.Join(commandRoot, "git"), []byte(gitFixture), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	imageId := "sha256:" + strings.Repeat("b", 64)
 	for _, fixture := range []struct {
-		name    string
-		omit    string
-		extra   string
-		change  string
-		wantErr string
+		name       string
+		omit       string
+		extra      string
+		change     string
+		failStatus bool
+		wantErr    string
 	}{
 		{name: "complete"},
+		{name: "git-status-failure", failStatus: true, wantErr: "synthetic Git status failure"},
 		{name: "missing-operator-proxy", omit: "operator-proxy", wantErr: "source lock is malformed"},
 		{name: "missing-warp", omit: "warp", wantErr: "source lock is malformed"},
 		{name: "unexpected", extra: "unexpected", wantErr: "source lock is malformed"},
@@ -418,6 +435,8 @@ esac
 			"PATH="+commandRoot+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"SOURCE_TEST_IMAGE_ROOT="+imageRoot,
 			"SOURCE_TEST_IMAGE_ID="+imageId,
+			"SOURCE_TEST_REAL_GIT="+gitPath,
+			fmt.Sprintf("SOURCE_TEST_FAIL_STATUS=%t", fixture.failStatus),
 		)
 		output, err := command.CombinedOutput()
 		if fixture.wantErr != "" {

@@ -18,6 +18,13 @@ image_tag=""
 allow_local_base=false
 original_args=("$@")
 
+# Exit 2 is reserved for evaluator/tooling failures; the caller must not turn
+# them into a terminal candidate build rejection while Docker remains healthy.
+infrastructure_failure() {
+    printf 'evaluator infrastructure failure: %s\n' "$*" >&2
+    exit 2
+}
+
 usage() {
     printf '%s\n' \
         'usage: build-submission.sh --base-image IMAGE@sha256:DIGEST --source-root DIR --patch FILE --policy FILE [--tag IMAGE]' \
@@ -149,49 +156,70 @@ for repository in server connect sdk proxy glog goidenticons userwireguard sn op
         exit 1
     }
     expected_commit="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$source_identity")"
-    [ "$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" = sim-latency ] &&
-        [ "$(git -C "$repository_root" rev-parse HEAD)" = "$expected_commit" ] &&
-        [ -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ] || {
-            printf 'evaluation source repository does not match its temporary source identity: %s\n' "$repository" >&2
-            exit 1
-        }
+    actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
+        infrastructure_failure "could not read evaluation $repository source branch"
+    actual_commit="$(git -C "$repository_root" rev-parse HEAD)" ||
+        infrastructure_failure "could not read evaluation $repository source commit"
+    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
+        infrastructure_failure "could not inspect evaluation $repository source worktree"
+    [ "$actual_branch" = sim-latency ] && [ "$actual_commit" = "$expected_commit" ] &&
+        [ -z "$source_status" ] ||
+        infrastructure_failure "evaluation source repository does not match its temporary source identity: $repository"
 done
-[ "$(git -C "$source_root/server" rev-parse HEAD)" = "$base_sha" ]
+server_commit="$(git -C "$source_root/server" rev-parse HEAD)" ||
+    infrastructure_failure "could not read evaluation server source commit"
+[ "$server_commit" = "$base_sha" ] || infrastructure_failure "evaluation server source does not match the base image"
 
 # The simulator/scorer source is part of the trusted evaluator, never the
 # submission surface. Authenticate its Git tree before and after applying the
 # patch so this boundary fails closed independently of the API policy.
-protected_simulator_tree="$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)"
-[[ "$protected_simulator_tree" =~ ^[0-9a-f]{40}$ ]] || {
-    printf 'trusted sim-latency source tree is missing\n' >&2
-    exit 1
-}
+protected_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+    infrastructure_failure "could not read the trusted sim-latency source tree"
+[[ "$protected_simulator_tree" =~ ^[0-9a-f]{40}$ ]] ||
+    infrastructure_failure "trusted sim-latency source tree is missing"
 
 # Apply and commit only inside the temporary candidate checkout. The same
 # deterministic commit is independently reconstructed by Dockerfile.submission.
 git -C "$source_root/server" apply --check --whitespace=error-all "$build_context/canonical.patch"
 git -C "$source_root/server" apply --whitespace=error-all "$build_context/canonical.patch"
-git -C "$source_root/server" diff --quiet -- connect/sim-latency || {
+if git -C "$source_root/server" diff --quiet -- connect/sim-latency; then
+    :
+else
+    protected_diff_status=$?
+    [ "$protected_diff_status" -eq 1 ] ||
+        infrastructure_failure "could not compare the protected sim-latency source worktree"
     printf 'submission attempted to modify the protected sim-latency source tree\n' >&2
     exit 1
-}
-[ -z "$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all -- connect/sim-latency)" ] || {
+fi
+protected_status="$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all -- connect/sim-latency)" ||
+    infrastructure_failure "could not inspect the protected sim-latency source worktree"
+[ -z "$protected_status" ] || {
     printf 'submission created content in the protected sim-latency source tree\n' >&2
     exit 1
 }
-git -C "$source_root/server" add --update
-git -C "$source_root/server" diff --cached --check
+git -C "$source_root/server" add --update || infrastructure_failure "could not stage the checked candidate patch"
+git -C "$source_root/server" diff --cached --check || infrastructure_failure "could not verify the checked candidate index"
 GIT_AUTHOR_NAME='URnetwork Competition' \
 GIT_AUTHOR_EMAIL='competition@invalid' \
 GIT_COMMITTER_NAME='URnetwork Competition' \
 GIT_COMMITTER_EMAIL='competition@invalid' \
 GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
 GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
-    git -C "$source_root/server" commit --quiet --no-gpg-sign -m "competition submission $patch_sha256"
-candidate_sha="$(git -C "$source_root/server" rev-parse HEAD)"
-[ "$(git -C "$source_root/server" symbolic-ref --quiet --short HEAD)" = sim-latency ]
-[ -z "$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all)" ]
-[ "$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)" = "$protected_simulator_tree" ] || {
+    git -C "$source_root/server" commit --quiet --no-gpg-sign -m "competition submission $patch_sha256" ||
+    infrastructure_failure "could not commit the checked candidate patch"
+candidate_sha="$(git -C "$source_root/server" rev-parse HEAD)" ||
+    infrastructure_failure "could not read the candidate source commit"
+candidate_branch="$(git -C "$source_root/server" symbolic-ref --quiet --short HEAD)" ||
+    infrastructure_failure "could not read the candidate source branch"
+candidate_status="$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all)" ||
+    infrastructure_failure "could not inspect the candidate source worktree"
+[ "$candidate_branch" = sim-latency ] && [ -z "$candidate_status" ] ||
+    infrastructure_failure "committed candidate source is not clean on the temporary branch"
+candidate_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+    infrastructure_failure "could not read the candidate protected sim-latency source tree"
+[[ "$candidate_simulator_tree" =~ ^[0-9a-f]{40}$ ]] ||
+    infrastructure_failure "candidate protected sim-latency source tree identity is invalid"
+[ "$candidate_simulator_tree" = "$protected_simulator_tree" ] || {
     printf 'submission modified the protected sim-latency source tree\n' >&2
     exit 1
 }

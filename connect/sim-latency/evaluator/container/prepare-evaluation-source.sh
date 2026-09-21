@@ -130,42 +130,39 @@ for repository in "${REPOSITORIES[@]}"; do
         exit 1
     }
     expected_commit="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$source_lock_path")"
-    [ "$(git -C "$repository_root" rev-parse HEAD)" = "$expected_commit" ] || {
+    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    [ "$actual_commit" = "$expected_commit" ] || {
         printf 'evaluation repository %s does not match the source lock\n' "$repository" >&2
         exit 1
     }
-    [ -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ] || {
+    [ -z "$source_status" ] || {
         printf 'evaluation repository is not clean: %s\n' "$repository" >&2
         exit 1
     }
     git -C "$repository_root" checkout --quiet -B sim-latency "$expected_commit"
-    [ "$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" = sim-latency ]
-    [ "$(git -C "$repository_root" rev-parse HEAD)" = "$expected_commit" ]
-    [ -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ]
+    actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
+    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    [ "$actual_branch" = sim-latency ]
+    [ "$actual_commit" = "$expected_commit" ]
+    [ -z "$source_status" ]
 done
 
+# Every locked head was just verified. Serialize that authenticated map instead
+# of hiding another round of Git invocation failures inside jq's arguments.
+source_repositories="$(jq -c .repositories "$source_lock_path")"
 identity_path="$destination/.evaluation-source.json"
 jq -nS \
     --arg base_image_id "$base_image_id" \
     --arg base_sha "$base_sha" \
     --argjson source_epoch "$source_epoch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
-    --arg server "$(git -C "$destination/server" rev-parse HEAD)" \
-    --arg connect "$(git -C "$destination/connect" rev-parse HEAD)" \
-    --arg sdk "$(git -C "$destination/sdk" rev-parse HEAD)" \
-    --arg proxy "$(git -C "$destination/proxy" rev-parse HEAD)" \
-    --arg glog "$(git -C "$destination/glog" rev-parse HEAD)" \
-    --arg goidenticons "$(git -C "$destination/goidenticons" rev-parse HEAD)" \
-    --arg userwireguard "$(git -C "$destination/userwireguard" rev-parse HEAD)" \
-    --arg sn "$(git -C "$destination/sn" rev-parse HEAD)" \
-    --arg operator_proxy "$(git -C "$destination/operator-proxy" rev-parse HEAD)" \
-    --arg warp "$(git -C "$destination/warp" rev-parse HEAD)" \
+    --argjson repositories "$source_repositories" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
       branch:"sim-latency",source_lock_sha256:$source_lock_sha256,
-      repositories:{server:$server,connect:$connect,sdk:$sdk,proxy:$proxy,
-        glog:$glog,goidenticons:$goidenticons,userwireguard:$userwireguard,sn:$sn,
-        "operator-proxy":$operator_proxy,warp:$warp},
+      repositories:$repositories,
       candidate_patch_sha256:null}' > "$identity_path"
 chmod 0400 "$identity_path"
 rm -f -- "$source_lock_path"

@@ -2278,10 +2278,11 @@ func TestSubmissionBuilderProtectsSimulatorTree(t *testing.T) {
 	}
 	script := string(scriptBytes)
 	for _, required := range []string{
-		`protected_simulator_tree="$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)"`,
+		`protected_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)"`,
 		`git -C "$source_root/server" diff --quiet -- connect/sim-latency`,
 		`status --porcelain=v1 --untracked-files=all -- connect/sim-latency`,
-		`[ "$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)" = "$protected_simulator_tree" ]`,
+		`candidate_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)"`,
+		`[ "$candidate_simulator_tree" = "$protected_simulator_tree" ]`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("submission builder is missing protected-tree check %q", required)
@@ -2495,7 +2496,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)`,
+		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp)`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B sim-latency "$expected_commit"`,
 		`source_lock_sha256`,
@@ -2521,8 +2522,8 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$baseline_source_root"`,
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
-		`for repository in server connect sdk proxy glog goidenticons userwireguard sn; do`,
-		`rev-parse HEAD:connect/sim-latency`,
+		`for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do`,
+		`rev-parse --verify HEAD:connect/sim-latency`,
 		`candidate changed the protected sim-latency source tree`,
 		`EVALUATION_SOURCE_DIR=$source`,
 		`.Destination == "/workspace" and .RW == false`,
@@ -2541,7 +2542,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildSubmissionBytes),
-		"for repository in server connect sdk proxy glog goidenticons userwireguard sn; do",
+		"for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do",
 	) {
 		t.Fatal("submission builder does not authenticate the complete source graph")
 	}

@@ -676,23 +676,50 @@ validate_output_tree() {
         die "candidate output contains a non-regular entry"
 }
 
+# The baseline has already been sealed for the container uid when the candidate
+# is built. Trust only these authenticated attempt-local repositories for each
+# read; never persist safe.directory or turn off Git's ownership check globally.
+authenticate_protected_simulator_tree() {
+    local baseline_tree candidate_tree
+    baseline_tree="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" \
+        -C "$baseline_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+        die "could not read the baseline protected sim-latency source tree: Git invocation failed"
+    candidate_tree="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" \
+        -C "$candidate_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+        die "could not read the candidate protected sim-latency source tree: Git invocation failed"
+    [[ "$baseline_tree" =~ ^[0-9a-f]{40}$ ]] && [[ "$candidate_tree" =~ ^[0-9a-f]{40}$ ]] ||
+        die "could not authenticate the protected sim-latency source tree: invalid Git object identity"
+    [ "$candidate_tree" = "$baseline_tree" ] ||
+        die "candidate changed the protected sim-latency source tree"
+}
+
 seal_evaluation_source() {
     local root="$1" expected_server="$2" expected_patch="$3"
     [ "$root" = "$baseline_source_root" ] || [ "$root" = "$candidate_source_root" ] ||
         die "refusing to seal an unexpected source directory"
     for repository in server connect sdk proxy glog goidenticons userwireguard sn operator-proxy warp; do
         local repository_root="$root/$repository"
-        local expected_commit
+        local expected_commit actual_branch actual_commit source_status
         expected_commit="$(jq -er --arg repository "$repository" \
             '.repositories[$repository]' "$root/.evaluation-source.json")"
-        [ "$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" = sim-latency ] &&
-            [ "$(git -C "$repository_root" rev-parse HEAD)" = "$expected_commit" ] &&
-            [ -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ] ||
+        actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
+            die "could not read temporary $repository source branch"
+        actual_commit="$(git -C "$repository_root" rev-parse HEAD)" ||
+            die "could not read temporary $repository source commit"
+        source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
+            die "could not inspect temporary $repository source worktree"
+        [ "$actual_branch" = sim-latency ] && [ "$actual_commit" = "$expected_commit" ] &&
+            [ -z "$source_status" ] ||
             die "temporary $repository source checkout is not clean and identity-bound"
     done
-    [ "$(git -C "$root/server" rev-parse HEAD)" = "$expected_server" ] ||
+    local server_commit actual_patch
+    server_commit="$(git -C "$root/server" rev-parse HEAD)" ||
+        die "could not read temporary server source commit"
+    [ "$server_commit" = "$expected_server" ] ||
         die "temporary server source checkout has the wrong commit"
-    [ "$(jq -er '.candidate_patch_sha256 // ""' "$root/.evaluation-source.json")" = "$expected_patch" ] ||
+    actual_patch="$(jq -er '.candidate_patch_sha256 // ""' "$root/.evaluation-source.json")" ||
+        die "could not read temporary source patch identity"
+    [ "$actual_patch" = "$expected_patch" ] ||
         die "temporary source patch identity mismatch"
 
     # Preserve tracked executable bits while making both the bind itself and
@@ -1485,9 +1512,7 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
      .image_key == $image_key and (.simulator_sha256 | test("^[0-9a-f]{64}$")) and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"
-[ "$(git -C "$candidate_source_root/server" rev-parse HEAD:connect/sim-latency)" = \
-    "$(git -C "$baseline_source_root/server" rev-parse HEAD:connect/sim-latency)" ] ||
-    die "candidate changed the protected sim-latency source tree"
+authenticate_protected_simulator_tree
 write_source_evidence false
 seal_evaluation_source "$candidate_source_root" "$candidate_sha" "$patch_sha256"
 }

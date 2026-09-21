@@ -35,6 +35,13 @@ The selected tree is mounted read-only at `/workspace` in each runner and is
 removed before evidence is retained. This keeps continuously updated control
 code on `main` separate from the measured source.
 
+Sealing transfers host ownership to the container uid before the baseline runs.
+The later host-side protected-tree comparison trusts each exact authenticated
+repository only for that Git command; it never adds global or wildcard trust.
+Git inspection failures are infrastructure failures, not evidence of a changed
+protected tree. The builder returns exit 2 for these failures so a healthy
+Docker daemon cannot turn a Git error into a terminal submission rejection.
+
 This replaces custom per-job cgroup filesystem code. Docker creates the
 container cgroups; Compose puts runner, PostgreSQL, and Redis below one
 root-owned `cgroup_parent` and applies explicit CPU-set, memory/swap, PID, and
