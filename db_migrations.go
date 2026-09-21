@@ -8103,6 +8103,63 @@ var migrations = []any{
 		$competition_candidate_review_gate$;
 	`),
 
+	// Keep these published entries at their original indices even when a
+	// feature consumer is removed; activation history and later identities remain.
+	// The latency attestations providers make to extenders
+	// (connect/DESIGNNOTES4.md §3): one row per attestation the operator
+	// verified, keyed so a replayed report is a no-op. The create_time index
+	// is the retention sweep; the (extender_id, create_time) index is the per
+	// extender read.
+	newSqlMigration(`
+		CREATE TABLE network_extender_latency (
+			latency_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			probe_nonce bytea NOT NULL,
+			rtt_ms int NOT NULL,
+			probe_time timestamp NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (latency_id),
+			UNIQUE (extender_id, client_id, probe_nonce)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_latency_create_time
+		ON network_extender_latency (create_time)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_latency_extender_id_create_time
+		ON network_extender_latency (extender_id, create_time)
+	`),
+
+	// The location an extender activated from, one row per activation
+	// (connect/EXTENDER.md M1), kept the way a provider's connection keeps
+	// its own: the privacy-preserving address hash and the city, region and
+	// country the activating address resolved to. The columns on
+	// network_extender are the latest activation; this is the history, which
+	// is what a provider latency attestation is later placed against.
+	newSqlMigration(`
+		CREATE TABLE network_extender_activation (
+			activation_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			activate_time timestamp NOT NULL,
+			ip_version int NOT NULL,
+			client_address_hash bytea NULL,
+			country_code varchar NOT NULL DEFAULT '',
+			location_id uuid NULL,
+			city_location_id uuid NULL,
+			region_location_id uuid NULL,
+			country_location_id uuid NULL,
+
+			PRIMARY KEY (activation_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_activation_extender_id_activate_time
+		ON network_extender_activation (extender_id, activate_time)
+	`),
+
 	// Staging names its best statistically eligible submission automatically,
 	// without honesty review or promotion. Keep the staging review block and
 	// production approval gate; finalized history is never rewritten.
