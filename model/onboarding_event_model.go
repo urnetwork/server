@@ -127,10 +127,12 @@ const AppOpenAttributionWindow = 48 * time.Hour
 func AttributeAppOpen(ctx context.Context, networkId server.Id, now time.Time) (attributed bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		attributed = AttributeAppOpenInTx(tx, ctx, networkId, now)
-	}, server.TxReadCommitted)
+	}, server.TxSerializable)
 	return
 }
 
+// Requires serializable isolation so concurrent missing-event reads conflict
+// and the transaction retry observes the attribution that already committed.
 func AttributeAppOpenInTx(tx server.PgTx, ctx context.Context, networkId server.Id, now time.Time) bool {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
@@ -294,6 +296,7 @@ type connectDayWriteJob struct {
 	clientId    server.Id
 	connectTime time.Time
 	day         time.Time
+	done        chan<- struct{}
 }
 
 var connectDayWriteJobs = make(chan connectDayWriteJob, connectDayWriteQueueSize)
@@ -342,21 +345,38 @@ func (c *connectDayCache) forget(clientId server.Id, day time.Time) {
 // connection is committed, so a failure here never fails or delays the
 // connection: it is logged and retried on the client's next connect.
 func RecordConnectDay(ctx context.Context, clientId server.Id, connectTime time.Time) {
+	recordConnectDay(ctx, clientId, connectTime, nil)
+}
+
+// Owns an optional completion signal, transferring it to the worker only when
+// admitted. Tests can join queued writes before destroying their database.
+func recordConnectDay(ctx context.Context, clientId server.Id, connectTime time.Time, done chan<- struct{}) {
+	defer func() {
+		if done != nil {
+			close(done)
+		}
+	}()
 	day := ConnectDayStart(connectTime)
 	if !connectDaySeen.remember(clientId, day) {
 		return
 	}
 	startConnectDayWriteWorkers()
-	job := connectDayWriteJob{ctx: context.WithoutCancel(ctx), clientId: clientId, connectTime: connectTime, day: day}
+	job := connectDayWriteJob{ctx: context.WithoutCancel(ctx), clientId: clientId, connectTime: connectTime, day: day, done: done}
 	select {
 	case connectDayWriteJobs <- job:
+		done = nil
 	default:
 		// No durable write was admitted; a later connection may retry it.
 		connectDaySeen.forget(clientId, day)
 	}
 }
 
+// Completes the admitted job after committing or forgetting a failed write,
+// including any retries needed to resolve competing network/day inserts.
 func recordConnectDayWrite(job connectDayWriteJob) {
+	if job.done != nil {
+		defer close(job.done)
+	}
 	writeCtx, writeCancel := context.WithTimeout(
 		job.ctx,
 		connectDayPostCommitTimeout,
@@ -368,6 +388,8 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 			glog.Warningf("[onboarding]connect.day write failed for client %s: %v\n", job.clientId, r)
 		}
 	}()
+	// The cache deduplicates clients, not networks. Serializable isolation makes
+	// competing empty network/day reads conflict and retry after one commits.
 	server.Tx(writeCtx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			writeCtx,
@@ -417,5 +439,5 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 			job.day,
 			job.day.Add(24*time.Hour),
 		))
-	}, server.TxReadCommitted)
+	}, server.TxSerializable)
 }

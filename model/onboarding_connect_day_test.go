@@ -56,13 +56,18 @@ func TestRecordConnectDayPersistsOncePerNetworkUtcDay(t *testing.T) {
 		})
 
 		connectAt := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
-		RecordConnectDay(ctx, clientId, connectAt)
-		RecordConnectDay(ctx, clientId, connectAt.Add(time.Hour))
-		RecordConnectDay(ctx, secondClientId, connectAt.Add(2*time.Hour))
-		awaitConnectDayEventCount(t, ctx, networkId, 1)
+		writes := []<-chan struct{}{
+			recordConnectDayForTest(ctx, clientId, connectAt),
+			recordConnectDayForTest(ctx, clientId, connectAt.Add(time.Hour)),
+			recordConnectDayForTest(ctx, secondClientId, connectAt.Add(2*time.Hour)),
+		}
+		defer func() { waitConnectDayWrites(writes...) }()
+		waitConnectDayWrites(writes...)
+		connect.AssertEqual(t, 1, connectDayEventCount(t, ctx, networkId))
 
-		RecordConnectDay(ctx, clientId, connectAt.Add(24*time.Hour))
-		awaitConnectDayEventCount(t, ctx, networkId, 2)
+		writes = append(writes, recordConnectDayForTest(ctx, clientId, connectAt.Add(24*time.Hour)))
+		waitConnectDayWrites(writes...)
+		connect.AssertEqual(t, 2, connectDayEventCount(t, ctx, networkId))
 	})
 }
 
@@ -86,26 +91,68 @@ func TestRecordConnectDayPersistsOnceAfterCallerCancellation(t *testing.T) {
 		callerCtx, cancelCaller := context.WithCancel(queryCtx)
 		cancelCaller()
 		connectAt := time.Date(2026, 9, 11, 12, 30, 0, 0, time.UTC)
-		RecordConnectDay(callerCtx, clientId, connectAt)
-		RecordConnectDay(callerCtx, clientId, connectAt.Add(time.Hour))
-		awaitConnectDayEventCount(t, queryCtx, networkId, 1)
+		writes := []<-chan struct{}{
+			recordConnectDayForTest(callerCtx, clientId, connectAt),
+			recordConnectDayForTest(callerCtx, clientId, connectAt.Add(time.Hour)),
+		}
+		defer waitConnectDayWrites(writes...)
+		waitConnectDayWrites(writes...)
+		connect.AssertEqual(t, 1, connectDayEventCount(t, queryCtx, networkId))
 		if connectDaySeen.remember(clientId, ConnectDayStart(connectAt)) {
 			t.Fatal("successful canceled-parent write was forgotten from the daily cache")
 		}
 	})
 }
 
-func awaitConnectDayEventCount(t testing.TB, ctx context.Context, networkId server.Id, want int) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if count := connectDayEventCount(t, ctx, networkId); count == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("connect.day events never reached %d", want)
-		}
-		time.Sleep(10 * time.Millisecond)
+// A failed optional write still completes its job and forgets the cache entry,
+// allowing the same client's next connection to persist the missing day.
+func TestRecordConnectDayFailedWriteCompletesAndCanRetry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx,
+				`INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`,
+				clientId, networkId,
+			))
+			server.RaisePgResult(tx.Exec(ctx, `
+				CREATE FUNCTION synthetic_reject_connect_day() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+					RAISE EXCEPTION 'synthetic connect.day rejection';
+				END;
+				$$;
+				CREATE TRIGGER synthetic_reject_connect_day
+				BEFORE INSERT ON network_onboarding_event
+				FOR EACH ROW EXECUTE FUNCTION synthetic_reject_connect_day();
+			`))
+		})
+
+		connectAt := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
+		waitConnectDayWrites(recordConnectDayForTest(ctx, clientId, connectAt))
+		connect.AssertEqual(t, 0, connectDayEventCount(t, ctx, networkId))
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx,
+				`DROP TRIGGER synthetic_reject_connect_day ON network_onboarding_event`,
+			))
+		})
+		waitConnectDayWrites(recordConnectDayForTest(ctx, clientId, connectAt))
+		connect.AssertEqual(t, 1, connectDayEventCount(t, ctx, networkId))
+	})
+}
+
+// Uses the real nonblocking admission path with a per-call completion signal.
+func recordConnectDayForTest(ctx context.Context, clientId server.Id, connectTime time.Time) <-chan struct{} {
+	done := make(chan struct{})
+	recordConnectDay(ctx, clientId, connectTime, done)
+	return done
+}
+
+// Join every write, including deduplicated admissions and serialization retries,
+// before asserting the final event count or tearing down the private database.
+func waitConnectDayWrites(writes ...<-chan struct{}) {
+	for _, done := range writes {
+		<-done
 	}
 }
 
