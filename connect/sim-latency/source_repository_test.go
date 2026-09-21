@@ -16,8 +16,9 @@ import (
 	"testing"
 )
 
-// Reads the network-free `go mod edit -json` shape without treating a moving
-// main checkout as authority to remove repositories from an existing lock.
+// Reads the network-free `go mod edit -json` shape. Modules below a sibling
+// belong to that repository's commit, not a new independently locked source.
+// A moving main checkout cannot remove repositories from an existing lock.
 func requiredLocalSourceRepositories(moduleBytes []byte) ([]string, error) {
 	var module sourceModuleGraphFixture
 	if err := json.Unmarshal(moduleBytes, &module); err != nil {
@@ -34,14 +35,16 @@ func requiredLocalSourceRepositories(moduleBytes []byte) ([]string, error) {
 			(replacement.Old.Version != "" && replacement.Old.Version != requiredVersion) {
 			continue
 		}
-		repository := filepath.Base(replacement.New.Path)
-		if replacement.New.Path != "../"+repository {
+		repositoryPath, sibling := strings.CutPrefix(replacement.New.Path, "../")
+		components := strings.Split(repositoryPath, "/")
+		if !sibling || strings.Contains(replacement.New.Path, "\\") ||
+			slices.Contains(components, "") || slices.Contains(components, ".") || slices.Contains(components, "..") {
 			return nil, fmt.Errorf("required local module %s is outside the sibling-repository layout: %s", replacement.Old.Path, replacement.New.Path)
 		}
-		repositoryNames = append(repositoryNames, repository)
+		repositoryNames = append(repositoryNames, components[0])
 	}
 	slices.Sort(repositoryNames)
-	return repositoryNames, nil
+	return slices.Compact(repositoryNames), nil
 }
 
 // Main can shed a dependency that the frozen evaluator still needs. A newly
@@ -143,19 +146,118 @@ func TestSourceRepositoryCoverageRejectsNewUnpinnedDependency(t *testing.T) {
 	}
 }
 
+// Several local modules can belong to one locked repository. Its direct root
+// module need not be required, and repeated ownership must not duplicate it.
+func TestSourceRepositoryCoverageIncludesNestedModules(t *testing.T) {
+	for _, includeRootModule := range []bool{false, true} {
+		repositories := []string{"server"}
+		if includeRootModule {
+			repositories = append(repositories, "connect")
+		}
+		var module sourceModuleGraphFixture
+		if err := json.Unmarshal(sourceModuleGraphBytes(t, repositories), &module); err != nil {
+			t.Fatal(err)
+		}
+		for index, localPath := range []string{"../connect/synthetic-transport", "../connect/synthetic-vendor/transport"} {
+			dependency := sourceModuleVersionFixture{Path: fmt.Sprintf("module.example/transport%d", index), Version: "v1.0.0"}
+			module.Require = append(module.Require, dependency)
+			module.Replace = append(module.Replace, sourceModuleReplacementFixture{
+				Old: dependency, New: sourceModuleVersionFixture{Path: localPath},
+			})
+		}
+		moduleBytes, err := json.Marshal(module)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := requiredLocalSourceRepositories(moduleBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"connect", "server"}; !slices.Equal(got, want) {
+			t.Fatalf("includeRootModule=%t: owning repositories = %v, want %v", includeRootModule, got, want)
+		}
+		if err := requireLocalSourceRepositoryCoverage(moduleBytes, sourceRepositoryNames()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Being nested does not make a new repository part of the frozen lock, even
+// when the nested directory has the same name as an already locked sibling.
+func TestSourceRepositoryCoverageRejectsUnpinnedNestedModule(t *testing.T) {
+	var module sourceModuleGraphFixture
+	if err := json.Unmarshal(sourceModuleGraphBytes(t, []string{"server", "synthetic-new-dependency"}), &module); err != nil {
+		t.Fatal(err)
+	}
+	module.Replace[0].New.Path += "/connect"
+	moduleBytes, err := json.Marshal(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = requireLocalSourceRepositoryCoverage(moduleBytes, sourceRepositoryNames())
+	if err == nil || !strings.Contains(err.Error(), "synthetic-new-dependency is absent") {
+		t.Fatalf("unpinned nested module did not identify its owning repository: %v", err)
+	}
+}
+
+// An unused, version-mismatched or remote replacement supplies no local source
+// to the required graph and must not create a spurious repository obligation.
+func TestSourceRepositoryCoverageIgnoresInactiveReplacements(t *testing.T) {
+	var module sourceModuleGraphFixture
+	if err := json.Unmarshal(sourceModuleGraphBytes(t, []string{"server", "connect"}), &module); err != nil {
+		t.Fatal(err)
+	}
+	module.Require = append(module.Require,
+		sourceModuleVersionFixture{Path: "module.example/versioned", Version: "v1.0.0"},
+		sourceModuleVersionFixture{Path: "module.example/remote", Version: "v1.0.0"},
+	)
+	module.Replace = append(module.Replace,
+		sourceModuleReplacementFixture{
+			Old: sourceModuleVersionFixture{Path: "module.example/unused"},
+			New: sourceModuleVersionFixture{Path: "../../synthetic-unused"},
+		},
+		sourceModuleReplacementFixture{
+			Old: sourceModuleVersionFixture{Path: "module.example/versioned", Version: "v2.0.0"},
+			New: sourceModuleVersionFixture{Path: "../../synthetic-version-mismatch"},
+		},
+		sourceModuleReplacementFixture{
+			Old: sourceModuleVersionFixture{Path: "module.example/remote"},
+			New: sourceModuleVersionFixture{Path: "module.example/remote-replacement", Version: "v2.0.0"},
+		},
+	)
+	moduleBytes, err := json.Marshal(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := requiredLocalSourceRepositories(moduleBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"connect", "server"}; !slices.Equal(got, want) {
+		t.Fatalf("inactive replacements changed required repositories to %v, want %v", got, want)
+	}
+}
+
+// Modules may descend into a sibling, but cannot escape it or rely on path
+// aliases whose owner differs before and after cleaning.
 func TestSourceRepositoryCoverageRetainsSiblingLayoutBoundary(t *testing.T) {
 	var module sourceModuleGraphFixture
 	if err := json.Unmarshal(sourceModuleGraphBytes(t, []string{"server", "connect"}), &module); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"../../connect", "/synthetic/connect", "../connect/nested"} {
+	for _, path := range []string{
+		"../../connect", "/synthetic/connect", "./connect", "../", "../.", "../..",
+		"../connect/..", "../connect/../sdk", "../connect/nested/../../sdk",
+		"../connect//nested", "../connect/./nested", "../connect/nested/",
+		`../connect/nested\..\..\synthetic`,
+	} {
 		module.Replace[0].New.Path = path
 		encoded, err := json.Marshal(module)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := requireLocalSourceRepositoryCoverage(encoded, sourceRepositoryNames()); err == nil || !strings.Contains(err.Error(), "outside the sibling-repository layout") {
-			t.Fatalf("non-sibling module %q accepted: %v", path, err)
+			t.Fatalf("module %q was not rejected at its layout boundary: %v", path, err)
 		}
 	}
 }
@@ -391,9 +493,24 @@ func TestPrepareEvaluationSourceAuthenticatesCompleteRepositorySet(t *testing.T)
 		}
 	}
 	repositoryCommits := map[string]string{}
+	const nestedModulePath = "synthetic-transport/go.mod"
+	const nestedModule = "module module.example/synthetic-transport\n"
 	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, imageRoot, repository)
-		sourceTestGit(t, filepath.Join(imageRoot, repository), "checkout", "--quiet", "--detach")
+		repositoryRoot := filepath.Join(imageRoot, repository)
+		if repository == "connect" {
+			modulePath := filepath.Join(repositoryRoot, nestedModulePath)
+			if err := os.MkdirAll(filepath.Dir(modulePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(modulePath, []byte(nestedModule), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sourceTestGit(t, repositoryRoot, "add", "--", nestedModulePath)
+			sourceTestGit(t, repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "tracked nested module")
+			repositoryCommits[repository] = sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD")
+		}
+		sourceTestGit(t, repositoryRoot, "checkout", "--quiet", "--detach")
 	}
 	sudoFixture := `#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -517,6 +634,10 @@ exec "$SOURCE_TEST_REAL_GIT" "$@"
 		}
 		if identity.BaseImageId != imageId || !maps.Equal(identity.Repositories, repositoryCommits) {
 			t.Fatalf("prepared source identity = %+v, want image %s and repositories %v", identity, imageId, repositoryCommits)
+		}
+		moduleBytes, err := os.ReadFile(filepath.Join(destination, "connect", nestedModulePath))
+		if err != nil || string(moduleBytes) != nestedModule {
+			t.Fatalf("prepared nested module = %q, error = %v, want the locked repository's bytes", moduleBytes, err)
 		}
 		for _, repository := range sourceRepositoryNames() {
 			preparedRoot := filepath.Join(destination, repository)
