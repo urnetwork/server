@@ -1019,6 +1019,23 @@ var logClasses = []logClass{
 		verify:    "For a proved pre-fix artifact, cancellation-correlated exact lines and paired window-stall transitions remain zero for ten minutes through comparable teardown after rollout. A deterministic live-outer-context generator returning the identical text is still logged and classified, genuine other errors and abandonments remain visible, and provider windows continue reaching their configured minimum.",
 		redactIDs: true,
 	},
+	{name: "window-evaluation-unwritten-expiry", re: regexp.MustCompile(
+		`\[ip_remote_multi_client\.go:[0-9]+\]\[multi\]evaluation ping error ` +
+			`\[[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}\] = ` +
+			`queued Pack expired before serialization: send Pack was not admitted(?: \([1-9][0-9]{0,18} suppressed\))?[[:space:]]*$`,
+	),
+		sample: func(string) string {
+			return "[multi]evaluation ping error: queued Pack expired before serialization: send Pack was not admitted (identity omitted)"
+		},
+		groupBy:       func(string) string { return "pre-serialization" },
+		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §14.6",
+		meaning:   "an initial evaluation ping expired in the local Transfer queue before serialization or sequence-number assignment; this is not a provider-response result",
+		mechanism: "The exact source-reviewed singleton marker is delivered through the asynchronous acknowledgement callback after its absolute local send budget expires. It is distinct from the synchronous signaling refusal reported by signal-send-not-admitted. A generic send Pack was not admitted result does not carry this unwritten proof.",
+		context:   "This line does not identify the queue-delay cause, the effective write budget, active artifact ancestry, or remote reachability. Current Connect still records this callback under its provider-failure fallback; that reason is not independent remote evidence. The rate counts throttled diagnostic lines, not unique candidates, providers, failures, or the suppressed total. Taskworker is the emitting service, not proof of a task failure.",
+		action:    "Prove the emitting artifact's embedded Connect input under §8.12, then correlate the same generation's effective PingWriteTimeout, local queue/admission waits, sequence/carrier progress and independent provider-window outcome. Preserve bounded queues and deadlines. Do not restart Taskworker, increase timeout/capacity, or diagnose provider/network failure from the expiry alone.",
+		verify:    "Require fresh comparable evaluation traffic for ten minutes with this exact class below 20/min and independent provider-window progress. A quiet log alone is not delivery proof. Generic admission errors, other ping errors and malformed suffixes must remain visible rather than acquiring this unwritten classification.",
+		redactIDs: true,
+	},
 	{name: "window-evaluation-budget", re: windowEvaluationBudgetRe,
 		sample:        windowEvaluationBudgetLogSample,
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4 and §14.6",

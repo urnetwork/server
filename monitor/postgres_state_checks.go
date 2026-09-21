@@ -5,6 +5,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,13 +45,11 @@ func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("pg state query returned no rows")
+	values, err := pgAggregateIntegers(rows, 4)
+	if err != nil {
+		return nil, err
 	}
-	active := atoiRow(rows[0], 0)
-	idleInTx := atoiRow(rows[0], 1)
-	oldestIdleS := atoiRow(rows[0], 2)
-	totalClient := atoiRow(rows[0], 3)
+	active, idleInTx, oldestIdleS, totalClient := values[0], values[1], values[2], values[3]
 
 	findings := []finding{}
 
@@ -142,7 +141,7 @@ func activeBattery(ctx context.Context, env *probeEnv) string {
 		GROUP BY query_id ORDER BY backends DESC LIMIT 5;
 	`)
 	if err != nil {
-		return "active battery failed: " + err.Error()
+		return "active battery failed: error_class=" + classifyObservationError(err)
 	}
 	lines := []string{"top active query_ids:"}
 	for _, r := range rows {
@@ -153,7 +152,8 @@ func activeBattery(ctx context.Context, env *probeEnv) string {
 }
 
 // idleTxBattery groups idle-in-tx backends by last query shape (SIGNALS.md
-// 5.6) — names the tx-scoped redis coupling sites that are stalling.
+// 5.6). Only validated numeric diagnostics leave this helper, before caching;
+// SQL and application text can contain literals or durable identities.
 func idleTxBattery(ctx context.Context, env *probeEnv) string {
 	rows, err := env.runner.pg(ctx, `
 		WITH idle AS MATERIALIZED (
@@ -180,15 +180,26 @@ func idleTxBattery(ctx context.Context, env *probeEnv) string {
 		ORDER BY sort_key, backends DESC, oldest_s DESC;
 	`)
 	if err != nil {
-		return "idle-tx battery failed: " + err.Error()
+		return "idle-tx battery failed: error_class=" + classifyObservationError(err)
 	}
 	lines := []string{"idle-in-tx by last query shape:"}
 	for _, r := range rows {
+		if len(r) != 7 || (r.str(1) != "oldest" && r.str(1) != "shape") {
+			return "idle-tx battery failed: error_class=invalid-response"
+		}
+		var numeric [3]int64
+		for i, column := range []int{2, 3, 4} {
+			value, err := strconv.ParseInt(r.str(column), 10, 64)
+			if err != nil || value < 0 {
+				return "idle-tx battery failed: error_class=invalid-response"
+			}
+			numeric[i] = value
+		}
 		if r.str(1) == "oldest" {
-			lines = append(lines, fmt.Sprintf("  oldest transaction: pid=%s continuously_idle=%ss application=%s :: %s", r.str(4), r.str(3), r.str(5), r.str(6)))
+			lines = append(lines, fmt.Sprintf("  oldest transaction: pid=%d continuously_idle=%ds application=withheld query=withheld", numeric[2], numeric[1]))
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("  backends=%s oldest_continuous_idle=%ss :: %s", r.str(2), r.str(3), r.str(6)))
+		lines = append(lines, fmt.Sprintf("  backends=%d oldest_continuous_idle=%ds query=withheld", numeric[0], numeric[1]))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -219,7 +230,11 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err != nil {
 		return nil, err
 	}
-	rate := atoiRow(rows[0], 0)
+	values, err := pgAggregateIntegers(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	rate := values[0]
 
 	// learned band: trailing-hour median (needs >= 30 samples). Read before
 	// recording so the median reflects history, not this reading's own
@@ -277,4 +292,21 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		}}, nil
 	}
 	return []finding{healthyFinding("pg/contracts-collapse", tierPage, "contracts-collapse", target)}, nil
+}
+
+// These two scalar aggregates always return one complete row, unlike the
+// optional GROUP BY batteries. Reject unknown values before changing state.
+func pgAggregateIntegers(rows []pgRow, columns int) ([]int64, error) {
+	if len(rows) != 1 || len(rows[0]) != columns {
+		return nil, fmt.Errorf("invalid response for PostgreSQL aggregate: expected one row with %d columns", columns)
+	}
+	values := make([]int64, columns)
+	for i := range values {
+		value, err := strconv.ParseInt(rows[0].str(i), 10, 64)
+		if err != nil || value < 0 {
+			return nil, fmt.Errorf("invalid response for PostgreSQL aggregate: expected nonnegative integers")
+		}
+		values[i] = value
+	}
+	return values, nil
 }

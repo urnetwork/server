@@ -128,7 +128,12 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 	}
 	rowsB, errB := env.runner.pg(ctx, snapSql)
 	if errA != nil || errB != nil {
-		parts = append(parts, fmt.Sprintf("snapshot delta failed: %v %v", errA, errB))
+		if errA != nil {
+			parts = append(parts, "snapshot delta failed: first_error_class="+classifyObservationError(errA))
+		}
+		if errB != nil {
+			parts = append(parts, "snapshot delta failed: second_error_class="+classifyObservationError(errB))
+		}
 	} else {
 		stmtSnapsA, idxScansA := parseSnap(rowsA)
 		stmtSnapsB, idxScansB := parseSnap(rowsB)
@@ -176,7 +181,7 @@ func planWallBattery(ctx context.Context, env *probeEnv) string {
 		FROM pg_stats WHERE tablename='transfer_contract' AND attname='open';
 	`)
 	if err != nil {
-		parts = append(parts, "pg_stats check failed: "+err.Error())
+		parts = append(parts, "pg_stats check failed: error_class="+classifyObservationError(err))
 	} else if len(rows) > 0 {
 		nDistinct := rows[0].str(0)
 		verdict := "healthy (both values present)"

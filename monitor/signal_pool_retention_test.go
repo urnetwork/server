@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ func TestPoolRetentionSignalSyntheticRetainedFleet(t *testing.T) {
 		"server_idle_timeout=0",
 		"608 total",
 		"Zero disables idle draining",
-		"Xops descendant of 31ae1e7",
+		"intentional local Xops checkout containing the 31ae1e7 idle-drain change",
 		"run-dbs.sh --pgbouncer-only",
 		"there is no separate run-pgbouncer.sh",
 		"requires their PIDs to remain unchanged",
@@ -115,5 +116,117 @@ func TestPoolRetentionSignalRejectsInconsistentSummary(t *testing.T) {
 	if _, err := NewPoolRetentionSignal().Run(context.Background(), syntheticSettings(source)); err == nil ||
 		!strings.Contains(err.Error(), "inconsistent") {
 		t.Fatalf("inconsistent pool-retention error = %v", err)
+	}
+}
+
+// Emitted guidance retains local-checkout policy and both independent reserve guards.
+func TestPoolRetentionSignalGuidancePreservesLocalCheckoutAndCapacity(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []Row
+	}{
+		{
+			name: "young-cohort-small-ceiling",
+			rows: poolRetentionRows("200", "140", "120", "110", "8", "2", "0", "120"),
+		},
+		{
+			name: "aged-cohort-large-ceiling",
+			rows: poolRetentionRows("1000", "700", "600", "560", "35", "5", "400", "1700"),
+		},
+	}
+	for _, c := range cases {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return c.rows, nil
+		}}
+		alerts, err := NewPoolRetentionSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatalf("%s: pool-retention run failed: %v", c.name, err)
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("%s: alert count = %d, want 1", c.name, len(alerts))
+		}
+		alert := alerts[0]
+		if alert.Class != "pgbouncer-idle-retention" || alert.Severity != SeverityWarn || alert.Sustain != 10 {
+			t.Errorf("%s: guidance change altered the retained threshold identity", c.name)
+		}
+		for _, want := range []string{
+			"intentional local Xops checkout containing the 31ae1e7 idle-drain change",
+			"deliberate local changes are allowed",
+			"explicit operational authorization",
+			"run-dbs.sh --pgbouncer-only",
+			"requires their PIDs to remain unchanged",
+		} {
+			if !strings.Contains(alert.Action, want) {
+				t.Errorf("%s: emitted action omitted %q", c.name, want)
+			}
+		}
+		for _, forbidden := range []string{"clean Xops", "clean checkout", "clean-tree"} {
+			if strings.Contains(alert.Action, forbidden) {
+				t.Errorf("%s: emitted action retained unintended policy %q", c.name, forbidden)
+			}
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{name: "baseline", value: alert.Baseline},
+			{name: "verify", value: alert.Verify},
+		} {
+			if !strings.Contains(field.value, "both more than 25% normal-role headroom and more than 64 normal slots") {
+				t.Errorf("%s: emitted %s does not require both independent reserve guards", c.name, field.name)
+			}
+		}
+	}
+}
+
+// The owning catalog section uses the same checkout and reserve contract as Alerts.
+func TestPoolRetentionCatalogGuidanceMatchesEmittedContract(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 1.3b PgBouncer idle-backend retention")
+	if start < 0 {
+		t.Fatal("pool-retention catalog section is missing")
+	}
+	section := catalog[start:]
+	end := strings.Index(section, "\n### ")
+	if end < 0 {
+		t.Fatal("pool-retention catalog section end is missing")
+	}
+	section = strings.Join(strings.Fields(section[:end]), " ")
+	for _, want := range []string{
+		"intentional local Xops checkout containing the 31ae1e7 idle-drain change",
+		"deliberate local changes are allowed",
+		"explicit operational authorization",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("pool-retention catalog omitted %q", want)
+		}
+	}
+	for _, band := range []struct {
+		name  string
+		start string
+		end   string
+	}{
+		{name: "healthy", start: "- HEALTHY:", end: "- WARN:"},
+		{name: "verify", start: "- VERIFY:", end: ""},
+	} {
+		bandStart := strings.Index(section, band.start)
+		if bandStart < 0 {
+			t.Fatalf("pool-retention catalog %s band is missing", band.name)
+		}
+		text := section[bandStart:]
+		if band.end != "" {
+			bandEnd := strings.Index(text, band.end)
+			if bandEnd < 0 {
+				t.Fatalf("pool-retention catalog %s band end is missing", band.name)
+			}
+			text = text[:bandEnd]
+		}
+		if !strings.Contains(text, "both more than 25% normal-role headroom and more than 64 normal slots") {
+			t.Errorf("pool-retention catalog %s band omitted an independent reserve guard", band.name)
+		}
 	}
 }

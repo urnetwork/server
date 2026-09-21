@@ -383,6 +383,11 @@ WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
   not a constant).
 - BROKEN: < 50% of trailing median for 3 consecutive minutes = brownout;
   < 1,000/min = outage (observed during CLUSTERDOWN: 150–700/min).
+- UNKNOWN: the count observation must contain exactly one row and one
+  nonnegative integer. Missing, extra, malformed, negative, or overflowing
+  values are `cannot-observe`, never zero throughput or a healthy rate, and
+  must not enter learned history. An explicitly observed numeric zero remains
+  affirmative zero throughput and follows the existing outage threshold.
 - SHAPE MATTERS: cliff (one minute 40k→1k) = systemic event (cluster state,
   deploy); sag (slow decline) = partial failure (one sick node, growing
   backlog); ramp = recovery in progress (do not re-alert during ramp).
@@ -1009,6 +1014,48 @@ SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
 FROM pg_stat_activity WHERE backend_type = 'client backend';
 ```
 - HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min.
+- UNKNOWN: the executable state summary requires exactly one row with four
+  nonnegative integers: active count, idle-in-transaction count, rounded
+  oldest transaction age in seconds, and total client count. Missing, extra,
+  malformed, negative, or overflowing cells are `cannot-observe`; they must
+  not count as healthy or re-arm its cached battery. A source error likewise
+  preserves the cache. A complete numeric zero row remains a valid in-band
+  observation. This strict aggregate contract does not apply to the later
+  optional `GROUP BY` batteries: an empty grouping can mean the work finished
+  between snapshots, and a battery failure reduces attribution rather than
+  suppressing a concrete count/age alert. Schema-valid numeric data still
+  needs trustworthy collection and privileges; this guard cannot establish
+  cause, time-aligned ownership, or recovery from absent diagnostics.
+- OPTIONAL DIAGNOSTIC ERRORS: active-query grouping, idle-transaction grouping,
+  and plan-wall snapshot/`pg_stats` failures retain only fixed error classes
+  in alert evidence, never returned error text. Plan-wall evidence separately
+  labels a failed first snapshot, second snapshot, and `pg_stats` check;
+  a nil error is not classified as a failure. Failed attribution must not erase
+  a concrete count/age violation or become whole-probe visibility failure.
+  Its class names the observation failure, not the workload cause; an empty
+  later grouping is still not recovery. This privacy boundary covers these
+  diagnostic error paths; successful active/plan-wall samples and general
+  diagnostic row schemas remain outside that review.
+- SUCCESSFUL IDLE DIAGNOSTICS: the idle battery withholds SQL and application
+  text before evidence enters its trip cache or reusable Alert/Markdown/JSONL
+  outputs. Whitespace normalization and truncation are not redaction: the
+  source-reproduced synthetic path retained literals and application identity,
+  but this is not evidence of real credential exposure. The existing query,
+  grouping/order/limits, oldest PID, backend counts, and continuous-idle ages
+  remain; rendered numeric fields must parse as nonnegative 64-bit integers.
+  An incomplete row, unknown row kind, or invalid numeric field withholds the
+  entire optional snapshot behind fixed `error_class=invalid-response`, not
+  a whole-probe visibility failure or suppression of the core count/age alert.
+  A genuinely empty optional grouping still remains valid. False-positive
+  qualifier: withheld text is not evidence of unsafe SQL, Redis causality, a
+  leak, or a persistent owner; ordinary parameterized queries are withheld too.
+  False-negative qualifier: this deliberately reduces workload attribution;
+  neither missing text nor an empty later grouping proves recovery. Use an
+  authorized protected lookup with current session/time evidence before action;
+  a PID alone is not durable ownership. Numeric validation cannot establish
+  source truth or close separate-snapshot, cached-trip, or truncated-grouping
+  attribution gaps. Successful active/plan-wall diagnostics, other SQL-sample
+  paths, and broader malformed-row attribution remain unreviewed here.
 - BROKEN: idle_in_tx > 100 requires attribution. Redis latency leaking through
   tx-scoped calls produced 563 during brownouts (2 when healthy), but a bounded
   close cohort can also put many workers briefly between statements. Report
@@ -1180,7 +1227,8 @@ WHERE backend_type = 'client backend';
 
 - HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
   ceiling, excess pool connections drain toward their configured warm minimum
-  after 600 idle seconds, and §1.3a retains more than 25% total headroom.
+  after 600 idle seconds, and §1.3a retains both more than 25% normal-role
+  headroom and more than 64 normal slots.
 - WARN: idle loopback backends consume at least 50% of the ordinary-role
   ceiling for ten consecutive 30-second samples. Report local idle, active,
   idle-in-transaction, continuously idle for at least 600 seconds, and the
@@ -1197,9 +1245,11 @@ WHERE backend_type = 'client backend';
   interval requires both owner attribution and the selected live settings
   before classifying the drain as disabled, ineffective, or mismatched.
 - ROOT-CAUSE ORDER: first read the selected settings from every live shard and
-  take one root socket census. If the timeout is zero, apply the isolated
-  Xops commit `31ae1e7` only after protected database maintenance is empty and
-  with explicit operational authorization. The supported consolidated runner
+  take one root socket census. If the timeout is zero, deploy from an
+  intentional local Xops checkout containing the 31ae1e7 idle-drain change
+  (deliberate local changes are allowed) only after protected database
+  maintenance is empty and with explicit operational authorization.
+  The supported consolidated runner
   is `xops/main/ansible/run-dbs.sh --pgbouncer-only`; there is no separate
   `run-pgbouncer.sh`. It sets the documented 600-second PgBouncer default,
   reloads only changed pooler units, and fails if any PID changes across
@@ -1218,7 +1268,8 @@ WHERE backend_type = 'client backend';
 - VERIFY: every live shard file reports `server_idle_timeout=600`; every
   PgBouncer PID is unchanged across the isolated reload; after more than 600
   seconds outside a demand peak, excess connections contract toward the warm
-  floor; §1.3a headroom stays above 25% for ten minutes; and neither
+  floor; §1.3a retains both more than 25% normal-role headroom and more than 64
+  normal slots for ten minutes; and neither
   `query_wait_timeout` nor a rejected server login recurs.
 
 The 2026-09-01 production control supplied exact causal evidence. Edge-2 had
@@ -1436,6 +1487,26 @@ ledger crosswalks deterministic:
   refusal gate, signal kind and reset flag. Its service aggregate remains
   alertable so splitting a burst across those finite groups cannot hide it;
   old mode/reason-only lines explicitly leave the gate unobserved.
+
+`window-evaluation-unwritten-expiry` recognizes only the source-reviewed
+`[multi]evaluation ping error [...] = queued Pack expired before serialization:
+send Pack was not admitted` line from `ip_remote_multi_client.go`, optionally
+ending in the emitter's numeric `(N suppressed)` suffix. It retains a fixed
+`pre-serialization` frame and identity-free sample. WARN at 20 diagnostic
+lines/minute in one completed known-class window (sustain 1); suppressed counts
+are not added. This is an asynchronous initial-ping queue deadline, not the
+synchronous signaling-admission class, an ordinary ping timeout, or a remote
+response. A generic `send Pack was not admitted` alone lacks the pre-wire
+proof. Near matches and unsupported suffixes stay in generic novelty.
+
+The 2026-09-21 Taskworker novel alert retained one complete sample of this
+known local boundary. Its 27/min top normalized key was truncated at 160 bytes,
+before the decisive suffix: do not assign all 27 lines that cause from the
+sample alone. The total 55/min and 17 shapes also leave the other 16 shapes
+unresolved. A previous `logs/novel|novel|taskworker|` ticket is service-level
+identity recurrence, not causal ancestry for the new sample. Cataloging this
+line does not diagnose the queue delay, establish active Connect ancestry, or
+resolve the remaining novel population. Follow §14.6 for the next discriminator.
 
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
@@ -8741,10 +8812,12 @@ Redis latency inside tx scopes remains one known cause: the same grouped query
 shape stays continuously idle and the pool recovers instantly when Redis does
 (563 → 2 observed). Backlog close workers instead appear as many
 per-contract query shapes with sub-second continuous idle ages; do not
-mass-terminate them. The battery always reports the single continuously oldest
-transaction even when its one-row query shape falls below the top six groups.
-Follow a subsidy-window query to the Payout canary and its transaction-local
-idle-timeout fix. Kill only proven zombies > 30 min;
+mass-terminate them. A complete optional battery reports the single continuously
+oldest transaction's validated PID/age even when its one-row query shape falls
+below the top six groups; SQL and application text are explicitly withheld
+before caching. Attribute a subsidy-window query through an authorized protected
+lookup before following the Payout canary and its transaction-local idle-timeout
+fix. Kill only proven zombies > 30 min;
 `idle_in_transaction_session_timeout` is the standing guard.
 
 The 10:43Z recovery sample demonstrated why this split matters. There were 121
@@ -8753,9 +8826,14 @@ high-count closer shapes were only 0–1s continuously idle. One Payout planner
 was the age owner: its subsidy-window transaction was 277s continuously idle
 and disappeared as it crossed the global 300s cutoff. The prior battery listed
 only shapes ordered by count, omitted that singleton, and therefore suggested
-generic Redis leakage. The probe now emits an explicit oldest PID/query line,
+generic Redis leakage. The probe now emits an explicit oldest PID/age line,
 labels summary age as transaction age rather than continuous idle duration,
-and explains the bounded-closer/Payout split.
+and explains the bounded-closer/Payout split. The withheld-text marker is not
+evidence of secret-bearing work or the same workload persisting. Missing,
+malformed, empty, or cached optional attribution cannot establish recovery or
+identify the current workload owner; preserve the concrete state warning and
+obtain a fresh protected discriminator. The successful-idle privacy correction
+does not certify active/plan-wall samples or other diagnostic paths (§1.3).
 
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
@@ -16074,6 +16152,14 @@ are prepared before capture; failed or superseded activation rolls back routes,
 DNS, and policy. An already armed explicit kill switch remains protected;
 the ordinary switch-off bootstrap leaves the native network available.
 
+The physical-network epoch belongs to the session, not its replaceable watchdog.
+Previously, an event between watcher removal and replacement publication could
+be discarded, allowing historical qualification to authorize capture. The
+session now retains that invalidation and replays only unhandled SDK notification
+work to its own replacement watcher; completed notifications and old-session
+callbacks cannot become new work. Deterministic absent-listener, delayed-callback,
+and compiled old-behavior controls cover this seam, not Windows event delivery.
+
 Client service diagnostics use `stage=bootstrap`, `stage=provider-proof`,
 `stage=packet-pump`, and `stage=capture`, with finite outcomes/reasons, aggregate
 counts, and local generations. `waiting-selection`, `discovery-pending`, and
@@ -17726,6 +17812,29 @@ campaigns can pass 60/60 on this old image, while the overlapping campaign
 then loses WireGuard and SOCKS returns with the hosted device still connected
 and its exit window ready. Isolated green results therefore do not disprove
 the stale-artifact diagnosis; require the simultaneous three-protocol soak.
+
+**Initial evaluation-ping local expiry:** the exact
+`window-evaluation-unwritten-expiry` marker comes from Transfer's singleton
+Pack deadline branch before serialization or sequence-number assignment.
+Its asynchronous callback reaches `recordEvaluationPingFailure`, which logs
+and records an evaluation failure; it is distinct from `ClientSignalSender`'s
+immediate false/nil admission diagnostic. Initial evaluation has not proved
+the candidate usable, so do not equate retaining an already-proven provider
+after an optional idle ping with admitting an unevaluated candidate.
+
+The current evaluation recorder falls back to `windowFailureProvider` for
+this exact local marker; its resulting `providers-unresponsive` reason is not
+independent evidence that a provider received or failed to answer the ping.
+First prove the emitting Connect input under §8.12, then inspect that same
+generation's effective `PingWriteTimeout`, queue/admission wait and
+sequence/carrier progress, together with independent provider-window outcomes.
+The marker establishes where the local attempt ended, not why it waited.
+Keep queue/deadline bounds and existing failure cleanup; no timeout/capacity
+increase, restart, or provider/network diagnosis follows from this text alone.
+Require ten minutes of fresh comparable evaluation traffic below the exact
+20/min class threshold plus independent window progress. Generic admission,
+structural ping errors, cancellation, malformed lines and the other novel
+shapes retain their independent controls.
 
 **Window-teardown false platform attribution:** a post-promotion observation
 beginning near `04:17Z` on 2026-09-09 reached 20--34 taskworker
