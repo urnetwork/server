@@ -25,7 +25,9 @@ func (logWindowProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	findings := []finding{}
 	for _, service := range services {
 		out, err := env.runner.warpctl(ctx, "logs", env.cfg.env, service, "--since=1m", "--limit=10000")
-		if err != nil && strings.TrimSpace(out) == "" {
+		if err != nil {
+			// Failed helpers may retain local diagnostics or partial remote output.
+			// Neither is a completed service log window.
 			return findings, fmt.Errorf("logs %s: %w", service, err)
 		}
 		tailer := newLogTailer(service, nil)

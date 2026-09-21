@@ -1754,6 +1754,22 @@ shape on stderr, then proves the service panic finding stays healthy. An
 exhausted query still restarts the tailer and is surfaced by tailer health; it
 is neither hidden nor attributed to the observed service.
 
+The bounded one-shot reader has the same attribution boundary. A deterministic
+2026-09-21 source reproduction showed that its nonempty-output exception could
+classify a failed helper's local `panic:` diagnostics as a service PAGE, or
+return zero findings from failed non-error-shaped/partial output. Any read error
+now ends that signal with its existing `monitor/visibility` / `cannot-observe`
+WARN and a nonzero one-shot result, regardless of retained bytes. Only the fixed
+observation error class enters alert evidence; failed output is not parsed as
+remote service logs. Empty failures, cancellation, successful empty windows, and
+successful remote panic windows have public `NewLogErrorsSignal` → `Monitor.Run`
+controls. False-positive qualifier: an errored helper is lost visibility, not
+proof of a service panic or Loki outage. False-negative qualifier: the adapter
+withholds that signal's accumulated partial findings on error, so their absence
+is not recovery; successful bounded reads still have their existing query-cap,
+parsing, and freshness limits. This source repair does not certify every live
+observer generation or alter the standing tailer's separate shutdown policy.
+
 The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
 an interrupted WebSocket internally, so an explicit `Tail read error ... no
 route to host ... Reconnecting` does not exit the child or increment the
