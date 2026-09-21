@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -43,5 +44,7 @@ require (
 )
 
 replace github.com/urnetwork/connect => ../connect
+
+replace github.com/pion/sctp => ../connect/third_party/sctp
 
 replace github.com/urnetwork/glog => ../glog
