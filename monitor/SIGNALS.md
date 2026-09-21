@@ -3548,6 +3548,13 @@ SELECT count(*) FROM transfer_contract WHERE open = true;
   later confirmed that this instance really was rising: 90,328, 91,679,
   124,317, 155,901, 182,471, then 212,497 at roughly five-minute intervals.
 
+An above-threshold warmup or a rise alone does not identify a retention defect.
+Before changing code or deploying, correlate consecutive age buckets with the
+running closer's duration/outcomes, current retention-fanout evidence, and the
+transfer_contract autovacuum phase. Apply the bounded retention correction only
+if that attribution is confirmed; the historical episodes below are not proof
+of the current running path.
+
 2026-08-30 close-tail discriminator: the set reached 244,019 (204,756 older
 than five minutes, only 11,765 older than 30 minutes) while one
 `CloseExpiredContracts` run processed a 52,970-contract cohort for 1,548s.

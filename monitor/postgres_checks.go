@@ -78,7 +78,7 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			observed:  observed,
 			evidence:  fmt.Sprintf("open age buckets: total=%d older_5m=%d older_30m=%d", openCount, olderFiveMinutes, olderThirtyMinutes),
 			context:   "Compare CloseExpiredContracts live/completed duration with the retention-fanout signal and transfer_contract autovacuum phase. A full cohort with sub-second worker transactions can still be delayed by persisted write/vacuum debt after the retention query itself clears.",
-			action:    "Fix or roll out the bounded retention path and let vacuum plus scheduled close cohorts converge; do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
+			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
 			verify:    "The older-than-five-minute cohort falls on consecutive samples, close cohorts return to seconds, and the total open set drains toward 10–50k.",
 			playbook:  "SIGNALS.md 2.6 and 2.10",
 		}}, nil
