@@ -3,10 +3,85 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Message-queue findings attribute the selected client rows, not worker rows.
+func TestWaitEventsMessageQueueReceiveCountsClientBackends(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		count  string
+		oldest string
+	}{
+		{name: "count boundary", count: "5", oldest: "0"},
+		{name: "aged singleton", count: "1", oldest: "61"},
+	} {
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			for _, want := range []string{
+				"backend_type='client backend' AND state='active'",
+				"HAVING count(*) >= 5 OR max(clock_timestamp()-query_start) > interval '1 minute'",
+			} {
+				if !strings.Contains(query, want) {
+					t.Errorf("%s changed the client-row query boundary", test.name)
+				}
+			}
+			return []Row{{"IPC", "MessageQueueReceive", test.count, test.oldest, "SELECT synthetic_value FROM synthetic_work", "4242", "77", "synthetic-worker", "local"}}, nil
+		}}
+		signal := NewWaitEventsSignal()
+		alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s did not emit exactly one bounded finding", test.name)
+		}
+		alert := alerts[0]
+		if alert.Class != "wait-event-cluster" || alert.Frame != "IPC:MessageQueueReceive" || alert.Severity != SeverityWarn || alert.Sustain != 2 || signal.Cadence() != 5*time.Minute {
+			t.Errorf("%s changed identity, severity or cadence gating", test.name)
+		}
+		for _, want := range []string{"counted client backends", "Parallel-query workers may be a dependency", "their rows are excluded"} {
+			if !strings.Contains(alert.Mechanism, want) {
+				t.Errorf("%s omitted the counted-client/possible-worker distinction: %s", test.name, want)
+			}
+		}
+		markdown := alert.Markdown()
+		for _, want := range []string{
+			"active=" + test.count,
+			"oldest_s=" + test.oldest,
+			"age_basis=query_start wait_residence=unknown",
+			"One-shot observations bypass sustain and do not prove recurrence",
+		} {
+			if !strings.Contains(markdown, want) {
+				t.Errorf("%s lost the bounded observation qualifier: %s", test.name, want)
+			}
+		}
+		if strings.Contains(markdown, "Parallel-query workers are waiting") {
+			t.Errorf("%s still describes counted client backends as worker rows", test.name)
+		}
+	}
+}
+
+// The owning catalog preserves the same client-versus-worker discriminator.
+func TestWaitEventsMessageQueueReceiveCatalogCountsClientBackends(t *testing.T) {
+	data, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(data), "### 2.2 Wait events on active queries")
+	if !found {
+		t.Fatal("wait-event catalog section is absent")
+	}
+	section, _, _ = strings.Cut(section, "\n### ")
+	section = strings.Join(strings.Fields(section), " ")
+	for _, want := range []string{"counts only client backends", "parallel-worker rows are excluded", "possible dependency, not counted identities"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("wait-event catalog omitted its row-ownership discriminator: %s", want)
+		}
+	}
+	if strings.Contains(section, "`IPC:MessageQueueReceive` = parallel workers") {
+		t.Error("wait-event catalog still attributes counted rows to workers")
+	}
+}
 
 // A one-shot retains count-only and age-only violations without manufacturing
 // the standing watcher's two-observation evidence.

@@ -2614,8 +2614,15 @@ Probe: `wait-events`
 
 `LWLock:WALWrite` clusters = WAL pressure (check checkpoint cadence,
 max_wal_size — a forced checkpoint every < 5 min melted main earlier this
-month). `IPC:MessageQueueReceive` = parallel workers. `Client:ClientRead` on
-active = server waiting on client mid-protocol.
+month). `IPC:MessageQueueReceive` = counted client backends waiting to receive
+messages. `Client:ClientRead` on active = server waiting on client mid-protocol.
+
+For `IPC:MessageQueueReceive`, this probe counts only client backends;
+parallel-worker rows are excluded by its `backend_type='client backend'`
+filter. Parallel workers are a possible dependency, not counted identities.
+Attribute the client query and its actual worker relationship before inferring
+a parallel-query bottleneck; a zero-age count burst does not prove a stalled
+query.
 
 Count alone is not a stall discriminator for `Client:ClientRead`. At 11:28Z on
 2026-08-30, consecutive samples contained five to seven active ClientRead rows,

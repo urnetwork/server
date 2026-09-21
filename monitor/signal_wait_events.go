@@ -100,7 +100,7 @@ func waitEventMeaning(wait string) string {
 	case "LWLock:WALInsert":
 		return "Backends are clustered while inserting WAL records; one write-heavy maintenance or application owner can serialize unrelated writers before WAL flush."
 	case "IPC:MessageQueueReceive":
-		return "Parallel-query workers are waiting on their message queues; attribute the parent query before treating backend count as organic load."
+		return "The counted client backends are waiting to receive messages. Parallel-query workers may be a dependency, but their rows are excluded by this probe; attribute the client queries and any actual worker dependency before inferring worker count or a stalled query."
 	case "Client:ClientRead":
 		return "PostgreSQL is waiting for clients mid-protocol; inspect the pool/client path rather than query execution."
 	case "Client:ClientWrite":
