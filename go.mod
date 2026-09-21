@@ -201,7 +201,7 @@ require (
 
 replace github.com/urnetwork/connect => ../connect
 
-replace github.com/pion/sctp => ../connect/third_party/sctp
+replace github.com/pion/sctp => ../connect/sctp
 
 replace github.com/urnetwork/proxy => ../proxy
 
