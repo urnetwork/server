@@ -55,10 +55,12 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution and",
-		"initial bounded read-only triage, evidence-authority",
-		"A `gpt-6-astra` agent at `max` reasoning owns all post-triage root-cause",
+		"A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution, the",
+		"monitor-test gates",
+		"bounded read-only failure fact collection, initial triage",
+		"A `gpt-6-astra` agent at `max` reasoning (\"Astra Max\") owns all",
 		"Astra consumes Terra's initial",
+		"every self-improvement repair to a probe, shared monitoring utility, signal catalog, or this harness",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
