@@ -306,6 +306,49 @@ func TestRunMainRequiresRetainedReconciliationReceipts(t *testing.T) {
 	}
 }
 
+// Dependency identity alone does not prove compatibility with current settings;
+// keep the local failure discriminator and recovery boundary in both owners.
+func TestMonitorDocumentationRequiresObserverSchemaCompatibility(t *testing.T) {
+	t.Parallel()
+	for _, document := range []struct {
+		path, start, end string
+	}{
+		{path: "RUN-MAIN.md", start: "## Start the authoritative continuous watcher", end: "## Safe watcher promotion"},
+		{path: "SIGNALS.md", start: "### 1.5 ", end: "### 1.6 "},
+	} {
+		data, err := os.ReadFile(document.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, section, found := strings.Cut(string(data), document.start)
+		if !found {
+			t.Fatalf("%s lost its observer documentation section", document.path)
+		}
+		section, _, found = strings.Cut(section, document.end)
+		if !found {
+			t.Fatalf("%s lost its observer documentation boundary", document.path)
+		}
+		documentation := strings.ToLower(strings.Join(strings.Fields(section), " "))
+		for _, required := range []string{
+			"effective `services.yml` schema",
+			"pre-query",
+			"not a loki outage",
+			"exit status 2 alone",
+			"long-lived tails",
+			"fresh reconciliation children",
+			"raw child output private",
+			"existing local warp checkout",
+			"controlled handoff",
+			"two fresh same-generation reconciliation windows",
+			"complete intended collector inventory",
+		} {
+			if !strings.Contains(documentation, required) {
+				t.Errorf("%s lost observer compatibility guidance %q", document.path, required)
+			}
+		}
+	}
+}
+
 func TestRunMainPromotesCompleteMarkdownDespiteProbeFailure(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)

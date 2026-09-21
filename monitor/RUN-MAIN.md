@@ -362,6 +362,27 @@ the resolved executable is stale, then pin only this watcher invocation's
 `PATH` to the validated executable directory. This does not alter Warpctl's
 release/build architecture or install anything on managed hosts.
 
+Check support for the effective `services.yml` schema as well as collector
+capabilities, both before launch and after a settings-generation change. A
+current checkout does not update a pinned older executable. The long-lived
+tails may keep their already-loaded configuration while fresh reconciliation
+children read a changed file and fail. A demonstrated local pre-query
+configuration failure is not a Loki outage or periodic WebSocket rotation;
+exit status 2 alone cannot distinguish configuration, query, and runtime errors.
+If needed, authorize one bounded invocation of the exact dependency with the
+same effective settings. Keep raw child output private, expose only fixed
+error/status markers, and never copy it into Alerts.
+
+For a confirmed schema mismatch, validate a compatible dependency from the
+existing local Warp checkout and use the controlled handoff below. Do not
+overwrite the attested executable in place, weaken validation, change valid
+inventory, or restart product services. This adds no build-admission policy.
+Before claiming recovery, require two fresh same-generation reconciliation
+windows for the complete intended collector inventory, with post-boundary
+advancing receipts and the independent stream/source-time controls below.
+A successful build, a live tail, or one capped query is insufficient; missing
+or partial evidence remains unknown.
+
 During candidate validation, inspect the executable image of every standing
 `warpctl logs ... -f` child, not only its abbreviated process command, and
 require it to match the recorded watcher-side Warpctl hash. A candidate that

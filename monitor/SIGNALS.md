@@ -1598,6 +1598,29 @@ visibility finding. Record and verify the VCS identity of the executable that
 the watcher children actually resolve; the revision of a nearby checkout does
 not establish that boundary.
 
+The exact observer dependency must also support the effective `services.yml`
+schema. On 2026-09-21, a pinned older Warpctl rejected a newly valid
+`class: lan` router: the old validator required `lan_interfaces`, while the
+current LAN-router schema intentionally uses `bridge_interfaces` instead.
+A bounded replay established a local pre-query configuration failure, not a
+Loki outage. Exit status 2 alone does not establish that cause. The long-lived
+tails had already loaded their configuration and could remain connected or
+rotate normally while fresh reconciliation children failed to load the current
+file. Periodic WebSocket rotation and query failure are separate boundaries;
+neither process liveness nor their timing proves query coverage or causality.
+
+Validate the compatible dependency from the existing local Warp checkout and
+promote it through the controlled handoff; do not weaken validation, alter valid
+inventory, or restart product services for this observer mismatch. Keep raw
+child output private and retain only fixed error/status markers in handoffs,
+never raw child output in Alerts. Require two fresh same-generation
+reconciliation windows across the complete intended collector inventory, using
+the retained receipt contract below. A failed query clears its success pair;
+age alone makes it stale without removing the last completed timestamps. A
+compatible build or one capped query is not recovery proof. Missing, failed,
+or incomplete evidence remains unknown, and independent stream/source-time
+controls still apply.
+
 The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
 takes precedence over generic `panic`. It requires the final
 `*errors.errorString=tx is closed` together with both deployed `txWithPool`
@@ -16261,17 +16284,36 @@ probe destinations are blocked or probing is disabled, even if some ordinary
 traffic could work; pending capture is conservative in that case. A legacy
 fixed-client shape with no qualified-exit evidence also cannot claim ready.
 
+The 2026-09-21 disposable ARM64 native check found a separate DNS rollback
+defect. With the DNS server/search-list flags selected, null string pointers
+passed to `SetInterfaceDnsSettings` returned `ERROR_INVALID_PARAMETER` (87)
+for both address families and retained the injected resolver through the
+ten-second observation. Non-null empty strings with the same selected flags
+returned success (0) and cleared it immediately. The corrected clear payload
+has a pure regression control; substitutes accepting null cannot establish
+this native API contract. The subsequent standalone suite passed 19 real-OS
+cases exercising WFP, Wintun, routes and DNS with injected provider proof,
+plus 11 synthetic retired-binding controls. A remaining test-adapter alias
+is harmless only when independent present-device enumeration proves absence
+and no network configuration remains; an alias alone is not that proof.
+Void cleanup completion or cleared ownership flags do not independently verify
+OS restoration. Retain explicit per-family DNS clear errors and independently
+compare the resulting OS state. The standalone native runner does not compile
+the full service or UI; retain matching app-build and service-selftest receipts
+separately.
+
 These are client diagnostics and manual acceptance evidence, not new server
 monitor signals. A healthy server does not prove client DNS or tunnel health.
-Deterministic Windows tests exercise native-effect substitutes, stale callbacks,
-stop/failure rollback, and negative controls for premature capture; they do not
-execute WFP, Wintun, or Windows route/DNS APIs. Runtime validation still requires
-matching v4 Windows app/service artifacts, native build/selftests, and an
-authorized disposable Windows environment: block bootstrap, verify native
-connectivity with the switch off and protection with it armed, then release
-provider proof and verify pump-before-capture, DNS/ordinary traffic, stop,
-reconnect, and network-change behavior. No production deployment or affected
-device recovery is implied by the source change or host-portable tests.
+Host-portable tests exercise native-effect substitutes, stale callbacks,
+stop/failure rollback, and negative controls for premature capture; only the
+separate native suite exercises the real OS effects above. Injected proof is
+not an actual provider connection. Remaining acceptance requires real-provider
+bootstrap and ordinary-traffic recovery, the matching v4 app/service UI and RPC
+path, sleep/resume and physical-network roaming, Windows x64, and signed-driver
+and MSI-install validation. Preserve the switch-off native-connectivity and
+armed-kill-switch distinction through those checks. No reported-user bootstrap
+cause, regional reachability, actual-provider recovery, or production deployment
+is established by these source, portable-test, or standalone-native receipts.
 
 #### Client authentication, routing continuity, and cross-platform validation
 
@@ -20484,6 +20526,37 @@ Chain-ready additionally requires `isSyncing=false`, preflight `ready=true`,
 and the configured, independently verified current runtime. An RPC response
 alone is insufficient: a zero-peer node can serve a permanently stale local
 chain.
+
+Head readiness and this probe's absence of alerts do not establish a historical
+`eth_call` latency SLO. The existing progress/identity checks do not measure
+historical execution queues, per-method latency, or timed-out work remaining in
+the backing node. Retrying successfully distinguishes a transient failed
+attempt from a permanently unavailable result; it does not identify a rate
+limiter, storage fault, or provider failure.
+
+For owned LAN RPC throughput, distinguish nginx's connection capacity and
+explicit request/connection quotas, the node's RPC connection limit and
+optional rate quota, client batch width, server execution concurrency, and the
+client's deadline. An upstream `keepalive` value is an idle-connection cache,
+not an in-flight request cap. Four client workers or several established TCP
+connections do not bound unfinished backend work after a timeout. A retry
+policy that reduces batches to sequential singleton requests can reduce
+throughput without a LAN rate limiter; a synchronous execution may continue
+after its caller stops waiting, but that overlap requires runtime evidence.
+
+Record the exact approved client route/source, RPC method and historical block
+selector, batch/retry/deadline settings, and backing process generation. Compare
+the intended template with readable runtime arguments and bounded nginx
+configuration, preserving the difference between on-disk source and loaded
+configuration. An absent command-line option requires the matching runtime's
+default semantics before claiming a quota is disabled. Correlate existing
+request status/duration evidence with same-interval CPU, pressure, memory and
+whole-device I/O deltas measured over their actual elapsed interval. Short
+healthy resource samples, head probes, missing queue exports, or unreadable
+configuration leave the historical cause unknown. Do not replay an audit or
+add load, increase limits, remove public access protections, or restart the
+node merely to force attribution. This is a manual discriminator, not an
+implemented historical-throughput alert class.
 
 `isSyncing=false` is especially unsafe by itself. With no peers, Subtensor can
 set `system_syncState.highestBlock` equal to its own stale `currentBlock` and
