@@ -14693,21 +14693,50 @@ tenant identities, socket peers, build bodies, and rendered configuration do
 not leave the host. Missing descriptors, malformed values, partial children,
 an inconsistent ring/rate view, a counter reset, or any host loss fails closed.
 
-The exact visibility class is WARN `cannot-observe`, with the affected
-host's Mimir-balance target, when those direct observations or comparisons
-cannot be completed. State read/validation/write failures instead fail the
-probe and are surfaced through the monitor's execution/visibility path. Neither
-failure establishes balanced ingestion or recovery from skew. Baseline arming
-after a first complete sample is a separate, expected warmup, not that alert.
+The exact visibility class is WARN `cannot-observe`, with sustain two and the
+affected host's Mimir-balance target, when those direct observations or
+comparisons cannot be completed. Identity-bound and fleet-view failures retain
+their separate `mimir-balance/state` and `mimir-fleet/mimir-balance` targets.
+State read/validation/write failures instead fail the probe and are surfaced
+through the monitor's execution/visibility path. Neither failure establishes
+balanced ingestion or recovery from skew. Baseline arming after a first
+complete sample or a new child generation is separate, expected warmup, not
+that alert solely because the prior identity is absent.
+
+The owner-local `observation_stage` is one of `host-observation-failed`,
+`no-local-child`, `child-observation-unavailable`, `counter-decreased`,
+`comparison-nonadvancing`, `comparison-stale`, `identity-bound-exceeded`, or
+`fleet-view-inconsistent`. These fixed values distinguish the retained source
+branch while preserving the existing `error_class`; they are not new Alert
+classes or production root causes. `host-observation-failed` remains coarse:
+command, transport, context, and parser failures share that branch. Only the
+first failure per target is emitted, so its stage does not rule out additional
+child failures. A counter decrease takes precedence over an unavailable
+interval for that same child. No raw errors, labels, process-start tokens,
+rendered configuration, or socket peers enter this diagnostic projection.
 
 Counter baselines are keyed by host, listener port, and canonical
 full-precision process start, bounded to 1,024 histories, and stored atomically
 under the shared versioned state lock. A child replacement starts a new
-baseline; a comparison older than three minutes is not used as a live rate.
+baseline. An elapsed interval at or below zero is `comparison-nonadvancing`;
+an interval above three minutes is `comparison-stale`. Exactly three minutes
+is admitted. These are unknown rate comparisons even when current counters
+were observed; they do not by themselves establish command, parser, or network
+failure. On an otherwise complete host within the history bound, the valid
+current snapshot arms the next comparison despite the unavailable interval.
+Wait for a subsequent valid same-generation comparison; this does not
+retroactively fill the gap. A source failure preserves that host's prior
+histories, including prior same-generation sibling histories on a partially
+observed host; history-bound overflow preserves the prior complete state.
+
 This makes watcher overlap safe without averaging an observation outage into a
 healthy balance. The first complete observation arms the baseline and emits no
 alert. A healthy comparison requires every configured host and every ring
 member to be present under one consistent global-rate and active-member view.
+Later stored-history advancement, a scope-only sentinel, or non-emission does
+not establish complete fleet balance, excluded-host visibility, or recovery.
+Do not retrospectively assign a stage to earlier generic visibility output:
+its historical branch remains unknown without a retained discriminator.
 
 Compute each child's attempted, accepted, and request rates from monotonic
 counter deltas over the exact elapsed interval. For Mimir 3.1.1's global
