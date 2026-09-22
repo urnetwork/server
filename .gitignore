@@ -24,3 +24,4 @@ temp/*
 .vscode/*
 .direnv
 
+.android-output.lock
