@@ -320,6 +320,10 @@ func TestForceCloseDisputeCancellationPreservesReservation(t *testing.T) {
 		if !errors.As(err, &pgError) || pgError.Code != "57014" {
 			t.Error("database cancellation did not retain its typed error")
 		}
+		var progress *ForceCloseAccountingError
+		if errors.As(err, &progress) {
+			t.Error("database cancellation gained accounting retry authority")
+		}
 		if after := fixture.state(t, ctx); after != before {
 			t.Error("database cancellation changed disputed or accounting state")
 		}
@@ -346,6 +350,9 @@ func TestForceCloseDisputeCancellationPreservesReservation(t *testing.T) {
 		})
 		if recovered == nil && callErr == nil {
 			t.Error("cancelled sweep reported success")
+		}
+		if recoveredErr, ok := recovered.(error); ok && errors.As(recoveredErr, &progress) || errors.As(callErr, &progress) {
+			t.Error("caller cancellation gained accounting retry authority")
 		}
 		if after := fixture.state(t, ctx); after != before {
 			t.Error("caller cancellation changed disputed or accounting state")

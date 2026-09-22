@@ -2,6 +2,7 @@ package work
 
 import (
 	"fmt"
+	"math"
 	mathrand "math/rand"
 	"time"
 
@@ -25,14 +26,24 @@ const (
 	// production cohort hit that deadline exactly while transfer_contract was
 	// paying down retention/autovacuum write debt; its per-contract commits
 	// survived, but the task retried with a Timeout and had to rescan. A 25k
-	// cohort keeps the same worker parallelism while committing scheduler
-	// progress four times as often.
+	// per-scan cap keeps the same worker parallelism. Open and disputed rows
+	// are scanned independently, so their deduplicated union can reach 50k.
 	closeExpiredContractsMaxCount = 25_000
 	closeExpiredContractsParallel = 92
 )
 
 func closeExpiredContractsFull(closeCount int64) bool {
 	return int64(closeExpiredContractsMaxCount/(4*DefaultCloseExpiredContractsBlockSize)) <= closeCount
+}
+
+// A rejected dispute does not count as progress. Keep the existing full/idle
+// cadence bands without accelerating an empty or only-rejected batch.
+func closeExpiredContractsRetryDelay(verifiedCloseCount int64, randomUnit float64) time.Duration {
+	randomUnit = max(0, min(randomUnit, math.Nextafter(1, 0)))
+	if closeExpiredContractsFull(verifiedCloseCount) {
+		return 2*time.Second + time.Duration(randomUnit*float64(2*time.Second))
+	}
+	return time.Minute + time.Duration(randomUnit*float64(4*time.Minute))
 }
 
 type CloseExpiredContractsArgs struct {
@@ -91,8 +102,21 @@ func CloseExpiredContracts(
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
 		)
+		// The model alone can attest that every selected row completed and
+		// every remaining failure is an independently verified accounting
+		// rejection. Never discover this authority inside a mixed error join.
+		full := closeExpiredContractsFull(c)
+		if accounting, ok := err.(*model.ForceCloseAccountingError); ok && clientSession.Ctx.Err() == nil &&
+			0 <= accounting.VerifiedCloseCount() && 0 < accounting.AccountingRejectionCount() &&
+			accounting.VerifiedCloseCount()+accounting.AccountingRejectionCount() == c {
+			full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
+			delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
+			err = task.WithRetryDelay(err, delay)
+			glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d retry_delay_ms=%d\n",
+				accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), delay.Milliseconds())
+		}
 		return &CloseExpiredContractsResult{
-			Full: closeExpiredContractsFull(c),
+			Full: full,
 		}, err
 	}
 	// else ignore lingering tasks with older block size

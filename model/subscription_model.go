@@ -1239,12 +1239,60 @@ const (
 // removes the stale stream entry.
 var errContractAlreadySettled = errors.New("Contract already closed with outcome settled")
 
-func isOnlyContractAlreadySettled(err error) bool {
+// Identity, not diagnostic text, authorizes the bounded disputed-row retry.
+var errContractInsufficientEscrow = errors.New("Escrow does not have enough value to pay out the full amount.")
+
+// A fresh existing row was read after the attempt; no stream cleanup ran.
+type forceCloseNonfinalError struct {
+	disputed bool
+}
+
+// Preserve the existing diagnostic while keeping verifier authority private.
+func (self *forceCloseNonfinalError) Error() string {
+	return "contract remained non-final after force-close attempt"
+}
+
+// Terminal settlement of a newly created dispute rejected only its escrow
+// guard, then one fresh read verified that the row remained disputed/nonfinal.
+type forceCloseDisputeRejectionError struct {
+	cause error
+}
+
+// Retain the settlement failure and its independent verification together.
+func (self *forceCloseDisputeRejectionError) Error() string { return self.cause.Error() }
+
+// Do not hide either cause from the batch or task's ordinary error inspection.
+func (self *forceCloseDisputeRejectionError) Unwrap() error { return self.cause }
+
+// The entire bounded batch completed, with only verified underfunded disputes
+// left unresolved. This is still a failure: reservations and full causes remain.
+type ForceCloseAccountingError struct {
+	cause                    error
+	verifiedCloseCount       int64
+	accountingRejectionCount int64
+}
+
+// Keep the durable error text unchanged.
+func (self *ForceCloseAccountingError) Error() string { return self.cause.Error() }
+
+// Preserve every original failure for ordinary error inspection.
+func (self *ForceCloseAccountingError) Unwrap() error { return self.cause }
+
+// Counts only fresh terminal verification followed by successful stream cleanup.
+func (self *ForceCloseAccountingError) VerifiedCloseCount() int64 { return self.verifiedCloseCount }
+
+// Counts still-reserved disputed rows, never successful closes.
+func (self *ForceCloseAccountingError) AccountingRejectionCount() int64 {
+	return self.accountingRejectionCount
+}
+
+// Single-cause wrappers preserve identity; multi-errors never grant authority.
+func isOnlyContractError(err error, expected error) bool {
 	for err != nil {
-		if err == errContractAlreadySettled {
+		if err == expected {
 			return true
 		}
-		// errors.Join and other multi-errors may contain the settled sentinel
+		// errors.Join and other multi-errors may contain the expected sentinel
 		// alongside a real failure. They must remain fail-closed.
 		if _, ok := err.(interface{ Unwrap() []error }); ok {
 			return false
@@ -1256,6 +1304,49 @@ func isOnlyContractAlreadySettled(err error) bool {
 		err = unwrapper.Unwrap()
 	}
 	return false
+}
+
+// Only the exact settled duplicate can skip malformed-contract quarantine.
+func isOnlyContractAlreadySettled(err error) bool {
+	return isOnlyContractError(err, errContractAlreadySettled)
+}
+
+// Every phase must be accounted for separately, not found somewhere in a join.
+func isForceCloseAccountingRejection(closeErr error, quarantineErr error, cleanupErr error) bool {
+	if quarantineErr != nil {
+		return false
+	}
+	if closeErr == nil {
+		rejection, ok := cleanupErr.(*forceCloseDisputeRejectionError)
+		return ok && rejection != nil && rejection.cause != nil
+	}
+	if !isOnlyContractError(closeErr, errContractInsufficientEscrow) {
+		return false
+	}
+	verification, ok := cleanupErr.(*forceCloseNonfinalError)
+	return ok && verification != nil && verification.disputed
+}
+
+// Only the exact guard permits one post-failure read. Missing, changed, or
+// unavailable state preserves ordinary failure; cancellation invalidates even
+// a positive verifier result. No financial operation is retried here.
+func finishForceCloseDisputeSettlement(ctx context.Context, settleErr error, verify func() error) error {
+	if !isOnlyContractError(settleErr, errContractInsufficientEscrow) {
+		return settleErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(settleErr, ctxErr)
+	}
+	verificationErr := verify()
+	joined := errors.Join(settleErr, verificationErr)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(joined, ctxErr)
+	}
+	verification, ok := verificationErr.(*forceCloseNonfinalError)
+	if ok && verification != nil && verification.disputed {
+		return &forceCloseDisputeRejectionError{cause: joined}
+	}
+	return joined
 }
 
 func finishForceCloseContract(closeErr error, quarantine func() error, cleanup func() error) error {
@@ -3014,7 +3105,7 @@ func settleEscrowInTx(
 	// }
 
 	if netSettledByteCount < usedTransferByteCount {
-		returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
+		returnErr = errContractInsufficientEscrow
 		return
 	}
 
@@ -4065,14 +4156,31 @@ func ForceCloseOpenContractIds(
 		if allowDisputeSettlement && found && !finalized && disputed {
 			// A successful close can create a dispute after both selection scans.
 			// Resolve once, then re-read; failed closes never enter this path.
-			settleDispute(tag, openContract.contractId)
+			settleErr := runForceClose(func() error {
+				settleDispute(tag, openContract.contractId)
+				return nil
+			})
+			if settleErr != nil {
+				return finishForceCloseDisputeSettlement(ctx, settleErr, func() error {
+					return runForceClose(func() error {
+						readState()
+						if !found {
+							return errors.New("contract disappeared before force-close verification")
+						}
+						if !finalized {
+							return &forceCloseNonfinalError{disputed: disputed}
+						}
+						return nil
+					})
+				})
+			}
 			readState()
 		}
 		if !found {
 			return fmt.Errorf("contract disappeared before force-close verification")
 		}
 		if !finalized {
-			return fmt.Errorf("contract remained non-final after force-close attempt")
+			return &forceCloseNonfinalError{disputed: disputed}
 		}
 		RemoveFromStream(ctx, openContract.contractId)
 		return nil
@@ -4090,6 +4198,8 @@ func ForceCloseOpenContractIds(
 	}
 
 	contractErrors := make([]error, len(openContracts))
+	contractCompleted := make([]bool, len(openContracts))
+	accountingRejections := make([]bool, len(openContracts))
 	workerErrors := make(chan error, parallel)
 	var wg sync.WaitGroup
 
@@ -4110,20 +4220,25 @@ func ForceCloseOpenContractIds(
 					closeErr := runForceClose(func() error {
 						return closeContract(tag, openContract)
 					})
+					var quarantineErr, cleanupErr error
 					contractErrors[j] = finishForceCloseContract(
 						closeErr,
 						func() error {
-							return runForceClose(func() error {
+							quarantineErr = runForceClose(func() error {
 								closeMalformedContract(tag, openContract, closeErr)
 								return nil
 							})
+							return quarantineErr
 						},
 						func() error {
-							return runForceClose(func() error {
+							cleanupErr = runForceClose(func() error {
 								return removeFinalizedContractFromStream(tag, openContract, closeErr == nil)
 							})
+							return cleanupErr
 						},
 					)
+					accountingRejections[j] = isForceCloseAccountingRejection(closeErr, quarantineErr, cleanupErr)
+					contractCompleted[j] = true
 				}
 			})
 			if recovered != nil {
@@ -4141,16 +4256,36 @@ func ForceCloseOpenContractIds(
 	close(workerErrors)
 
 	closeCount += int64(len(openContracts))
+	accountingOnly := true
+	var verifiedCloseCount, accountingRejectionCount int64
 	for index, contractErr := range contractErrors {
+		if !contractCompleted[index] {
+			accountingOnly = false
+		} else if contractErr == nil {
+			verifiedCloseCount++
+		} else if accountingRejections[index] {
+			accountingRejectionCount++
+		} else {
+			accountingOnly = false
+		}
 		if contractErr != nil {
 			err = errors.Join(err, fmt.Errorf("force close contract %s at index %d: %w", openContracts[index].contractId, index, contractErr))
 		}
 	}
 	for workerErr := range workerErrors {
+		accountingOnly = false
 		err = errors.Join(err, fmt.Errorf("force close worker: %w", workerErr))
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		accountingOnly = false
 		err = errors.Join(err, ctxErr)
+	}
+	if accountingOnly && 0 < accountingRejectionCount {
+		err = &ForceCloseAccountingError{
+			cause:                    err,
+			verifiedCloseCount:       verifiedCloseCount,
+			accountingRejectionCount: accountingRejectionCount,
+		}
 	}
 
 	return
