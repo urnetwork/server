@@ -4614,6 +4614,75 @@ representations, stale legacy data, missing/partial/malformed count documents,
 and schema changes across an observation. Missing cache visibility must not
 erase an independently observed ineligible-supply finding.
 
+### 2.9a User-visible provider-count degradation — product selection coverage
+Probe: `provider-count`
+
+The provider list is a product surface, not a diagnostic cache detail. A
+nonempty US zero-caller canary in §2.9 can remain healthy while a real caller
+gets few or no providers because its country target, location group, caller
+alias, requested IP family, final network-only filter, exclusion list, or API
+reader is different. That is a key availability failure and must page as such;
+do not let global connected-provider, score-writer freshness, or a single
+cache key turn a degraded product list into apparent recovery.
+
+Export a bounded `FindProviders2` outcome metric at the API response boundary.
+It must carry only bounded dimensions: requested address-family class
+(`any`, `v4`, `v6`), location-kind (`country`, `group`, `best-available`, or
+`mixed`), caller-country (ISO country code or `unknown`), rank mode, whether
+ForceMinimum was requested, and a result-count band (`0`, `1-2`, `3-9`,
+`10+`). Do not label it with a client, network, location UUID, provider,
+address, request path, or arbitrary specification. Record the count after
+the network-only, IP-family, and explicit-destination exclusion filters—the
+same list returned to the app—not merely the raw Redis score-cache count.
+
+Alert bands are based on completed response cohorts rather than a traffic
+silence:
+
+- **PAGE — effective empty:** at least 20 completed ordinary requests in a
+  five-minute window for one bounded request class and at least 80% return zero
+  providers. Split the response boundary from §2.9: normal=0 with
+  ForceMinimum>0 is a gate wipe; both=0 is missing or unreachable supply; a
+  nonzero raw cache with zero returned providers points to request-time
+  network-only, IP-family, or exclusion filtering.
+- **WARN — material degradation:** at least 50 ordinary requests in fifteen
+  minutes and the `0` plus `1-2` bands are at least 50%, while the same class's
+  established rolling baseline is materially lower. Preserve the baseline and
+  sample count; never page from a single caller or a quiet class.
+- **VISIBILITY:** no response outcome metric, an unknown address-family
+  classification, or a changed bounded schema is unobservable. It is not zero
+  providers and must not silently clear an existing degradation.
+
+False-positive qualifiers: a deliberate caller exclusion, an explicit pinned
+provider that is unavailable, a private/network-only request outside that
+network, a ForceMinimum diagnostic call, or a user-requested restrictive
+country/group can legitimately return a small list. The metric therefore
+separates ordinary from ForceMinimum requests and uses cohorts, not individual
+results. A global supply decline can also be real hardware/operations capacity:
+when active-provider headroom and proxy device ceilings are exhausted, adding
+software retries cannot create providers; add capacity while preserving the
+software selection diagnosis.
+
+False-negative qualifiers: the API can return candidates that fail to connect;
+pair this signal with §2.17 missing-origin, §2.18 stale-destination, §2.19a
+egress-admission, and client connection success. A request class with no
+traffic cannot certify its own availability, so controlled synthetic requests
+must cover the product-supported country/group and IP-family matrix without
+using customer identities. Cache coverage alone also cannot see a stale mobile
+or desktop client that never asks the current API.
+
+Verification: require two consecutive windows in which every materially used
+ordinary request class has its response-count distribution back inside the
+recorded baseline, §2.9 has complete current cache documents, and successful
+provider contracts recover. Do not clear Redis keys, weaken quality/reliability
+gates, or fabricate provider requests to manufacture recovery.
+
+Implementation convention: SIGNALS.md §2.9a (`provider-count`) maps to
+`signal_provider_count.go` and `signal_provider_count_test.go`. The probe
+queries only the bounded API outcome metric and compares it with a bounded
+rolling baseline. Synthetic tests must cover an effective-empty cohort, a
+small-list regression, a legitimate explicit exclusion, an IP-family-only
+failure, missing telemetry, and Markdown rendering with no identifiers.
+
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
 
