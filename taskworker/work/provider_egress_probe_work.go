@@ -343,7 +343,11 @@ func ProviderEgressProbe(
 	if args.ShardCount != settings.ShardCount || settings.ShardCount <= args.ShardIndex {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
-	return executeProviderEgressProbe(clientSession.Ctx, args)
+	result, err := executeProviderEgressProbe(clientSession.Ctx, args)
+	if providerEgressProbeUnfundedOnly(err) {
+		err = task.WithRetryDelay(err, time.Duration(args.IdleDelaySeconds)*time.Second)
+	}
+	return result, err
 }
 
 // ProviderEgressProbePost checkpoints one batch before scheduling its
@@ -392,6 +396,7 @@ func readProviderEgressOperatorSecret() (string, error) {
 // the two independent probe schedules cannot starve each other when one fails.
 // It is safe for concurrent use after construction.
 type providerEgressProbePass struct {
+	readiness             *providerEgressProbeReadiness
 	blackholeDue          func(context.Context, int) ([]string, error)
 	fullDue               func(context.Context, int) ([]string, error)
 	loadPins              func(context.Context) (map[string][]string, error)
@@ -432,6 +437,10 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	concurrency int,
 	clientIds []string,
 ) (fleetprobe.BlackholeSummary, error) {
+	if err := self.readiness.check(ctx); err != nil {
+		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+		return fleetprobe.BlackholeSummary{}, err
+	}
 	options := self.blackholeOptions
 	options.Pins = pinSource
 	options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
@@ -445,15 +454,43 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 		return fleetprobe.BlackholeSummary{}, fmt.Errorf("run blackhole batch: %w", runErr)
 	}
 
-	egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
+	var measurementErr error
+	for _, check := range summary.Checks {
+		if !check.OK && check.Failure != egresshealth.FailureTLSAuthentication {
+			measurementErr = self.readiness.check(ctx)
+			break
+		}
+	}
+	if measurementErr != nil {
+		// Credit can run out during a batch. Keep successful traffic and
+		// authenticated TLS failures, but retain previous provider state for
+		// negative reachability measured across this shared admission failure.
+		checks := make([]ingest.BlackholeCheck, 0, len(summary.Checks))
+		summary.Dark = 0
+		summary.TunnelFailed = 0
+		for _, check := range summary.Checks {
+			if check.OK || check.Failure == egresshealth.FailureTLSAuthentication {
+				checks = append(checks, check)
+				if !check.OK {
+					summary.Dark++
+				}
+			}
+		}
+		summary.Checks = checks
+		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+	} else {
+		egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
+	}
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(len(summary.Checks)))
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(summary.Dark))
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
-	if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
-		egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
-		return summary, fmt.Errorf("submit blackhole batch: %w", submitErr)
+	if len(summary.Checks) > 0 {
+		if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+			egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
+			return summary, errors.Join(measurementErr, fmt.Errorf("submit blackhole batch: %w", submitErr))
+		}
 	}
-	return summary, nil
+	return summary, measurementErr
 }
 
 func (self *providerEgressProbePass) runFullBatch(
@@ -462,6 +499,10 @@ func (self *providerEgressProbePass) runFullBatch(
 	pinSource fleetprobe.PinSource,
 	clientIds []string,
 ) providerEgressFullOutcome {
+	if err := self.readiness.check(ctx); err != nil {
+		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+		return providerEgressFullOutcome{err: err}
+	}
 	options := self.fullOptions
 	options.Pins = pinSource
 	options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
@@ -476,13 +517,18 @@ func (self *providerEgressProbePass) runFullBatch(
 		return providerEgressFullOutcome{err: fmt.Errorf("run full-probe batch: %w", runErr)}
 	}
 
-	egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
+	measurementErr := self.readiness.err()
+	if measurementErr != nil {
+		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+	} else {
+		egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
+	}
 	egressProbePassProvidersTotal.WithLabelValues("full", "attempted").Add(float64(summary.Attempted))
 	egressProbePassProvidersTotal.WithLabelValues("full", "submitted").Add(float64(summary.Submitted))
 	egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
 	egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
 	recordEgressProbeGeolocationDiagnostics(summary)
-	return providerEgressFullOutcome{summary: summary}
+	return providerEgressFullOutcome{summary: summary, err: measurementErr}
 }
 
 // drainBlackhole runs the already-selected batch and, while a concurrent full
@@ -553,6 +599,9 @@ func (self *providerEgressProbePass) run(
 				self.refreshFleet(ctx)
 			}
 		}()
+	}
+	if err := self.readiness.check(ctx); err != nil {
+		return &ProviderEgressProbeResult{}, err
 	}
 	errList := []error{}
 	blackholeClientIds, err := self.blackholeDue(ctx, args.Blackhole.Limit)
@@ -669,7 +718,7 @@ func runProviderEgressProbe(
 	args *ProviderEgressProbeArgs,
 ) (*ProviderEgressProbeResult, error) {
 	identity := model.GetProberIdentity(ctx)
-	if identity == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
+	if identity == nil || identity.NetworkId == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
 		return nil, fmt.Errorf("provider egress prober identity is not bootstrapped")
 	}
 	operatorSecret, err := readProviderEgressOperatorSecret()
@@ -696,6 +745,11 @@ func runProviderEgressProbe(
 	// every finding the prober submits passes through the metrics reporter
 	// first (see provider_egress_probe_metrics.go), then to the operator
 	reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
+	readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
+	guardedReporter := &providerEgressProbeReadinessReporter{
+		egressProbeIngest: reporter,
+		readiness:         readiness,
+	}
 
 	var bandwidthSampler *bandwidth.Sampler
 	bandwidthTargets := []bandwidth.Target{}
@@ -721,6 +775,7 @@ func runProviderEgressProbe(
 	}
 
 	pass := &providerEgressProbePass{
+		readiness:    readiness,
 		blackholeDue: operator.BlackholeDue,
 		fullDue:      operator.Due,
 		loadPins: func(ctx context.Context) (map[string][]string, error) {
@@ -737,8 +792,8 @@ func runProviderEgressProbe(
 		fullOptions: fleetprobe.FullOptions{
 			TunnelConfig:   tunnelConfig,
 			Submit:         reporter,
-			Attempts:       reporter,
-			HealthResults:  reporter,
+			Attempts:       guardedReporter,
+			HealthResults:  guardedReporter,
 			Bandwidth:      bandwidthSampler,
 			BandwidthHosts: bandwidth.TargetHosts(bandwidthTargets),
 		},
@@ -747,6 +802,9 @@ func runProviderEgressProbe(
 		refreshFleet: refreshEgressProbeFleetMetrics,
 	}
 	result, err := pass.run(ctx, args)
+	if result == nil {
+		return nil, err
+	}
 
 	log.Printf(
 		"provider-egress task: shard=%d/%d full_due=%d attempted=%d submitted=%d failed=%d blackhole_due=%d checked=%d dark=%d tunnel_failed=%d backlog=%t",
