@@ -2349,7 +2349,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 						message = nextMessage
 					case <-pingTimer.C:
 						stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-						err := framer.Write(stream, make([]byte, 0))
+						// Heartbeats reuse existing stream scratch but never allocate
+						// the large reliable batch on an otherwise DATAGRAM-only lane.
+						err := framer.WriteBatchWithStorage(stream, [][]byte{nil}, writeBatchStorage)
 						if err != nil {
 							glog.Infof("[ts]err = %s\n", err)
 							return
