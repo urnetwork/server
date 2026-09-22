@@ -61,7 +61,11 @@ const (
 )
 
 type testConnectConfig struct {
-	enableH1Plus          bool
+	enableH1Plus bool
+	// expectH1WebSocket verifies the negotiated client carrier while the
+	// fixture transports are live. It is used to pin the rollout-disabled H1
+	// path to ordinary RFC WebSocket rather than merely observing delivery.
+	expectH1WebSocket     bool
 	oldH1Provider         bool
 	enableChaos           bool
 	enableTransportReform bool
@@ -186,6 +190,7 @@ func testConnect(
 		config.transportMode = connect.TransportModeH1
 	}
 	h1PlusStats := &connect.H1PlusStats{}
+	h1ConnectionStats := &connect.H1ConnectionStats{}
 	if config.enableH1Plus {
 		defer func() {
 			stats := h1PlusStats.Snapshot()
@@ -473,6 +478,7 @@ func testConnect(
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.EnableH1Plus = config.enableH1Plus
 		settings.H1PlusStats = h1PlusStats
+		settings.H1ConnectionStats = h1ConnectionStats
 		settings.QuicTlsConfig.InsecureSkipVerify = true
 		settings.H3Port = endpoint.h3Port
 		settings.DnsPort = endpoint.dnsPort
@@ -890,6 +896,12 @@ func testConnect(
 	}
 	if err := waitForTestConnectPlatformTransport(ctx, transportBs, progressTimeout); err != nil {
 		t.Fatalf("client B initial platform transport: %v", err)
+	}
+	if config.expectH1WebSocket {
+		stats := h1ConnectionStats.Snapshot()
+		if stats.WebSocketConnectionCount == 0 || stats.H1PlusConnectionCount != 0 {
+			t.Fatalf("H1+ disabled carrier stats=%+v, want live WebSocket and zero H1+ connections", stats)
+		}
 	}
 
 	initialTransferBalance := ByteCount(1024) * ByteCount(1024) * ByteCount(1024) * ByteCount(1024)
