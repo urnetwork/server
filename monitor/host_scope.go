@@ -33,6 +33,16 @@ func ExcludeHosts(settings SignalSettings, names ...string) (SignalSettings, err
 				matches++
 			}
 		}
+		for _, configured := range settings.Routers {
+			if configured.Name == name {
+				matches++
+			}
+		}
+		for _, configured := range settings.disabledHosts {
+			if configured.Name == name {
+				matches++
+			}
+		}
 		if matches == 0 {
 			return SignalSettings{}, fmt.Errorf("monitor: excluded host is not configured")
 		}
@@ -82,8 +92,12 @@ func newHostScopeRunner(transport probeRunner, cfg *monitorConfig, names []strin
 	for _, name := range names {
 		self.excludedHostNames[name] = true
 	}
-	for _, configured := range cfg.hosts {
+	for _, configured := range cfg.scopeHosts() {
+		if configured.disabled {
+			self.excludedHostNames[configured.name] = true
+		}
 		endpoints := []string{configured.name, configured.lanIp, configured.overlayIp}
+		endpoints = append(endpoints, configured.scopeEndpoints...)
 		if cfg.publicDomain != "" {
 			endpoints = append(endpoints, configured.name+"."+cfg.publicDomain)
 		}
@@ -99,6 +113,13 @@ func newHostScopeRunner(transport probeRunner, cfg *monitorConfig, names []strin
 		for _, endpoint := range endpoints {
 			if normalized := normalizeHostScopeEndpoint(endpoint); normalized != "" {
 				self.endpointHostNames[normalized] = append(self.endpointHostNames[normalized], configured.name)
+			}
+		}
+	}
+	for _, target := range cfg.publicUdp.Targets {
+		for _, endpoint := range []string{target.IPv4Address, target.IPv6Address} {
+			if normalized := normalizeHostScopeEndpoint(endpoint); normalized != "" {
+				self.endpointHostNames[normalized] = append(self.endpointHostNames[normalized], target.Host)
 			}
 		}
 	}
@@ -351,7 +372,7 @@ func (self *hostScopeRunner) reduceFindings(settings SignalSettings, findings []
 	result := make([]finding, 0, len(findings)+1)
 	for _, observed := range findings {
 		excludedTarget, allowedTarget := false, false
-		for _, configured := range self.cfg.hosts {
+		for _, configured := range self.cfg.scopeHosts() {
 			if hostScopeTargetMatches(observed.target, configured.name) {
 				if self.excludedHostNames[configured.name] {
 					excludedTarget = true

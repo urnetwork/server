@@ -24,6 +24,7 @@ type HostSettings struct {
 	LANAddress     string
 	OverlayAddress string
 	Roles          []string
+	scopeEndpoints []string
 
 	// SSHUser and SSHKeyPaths override the environment-wide SSH identity for
 	// infrastructure hosts whose administrative account is deliberately
@@ -386,6 +387,12 @@ type SignalSettings struct {
 	AddressMode AddressMode
 
 	Hosts []HostSettings
+	// Routers are explicitly enrolled read-only targets, never Linux hosts.
+	Routers       []RouterSettings
+	PublicUdp     PublicUdpSettings
+	disabledHosts []HostSettings
+	// Private desired-input identity participates only in in-memory generation checks.
+	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
 	// authoritative topology; exclusions never remove placements or capacity.
 	ExcludedHosts     []string
@@ -445,6 +452,9 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 }
 
 func (s SignalSettings) withDefaults() SignalSettings {
+	s.Routers = cloneRouterSettings(s.Routers)
+	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
+	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
 	}
@@ -523,13 +533,16 @@ func (s SignalSettings) validate() error {
 	if _, err := ExcludeHosts(s); err != nil {
 		return err
 	}
+	if err := validateRouterSettings(s); err != nil {
+		return err
+	}
 	if s.Source != nil {
 		return nil
 	}
 	if s.SSHUser == "" && s.SSHDevUser == "" {
 		return fmt.Errorf("monitor: SSH user is required")
 	}
-	if len(s.Hosts) == 0 {
+	if len(s.Hosts) == 0 && len(s.Routers) == 0 {
 		return fmt.Errorf("monitor: at least one host is required")
 	}
 	return nil
@@ -543,7 +556,7 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 	} else {
 		transport = newRunner(cfg)
 	}
-	if len(settings.ExcludedHosts) != 0 {
+	if len(settings.ExcludedHosts) != 0 || len(cfg.disabledHosts) != 0 || cfg.hasDisabledRouter() {
 		transport = newHostScopeRunner(transport, cfg, settings.ExcludedHosts)
 	}
 
@@ -589,12 +602,34 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
 		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
 		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
+		publicUdp:              clonePublicUdpSettings(settings.PublicUdp),
 		stateDir:               settings.StateDir,
 		sshConnectTimeout:      settings.SSHConnectTimeout,
 		commandTimeout:         settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands
+	}
+	if settings.SettingsGenerationCheck != nil {
+		startup := settings
+		startup.Routers = cloneRouterSettings(settings.Routers)
+		startup.PublicUdp = clonePublicUdpSettings(settings.PublicUdp)
+		cfg.routerGenerationCheck = func(ctx context.Context) (bool, error) {
+			return startup.SettingsGenerationCheck(ctx, startup)
+		}
+	}
+	for _, configured := range settings.Routers {
+		cfg.routers = append(cfg.routers, &host{
+			name: configured.Name, lanIp: configured.LANAddress, overlayIp: configured.OverlayAddress,
+			sshUser: configured.SSHUser, sshKeyPaths: append([]string(nil), configured.SSHKeyPaths...), disabled: configured.Disabled,
+		})
+	}
+	for _, configured := range settings.disabledHosts {
+		cfg.disabledHosts = append(cfg.disabledHosts, &host{
+			name: configured.Name, lanIp: configured.LANAddress, overlayIp: configured.OverlayAddress, disabled: true,
+			edgeIPv6: cloneEdgeIPv6Settings(configured.EdgeIPv6), publicLB: clonePublicLBSettings(configured.PublicLB), proxy: cloneProxyHostSettings(configured.Proxy),
+			scopeEndpoints: append([]string(nil), configured.scopeEndpoints...),
+		})
 	}
 	for _, configured := range settings.Hosts {
 		h := &host{

@@ -545,6 +545,61 @@ block alerts before any DNS observation. Its managed domains and expected
 A/AAAA sets are public configuration, remain distinct from `services.yml` LB
 addresses, and are compared in memory without rendering addresses in alerts.
 
+### 7.1 Explicit read-only router enrollment
+
+Router observations (§§18.4–18.6) use a separate optional `routers` list. The
+following values are synthetic documentation examples, not an enrollment:
+
+```yaml
+routers:
+  - name: router-test
+    lan_ip: 192.0.2.9
+    overlay_ip: 198.51.100.9
+    ssh_user: synthetic-reader
+    ssh_identity_files: ["/synthetic/router-observer-key"]
+    disabled: true
+```
+
+An operator must explicitly enable an approved exact router and provide a
+current numeric address for the selected `address_mode`. No router is added
+to `hosts`, assigned Linux roles, inferred from an alert, or selected through
+the legacy first-host LAN-route map. Per-router SSH identity overrides the
+environment identity; keys are normal existing local SSH identity files.
+Disabled/excluded router names and known shared endpoints remain denied. The
+same guard includes disabled Linux hosts' known public/alias endpoints while
+leaving enabled generic-host denominators unchanged. Exclusion selectors can
+name either inventory and reject unknown/ambiguous identities.
+
+The local Warp tool must support read-only `vyos create-config` and the
+versioned `vyos compare-config` summary. Server does not import Warp. Each
+probe renders ONE desired config into a mode-0700 ephemeral directory;
+config captures are private files there and are removed after comparison.
+The comparison command never generates/applies a migration, and topology-only
+calls may leave running/saved captures absent without treating them as equal.
+Desired input changes are checked in memory before/after the observation;
+they require controlled monitor promotion, not hot-reload. No secret-derived
+fingerprint or raw output is published.
+
+SSH is batch/strict-host-key and unprivileged. The remote command gates on
+`hostname -s`, then brackets reads with the boot identity and an end marker.
+Config uses `/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration` and
+`/config/config.boot`; neighbors use `ip -s neigh show nud all`; conntrack
+uses read-only `/proc` count/max/stats and module hashsize. No Python, `ip -j`,
+sudo, pings, historical RPC, cache flush or router restart is attempted.
+Missing tools/permissions, truncation, nonzero exit, concealed values or
+unsupported formats stay unknown. Compatible firmware/CLI and actual hardware
+behavior require separate acceptance; a boot bracket is not atomic config.
+
+Each probe has a 45-second whole-run budget, two concurrent target tasks,
+20-second command deadlines, and locally enforced output caps (1 MiB per
+config, 256 KiB telemetry/summary, 64 KiB stderr). Cancellation also stops
+queued targets. The existing per-endpoint SSH semaphore remains authoritative.
+Injected sources must honor context cancellation; there is no native network
+fallback when a synthetic/alternate source lacks local capability. Empty
+inventory is explicitly unconfigured, cold neighbor state is unknown, and
+conntrack counter health needs a bounded same-boot pair. These are not fleet
+coverage or client-request success claims.
+
 ## 8. Development plan
 
 Phase 0 (now): local run from the workstation against main —

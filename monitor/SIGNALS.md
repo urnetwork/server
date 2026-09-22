@@ -236,7 +236,7 @@ active missing capability and must not be read as green.
 | 16.3 | Shared contract | `key-publication`, `log-errors` |
 | 16.4 | Shared contract | `edge-ipv6`, `key-publication`, `proxy-path` |
 | 16.5 | Runbook | `edge-ipv6`, `key-publication`, `log-errors` |
-| 16.6 | Shared contract | `edge-ipv6`, `key-publication`, `log-errors` |
+| 16.6 | Shared contract | `public-udp`, `edge-ipv6`, `key-publication`, `log-errors` |
 | 16.7 | Runbook | `rollout-guard`, `provenance`, `key-publication`, `log-errors` |
 | 16.8 | Runbook | `edge-ipv6`, `key-publication`, `rollout-guard`, `provenance`, `log-errors` |
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
@@ -19977,12 +19977,17 @@ envelopes, not DNS resolvers and not HTTP/3. The client keeps SNI
 
 Both names are weighted and their eligible address sets can overlap. Never
 infer a fixed address pool from the mode or from one resolver's cached answer.
+Current coverage follows the configured service/alias/address-family matrix;
+an A-only lookup or DNS health selection must not silently remove a configured
+IPv6 or unhealthy physical path from that denominator. Explicit operational
+exclusions remain unknown and must never be contacted by a fallback probe.
 An ordinary HTTP status health check can keep an interface in Route53 while
-its UDP/53 path is broken. Enumerate/pin the returned address immediately
-before the transport probe; the fleet gate is **every eligible weighted target
-passes**, not "one target worked."
+its UDP/53 path is broken. Enumerate and pin every configured eligible target
+before the transport probe; selected DNS answers do not define or shrink that
+inventory. The fleet gate is **every eligible weighted target passes**, not
+"one target worked."
 
-The intended IPv4 path is:
+The intended Connect LB path, for each configured forwarding family, is:
 ```
 client DNS envelope -> public P:53/udp -> interface-scoped warp DNAT
                     -> LB logical UDP/4053 -> nginx PPv2
@@ -19992,25 +19997,35 @@ reply              <- reverse conntrack NAT                    <-
 
 Policy invariants:
 
-- UDP/53 is an IPv4-only forward alias to service port 4053. Absence of an
-  IPv6 port-53 alias is intentional until product policy changes.
-- UDP/4053 must stay private: there must be no direct public 4053 rule.
-- UDP/8053 is a private compatibility listener only during the rolling
-  migration. It must have no direct public rule and must be removed after old
-  LBs have drained.
+- UDP/53 forwards to Connect service port 4053 in every family declared by
+  current intent. There is no normative IPv4-only exception: a configured
+  IPv6 alias requires its own exact tuple and native carrier proof.
+- Connect LB UDP/4053 must stay private: no direct public 4053 rule may
+  expose that owner.
+- Connect LB UDP/8053 is a private compatibility listener only during the
+  rolling migration. It must have no direct public rule and must be removed
+  after old LBs have drained. This is an ownership rule, not a global port
+  ban: Alt's explicitly published direct external UDP ports are legitimate
+  when declared by that service's active configuration.
 - TCP/53 is unrelated and must not be created by this mapping.
-- The server transform order is PPv2 first, DNS `decode53` second, then QUIC.
+- On the Connect LB path, the server transform order is PPv2 first, DNS
+  `decode53` second, then QUIC. An Alt direct UDP front does not acquire a
+  fictitious LB/PP prerequisite; its API front uses HTTP/3 negotiation and its
+  Connect front uses custom QUIC, each with the correct SNI and codec.
 
 Inspect one selected interface around one forced-mode attempt:
 ```
 dig +short A connect.bringyour.com
+dig +short AAAA connect.bringyour.com
 dig +short A whodis.bringyour.com
+dig +short AAAA whodis.bringyour.com
 
 sudo iptables-save -t nat -c \
   | grep -E -- '--dport (53|4053|8053)|dpt:(53|4053|8053)'
 sudo ip6tables-save -t nat -c \
   | grep -E -- '--dport (53|4053|8053)|dpt:(53|4053|8053)'
 sudo conntrack -L -f ipv4 -p udp --dport 53
+sudo conntrack -L -f ipv6 -p udp --dport 53
 sudo docker logs --since <boundary> <connect-container> 2>&1 \
   | grep -E '\[c\]h3 accept connection|proxy protocol'
 ```
@@ -20025,7 +20040,7 @@ selected `P:53` tuple.
 For a successful forced probe to `P:53`, require all of:
 
 1. raw DNS envelopes were sent to `P:53`;
-2. the exact IPv4 DNAT counter increments;
+2. the exact configured-family DNAT counter increments;
 3. connect logs an H3 accept on its **4053 allocation**, not the direct-443
    allocation (an 8053 accept is expected only from a draining old LB);
 4. the flow is `[ASSURED]` in conntrack;
@@ -20046,8 +20061,10 @@ The boundary split is unusually sharp:
 - DNAT rises, but there is no H3 accept on a 4053 allocation: inspect the
   running nginx UDP/4053 listener, PPv2 errors, backend selection, and DNS
   decode. This is ingress/LB/decode, not client auth.
-- H3 accepts and conntrack is `[ASSURED]`, but the raw client sees another
-  source address/port: return-SNAT regression.
+- H3 accepts and conntrack is `[ASSURED]`, but a response independently
+  correlated to that exact attempt returns from another source address/port:
+  investigate return-SNAT. Mismatched or unsolicited datagrams alone are not
+  sufficient correlation or proof of an SNAT root cause.
 - Handshake and tuple proof pass, but authenticated traffic does not: move up
   to auth, mode election, and application routing (§16.3).
 
@@ -20092,7 +20109,8 @@ The `whodis.bringyour.com` discovery record was deployed on 2026-08-20 at
 `main-lb.bringyour.com`, with target-health evaluation enabled (change
 `C0194887P6U8F3TB0CUC`). Route53 reached `INSYNC`, and all four authoritative
 servers returned an eligible edge IPv4 address. The absence of an AAAA record
-is deliberate because public UDP/53 is IPv4-only. Immediately after creating
+matched the IPv4-only alias deployed at that historical checkpoint; it is not
+the current family policy above. Immediately after creating
 a previously nonexistent name, recursive resolvers can retain the old negative
 answer until its cache expires; distinguish that propagation window from a bad
 record by querying an authoritative server directly. Do not release a client
@@ -20423,6 +20441,89 @@ thousands of received/sent H3 DATAGRAM messages with zero carrier errors,
 proving routed app traffic rather than handshake-only success. That sequence
 is the known-good recovery shape for direct H3. The DNS-carrier matrix and
 failure split are recorded in §16.6.
+
+### 16.9 Public UDP/QUIC exact return path
+
+Probe: `public-udp`
+
+`signal_public_udp.go` plus `public_udp.go` and `public_udp_transport.go`
+implement the bounded transport layer of §16.6/§14.5. The dated §16.7 and
+existing §16.8 remain historical/runbook context, not current address-family
+or service-port authority.
+
+Enrollment is explicit in `public_udp`: `enabled`, an independent
+`expected_targets` logical-row count, and `targets`. Each target names a stable
+nonsecret `name`, an existing enabled `host`, `interface`, `service`
+(`connect` or `alt`), `alias`, `front` (`connect` or Alt `api`), `carrier`
+(`quic`, `dns`, `dns-pump`), `families` (`ipv4`, `ipv6`), the exact configured
+`ipv4_address` / `ipv6_address`, public `port`, TLS `server_name`, and an
+explicit canonical trailing-dot `dns_tld` only for the DNS carriers. No DNS
+resolver chooses a convenient address. Missing family pins, duplicate logical
+paths, an incomplete denominator, ambiguous/missing enabled host ownership or
+invalid protocol authority reject the entire matrix before transport. Disabled
+enrollment is unarmed, not a healthy or recovery result. The explicit matrix
+does not discover unlisted dynamic fleet paths; its owner must reconcile it
+with current desired service/alias intent before arming.
+
+Every declared family row gets a fresh bounded socket and private attempt
+correlation token. The native adapter performs QUIC `Dial`, not early-data
+admission. It uses the exact pinned numeric destination, correct SNI and normal
+certificate verification; only Alt's API front offers `h3`. Connect H3 is
+custom QUIC, not HTTP/3. DNS modes use the existing native packet-translation
+codec, not a generic UDP DNS query. A raw packet boundary below translation
+filters the complete source address and port before QUIC sees a datagram.
+Unexpected tuples are discarded and counted, never accepted as authenticated
+return evidence or treated alone as proof of an SNAT root cause.
+
+Healthy requires matching attempt and requested tuple, a fresh socket,
+completed authenticated handshake, expected negotiated protocol and positive
+bounded raw sent/received evidence from that exact peer. This proves only the
+transport return path. It does not prove provider authentication, API request
+success, application egress, client election or the serving DNAT generation;
+those layers remain separate §14.5 checks. No HTTP request, provider request,
+DNS lookup, SSH/router observation or credential enrollment is performed.
+Alt direct external UDP ports are evaluated as explicitly enrolled Alt paths,
+not misclassified as leaked Connect-private ports.
+
+The cadence is five minutes. At most 32 logical rows expand into 64 family
+attempts, with four workers, five seconds per attempt, and hard raw bounds of
+2048 datagrams and 1 MiB in each direction. Unexpected inbound traffic shares
+the receive budget. DNS state/queues retain their native bounded codec limits.
+Socket closure precedes transport teardown; translation closure joins its
+workers. No second probe attempt, resolver fallback or alternate endpoint is
+attempted. The over-limit datagram needed to detect a receive-budget breach
+is discarded and closes the socket; it supplies neither health nor accepted
+packet evidence.
+
+| Finding | Predicate and qualification | Sustain / paging |
+| --- | --- | --- |
+| `public-udp-inventory` | Declared matrix invalid or incomplete; no path contacted | WARN, 1; never automatic PAGE |
+| `public-udp-path` | A fresh correlated bounded attempt sent bytes but did not complete its authenticated QUIC handshake | WARN, 2 consecutive evaluations; no time-only PAGE |
+| `public-udp-observation` | Source capability, observer family route/socket, TLS authority, packet budget, correlation or complete authenticated evidence is missing/invalid | WARN, 1; never automatic PAGE |
+
+Configured sustain is not two-sample evidence by itself. Each family and
+protocol owns a distinct target, so healthy IPv4 cannot resolve failed IPv6.
+Only a fresh fully verified result supplies transport recovery; missing
+evidence and non-emission do not. Overall monitor cancellation joins workers
+and publishes no partial findings. A per-attempt expired source cannot return
+late positive evidence as healthy. Alternate `SignalSettings.Source` must
+implement `PublicUdpSignalSource` explicitly and honor cancellation; absence
+never permits a native network fallback.
+
+The shared host-scope guard rejects excluded/disabled owners and any endpoint
+shared with a paused owner before real or synthetic transport admission.
+Partial operational coverage remains visible without paging or guessing
+excluded-host health. Alerts/Markdown/JSON contain only stable enrollment
+labels, fixed family/protocol/failure domains and bounded counts. They omit
+raw endpoints, TLS names, codec suffixes, packets, tokens and errors.
+
+Deterministic acceptance controls cover complete and partial enrollment,
+source absence, source/deadline cancellation, wrong attempts/tuples, protocol
+and TLS authority, per-family recovery isolation, exclusion/shared endpoint
+guards, privacy and bounded packet correlation. Native QUIC/TLS and all DNS
+codec controls use a synthetic in-memory packet network and generated test
+certificates, not production probes. Runtime enrollment or deployment still
+requires the normal separately authorized settings and watcher workflow.
 
 ## 17. Subtensor RPC gateway (snow)
 
@@ -22165,6 +22266,152 @@ authority and recursive answer to agree exactly for three
 consecutive five-minute samples, including `NOERROR`/NODATA for each forbidden
 family. DNS record repair is an operator/authoritative-provider action; a
 server deployment alone cannot correct an incorrect RRset.
+
+### 18.4 Router running and saved configuration agreement
+
+Probe: `router-config`
+
+Every five minutes, observe only the explicit `routers` inventory in
+`monitor.yml`. Router entries never enter generic Linux host probes. Names,
+management addresses and SSH identities are operator-owned; neither alert
+endpoints nor the legacy first-host LAN-route map may enroll a router. An
+absent inventory emits WARN `router-observation-unconfigured` immediately,
+not full-fleet health. Disabled/excluded logical owners and their known shared
+endpoints are denied before transport and retain the existing partial-scope
+warning. Operator re-enable authority is required; this probe cannot enroll,
+deploy, apply, save, flush or restart anything.
+
+A run has a 45-second total observation budget, two concurrent router tasks,
+at most one SSH capture and two local Warp calls per target, and 20-second
+command deadlines. Local pipes cap each configuration at 1 MiB, other output
+at 256 KiB and stderr at 64 KiB. Config capture additionally has a bounded
+combined envelope. A live hostname gate precedes reads; the same hostname and
+boot identity must bracket a native-zero capture with its required final
+marker. Missing markers, output overflow, partial/malformed captures,
+cancellation, source failure or stale desired inputs are unknown. Remote
+Python and `ip -j` are not required; unavailable permissions/tools do not
+trigger privilege escalation or a fallback target.
+
+The local current Warp tool renders one desired config into an ephemeral
+private directory. Its read-only `vyos compare-config` compares running
+`show configuration` and saved `/config/config.boot` against that same frozen
+artifact using the existing VyOS parser, without a Server-to-Warp module
+dependency or a second desired reload. Schema/version, required fields,
+duplicate/trailing JSON and count consistency are checked. The current
+settings generation, including complete desired router input resources,
+must agree before and after collection. This is not proof of an atomic live
+snapshot, tool-to-firmware compatibility or applied packet behavior.
+
+WARN `router-config-drift` has sustain 2 and a stable `running` or `saved`
+frame. Valid structural nonzero differences remain useful even when another
+value is concealed: retain the positive drift and a separate
+`cannot-observe` finding. Only the helper's fixed completed-comparison reasons
+authorize those counts; invalid/partial input counts are not evidence.
+Protected deletion is concrete drift when comparison succeeded, never
+healthy refusal. The helper's `protection-unavailable` state follows a
+completed structural comparison too: retain its known nonzero counts alongside
+unknown management-uplink protection. Zero counts in that state never establish
+equality or protected-path safety. Concealed/masked comparisons likewise cannot
+establish either. Raw configs, paths, secrets, addresses, command errors and
+content fingerprints never enter Alert, Markdown or JSONL.
+
+False positives include desired/live changes during sequential reads; repeat
+the complete comparison with the same approved generation before action.
+False negatives include unenrolled routers, concealed values, capture gaps,
+unsupported firmware syntax and semantic behavior beyond rendered config.
+Retain these as unknown, not recovery. Hardware acceptance and operator review
+of a private diff remain required before any separately authorized rollout.
+
+### 18.5 Router exact desired neighbor state
+
+Probe: `router-neighbors`
+
+Use the same opt-in inventory, generation checks, bounded capture and privacy
+contract as §18.4. Desired topology comes only from the one frozen desired
+render and the existing Warp parser: explicit upstream next hops, exact
+interface routes and supported exact IPv6 host destinations joined to a
+unique on-link interface. An RA prefix alone never invents a host address.
+Ambiguous/unsupported explicit topology or an incomplete explicit denominator
+is unknown; a bridge neighbor does not prove the downstream physical-port
+owner. Bare/spare advertised prefixes do not invalidate certain upstream or
+static neighbors, but the helper's `derived-explicit-neighbors-only` qualifier
+adds unknown census coverage alongside their independent observations. No
+dynamic host census or full-port reachability is claimed.
+
+Read `ip -s neigh show nud all` without changing cache or sending traffic.
+Match the exact configured interface and address family/address privately.
+Fresh REACHABLE with confirmed age at most 30 seconds is positive current
+cache evidence. STALE, permanent/idle entries, a missing neighbor, unsupported
+text, and transitional DELAY/PROBE are unknown rather than an outage. Kernel
+and iproute format compatibility must be validated on the target hardware.
+The age tuple is seconds since use/confirmation/update in the
+[iproute2 neighbor reader](https://github.com/iproute2/iproute2/blob/main/ip/ipneigh.c).
+The parser accepts both the older spaced output and the modern reader's exact
+adjacent updated-age/probes or updated-age/state grammar (for example,
+`used 4/0/0probes 1 REACHABLE` and `used 4/0/0REACHABLE`). A missing optional
+probe counter does not invent active-resolution evidence. Only those known
+suffixes are split; malformed values, duplicate fields/rows and unknown tokens
+remain unknown. The ordinary `router` flag is supported; `proxy`, `managed`,
+`extern_learn`, `extern_valid`, `offload` and `proto` variants remain unsupported
+until their target-specific ownership and age semantics are accepted. These
+synthetic grammar controls are not hardware or kernel-behavior validation.
+
+WARN `router-neighbor-active-failure` requires two complete samples, 1 second
+to 15 minutes apart, with the same boot and desired artifact. The exact
+neighbor must be FAILED or INCOMPLETE in both, have nonzero resolution probes,
+and have both use and update ages at most 30 seconds. Historical probes alone
+are not active-path proof. This paired predicate supplies sustain; the emitted
+finding has sustain 1. Missing/failed captures invalidate the pair. Evidence
+contains aggregate expected/reachable/unknown/active-failed counts only.
+
+False positives remain possible from narrowly sampled resolution churn or
+firmware age semantics; this does not identify ISP, cable, firewall or whole
+logical-request failure. False negatives include failures between cadences,
+traffic absent in the 30-second freshness window, incomplete desired host
+authority and unreachable observation paths. Exact UDP/QUIC return-path
+coverage is a separate signal. Do not flush neighbors or infer recovery from
+non-emission; require fresh confirmed exact-neighbor samples and the relevant
+authorized path evidence.
+
+### 18.6 Router applied conntrack capacity and bounded counter deltas
+
+Probe: `router-conntrack`
+
+Every five minutes under §18.4's access/budget contract, read live
+`nf_conntrack_count`, `nf_conntrack_max`, module `hashsize`, and
+`/proc/net/stat/nf_conntrack`. Read-only kernel values, not declarations, prove
+the observed applied sizes. Table and hash targets from the frozen desired
+config are independently optional: compare each known field, retain unknown
+for an absent/invalid counterpart, and never invent a platform default.
+Live pressure and counters remain observable even with no explicit target.
+
+WARN `router-conntrack-capacity` (sustain 2) reports any known desired/live
+size mismatch. WARN `router-conntrack-pressure` (sustain 2) reports live
+count/max occupancy at least 90 percent. Per-CPU `entries` repeats the table
+count and is never summed as occupancy. The
+[kernel conntrack documentation](https://docs.kernel.org/networking/nf_conntrack-sysctl.html)
+defines the independent live count, maximum and bucket settings; expected
+memory sizing remains an operator/resource decision, not a probe mutation.
+
+Strict complete per-CPU counter rows are paired only with the same boot,
+desired generation, header/CPU shape and applied max/hash, 1 second to 15
+minutes apart. A decreased per-CPU counter, reset, stale pair, shape change,
+malformed read or missing first sample emits `cannot-observe` rather than a
+zero delta. WARN `router-conntrack-drops` (sustain 2) preserves positive
+`drop`/`early_drop` deltas. An `insert_failed` delta alone can reflect benign
+duplicate insertion/races and is an unknown-cause qualifier, not packet-loss
+proof. Concrete capacity or pressure findings survive an unknown counter
+pair; private counters are reduced to fixed scalar summaries only.
+
+False positives include temporary bursts near the static occupancy band and
+counter meanings that differ on unsupported kernels. False negatives include
+short bursts between cadences, resets/hotplug that invalidate pairing,
+hardware-offloaded paths outside these software counters, and failed reads.
+No claim of full router throughput, hardware acceptance, client impact or
+resource headroom follows from a healthy bounded software sample. Operator
+closure requires current applied limits, a reviewed memory/traffic budget,
+and complete subsequent zero-drop pairs; no restart, table flush, resizing,
+deployment or audit-completion inference is authorized by these observations.
 
 ## 19. Web platform association metadata
 
