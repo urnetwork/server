@@ -11,25 +11,6 @@ import (
 	"testing"
 )
 
-// Extracts real shell code so the fixtures cannot replace its exit handling.
-func sourceGitScriptSection(t *testing.T, name string, startMarker string, endMarker string) string {
-	t.Helper()
-	scriptBytes, err := os.ReadFile(filepath.Join("evaluator", "container", name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(scriptBytes)
-	start := strings.Index(script, startMarker)
-	if start < 0 {
-		t.Fatalf("%s is missing %q", name, startMarker)
-	}
-	end := strings.Index(script[start:], endMarker)
-	if end < 0 {
-		t.Fatalf("%s is missing %q after %q", name, endMarker, startMarker)
-	}
-	return script[start : start+end]
-}
-
 // Git's own test switch forces its ownership check without requiring chown.
 // The wrapper applies it only to the sealed baseline, matching the incident.
 func TestEvaluatorReadsSealedProtectedSourceWithoutPersistentGitTrust(t *testing.T) {

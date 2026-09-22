@@ -1546,14 +1546,29 @@ func hashLocalMountDirectory(root string) (string, error) {
 	return hex.EncodeToString(manifest.Sum(nil)), nil
 }
 
+// New rounds freeze the complete host command identity. Legacy rounds retain
+// their schema-one policy during the rolling upgrade; they never had that pin.
 func storedPolicyMatches(settings *Settings, stored json.RawMessage) bool {
-	var actual roundPolicySnapshot
-	if len(stored) == 0 || json.Unmarshal(stored, &actual) != nil {
+	actual, err := decodeRoundPolicySnapshot(stored)
+	if err != nil {
 		return false
 	}
 	expectedBytes, err := policySnapshot(settings)
 	if err != nil {
 		return false
+	}
+	if actual.Schema == 1 {
+		var expected roundPolicySnapshot
+		if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+			return false
+		}
+		expected.Schema = 1
+		expected.EvaluatorCommand = ""
+		expected.EvaluatorCommandSha256 = ""
+		expectedBytes, err = json.Marshal(expected)
+		if err != nil {
+			return false
+		}
 	}
 	actualBytes, err := json.Marshal(actual)
 	return err == nil && bytes.Equal(actualBytes, expectedBytes)
@@ -3834,19 +3849,21 @@ func (self PostgresStore) dequeueSignal(ctx context.Context, settings *Settings)
 }
 
 type roundPolicySnapshot struct {
-	Schema               int              `json:"schema"`
-	CompetitionId        string           `json:"competition_id"`
-	BaseSha              string           `json:"base_sha"`
-	EvaluatorImageDigest string           `json:"evaluator_image_digest"`
-	ScoreSchema          int              `json:"score_schema"`
-	ScorerVersion        string           `json:"scorer_version"`
-	PatchPolicy          PatchPolicy      `json:"patch_policy"`
-	EvaluationPolicy     EvaluationPolicy `json:"evaluation_policy"`
-	SeasonPolicy         SeasonPolicy     `json:"season_policy"`
+	Schema                 int              `json:"schema"`
+	CompetitionId          string           `json:"competition_id"`
+	BaseSha                string           `json:"base_sha"`
+	EvaluatorImageDigest   string           `json:"evaluator_image_digest"`
+	EvaluatorCommand       string           `json:"evaluator_command,omitempty"`
+	EvaluatorCommandSha256 string           `json:"evaluator_command_sha256,omitempty"`
+	ScoreSchema            int              `json:"score_schema"`
+	ScorerVersion          string           `json:"scorer_version"`
+	PatchPolicy            PatchPolicy      `json:"patch_policy"`
+	EvaluationPolicy       EvaluationPolicy `json:"evaluation_policy"`
+	SeasonPolicy           SeasonPolicy     `json:"season_policy"`
 }
 
-// Decodes the complete schema-one snapshot before any of its identity fields
-// are trusted for authenticated encryption or evaluator provenance.
+// Both policy versions remain readable for seed reveal and historical evidence.
+// Schema two also authenticates the host script; schema one never carried it.
 func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, error) {
 	if len(stored) == 0 {
 		return nil, errors.New("round policy is empty")
@@ -3860,26 +3877,37 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("round policy has trailing content")
 	}
-	if policy.Schema != 1 || policy.CompetitionId == "" || 128 < len(policy.CompetitionId) ||
+	if (policy.Schema != 1 && policy.Schema != 2) || policy.CompetitionId == "" || 128 < len(policy.CompetitionId) ||
 		!gitShaPattern.MatchString(policy.BaseSha) ||
 		!imageDigestPattern.MatchString(policy.EvaluatorImageDigest) ||
 		policy.ScoreSchema != ScoreSchema || policy.ScorerVersion != ScorerVersion {
 		return nil, errors.New("round policy identity is invalid")
 	}
+	if policy.Schema == 1 {
+		if policy.EvaluatorCommand != "" || policy.EvaluatorCommandSha256 != "" {
+			return nil, errors.New("legacy round policy cannot carry an evaluator command pin")
+		}
+	} else if err := validatePinnedCommand(policy.EvaluatorCommand, policy.EvaluatorCommandSha256, "round evaluator"); err != nil {
+		return nil, err
+	}
 	return policy, nil
 }
 
+// Freeze the command path as well as its bytes because it resolves sibling
+// helpers from its immutable release directory.
 func policySnapshot(settings *Settings) ([]byte, error) {
 	return json.Marshal(roundPolicySnapshot{
-		Schema:               1,
-		CompetitionId:        settings.CompetitionId,
-		BaseSha:              settings.BaseSha,
-		EvaluatorImageDigest: settings.EvaluatorImageDigest,
-		ScoreSchema:          ScoreSchema,
-		ScorerVersion:        ScorerVersion,
-		PatchPolicy:          settings.PatchPolicy,
-		EvaluationPolicy:     settings.EvaluationPolicy,
-		SeasonPolicy:         settings.SeasonPolicy,
+		Schema:                 2,
+		CompetitionId:          settings.CompetitionId,
+		BaseSha:                settings.BaseSha,
+		EvaluatorImageDigest:   settings.EvaluatorImageDigest,
+		EvaluatorCommand:       settings.EvaluatorCommand,
+		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
+		ScoreSchema:            ScoreSchema,
+		ScorerVersion:          ScorerVersion,
+		PatchPolicy:            settings.PatchPolicy,
+		EvaluationPolicy:       settings.EvaluationPolicy,
+		SeasonPolicy:           settings.SeasonPolicy,
 	})
 }
 

@@ -126,18 +126,35 @@ if [ "$include_worktree" = false ]; then
 fi
 
 overlay_worktree() {
-    local source_root="$1" clone_root="$2" relative
-    if ! git -C "$source_root" diff --quiet HEAD; then
+    local source_root="$1" clone_root="$2" relative diff_status overlay_status
+    local untracked_path="$build_context/untracked-files"
+    if git -C "$source_root" diff --quiet HEAD; then
+        :
+    else
+        diff_status=$?
+        [ "$diff_status" -eq 1 ] || {
+            printf 'could not inspect development source changes: %s\n' "$source_root" >&2
+            exit 1
+        }
         git -C "$source_root" diff --binary HEAD | git -C "$clone_root" apply --whitespace=nowarn
     fi
+    # Process-substitution failures are not propagated by the read loop.
+    git -C "$source_root" ls-files --others --exclude-standard -z > "$untracked_path" || {
+        printf 'could not enumerate development source files: %s\n' "$source_root" >&2
+        exit 1
+    }
     while IFS= read -r -d '' relative; do
         [ -f "$source_root/$relative" ] && [ ! -L "$source_root/$relative" ] || {
             printf 'development snapshot only accepts regular untracked files: %s/%s\n' "$source_root" "$relative" >&2
             exit 1
         }
         install -D -m "$(stat -c '%a' "$source_root/$relative")" "$source_root/$relative" "$clone_root/$relative"
-    done < <(git -C "$source_root" ls-files --others --exclude-standard -z)
-    if [ -n "$(git -C "$clone_root" status --porcelain --untracked-files=all)" ]; then
+    done < "$untracked_path"
+    overlay_status="$(git -C "$clone_root" status --porcelain --untracked-files=all)" || {
+        printf 'could not inspect development clone: %s\n' "$clone_root" >&2
+        exit 1
+    }
+    if [ -n "$overlay_status" ]; then
         git -C "$clone_root" add --all
         GIT_AUTHOR_NAME='URnetwork Evaluator' \
         GIT_AUTHOR_EMAIL='evaluator@invalid' \
@@ -167,7 +184,11 @@ for repository in "${REPOSITORIES[@]}"; do
     if [ "$include_worktree" = true ]; then
         overlay_worktree "$source_root" "$clone_root"
     fi
-    [ -z "$(git -C "$clone_root" status --porcelain --untracked-files=all)" ] || {
+    clone_status="$(git -C "$clone_root" status --porcelain --untracked-files=all)" || {
+        printf 'could not inspect temporary clone: %s\n' "$repository" >&2
+        exit 1
+    }
+    [ -z "$clone_status" ] || {
         printf 'temporary clone is not clean: %s\n' "$repository" >&2
         exit 1
     }

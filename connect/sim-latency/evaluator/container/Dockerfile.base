@@ -64,7 +64,8 @@ COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run
 # see equivalent remapped read-only mounts. Trust only the exact ten
 # repositories authenticated by source-lock.json.
 RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
-    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)" \
+    && source_status="$(git -C /workspace/server status --porcelain --untracked-files=all)" \
+    && test -z "$source_status" \
     && test "$(sha256sum /opt/urnetwork/source-lock.json | awk '{print $1}')" = "${SOURCE_LOCK_SHA256}" \
     && chmod -R go-w,a+rX /workspace \
     && git config --system --add safe.directory /workspace/server \
@@ -137,7 +138,8 @@ RUN install -m 0444 /dev/null /opt/urnetwork/submission/canonical.patch \
         '{schema: 1, image_kind: "evaluator-base", base_sha: $base_sha, build_sha: $base_sha, source_epoch: $source_epoch, source_config_sha256: $source_config_sha256, patch_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", policy_sha256: null, source_lock_sha256: $source_lock_sha256, simulator_sha256: $simulator_sha256, paths: []}' \
         > /opt/urnetwork/image-identity.json \
     && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/source-lock.json /opt/urnetwork/sim-latency.yml \
-    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
+    && source_status="$(git -C /workspace/server status --porcelain --untracked-files=all)" \
+    && test -z "$source_status"
 
 LABEL org.opencontainers.image.title="URnetwork sim-latency evaluator base" \
       org.opencontainers.image.revision="${BASE_SHA}" \
@@ -152,5 +154,6 @@ USER 65532:65532
 WORKDIR /workspace/server
 RUN --network=none test -r /workspace/server/go.mod \
     && test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
-    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
+    && source_status="$(git -C /workspace/server status --porcelain --untracked-files=all)" \
+    && test -z "$source_status"
 CMD ["identity"]

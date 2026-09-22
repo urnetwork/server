@@ -41,7 +41,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$base_image" ] && [ -n "$policy_path" ] || { usage >&2; exit 2; }
-for command in git jq mktemp realpath sed sha256sum sudo; do
+for command in cat git grep jq mktemp realpath sed sha256sum sudo; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'missing command: %s\n' "$command" >&2
         exit 1
@@ -86,7 +86,8 @@ base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
 evaluation_source_root="$test_root/evaluation-source"
 $PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" \
     --destination "$evaluation_source_root" >/dev/null
-test -z "$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
+source_status="$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
+test -z "$source_status"
 
 # Even a deliberately malformed operator policy cannot open the trusted
 # simulator tree. Exercise the builder's post-apply tree authentication, not
@@ -101,18 +102,23 @@ malformed_policy="$test_root/malformed-policy.json"
 jq '.allowed_paths = ["connect/sim-latency/main.go"] |
     .forbidden_paths = ["unrelated/**"]' "$policy_path" > "$malformed_policy"
 protected_tag="urnetwork/sim-latency-protected-reject:$(sha256sum "$protected_patch" | awk '{print substr($1,1,32)}')"
-if "$SCRIPT_DIR/build-submission.sh" \
+protected_build_status=0
+"$SCRIPT_DIR/build-submission.sh" \
     "${build_args[@]}" \
     --base-image "$base_image" \
     --source-root "$evaluation_source_root" \
     --patch "$protected_patch" \
     --policy "$malformed_policy" \
-    --tag "$protected_tag"; then
-    printf 'builder accepted a patch to the protected sim-latency tree\n' >&2
+    --tag "$protected_tag" 2> "$test_root/protected-build.stderr.log" || protected_build_status=$?
+if [ "$protected_build_status" -ne 1 ] ||
+    ! grep -Fxq 'submission attempted to modify the protected sim-latency source tree' "$test_root/protected-build.stderr.log"; then
+    cat "$test_root/protected-build.stderr.log" >&2
+    printf 'builder did not prove protected sim-latency rejection (exit %s)\n' "$protected_build_status" >&2
     exit 1
 fi
 git -C "$evaluation_source_root/server" checkout -- connect/sim-latency/main.go
-test -z "$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
+source_status="$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
+test -z "$source_status"
 ! sudo -n docker image inspect "$protected_tag" >/dev/null 2>&1
 
 target="$evaluation_source_root/server/connect/resident_contract_manager.go"

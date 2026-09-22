@@ -41,6 +41,20 @@ repository only for that Git command; it never adds global or wildcard trust.
 Git inspection failures are infrastructure failures, not evidence of a changed
 protected tree. The builder returns exit 2 for these failures so a healthy
 Docker daemon cannot turn a Git error into a terminal submission rejection.
+The base builder, image build stages, and isolation checks also require a
+successful Git inspection before accepting an empty status as a clean tree.
+The isolation check only passes a protected-source probe after the specific
+submission rejection, not an unrelated build or infrastructure failure.
+
+New rounds use policy schema 2, which freezes the host evaluator command path
+and SHA-256 as well as the evaluator image. Moving to a different release
+directory or changing the script requires a new round; a worker configuration
+change cannot silently change an existing schema-2 round. Schema-1 rounds
+remain readable and evaluable during the upgrade, but have no historical host
+script pin to compare. Keep their configured release unchanged until they
+drain; this upgrade does not rewrite an open round's policy or evidence. Upgrade
+both the API and worker before creating a schema-2 round; old workers cannot
+evaluate that new policy version.
 
 This replaces custom per-job cgroup filesystem code. Docker creates the
 container cgroups; Compose puts runner, PostgreSQL, and Redis below one
