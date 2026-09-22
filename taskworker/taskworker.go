@@ -26,6 +26,9 @@ import (
 var removedTaskTargets = []string{
 	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
 	"github.com/urnetwork/server/controller.RefreshTransferBalances",
+	// Removed with the reverted extender-latency experiment. Its already
+	// scheduled production row otherwise retries Target not found forever.
+	"github.com/urnetwork/server/taskworker/work.RemoveOldExtenderLatencies",
 }
 
 // InitTasks schedules the recurring tasks. It is invoked at startup by the
