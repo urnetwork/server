@@ -1000,6 +1000,8 @@ run_live_comparison() {
     compare_cgroup="${compare_cgroup:0:95}.slice"
     compare_cgroup="${compare_cgroup/.slice.slice/.slice}"
     if [ -n "$round_baseline_path" ]; then
+        # Official score commands accept results.csv and resolve its run.json
+        # sidecar; compare below accepts the manifests directly.
         comparison="$(sudo -n docker run --rm --name "$compare_name" \
             --network none --read-only --user 65532:65532 \
             --cpuset-cpus "$cpuset" \
@@ -1012,7 +1014,7 @@ run_live_comparison() {
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
             --entrypoint /opt/urnetwork/bin/sim-latency \
             "$base_image_id" score-progress \
-            --run "$(join_csv "${candidate_manifests[@]}")" \
+            --run "$(join_csv "${candidate_csv[@]}")" \
             --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
     else
         comparison="$(sudo -n docker run --rm --name "$compare_name" \
