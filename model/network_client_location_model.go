@@ -5058,6 +5058,7 @@ func FindProviders2(
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
 	providers := []*FindProvidersProvider{}
+	callerCountryCode := ""
 
 	// an unknown filter is refused before any spec is read: a filter this
 	// server cannot interpret must not silently widen to "any family"
@@ -5135,6 +5136,7 @@ func FindProviders2(
 		if err != nil {
 			return nil, err
 		}
+		callerCountryCode = ipInfo.CountryCode
 
 		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
 
@@ -5293,9 +5295,11 @@ func FindProviders2(
 		RecordProviderSearchMatches(session.Ctx, providerClientIds, server.NowUtc())
 	}
 
-	return &FindProviders2Result{
+	result := &FindProviders2Result{
 		Providers: providers,
-	}, nil
+	}
+	recordFindProviders2Outcome(findProviders2, callerCountryCode, len(result.Providers))
+	return result, nil
 }
 
 type CreateProviderSpecArgs struct {

@@ -4627,8 +4627,8 @@ cache key turn a degraded product list into apparent recovery.
 
 Export a bounded `FindProviders2` outcome metric at the API response boundary.
 It must carry only bounded dimensions: requested address-family class
-(`any`, `v4`, `v6`), location-kind (`country`, `group`, `best-available`, or
-`mixed`), caller-country (ISO country code or `unknown`), rank mode, whether
+(`any`, `v4`, `v6`), location-kind (`location`, `group`, `best-available`,
+`mixed`, or `direct`), caller-country (ISO country code or `unknown`), rank mode, whether
 ForceMinimum was requested, and a result-count band (`0`, `1-2`, `3-9`,
 `10+`). Do not label it with a client, network, location UUID, provider,
 address, request path, or arbitrary specification. Record the count after
