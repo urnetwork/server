@@ -1403,21 +1403,48 @@ criterion.
 Probe: `redis-cluster`
 
 ```bash
-redis-cli -p 6379 CLUSTER INFO | grep -E 'cluster_state|slots_fail|known_nodes'
-# per-node PING with a hard timeout — a wedged node hangs, it does not error
-for p in $(seq 6380 6411); do timeout 2 redis-cli -p $p PING >/dev/null || echo "$p DEAD/WEDGED"; done
+redis-cli --raw -h 127.0.0.1 -p 6379 CLUSTER INFO
+# For EACH exact configured node port, independently of the bootstrap port:
+timeout -k 1s 2s redis-cli --raw -h 127.0.0.1 -p "$configured_port" PING
+# Require literal PONG AND successful exit; do not discard the reply.
 ```
-- HEALTHY: cluster_state:ok, slots_fail 0, known_nodes == expected (32 as of
-  the 2026-07-17 phantom purge: 32 slot-holding masters, 0 replicas; the entry
-  port 6379 lands on a member — myself shows 6396 — so it is not a distinct
-  member; phantoms from restarts/dead replicas inflate this — see 3.6), every
-  PING < 100ms.
-- BROKEN: any PING timeout = event-loop wedge (the #1 recurring failure —
-  process alive, kernel accepting into backlog, event loop starved);
-  cluster_state:fail = at least one slot uncovered.
-- With cluster-require-full-coverage now `no`, a single dead shard degrades
-  1/32 of keys WITHOUT flipping cluster_state on other nodes — the monitor
-  MUST check per-node liveness, not just cluster_state.
+
+- HEALTHY local observation: unique valid `cluster_state:ok`,
+  `cluster_slots_fail:0` and a positive numeric `cluster_known_nodes`, plus a
+  complete framed sweep with literal `PONG` from every exact configured node
+  port. The reducer does not measure or claim sub-100ms latency. Membership
+  count and replica policy are separate topology checks (§3.6): the dated
+  2026-07-17 baseline was 32 slot-holding masters and no replicas, not a new
+  unconditional count policy in this liveness reducer. The bootstrap port is
+  a proxy to a member, not an additional member.
+- PAGE `cluster-state`, sustain 1: a unique valid `cluster_state:fail` or
+  positive `cluster_slots_fail`. A separately missing/invalid required field
+  also emits observation unknown; it does not suppress this known fault.
+  Duplicate or contradictory values have no authority for their own field.
+- PAGE `node-unreachable`, sustain 1: an exact node's completed local PING
+  attempt timed out. This is a liveness symptom, **not proof of an event-loop
+  wedge**, missing listener, or remote network failure. The command requests
+  a two-second timeout with a one-second forced-termination fallback; the
+  outer SSH command budget can leave the sweep partial. Only unambiguous
+  completed timeout rows are retained in that case.
+- WARN `cannot-observe`: credentials/source denial, other command failure,
+  non-PONG/error reply (even with exit status zero), missing/invalid inventory,
+  malformed/duplicate/foreign rows, missing fields or incomplete framing.
+  None is silently healthy or converted into a production PAGE. A valid
+  independent cluster fault or completed timeout remains alongside unknown.
+  Overall monitor cancellation discards partial findings.
+- Scope is **host-loopback-only**. Healthy local PING does not establish
+  listener binding, firewall/routing, or caller reachability over LAN/VPN.
+  Bootstrap-port PONG does not prove direct shard-port access; the caller's
+  selected client path must be checked separately. No credentials or key
+  operations are added by this signal.
+- Timeout evidence is limited to the framed sweep's fixed statuses/counts.
+  The reducer no longer automatically runs the optional §5.2 node battery;
+  use that playbook separately for the causal discriminator. Raw CLI replies
+  and optional CLUSTER NODES failure text are not emitted as error evidence.
+- With `cluster-require-full-coverage=no`, one unavailable shard can affect
+  its owned keys without changing the aggregate state observed on another
+  member. Check each configured shard as well as the bootstrap aggregate.
 
 ### 1.4a Redis exporter counter-rate visibility
 Probe: `redis-rates`
