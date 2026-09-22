@@ -1389,58 +1389,40 @@ func testConnect(
 				// 	}
 				// }
 
+				readQueues := func() testConnectQueuesSnapshot {
+					var snapshot testConnectQueuesSnapshot
+					snapshot.resendA.itemCount, snapshot.resendA.byteCount, snapshot.sequenceIdA, snapshot.resendA.messageTypes = clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
+					snapshot.resendB.itemCount, snapshot.resendB.byteCount, snapshot.sequenceIdB, snapshot.resendB.messageTypes = clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
+					snapshot.receiveA.itemCount, snapshot.receiveA.byteCount, snapshot.receiveA.messageTypes = clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), snapshot.sequenceIdB)
+					snapshot.receiveB.itemCount, snapshot.receiveB.byteCount, snapshot.receiveB.messageTypes = clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), snapshot.sequenceIdA)
+					return snapshot
+				}
+				var queues testConnectQueuesSnapshot
 				if config.enableEncryption || config.forceStream {
-					// flush EncryptedControl messages and p2p signal messages
-					controlMessageCount := func(messageTypes []protocol.MessageType) int {
-						count := 0
-						for _, messageType := range messageTypes {
-							switch messageType {
-							case protocol.MessageType_TransferEncryptedControl:
-								count += 1
-							}
-						}
-						return count
-					}
-					err := TestingWaitForConnectCondition(ctx, progressTimeout, 10*time.Second, func(context.Context) (bool, string) {
-						_, _, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
-						_, _, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
-						_, _, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
-						_, _, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
-						count := 0
-						count += controlMessageCount(resendMessageTypesA)
-						count += controlMessageCount(resendMessageTypesB)
-						count += controlMessageCount(receiveMessageTypesA)
-						count += controlMessageCount(receiveMessageTypesB)
-						return count == 0, fmt.Sprintf(
-							"pending controls=%d sequence_a=%s resend_a=%v receive_b=%v sequence_b=%s resend_b=%v receive_a=%v",
-							count, sequenceIdA, resendMessageTypesA, receiveMessageTypesB,
-							sequenceIdB, resendMessageTypesB, receiveMessageTypesA,
-						)
-					})
+					var err error
+					queues, err = waitForTestConnectControlDrain(ctx, progressTimeout, readQueues)
 					if err != nil {
 						t.Fatalf("control messages did not settle: %v", err)
 					}
+				} else {
+					queues = readQueues()
 				}
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
-				connect.AssertEqual(t, resendMessageTypesA, nil)
-				connect.AssertEqual(t, resendItemCountA, 0)
-				connect.AssertEqual(t, resendItemByteCountA, ByteCount(0))
+				connect.AssertEqual(t, queues.resendA.messageTypes, nil)
+				connect.AssertEqual(t, queues.resendA.itemCount, 0)
+				connect.AssertEqual(t, queues.resendA.byteCount, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
-				connect.AssertEqual(t, resendMessageTypesB, nil)
-				connect.AssertEqual(t, resendItemCountB, 0)
-				connect.AssertEqual(t, resentItemByteCountB, ByteCount(0))
+				connect.AssertEqual(t, queues.resendB.messageTypes, nil)
+				connect.AssertEqual(t, queues.resendB.itemCount, 0)
+				connect.AssertEqual(t, queues.resendB.byteCount, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
-				connect.AssertEqual(t, receiveMessageTypesA, nil)
-				connect.AssertEqual(t, receiveItemCountA, 0)
-				connect.AssertEqual(t, receiveItemByteCountA, ByteCount(0))
+				connect.AssertEqual(t, queues.receiveA.messageTypes, nil)
+				connect.AssertEqual(t, queues.receiveA.itemCount, 0)
+				connect.AssertEqual(t, queues.receiveA.byteCount, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
-				connect.AssertEqual(t, receiveMessageTypesB, nil)
-				connect.AssertEqual(t, receiveItemCountB, 0)
-				connect.AssertEqual(t, receiveItemByteCountB, ByteCount(0))
+				connect.AssertEqual(t, queues.receiveB.messageTypes, nil)
+				connect.AssertEqual(t, queues.receiveB.itemCount, 0)
+				connect.AssertEqual(t, queues.receiveB.byteCount, ByteCount(0))
 			}
 		}
 	}

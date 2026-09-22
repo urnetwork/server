@@ -126,15 +126,15 @@ func TestVacuumHealthSignalExplainsReliabilityHorizon(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "dead-tuples")
 	for _, detail := range []string{
-		"full running-window re-anchor",
-		"multi-billion-row transaction",
-		"restricted each vacuum to rows removable before that old horizon",
-		"four-hour reliability re-anchor cadence",
-		"waiting maintenance proceeds",
+		"references reliability running-state data",
+		"share this truncated prefix",
+		"does not establish the maintenance phase or deployed cadence",
+		"current drained-target distance",
+		"durable window markers advance",
 	} {
 		markdown := alert.Markdown()
 		if !strings.Contains(markdown, detail) {
-			t.Fatalf("reliability horizon alert missing %q:\n%s", detail, markdown)
+			t.Fatal("reliability horizon alert lost its phase/provenance qualifier")
 		}
 	}
 }

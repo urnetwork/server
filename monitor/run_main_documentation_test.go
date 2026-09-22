@@ -1,10 +1,116 @@
 package monitor
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// Execute the operator's documented selector with synthetic lsof records only;
+// no live process census, installed Warpctl, or monitor transport is involved.
+func runMainImageSelector(t *testing.T, fixture string, withoutAnd bool) (string, error) {
+	t.Helper()
+	data, err := os.ReadFile("RUN-MAIN.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "```sh\n# monitor-warpctl-image-selector\n"
+	_, remaining, found := strings.Cut(string(data), marker)
+	if !found {
+		t.Fatal("RUN-MAIN.md is missing its PID-scoped executable-image selector")
+	}
+	command, _, found := strings.Cut(remaining, "\n```")
+	if !found {
+		t.Fatal("RUN-MAIN.md executable-image selector is unterminated")
+	}
+	if withoutAnd {
+		command = strings.Replace(command, "-a -p", "-p", 1)
+	}
+	binDirectory := t.TempDir()
+	const syntheticLsof = `#!/bin/sh
+case "$*" in
+  '-nP -a -p 4242 -d txt -Fpcfn') ;;
+  '-nP -p 4242 -d txt -Fpcfn') printf 'p4343\ncwarpctl\nftxt\nn/synthetic/decoy/warpctl\n' ;;
+  *) printf 'unexpected synthetic lsof arguments\n' >&2; exit 99 ;;
+esac
+case "$MONITOR_IMAGE_FIXTURE" in
+  missing) exit 1 ;;
+  foreign) printf 'p4343\ncwarpctl\nftxt\nn/synthetic/decoy/warpctl\n'; exit 0 ;;
+  wrong-fd) printf 'p4242\ncwarpctl\nf3\nn/synthetic/validated/warpctl\n'; exit 0 ;;
+  orphan-name) printf 'ftxt\nn/synthetic/validated/warpctl\n'; exit 0 ;;
+esac
+printf 'p4242\ncwarpctl\nftxt\nn/synthetic/validated/warpctl\nftxt\nn/synthetic/libobserver.dylib\n'
+case "$MONITOR_IMAGE_FIXTURE" in
+  ambiguous) printf 'ftxt\nn/synthetic/another/warpctl\n' ;;
+  command-error) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDirectory, "lsof"), []byte(syntheticLsof), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	awk, err := exec.LookPath("awk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	process := exec.CommandContext(ctx, bash, "-c", command)
+	process.Env = []string{
+		"PATH=" + binDirectory + string(os.PathListSeparator) + filepath.Dir(awk),
+		"monitor_tail_pid=4242",
+		"monitor_image_evidence=" + filepath.Join(binDirectory, "image-evidence.txt"),
+		"MONITOR_IMAGE_FIXTURE=" + fixture,
+	}
+	output, err := process.CombinedOutput()
+	return string(output), err
+}
+
+// A target's text image must win by PID and descriptor association, not order
+// among executable-looking names from the target and an unrelated decoy.
+func TestRunMainImageSelectorKeepsExactTarget(t *testing.T) {
+	output, err := runMainImageSelector(t, "target", false)
+	if err != nil || output != "/synthetic/validated/warpctl\n" {
+		t.Fatalf("target selection = %q, %v", output, err)
+	}
+	if output, err := runMainImageSelector(t, "target", true); err == nil {
+		t.Fatalf("unscoped decoy/target records were accepted: %q", output)
+	}
+}
+
+// Unknown, malformed, ambiguous, or failed observations cannot certify an
+// image even if one plausible executable name remains in the output.
+func TestRunMainImageSelectorRejectsUnknownEvidence(t *testing.T) {
+	for _, fixture := range []string{"missing", "foreign", "wrong-fd", "orphan-name", "ambiguous", "command-error"} {
+		if output, err := runMainImageSelector(t, fixture, false); err == nil {
+			t.Fatalf("%s evidence was accepted: %q", fixture, output)
+		}
+	}
+}
+
+// Preserve the operator's evidence boundary independently of the selector.
+func TestRunMainRequiresPidScopedExecutableEvidence(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"lsof ORs selection options unless `-a` is present",
+		"PID and `txt` association",
+		"missing or ambiguous result is unknown",
+		"parent ownership and process start identity",
+		"Never select an image with `head -n1`",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md lost executable-image evidence boundary %q", required)
+		}
+	}
+}
 
 func runMainDocumentation(t *testing.T) string {
 	t.Helper()
@@ -196,6 +302,49 @@ func TestRunMainRequiresRetainedReconciliationReceipts(t *testing.T) {
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md lost reconciliation evidence contract %q", required)
+		}
+	}
+}
+
+// Dependency identity alone does not prove compatibility with current settings;
+// keep the local failure discriminator and recovery boundary in both owners.
+func TestMonitorDocumentationRequiresObserverSchemaCompatibility(t *testing.T) {
+	t.Parallel()
+	for _, document := range []struct {
+		path, start, end string
+	}{
+		{path: "RUN-MAIN.md", start: "## Start the authoritative continuous watcher", end: "## Safe watcher promotion"},
+		{path: "SIGNALS.md", start: "### 1.5 ", end: "### 1.6 "},
+	} {
+		data, err := os.ReadFile(document.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, section, found := strings.Cut(string(data), document.start)
+		if !found {
+			t.Fatalf("%s lost its observer documentation section", document.path)
+		}
+		section, _, found = strings.Cut(section, document.end)
+		if !found {
+			t.Fatalf("%s lost its observer documentation boundary", document.path)
+		}
+		documentation := strings.ToLower(strings.Join(strings.Fields(section), " "))
+		for _, required := range []string{
+			"effective `services.yml` schema",
+			"pre-query",
+			"not a loki outage",
+			"exit status 2 alone",
+			"long-lived tails",
+			"fresh reconciliation children",
+			"raw child output private",
+			"existing local warp checkout",
+			"controlled handoff",
+			"two fresh same-generation reconciliation windows",
+			"complete intended collector inventory",
+		} {
+			if !strings.Contains(documentation, required) {
+				t.Errorf("%s lost observer compatibility guidance %q", document.path, required)
+			}
 		}
 	}
 }

@@ -78,7 +78,7 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			observed:  observed,
 			evidence:  fmt.Sprintf("open age buckets: total=%d older_5m=%d older_30m=%d", openCount, olderFiveMinutes, olderThirtyMinutes),
 			context:   "Compare CloseExpiredContracts live/completed duration with the retention-fanout signal and transfer_contract autovacuum phase. A full cohort with sub-second worker transactions can still be delayed by persisted write/vacuum debt after the retention query itself clears.",
-			action:    "Fix or roll out the bounded retention path and let vacuum plus scheduled close cohorts converge; do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
+			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
 			verify:    "The older-than-five-minute cohort falls on consecutive samples, close cohorts return to seconds, and the total open set drains toward 10–50k.",
 			playbook:  "SIGNALS.md 2.6 and 2.10",
 		}}, nil
@@ -791,10 +791,10 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		action := "Remove or bound the identified write fan-out first. Only address a horizon holder after confirming its owner and safety; do not cancel a progressing autovacuum merely because its index phase is long."
 		verify := "The high-row writer is bounded, the active vacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		if strings.Contains(strings.ToLower(r.str(20)), "client_reliability_running") {
-			mechanism += " The selected horizon is UpdateReliabilities performing a full running-window re-anchor; the pre-fix threshold was shorter than the task cadence, so this multi-billion-row transaction recurred every cycle and restricted each vacuum to rows removable before that old horizon. It can reduce, rather than completely prevent, reclamation."
-			context += " The task-overdue signal is the authoritative task diagnosis; this vacuum signal describes its MVCC consequence."
-			action = "Allow a progressing bounded re-anchor to finish, and roll out the four-hour reliability re-anchor cadence while retaining the 30-minute incremental cadence. Do not cancel the transaction, raise its deadline, or retune autovacuum to hide the shared root cause."
-			verify = "Most reliability cycles take the incremental path below their historical p95; " + recoveryTarget + " on consecutive five-minute samples, and after the bounded re-anchor completes the waiting maintenance proceeds and later vacuums can see the full removable cohort."
+			mechanism += " The selected horizon sample references reliability running-state data. Full re-anchor and rolling-enter statements share this truncated prefix, so the sample does not establish the maintenance phase or deployed cadence. An old snapshot can restrict the removable cohort without preventing all reclamation."
+			context += " The task-canary/task-overdue diagnostic and running-window markers supply the current phase and progress discriminator. Establish task ownership, complete SQL phase and current drained-target distance; this truncated query alone does not prove a full anchor or legacy artifact."
+			action = "Let independently verified, bounded progressing work finish. Establish reliability task ownership, SQL phase, current drained-target/window markers and deployed source before changing maintenance policy. Do not cancel the transaction, raise its deadline, or retune autovacuum from a truncated query sample alone."
+			verify = "The attributed reliability attempt reaches its bounded outcome and durable window markers advance; the active vacuum completes and " + recoveryTarget + " on consecutive five-minute samples. One released horizon or partial reclamation is not full recovery."
 		} else if lowerQuery := strings.ToLower(r.str(20)); strings.Contains(lowerQuery, "update transfer_contract") &&
 			strings.Contains(lowerQuery, "reap_time") {
 			mechanism += " The selected horizon is the legacy CompletePayment retention fan-out: one indexed payment lookup is updating millions of transfer_contract reap_time values inside one transaction, generating the dead rows and holding their old snapshot while autovacuum works."

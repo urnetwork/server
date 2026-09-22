@@ -41,17 +41,27 @@ type monitorOptions struct {
 	excludedEdgeIPv6Hosts stringFlags
 }
 
+// Exit only after the command-owned process lifecycle has returned.
 func main() {
+	os.Exit(runMonitorProcess(func() error {
+		return run(os.Args[1:], os.Stdout)
+	}, os.Stderr, server.ScrubProcessLogs))
+}
+
+// Drain both scrubbed descriptors before returning the final process status.
+func runMonitorProcess(runCommand func() error, stderr io.Writer, scrubLogs func() (func(), error)) int {
 	// Address scrubbing for everything this process writes to stdout and
 	// stderr, installed before anything can log. A failure here is not fatal:
 	// it degrades to the previous unscrubbed behavior rather than losing
 	// logging entirely. See server.ScrubProcessLogs.
-	server.ScrubProcessLogs()
+	restore, _ := scrubLogs()
+	defer restore()
 
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err := runCommand(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func run(args []string, stdout io.Writer) error {

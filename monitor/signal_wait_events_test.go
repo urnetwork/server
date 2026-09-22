@@ -2,9 +2,212 @@ package monitor
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+// Message-queue findings attribute the selected client rows, not worker rows.
+func TestWaitEventsMessageQueueReceiveCountsClientBackends(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		count  string
+		oldest string
+	}{
+		{name: "count boundary", count: "5", oldest: "0"},
+		{name: "aged singleton", count: "1", oldest: "61"},
+	} {
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			for _, want := range []string{
+				"backend_type='client backend' AND state='active'",
+				"HAVING count(*) >= 5 OR max(clock_timestamp()-query_start) > interval '1 minute'",
+			} {
+				if !strings.Contains(query, want) {
+					t.Errorf("%s changed the client-row query boundary", test.name)
+				}
+			}
+			return []Row{{"IPC", "MessageQueueReceive", test.count, test.oldest, "SELECT synthetic_value FROM synthetic_work", "4242", "77", "synthetic-worker", "local"}}, nil
+		}}
+		signal := NewWaitEventsSignal()
+		alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s did not emit exactly one bounded finding", test.name)
+		}
+		alert := alerts[0]
+		if alert.Class != "wait-event-cluster" || alert.Frame != "IPC:MessageQueueReceive" || alert.Severity != SeverityWarn || alert.Sustain != 2 || signal.Cadence() != 5*time.Minute {
+			t.Errorf("%s changed identity, severity or cadence gating", test.name)
+		}
+		for _, want := range []string{"counted client backends", "Parallel-query workers may be a dependency", "their rows are excluded"} {
+			if !strings.Contains(alert.Mechanism, want) {
+				t.Errorf("%s omitted the counted-client/possible-worker distinction: %s", test.name, want)
+			}
+		}
+		markdown := alert.Markdown()
+		for _, want := range []string{
+			"active=" + test.count,
+			"oldest_s=" + test.oldest,
+			"age_basis=query_start wait_residence=unknown",
+			"One-shot observations bypass sustain and do not prove recurrence",
+		} {
+			if !strings.Contains(markdown, want) {
+				t.Errorf("%s lost the bounded observation qualifier: %s", test.name, want)
+			}
+		}
+		if strings.Contains(markdown, "Parallel-query workers are waiting") {
+			t.Errorf("%s still describes counted client backends as worker rows", test.name)
+		}
+	}
+}
+
+// The owning catalog preserves the same client-versus-worker discriminator.
+func TestWaitEventsMessageQueueReceiveCatalogCountsClientBackends(t *testing.T) {
+	data, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(data), "### 2.2 Wait events on active queries")
+	if !found {
+		t.Fatal("wait-event catalog section is absent")
+	}
+	section, _, _ = strings.Cut(section, "\n### ")
+	section = strings.Join(strings.Fields(section), " ")
+	for _, want := range []string{"counts only client backends", "parallel-worker rows are excluded", "possible dependency, not counted identities"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("wait-event catalog omitted its row-ownership discriminator: %s", want)
+		}
+	}
+	if strings.Contains(section, "`IPC:MessageQueueReceive` = parallel workers") {
+		t.Error("wait-event catalog still attributes counted rows to workers")
+	}
+}
+
+// A one-shot retains count-only and age-only violations without manufacturing
+// the standing watcher's two-observation evidence.
+func TestWaitEventsOneShotDoesNotClaimCadenceRecurrence(t *testing.T) {
+	for _, test := range []struct {
+		wait   string
+		count  string
+		oldest string
+	}{
+		{wait: "BgworkerShutdown", count: "5", oldest: "0"},
+		{wait: "MessageQueueInternal", count: "6", oldest: "0"},
+		{wait: "SyntheticWait", count: "1", oldest: "61"},
+	} {
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if !strings.Contains(query, "HAVING count(*) >= 5 OR max(clock_timestamp()-query_start) > interval '1 minute'") {
+				t.Fatal("wait-event count or age threshold changed")
+			}
+			return []Row{{"IPC", test.wait, test.count, test.oldest, "SELECT synthetic_value FROM synthetic_work", "4242", "77", "synthetic-worker", "local"}}, nil
+		}}
+		signal := NewWaitEventsSignal()
+		alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("%s one-shot returned %d alerts, want one", test.wait, len(alerts))
+		}
+		alert := alerts[0]
+		if alert.Class != "wait-event-cluster" || alert.Frame != "IPC:"+test.wait || alert.Severity != SeverityWarn || alert.Sustain != 2 || signal.Cadence() != 5*time.Minute {
+			t.Fatalf("%s changed wait-event identity or gating: %+v", test.wait, alert)
+		}
+		if strings.Contains(alert.Markdown(), "recurred across the cadence") {
+			t.Fatalf("%s one-shot claimed unobserved cadence recurrence: %s", test.wait, alert.Markdown())
+		}
+		if !strings.Contains(alert.Mechanism, "in this observation") || !strings.Contains(alert.Context, "One-shot observations bypass sustain and do not prove recurrence") {
+			t.Fatalf("%s omitted the one-shot evidence boundary: %s", test.wait, alert.Markdown())
+		}
+	}
+}
+
+// Empty source results remain healthy; an incomplete source row remains a
+// visibility failure rather than becoming an invented wait diagnosis.
+func TestWaitEventsOneShotHealthyAndIncompleteEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		rows    []Row
+		wantErr bool
+	}{
+		{name: "healthy", rows: nil},
+		{name: "incomplete", rows: []Row{{"IPC", "SyntheticWait"}}, wantErr: true},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return test.rows, nil }}
+		alerts, err := NewWithSignals(syntheticSettings(source), NewWaitEventsSignal()).Run(context.Background())
+		if (err != nil) != test.wantErr {
+			t.Fatalf("%s error = %v, want error=%t", test.name, err, test.wantErr)
+		}
+		if !test.wantErr && len(alerts) != 0 {
+			t.Fatalf("healthy observation emitted alerts: %+v", alerts)
+		}
+		if test.wantErr && (len(alerts) != 1 || alerts[0].SignalID != "monitor/visibility") {
+			t.Fatalf("incomplete observation did not remain a visibility failure: %+v", alerts)
+		}
+	}
+}
+
+// The real loop still waits for two consecutive family observations and resets
+// on a healthy observation. Explicit ticks replace the five-minute wall clock.
+func TestWaitEventsRunLoopRetainsConsecutiveObservationGate(t *testing.T) {
+	row := Row{"IPC", "BgworkerShutdown", "5", "0", "SELECT synthetic_value FROM synthetic_work", "4242", "77", "synthetic-worker", "local"}
+	observations := [][]Row{{row}, {row}, nil, {row}, {row}}
+	nextObservation := 0
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		if nextObservation == len(observations) {
+			return nil, fmt.Errorf("unexpected observation after the last explicit tick")
+		}
+		rows := observations[nextObservation]
+		nextObservation++
+		return rows, nil
+	}}
+	monitor := NewWithSignals(syntheticSettings(source), NewWaitEventsSignal())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticks := make(chan time.Time)
+	handled := make(chan Alerts, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- monitor.runLoop(ctx, func(_ context.Context, _ Signal, alerts Alerts) error {
+			handled <- alerts
+			return nil
+		}, func(cadence time.Duration) runLoopTicker {
+			if cadence != 5*time.Minute {
+				t.Errorf("wait-event cadence = %s, want five minutes", cadence)
+			}
+			return &manualRunLoopTicker{c: ticks}
+		})
+	}()
+	for observation, want := range []int{0, 1, 0, 0, 1} {
+		if observation != 0 {
+			select {
+			case ticks <- time.Time{}:
+			case <-ctx.Done():
+				t.Fatal("loop did not accept the next explicit tick")
+			}
+		}
+		select {
+		case alerts := <-handled:
+			if len(alerts) != want {
+				t.Fatalf("observation %d returned %d alerts, want %d", observation+1, len(alerts), want)
+			}
+			if want != 0 && (alerts[0].Sustain != 2 || alerts[0].Frame != "IPC:BgworkerShutdown") {
+				t.Fatalf("standing alert changed identity or sustain: %+v", alerts[0])
+			}
+		case <-ctx.Done():
+			t.Fatal("loop did not finish the explicit observation")
+		}
+	}
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not join after cancellation")
+	}
+}
 
 func TestWaitEventsSignalSyntheticWALWaitCluster(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
@@ -49,7 +252,7 @@ func TestWaitEventsSignalAgedSingletonIncludesAttribution(t *testing.T) {
 		want string
 	}{
 		"baseline count branch":  {alert.Baseline, "five active client backends"},
-		"baseline age branch":    {alert.Baseline, "more than one minute"},
+		"baseline age branch":    {alert.Baseline, "query age above one minute"},
 		"sample attribution":     {alert.Evidence, sample},
 		"pid attribution":        {alert.Evidence, "pid=8123"},
 		"query attribution":      {alert.Evidence, "query_id=9911"},

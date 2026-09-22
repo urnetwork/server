@@ -328,12 +328,12 @@ func (pgCapacityProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			class: "pg-client-capacity", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("PostgreSQL on %s rejected the direct capacity observation because no eligible client slot was available", target),
 			mechanism: "PostgreSQL reached max_connections after accounting for reserved slots. PgBouncer's server_login_retry can cache and fan this rejection across application requests, but the direct 5432 rejection proves the server ceiling itself is exhausted at this instant.",
-			baseline:  "Direct 5432 accepts the read-only observation and ordinary roles retain more than 25% normal-role connection headroom.",
+			baseline:  "Direct 5432 accepts the read-only observation and ordinary roles retain both more than 25% normal-role connection headroom and more than 64 eligible slots.",
 			observed:  "direct_connection_result=too_many_clients_already server_login_retry_possible=true capacity_values=unavailable",
 			evidence:  "The transport error contained PostgreSQL's canonical `too many clients already` result. Its remaining text is deliberately omitted because it can contain command framing rather than additional capacity evidence.",
 			context:   "Application logs can repeat this one rejection as Unexpected error, route recovery, and goroutine-shaped JSON. Raw panic-class volume is diagnostic amplification, not a count of unique rejected PostgreSQL sessions. In the 2026-09-01 production control, repeatedly retried legacy concurrent reindex work caused WAL waits and 60-66-second COMMIT latency; application deadlines then lost client sessions while PgBouncer opened replacements. PostgreSQL did not restart, and the later idle cohort was recovery turnover rather than proof of an idle-session leak.",
 			action:    pgCapacityAction(),
-			verify:    "For ten minutes through the triggering workload, direct 5432 remains observable, ordinary-role headroom stays above 25%, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs.",
+			verify:    "For ten minutes through the triggering workload, direct 5432 remains observable, ordinary-role headroom stays above 25% with more than 64 eligible slots, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs.",
 			playbook:  "SIGNALS.md §1.3a, §1.5, and §2.11",
 		}}, nil
 	}
@@ -359,7 +359,7 @@ func (pgCapacityProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		severity = tierPage
 		sustain = 1
 	}
-	if usedFraction < pgCapacityWarnFraction {
+	if usedFraction < pgCapacityWarnFraction && remaining > pgCapacityPageSlots {
 		return []finding{healthyFinding("pg/client-capacity", tierPage, "pg-client-capacity", target)}, nil
 	}
 	return []finding{{
@@ -370,12 +370,12 @@ func (pgCapacityProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			target, 100*usedFraction, remaining,
 		),
 		mechanism: "Ordinary application roles are admitted only below max_connections minus superuser_reserved_connections and reserved_connections. All existing client backends consume that threshold. Independent PgBouncer processes enforce local pools, so their aggregate server connections plus direct maintenance sessions can exhaust PostgreSQL even when each shard is individually within its own limit.",
-		baseline:  "Ordinary roles retain more than 25% of the normal-role ceiling; active, idle, and idle-in-transaction owners are separately attributable.",
+		baseline:  "Ordinary roles retain both more than 25% of the normal-role ceiling and more than 64 eligible slots; active, idle, and idle-in-transaction owners are separately attributable.",
 		observed:  observed,
 		evidence:  pgCapacityEvidence(owners),
 		context:   "The summary includes this read-only direct probe as one real client. Capacity is not query load: a high idle count and a high active count require different root-cause work. Application pg-client-capacity log volume is diagnostic amplification and can repeat several times per failed request. The 2026-09-01 production control tied the rejected-login wave to repeatedly retried legacy concurrent reindex work, WAL waits, 60-66-second COMMIT latency, client deadline loss, and replacement overlap; PostgreSQL did not restart, and a later idle recovery cohort did not establish retention as the cause.",
 		action:    pgCapacityAction(),
-		verify:    "For ten minutes through the triggering workload, ordinary-role headroom stays above 25%, direct 5432 remains observable, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs.",
+		verify:    "For ten minutes through the triggering workload, ordinary-role headroom stays above 25% with more than 64 eligible slots, direct 5432 remains observable, completed COMMIT latency and WAL waits return to their ordinary band, and neither pg-client-capacity nor query_wait_timeout recurs.",
 		playbook:  "SIGNALS.md §1.3a, §1.5, and §2.11",
 	}}, nil
 }

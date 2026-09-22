@@ -204,3 +204,82 @@ func TestPgCapacitySignalRejectsMalformedSummary(t *testing.T) {
 		t.Fatalf("missing capacity summary error = %v", err)
 	}
 }
+
+// Preserve both independent capacity bands.
+func TestPgCapacityIndependentRemainingSlotGuard(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		maximum   string
+		ceiling   string
+		clients   string
+		remaining string
+		severity  Severity
+		sustain   int
+	}{
+		{name: "small ceiling sixty remaining", maximum: "203", ceiling: "200", clients: "140", remaining: "60", severity: SeverityPage, sustain: 1},
+		{name: "small ceiling exactly sixty-four", maximum: "203", ceiling: "200", clients: "136", remaining: "64", severity: SeverityPage, sustain: 1},
+		{name: "small ceiling sixty-five healthy", maximum: "203", ceiling: "200", clients: "135", remaining: "65"},
+		{name: "large ceiling below warning", maximum: "1003", ceiling: "1000", clients: "749", remaining: "251"},
+		{name: "large ceiling warning boundary", maximum: "1003", ceiling: "1000", clients: "750", remaining: "250", severity: SeverityWarn, sustain: 2},
+		{name: "large ceiling percentage page", maximum: "1003", ceiling: "1000", clients: "900", remaining: "100", severity: SeverityPage, sustain: 1},
+		{name: "sixty-five preserves utilization warning", maximum: "303", ceiling: "300", clients: "235", remaining: "65", severity: SeverityWarn, sustain: 2},
+		{name: "sixty-four promotes utilization warning", maximum: "303", ceiling: "300", clients: "236", remaining: "64", severity: SeverityPage, sustain: 1},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return []Row{{
+				"summary", test.maximum, "3", "0", test.ceiling,
+				test.clients, test.clients, "0", "0", "4MB", "128MB",
+			}}, nil
+		}}
+		alerts, err := NewPgCapacitySignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if test.severity == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("%s: healthy independent bands produced %d alerts", test.name, len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("%s: capacity alerts = %d, want one", test.name, len(alerts))
+		}
+		alert := alerts[0]
+		if alert.Class != "pg-client-capacity" || alert.Severity != test.severity || alert.Sustain != test.sustain {
+			t.Fatalf("%s: class/severity/sustain = %s/%s/%d, want pg-client-capacity/%s/%d",
+				test.name, alert.Class, alert.Severity, alert.Sustain, test.severity, test.sustain)
+		}
+		if !strings.Contains(alert.Observed, "normal_role_slots_remaining="+test.remaining+" ") {
+			t.Fatalf("%s: independent slot observation missing: %s", test.name, alert.Observed)
+		}
+		if !strings.Contains(alert.Baseline, "more than 64") ||
+			!strings.Contains(alert.Verify, "more than 64") {
+			t.Fatalf("%s: capacity recovery guidance omits the independent slot band", test.name)
+		}
+	}
+}
+
+// Preserve source uncertainty when numeric capacity evidence is unavailable.
+func TestPgCapacitySlotGuardDoesNotReplaceUnknownObservation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		rows []Row
+		err  error
+	}{
+		{name: "missing summary"},
+		{name: "unrelated source error", err: errors.New("synthetic observation unavailable")},
+		{name: "canceled source", err: context.Canceled},
+		{name: "invalid ceiling", rows: []Row{
+			{"summary", "3", "3", "0", "0", "0", "0", "0", "0", "4MB", "128MB"},
+		}},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return test.rows, test.err
+		}}
+		alerts, err := NewPgCapacitySignal().Run(context.Background(), syntheticSettings(source))
+		if err == nil || len(alerts) != 0 {
+			t.Fatalf("%s: unknown observation became numeric capacity evidence: err=%v alerts=%d",
+				test.name, err, len(alerts))
+		}
+	}
+}

@@ -6,6 +6,7 @@
 package monitor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -983,7 +984,12 @@ func monitorSSHKeyPaths(paths []string) []string {
 func loadGooglePlayReportingSettings() GooglePlayReportingSettings {
 	credentialResource, err := server.Vault.SimpleResource("google-play-reporting.json")
 	if err != nil {
-		return GooglePlayReportingSettings{}
+		if errors.Is(err, server.ErrResourceNotFound) {
+			return GooglePlayReportingSettings{}
+		}
+		return GooglePlayReportingSettings{
+			Enabled: true, LoadError: fmt.Errorf("google-play-reporting.json is unavailable"),
+		}
 	}
 	settings := GooglePlayReportingSettings{Enabled: true}
 	var credential googlePlayReportingVault
@@ -1000,7 +1006,7 @@ func loadGooglePlayReportingSettings() GooglePlayReportingSettings {
 
 	appResource, err := server.Vault.SimpleResource("google.yml")
 	if err != nil {
-		settings.LoadError = fmt.Errorf("google.yml: %w", err)
+		settings.LoadError = fmt.Errorf("google.yml is unavailable")
 		return settings
 	}
 	var app googleAppVaultYaml
@@ -1018,7 +1024,12 @@ func loadGooglePlayReportingSettings() GooglePlayReportingSettings {
 func loadAppleReportingSettings() AppleReportingSettings {
 	credentialResource, err := server.Vault.SimpleResource("apple-reporting.yml")
 	if err != nil {
-		return AppleReportingSettings{}
+		if errors.Is(err, server.ErrResourceNotFound) {
+			return AppleReportingSettings{}
+		}
+		return AppleReportingSettings{
+			Enabled: true, LoadError: fmt.Errorf("apple-reporting.yml is unavailable"),
+		}
 	}
 	settings := AppleReportingSettings{Enabled: true}
 	var credential appleReportingVault
@@ -1032,7 +1043,7 @@ func loadAppleReportingSettings() AppleReportingSettings {
 
 	appResource, err := server.Vault.SimpleResource("apple.yml")
 	if err != nil {
-		settings.LoadError = fmt.Errorf("apple.yml: %w", err)
+		settings.LoadError = fmt.Errorf("apple.yml is unavailable")
 		return settings
 	}
 	var app appleAppVaultYaml

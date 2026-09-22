@@ -383,6 +383,11 @@ WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
   not a constant).
 - BROKEN: < 50% of trailing median for 3 consecutive minutes = brownout;
   < 1,000/min = outage (observed during CLUSTERDOWN: 150–700/min).
+- UNKNOWN: the count observation must contain exactly one row and one
+  nonnegative integer. Missing, extra, malformed, negative, or overflowing
+  values are `cannot-observe`, never zero throughput or a healthy rate, and
+  must not enter learned history. An explicitly observed numeric zero remains
+  affirmative zero throughput and follows the existing outage threshold.
 - SHAPE MATTERS: cliff (one minute 40k→1k) = systemic event (cluster state,
   deploy); sag (slow decline) = partial failure (one sick node, growing
   backlog); ramp = recovery in progress (do not re-alert during ramp).
@@ -441,6 +446,51 @@ FROM failures GROUP BY task;
   `reschedule_error` even though the same pass removed the finalized stream;
   deploy the convergence handling and do not edit the task row or replay the
   settlement.
+- A separate `CloseExpiredContracts` boundary can create a dispute during the
+  sweep itself: finalizing unequal checkpoint totals leaves `dispute=true` and
+  `outcome IS NULL` after the open/disputed selection scans have completed. The
+  independent terminal check then reports `contract remained non-final after
+  force-close attempt`. The source reproducer
+  `TestForceCloseCheckpointDisputeConvergesInOneSweep` covers both one-checkpoint
+  orientations and both-checkpoint pairs, equal-total healthy controls, actual
+  average settlement, reservation/stream cleanup, and a no-op second sweep.
+  Require its pre-fix failure and post-fix success as source-mechanism evidence;
+  those results do not identify a production task or deployed worker generation.
+
+  The owning model correction uses the existing terminal read as its gate:
+  only a successful original close and a freshly observed, existing,
+  nonfinal/disputed row may enter one atomic dispute settlement, followed by one
+  terminal re-read. Healthy finalized rows add no dispute transaction. Raising
+  settlement errors inside that transaction rolls back the dispute clear;
+  insufficient disputed escrow stays reserved and visible rather than becoming
+  eligible for non-disputed quarantine. Existing malformed non-disputed
+  quarantine is unchanged. Missing/nonfinal rows, typed-settled duplicates with
+  failed verification, mixed errors, cancellation, and cleanup failures remain
+  errors; a failed original close is not retried by terminal verification.
+
+  The bounded 2026-09-21 history observation found this exact nonfinal marker in
+  three retained-error completions; all seven observed completions had completed
+  posts. The later scoped pending check found zero failing rows and one clean
+  key-qualified successor. This confirms a prior verification failure and later
+  point-in-time progress, not the precise checkpoint/dispute cause, a full family
+  census, or sustained recovery. A successful retry copies its earlier error to
+  `finished_task`, so retained text is not a new failure timestamp. Keep generic
+  nonfinal/unclassified and historical-error warnings; do not infer convergence
+  from a missing alert, fresh heartbeat, or successful completion alone.
+
+  Future authorized rollout belongs to every Taskworker generation that can
+  claim this target, including the same target in an operator workload when in
+  scope, not an API-only or monitor-only deployment. After the verified artifact
+  boundary, require a natural retry/successor chain with completed posts, clean
+  fresh successors and no new matching errors through this section's five-minute
+  parked-task window plus ingestion delay and the full natural retry/successor
+  window. Five elapsed minutes alone do not close an unobserved due time, a live
+  claim, a run without an observed terminal/deadline result, or incomplete
+  history. Keep close-duration/open-age and escrow checks independent.
+  Pre-boundary retained errors must stay distinguishable from new attempts.
+  Partial host/generation coverage, capped/empty history, or missing attempt
+  correlation remains unknown. Do not replay/delete task rows, invoke the
+  administrative closer, accelerate retries, or raise deadlines to verify it.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
@@ -964,6 +1014,72 @@ SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
 FROM pg_stat_activity WHERE backend_type = 'client backend';
 ```
 - HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min.
+- UNKNOWN: the executable state summary requires exactly one row with four
+  nonnegative integers: active count, idle-in-transaction count, rounded
+  oldest transaction age in seconds, and total client count. Missing, extra,
+  malformed, negative, or overflowing cells are `cannot-observe`; they must
+  not count as healthy or re-arm its cached battery. A source error likewise
+  preserves the cache. A complete numeric zero row remains a valid in-band
+  observation. This strict aggregate contract does not apply to the later
+  optional `GROUP BY` batteries: an empty grouping can mean the work finished
+  between snapshots, and a battery failure reduces attribution rather than
+  suppressing a concrete count/age alert. Schema-valid numeric data still
+  needs trustworthy collection and privileges; this guard cannot establish
+  cause, time-aligned ownership, or recovery from absent diagnostics.
+- OPTIONAL DIAGNOSTIC ERRORS: active-query grouping, idle-transaction grouping,
+  and plan-wall snapshot/`pg_stats` failures retain only fixed error classes
+  in alert evidence, never returned error text. Plan-wall evidence separately
+  labels a failed first snapshot, second snapshot, and `pg_stats` check;
+  a nil error is not classified as a failure. Failed attribution must not erase
+  a concrete count/age violation or become whole-probe visibility failure.
+  Its class names the observation failure, not the workload cause; an empty
+  later grouping is still not recovery. Successful rows have the separate
+  bounded projections below; this is not a general diagnostic redactor.
+- SUCCESSFUL IDLE DIAGNOSTICS: the idle battery withholds SQL and application
+  text before evidence enters its trip cache or reusable Alert/Markdown/JSONL
+  outputs. Whitespace normalization and truncation are not redaction: the
+  source-reproduced synthetic path retained literals and application identity,
+  but this is not evidence of real credential exposure. The existing query,
+  grouping/order/limits, oldest PID, backend counts, and continuous-idle ages
+  remain; rendered numeric fields must parse as nonnegative 64-bit integers.
+  An incomplete row, unknown row kind, or invalid numeric field withholds the
+  entire optional snapshot behind fixed `error_class=invalid-response`, not
+  a whole-probe visibility failure or suppression of the core count/age alert.
+  A genuinely empty optional grouping still remains valid. False-positive
+  qualifier: withheld text is not evidence of unsafe SQL, Redis causality, a
+  leak, or a persistent owner; ordinary parameterized queries are withheld too.
+  False-negative qualifier: this deliberately reduces workload attribution;
+  neither missing text nor an empty later grouping proves recovery. Use an
+  authorized protected lookup with current session/time evidence before action;
+  a PID alone is not durable ownership. Numeric validation cannot establish
+  source truth or close separate-snapshot, cached-trip, or truncated-grouping
+  attribution gaps. Other SQL-sample paths and broader malformed-row
+  attribution remain outside this boundary.
+- SUCCESSFUL ACTIVE / PLAN DIAGNOSTICS: the active battery withholds SQL and
+  arbitrary wait labels before caching or Alert/Markdown/JSONL rendering.
+  Signed 64-bit query IDs, a fixed `uncomputed` marker for a NULL ID, and
+  nonnegative backend counts remain; exact `-:-` becomes `waits=none`, all
+  other wait labels become `withheld`. A malformed projected row yields only
+  a fixed optional `observation-invalid-response` note. Plan-wall snapshots likewise
+  validate signed query IDs, nonnegative integer counters and finite rounded
+  durations. Index labels become fixed source-owned name roles or
+  `other-name-withheld`, retaining ranked numeric deltas, not arbitrary names.
+  A name role does not establish an index's definition, validity, or plan use.
+  Each invalid snapshot retains its first/second component label; independent
+  valid statistics or deltas remain available and the core PAGE is preserved.
+  Empty optional results are still valid, not a healthy workload claim.
+  False-positive qualifier: the actual-render synthetic regression establishes
+  the unguarded path, not real credential exposure. Canonical query IDs and
+  Boolean statistics are numeric/Boolean; arbitrary marker cells test malformed
+  source data, not ordinary secret-bearing PostgreSQL output. Parameterized
+  SQL and harmless custom names are withheld too. False-negative qualifier:
+  minimization reduces attribution; use a separately authorized protected
+  current-session/schema lookup. No query selection, schema scope, cadence,
+  cache, threshold, or counter-reset arithmetic changed. Missing first samples,
+  counter resets/precision, top-N churn, NULL IDs, non-atomic intervals and
+  cached-trip age remain limits; an empty or negative delta is not recovery.
+  The Boolean `pg_stats` projection and its unknown controls are in §5.8.
+  Other SQL-sample and Redis batteries are not certified by this repair.
 - BROKEN: idle_in_tx > 100 requires attribution. Redis latency leaking through
   tx-scoped calls produced 563 during brownouts (2 when healthy), but a bounded
   close cohort can also put many workers briefly between statements. Report
@@ -971,9 +1087,9 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   transaction; they can have different owners. Oldest transaction age > 30
   min = leaked transaction pinning the vacuum xmin horizon (kills autovacuum
   silently).
-- BROKEN: active > 100 with wait_event '-' (on-CPU) = a query-plan CPU wall,
-  not load (360–390 seen 2026-07-17 vs ~6 healthy; idle-in-tx elevated too but
-  redis was healthy — check 1.4 to disambiguate). pgbouncer kills queued
+- BROKEN: active > 100 with no wait event is a query-plan CPU-wall candidate,
+  not proof of that cause (360–390 seen 2026-07-17 vs ~6 healthy; idle-in-tx
+  elevated too but redis was healthy — check 1.4 to disambiguate). pgbouncer kills queued
   clients with query_wait_timeout while direct 5432 connects fine → 5.8.
 - KEY INSIGHT: pgadmin-style "connection utilization" is NOT query load.
   Real active backends were ~6 even during the worst incidents. Always split
@@ -1048,11 +1164,11 @@ socket census rather than disclosing its address in monitor output.
   superuser_reserved_connections - reserved_connections`. Every existing
   client backend consumes the admission threshold, including a privileged or
   direct-maintenance owner and the observation session itself.
-- HEALTHY: more than 25% normal-role headroom remains.
+- HEALTHY: both more than 25% normal-role headroom and more than 64 slots remain.
 - WARN: at least 75% of that ceiling is occupied for two consecutive 30-second
   samples. Capacity is not query load: split active, idle, and
   idle-in-transaction owners before assigning a cause.
-- PAGE: at least 90% is occupied, 64 or fewer normal-role slots remain, or the
+- PAGE (independent guards): at least 90% is occupied, 64 or fewer slots remain, or the
   direct observation itself receives `FATAL: sorry, too many clients already`.
   A direct rejection has no numeric snapshot, but it is affirmative server
   capacity evidence rather than a generic monitor visibility failure.
@@ -1085,7 +1201,7 @@ socket census rather than disclosing its address in monitor output.
   database concurrency budget, but it does not replace owner attribution and
   bounded pools.
 - VERIFY: for ten minutes through the workload that triggered the alert,
-  direct 5432 stays observable, ordinary-role headroom remains above 25%,
+  direct 5432 stays observable, headroom remains above 25% with more than 64 slots,
   completed `COMMIT` latency and WAL waits return to their ordinary band, and
   neither `pg-client-capacity` nor `query_wait_timeout` recurs.
 
@@ -1135,7 +1251,8 @@ WHERE backend_type = 'client backend';
 
 - HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
   ceiling, excess pool connections drain toward their configured warm minimum
-  after 600 idle seconds, and §1.3a retains more than 25% total headroom.
+  after 600 idle seconds, and §1.3a retains both more than 25% normal-role
+  headroom and more than 64 normal slots.
 - WARN: idle loopback backends consume at least 50% of the ordinary-role
   ceiling for ten consecutive 30-second samples. Report local idle, active,
   idle-in-transaction, continuously idle for at least 600 seconds, and the
@@ -1152,9 +1269,11 @@ WHERE backend_type = 'client backend';
   interval requires both owner attribution and the selected live settings
   before classifying the drain as disabled, ineffective, or mismatched.
 - ROOT-CAUSE ORDER: first read the selected settings from every live shard and
-  take one root socket census. If the timeout is zero, apply the isolated
-  Xops commit `31ae1e7` only after protected database maintenance is empty and
-  with explicit operational authorization. The supported consolidated runner
+  take one root socket census. If the timeout is zero, deploy from an
+  intentional local Xops checkout containing the 31ae1e7 idle-drain change
+  (deliberate local changes are allowed) only after protected database
+  maintenance is empty and with explicit operational authorization.
+  The supported consolidated runner
   is `xops/main/ansible/run-dbs.sh --pgbouncer-only`; there is no separate
   `run-pgbouncer.sh`. It sets the documented 600-second PgBouncer default,
   reloads only changed pooler units, and fails if any PID changes across
@@ -1173,7 +1292,8 @@ WHERE backend_type = 'client backend';
 - VERIFY: every live shard file reports `server_idle_timeout=600`; every
   PgBouncer PID is unchanged across the isolated reload; after more than 600
   seconds outside a demand peak, excess connections contract toward the warm
-  floor; §1.3a headroom stays above 25% for ten minutes; and neither
+  floor; §1.3a retains both more than 25% normal-role headroom and more than 64
+  normal slots for ten minutes; and neither
   `query_wait_timeout` nor a rejected server login recurs.
 
 The 2026-09-01 production control supplied exact causal evidence. Edge-2 had
@@ -1392,6 +1512,26 @@ ledger crosswalks deterministic:
   alertable so splitting a burst across those finite groups cannot hide it;
   old mode/reason-only lines explicitly leave the gate unobserved.
 
+`window-evaluation-unwritten-expiry` recognizes only the source-reviewed
+`[multi]evaluation ping error [...] = queued Pack expired before serialization:
+send Pack was not admitted` line from `ip_remote_multi_client.go`, optionally
+ending in the emitter's numeric `(N suppressed)` suffix. It retains a fixed
+`pre-serialization` frame and identity-free sample. WARN at 20 diagnostic
+lines/minute in one completed known-class window (sustain 1); suppressed counts
+are not added. This is an asynchronous initial-ping queue deadline, not the
+synchronous signaling-admission class, an ordinary ping timeout, or a remote
+response. A generic `send Pack was not admitted` alone lacks the pre-wire
+proof. Near matches and unsupported suffixes stay in generic novelty.
+
+The 2026-09-21 Taskworker novel alert retained one complete sample of this
+known local boundary. Its 27/min top normalized key was truncated at 160 bytes,
+before the decisive suffix: do not assign all 27 lines that cause from the
+sample alone. The total 55/min and 17 shapes also leave the other 16 shapes
+unresolved. A previous `logs/novel|novel|taskworker|` ticket is service-level
+identity recurrence, not causal ancestry for the new sample. Cataloging this
+line does not diagnose the queue delay, establish active Connect ancestry, or
+resolve the remaining novel population. Follow §14.6 for the next discriminator.
+
 An exact `automatic balance-code delivery failed without email recovery` line
 is `payment-balance-code-undelivered`: PAGE on the first line. It means a paid
 fulfillment retained its durable balance code, automatic redemption failed,
@@ -1457,6 +1597,29 @@ tail, two clean reconciliations, and ten quiet minutes before closing the
 visibility finding. Record and verify the VCS identity of the executable that
 the watcher children actually resolve; the revision of a nearby checkout does
 not establish that boundary.
+
+The exact observer dependency must also support the effective `services.yml`
+schema. On 2026-09-21, a pinned older Warpctl rejected a newly valid
+`class: lan` router: the old validator required `lan_interfaces`, while the
+current LAN-router schema intentionally uses `bridge_interfaces` instead.
+A bounded replay established a local pre-query configuration failure, not a
+Loki outage. Exit status 2 alone does not establish that cause. The long-lived
+tails had already loaded their configuration and could remain connected or
+rotate normally while fresh reconciliation children failed to load the current
+file. Periodic WebSocket rotation and query failure are separate boundaries;
+neither process liveness nor their timing proves query coverage or causality.
+
+Validate the compatible dependency from the existing local Warp checkout and
+promote it through the controlled handoff; do not weaken validation, alter valid
+inventory, or restart product services for this observer mismatch. Keep raw
+child output private and retain only fixed error/status markers in handoffs,
+never raw child output in Alerts. Require two fresh same-generation
+reconciliation windows across the complete intended collector inventory, using
+the retained receipt contract below. A failed query clears its success pair;
+age alone makes it stale without removing the last completed timestamps. A
+compatible build or one capped query is not recovery proof. Missing, failed,
+or incomplete evidence remains unknown, and independent stream/source-time
+controls still apply.
 
 The exact API transaction-cleanup masking stack is `tx-rollback-mask`, and it
 takes precedence over generic `panic`. It requires the final
@@ -1524,6 +1687,23 @@ the exhaustion. The operational gate is to let current index progress finish,
 then deploy the current-main Taskworker fixes `908a8b2c` and `d8392c83`; do
 not tune the 32 pool shards as the first root-cause action.
 
+Fast-exit output is a separate observer boundary. A local 2026-09-21
+`-list-signals` pipeline returned only a prefix of the listing; that count did
+not prove a missing signal registration. The monitor CLI discarded the
+restore function from `server.ScrubProcessLogs`, so normal return and
+`os.Exit(1)` could end the process before its asynchronous stdout/stderr
+readers drained. The CLI-owned lifecycle now prints any command error while
+scrubbing remains active, joins both readers, and only then returns the status
+to the actual exit. Deterministic channel controls cover successful, failed,
+canceled, and scrubber-setup-failed commands; a discarded-restore mutation must
+fail the same ordering check. Real subprocess controls retain complete redacted
+output, including unterminated final lines, and the entrypoint's listing/error
+exit codes. Compare complete output with the exact binary's in-memory registry;
+incomplete output remains unknown, not catalog absence. RUN-MAIN.md retains
+direct-file one-shot completion markers. Abrupt termination and other service
+entrypoints have separate lifecycle owners; this is not a blanket instruction
+to restore descriptors before those services have stopped their producers.
+
 Implementation regression learned 2026-08-30: the standing tailer, restart
 health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
 bounded one-minute `logWindowProbe`; no production path instantiated the
@@ -1573,6 +1753,22 @@ test emits an ordinary remote line on stdout and the exact exhausted-502 panic
 shape on stderr, then proves the service panic finding stays healthy. An
 exhausted query still restarts the tailer and is surfaced by tailer health; it
 is neither hidden nor attributed to the observed service.
+
+The bounded one-shot reader has the same attribution boundary. A deterministic
+2026-09-21 source reproduction showed that its nonempty-output exception could
+classify a failed helper's local `panic:` diagnostics as a service PAGE, or
+return zero findings from failed non-error-shaped/partial output. Any read error
+now ends that signal with its existing `monitor/visibility` / `cannot-observe`
+WARN and a nonzero one-shot result, regardless of retained bytes. Only the fixed
+observation error class enters alert evidence; failed output is not parsed as
+remote service logs. Empty failures, cancellation, successful empty windows, and
+successful remote panic windows have public `NewLogErrorsSignal` → `Monitor.Run`
+controls. False-positive qualifier: an errored helper is lost visibility, not
+proof of a service panic or Loki outage. False-negative qualifier: the adapter
+withholds that signal's accumulated partial findings on error, so their absence
+is not recovery; successful bounded reads still have their existing query-cap,
+parsing, and freshness limits. This source repair does not certify every live
+observer generation or alter the standing tailer's separate shutdown policy.
 
 The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
 an interrupted WebSocket internally, so an explicit `Tail read error ... no
@@ -2265,8 +2461,16 @@ status, never selector values, resource contents, or credentials.
 
 Coverage alerts retain the originating probe number and key, identifying which
 observation lost coverage. Their cross-cutting `monitor-host-scope-partial`
-class and `monitor/host-scope` ID link here; the settings-freshness probe also
-emits the process-wide policy warning under §1.6.
+class and `monitor/host-scope` ID link here; their stable frame is the owning
+probe key. Preserve these per-probe facts rather than collapsing them into one
+row. `blocked_hosts` counts denied hosts within that probe; counts across probe
+frames can overlap and must not be summed as distinct hosts. The
+settings-freshness probe also emits the process-wide policy warning under §1.6
+with its own frame and zero blocked observations. Older artifacts emitted an
+empty shared frame, causing distinct probe facts to collide in exact-identity
+accounting. When comparing across the corrected artifact boundary, use the
+retained origin metadata: the newly separated identities are not new incidents,
+and disappearance of the old shared identity is not restored coverage.
 
 Scope ownership comes from inventory-owned destinations, not external chain
 reference RPCs. Owned Grafana clients also guard redirected requests; injected
@@ -2449,8 +2653,15 @@ Probe: `wait-events`
 
 `LWLock:WALWrite` clusters = WAL pressure (check checkpoint cadence,
 max_wal_size — a forced checkpoint every < 5 min melted main earlier this
-month). `IPC:MessageQueueReceive` = parallel workers. `Client:ClientRead` on
-active = server waiting on client mid-protocol.
+month). `IPC:MessageQueueReceive` = counted client backends waiting to receive
+messages. `Client:ClientRead` on active = server waiting on client mid-protocol.
+
+For `IPC:MessageQueueReceive`, this probe counts only client backends;
+parallel-worker rows are excluded by its `backend_type='client backend'`
+filter. Parallel workers are a possible dependency, not counted identities.
+Attribute the client query and its actual worker relationship before inferring
+a parallel-query bottleneck; a zero-age count burst does not prove a stalled
+query.
 
 Count alone is not a stall discriminator for `Client:ClientRead`. At 11:28Z on
 2026-08-30, consecutive samples contained five to seven active ClientRead rows,
@@ -2463,6 +2674,18 @@ single ClientRead older than one minute still identifies a client/pool path
 that must be attributed. The rebuilt watcher validated the negative branch:
 a direct production sample again found seven distinct ClientRead PIDs with a
 4ms oldest command, while the wait-events probe emitted no alert.
+
+The emitted `oldest_s` measures query age from `query_start`, not continuous
+wait residence. An aged query can have just entered the sampled wait; this
+collector has no wait-entry timestamp or residence history. The explicit
+`age_basis=query_start`/`wait_residence=unknown` qualifier preserves that
+boundary without changing the count/age query, five-minute cadence, sustain,
+ClientRead exception or identity. False-positive qualifier: neither an aged
+singleton nor a zero-age IPC count burst proves a minute spent waiting or a
+stalled command. False-negative qualifier: separate samples cannot recover
+intervening wait transitions, and rounding hides sub-second query age. Obtain
+bounded same-command history before claiming residence; retain the real
+count/query-age warning and existing family-level recurrence controls.
 
 False-positive qualifier for persistence attribution: cadence sustain is keyed
 by database target and wait family, not PID, query ID, or query start. Two
@@ -2478,6 +2701,17 @@ also miss waits that begin and end between ticks, and each grouped row retains
 only its oldest query shape; absent/unknown query IDs cannot establish
 continuity. Missing prior samples or incomplete active-query history leave
 persistence unknown, not healthy.
+
+False-positive qualifier for one-shot observations: `Run` and `RunSignal`
+bypass the standing loop's sustain gate. A count-only cluster with a zero-second
+oldest command, or one aged command, therefore proves only the current band
+violation. It does not prove recurrence across cadences or a persistent stall.
+The September 21 one-shot IPC clusters exposed generic mechanism text that
+incorrectly asserted recurrence before the gate had run. The explanation now
+states only the observed boundary and explicitly retains this qualifier. The
+five-backend count guard, one-minute age guard, five-minute cadence, and
+two-consecutive-observation standing gate are unchanged. A healthy observation
+resets that family gate; it does not establish health between observations.
 
 At 06:03Z on 2026-08-31, a read-only one-shot observation found one
 `IO:DataFileRead` waiter at 71s. It cleared before the immediate attribution
@@ -3085,6 +3319,26 @@ cleanup just as an idle-in-transaction session does. Autovacuum thresholds are
 hand-tuned per giant table because default scale factors never fire on 600M-row
 tables.
 
+The 160-character horizon SQL sample is not a reliability phase or deployment
+discriminator. Full re-anchor and rolling-enter INSERTs share its observable
+prefix; the rolling `ON CONFLICT` clause occurs later. A reference to running
+state (including its metadata) is only a candidate ownership clue. The source
+regression gives both branches the same truncated sample and preserves the
+debt warning while rejecting a full-anchor or historical-cadence diagnosis.
+Use the existing task-canary/task-overdue full-SQL phase and running-window
+discriminator (§1.2), including the current drained target's distance from
+the re-anchor marker and verified deployed source. Historical full-anchor
+incidents below retain their independently collected evidence; do not assign
+that history to a new prefix-only observation. False-positive qualifier:
+threshold overshoot with an active vacuum is not failed cleanup, and one
+reliability-shaped candidate does not prove which task, phase, old revision or
+write fan-out caused the debt. False-negative qualifier: no companion phase
+alert, a released horizon or partial reclamation cannot prove recovery. Require
+the attributed attempt's bounded outcome, durable marker movement, completed
+vacuum and consecutive below-threshold samples with source coverage. Query,
+threshold, cadence, sustain and identity remain unchanged; this qualification
+does not authorize cancellation, a cadence rollout or extra collection.
+
 That configured-threshold rule prevents an intentional cascade victim from
 becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
 tuples with no active vacuum and no old horizon holder, but its fixed vacuum
@@ -3332,6 +3586,13 @@ SELECT count(*) FROM transfer_contract WHERE open = true;
   2026-08-30 hardening was prompted by a 212,497 alert whose persisted samples
   later confirmed that this instance really was rising: 90,328, 91,679,
   124,317, 155,901, 182,471, then 212,497 at roughly five-minute intervals.
+
+An above-threshold warmup or a rise alone does not identify a retention defect.
+Before changing code or deploying, correlate consecutive age buckets with the
+running closer's duration/outcomes, current retention-fanout evidence, and the
+transfer_contract autovacuum phase. Apply the bounded retention correction only
+if that attribution is confirmed; the historical episodes below are not proof
+of the current running path.
 
 2026-08-30 close-tail discriminator: the set reached 244,019 (204,756 older
 than five minutes, only 11,765 older than 30 minutes) while one
@@ -8660,10 +8921,12 @@ Redis latency inside tx scopes remains one known cause: the same grouped query
 shape stays continuously idle and the pool recovers instantly when Redis does
 (563 → 2 observed). Backlog close workers instead appear as many
 per-contract query shapes with sub-second continuous idle ages; do not
-mass-terminate them. The battery always reports the single continuously oldest
-transaction even when its one-row query shape falls below the top six groups.
-Follow a subsidy-window query to the Payout canary and its transaction-local
-idle-timeout fix. Kill only proven zombies > 30 min;
+mass-terminate them. A complete optional battery reports the single continuously
+oldest transaction's validated PID/age even when its one-row query shape falls
+below the top six groups; SQL and application text are explicitly withheld
+before caching. Attribute a subsidy-window query through an authorized protected
+lookup before following the Payout canary and its transaction-local idle-timeout
+fix. Kill only proven zombies > 30 min;
 `idle_in_transaction_session_timeout` is the standing guard.
 
 The 10:43Z recovery sample demonstrated why this split matters. There were 121
@@ -8672,9 +8935,14 @@ high-count closer shapes were only 0–1s continuously idle. One Payout planner
 was the age owner: its subsidy-window transaction was 277s continuously idle
 and disappeared as it crossed the global 300s cutoff. The prior battery listed
 only shapes ordered by count, omitted that singleton, and therefore suggested
-generic Redis leakage. The probe now emits an explicit oldest PID/query line,
+generic Redis leakage. The probe now emits an explicit oldest PID/age line,
 labels summary age as transaction age rather than continuous idle duration,
-and explains the bounded-closer/Payout split.
+and explains the bounded-closer/Payout split. The withheld-text marker is not
+evidence of secret-bearing work or the same workload persisting. Missing,
+malformed, empty, or cached optional attribution cannot establish recovery or
+identify the current workload owner; preserve the concrete state warning and
+obtain a fresh protected discriminator. The idle projection and the separate
+active/plan-wall projection (§1.3/§5.8) do not certify other diagnostic paths.
 
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
@@ -9076,7 +9344,8 @@ cliff); CloseExpiredContracts 8s → 20-25min with Timeout errors; idle-in-tx
 elevated even though redis is healthy (run 1.4 first to rule redis out).
 1. psql direct to 5432 (never wait on the pgbouncer queue). Group actives by
    pg_stat_activity.query_id — if 1–3 shapes own the pile (186+159 of 360
-   observed), it is a plan problem, not organic load.
+   observed), prioritize a plan discriminator; concentration alone does not
+   distinguish a bad plan from organic concurrency.
 2. Confirm the plan: EXPLAIN (ANALYZE, BUFFERS) one shape with real params —
    the tell is a giant Rows-Removed-by-Filter on the wrong index — plus a 30s
    idx_scan snapshot delta (the intended index sits at 0). Get the CURRENT
@@ -9108,6 +9377,26 @@ elevated even though redis is healthy (run 1.4 first to rule redis out).
    scoped query off the generic open/create-time index. Then require two
    consecutive production samples with single-digit active counts and bounded
    pair calls.
+
+The automatic plan-wall battery uses the existing bounded 15-second snapshots,
+not the longer manual intervals above. Its successful evidence is projected
+before the trip cache (§1.3). For `transfer_contract.open`, accept only one
+complete three-cell row, finite Boolean-compatible `n_distinct`, exact Boolean
+MCV labels and matching finite frequencies in [0,1] whose sum is at most one
+(allowing float rounding). Multiple rows are ambiguous because the unchanged
+query does not select a schema. Malformed/partial/ambiguous rows produce only
+the fixed optional `pg_stats` `observation-invalid-response` note, never a healthy verdict;
+zero rows omit the verdict. NULL/empty MCV data and otherwise valid incomplete
+distributions remain explicitly unknown. A complete two-valued sample reports
+both values observed, not plan health; a complete one-valued sample is a
+legacy-reader discriminator, not permission to ANALYZE or proof of poisoning.
+False-positive qualifier: the canonical generated column is Boolean, so
+synthetic non-Boolean cells demonstrate missing validation rather than real
+credential leakage or a deployed schema collision. False-negative qualifier:
+typed evidence cannot prove source/schema ownership, freshness, a comparable
+counter generation or the selected plan. The existing stats selection and
+delta/reset arithmetic are unchanged; protected current plan/index evidence
+and the core state/rate controls are still required before claiming recovery.
 
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list
@@ -15964,6 +16253,84 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
   agent's sockets too, making its public-egress probe bypass the tunnel and
   turning a green result into a harness false positive.
 
+#### Windows bootstrap capture before provider proof
+
+The Windows source audit confirmed a client-side outage mechanism: the former
+`TunnelController::StartLocked` applied Connecting WFP, capture routes/DNS, and
+Connected WFP before starting its packet pump, while the app could select a
+provider only after `BootstrapSession` received that start reply. A blocked
+bootstrap or empty provider window could therefore take over a working native
+connection. This ordering is source-confirmed; it does not establish the initial
+resolver/platform failure on an affected device or prove regional reachability.
+UDP or IPv6 warmup failures alone do not establish that HTTPS/WSS and the
+network-space DoH paths also failed.
+
+The corrected Windows control contract is v4: the initial `preparing` start
+reply means RPC is usable, capture routes and tunnel DNS are absent, and provider
+selection may proceed. During activation, status may remain `preparing` while
+machine effects are being applied; the explicit routes/DNS fields report those
+facts, and only `up` reports a committed capture transaction.
+Capture requires a positive, unchanged SDK destination generation around an
+exit sample, at least one Added provider, and a currently usable Proven exit
+(not done, quarantined, or warned). Pool `MinSatisfied` and IPv6 availability
+are not prerequisites for a usable IPv4 exit. Callbacks invalidate old proof;
+session cancellation, destination changes, and an eight-second ticket expiry
+prevent stale activation. Physical network changes/resume request a bounded
+SDK re-probe and require qualification newer than that event, conservatively
+accounting for the SDK's truncated probe age. The pump and latest split rules
+are prepared before capture; failed or superseded activation rolls back routes,
+DNS, and policy. An already armed explicit kill switch remains protected;
+the ordinary switch-off bootstrap leaves the native network available.
+
+The physical-network epoch belongs to the session, not its replaceable watchdog.
+Previously, an event between watcher removal and replacement publication could
+be discarded, allowing historical qualification to authorize capture. The
+session now retains that invalidation and replays only unhandled SDK notification
+work to its own replacement watcher; completed notifications and old-session
+callbacks cannot become new work. Deterministic absent-listener, delayed-callback,
+and compiled old-behavior controls cover this seam, not Windows event delivery.
+
+Client service diagnostics use `stage=bootstrap`, `stage=provider-proof`,
+`stage=packet-pump`, and `stage=capture`, with finite outcomes/reasons, aggregate
+counts, and local generations. `waiting-selection`, `discovery-pending`, and
+`qualification-pending` differ from unavailable/stalled sampling. `active`
+means the capture transaction committed; it is not a promise that every
+destination or address family works. Qualification can be unavailable when
+probe destinations are blocked or probing is disabled, even if some ordinary
+traffic could work; pending capture is conservative in that case. A legacy
+fixed-client shape with no qualified-exit evidence also cannot claim ready.
+
+The 2026-09-21 disposable ARM64 native check found a separate DNS rollback
+defect. With the DNS server/search-list flags selected, null string pointers
+passed to `SetInterfaceDnsSettings` returned `ERROR_INVALID_PARAMETER` (87)
+for both address families and retained the injected resolver through the
+ten-second observation. Non-null empty strings with the same selected flags
+returned success (0) and cleared it immediately. The corrected clear payload
+has a pure regression control; substitutes accepting null cannot establish
+this native API contract. The subsequent standalone suite passed 19 real-OS
+cases exercising WFP, Wintun, routes and DNS with injected provider proof,
+plus 11 synthetic retired-binding controls. A remaining test-adapter alias
+is harmless only when independent present-device enumeration proves absence
+and no network configuration remains; an alias alone is not that proof.
+Void cleanup completion or cleared ownership flags do not independently verify
+OS restoration. Retain explicit per-family DNS clear errors and independently
+compare the resulting OS state. The standalone native runner does not compile
+the full service or UI; retain matching app-build and service-selftest receipts
+separately.
+
+These are client diagnostics and manual acceptance evidence, not new server
+monitor signals. A healthy server does not prove client DNS or tunnel health.
+Host-portable tests exercise native-effect substitutes, stale callbacks,
+stop/failure rollback, and negative controls for premature capture; only the
+separate native suite exercises the real OS effects above. Injected proof is
+not an actual provider connection. Remaining acceptance requires real-provider
+bootstrap and ordinary-traffic recovery, the matching v4 app/service UI and RPC
+path, sleep/resume and physical-network roaming, Windows x64, and signed-driver
+and MSI-install validation. Preserve the switch-off native-connectivity and
+armed-kill-switch distinction through those checks. No reported-user bootstrap
+cause, regional reachability, actual-provider recovery, or production deployment
+is established by these source, portable-test, or standalone-native receipts.
+
 #### Client authentication, routing continuity, and cross-platform validation
 
 A client with no usable peers until its UI is opened is not sufficient evidence
@@ -17594,6 +17961,29 @@ campaigns can pass 60/60 on this old image, while the overlapping campaign
 then loses WireGuard and SOCKS returns with the hosted device still connected
 and its exit window ready. Isolated green results therefore do not disprove
 the stale-artifact diagnosis; require the simultaneous three-protocol soak.
+
+**Initial evaluation-ping local expiry:** the exact
+`window-evaluation-unwritten-expiry` marker comes from Transfer's singleton
+Pack deadline branch before serialization or sequence-number assignment.
+Its asynchronous callback reaches `recordEvaluationPingFailure`, which logs
+and records an evaluation failure; it is distinct from `ClientSignalSender`'s
+immediate false/nil admission diagnostic. Initial evaluation has not proved
+the candidate usable, so do not equate retaining an already-proven provider
+after an optional idle ping with admitting an unevaluated candidate.
+
+The current evaluation recorder falls back to `windowFailureProvider` for
+this exact local marker; its resulting `providers-unresponsive` reason is not
+independent evidence that a provider received or failed to answer the ping.
+First prove the emitting Connect input under §8.12, then inspect that same
+generation's effective `PingWriteTimeout`, queue/admission wait and
+sequence/carrier progress, together with independent provider-window outcomes.
+The marker establishes where the local attempt ended, not why it waited.
+Keep queue/deadline bounds and existing failure cleanup; no timeout/capacity
+increase, restart, or provider/network diagnosis follows from this text alone.
+Require ten minutes of fresh comparable evaluation traffic below the exact
+20/min class threshold plus independent window progress. Generic admission,
+structural ping errors, cancellation, malformed lines and the other novel
+shapes retain their independent controls.
 
 **Window-teardown false platform attribution:** a post-promotion observation
 beginning near `04:17Z` on 2026-09-09 reached 20--34 taskworker
@@ -20153,6 +20543,37 @@ and the configured, independently verified current runtime. An RPC response
 alone is insufficient: a zero-peer node can serve a permanently stale local
 chain.
 
+Head readiness and this probe's absence of alerts do not establish a historical
+`eth_call` latency SLO. The existing progress/identity checks do not measure
+historical execution queues, per-method latency, or timed-out work remaining in
+the backing node. Retrying successfully distinguishes a transient failed
+attempt from a permanently unavailable result; it does not identify a rate
+limiter, storage fault, or provider failure.
+
+For owned LAN RPC throughput, distinguish nginx's connection capacity and
+explicit request/connection quotas, the node's RPC connection limit and
+optional rate quota, client batch width, server execution concurrency, and the
+client's deadline. An upstream `keepalive` value is an idle-connection cache,
+not an in-flight request cap. Four client workers or several established TCP
+connections do not bound unfinished backend work after a timeout. A retry
+policy that reduces batches to sequential singleton requests can reduce
+throughput without a LAN rate limiter; a synchronous execution may continue
+after its caller stops waiting, but that overlap requires runtime evidence.
+
+Record the exact approved client route/source, RPC method and historical block
+selector, batch/retry/deadline settings, and backing process generation. Compare
+the intended template with readable runtime arguments and bounded nginx
+configuration, preserving the difference between on-disk source and loaded
+configuration. An absent command-line option requires the matching runtime's
+default semantics before claiming a quota is disabled. Correlate existing
+request status/duration evidence with same-interval CPU, pressure, memory and
+whole-device I/O deltas measured over their actual elapsed interval. Short
+healthy resource samples, head probes, missing queue exports, or unreadable
+configuration leave the historical cause unknown. Do not replay an audit or
+add load, increase limits, remove public access protections, or restart the
+node merely to force attribution. This is a manual discriminator, not an
+implemented historical-throughput alert class.
+
 `isSyncing=false` is especially unsafe by itself. With no peers, Subtensor can
 set `system_syncState.highestBlock` equal to its own stale `currentBlock` and
 therefore report false even though the public chain is millions of blocks
@@ -21843,6 +22264,32 @@ failures use `provider-api`, and rejected response contracts use
 `provider-data-invalid`; their `SignalID` remains `monitor/visibility` and the
 monitor run remains non-zero. Do not silently disable a configured provider to
 clear one of those failures.
+
+Only the resolver's explicit not-found result establishes that an optional
+reporting credential is absent. An unavailable lookup, non-regular file, or
+dangling link keeps that provider enabled and produces
+`monitor/visibility` / `provider-authentication` with the fixed resource name
+and `is unavailable` reason; a failed read or malformed readable file retains
+the existing `is unreadable or malformed` reason. Paths, filesystem error
+details and credential contents are not copied into those diagnostics. Other
+probes still run. The actual-resolver tests in
+`config_provider_lookup_test.go` cover both providers' absent, regular,
+non-regular, dangling and readable-malformed controls, with public
+`Monitor.Run` and Markdown visibility assertions on the failure paths.
+
+After the dedicated key has loaded, a missing or unavailable shared
+`google.yml` / `apple.yml` app-identity resource is also a visible configured
+provider failure, never an optional-key no-op. Those lookup errors use the
+same fixed resource-name / `is unavailable` diagnostic, without raw paths;
+`config_provider_app_lookup_test.go` exercises the actual resolver and public
+Alert/Markdown/error path for missing, non-regular and dangling resources.
+
+This local visibility failure does not prove a rejected provider key or a
+remote API outage. Conversely, a genuinely absent optional resource remains
+unarmed, not a successful zero-crash observation. Correct the exact local
+lookup/read boundary and reload the monitor settings through the normal
+observer-generation workflow; a readable file alone is not recovery until
+the provider reaches its existing authenticated freshness/data contract.
 
 Both probes persist versioned atomic cursors under
 `StateDir/provider-reports/`, retain an overlapping lookback, and commit state
