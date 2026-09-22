@@ -18763,7 +18763,7 @@ backpressure, but unrelated WireGuard peers must continue.
 connected while its provider window drains below target with
 `stall=platform-unreachable`. Before treating that state as provider ingress
 loss, query Connect and the selected Proxy block for
-`[framer][reject] ... messageLen=... > MaxMessageLen=4096`. The standing
+`[framer][reject] ... messageLen=... > MaxMessageLen=...`. The standing
 `logs/framer-message-too-large` class covers this signal explicitly because
 the transport emits the rejection at info severity. The 2026-09-01 main
 reproduction rejected 4,232- and 4,187-byte reliable H1 messages during the
@@ -18783,33 +18783,43 @@ oversized Pack, so the H1 route could not recover and a multi-window refill
 kept trying against an impossible admission boundary. Current Connect defaults
 set `ClientSettings.MinimumMessageLenLimit`, the platform H1 WebSocket read
 limit, every default framer, and the resident exchange/handler cap to the same
-8 KiB pooled class. Ordinary H1 data groups retain their 4 KiB target, and the
-per-device carrier budget remains the admission bound; this is not an
-unbounded-buffer fix.
+bounded 16 KiB ceiling. Ordinary H1 data groups retain their 4 KiB target; the
+existing pool stops at its 8 KiB class, so larger handshake carriers are
+unpooled, and the per-device carrier budget remains the admission bound. This
+is not an unbounded-buffer fix.
+
+A later production observation rejected a 9,124-byte carrier at the former
+8 KiB ceiling. That disproves the earlier 8 KiB safety margin even though it
+covered the previously measured 4,950-byte profile. The compatible Connect and
+Proxy artifacts must therefore carry the shared 16 KiB floor. A smaller
+rejection can be historical evidence; only a fresh rejection at or below the
+active declared cap proves a currently incompatible endpoint. Conversely, a
+quiet rejection log alone is not recovery proof: require provider-window
+recovery and the paired endpoint identity as well.
 
 The v190 standing cadence at 2026-09-01T15:27Z observed a fresh Connect write
 rejection at `messageLen=4408`, `MaxMessageLen=4096`, and
-`maxFrameLen=4100`. That exact runtime cap directly proves the compatible pair
-is absent even while §8.12 source metadata is unavailable: current-main Connect
-commit `096414ac` makes the shared minimum 8 KiB, and current-main server commit
-`c1403f16` propagates it through the resident H1 path. Stable patch IDs prove
-they are patch-identical to the former `7e0fcba` and `53780b3e` hashes after
-both histories were rewritten. After §8.13 can read the exact Warpctl identity,
-deploy Connect and Proxy artifacts from intentional local checkouts containing
-the current-main commit pair; deploying only one endpoint leaves the other able
-to reject the same carrier. Record participating diffs because a mutable
-version label is not proof of either commit.
+`maxFrameLen=4100`. That exact runtime cap directly proved an incompatible
+endpoint even while §8.12 source metadata was unavailable. The prior 8 KiB
+Connect/server pair is insufficient for the 9,124-byte observation; require
+the later shared 16 KiB change at both endpoints. After §8.13 can read the
+exact Warpctl identity, deploy Connect and Proxy artifacts from intentional
+local checkouts containing that paired change; deploying only one endpoint
+leaves the other able to reject the same carrier. Record participating diffs
+because a mutable version label is not proof of either commit.
 
 Deploy both ends of the H1 path before judging the change: the Connect
 resident must admit/forward the carrier and the H1-only hosted DeviceLocal must
-accept it. Require zero new 4 KiB framer rejections, a window at target without
+accept it. Require zero new framer rejections at the active 16 KiB cap, a window at target without
 `platform-unreachable`, no busy exit retirement caused by that stall, and three
 complete sustained HTTP/SOCKS/WireGuard overlap passes. The deterministic
-regressions are `TestMinimumMessageLenLimitFitsWorstCaseHandshake` and
+regressions are `TestFramerObservedHandshakeCarrierAdmission`,
+`TestMinimumMessageLenLimitFitsWorstCaseHandshake`, and
 `TestH1MaximumLogicalGroupEncryptedPackFitsMinimumMessageLimit` in Connect,
 plus `TestResidentAdmitsMinimumMessageLenLimit` in the server Connect package;
-the latter sends the full declared minimum through the production resident
-framing path and would fail at the legacy cap.
+the first proves the legacy 8 KiB rejection and 16 KiB admission of a larger
+synthetic carrier, while the latter sends the full declared minimum through the
+production resident framing path.
 
 **Finite TUN return-burst stall:** HTTP CONNECT and SOCKS can lose a completed
 origin response even with no active WireGuard attachment. The decisive
