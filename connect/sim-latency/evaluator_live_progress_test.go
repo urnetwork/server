@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -155,6 +156,25 @@ sudo() {
 		t.Fatalf("live-progress fixture timed out: %s", stderr.Bytes())
 	}
 	return stdout, stderr.Bytes(), err
+}
+
+// The epoch-7 failure occurred even though run.json existed: the official
+// reader treats its argument as a CSV and searches for a manifest sidecar.
+func TestEvaluatorLiveProgressManifestIsNotCsvInput(t *testing.T) {
+	root := newEvaluatorLiveProgressFixture(t, 1)
+	manifestPath := filepath.Join(root, "candidate-01", "run.json")
+	if _, err := readRunStats(manifestPath); err != nil {
+		t.Fatalf("synthetic candidate manifest is not readable: %v", err)
+	}
+	_, _, err := readOfficialRunSidecar(manifestPath)
+	var coded *scoreCodedError
+	if !errors.As(err, &coded) || coded.code != "missing_run_manifest" {
+		t.Fatalf("manifest argument did not reproduce the epoch-7 failure: %v", err)
+	}
+	runStats, _, err := readOfficialRunSidecar(filepath.Join(root, "candidate-01", "results.csv"))
+	if err != nil || runStats.EvaluationId != "candidate-01" {
+		t.Fatalf("results.csv did not resolve the same manifest: stats=%+v error=%v", runStats, err)
+	}
 }
 
 // The first completed replicate and the full nine-replicate set both consume
