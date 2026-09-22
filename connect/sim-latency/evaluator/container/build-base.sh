@@ -212,6 +212,7 @@ fi
 
 DOCKER_BUILDKIT=1 sudo -n docker build \
     --platform linux/amd64 \
+    --no-cache \
     --network default \
     --file "$SCRIPT_DIR/Dockerfile.base" \
     --build-arg "BASE_SHA=$base_sha" \

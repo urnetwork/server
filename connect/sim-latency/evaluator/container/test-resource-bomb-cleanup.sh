@@ -80,7 +80,7 @@ CGO_ENABLED=0 go build -trimpath -o "$build_context/resource-bomb" \
     "$SERVER_ROOT/connect/sim-latency/evaluator/container/testdata/resource-bomb"
 install -m 0444 "$FIXTURE_ROOT/Dockerfile" "$build_context/Dockerfile"
 taskset -c "$management_cpuset" sudo -n docker build \
-    --network none --provenance=false --file "$build_context/Dockerfile" \
+    --network none --provenance=false --no-cache --file "$build_context/Dockerfile" \
     --tag "$IMAGE" "$build_context" >/dev/null
 
 taskset -c "$management_cpuset" sudo -n docker network create \

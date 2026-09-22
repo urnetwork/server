@@ -1,9 +1,9 @@
 
 GOBUILD=go build -trimpath
 
-.PHONY: all clean build init warp_build warp_build_image
+.PHONY: all clean build warp_build warp_build_image
 
-all: init clean build
+all: clean build
 
 clean:
 	rm -rf build
@@ -26,7 +26,3 @@ warp_build_image:
 		--no-cache \
 		--push \
 		.
-
-init:
-	go clean -cache
-	go clean -modcache
