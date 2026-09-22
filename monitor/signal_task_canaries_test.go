@@ -1753,10 +1753,10 @@ func TestTaskCanariesSignalExplainsCloseCohortDeadline(t *testing.T) {
 	for _, want := range []string{
 		"task row does not contain the selected cohort size",
 		"matching live selection log",
-		"older 100,000-contract generation from the current 25,000 cap",
+		"merged count above 25,000 does not prove an older generation",
 		"per-contract commits made durable progress",
-		"If n exceeds 25,000",
-		"if n is already at or below 25,000",
+		"actual executor artifact and per-scan cap/count authority",
+		"existing 25,000 per-scan cap",
 		"92-worker inner pool",
 		"older-than-five-minute open set falls",
 	} {
@@ -1766,6 +1766,39 @@ func TestTaskCanariesSignalExplainsCloseCohortDeadline(t *testing.T) {
 	}
 	if strings.Contains(markdown, "The deployed closer selected one 100,000-contract cohort") {
 		t.Fatalf("close timeout diagnosis invented an unobserved deployed cohort size: %s", markdown)
+	}
+	if strings.Contains(markdown, "If n exceeds 25,000") || strings.Contains(markdown, "Live selection stays at or below 25,000") {
+		t.Fatal("combined selection count was mistaken for a single-scan cap")
+	}
+}
+
+// Prompt retry is not financial recovery. The existing grouped failure row
+// must remain visible independently of the more-than-five-minute parked count.
+func TestTaskCanariesCloseRejectionRemainsVisibleWithPromptRetry(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"CloseExpiredContracts", "1", "0", "0", "17", "90",
+				"Escrow does not have enough value to pay out the full amount.\ncontract remained non-final after force-close attempt",
+				"1800", "1", "other=1"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal("synthetic prompt-retry observation failed")
+	}
+	alert := requireAlertClass(t, alerts, "task-parked")
+	if alert.Severity != SeverityWarn || alert.Sustain != 1 || alert.Frame != "CloseExpiredContracts" {
+		t.Fatal("prompt retry hid or changed the unresolved failure identity")
+	}
+	for _, want := range []string{"failing_rows=1", "parked_over_5m=0", "max_errors=17", "sample_run_at_in_s=90"} {
+		if !strings.Contains(alert.Observed, want) || !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("prompt financial retry omitted fixed evidence %q", want)
+		}
 	}
 }
 

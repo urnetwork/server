@@ -394,6 +394,16 @@ WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
 - Action line: "check 1.2 canaries + redis cluster_state; correlate with
   deploys/restarts in the last 10 min".
 
+False-negative qualifier: every valid observation, including a depressed one,
+enters the rolling one-hour baseline. The six-hour override only replaces an
+unusually high one-hour median; it does not preserve the original baseline
+through a sustained decline. A depressed rate above the static 1,000/min floor
+can therefore stop breaching the learned relative band without regaining its
+pre-incident throughput. Disappearance from an emitted-only alert history is
+not recovery. Before incident closure, compare current absolute throughput
+with the retained pre-incident same-scope baseline and verify actual caller
+admission/delivery success; backlog and churn remain independent evidence.
+
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`
 
@@ -500,6 +510,49 @@ FROM failures GROUP BY task;
   Partial host/generation coverage, capped/empty history, or missing attempt
   correlation remains unknown. Do not replay/delete task rows, invoke the
   administrative closer, accelerate retries, or raise deadlines to verify it.
+- An underfunded disputed close is a separate financial rejection, not a task
+  timeout or Redis availability diagnosis. On 2026-09-22, complete private
+  pending-task evidence joined the escrow payout guard with a nonfinal-row
+  verifier; a filtered task-name log had omitted the second continuation line.
+  The exact disputed companion had two unequal final usage reports whose
+  required average exceeded its grant, one unsettled escrow equal to that
+  grant, and no missing or expired balance join. The settlement guard correctly
+  rejected that row. This identifies its accounting rejection, not the ingress
+  cause of over-grant reports or a payer-specific cause for every admission
+  failure. Preserve complete private error/state authority; clipped samples and
+  filtered logs are not complete joined-error evidence.
+
+  The same failed contract's payer was checked separately at 14:14Z. Its one
+  current balance had complete PostgreSQL reservation coverage, an equal Redis
+  mirror and positive available balance meeting the current local one-leg
+  minimum. That was not a rejecting API payer exemplar, an atomic cross-store
+  snapshot or proof of affordability for an unknown larger request. It does
+  not join this rejected settlement to the elevated API denial population or
+  authorize releasing any reservation.
+
+  Current source leaves the dispute, reports, reservation, original error and
+  increasing task error count intact. Only after the entire bounded batch has
+  completed, with every successful sibling independently terminal-verified and
+  stream-cleaned and every remaining failure exclusively an underfunded dispute
+  freshly verified still nonfinal, may the owning target request an explicit
+  retry delay on that same pending task. At least 6,250 verified siblings selects
+  a 2–4 second retry; fewer, including zero, retains the existing 1–5 minute idle
+  cadence. Selected candidates and rejected rows do not count as successful
+  progress. A dispute created during checkpoint finalization gets only one
+  additional fresh state read after the exact typed escrow guard; healthy
+  settlement adds no read and no financial operation is retried. Missing,
+  finalized, changed, unavailable, canceled, mixed-error or cleanup-failed
+  verification stays on ordinary backoff. This does not clamp usage, release the
+  disputed reservation, force settlement, create a replacement task or make the
+  whole failed batch successful.
+
+  The grouped failure warning remains even when `parked_over_5m=0`; prompt
+  scheduling proves neither financial resolution nor recovery. Verify bounded
+  terminal-sibling progress and falling aged-open buckets separately from the
+  unresolved financial row. Fix or adjudicate its ingress/accounting cause
+  through its owning policy, without deleting/replaying the task or weakening
+  the guard. Only the target's positive typed batch proof can request this
+  cadence; diagnostic error text alone cannot authorize it.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
@@ -3590,7 +3643,9 @@ three-observation sustain below are unchanged.
 - HEALTHY: ~10–50k (29,981 at steady state after the 2026-07-17 recovery;
   pre-incident hourly residue was ~8k).
 - BROKEN: > 150k and rising = closes not keeping up (CloseExpiredContracts
-  stalled or timing out; its healthy run is seconds, 20–25 min when broken).
+  stalled, timing out, or failing into long backoff). A short failed attempt can
+  still be broken; 20–25 minute attempts are one historical latency shape, not
+  a required failure duration.
   While the 2.3 landmine plan is live, every pair lookup degrades linearly
   with this number, and the growth is the feedback loop's fuel (slow closes →
   bigger open set → slower pair queries → slower closes). 700k at the
@@ -3612,6 +3667,22 @@ running closer's duration/outcomes, current retention-fanout evidence, and the
 transfer_contract autovacuum phase. Apply the bounded retention correction only
 if that attribution is confirmed; the historical episodes below are not proof
 of the current running path.
+
+Current source has two independent scans, each limited to 25,000: aged open
+contracts and aged disputed/nonfinal contracts. Their deduplicated union can
+therefore contain up to 50,000 candidates. A merged selection above 25,000 does
+not prove a legacy deployment; establish the exact executor source and per-scan
+cap/count authority before prescribing a cap correction. Do not raise either
+scan to 50,000. Candidate count is not terminal-verified sibling progress.
+
+Also compare the complete stored failure and next due time with the attempt's
+duration. A verified underfunded dispute can leave unrelated per-contract
+commits durable while the whole task fails and backs off. The narrow §1.2 retry
+isolation keeps that financial failure visible and reserved while verified
+siblings continue at the existing full/idle cadence. It does not identify why
+usage exceeded escrow, or prove that a particular payer's admission failure is
+caused by this backlog. Require the exact private financial discriminator; do
+not turn a high count into a Redis-reconciliation or financial-write mandate.
 
 2026-08-30 close-tail discriminator: the set reached 244,019 (204,756 older
 than five minutes, only 11,765 older than 30 minutes) while one
@@ -3861,6 +3932,15 @@ Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
 never becomes a finished duration because the same pending attempt is reclaimed.
 Retain the latest overrun for 45 minutes so an immediate fast successor cannot
 erase its precursor.
+
+This duration probe cannot detect every failure-to-progress mode. A short
+accounting-rejected attempt may put the global singleton into long backoff;
+retain §1.2's error/count/next-due warning and §2.6's age buckets even below the
+120-second duration threshold. Conversely, the positively verified accounting
+retry from §1.2 preserves unresolved financial failure despite a prompt next
+attempt. Complete error authority is independent of filtered task-name logs,
+which may omit joined-error continuation lines. Current 25,000 limits apply to
+each of the two independent open/disputed scans, not to their merged cohort.
 
 - HEALTHY: full deployed legacy cohorts normally finish in roughly 20–30s.
 - WARN: a live or completed checkpoint reaches 120s. Internally correlate its
@@ -8728,7 +8808,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[onboarding]app open attribution failed ... inconsistent types deduced for parameter $4 (SQLSTATE 42P08)` (`onboarding-app-open-attribution`) | The API request remained usable, but PostgreSQL rejected the complete attributed app-open insert because one untyped parameter appeared in incompatible INSERT-output and comparison contexts. On 2026-09-10 every Main API generation repeated this at hundreds of lines/minute, which made app-open engagement disappear from the onboarding tracker while ordinary app use continued. | Deploy an API artifact containing server `0aac4806`, whose statement casts every reused UUID, varchar, and timestamp parameter explicitly. Do not replay requests or manufacture analytics rows. The fixed alert sample omits the network identifier. Verify the real PostgreSQL synthetic attribution test, exactly one attributed event with the exact `flow_step`, full API convergence, and zero recurrence for ten minutes after ingestion delay. |
 | `[onboarding]connect.day write failed ... inconsistent types deduced for parameter $3 (SQLSTATE 42P08)` (`onboarding-connect-day-write`) | The Connect session was already committed and remains usable, but the separate `RecordConnectDay` transaction was rejected before it wrote analytics. The same untyped parameter was used as INSERT output and a varchar comparison. Recovery deliberately forgets the process-local cache entry, so the next connection retries and amplifies the defect. The 2026-09-10 persistence manifest's outer identity said Taskworker, but every selected private record and the focused snapshot named Connect; a bounded current discriminator found the exact source/SQLSTATE intersection throughout sampled Connect generations and zero matching Taskworker lines. All sampled Connect endpoints ran `2026.9.10+1042581110`, containing first-bad server commit `821f8131`. | Deploy Connect from a server checkout whose real statement explicitly casts every reused UUID, varchar, and timestamp parameter. Do not restart Taskworker, replay raw connections, or fabricate missing historical events; backfill is a separate product/data-policy decision. The fixed alert sample omits the client identifier. Verify the PostgreSQL test records exactly one `connect.day` event per network per UTC day, every Connect block runs the corrected artifact, and neither this class nor its former `novel` shape recurs for ten minutes after ingestion delay while connections continue. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
-| `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
+| `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Counts are failed/retried attempts, not unique users. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes is an elevated-denial trigger, not proof of Redis drift. Distinguish genuine depletion or grant regression, Redis mirror drift, and stale authoritative PostgreSQL escrow retained by a close backlog. Compare complete closer failures/cadence and exact private payer accounting with mirror-versus-source evidence before authorizing reconciliation. Require a same-generation temporal baseline and actual admission/delivery impact before assigning a new outage's cause. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean marker-capable `928abfca` Taskworker only where §8.12/§2.14 proves it absent; `66525afc` alone has the fail-closed activity/error path but not the capability gauge or exact pre-POST marker. Another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
 | `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
@@ -9004,12 +9084,22 @@ active/plan-wall projection (§1.3/§5.8) do not certify other diagnostic paths.
 
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
-pull forward once the cause is fixed. Long-running = live lease + claim
+an explicitly authorized pull-forward only after the cause is fixed. Long-running = live lease + claim
 heartbeat advancing → let it run; compare against finished_task history
 before declaring it stuck. The grouped task alert includes the representative
 row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
+
+`CloseExpiredContracts` can fail briefly on a correctly enforced escrow guard
+and retain the same singleton in ordinary long backoff; this is not an execution
+timeout. Only §1.2's completed-batch proof of exclusive, freshly verified
+underfunded disputes permits the target-owned bounded retry. That path preserves
+the pending task, original full error, increasing error count and reservations.
+The warning must remain when the retry is prompt and the parked count is zero.
+Neither a fresh heartbeat nor verified sibling progress resolves the financial
+row or makes the whole batch successful. Mixed database/Redis/cleanup/cancel
+errors retain ordinary policy, and a missing observation never proves recovery.
 
 For `BackfillClock`, an exact 600s cancellation has its own discriminator.
 One task row plus one lease and one client-backend leader means RunOnce is
@@ -12838,6 +12928,28 @@ retired-generation ownership before changing limits. Do not merely increase
 host limits. If the corrected bounded per-client cost later reaches legitimate
 capacity, add Connect hardware or reduce admission; that operational/hardware
 boundary cannot be fixed solely in software.
+
+The 2026-09-22 incident adds a temporal and delivery qualifier, not a new
+runtime threshold. Compare the same process generations before assigning a
+persistent runtime PAGE as a new outage's cause; a missing-metrics finding
+framed as `host/runtime-saturation` is not measured CPU saturation. The eight
+observed API generations already emitted about 79,495 non-companion
+insufficient-balance attempts/minute at 11:00Z and 85,807/minute at 12:25Z
+(`60 * sum(rate(counter[5m]))` over complete, fresh matched children), before
+the reported 12:26Z churn and 13:00Z contract decline. Attempts are not unique
+users, and this earlier background does not identify the later failure's cause.
+
+Keep actual admission/delivery success independent. The resident
+`forward_receive_dropped_messages` counter includes any false return from
+`ForwardWithTimeout`: canceled contexts, malformed frames, closed sequences,
+and queue refusal/timeout. It is not exclusively buffer saturation. Exchange
+`kind=data` means a completed nonempty frame, including possible control,
+acknowledgement or retransmission; it is not a customer-payload or end-to-end
+success count. Never divide unmatched stage counters into a packet-loss ratio.
+Aggregate ongoing frame traffic can hide an affected minority or absent return
+traffic, while five-minute rates smooth brief interruptions. A privately bound
+failing session's existing contract/admission, acknowledgement and return-path
+diagnostics remain the impact discriminator; missing evidence is unknown.
 
 Implementation convention: SIGNALS.md §8.15 (`service-load`) maps to
 `signal_service_load.go` and `signal_service_load_test.go`. Synthetic tests pin

@@ -149,7 +149,7 @@ func TestOpenContractsSignalSyntheticOpenSetBacklog(t *testing.T) {
 	if !strings.Contains(rising.Symptom, "rising (previous 159000)") ||
 		!strings.Contains(rising.Observed, "delta=2000") ||
 		!strings.Contains(rising.Observed, "older_5m=120000 older_30m=8000") ||
-		!strings.Contains(rising.Mechanism, "cohorts of up to 25,000") ||
+		!strings.Contains(rising.Mechanism, "independent open and disputed scans capped at 25,000 each") ||
 		!strings.Contains(rising.Mechanism, "older deployments used 100,000") ||
 		!strings.Contains(rising.Context, "retention-fanout") ||
 		!strings.Contains(rising.Verify, "older-than-five-minute cohort falls") {
@@ -237,6 +237,11 @@ func TestOpenContractsSignalActionRequiresCausalAttribution(t *testing.T) {
 			"count alone does not establish a retention defect",
 			"only after that cause is confirmed in the running path",
 			"Do not raise closer concurrency while PostgreSQL write/vacuum debt is present",
+			"complete stored error and next run time",
+			"underfunded disputed row",
+			"preserve its settlement guard and reservation",
+			"terminal-verified sibling progress",
+			"without inferring that cause from the backlog count",
 		} {
 			if !strings.Contains(alert.Action, want) {
 				t.Errorf("%s: emitted action omitted causal qualifier %q", c.name, want)
@@ -244,6 +249,11 @@ func TestOpenContractsSignalActionRequiresCausalAttribution(t *testing.T) {
 		}
 		if strings.Contains(alert.Action, "Fix or roll out the bounded retention path") {
 			t.Errorf("%s: emitted action still assumes an unproved retention cause", c.name)
+		}
+		if !strings.Contains(alert.Mechanism, "deduplicated union can contain up to 50,000 candidates") ||
+			!strings.Contains(alert.Context, "Filtered task-name logs can omit joined-error continuation lines") ||
+			!strings.Contains(alert.Verify, "unresolved financial rejection remains a task failure warning") {
+			t.Errorf("%s: checkpoint/financial unknown qualifiers missing", c.name)
 		}
 		if !strings.Contains(alert.Markdown(), "### Action\n\n"+alert.Action+"\n\n### Verify\n") {
 			t.Errorf("%s: Markdown did not preserve the qualified action", c.name)

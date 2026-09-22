@@ -279,7 +279,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	if phase == "active" {
 		phaseWithArticle = "an active"
 	}
-	incidentContext := "Correlate, rather than conflate, this duration with open-contract five/30-minute buckets, the exact legacy payment-retention query, and transfer_contract autovacuum phase. Host/generation/container is chronology; executor overlap alone is not causal proof."
+	incidentContext := "Correlate, rather than conflate, this duration with open-contract five/30-minute buckets, complete task errors and next run time, the exact legacy payment-retention query, and transfer_contract autovacuum phase. Host/generation/container is chronology; executor overlap alone is not causal proof. A short accounting-rejected attempt can park the singleton without crossing this duration threshold; task-canary warnings remain independent even when its retry is prompt."
 	if phase == "active" && failedPrecursorToActive {
 		incidentContext += " The precursor fields preserve the latest deadline failure alongside the current active attempt; compare their executor identities and cohort timings without treating co-location as a uniquely identified mechanism."
 	}
@@ -288,7 +288,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		retryEvidence = " The retry fields preserve the same durable attempt's next observed lifecycle and executor; a fast peer retry is an A/B control for load sensitivity, not permission to erase the failed precursor."
 		incidentContext += retryEvidence
 	}
-	logEvidence := "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled deadline attempts that never become a finished duration; finished_task retains completed duration. The latest failed overrun remains visible for 45 minutes, including beside a newer active successor, so retry progress cannot erase the precursor."
+	logEvidence := "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled deadline attempts that never become a finished duration; finished_task retains completed duration. The latest failed overrun remains visible for 45 minutes, including beside a newer active successor, so retry progress cannot erase the precursor. Task-name-filtered logs can omit joined-error continuation lines; use complete stored error evidence for the failure cause."
 	if activeLogSource == "host-journal-fallback" {
 		logEvidence += " The fleet log gateway was unavailable, so the task lifecycle came from bounded taskworker journals on the configured service hosts."
 	}
@@ -301,13 +301,13 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			durationSeconds,
 			int(closeDurationLimit/time.Second),
 		),
-		mechanism: "CloseExpiredContracts commits contracts individually but acknowledges scheduler progress only when the selected checkpoint returns. Current 25,000-contract checkpoints can still overrun while legacy payment-retention writes and transfer_contract vacuum debt drain; older 100,000-contract generations make the rollback/discovery boundary four times larger. A timeout preserves per-contract commits but loses the task-level checkpoint.",
-		baseline:  "Healthy full checkpoints finish in roughly 20–30s; warn at 120s, and every checkpoint must finish well before the 1,800s deadline. Current source and the observed main generation cap a checkpoint at 25,000 contracts; older generations used 100,000.",
+		mechanism: "CloseExpiredContracts commits contracts individually but acknowledges scheduler progress only when the selected checkpoint returns. Current source independently caps open and disputed scans at 25,000 each; their deduplicated union can contain up to 50,000 selected candidates, not necessarily verified closes. Checkpoints can still overrun while legacy payment-retention writes and transfer_contract vacuum debt drain. A timeout preserves per-contract commits but loses the task-level checkpoint.",
+		baseline:  "Healthy full checkpoints finish in roughly 20–30s; warn at 120s, and every checkpoint must finish well before the 1,800s deadline. Current source uses a 25,000 per-scan cap; older generations used 100,000 per scan. Verify the actual executor artifact rather than inferring its cap from the merged selection count.",
 		observed:  observed,
 		evidence:  logEvidence + retryEvidence,
 		context:   incidentContext,
-		action:    "Retain the 25,000-contract cap on generations that already have it and roll it out only where live selection logs still show a larger cohort. Keep the bounded retention queue active, then let scheduled closes and autovacuum drain the debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
-		verify:    "Live selection logs stay at or below 25,000, every active generation keeps close checkpoints below 120s, no exact-1,800s timeout recurs, and the older-than-five/30-minute open-contract buckets fall on consecutive samples.",
-		playbook:  "SIGNALS.md §2.6 and §2.10",
+		action:    "Retain the independent 25,000-row scan caps on generations that already have them; roll out that existing correction only where executor provenance proves the older per-scan limit. A merged selection above 25,000 does not prove an older artifact. Keep the bounded retention queue active, then let independently verified scheduled closes and autovacuum drain confirmed debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
+		verify:    "Verify the executor's independent scan caps are at most 25,000 and their deduplicated union at most 50,000. Every active generation keeps close checkpoints below 120s, no exact-1,800s timeout recurs, and the older-than-five/30-minute open-contract buckets fall on consecutive samples. Prompt retries or verified sibling progress do not clear unresolved financial failure warnings.",
+		playbook:  "SIGNALS.md §1.2, §2.6 and §2.10",
 	}}, nil
 }

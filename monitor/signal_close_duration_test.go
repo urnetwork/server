@@ -51,10 +51,14 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 		"active_host=edge-3",
 		"active_generation=g2",
 		"active_container=new",
-		"Current 25,000-contract checkpoints",
-		"observed main generation cap a checkpoint at 25,000 contracts",
-		"Retain the 25,000-contract cap",
-		"roll it out only where live selection logs still show a larger cohort",
+		"independently caps open and disputed scans at 25,000 each",
+		"deduplicated union can contain up to 50,000 selected candidates",
+		"Verify the actual executor artifact",
+		"Retain the independent 25,000-row scan caps",
+		"executor provenance proves the older per-scan limit",
+		"merged selection above 25,000 does not prove an older artifact",
+		"filtered logs can omit joined-error continuation lines",
+		"task-canary warnings remain independent even when its retry is prompt",
 		"executor overlap alone is not causal proof",
 		"Do not raise the deadline",
 	} {
@@ -66,6 +70,8 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 	for _, stale := range []string{
 		"The deployed 100,000-contract task checkpoint",
 		"Roll out the bounded retention queue and the 25,000-contract checkpoint",
+		"roll it out only where live selection logs still show a larger cohort",
+		"Live selection logs stay at or below 25,000",
 	} {
 		if strings.Contains(alert.Markdown(), stale) {
 			t.Fatalf("active close alert retained stale deployment diagnosis %q:\n%s", stale, alert.Markdown())
