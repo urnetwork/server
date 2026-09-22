@@ -100,12 +100,34 @@ func (self closeRetryFixture) requireAccounting(t testing.TB, ctx context.Contex
 // At error count16 the old evaluator adds30–90min despite completed siblings.
 // Assert persisted run_at minus release_time, not scheduler timing or a sleep.
 func TestCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T) {
+	testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t, false)
+}
+
+// The second rejected row is terminal and unpaid after the existing quarantine.
+// Its retained diagnostic must not push the shared task back to hour-scale delay.
+func TestCloseExpiredVerifiedQuarantineKeepsTaskAndIdleCadence(t *testing.T) {
+	testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t, true)
+}
+
+// Both paths drive the real target/evaluator and persisted retry timestamps;
+// no wall-clock waiting or injected retry wrapper supplies the expected result.
+func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, quarantineOrigin bool) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		oldBase, oldCap := task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout
 		task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout = 2*time.Second, time.Hour
 		t.Cleanup(func() { task.RescheduleTimeout, task.RescheduleBackoffMaxTimeout = oldBase, oldCap })
 		ctx := context.Background()
 		fixture := newCloseRetryFixture(t, ctx)
+		if quarantineOrigin {
+			var sourceId, destinationId server.Id
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT source_id,destination_id FROM transfer_contract WHERE contract_id=$1`, fixture.originId).Scan(&sourceId, &destinationId))
+			})
+			if model.CloseContract(ctx, fixture.originId, sourceId, 2*fixture.grant, true) != nil ||
+				model.CloseContract(ctx, fixture.originId, destinationId, 2*fixture.grant, true) != nil {
+				t.Fatal("synthetic over-grant checkpoint pair failed")
+			}
+		}
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()
 		server.Tx(ctx, func(tx server.PgTx) { ScheduleCloseExpiredContracts(clientSession, tx, 0, false) })
@@ -164,12 +186,25 @@ func TestCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T) {
 					if errorCount != 17+pass || !strings.Contains(storedError, "Escrow does not have enough value") || !strings.Contains(storedError, "contract remained non-final") {
 						t.Error("accounting error/count visibility was weakened")
 					}
+					if quarantineOrigin && pass == 0 && strings.Count(storedError, "Escrow does not have enough value") != 2 {
+						t.Error("terminal quarantine diagnostic was discarded")
+					}
 					if delay := runAt.Sub(releaseAt); delay < time.Minute || 5*time.Minute <= delay {
 						t.Errorf("isolated accounting rejection retry=%s, want existing1–5min idle cadence", delay)
 					}
 				})
 			})
 			fixture.requireAccounting(t, ctx)
+			if quarantineOrigin {
+				server.Db(ctx, func(conn server.PgConn) {
+					var settled bool
+					var payout int64
+					server.Raise(conn.QueryRow(ctx, `SELECT settled,coalesce(payout_byte_count,0) FROM transfer_escrow WHERE contract_id=$1`, fixture.originId).Scan(&settled, &payout))
+					if settled || payout != 0 {
+						t.Error("verified quarantine gained financial settlement authority")
+					}
+				})
+			}
 			if len(task.GetFinishedTasks(ctx, taskId)) != 0 {
 				t.Fatal("failed batch was falsely recorded as a successful task")
 			}

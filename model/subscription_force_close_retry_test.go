@@ -72,27 +72,100 @@ func TestForceCloseAccountingRejectionReportsZeroProgress(t *testing.T) {
 	})
 }
 
-// Existing malformed non-disputed quarantine is not the safe disputed-row
-// isolation case, even when an underfunded dispute occurs beside it.
-func TestForceCloseAccountingRejectionDoesNotAuthorizeMixedFailure(t *testing.T) {
+// A known escrow rejection already quarantined and independently verified
+// terminal cannot park the unrelated sweep behind its old error count. Keep
+// its diagnostic and unpaid accounting distinct from a successful settlement.
+func TestForceCloseVerifiedQuarantineDoesNotParkAccountingBatch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const escrow = ByteCount(32 * 1024 * 1024)
 		bad := newForceCloseDisputeFixture(t, ctx, false, false, 0, 4*escrow, escrow)
 		malformed := newForceCloseDisputeFixture(t, ctx, true, true, 2*escrow, 2*escrow, escrow)
+		good := newForceCloseDisputeFixture(t, ctx, true, true, 1024, 1024, escrow)
 		before := bad.state(t, ctx)
+		malformedBefore := malformed.state(t, ctx)
 		selected, err := ForceCloseOpenContractIds(ctx, bad.cutoff, 10, 2, 1, 0)
-		if selected != 2 || err == nil || bad.state(t, ctx) != before {
+		if selected != 3 || err == nil || bad.state(t, ctx) != before {
 			t.Fatal("mixed failure lost the actual failed accounting boundary")
 		}
 		var progress forceCloseAccountingProgress
-		if errors.As(err, &progress) {
-			t.Fatal("mixed malformed failure gained accounting-only retry authority")
+		if !errors.As(err, &progress) || progress.VerifiedCloseCount() != 2 || progress.AccountingRejectionCount() != 1 {
+			t.Fatal("terminal-verified accounting quarantine parked unrelated cleanup work")
 		}
-		if state := malformed.state(t, ctx); state.outcome != ContractOutcomeSettled || state.streamFound {
-			t.Fatal("existing non-disputed malformed quarantine behavior changed")
+		var accounting *ForceCloseAccountingError
+		if !errors.As(err, &accounting) || accounting.QuarantinedAccountingRejectionCount() != 1 {
+			t.Fatal("no-payout quarantine was counted as ordinary settlement")
+		}
+		if strings.Count(err.Error(), errContractInsufficientEscrow.Error()) != 2 || !strings.Contains(err.Error(), "contract remained non-final") {
+			t.Fatal("verified quarantine hid either original accounting failure")
+		}
+		quarantined := malformed.state(t, ctx)
+		if quarantined.outcome != ContractOutcomeSettled || quarantined.dispute || quarantined.open || quarantined.streamFound ||
+			quarantined.escrowSettled || quarantined.escrowPayoutByteCount != malformedBefore.escrowPayoutByteCount ||
+			quarantined.payerBalanceByteCount != malformedBefore.payerBalanceByteCount ||
+			quarantined.providerPayoutByteCount != malformedBefore.providerPayoutByteCount || quarantined.netEscrowByteCount != 0 ||
+			quarantined.sourceByteCount != malformedBefore.sourceByteCount || quarantined.destinationByteCount != malformedBefore.destinationByteCount {
+			t.Fatal("verified quarantine changed the existing no-payout accounting policy")
+		}
+		if state := good.state(t, ctx); state.outcome != ContractOutcomeSettled || state.streamFound || !state.escrowSettled || state.escrowPayoutByteCount != 1024 {
+			t.Fatal("valid sibling failed ordinary settlement")
+		}
+		selected, err = ForceCloseOpenContractIds(ctx, bad.cutoff, 10, 2, 1, 0)
+		if selected != 1 || !errors.As(err, &progress) || progress.VerifiedCloseCount() != 0 || progress.AccountingRejectionCount() != 1 ||
+			bad.state(t, ctx) != before || malformed.state(t, ctx) != quarantined {
+			t.Fatal("retry repeated terminal accounting or lost the still-reserved dispute")
 		}
 	})
+}
+
+// Even a quarantine-only page must checkpoint promptly with an error, not
+// report financial success or keep the entire sweep on exponential backoff.
+func TestForceCloseVerifiedQuarantineReportsTerminalAccountingProgress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const escrow = ByteCount(32 * 1024 * 1024)
+		malformed := newForceCloseDisputeFixture(t, ctx, true, true, 2*escrow, 2*escrow, escrow)
+		selected, err := ForceCloseOpenContractIds(ctx, malformed.cutoff, 10, 1, 1, 0)
+		var accounting *ForceCloseAccountingError
+		if selected != 1 || !errors.As(err, &accounting) || !errors.Is(err, errContractInsufficientEscrow) ||
+			accounting.VerifiedCloseCount() != 1 || accounting.AccountingRejectionCount() != 0 || accounting.QuarantinedAccountingRejectionCount() != 1 {
+			t.Fatal("quarantine-only page lost its bounded progress or accounting failure")
+		}
+	})
+}
+
+// Matching text, an unclaimed concurrent finalization, incomplete posts, and
+// failed stream cleanup cannot shorten ordinary backoff for a whole batch.
+func TestForceCloseQuarantineAuthorityRequiresEveryPhase(t *testing.T) {
+	other := errors.New("synthetic infrastructure failure")
+	cases := []struct {
+		name          string
+		closeErr      error
+		claimed       bool
+		quarantineErr error
+		cleanupErr    error
+		want          bool
+	}{
+		{name: "complete", closeErr: errContractInsufficientEscrow, claimed: true, want: true},
+		{name: "single-wrapper", closeErr: fmt.Errorf("synthetic close: %w", errContractInsufficientEscrow), claimed: true, want: true},
+		{name: "not-claimed", closeErr: errContractInsufficientEscrow},
+		{name: "text-only", closeErr: errors.New(errContractInsufficientEscrow.Error()), claimed: true},
+		{name: "mixed-close", closeErr: errors.Join(errContractInsufficientEscrow, other), claimed: true},
+		{name: "single-leaf-join", closeErr: errors.Join(errContractInsufficientEscrow), claimed: true},
+		{name: "different-malformed", closeErr: other, claimed: true},
+		{name: "database-or-post", closeErr: errContractInsufficientEscrow, claimed: true, quarantineErr: other},
+		{name: "stream-or-read", closeErr: errContractInsufficientEscrow, claimed: true, cleanupErr: other},
+		{name: "disputed", closeErr: errContractInsufficientEscrow, claimed: true, cleanupErr: &forceCloseNonfinalError{disputed: true}},
+		{name: "open", closeErr: errContractInsufficientEscrow, claimed: true, cleanupErr: &forceCloseNonfinalError{}},
+		{name: "cancelled", closeErr: errContractInsufficientEscrow, claimed: true, cleanupErr: context.Canceled},
+		{name: "deadline", closeErr: errContractInsufficientEscrow, claimed: true, quarantineErr: context.DeadlineExceeded},
+		{name: "no-error", claimed: true},
+	}
+	for _, c := range cases {
+		if got := isForceCloseQuarantinedAccountingRejection(c.closeErr, c.claimed, c.quarantineErr, c.cleanupErr); got != c.want {
+			t.Errorf("%s: quarantine authority=%t, want %t", c.name, got, c.want)
+		}
+	}
 }
 
 // A matching leaf inside an arbitrary join, or matching text without source

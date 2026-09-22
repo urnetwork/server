@@ -533,18 +533,52 @@ FROM failures GROUP BY task;
   Current source leaves the dispute, reports, reservation, original error and
   increasing task error count intact. Only after the entire bounded batch has
   completed, with every successful sibling independently terminal-verified and
-  stream-cleaned and every remaining failure exclusively an underfunded dispute
-  freshly verified still nonfinal, may the owning target request an explicit
+  stream-cleaned and every failure exclusively either an underfunded dispute
+  freshly verified still nonfinal or an exact escrow rejection whose existing
+  no-payout quarantine this attempt successfully claimed, fully posted, and
+  independently terminal-verified/stream-cleaned, may the owning target request an explicit
   retry delay on that same pending task. At least 6,250 verified siblings selects
   a 2–4 second retry; fewer, including zero, retains the existing 1–5 minute idle
-  cadence. Selected candidates and rejected rows do not count as successful
-  progress. A dispute created during checkpoint finalization gets only one
+  cadence. Selected candidates and unresolved rejected rows do not count as
+  terminal progress. Verified no-payout quarantines do count as terminal progress
+  but have their own `quarantined_accounting` count; they are never reported as
+  successful financial settlements. A dispute created during checkpoint finalization gets only one
   additional fresh state read after the exact typed escrow guard; healthy
   settlement adds no read and no financial operation is retried. Missing,
   finalized, changed, unavailable, canceled, mixed-error or cleanup-failed
   verification stays on ordinary backoff. This does not clamp usage, release the
   disputed reservation, force settlement, create a replacement task or make the
   whole failed batch successful.
+
+  The later 2026-09-22 discriminator exposed a second boundary: the same pending
+  error contained two exact escrow-guard rejections, one now terminal and
+  nondisputed and one still nonfinal/disputed. The source previously treated
+  even a successfully claimed/posted/terminal-verified no-payout quarantine as
+  an unclassified mixed failure, so that one diagnostic restored hour-scale
+  backoff for the entire completed page. The task had 32 accumulated errors,
+  no live lease, and no successful completion for nearly 13 hours. A separate
+  bounded payer join found 39,978 distinct open prober contracts, all beyond the
+  five-minute expiry cutoff; multiple escrow rows per contract must not be
+  counted as distinct contracts. `TestForceCloseVerifiedQuarantineDoesNotParkAccountingBatch`
+  and `TestCloseExpiredVerifiedQuarantineKeepsTaskAndIdleCadence` reproduce the
+  mixed state and the real scheduler boundary without changing reports,
+  reservations, payout guards, or the existing quarantine policy.
+
+  False-positive qualifiers: a current terminal row alone does not attest who
+  finalized it, nor authorize prompt retry; require the exact attempt's own
+  successful quarantine claim, completed posts and fresh terminal/stream
+  verification. Other malformed errors, same-text errors without sentinel
+  identity, missing state, cancellation and infrastructure failures retain
+  ordinary backoff. Old error text on a now-running retry is not a new failure.
+  False-negative qualifiers: the task can make durable partial progress while
+  retaining this error, and a fresh heartbeat or a prompt retry cannot prove
+  that the aged eligible population is shrinking. A healthy bootstrap task
+  does not establish available prober credit: subtract current reservations
+  using the admission formula and independently compare durable outstanding
+  reservations. Prober exhaustion and a control-plane fault can coexist;
+  cancellation text alone does not distinguish a failed dial from task-budget
+  expiration. Keep provider publication, contract admission and cleanup-age
+  observations independent rather than clearing one from another's recovery.
 
   The grouped failure warning remains even when `parked_over_5m=0`; prompt
   scheduling proves neither financial resolution nor recovery. Verify bounded
@@ -4617,6 +4651,13 @@ erase an independently observed ineligible-supply finding.
 ### 2.9a User-visible provider-count degradation — product selection coverage
 Probe: `provider-count`
 
+The registered healthy sentinel is `provider-count-degraded`. It emits no
+Markdown alert by itself; it exists so the probe has one stable class whose
+healthy state can be catalog-audited. Real findings are the distinct
+`provider-count-effective-empty` PAGE and `provider-count-small-list` WARN
+classes below. Do not interpret absence of either real finding as healthy when
+the metric is unavailable: the probe returns an explicit observation error.
+
 The provider list is a product surface, not a diagnostic cache detail. A
 nonempty US zero-caller canary in §2.9 can remain healthy while a real caller
 gets few or no providers because its country target, location group, caller
@@ -6825,7 +6866,7 @@ An error can follow a successful write whose acknowledgment was lost; the new
 metrics do not prove non-persistence or authorize retries. Returned errors and
 the prober's existing non-fatal behavior are unchanged.
 
-The reusable probe runs once per minute using one fixed seven-family Mimir
+The reusable probe runs once per minute using one fixed nine-family Mimir
 instant query through an inventory services gateway. It returns values plus
 their underlying source timestamps, with a 15-second request limit and 2 MiB
 remote/in-process response cap. The observation timestamp alone is insufficient.
@@ -6858,6 +6899,37 @@ provider was affected, or whether a later current database row recovered that
 historical event. Both classes retain direct §2.19 deadline/config controls; no
 scheduler, lifecycle, retry, concurrency, or queue behavior changes here.
 
+Taskworker also preseeds `urnetwork_egress_probe_pass_providers_total` for the
+fixed full-pass results `attempted`, `submitted`, `skipped`, and `failed`, plus
+`urnetwork_egress_probe_pass_errors_total` for its fixed bounded steps. These
+are pass accounting, not per-provider verdicts. They close a visibility gap: a
+shared control-plane, credit, identity, or task-context failure can attempt a
+whole full batch, submit none, and leave existing blackhole verdicts stale. A
+constructed tunnel is not proof that its data path became usable.
+
+The producer has a matching correctness boundary: `fleetprobe.RunBlackhole`
+discards an in-flight result if the owning context is canceled before that
+result can be retained. Otherwise canceled requests are rendered as
+`all_destinations_failed` and falsely persist a provider-blackhole verdict.
+`TestRunBlackholeDoesNotPersistInFlightFailureAfterCancellation` is the
+deterministic root-cause regression. It does not suppress an ordinary timeout
+whose owning context remains live; that remains a real provider measurement.
+
+`egress-full-no-submission` is a PAGE when a complete Taskworker interval
+attempts at least one ordinary full batch (currently at least eight providers),
+submits zero results, and every attempted probe fails. It separately reports a
+bounded pass-cancellation delta. Cancellation supports a task-budget/lifecycle
+branch but does not prove DNS, LB, or provider failure; likewise zero
+`tunnel_failed` says only that asynchronous tunnel construction did not fail.
+First compare prober available credit after durable escrow reservations, its
+identity/bootstrap state, task deadline/cancellation path, and bounded
+platform/API dial path. Keep provider tunnel/blackhole evidence and product
+provider-list impact (§2.9a) independent. Do not mark providers bad, delete
+verdicts, relax selection gates, or alter escrow from this aggregate. Recovery
+requires two complete traffic-bearing intervals with submitted full results
+plus independent §2.19, §2.23, and product-list recovery; quiet work or a
+newly constructed tunnel is not recovery.
+
 Action: first prove exact API/Taskworker artifact ancestry and executable
 capabilities. Deploy approved owning builds only when the capability is proved
 missing; if it is present, diagnose transport, source freshness, joins, resets,
@@ -6876,8 +6948,9 @@ Implementation convention: SIGNALS.md §2.19a (`egress-admission`) maps to
 `signal_egress_admission.go` and `signal_egress_admission_test.go`. Deterministic
 synthetic coverage pins warmup/healthy/idle controls, missing and mixed telemetry,
 underlying source freshness, duplicate ignored labels, process overlap/reset,
-unpaired selection/request deltas, each post-call failure class, additive real
-alerts, bounded query/response cost, privacy, and Markdown. Producer regressions
+unpaired selection/request deltas, each post-call failure class, the all-failed
+full-pass/no-submission control-plane shape, additive real alerts, bounded
+query/response cost, privacy, and Markdown. Producer regressions
 pin the strict expiry boundary, actual limited/deduplicated EDF counts, fixed
 preseeded label domains, post-call timing/error identity, and nil-health no-op.
 Formal Go execution remains subject to the repository's toolchain/license gate;

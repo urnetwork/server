@@ -103,17 +103,19 @@ func CloseExpiredContracts(
 			closeExpiredContracts.BlockIndex,
 		)
 		// The model alone can attest that every selected row completed and
-		// every remaining failure is an independently verified accounting
-		// rejection. Never discover this authority inside a mixed error join.
+		// every failure is a verified still-reserved dispute or completed
+		// no-payout quarantine. Never infer authority from a mixed error join.
 		full := closeExpiredContractsFull(c)
 		if accounting, ok := err.(*model.ForceCloseAccountingError); ok && clientSession.Ctx.Err() == nil &&
-			0 <= accounting.VerifiedCloseCount() && 0 < accounting.AccountingRejectionCount() &&
+			0 <= accounting.VerifiedCloseCount() && 0 <= accounting.AccountingRejectionCount() &&
+			0 <= accounting.QuarantinedAccountingRejectionCount() && accounting.QuarantinedAccountingRejectionCount() <= accounting.VerifiedCloseCount() &&
+			0 < accounting.AccountingRejectionCount()+accounting.QuarantinedAccountingRejectionCount() &&
 			accounting.VerifiedCloseCount()+accounting.AccountingRejectionCount() == c {
 			full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
 			delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
 			err = task.WithRetryDelay(err, delay)
-			glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d retry_delay_ms=%d\n",
-				accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), delay.Milliseconds())
+			glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d retry_delay_ms=%d\n",
+				accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
 		}
 		return &CloseExpiredContractsResult{
 			Full: full,

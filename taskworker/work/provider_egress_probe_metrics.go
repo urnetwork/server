@@ -329,6 +329,7 @@ func init() {
 			egressProbeSubmissionOutcomesTotal.WithLabelValues(kind, outcome)
 		}
 	}
+	preseedEgressProbePassMetrics()
 	prometheus.MustRegister(
 		egressProbeSubmissionOutcomesTotal,
 		egressProbeSubmissionObservationEnabled,
@@ -357,6 +358,21 @@ func init() {
 		egressProbeFleetDominantShare,
 		egressProbeFleetSnapshotTimestamp,
 	)
+}
+
+// preseedEgressProbePassMetrics is kept separate so deterministic metric tests
+// can prove the executable observation contract after resetting a CounterVec.
+func preseedEgressProbePassMetrics() {
+	// These fixed zero children are an observation contract. A full pass can
+	// fail before it opens any provider tunnel, so without them an executable
+	// that is precisely in the control-plane outage state would omit the
+	// submitted/failed counters and look merely unobservable to the monitor.
+	for _, result := range []string{"attempted", "submitted", "skipped", "failed"} {
+		egressProbePassProvidersTotal.WithLabelValues("full", result)
+	}
+	for _, step := range []string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled"} {
+		egressProbePassErrorsTotal.WithLabelValues(step)
+	}
 }
 
 // egressProbeCountryLabel normalizes a country code for a label: lowercased

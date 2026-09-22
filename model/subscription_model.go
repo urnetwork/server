@@ -1264,12 +1264,14 @@ func (self *forceCloseDisputeRejectionError) Error() string { return self.cause.
 // Do not hide either cause from the batch or task's ordinary error inspection.
 func (self *forceCloseDisputeRejectionError) Unwrap() error { return self.cause }
 
-// The entire bounded batch completed, with only verified underfunded disputes
-// left unresolved. This is still a failure: reservations and full causes remain.
+// The bounded batch completed with only verified accounting rejections: either
+// a still-reserved dispute or an existing no-payout quarantine verified terminal.
+// This is still a failure; full causes and unresolved reservations remain.
 type ForceCloseAccountingError struct {
-	cause                    error
-	verifiedCloseCount       int64
-	accountingRejectionCount int64
+	cause                               error
+	verifiedCloseCount                  int64
+	accountingRejectionCount            int64
+	quarantinedAccountingRejectionCount int64
 }
 
 // Keep the durable error text unchanged.
@@ -1278,12 +1280,19 @@ func (self *ForceCloseAccountingError) Error() string { return self.cause.Error(
 // Preserve every original failure for ordinary error inspection.
 func (self *ForceCloseAccountingError) Unwrap() error { return self.cause }
 
-// Counts only fresh terminal verification followed by successful stream cleanup.
+// Counts fresh terminal verification followed by successful stream cleanup,
+// including the separately reported no-payout quarantine subset.
 func (self *ForceCloseAccountingError) VerifiedCloseCount() int64 { return self.verifiedCloseCount }
 
 // Counts still-reserved disputed rows, never successful closes.
 func (self *ForceCloseAccountingError) AccountingRejectionCount() int64 {
 	return self.accountingRejectionCount
+}
+
+// Subset of verified closes that retained a rejected report and paid nothing;
+// terminal progress is not authority to report successful financial settlement.
+func (self *ForceCloseAccountingError) QuarantinedAccountingRejectionCount() int64 {
+	return self.quarantinedAccountingRejectionCount
 }
 
 // Single-cause wrappers preserve identity; multi-errors never grant authority.
@@ -1325,6 +1334,14 @@ func isForceCloseAccountingRejection(closeErr error, quarantineErr error, cleanu
 	}
 	verification, ok := cleanupErr.(*forceCloseNonfinalError)
 	return ok && verification != nil && verification.disputed
+}
+
+// Only this attempt's successful no-payout claim, complete posts and fresh
+// terminal/stream verification authorize progress despite the exact escrow
+// guard. A concurrent terminal row alone cannot donate quarantine authority.
+func isForceCloseQuarantinedAccountingRejection(closeErr error, quarantineClaimed bool, quarantineErr error, cleanupErr error) bool {
+	return quarantineClaimed && quarantineErr == nil && cleanupErr == nil &&
+		isOnlyContractError(closeErr, errContractInsufficientEscrow)
 }
 
 // Only the exact guard permits one post-failure read. Missing, changed, or
@@ -3899,7 +3916,7 @@ func ForceCloseOpenContractIds(
 	// `outcome IS NULL` so that a concurrent close/settle is not overwritten.
 	// `dispute = false` so that a contract that entered dispute mid-close is
 	// left for the dispute scan to settle correctly on a later pass.
-	closeMalformedContract := func(tag string, openContract *OpenContract, err error) {
+	closeMalformedContract := func(tag string, openContract *OpenContract, err error) bool {
 		glog.Infof("%sforce close malformed contract: %s\n", tag, err)
 
 		claimed := false
@@ -3934,6 +3951,7 @@ func ForceCloseOpenContractIds(
 			)
 			releaseNetEscrowForContract(ctx, openContract.contractId)
 		}
+		return claimed
 	}
 
 	// Claim only a current dispute. Failed settlement must roll back its clear,
@@ -4200,6 +4218,7 @@ func ForceCloseOpenContractIds(
 	contractErrors := make([]error, len(openContracts))
 	contractCompleted := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
+	quarantinedAccountingRejections := make([]bool, len(openContracts))
 	workerErrors := make(chan error, parallel)
 	var wg sync.WaitGroup
 
@@ -4221,11 +4240,12 @@ func ForceCloseOpenContractIds(
 						return closeContract(tag, openContract)
 					})
 					var quarantineErr, cleanupErr error
+					var quarantineClaimed bool
 					contractErrors[j] = finishForceCloseContract(
 						closeErr,
 						func() error {
 							quarantineErr = runForceClose(func() error {
-								closeMalformedContract(tag, openContract, closeErr)
+								quarantineClaimed = closeMalformedContract(tag, openContract, closeErr)
 								return nil
 							})
 							return quarantineErr
@@ -4238,6 +4258,7 @@ func ForceCloseOpenContractIds(
 						},
 					)
 					accountingRejections[j] = isForceCloseAccountingRejection(closeErr, quarantineErr, cleanupErr)
+					quarantinedAccountingRejections[j] = isForceCloseQuarantinedAccountingRejection(closeErr, quarantineClaimed, quarantineErr, cleanupErr)
 					contractCompleted[j] = true
 				}
 			})
@@ -4257,12 +4278,15 @@ func ForceCloseOpenContractIds(
 
 	closeCount += int64(len(openContracts))
 	accountingOnly := true
-	var verifiedCloseCount, accountingRejectionCount int64
+	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
 	for index, contractErr := range contractErrors {
 		if !contractCompleted[index] {
 			accountingOnly = false
 		} else if contractErr == nil {
 			verifiedCloseCount++
+		} else if quarantinedAccountingRejections[index] {
+			verifiedCloseCount++
+			quarantinedAccountingRejectionCount++
 		} else if accountingRejections[index] {
 			accountingRejectionCount++
 		} else {
@@ -4280,11 +4304,12 @@ func ForceCloseOpenContractIds(
 		accountingOnly = false
 		err = errors.Join(err, ctxErr)
 	}
-	if accountingOnly && 0 < accountingRejectionCount {
+	if accountingOnly && 0 < accountingRejectionCount+quarantinedAccountingRejectionCount {
 		err = &ForceCloseAccountingError{
-			cause:                    err,
-			verifiedCloseCount:       verifiedCloseCount,
-			accountingRejectionCount: accountingRejectionCount,
+			cause:                               err,
+			verifiedCloseCount:                  verifiedCloseCount,
+			accountingRejectionCount:            accountingRejectionCount,
+			quarantinedAccountingRejectionCount: quarantinedAccountingRejectionCount,
 		}
 	}
 
