@@ -392,12 +392,181 @@ func TestWorkerMemorySignalSyntheticRateFailureDoesNotHideHeapSkew(t *testing.T)
 		t.Fatal(err)
 	}
 	markdown := requireAlertClass(t, alerts, "worker-memory-skew").Markdown()
-	if !strings.Contains(markdown, "best-effort five-minute rate lookup failed: metrics-1: synthetic rate query unavailable") {
+	if !strings.Contains(markdown, "best-effort five-minute rate lookup failed (error_class=observation-unclassified)") {
 		t.Fatalf("heap alert did not preserve rate-query degradation evidence:\n%s", markdown)
 	}
 	if strings.Contains(markdown, "cpu_cores_5m=") {
 		t.Fatalf("heap alert rendered unavailable rate values:\n%s", markdown)
 	}
+}
+
+// Every value in this fixture is synthetic, including the credential, address,
+// task ID and response-body markers. A real optional error must never be needed
+// to exercise the durable-output privacy boundary.
+const workerOptionalPrivateText = "synthetic-private-marker credential=synthetic-only Bearer synthetic-token task=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa address=192.0.2.91 peer=2001:db8::91 url=https://synthetic-user:synthetic-password@example.invalid/private?token=synthetic-query payload=synthetic-payload"
+
+func requireWorkerOptionalErrorPrivacy(t *testing.T, alert Alert, wantClass string) {
+	t.Helper()
+	structured, err := json.Marshal(alert)
+	if err != nil {
+		t.Fatal("synthetic Alert encoding failed")
+	}
+	var jsonl strings.Builder
+	if err := (Alerts{alert}).WriteJSONL(&jsonl); err != nil {
+		t.Fatal("synthetic JSONL encoding failed")
+	}
+	for format, rendered := range map[string]string{
+		"Alert": string(structured), "Markdown": (Alerts{alert}).Markdown(), "JSONL": jsonl.String(),
+	} {
+		if wantClass != "" && !strings.Contains(rendered, "error_class="+wantClass) {
+			t.Errorf("%s lost the fixed optional error class", format)
+		}
+		for index, forbidden := range []string{
+			"synthetic-private-marker", "synthetic-only", "synthetic-token",
+			"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "192.0.2.91", "2001:db8::91",
+			"synthetic-user", "synthetic-password", "example.invalid", "synthetic-query", "synthetic-payload",
+		} {
+			if strings.Contains(rendered, forbidden) {
+				t.Errorf("%s leaked private fixture component %d", format, index)
+			}
+		}
+	}
+}
+
+func TestWorkerMemoryOptionalRateErrorsStayPrivate(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	const gib = float64(uint64(1) << 30)
+	payload := workerMetricsFixtureJSON(t, now,
+		workerMetricFixture{host: "edge-0", block: "g1", instance: "a", heap: 0.125 * gib},
+		workerMetricFixture{host: "edge-1", block: "g1", instance: "b", heap: 0.25 * gib},
+		workerMetricFixture{host: "edge-3", block: "g2", instance: "hot", heap: 24 * gib},
+	)
+	response, err := json.Marshal(map[string]any{"status": "error", "error": "permission denied: " + workerOptionalPrivateText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, response, wantClass string
+		err                       error
+	}{
+		{name: "transport", err: errors.New("permission denied: " + workerOptionalPrivateText), wantClass: observationErrorClassAccessDenied},
+		{name: "response body", response: string(response), wantClass: observationErrorClassAccessDenied},
+		{name: "timeout", err: fmt.Errorf("%s: %w", workerOptionalPrivateText, context.DeadlineExceeded), wantClass: observationErrorClassTimeout},
+		{name: "canceled", err: fmt.Errorf("%s: %w", workerOptionalPrivateText, context.Canceled), wantClass: observationErrorClassCanceled},
+		{name: "unclassified", err: errors.New(workerOptionalPrivateText), wantClass: observationErrorClassUnclassified},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{
+				hostFn: func(_ HostSettings, command string) (string, error) {
+					if strings.Contains(command, "monitor_rate") {
+						return test.response, test.err
+					}
+					return payload, nil
+				},
+				localFn: func(string, ...string) (string, error) { return "", nil },
+			}
+			alerts, err := NewWithSignals(workerMemorySyntheticSettings(source, now), NewWorkerMemorySignal()).Run(context.Background())
+			if err != nil || len(alerts) != 1 {
+				t.Fatal("optional rate failure replaced or erased the primary heap finding")
+			}
+			alert := requireAlertClass(t, alerts, "worker-memory-skew")
+			if alert.Target != "edge-3/g2" || alert.Frame != "hot" || alert.Severity != SeverityWarn || alert.Sustain != 2 ||
+				!strings.Contains(alert.Observed, "heap_gib=24.00") || strings.Contains(alert.Observed, "cpu_cores_5m=") {
+				t.Fatal("optional rate failure changed heap identity, guards, or unavailable-rate meaning")
+			}
+			if !strings.Contains(alert.Evidence, "best-effort five-minute rate lookup failed") {
+				t.Fatal("optional rate failure lost its source qualifier")
+			}
+			requireWorkerOptionalErrorPrivacy(t, alert, test.wantClass)
+		})
+	}
+}
+
+// Both owners use readTaskLifecycleLog. Exercise its real fallback and partial
+// normalization before testing the owner projection, not a stubbed finding.
+func testWorkerOptionalLifecycleErrorPrivacy(t *testing.T, newSignal func() Signal, class string) {
+	t.Helper()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	const gib = float64(uint64(1) << 30)
+	workers := []workerMetricFixture{
+		{host: "edge-0", block: "g1", instance: "a", heap: 0.125 * gib, cpuRate: 0.02, allocRate: 1 << 20},
+		{host: "edge-1", block: "g1", instance: "b", heap: 0.25 * gib, cpuRate: 0.04, allocRate: 2 << 20},
+		{host: "edge-3", block: "g2", instance: "hot", heap: 24 * gib, cpuRate: 4, allocRate: 650 << 20},
+	}
+	heapPayload := workerMetricsFixtureJSON(t, now, workers...)
+	ratePayload := workerRatesFixtureJSON(t, now, workers...)
+	journal := fmt.Sprintf(
+		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":%q,"CONTAINER_TAG":"warp|synthetic|taskworker|g2","CONTAINER_ID":"hot","_HOSTNAME":"edge-3"}`,
+		now.Add(-5*time.Second).Format(time.RFC3339Nano),
+		"[aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]eval active(130.00s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})",
+	)
+	badTag, err := json.Marshal(map[string]string{
+		"SYSLOG_TIMESTAMP": now.Format(time.RFC3339Nano), "MESSAGE": "synthetic ignored record", "CONTAINER_TAG": workerOptionalPrivateText,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, wantClass string
+		wantActive      bool
+	}{
+		{name: "unavailable", wantClass: observationErrorClassAccessDenied},
+		{name: "partial fleet", wantClass: observationErrorClassAccessDenied, wantActive: true},
+		{name: "partial normalized", wantClass: observationErrorClassUnclassified, wantActive: true},
+		{name: "complete fallback", wantActive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{
+				hostFn: func(_ HostSettings, command string) (string, error) {
+					if strings.Contains(command, "monitor_rate") {
+						return ratePayload, nil
+					}
+					return heapPayload, nil
+				},
+				localFn: func(string, ...string) (string, error) {
+					return workerOptionalPrivateText, errors.New("synthetic gateway: " + workerOptionalPrivateText)
+				},
+				hostTimeoutFn: func(host HostSettings, command string, timeout time.Duration) (string, error) {
+					if timeout != taskworkerJournalTimeout || !strings.Contains(command, "--grep='eval'") {
+						t.Error("unexpected lifecycle fallback command or bound")
+					}
+					if test.name == "unavailable" || host.Name == "metrics-2" {
+						return workerOptionalPrivateText, errors.New("permission denied: " + workerOptionalPrivateText)
+					}
+					if test.name == "partial normalized" {
+						return journal + "\n" + string(badTag), nil
+					}
+					return journal, nil
+				},
+			}
+			settings := workerMemorySyntheticSettings(source, now)
+			if test.name == "partial fleet" {
+				settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-2", Roles: []string{"services"}})
+			}
+			alerts, err := NewWithSignals(settings, newSignal()).Run(context.Background())
+			if err != nil || len(alerts) != 1 {
+				t.Fatal("optional lifecycle failure replaced or erased the primary worker finding")
+			}
+			alert := requireAlertClass(t, alerts, class)
+			if alert.Target != "edge-3/g2" || alert.Frame != "hot" || alert.Severity != SeverityWarn || alert.Sustain != 2 {
+				t.Fatal("optional lifecycle result changed the primary worker identity or sustain")
+			}
+			if got := strings.Contains(alert.Observed, "active_tasks=CloseExpiredContracts:130s"); got != test.wantActive {
+				t.Fatal("partial lifecycle result lost valid attribution or invented unavailable attribution")
+			}
+			if test.wantActive && !strings.Contains(alert.Observed, "active_log_source=host-journal-fallback") {
+				t.Fatal("partial lifecycle result lost its authoritative source qualifier")
+			}
+			if got := strings.Contains(alert.Evidence, "task-lifecycle lookup was degraded"); got != (test.wantClass != "") {
+				t.Fatal("complete and degraded lifecycle observations were conflated")
+			}
+			requireWorkerOptionalErrorPrivacy(t, alert, test.wantClass)
+		})
+	}
+}
+
+func TestWorkerMemoryOptionalLifecycleErrorsStayPrivate(t *testing.T) {
+	testWorkerOptionalLifecycleErrorPrivacy(t, NewWorkerMemorySignal, "worker-memory-skew")
 }
 
 func TestWorkerMemorySignalSyntheticFallsBackToAnotherServiceGateway(t *testing.T) {

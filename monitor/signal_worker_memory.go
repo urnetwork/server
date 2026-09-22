@@ -314,12 +314,12 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		}
 		evidence := "The values come from the process's pushed Go runtime and process metrics in Mimir. Five-minute CPU/allocation/GC rates distinguish active allocation pressure from a completed task's heap awaiting collection. The active_tasks field joins the same host/block to authoritative taskworker eval-active heartbeats; compare those task families on other executors."
 		if rateErr != nil {
-			evidence += " The best-effort five-minute rate lookup failed: " + rateErr.Error()
+			evidence += fmt.Sprintf(" The best-effort five-minute rate lookup failed (error_class=%s).", classifyObservationError(rateErr))
 		} else if worker.rateMask != workerRateAll {
 			evidence += " Mimir did not return every five-minute rate for this exact worker identity."
 		}
 		if activeLogErr != nil {
-			evidence += " The task-lifecycle lookup was degraded: " + activeLogErr.Error()
+			evidence += fmt.Sprintf(" The task-lifecycle lookup was degraded (error_class=%s).", classifyObservationError(activeLogErr))
 		} else if len(activeTasks) == 0 {
 			evidence += " No fresh active-task heartbeat was available for this executor, so the heap finding remains valid without task attribution."
 		}

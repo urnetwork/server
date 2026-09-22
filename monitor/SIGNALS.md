@@ -4897,6 +4897,19 @@ CPU time, and encoded output is not heap ownership. The heap probe now exposes
 this existing exact-process evidence even below the separate churn guards;
 the warning still requires the original heap thresholds and sustain.
 
+Optional five-minute rate and task-lifecycle failures do not clear an observed
+heap warning. Keep valid task records and `active_log_source=host-journal-fallback`
+when a partial journal read still supplies attribution, but retain the degraded
+source qualifier; complete fallback is not degraded merely because the fleet
+gateway failed. Render optional errors only as the shared fixed `error_class`,
+including `observation-unclassified` when no more specific class is established.
+Never copy raw command errors, response bodies, credentials, URLs, or task IDs
+from those errors into public Alert, Markdown, or JSONL evidence. Synthetic
+transport/response, timeout/canceled, and partial/complete fallback controls
+preserve the heap identity and sustain, omit unavailable rate values, and enforce
+this privacy boundary. This correction does not establish raw metric freshness
+or exact-process artifact provenance.
+
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
 
@@ -4927,6 +4940,12 @@ label_replace(
   ratios. A missing heartbeat prevents task attribution but does not clear the
   process-rate finding. A large quiescent heap belongs to §2.12; this signal
   catches sustained encoding/allocation even after streaming bounds live heap.
+- Optional task-lifecycle failures use the same fixed `error_class` privacy
+  boundary as §2.12, never raw error text. Preserve valid partial fallback task
+  attribution and its source label alongside the degraded-source qualifier;
+  a complete host-journal fallback remains complete even if the gateway failed.
+  Public Alert/Markdown/JSONL controls retain the process-rate warning, exact
+  identity, and sustain without inventing attribution when every source fails.
 - When the host/block has a fresh `UpdateClientScores` heartbeat, read the
   global durable score-alias marker as historical compatibility state only.
   Present means some writer completed a pass; absent or unreadable does not
