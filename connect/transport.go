@@ -50,6 +50,8 @@ var connectedGauge = prometheus.NewGauge(
 	},
 )
 
+var defaultConnectH1PlusStats = &connect.H1PlusStats{}
+
 var h3ListenerUpGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -342,7 +344,8 @@ func writeConnectH1UserReadyBatch(
 	messageCount := 1
 	messageByteCount := len(firstMessage)
 	open = true
-	if writeBatch != nil {
+	framedWriter, framed := writer.(interface{ WriteMessages([][]byte) error })
+	if writeBatch != nil || framed {
 	drainReady:
 		for connectH1WriteBatchCanDrain(messageCount, messageByteCount) {
 			select {
@@ -376,6 +379,25 @@ func writeConnectH1UserReadyBatch(
 
 	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return open, err
+	}
+	if framed {
+		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+		n := 0
+		for _, message := range messageStorage[:messageCount] {
+			if len(message) > 16 {
+				payloads[n] = message
+				n++
+			}
+		}
+		if err = framedWriter.WriteMessages(payloads[:n]); err != nil {
+			return open, err
+		}
+		if onSent != nil {
+			for _, message := range payloads[:n] {
+				onSent(ByteCount(len(message)))
+			}
+		}
+		return open, nil
 	}
 	if writeBatch != nil {
 		writeBatch.BeginWriteBatch()
@@ -414,6 +436,7 @@ func writeConnectH1UserReadyBatch(
 // var serviceTransitionTime = time.Now().Add(30 * time.Second)
 
 func init() {
+	prometheus.MustRegister(server.NewH1PlusCollector("connect", connect.H1FramerProtocol, defaultConnectH1PlusStats))
 	prometheus.MustRegister(connectedGauge)
 	prometheus.MustRegister(h3ListenerUpGauge)
 	prometheus.MustRegister(h3ListenerRestartsCounter)
@@ -424,6 +447,7 @@ func init() {
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	// platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
+		H1PlusStats: defaultConnectH1PlusStats,
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
@@ -472,6 +496,10 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
+	// The custom carrier is opt-in until the deployment/device rollout gates
+	// in connect/H1PLUS.md are qualified. WebSocket remains accepted.
+	EnableH1Plus     bool
+	H1PlusStats      *connect.H1PlusStats
 	MinPingTimeout   time.Duration
 	MaxPingTimeout   time.Duration
 	PingTrackerCount int
@@ -1251,49 +1279,78 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return nil, transportVersion
 	}()
 
-	upgrader := websocket.Upgrader{
-		ReadBufferSize:  4 * 1024,
-		WriteBufferSize: 4 * 1024,
+	custom := connect.IsFramedUpgrade(r, connect.H1FramerProtocol)
+	upgradeStart := time.Now()
+	var ws connect.H1MessageConn
+	defer func() {
+		if ws != nil {
+			ws.Close()
+		}
+	}()
+	if custom {
+		if !self.settings.EnableH1Plus || !connect.H1PlusAvailable() {
+			http.Error(w, "upgrade unavailable", http.StatusUpgradeRequired)
+			return
+		}
+		if err := connect.ValidateFramedUpgradeRequest(r, connect.H1FramerProtocol); err != nil {
+			http.Error(w, "invalid upgrade", http.StatusBadRequest)
+			return
+		}
+		if auth == nil {
+			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: 401, Reason: "authorization", Terminal: true})
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		upgrader := websocket.Upgrader{
+			ReadBufferSize:  4 * 1024,
+			WriteBufferSize: 4 * 1024,
+		}
+
+		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
+		ws, err = upgrader.Upgrade(batchResponseWriter, r, nil)
+		if err != nil {
+			return
+		}
+
+		// enforce the message size limit on messages in
+		// +4 for the framer's length header (the websocket carries the framed message).
+		ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
+
+		if auth == nil {
+			ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+			messageType, authFrameBytes, err := ws.ReadMessage()
+			if err != nil {
+				// server.Logger("TIMEOUT HA\n")
+				return
+			}
+			if messageType != websocket.BinaryMessage {
+				return
+			}
+
+			message, err := connect.DecodeFrame(authFrameBytes)
+			if err != nil {
+				return
+			}
+			var ok bool
+			auth, ok = message.(*protocol.Auth)
+			if !ok {
+				return
+			}
+
+			// echo the auth message on successful auth
+			ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+			err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
+			if err != nil {
+				// server.Logger("TIMEOUT HC\n")
+				return
+			}
+		}
 	}
-
-	batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
-	ws, err := upgrader.Upgrade(batchResponseWriter, r, nil)
-	if err != nil {
-		return
-	}
-	defer ws.Close()
-
-	// enforce the message size limit on messages in
-	// +4 for the framer's length header (the websocket carries the framed message).
-	ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
-
-	if auth == nil {
-		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-		messageType, authFrameBytes, err := ws.ReadMessage()
-		if err != nil {
-			// server.Logger("TIMEOUT HA\n")
-			return
-		}
-		if messageType != websocket.BinaryMessage {
-			return
-		}
-
-		message, err := connect.DecodeFrame(authFrameBytes)
-		if err != nil {
-			return
-		}
-		var ok bool
-		auth, ok = message.(*protocol.Auth)
-		if !ok {
-			return
-		}
-
-		// echo the auth message on successful auth
-		ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-		err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
-		if err != nil {
-			// server.Logger("TIMEOUT HC\n")
-			return
+	rejectCustomAuth := func(status int) {
+		if custom {
+			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: true})
+			http.Error(w, "unauthorized", status)
 		}
 	}
 
@@ -1302,6 +1359,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// than logged per occurrence; the detail is at V(1)
 	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
 	if err != nil {
+		rejectCustomAuth(http.StatusUnauthorized)
 		if glog.V(1) {
 			glog.Infof("[t]auth jwt err = %s\n", err)
 		}
@@ -1309,9 +1367,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if byJwt.ClientId == nil {
+		rejectCustomAuth(http.StatusForbidden)
 		return
 	}
 	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
+		rejectCustomAuth(http.StatusUnauthorized)
 		if glog.V(1) {
 			glog.Infof("[t]inactive auth jwt: %s\n", err)
 		}
@@ -1322,6 +1382,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	instanceId, err := server.IdFromBytes(auth.InstanceId)
 	if err != nil {
+		rejectCustomAuth(http.StatusBadRequest)
 		return
 	}
 
@@ -1329,8 +1390,21 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// this will fail for example if the client has been removed
 	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
 	if networkId == nil || *networkId != byJwt.NetworkId {
+		rejectCustomAuth(http.StatusForbidden)
 		// server.Logger("ERROR HB\n")
 		return
+	}
+	if custom {
+		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, self.settings.WriteTimeout)
+		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
+		if upgradeErr != nil {
+			return
+		}
+		ws, err = connect.NewFramedMessageConn(conn, connect.H1FramerProtocol, self.settings.FramerSettings.MaxMessageLen, self.settings.H1PlusStats)
+		if err != nil {
+			conn.Close()
+			return
+		}
 	}
 
 	// the declared family rides with the connection record; the observed
@@ -1397,7 +1471,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			for {
 
 				ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-				messageType, r, err := ws.NextReader()
+				messageType, message, err := connect.ReadH1PooledMessage(ws, int64(self.settings.FramerSettings.MaxMessageLen+4))
 				if err != nil {
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -1408,14 +1482,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 				switch messageType {
 				case websocket.BinaryMessage:
-
-					message, err := connect.MessagePoolReadAll(r)
-					if err != nil {
-						if connectionId := announce.ConnectionId(); connectionId != nil {
-							model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
-						}
-						return
-					}
 
 					// reliability tracking
 					announce.ReceiveMessage(ByteCount(len(message)))
