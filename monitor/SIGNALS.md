@@ -6907,6 +6907,68 @@ shared control-plane, credit, identity, or task-context failure can attempt a
 whole full batch, submit none, and leave existing blackhole verdicts stale. A
 constructed tunnel is not proof that its data path became usable.
 
+The shared admission guard also preseeds the fixed steps `funding_unavailable`
+and `funding_unknown`. A pass uses the existing admission formula: sum the
+nonnegative remainder of each active, in-window PostgreSQL balance after its
+nonnegative Redis reservation. It requires the server's initial contract minimum
+before a pass and every batch, and rechecks before negative blackhole, full-health
+or failed-attempt publication. A failed read is unknown, never funded. A failure
+is latched for that bounded pass so a later recovery cannot retroactively validate
+its earlier negative measurements. Successful traffic, locations, attempts and
+actual TLS authentication failures remain independently valid evidence. Prior
+negative verdicts are retained, not cleared or relaxed, and an ordinary provider
+timeout with funded observation retains its existing behavior.
+
+Only a failure composed entirely of the typed insufficient-credit cause receives
+the shard's existing idle-delay retry through `task.WithRetryDelay`; the task and
+its increasing error count remain intact. Mixed errors, datastore uncertainty,
+and cancellation retain ordinary backoff. This avoids an accumulated funding
+failure parking the same task for an hour after cleanup makes credit available.
+It does not grant credit, change escrow or payout guards, retry financial writes,
+or alter the six-hour bootstrap funding policy.
+
+Any complete advancing `funding_unavailable` delta yields `egress-prober-unfunded`
+PAGE even when the guard prevents every new provider attempt. A
+`funding_unknown` delta yields `egress-prober-funding-unobservable` WARN without
+asserting credit exhaustion. Both remain additive to incomplete process evidence.
+Missing either new fixed zero series remains `egress-admission-unobservable`,
+including older Taskworker artifacts during rollout.
+
+The 2026-09-22 bounded discriminator established exhausted admission credit on
+all 36 eligible prober balances, with all 36 Redis mirrors exactly matching
+durable outstanding reservations in the subsequent check. That check found
+45,875 distinct open payer contracts, all older than the five-minute expiry
+threshold, with no unresolved dispute, missing contract join or terminal-unsettled
+residual in that eligible-balance population. A later complete close-shape sample
+found 31,484 source-final, zero-use contracts among 43,952 open payer contracts.
+An unused prefetched contract is unknown to the destination and correctly awaits
+expiry rather than receiving invented bilateral settlement. The already-running
+cleanup backlog therefore holds genuine reservations; changing the Redis mirror
+or manually funding the account would not repair that mechanism. Bootstrap's
+last successful grant and an unexpired token did not establish current affordability.
+
+The owning Operator Proxy correction gives only the cheap blackhole tunnel a
+private 1 MiB contract-reservation ramp target using fresh client settings. It
+avoids the ordinary large unused successors for this small measurement; full
+geolocation and bandwidth tunnels keep their defaults. This is a per-request
+target, not a total quota or a hard cap: a larger legal message floor still wins,
+and an independent provider's return-companion prefetch is not governed by the
+probing client's setting. `TestProviderTunnelContractReservationRequests` observes
+the real serialized `CreateContract` requests for opening and later sequences,
+including ordinary and network-peer lanes, and retains the default ramp and
+larger-message controls. Settings-isolation and blackhole-only wiring tests
+prevent the short-probe policy from changing other traffic or financial guards.
+
+False-positive qualifiers: these finite checks do not acquire a reservation or
+prove atomic continuity across PostgreSQL, Redis and the measurement. An unfunded
+snapshot does not prove every provider is healthy, and independent positive or
+TLS-integrity evidence remains valid. False-negative qualifiers: transient
+exhaustion between checks or rejection of a larger later contract can escape this
+initial-minimum guard; missing authority and old producer telemetry remain unknown.
+Require naturally restored admission, falling expired-open reservations, advancing
+measurements and product provider-list recovery. Quiet guard counters or provider
+evidence aging into unknown are not recovery.
+
 The producer has a matching correctness boundary: `fleetprobe.RunBlackhole`
 discards an in-flight result if the owning context is canceled before that
 result can be retained. Otherwise canceled requests are rendered as
@@ -7696,6 +7758,14 @@ This is a **software/operational common-path and data-integrity** signal. It is
 not resolved by adding Proxy hardware. Hardware raises the independent active
 client ceiling but cannot repair a prober credential, balance, API path,
 classifier, or persistence invariant.
+
+For the confirmed shared-credit boundary in §2.19a, retain this distribution as
+historical/current provider evidence while the producer withholds new invalid
+negative measurements. It must not be rewritten into healthy results. A current
+bootstrap success, zero local tunnel-constructor failures, or lower failed-attempt
+volume after the guard closes cannot establish restored provider traffic. Verify
+the admission formula and durable reservations separately, then require ordinary
+replacement success evidence through the due windows above.
 
 Implementation convention: SIGNALS.md §2.23 (`egress-outcomes`) maps to
 `signal_egress_outcomes.go` and `signal_egress_outcomes_test.go`. Synthetic

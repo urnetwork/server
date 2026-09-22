@@ -272,6 +272,66 @@ func TestEgressAdmissionPagesWhenFullProbesFailWithoutAnySubmission(t *testing.T
 	}
 }
 
+// A closed producer gate has no attempted traffic; its own confirmed failure
+// must remain visible rather than clearing the full-no-submission symptom.
+func TestEgressAdmissionPagesForUnfundedProberWithoutProviderAttempts(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	processes := egressAdmissionTestProcesses(now)
+	signal := NewEgressAdmissionSignal()
+	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	now = now.Add(time.Minute)
+	processes[1].values["pass_error/funding_unavailable"]++
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alert := requireAlertClass(t, alerts, "egress-prober-unfunded")
+	if alert.Severity != SeverityPage || alert.Frame != "shared-prober" {
+		t.Fatalf("unfunded alert identity = %+v", alert)
+	}
+	for _, want := range []string{"unfunded_pass_observations=1", "prior provider evidence is retained", "durable outstanding reservations", "quiet guarded pass"} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("unfunded alert missing %q", want)
+		}
+	}
+	if requireAlertClassCount(alerts, "egress-full-no-submission") != 0 {
+		t.Fatal("guarded zero work was relabeled as attempted full probes")
+	}
+}
+
+// Read failure is independently visible without asserting an account balance.
+func TestEgressAdmissionUnknownFundingCannotBecomeUnfundedOrHealthy(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	processes := egressAdmissionTestProcesses(now)
+	signal := NewEgressAdmissionSignal()
+	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	now = now.Add(time.Minute)
+	processes[1].values["pass_error/funding_unknown"]++
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alert := requireAlertClass(t, alerts, "egress-prober-funding-unobservable")
+	if alert.Severity != SeverityWarn || !strings.Contains(alert.Markdown(), "does not establish insufficient credit") {
+		t.Fatalf("unknown funding lost its observation qualifier: %+v", alert)
+	}
+	if requireAlertClassCount(alerts, "egress-prober-unfunded") != 0 {
+		t.Fatal("failed read manufactured a confirmed funding verdict")
+	}
+}
+
+// Older artifacts lack these preseeded series. Their absence is visibility
+// debt even when other counters are present and currently zero.
+func TestEgressAdmissionMissingFundingSeriesRemainsUnobservable(t *testing.T) {
+	for _, missing := range []string{"pass_error/funding_unavailable", "pass_error/funding_unknown"} {
+		now := time.Unix(1_700_000_000, 0).UTC()
+		processes := egressAdmissionTestProcesses(now)
+		processes[1].omit = missing
+		signal := NewEgressAdmissionSignal()
+		runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+		now = now.Add(time.Minute)
+		alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+		requireAlertClass(t, alerts, "egress-admission-unobservable")
+		if requireAlertClassCount(alerts, "egress-prober-unfunded") != 0 {
+			t.Fatal("missing producer capability manufactured a funding failure")
+		}
+	}
+}
+
 func TestEgressAdmissionMixedTelemetryPreservesKnownFailure(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
