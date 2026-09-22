@@ -32,6 +32,11 @@ type Config struct {
 	DeviceDescription string
 	DeviceSpec        string
 	Version           string
+	// ContractReservationByteCount optionally bounds the per-contract size
+	// ramp for a small probe. Zero preserves the shared transfer defaults.
+	// This is a reservation target, not a traffic quota: packet-size floors
+	// and the server's admission bounds still apply, and contracts renew.
+	ContractReservationByteCount connect.ByteCount
 }
 
 // ErrPinsRequired is returned by Open when Config.Pins is nil or empty. The
@@ -41,6 +46,9 @@ type Config struct {
 // disabled for every request. Refusing to open is cheaper than discovering
 // that later from a skewed geolocation result.
 var ErrPinsRequired = errors.New("providertunnel: Config.Pins must not be empty; a tunnel with no pins cannot safely carry a geolocation probe")
+
+// Negative reservation targets are malformed, not a request for defaults.
+var ErrContractReservation = errors.New("providertunnel: contract reservation byte count must not be negative")
 
 // ErrPlainHTTPRefused is returned for any http:// request made through a
 // tunnel client. The allowlist and the certificate pins live in
@@ -75,6 +83,19 @@ var newControlplaneClientStrategy = controlplane.NewClientStrategy
 func providerTunnelMultiClientSettings() *connect.MultiClientSettings {
 	settings := connect.DefaultMultiClientSettings()
 	settings.ProviderProbe = false
+	return settings
+}
+
+// Each generated client owns fresh settings. Full and bandwidth probes leave
+// the reservation target unset and retain the shared contract ramp.
+func providerTunnelClientSettings(reservationByteCount connect.ByteCount) *connect.ClientSettings {
+	settings := connect.DefaultClientSettings()
+	if 0 < reservationByteCount {
+		contracts := settings.ContractManagerSettings
+		contracts.InitialContractTransferByteCount = min(contracts.InitialContractTransferByteCount, reservationByteCount)
+		contracts.InitialNetworkPeerContractTransferByteCount = min(contracts.InitialNetworkPeerContractTransferByteCount, reservationByteCount)
+		contracts.StandardContractTransferByteCount = min(contracts.StandardContractTransferByteCount, reservationByteCount)
+	}
 	return settings
 }
 
@@ -150,6 +171,9 @@ type closeAndWaiter interface {
 // multiclient generator pinned to one ProviderSpec, a gvisor tun, and a packet
 // pump in both directions.
 func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel, error) {
+	if cfg.ContractReservationByteCount < 0 {
+		return nil, ErrContractReservation
+	}
 	if len(cfg.Pins) == 0 {
 		return nil, ErrPinsRequired
 	}
@@ -178,7 +202,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cfg.DeviceSpec,
 		cfg.Version,
 		&cfg.ClientId,
-		connect.DefaultClientSettings,
+		func() *connect.ClientSettings {
+			return providerTunnelClientSettings(cfg.ContractReservationByteCount)
+		},
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 

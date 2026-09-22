@@ -46,8 +46,23 @@ type BlackholeSummary struct {
 	TunnelFailed int
 }
 
+// The cheap reachability pass uses a private config copy; full and bandwidth
+// passes may share the caller's original config without inheriting its policy.
+func blackholeTunnelConfig(options BlackholeOptions) providertunnel.Config {
+	config := options.TunnelConfig
+	config.Pins = options.Pins()
+	// Three tiny HTTPS connectivity checks do not need the ordinary 1MiB ->
+	// 32.75MiB -> 128MiB contract ramp. An unused prefetched successor keeps
+	// its reservation until server expiry even after a final source close.
+	config.ContractReservationByteCount = 1024 * 1024
+	return config
+}
+
 // Required pins, timeouts, and concurrency fail before a tunnel is opened.
 func validateBlackholeOptions(options BlackholeOptions) error {
+	if options.TunnelConfig.ContractReservationByteCount < 0 {
+		return providertunnel.ErrContractReservation
+	}
 	if options.Pins == nil || len(options.Pins()) == 0 {
 		return providertunnel.ErrPinsRequired
 	}
@@ -171,8 +186,7 @@ func checkBlackholeProvider(
 		}
 	}
 
-	tunnelConfig := options.TunnelConfig
-	tunnelConfig.Pins = options.Pins()
+	tunnelConfig := blackholeTunnelConfig(options)
 	tunnel, err := providertunnel.Open(ctx, tunnelConfig, clientId)
 	if err != nil {
 		return BlackholeResult{
