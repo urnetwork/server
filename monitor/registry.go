@@ -62,6 +62,7 @@ func NewSignals() []Signal {
 		NewConnectionRateSignal(),
 		NewSelectionFreshnessSignal(),
 		NewSelectionPopulationSignal(),
+		NewProviderCountSignal(),
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
 		NewWorkerMemorySignal(),
