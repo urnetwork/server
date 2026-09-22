@@ -314,15 +314,25 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	return []finding{healthyFinding("pg/contracts-collapse", tierPage, "contracts-collapse", target)}, nil
 }
 
-// These two scalar aggregates always return one complete row, unlike the
-// optional GROUP BY batteries. Reject unknown values before changing state.
-func pgAggregateIntegers(rows []pgRow, columns int) ([]int64, error) {
+// Required scalar aggregates return one complete row, unlike optional GROUP BY
+// batteries. Check shape before indexing, converting values or changing state.
+func pgAggregateRow(rows []pgRow, columns int) (pgRow, error) {
 	if len(rows) != 1 || len(rows[0]) != columns {
 		return nil, fmt.Errorf("invalid response for PostgreSQL aggregate: expected one row with %d columns", columns)
 	}
+	return rows[0], nil
+}
+
+// These two scalar aggregates additionally require nonnegative integers. Keep
+// numeric validation separate from owners with a legitimate signed sentinel.
+func pgAggregateIntegers(rows []pgRow, columns int) ([]int64, error) {
+	row, err := pgAggregateRow(rows, columns)
+	if err != nil {
+		return nil, err
+	}
 	values := make([]int64, columns)
 	for i := range values {
-		value, err := strconv.ParseInt(rows[0].str(i), 10, 64)
+		value, err := strconv.ParseInt(row.str(i), 10, 64)
 		if err != nil || value < 0 {
 			return nil, fmt.Errorf("invalid response for PostgreSQL aggregate: expected nonnegative integers")
 		}

@@ -406,6 +406,15 @@ at all, and a taskworker lifecycle gap can do the same. On zero completions,
 preserve bounded per-minute completion history, pending claim/lease state,
 direct PostgreSQL capacity, active reindex progress, and Redis cluster state;
 attribute the failed layer before mutating it.
+
+The required completion-count aggregate must return exactly one row with one
+column. A successful command with no row, a missing column, or extra rows or
+columns is unknown (`cannot-observe`, `observation-invalid-response`), not a
+zero-completion incident; reject it before reading optional diagnostics. A
+valid count of zero remains the real `canary-dead` PAGE with sustain 1 on the
+one-minute cadence. Empty optional overdue or failure `GROUP BY` results remain
+valid; this is not a global rule rejecting empty PostgreSQL query results.
+
 ```sql
 -- completions (locations) in the last 3 minutes: healthy 12–25, broken 0
 SELECT count(*) FROM finished_task
@@ -3568,6 +3577,16 @@ Probe: `open-contracts`
 SELECT count(*) FROM transfer_contract WHERE open = true;
 -- walks only the open partial index; seconds even under load
 ```
+
+The automated probe reads total, older-than-five-minute and older-than-30-minute
+counts as exactly one three-column aggregate row. Successful-empty, short or
+extra-row/column responses are `cannot-observe` with
+`observation-invalid-response`; they must not initialize or overwrite the
+previous valid count. A valid all-zero row remains an observed empty open set,
+not unknown. The next valid sample compares with the last valid count, or
+retains warmup if none existed; the threshold, five-minute cadence and
+three-observation sustain below are unchanged.
+
 - HEALTHY: ~10–50k (29,981 at steady state after the 2026-07-17 recovery;
   pre-incident hourly residue was ~8k).
 - BROKEN: > 150k and rising = closes not keeping up (CloseExpiredContracts
@@ -4062,6 +4081,15 @@ the affirmative §2.15 `reliability-window-churn` signature; rate alone does not
 prove a restart or provider-score corruption. A failed diagnostic retains the
 observed high-rate finding without upgrading its causal explanation.
 
+The required `COALESCE(sum(n_tup_ins),0)` result must be exactly one row with
+one column. A successful-empty result or missing/extra row or column is
+`cannot-observe` with `observation-invalid-response`, before the counter,
+sample time or learned/persisted baseline can change. The next valid rate uses
+the full interval since the preceding valid counter. A real zero remains a
+valid counter and follows the existing initial/reset warmup rules; it is not
+missing evidence. Optional and grouped queries keep their own empty-result
+contracts; no global PostgreSQL parser or numeric-band rule changes here.
+
 ```sql
 SELECT date_trunc('minute', connect_time), count(*)
 FROM network_client_connection
@@ -4153,6 +4181,17 @@ Probe: `selection-freshness`
 `{cs_<fm>_<rank>_<callerLoc>_<targetLoc>}` score cache (counts `c_l`/`c_g`,
 filters `f_l`/`f_g`, samples `s_l_N`/`s_g_N`), and that cache has exactly ONE
 writer: the recurring `UpdateClientScores` task, writing with ttl 18000s (5h).
+
+The automated completion-gap aggregate requires exactly one signed scalar
+row. Successful-empty, missing-column or extra-row/column responses remain
+`cannot-observe` with `observation-invalid-response`, before any lifecycle
+lookup. A valid zero means a fresh completion; the explicit `-1` no-completion
+sentinel remains a real PAGE, not unknown or a rejected negative count. The
+five-minute cadence and sustain 1 remain unchanged: exactly 90 minutes is
+healthy, over 90 minutes through exactly three hours is WARN, and over three
+hours or the no-completion sentinel is PAGE. A successful empty optional
+lifecycle log does not erase an observed stale gap or invent an active task.
+
 Two freshness reads:
 ```sql
 -- completion gap: healthy is back-to-back runs, 12–50 min each

@@ -1,11 +1,326 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
+
+// These four scalar-aggregate owners share a shape contract, not a numeric
+// contract: selection's negative sentinel and legitimate empty GROUP BY
+// results must remain valid. Keep the common public-entry controls here.
+type requiredAggregateFixture struct {
+	newSignal   func() Signal
+	queryMarker string
+	healthyRow  Row
+}
+
+const aggregatePrivateCell = "synthetic-private-aggregate password=fixture-only 192.0.2.61"
+
+func requiredAggregateBadShapes(valid Row) []struct {
+	name string
+	rows []Row
+} {
+	cases := []struct {
+		name string
+		rows []Row
+	}{
+		{name: "nil rows"},
+		{name: "empty rows", rows: []Row{}},
+		{name: "nil row", rows: []Row{nil}},
+		{name: "empty row", rows: []Row{{}}},
+		{name: "extra row", rows: []Row{valid, {aggregatePrivateCell}}},
+		{name: "extra column", rows: []Row{append(append(Row(nil), valid...), aggregatePrivateCell)}},
+	}
+	if len(valid) > 1 {
+		cases = append(cases, struct {
+			name string
+			rows []Row
+		}{name: "short row", rows: []Row{valid[:len(valid)-1]}})
+	}
+	return cases
+}
+
+// Test-only recovery lets every current panic be reported without terminating
+// the package. It is deliberately outside the production monitor/loop.
+func runRequiredAggregateSafely(m *Monitor) (alerts Alerts, err error, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	alerts, err = m.Run(context.Background())
+	return
+}
+
+func requireAggregateVisibility(t *testing.T, signal Signal, alerts Alerts, class string) {
+	t.Helper()
+	if len(alerts) != 1 {
+		t.Errorf("required aggregate returned %d alerts, want one visibility finding", len(alerts))
+		return
+	}
+	alert := alerts[0]
+	if alert.SignalID != "monitor/visibility" || alert.SignalKey != signal.Key() ||
+		alert.Class != "cannot-observe" || alert.Target != signal.ID() || alert.Frame != "" ||
+		alert.Severity != SeverityWarn || alert.Sustain != 2 || alert.PageSustain != 0 ||
+		alert.Observed != "error_class="+class {
+		t.Error("required aggregate changed the fixed-class visibility identity or sustain")
+	}
+	encoded, err := json.Marshal(alert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonl bytes.Buffer
+	if err := alerts.WriteJSONL(&jsonl); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(jsonl.Bytes(), []byte{'\n'}) != 1 {
+		t.Error("one aggregate visibility finding did not produce one JSONL record")
+	}
+	for _, rendered := range []string{string(encoded), alert.Markdown(), jsonl.String()} {
+		for _, forbidden := range []string{"synthetic-private-aggregate", "fixture-only", "192.0.2.61"} {
+			if strings.Contains(rendered, forbidden) {
+				t.Error("aggregate visibility rendered a rejected synthetic private cell")
+			}
+		}
+	}
+}
+
+func testRequiredAggregateShape(t *testing.T, fixture requiredAggregateFixture) {
+	t.Helper()
+	for _, test := range requiredAggregateBadShapes(fixture.healthyRow) {
+		t.Run(test.name, func(t *testing.T) {
+			requiredReads, otherReads := 0, 0
+			source := &syntheticSource{
+				postgresFn: func(query string) ([]Row, error) {
+					if strings.Contains(query, fixture.queryMarker) {
+						requiredReads++
+						return test.rows, nil
+					}
+					otherReads++
+					return nil, nil
+				},
+				localFn: func(string, ...string) (string, error) { otherReads++; return "", nil },
+			}
+			signal := fixture.newSignal()
+			alerts, err, panicked := runRequiredAggregateSafely(NewWithSignals(syntheticSettings(source), signal))
+			if panicked {
+				t.Error("successful malformed aggregate panicked instead of returning unknown")
+			} else {
+				if err == nil {
+					t.Error("successful malformed aggregate did not return an error")
+				} else {
+					for _, forbidden := range []string{"synthetic-private-aggregate", "fixture-only", "192.0.2.61"} {
+						if strings.Contains(err.Error(), forbidden) {
+							t.Error("shape error rendered a rejected synthetic private cell")
+						}
+					}
+				}
+				requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+			}
+			if requiredReads != 1 || otherReads != 0 {
+				t.Errorf("invalid aggregate read required=%d optional=%d, want 1/0", requiredReads, otherReads)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{name: "untyped source failure", err: errors.New("connection refused"), class: observationErrorClassUnclassified},
+		{name: "source unreachable", err: &unreachableError{host: "synthetic-pg", err: errors.New("connection refused")}, class: observationErrorClassUnreachable},
+		{name: "source deadline", err: context.DeadlineExceeded, class: observationErrorClassTimeout},
+		{name: "source canceled", err: context.Canceled, class: observationErrorClassCanceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			source := &syntheticSource{postgresFn: func(string) ([]Row, error) { reads++; return nil, test.err }}
+			signal := fixture.newSignal()
+			alerts, err, panicked := runRequiredAggregateSafely(NewWithSignals(syntheticSettings(source), signal))
+			if panicked || !errors.Is(err, test.err) || reads != 1 {
+				t.Error("required aggregate changed the original source error or repeated its read")
+			}
+			requireAggregateVisibility(t, signal, alerts, test.class)
+		})
+	}
+	t.Run("independent sibling still runs", func(t *testing.T) {
+		ownerReads, siblingReads := 0, 0
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, fixture.queryMarker):
+				ownerReads++
+				return nil, nil
+			case strings.Contains(query, "create_time >= date_trunc('minute',now())"):
+				siblingReads++
+				return []Row{{"0"}}, nil
+			default:
+				t.Error("unexpected query outside the required aggregate and independent sibling")
+				return nil, nil
+			}
+		}}
+		signal := fixture.newSignal()
+		alerts, err, panicked := runRequiredAggregateSafely(NewWithSignals(syntheticSettings(source), signal, NewContractRateSignal()))
+		if panicked {
+			t.Fatal("malformed aggregate panicked before the independent sibling could run")
+		}
+		if err == nil || len(alerts) != 2 || ownerReads != 1 || siblingReads != 1 {
+			t.Fatal("malformed aggregate erased the independent sibling or repeated a source")
+		}
+		unknown := requireAlertClass(t, alerts, "cannot-observe")
+		requireAggregateVisibility(t, signal, Alerts{unknown}, observationErrorClassInvalidResponse)
+		if sibling := requireAlertClass(t, alerts, "contracts-collapse"); sibling.Severity != SeverityPage || sibling.Sustain != 3 {
+			t.Error("malformed sibling altered genuine contract-rate outage evidence")
+		}
+	})
+}
+
+func testRequiredAggregateRunLoop(t *testing.T, fixture requiredAggregateFixture) {
+	t.Helper()
+	// Fail RED in this goroutine before an unguarded nil row can panic in a
+	// scheduler worker. Once corrected, exercise the actual public RunLoop.
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return nil, nil }}
+	signal := fixture.newSignal()
+	alerts, err, panicked := runRequiredAggregateSafely(NewWithSignals(syntheticSettings(source), signal))
+	if panicked {
+		t.Fatal("empty required aggregate panics; refusing to launch the unsafe loop worker")
+	}
+	if err == nil {
+		t.Fatal("empty required aggregate must be unknown before exercising recurrence")
+	}
+	requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+	synctest.Test(t, func(t *testing.T) {
+		next := 0
+		observations := [][]Row{nil, nil, {fixture.healthyRow}, nil, nil}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if !strings.Contains(query, fixture.queryMarker) {
+				return nil, nil // Legitimate empty optional GROUP BY observations.
+			}
+			if next >= len(observations) {
+				return nil, errors.New("unexpected synthetic aggregate cadence")
+			}
+			rows := observations[next]
+			next++
+			return rows, nil
+		}}
+		signal := fixture.newSignal()
+		settings := syntheticSettings(source)
+		settings.Now = time.Now
+		m := NewWithSignals(settings, signal)
+		ctx, cancel := context.WithCancel(context.Background())
+		handled := make(chan Alerts, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- m.RunLoop(ctx, func(_ context.Context, _ Signal, alerts Alerts) error {
+				handled <- alerts
+				return nil
+			})
+		}()
+		defer func() {
+			cancel()
+			synctest.Wait()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error("public aggregate loop did not shut down cleanly")
+				}
+			default:
+				t.Error("public aggregate loop did not join after parent cancellation")
+			}
+			if len(handled) != 0 {
+				t.Error("parent shutdown manufactured an extra visibility finding")
+			}
+		}()
+		for tick, want := range []int{0, 1, 0, 0, 1} {
+			if tick > 0 {
+				time.Sleep(signal.Cadence())
+			}
+			synctest.Wait()
+			select {
+			case alerts := <-handled:
+				if len(alerts) != want {
+					t.Errorf("cadence %d emitted %d alerts, want %d", tick, len(alerts), want)
+				}
+				if want != 0 {
+					requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+				}
+			default:
+				t.Fatal("public loop did not finish the scheduled aggregate observation")
+			}
+		}
+		if next != len(observations) {
+			t.Error("public loop did not consume exactly the five required observations")
+		}
+	})
+}
+
+func taskCanaryAggregateFixture() requiredAggregateFixture {
+	return requiredAggregateFixture{NewTaskCanariesSignal, "run_end_time > now() - interval '3 minutes'", Row{"12"}}
+}
+
+func TestTaskCanariesAggregateShape(t *testing.T) {
+	testRequiredAggregateShape(t, taskCanaryAggregateFixture())
+}
+
+func TestTaskCanariesAggregateRunLoop(t *testing.T) {
+	testRequiredAggregateRunLoop(t, taskCanaryAggregateFixture())
+}
+
+func TestTaskCanariesAggregateZeroAndOptionalEmptyGroups(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		count         string
+		batteryFailed bool
+	}{
+		{name: "healthy count with empty groups", count: "12"},
+		{name: "affirmative zero with empty groups", count: "0"},
+		{name: "affirmative zero with optional battery loss", count: "0", batteryFailed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requiredReads, optionalReads, failureReads := 0, 0, 0
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, taskCanaryAggregateFixture().queryMarker) {
+					requiredReads++
+					return []Row{{test.count}}, nil
+				}
+				optionalReads++
+				if strings.Contains(query, "WITH failures AS") {
+					failureReads++
+					if test.batteryFailed && failureReads == 1 {
+						return nil, errors.New("permission denied: synthetic optional battery")
+					}
+				}
+				return nil, nil
+			}}
+			signal := NewTaskCanariesSignal()
+			alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+			if err != nil || requiredReads != 1 || optionalReads == 0 || signal.Cadence() != time.Minute {
+				t.Fatal("valid scalar or empty optional groups changed the canary source contract")
+			}
+			if test.count != "0" {
+				if len(alerts) != 0 {
+					t.Error("valid positive count and empty optional groups became an outage")
+				}
+				return
+			}
+			if len(alerts) != 1 {
+				t.Fatal("affirmative zero did not retain exactly one real canary finding")
+			}
+			alert := requireAlertClass(t, alerts, "canary-dead")
+			if alert.SignalID != signal.ID() || alert.Target != "pg-1" || alert.Severity != SeverityPage || alert.Sustain != 1 {
+				t.Error("affirmative canary zero changed identity, severity or sustain")
+			}
+			if test.batteryFailed && !strings.Contains(alert.Evidence, "task_error_battery=unavailable error_class="+observationErrorClassAccessDenied) {
+				t.Error("optional battery failure erased its qualifier or the real zero-count finding")
+			}
+		})
+	}
+}
 
 func TestTaskCanariesSignalSyntheticDeadCanary(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {

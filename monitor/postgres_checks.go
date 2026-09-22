@@ -56,9 +56,13 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
-	openCount := atoiRow(rows[0], 0)
-	olderFiveMinutes := atoiRow(rows[0], 1)
-	olderThirtyMinutes := atoiRow(rows[0], 2)
+	row, err := pgAggregateRow(rows, 3)
+	if err != nil {
+		return nil, err
+	}
+	openCount := atoiRow(row, 0)
+	olderFiveMinutes := atoiRow(row, 1)
+	olderThirtyMinutes := atoiRow(row, 2)
 
 	previous, trendReady := self.observe(openCount)
 	rising := trendReady && previous < openCount
@@ -291,7 +295,11 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err != nil {
 		return nil, err
 	}
-	count := int64(atoiRow(rows[0], 0))
+	row, err := pgAggregateRow(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	count := int64(atoiRow(row, 0))
 	rate, rateReady := self.observe(count, time.Now())
 	if !rateReady {
 		return []finding{
@@ -428,7 +436,11 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 	if err != nil {
 		return nil, err
 	}
-	gapS := atoiRow(rows[0], 0)
+	row, err := pgAggregateRow(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	gapS := atoiRow(row, 0)
 
 	if gapS < 0 || gapS > 90*60 {
 		activeLog, activeLogSource, activeLogErr := readTaskLifecycleLog(

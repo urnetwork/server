@@ -4,7 +4,62 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
+
+func selectionFreshnessAggregateFixture() requiredAggregateFixture {
+	return requiredAggregateFixture{NewSelectionFreshnessSignal, "FROM finished_task WHERE function_name LIKE '%UpdateClientScores%'", Row{"0"}}
+}
+
+func TestSelectionFreshnessAggregateShape(t *testing.T) {
+	testRequiredAggregateShape(t, selectionFreshnessAggregateFixture())
+}
+
+func TestSelectionFreshnessAggregateRunLoop(t *testing.T) {
+	testRequiredAggregateRunLoop(t, selectionFreshnessAggregateFixture())
+}
+
+func TestSelectionFreshnessAggregateSentinelAndBands(t *testing.T) {
+	for _, test := range []struct {
+		gap      string
+		severity Severity
+	}{
+		{gap: "0"},
+		{gap: "5400"},
+		{gap: "5401", severity: SeverityWarn},
+		{gap: "10800", severity: SeverityWarn},
+		{gap: "10801", severity: SeverityPage},
+		{gap: "-1", severity: SeverityPage},
+	} {
+		t.Run(test.gap, func(t *testing.T) {
+			requiredReads, lifecycleReads := 0, 0
+			source := &syntheticSource{
+				postgresFn: func(string) ([]Row, error) { requiredReads++; return []Row{{test.gap}}, nil },
+				localFn:    func(string, ...string) (string, error) { lifecycleReads++; return "", nil },
+			}
+			signal := NewSelectionFreshnessSignal()
+			alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+			if err != nil || requiredReads != 1 || signal.Cadence() != 5*time.Minute {
+				t.Fatal("valid signed selection scalar changed its observation contract")
+			}
+			if test.severity == "" {
+				if len(alerts) != 0 || lifecycleReads != 0 {
+					t.Error("healthy selection boundary emitted an alert or read lifecycle logs")
+				}
+				return
+			}
+			if len(alerts) != 1 || lifecycleReads != 1 {
+				t.Fatal("selection violation or no-completion sentinel did not retain one finding and one optional read")
+			}
+			alert := requireAlertClass(t, alerts, "selection-stale")
+			if alert.SignalID != signal.ID() || alert.Target != "pg-1" || alert.Severity != test.severity || alert.Sustain != 1 ||
+				!strings.Contains(alert.Observed, "completion_gap_s="+test.gap+" ") ||
+				strings.Contains(alert.Observed, "active_duration_s=") {
+				t.Error("selection signed sentinel, severity or empty-lifecycle meaning changed")
+			}
+		})
+	}
+}
 
 func TestSelectionFreshnessSignalSyntheticSelectionStaleness(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{{"6000"}}, nil }}
