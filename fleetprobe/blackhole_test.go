@@ -92,6 +92,45 @@ func TestRunBlackholeDoesNotStartAdmittedWorkAfterCancellation(t *testing.T) {
 	}
 }
 
+// A cancellation that arrives while an already-admitted check is blocked is a
+// prober lifecycle failure, not evidence that the provider blackholed traffic.
+// Before the guard, this synthetic all-destinations-failed result was emitted
+// and persisted even though every request had been canceled by the owner.
+func TestRunBlackholeDoesNotPersistInFlightFailureAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan BlackholeSummary, 1)
+	go func() {
+		summary, err := RunBlackhole(ctx, []string{"synthetic-provider"}, BlackholeOptions{
+			Pins:        testPins,
+			Timeout:     time.Second,
+			Concurrency: 1,
+			CheckOne: func(_ context.Context, providerClientId string) BlackholeResult {
+				close(entered)
+				<-release
+				return BlackholeResult{
+					Check:   ingest.BlackholeCheck{ClientId: providerClientId, OK: false, Failure: "all_destinations_failed", CheckedAt: time.Unix(1, 0).UTC()},
+					Dark:    true,
+					Details: "synthetic canceled control-plane request",
+				}
+			},
+		})
+		if err != nil {
+			t.Errorf("RunBlackhole: %v", err)
+		}
+		done <- summary
+	}()
+
+	<-entered
+	cancel()
+	close(release)
+	summary := <-done
+	if len(summary.Checks) != 0 || summary.Dark != 0 || summary.TunnelFailed != 0 {
+		t.Fatalf("canceled in-flight check became provider verdict: %+v", summary)
+	}
+}
+
 func TestRunBlackholePreservesDueOrder(t *testing.T) {
 	providerClientIds := []string{"third", "first", "second"}
 	var stateLock sync.Mutex

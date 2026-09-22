@@ -94,7 +94,17 @@ func RunBlackhole(
 				if ctx.Err() != nil {
 					continue
 				}
-				results[job.Index] = checkBlackholeProvider(ctx, job.ProviderClientId, options)
+				result := checkBlackholeProvider(ctx, job.ProviderClientId, options)
+				// The check may have been admitted while its parent task still had
+				// budget, then finish after the task/context was canceled. Its three
+				// canceled HTTP requests look exactly like a provider blackhole, but
+				// the only fact established is that the prober lost its own budget.
+				// Do not persist that as a negative provider verdict. This mirrors
+				// the full health path's ErrNoBudget boundary.
+				if ctx.Err() != nil {
+					continue
+				}
+				results[job.Index] = result
 			}
 		}()
 	}
