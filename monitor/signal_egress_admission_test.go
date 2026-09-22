@@ -53,6 +53,12 @@ func egressAdmissionTestJson(t *testing.T, now time.Time, processes []egressAdmi
 			if parts[0] == "submission" {
 				labels["kind"], labels["outcome"] = parts[1], parts[2]
 			}
+			if parts[0] == "full" {
+				labels["result"] = parts[1]
+			}
+			if parts[0] == "pass_error" {
+				labels["step"] = parts[1]
+			}
 			value := process.values[key]
 			switch key {
 			case "rss":
@@ -242,6 +248,30 @@ func TestEgressAdmissionExpiredAndAllSubmissionFailuresKeepOwningLimits(t *testi
 	}
 }
 
+func TestEgressAdmissionPagesWhenFullProbesFailWithoutAnySubmission(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	processes := egressAdmissionTestProcesses(now)
+	signal := NewEgressAdmissionSignal()
+	runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	now = now.Add(time.Minute)
+	processes[1].values["full/attempted"] += 8
+	processes[1].values["full/failed"] += 8
+	processes[1].values["pass_error/canceled"]++
+	alerts := runEgressAdmissionTest(t, signal, now, egressAdmissionTestJson(t, now, processes))
+	alert := requireAlertClass(t, alerts, "egress-full-no-submission")
+	if alert.Severity != SeverityPage || alert.Frame != "control-plane" {
+		t.Fatalf("full no-submission alert identity = %+v", alert)
+	}
+	for _, want := range []string{"full_attempted=8", "full_submitted=0", "full_failed=8", "pass_canceled=1", "Tunnel construction alone is not readiness", "durable escrow reservations"} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("full no-submission alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if requireAlertClassCount(alerts, "egress-submission-unacknowledged") != 0 {
+		t.Fatalf("no reporter call was misreported as an unacknowledged reporter result: %+v", alerts)
+	}
+}
+
 func TestEgressAdmissionMixedTelemetryPreservesKnownFailure(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	processes := egressAdmissionTestProcesses(now)
@@ -272,7 +302,10 @@ func TestEgressAdmissionRepeatedScrapeAndLongGapRemainUnobservable(t *testing.T)
 
 func TestEgressAdmissionBoundedInvalidResponseAndQueryContract(t *testing.T) {
 	query := egressAdmissionQuery("synthetic")
-	if strings.Count(query, `"monitor_egress_part","timestamp"`) != 7 || strings.Count(query, `"monitor_egress_part","value"`) != 7 {
+	if strings.Contains(query, `}{`) || !strings.Contains(query, `urnetwork_egress_probe_pass_providers_total{env="synthetic",job=~"taskworker",schedule="full"}`) {
+		t.Fatalf("full-pass selector is not one valid, bounded label matcher: %s", query)
+	}
+	if strings.Count(query, `"monitor_egress_part","timestamp"`) != 9 || strings.Count(query, `"monitor_egress_part","value"`) != 9 {
 		t.Fatal("every fixed family needs its source timestamp; query cost changed")
 	}
 	for _, forbidden := range []string{"provider_id", "client_id", "network_id", "shard", "group_left", "query_range"} {

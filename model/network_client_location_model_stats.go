@@ -19,6 +19,8 @@ import (
 	"container/heap"
 	mathrand "math/rand"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -202,8 +204,107 @@ var findProviders2LoadSeconds = prometheus.NewHistogram(prometheus.HistogramOpts
 	Buckets: prometheus.DefBuckets,
 })
 
+// findProviders2OutcomesTotal measures the product-visible provider list after
+// all request-time eligibility filters.  Its labels are intentionally bounded:
+// no client, network, location ID, provider, address, or request identifier
+// may turn a degraded-list observation into a high-cardinality data leak.
+var findProviders2OutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_findproviders2_outcomes_total",
+	Help: "FindProviders2 completed response outcomes by bounded request class and result-count band",
+}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "result_count"})
+
 func init() {
-	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds)
+	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds, findProviders2OutcomesTotal)
+}
+
+func findProviders2OutcomeIpFamily(ipFamily string) string {
+	switch ipFamily {
+	case "", "v4-capable":
+		return "any"
+	case "v6-capable", "v6-only":
+		return "v6"
+	case "v4-only":
+		return "v4"
+	case "dualstack":
+		return "dualstack"
+	default:
+		return "unknown"
+	}
+}
+
+func findProviders2OutcomeLocationKind(findProviders2 *FindProviders2Args) string {
+	hasLocation := false
+	hasGroup := false
+	hasBestAvailable := false
+	for _, spec := range findProviders2.Specs {
+		if spec == nil {
+			continue
+		}
+		hasLocation = hasLocation || spec.LocationId != nil
+		hasGroup = hasGroup || spec.LocationGroupId != nil
+		hasBestAvailable = hasBestAvailable || spec.BestAvailable
+	}
+	count := 0
+	for _, present := range []bool{hasLocation, hasGroup, hasBestAvailable} {
+		if present {
+			count++
+		}
+	}
+	switch count {
+	case 0:
+		return "direct"
+	case 1:
+		if hasLocation {
+			return "location"
+		}
+		if hasGroup {
+			return "group"
+		}
+		return "best-available"
+	default:
+		return "mixed"
+	}
+}
+
+func findProviders2OutcomeCountBand(count int) string {
+	switch {
+	case count <= 0:
+		return "0"
+	case count <= 2:
+		return "1-2"
+	case count <= 9:
+		return "3-9"
+	default:
+		return "10+"
+	}
+}
+
+func recordFindProviders2Outcome(
+	findProviders2 *FindProviders2Args,
+	callerCountry string,
+	resultCount int,
+) {
+	callerCountry = strings.ToLower(strings.TrimSpace(callerCountry))
+	if len(callerCountry) != 2 {
+		callerCountry = "unknown"
+	}
+	rankMode := findProviders2.RankMode
+	switch rankMode {
+	case "", RankModeQuality:
+		rankMode = RankModeQuality
+	case RankModeSpeed:
+		// The request value is already one of the fixed metric vocabulary.
+	default:
+		rankMode = "unknown"
+	}
+	findProviders2OutcomesTotal.WithLabelValues(
+		findProviders2OutcomeIpFamily(findProviders2.IpFamily),
+		findProviders2OutcomeLocationKind(findProviders2),
+		callerCountry,
+		rankMode,
+		strconv.FormatBool(findProviders2.ForceMinimum),
+		findProviders2OutcomeCountBand(resultCount),
+	).Inc()
 }
 
 func enqueueFindProviders2Sample(job *findProviders2SampleJob) {

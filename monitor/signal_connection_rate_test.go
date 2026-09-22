@@ -1,11 +1,193 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func connectionRateAggregateFixture() requiredAggregateFixture {
+	return requiredAggregateFixture{NewConnectionRateSignal, "SELECT COALESCE(sum(n_tup_ins), 0)", Row{"10000"}}
+}
+
+func TestConnectionRateAggregateShape(t *testing.T) {
+	testRequiredAggregateShape(t, connectionRateAggregateFixture())
+}
+
+func TestConnectionRateAggregateRunLoop(t *testing.T) {
+	testRequiredAggregateRunLoop(t, connectionRateAggregateFixture())
+}
+
+func TestConnectionRateAggregateUnknownPreservesCounterAndBaseline(t *testing.T) {
+	for _, test := range requiredAggregateBadShapes(connectionRateAggregateFixture().healthyRow) {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				baseline, err := newBaselineStore(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				start := time.Now()
+				for i := 30; i > 0; i-- {
+					baseline.record(connectRateMetric, start.Add(-time.Duration(i)*time.Minute), 1000)
+				}
+				beforeSamples := append([]baselineSample(nil), baseline.metricSamples[connectRateMetric]...)
+				beforeAppends := baseline.metricAppendCounts[connectRateMetric]
+				beforeBytes, err := os.ReadFile(baseline.path(connectRateMetric))
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows := test.rows
+				reads := 0
+				source := &syntheticSource{postgresFn: func(string) ([]Row, error) { reads++; return rows, nil }}
+				signal := NewConnectionRateSignal()
+				probe := signal.(*signalAdapter).probe.(*pgConnectRateProbe)
+				probe.initialized, probe.lastCount, probe.lastTime = true, 10000, start
+				settings := syntheticSettings(source)
+				settings.Now = time.Now
+				settings.runtime = &signalRuntime{baseline: baseline}
+				m := NewWithSignals(settings, signal)
+				time.Sleep(time.Minute)
+				alerts, err, panicked := runRequiredAggregateSafely(m)
+				if panicked {
+					t.Error("unknown connection aggregate panicked")
+				} else {
+					if err == nil {
+						t.Error("unknown connection aggregate was accepted")
+					}
+					requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+				}
+				afterBytes, err := os.ReadFile(baseline.path(connectRateMetric))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !probe.initialized || probe.lastCount != 10000 || !probe.lastTime.Equal(start) || reads != 1 ||
+					!reflect.DeepEqual(baseline.metricSamples[connectRateMetric], beforeSamples) ||
+					baseline.metricAppendCounts[connectRateMetric] != beforeAppends || !bytes.Equal(afterBytes, beforeBytes) {
+					t.Error("unknown aggregate changed counter time, learned samples or persisted baseline bytes")
+				}
+				// The valid continuation spans two minutes since the last real
+				// counter, not one minute since an invented zero/accepted row.
+				time.Sleep(time.Minute)
+				rows = []Row{{"10200"}}
+				alerts, err = m.Run(context.Background())
+				if err != nil || reads != 2 || len(alerts) != 1 {
+					t.Fatal("valid counter continuation did not retain the genuine low-rate finding")
+				}
+				alert := requireAlertClass(t, alerts, "connects-rate")
+				if alert.Observed != "connects_last_min=100 median=1000" || alert.Severity != SeverityWarn || alert.Sustain != 5 ||
+					probe.lastCount != 10200 || !probe.lastTime.Equal(start.Add(2*time.Minute)) {
+					t.Error("valid rate did not use the full interval from the preceding valid counter")
+				}
+				samples := baseline.metricSamples[connectRateMetric]
+				continuedBytes, err := os.ReadFile(baseline.path(connectRateMetric))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(samples) != len(beforeSamples)+1 || samples[len(samples)-1].v != 100 ||
+					!samples[len(samples)-1].at.Equal(start.Add(2*time.Minute)) ||
+					baseline.metricAppendCounts[connectRateMetric] != beforeAppends+1 ||
+					!bytes.HasPrefix(continuedBytes, beforeBytes) || bytes.Count(continuedBytes, []byte{'\n'}) != beforeAppends+1 {
+					t.Error("only the valid continuation should append one rate sample")
+				}
+			})
+		})
+	}
+}
+
+func TestConnectionRateAggregateUnknownDoesNotInitializeCounter(t *testing.T) {
+	for _, test := range requiredAggregateBadShapes(connectionRateAggregateFixture().healthyRow) {
+		t.Run(test.name, func(t *testing.T) {
+			rows := test.rows
+			source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return rows, nil }}
+			signal := NewConnectionRateSignal()
+			probe := signal.(*signalAdapter).probe.(*pgConnectRateProbe)
+			m := NewWithSignals(syntheticSettings(source), signal)
+			alerts, err, panicked := runRequiredAggregateSafely(m)
+			if panicked {
+				t.Error("unknown first connection aggregate panicked")
+			} else {
+				if err == nil {
+					t.Error("unknown first connection aggregate was accepted")
+				}
+				requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+			}
+			if probe.initialized || probe.lastCount != 0 || !probe.lastTime.IsZero() {
+				t.Error("unknown aggregate consumed the initial counter warmup")
+			}
+			rows = []Row{{"0"}}
+			alerts, err = m.Run(context.Background())
+			if err != nil || len(alerts) != 0 || !probe.initialized || probe.lastCount != 0 || probe.lastTime.IsZero() {
+				t.Error("valid zero must initialize a real counter without a throughput finding")
+			}
+		})
+	}
+}
+
+func TestConnectionRateAggregateValidCounterBands(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		count       string
+		initialized bool
+		elapsed     time.Duration
+		class       string
+		sustain     int
+	}{
+		{name: "first zero", count: "0"},
+		{name: "counter reset", count: "0", initialized: true, elapsed: time.Minute},
+		{name: "nonadvancing clock", count: "10200", initialized: true},
+		{name: "low rate", count: "10100", initialized: true, elapsed: time.Minute, class: "connects-rate", sustain: 5},
+		{name: "low equality", count: "10500", initialized: true, elapsed: time.Minute},
+		{name: "storm equality", count: "12500", initialized: true, elapsed: time.Minute},
+		{name: "storm", count: "13000", initialized: true, elapsed: time.Minute, class: "connects-storm", sustain: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				stateDir := t.TempDir()
+				values := make([]float64, 30)
+				for i := range values {
+					values[i] = 1000
+				}
+				populateMetric(t, stateDir, connectRateMetric, values...)
+				source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+					if strings.Contains(query, connectionRateAggregateFixture().queryMarker) {
+						return []Row{{test.count}}, nil
+					}
+					return nil, nil // Optional storm cohort does not change the scalar contract.
+				}}
+				signal := NewConnectionRateSignal()
+				probe := signal.(*signalAdapter).probe.(*pgConnectRateProbe)
+				if test.initialized {
+					probe.initialized, probe.lastCount, probe.lastTime = true, 10000, time.Now().Add(-test.elapsed)
+				}
+				settings := syntheticSettings(source)
+				settings.StateDir = stateDir
+				settings.Now = time.Now
+				alerts, err := NewWithSignals(settings, signal).Run(context.Background())
+				if err != nil || signal.Cadence() != time.Minute {
+					t.Fatal("valid connection scalar changed its source or cadence contract")
+				}
+				if test.class == "" {
+					if len(alerts) != 0 {
+						t.Error("valid zero, warmup or exact rate boundary became an outage")
+					}
+					return
+				}
+				if len(alerts) != 1 {
+					t.Fatal("genuine connection-rate violation lost its sole product finding")
+				}
+				alert := requireAlertClass(t, alerts, test.class)
+				if alert.SignalID != signal.ID() || alert.Target != "pg-1" || alert.Severity != SeverityWarn || alert.Sustain != test.sustain {
+					t.Error("valid connection-rate finding changed identity or escalation")
+				}
+			})
+		})
+	}
+}
 
 func TestConnectionRateSignalSyntheticConnectionCollapse(t *testing.T) {
 	stateDir := t.TempDir()

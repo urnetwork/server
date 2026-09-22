@@ -22,6 +22,17 @@ const (
 	mimirBalanceFrontPort    = 3100
 )
 
+const (
+	mimirBalanceStageHostObservationFailed = "host-observation-failed"
+	mimirBalanceStageNoLocalChild          = "no-local-child"
+	mimirBalanceStageChildUnavailable      = "child-observation-unavailable"
+	mimirBalanceStageCounterDecreased      = "counter-decreased"
+	mimirBalanceStageNonadvancing          = "comparison-nonadvancing"
+	mimirBalanceStageStale                 = "comparison-stale"
+	mimirBalanceStageIdentityBound         = "identity-bound-exceeded"
+	mimirBalanceStageFleetView             = "fleet-view-inconsistent"
+)
+
 // Signal mimir-balance implements SIGNALS.md §11.20b. It distinguishes a
 // genuinely full tenant budget from one overloaded distributor caused by
 // persistent remote-write connection skew.
@@ -103,6 +114,14 @@ type mimirBalanceRate struct {
 	overloaded bool
 }
 
+// stage is assigned only from fixed owner-local branch constants, never from
+// command/parser output. It is not an Alert class or a production cause.
+type mimirBalanceVisibilityFailure struct {
+	target string
+	stage  string
+	err    error
+}
+
 type mimirBalanceAssessment struct {
 	configuredHosts             int
 	observableHosts             int
@@ -127,7 +146,7 @@ type mimirBalanceAssessment struct {
 	localConnections            int64
 	remoteConnections           int64
 	overloadedRemoteConnections int64
-	visibilityFailures          []mimirAdmissionVisibilityFailure
+	visibilityFailures          []mimirBalanceVisibilityFailure
 }
 
 func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -198,7 +217,7 @@ func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]find
 			continue
 		}
 		seenVisibility[failure.target] = true
-		findings = append(findings, cannotObserveFinding(failure.target, failure.err))
+		findings = append(findings, mimirBalanceCannotObserveFinding(failure))
 	}
 	if mimirBalanceIsSkewed(assessment) {
 		findings = append(findings, mimirBalanceFinding(assessment))
@@ -208,6 +227,20 @@ func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]find
 		))
 	}
 	return findings, nil
+}
+
+func mimirBalanceCannotObserveFinding(failure mimirBalanceVisibilityFailure) finding {
+	result := cannotObserveFinding(failure.target, failure.err)
+	result.observed += " observation_stage=" + failure.stage
+	result.context = "The fixed observation stage names the first retained failure for this target; additional child failures may exist. It identifies a source branch, not a production root cause or recovery."
+	result.playbook = "SIGNALS.md §11.20b and §1.7 and MONITOR.md §3.6"
+	if failure.stage == mimirBalanceStageNonadvancing || failure.stage == mimirBalanceStageStale {
+		result.mechanism = "The current child counters were observed, but a live same-generation rate comparison cannot be formed because its interval is nonadvancing or stale. Ingestion balance is unknown; this branch alone does not establish a source-command, parser, or network failure."
+		result.baseline = "Every configured child has a monotonic same-generation counter comparison over a positive interval no longer than three minutes, under one consistent fleet view."
+		result.action = "Wait for the next valid same-generation comparison using the persisted baseline. A valid current snapshot refreshes the baseline only on an otherwise complete host within the history bound; additional source failures may preserve prior history. Do not infer transport failure, balanced ingestion, or recovery from this comparison gap."
+		result.verify = "The next comparison is complete for every configured host and ring member; a valid new baseline does not retroactively fill the unavailable interval."
+	}
+	return result
 }
 
 func validateMimirBalanceState(state mimirBalancePersistedState) error {
@@ -291,8 +324,8 @@ func assessMimirBalance(
 			assessment.directComplete = false
 			assessment.rateComplete = false
 			preserveHost()
-			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-				target: hostName + "/mimir-balance", err: fmt.Errorf("host observation failed"),
+			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+				target: hostName + "/mimir-balance", stage: mimirBalanceStageHostObservationFailed, err: fmt.Errorf("host observation failed"),
 			})
 			continue
 		}
@@ -302,8 +335,8 @@ func assessMimirBalance(
 			assessment.directComplete = false
 			assessment.rateComplete = false
 			preserveHost()
-			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-				target: hostName + "/mimir-balance", err: fmt.Errorf("no local Mimir child was identified"),
+			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+				target: hostName + "/mimir-balance", stage: mimirBalanceStageNoLocalChild, err: fmt.Errorf("no local Mimir child was identified"),
 			})
 			continue
 		}
@@ -315,8 +348,8 @@ func assessMimirBalance(
 				hostComplete = false
 				assessment.directComplete = false
 				assessment.rateComplete = false
-				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-					target: hostName + "/mimir-balance", err: fmt.Errorf("a local Mimir child omitted its bounded observation"),
+				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+					target: hostName + "/mimir-balance", stage: mimirBalanceStageChildUnavailable, err: fmt.Errorf("a local Mimir child omitted its bounded observation"),
 				})
 				continue
 			}
@@ -355,16 +388,20 @@ func assessMimirBalance(
 				instance.requestsInTotal < previous.requestsInTotal {
 				assessment.rateComplete = false
 				assessment.counterResets++
-				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-					target: hostName + "/mimir-balance", err: fmt.Errorf("a monotonic distributor counter decreased"),
+				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+					target: hostName + "/mimir-balance", stage: mimirBalanceStageCounterDecreased, err: fmt.Errorf("a monotonic distributor counter decreased"),
 				})
 				continue
 			}
 			elapsed := time.Duration(now.UnixNano() - previous.observedUnixNS)
 			if elapsed <= 0 || mimirBalanceMaximumGap < elapsed {
 				assessment.rateComplete = false
-				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-					target: hostName + "/mimir-balance", err: fmt.Errorf("the live counter comparison interval is unavailable"),
+				stage := mimirBalanceStageStale
+				if elapsed <= 0 {
+					stage = mimirBalanceStageNonadvancing
+				}
+				assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+					target: hostName + "/mimir-balance", stage: stage, err: fmt.Errorf("the live counter comparison interval is unavailable"),
 				})
 				continue
 			}
@@ -391,8 +428,8 @@ func assessMimirBalance(
 	if len(next) > mimirBalanceHistoryLimit {
 		assessment.directComplete = false
 		assessment.rateComplete = false
-		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-			target: "mimir-balance/state", err: fmt.Errorf("current child identity bound exceeded"),
+		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+			target: "mimir-balance/state", stage: mimirBalanceStageIdentityBound, err: fmt.Errorf("current child identity bound exceeded"),
 		})
 		return assessment, state
 	}
@@ -400,8 +437,8 @@ func assessMimirBalance(
 		(assessment.activeDistributorsMinimum != assessment.activeDistributorsMaximum ||
 			assessment.activeDistributorsMinimum != int64(assessment.instanceCount) ||
 			math.Abs(assessment.ingestionRateMaximum-assessment.ingestionRateMinimum) > 0.001) {
-		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
-			target: "mimir-fleet/mimir-balance", err: fmt.Errorf("the distributor ring or rate view is inconsistent"),
+		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
+			target: "mimir-fleet/mimir-balance", stage: mimirBalanceStageFleetView, err: fmt.Errorf("the distributor ring or rate view is inconsistent"),
 		})
 	}
 	if !assessment.directComplete || len(rates) != assessment.instanceCount ||

@@ -329,6 +329,55 @@ func TestEgressProbePassRecordsBatchMetricsAndRefreshesFleet(t *testing.T) {
 	}
 }
 
+// An all-failed control-plane pass must still expose zero submitted counters.
+// If these children are not preseeded, the monitor cannot distinguish that
+// outage from an old/missing executable metric family.
+func TestEgressProbePassMetricDomainsArePreseeded(t *testing.T) {
+	egressProbePassProvidersTotal.Reset()
+	egressProbePassErrorsTotal.Reset()
+	preseedEgressProbePassMetrics()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, family := range families {
+		switch family.GetName() {
+		case "urnetwork_egress_probe_pass_providers_total":
+			for _, metric := range family.Metric {
+				schedule, result := "", ""
+				for _, pair := range metric.Label {
+					if pair.GetName() == "schedule" {
+						schedule = pair.GetValue()
+					}
+					if pair.GetName() == "result" {
+						result = pair.GetValue()
+					}
+				}
+				if schedule == "full" {
+					seen["full/"+result] = true
+				}
+			}
+		case "urnetwork_egress_probe_pass_errors_total":
+			for _, metric := range family.Metric {
+				for _, pair := range metric.Label {
+					if pair.GetName() == "step" {
+						seen["error/"+pair.GetValue()] = true
+					}
+				}
+			}
+		}
+	}
+	for _, key := range []string{
+		"full/attempted", "full/submitted", "full/skipped", "full/failed",
+		"error/blackhole_due", "error/full_due", "error/pins", "error/blackhole_run", "error/blackhole_submit", "error/full_run", "error/canceled",
+	} {
+		if !seen[key] {
+			t.Fatalf("missing preseeded pass metric child %q", key)
+		}
+	}
+}
+
 func TestSetEgressProbeFleetGaugesClearsStaleDominantClass(t *testing.T) {
 	firstRefresh := time.Unix(1_700_000_000, 0)
 	setEgressProbeFleetGauges(egressProbeFleetSnapshot{

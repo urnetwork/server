@@ -99,7 +99,9 @@ type proxyTestOptions struct {
 	// when true, stand up the device rpc endpoint over a plain http listener so
 	// the e2e can drive it over ws (the way server/connect exposes its handler
 	// for tests). Used by the device rpc e2e.
-	enableDeviceRpc bool
+	enableDeviceRpc       bool
+	enableDeviceRpcH1Plus bool
+	deviceRpcH1PlusStats  *connect.H1PlusStats
 	// when true, stand up only what the device rpc CONTROL plane needs: no live
 	// provider client (transport, egress NAT, provide registration) and no wait
 	// for the proxy device to reach a usable egress path. For tests of rpc
@@ -498,6 +500,8 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 
 	// ---- the real proxy servers (socks/http/https/wg/api) --------------------
 	proxySettings := DefaultProxySettings()
+	proxySettings.EnableDeviceRpcH1Plus = opts.enableDeviceRpcH1Plus
+	proxySettings.DeviceRpcH1PlusStats = opts.deviceRpcH1PlusStats
 	testPorts, releaseTestPorts := reserveProxyTestPorts(t)
 	proxySettings.SocksPort = testPorts.socks
 	proxySettings.HttpPort = testPorts.http

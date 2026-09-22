@@ -61,6 +61,12 @@ const (
 )
 
 type testConnectConfig struct {
+	enableH1Plus bool
+	// expectH1WebSocket verifies the negotiated client carrier while the
+	// fixture transports are live. It is used to pin the rollout-disabled H1
+	// path to ordinary RFC WebSocket rather than merely observing delivery.
+	expectH1WebSocket     bool
+	oldH1Provider         bool
 	enableChaos           bool
 	enableTransportReform bool
 	enableNack            bool
@@ -182,6 +188,23 @@ func testConnect(
 
 	if config.transportMode == "" {
 		config.transportMode = connect.TransportModeH1
+	}
+	h1PlusStats := &connect.H1PlusStats{}
+	h1ConnectionStats := &connect.H1ConnectionStats{}
+	if config.enableH1Plus {
+		defer func() {
+			stats := h1PlusStats.Snapshot()
+			if stats.Attempts == 0 {
+				t.Error("H1+ integration did not attempt custom upgrade")
+			}
+			if config.oldH1Provider {
+				if stats.Accepted != 0 || stats.Fallbacks == 0 {
+					t.Errorf("old H1 provider did not use fallback: %+v", stats)
+				}
+			} else if stats.Accepted == 0 || stats.Messages == 0 {
+				t.Errorf("H1+ integration did not carry messages: %+v", stats)
+			}
+		}()
 	}
 	fmt.Printf("[transport mode]%s\n", config.transportMode)
 
@@ -308,6 +331,7 @@ func testConnect(
 		dnsPacketConn net.PacketConn,
 	) (*http.Server, *ConnectHandler) {
 		settings := DefaultConnectHandlerSettings()
+		settings.EnableH1Plus = config.enableH1Plus && !config.oldH1Provider
 		// settings.EnableTlsSelfSign = true
 		settings.ListenH3Port = 0
 		settings.ListenDnsPort = 0
@@ -452,6 +476,9 @@ func testConnect(
 		platformBudget *connect.PlatformTransportBudget,
 	) *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
+		settings.EnableH1Plus = config.enableH1Plus
+		settings.H1PlusStats = h1PlusStats
+		settings.H1ConnectionStats = h1ConnectionStats
 		settings.QuicTlsConfig.InsecureSkipVerify = true
 		settings.H3Port = endpoint.h3Port
 		settings.DnsPort = endpoint.dnsPort
@@ -869,6 +896,12 @@ func testConnect(
 	}
 	if err := waitForTestConnectPlatformTransport(ctx, transportBs, progressTimeout); err != nil {
 		t.Fatalf("client B initial platform transport: %v", err)
+	}
+	if config.expectH1WebSocket {
+		stats := h1ConnectionStats.Snapshot()
+		if stats.WebSocketConnectionCount == 0 || stats.H1PlusConnectionCount != 0 {
+			t.Fatalf("H1+ disabled carrier stats=%+v, want live WebSocket and zero H1+ connections", stats)
+		}
 	}
 
 	initialTransferBalance := ByteCount(1024) * ByteCount(1024) * ByteCount(1024) * ByteCount(1024)

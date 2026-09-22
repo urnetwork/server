@@ -34,6 +34,8 @@ var wgPeersGauge = prometheus.NewGauge(
 	},
 )
 
+var defaultDeviceRpcH1PlusStats = &connect.H1PlusStats{}
+
 var wgInboundPeerQueueDropPacketsGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -76,6 +78,7 @@ var lifecycleJoinEnabledGauge = prometheus.NewGaugeFunc(
 )
 
 func init() {
+	prometheus.MustRegister(server.NewH1PlusCollector("proxy", connect.H1FramerXlProtocol, defaultDeviceRpcH1PlusStats))
 	prometheus.MustRegister(wgPeersGauge)
 	prometheus.MustRegister(wgInboundPeerQueueDropPacketsGauge)
 	prometheus.MustRegister(wgInboundDecryptionQueueDropPacketsGauge)
@@ -95,6 +98,7 @@ func DefaultProxySettings() *ProxySettings {
 	// dial failure can recover inside an ordinary client request deadline.
 	httpProxySettings := proxy.DefaultHttpProxySettings()
 	return &ProxySettings{
+		DeviceRpcH1PlusStats:     defaultDeviceRpcH1PlusStats,
 		SocksPort:                InternalSocksPort,
 		HttpPort:                 InternalHttpPort,
 		HttpsPort:                InternalHttpsPort,
@@ -140,6 +144,10 @@ func DefaultProxySettings() *ProxySettings {
 }
 
 type ProxySettings struct {
+	// EnableDeviceRpcH1Plus accepts authenticated urnetwork-framerxl/1 in
+	// addition to WebSocket. Default false supports staged deployment.
+	EnableDeviceRpcH1Plus bool
+	DeviceRpcH1PlusStats  *connect.H1PlusStats
 	// Ingress ports are settings instead of constructor-local constants so
 	// independent instances (including tests and overlapping local
 	// environments) can bind disjoint sockets. Production defaults retain the

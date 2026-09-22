@@ -75,12 +75,14 @@ type egressAdmissionSnapshot struct {
 
 var egressAdmissionLanes = [...]string{"no-location", "stale-location", "stale-health", "missing-health"}
 var egressAdmissionOutcomes = [...]string{"acknowledged", "unsupported", "canceled", "error_or_unknown"}
+var egressAdmissionFullResults = [...]string{"attempted", "submitted", "skipped", "failed"}
+var egressAdmissionPassErrors = [...]string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled"}
 
 // One bounded instant query returns fixed families and their actual source
 // timestamps. The instant evaluation timestamp alone cannot prove freshness.
 func egressAdmissionQuery(environment string) string {
 	parts := []string{}
-	for _, family := range []struct{ name, metric, job string }{
+	for _, family := range []struct{ name, metric, job, extraSelector string }{
 		{name: "rss", metric: "process_resident_memory_bytes", job: "api|taskworker"},
 		{name: "start", metric: "process_start_time_seconds", job: "api|taskworker"},
 		{name: "enabled", metric: "urnetwork_egress_due_observation_enabled", job: "api"},
@@ -88,8 +90,14 @@ func egressAdmissionQuery(environment string) string {
 		{name: "selected", metric: "urnetwork_egress_due_selected_total", job: "api"},
 		{name: "enabled", metric: "urnetwork_egress_probe_submission_observation_enabled", job: "taskworker"},
 		{name: "submission", metric: "urnetwork_egress_probe_submission_outcomes_total", job: "taskworker"},
+		{name: "full", metric: "urnetwork_egress_probe_pass_providers_total", job: "taskworker", extraSelector: `schedule="full"`},
+		{name: "pass_error", metric: "urnetwork_egress_probe_pass_errors_total", job: "taskworker"},
 	} {
-		selector := fmt.Sprintf(`%s{env=%s,job=~%s}`, family.metric, strconv.Quote(environment), strconv.Quote(family.job))
+		extraSelector := ""
+		if family.extraSelector != "" {
+			extraSelector = "," + family.extraSelector
+		}
+		selector := fmt.Sprintf(`%s{env=%s,job=~%s%s}`, family.metric, strconv.Quote(environment), strconv.Quote(family.job), extraSelector)
 		for _, part := range []string{"value", "timestamp"} {
 			value := selector
 			if part == "timestamp" {
@@ -151,6 +159,10 @@ func parseEgressAdmission(out, environment string, now time.Time) (map[egressAdm
 			key += "/" + series.Metric["lane"] + "/" + series.Metric["expired"]
 		case "submission":
 			key += "/" + series.Metric["kind"] + "/" + series.Metric["outcome"]
+		case "full":
+			key += "/" + series.Metric["result"]
+		case "pass_error":
+			key += "/" + series.Metric["step"]
 		}
 		known := false
 		for _, expected := range egressAdmissionKeys(identity.job) {
@@ -198,6 +210,12 @@ func egressAdmissionKeys(job string) []string {
 			for _, outcome := range egressAdmissionOutcomes {
 				keys = append(keys, "submission/"+kind+"/"+outcome)
 			}
+		}
+		for _, result := range egressAdmissionFullResults {
+			keys = append(keys, "full/"+result)
+		}
+		for _, step := range egressAdmissionPassErrors {
+			keys = append(keys, "pass_error/"+step)
 		}
 	}
 	return keys
@@ -331,6 +349,28 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 				playbook:  "SIGNALS.md §2.19a",
 			})
 		}
+	}
+	// A completed full pass normally submits at least one result when it opens
+	// provider tunnels.  A nontrivial attempted cohort with no submission and
+	// no successful reporter call is the incident shape in which a shared
+	// control-plane/context failure makes healthy providers appear dark.  It is
+	// deliberately independent of per-provider blackhole verdicts: those can
+	// be stale, and tunnel construction is not readiness.
+	attempted := deltas["full/attempted"]
+	submitted := deltas["full/submitted"]
+	failed := deltas["full/failed"]
+	if attempted >= 8 && submitted == 0 && failed >= attempted {
+		canceled := deltas["pass_error/canceled"]
+		findings = append(findings, finding{
+			probeId: self.id(), tier: tierPage, class: "egress-full-no-submission", target: "egress-fleet", frame: "control-plane", sustain: 1,
+			symptom:   "Full egress probes attempted a provider cohort but submitted no results",
+			mechanism: "A full-pass attempted count with zero submitted and every attempted probe failed proves probe-pipeline progress without a usable result. A concurrent canceled task/pass counter supports a budget or lifecycle cancellation branch, but does not prove DNS, the load balancer, or providers failed. Tunnel construction alone is not readiness.",
+			baseline:  "Every traffic-bearing full-probe interval has at least one submitted result, or a bounded partial-failure cohort that does not consume every attempted provider.",
+			observed:  fmt.Sprintf("full_attempted=%.0f full_submitted=%.0f full_failed=%.0f pass_canceled=%.0f complete_process_intervals=%d", attempted, submitted, failed, canceled, complete),
+			action:    "First inspect the prober's available transfer credit after durable escrow reservations, then its persisted identity/bootstrap state, task deadline/cancellation path, and bounded platform/API dial path from each executing Taskworker. Keep provider blackhole verdicts and actual tunnel health independent; do not mark providers bad, delete verdicts, or relax selection gates from this aggregate.",
+			verify:    "After the proved shared boundary is repaired, require two complete traffic-bearing intervals with submitted full-probe results, no renewed full-no-submission finding, advancing §2.19/§2.23 evidence, and product provider-list recovery. Quiet probes or a fresh tunnel constructor alone are not recovery.",
+			playbook:  "SIGNALS.md §2.19a, §2.23, §2.9a, and §1.2",
+		})
 	}
 	return findings
 }

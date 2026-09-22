@@ -253,7 +253,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 
 		evidence := "One-minute rates come from the taskworker process metrics pushed to Mimir, grouped by exact host/block/runtime instance and compared with the fresh paired fleet median. Two consecutive probe failures provide a two-minute sustain guard. Recent eval-active heartbeats are joined on host/block."
 		if activeLogErr != nil {
-			evidence += " The task-lifecycle lookup was degraded: " + activeLogErr.Error()
+			evidence += fmt.Sprintf(" The task-lifecycle lookup was degraded (error_class=%s).", classifyObservationError(activeLogErr))
 		} else if activeSummary == "" {
 			evidence += " No fresh active-task heartbeat was available for this executor, so the rate finding remains valid without task attribution."
 		}

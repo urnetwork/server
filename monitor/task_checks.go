@@ -654,7 +654,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
-	completions := atoiRow(rows[0], 0)
+	row, err := pgAggregateRow(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	completions := atoiRow(row, 0)
 	if completions == 0 {
 		findings = append(findings, finding{
 			probeId: "pg/canary-dead", tier: tierPage,
@@ -1008,10 +1012,10 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertAction = "Correlate the exact terminal evaluator line and successor, then use the bounded reliability phase, marker, and index diagnostic to select the active root cause. Do not redeploy a historical cadence/checkpoint fix, raise the deadline, or manually kick the fresh retry from the cleanup error alone."
 			alertVerify = "The terminal evaluator duration and successor identity are correlated, the active phase receives its demonstrated repair boundary, and the retry reaches a bounded successful result without repeating the diagnosed cause."
 		} else if task == "CloseExpiredContracts" && strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
-			alertMechanism = "A close checkpoint reached the exact 30-minute task boundary. Its per-contract commits made durable progress, but the scheduler did not checkpoint task success, so the retry must rescan the remaining ordered cohort while old contracts accumulate. The task row does not contain the selected cohort size; use the matching live selection log before distinguishing an older 100,000-contract generation from the current 25,000 cap."
+			alertMechanism = "A close checkpoint reached the exact 30-minute task boundary. Its per-contract commits made durable progress, but the scheduler did not checkpoint task success, so the retry must rescan the remaining ordered cohort while old contracts accumulate. The task row does not contain the selected cohort size; the matching live selection log reports a merged set, not each scan's cap. Current source independently selects up to 25,000 open and 25,000 disputed rows, so a merged count above 25,000 does not prove an older generation."
 			alertContext += " A distinct successor attempt after the retry is evidence that per-contract work survived; it does not make that scheduler boundary safe under recurring write/vacuum pressure."
-			alertAction = "Read the matching `found <n> contracts to close` journal line. If n exceeds 25,000, roll out the 25,000 cap while retaining the 92-worker inner pool; if n is already at or below 25,000, retain it and attribute the remaining overrun to the active retention, vacuum, storage, or executor phase before reducing the checkpoint further. Do not raise the 30-minute deadline or add task-level shards."
-			alertVerify = "Live selection stays at or below 25,000, each full cohort acknowledges task success before the deadline and schedules its immediate successor, and the older-than-five-minute open set falls on consecutive samples without another Timeout."
+			alertAction = "Read the matching `found <n> contracts to close` journal line, then verify the actual executor artifact and per-scan cap/count authority before prescribing a cap change. If the artifact still uses the older 100,000 per-scan limit, roll out the existing 25,000 per-scan cap while retaining the 92-worker inner pool; otherwise retain it and attribute the remaining overrun to the active retention, vacuum, storage, or executor phase before reducing the checkpoint further. Do not raise either scan to 50,000, the 30-minute deadline, or the number of task-level shards."
+			alertVerify = "Each independent scan stays at or below 25,000 and their deduplicated union at or below 50,000. Successful full cohorts acknowledge task success before the deadline and schedule their successor; independently verified accounting-rejected batches remain failed tasks with bounded retry. The older-than-five-minute open set falls on consecutive samples without another Timeout."
 		} else if task == "Payout" && strings.Contains(lowerError, "connlockerror=conn closed") {
 			alertMechanism = "The bounded payment-plan transaction remained intentionally idle while a separate reliability-maintenance transaction ran longer than PostgreSQL's five-minute idle-in-transaction timeout, so PostgreSQL closed the outer connection before it could commit."
 			alertContext += " Scope the exception to this payment-plan transaction with SET LOCAL; the task MaxTime and bounded plan slice remain the safety limits, while every unrelated session keeps the global timeout."

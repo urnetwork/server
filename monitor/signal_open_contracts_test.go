@@ -11,6 +11,110 @@ import (
 	"time"
 )
 
+func openContractsAggregateFixture() requiredAggregateFixture {
+	return requiredAggregateFixture{NewOpenContractsSignal, "WHERE open = true", Row{"50000", "1000", "0"}}
+}
+
+func TestOpenContractsAggregateShape(t *testing.T) {
+	testRequiredAggregateShape(t, openContractsAggregateFixture())
+}
+
+func TestOpenContractsAggregateRunLoop(t *testing.T) {
+	testRequiredAggregateRunLoop(t, openContractsAggregateFixture())
+}
+
+func TestOpenContractsAggregateUnknownPreservesTrend(t *testing.T) {
+	for _, test := range requiredAggregateBadShapes(openContractsAggregateFixture().healthyRow) {
+		t.Run(test.name, func(t *testing.T) {
+			for _, seeded := range []bool{false, true} {
+				name := "uninitialized"
+				if seeded {
+					name = "previous valid count"
+				}
+				t.Run(name, func(t *testing.T) {
+					signal := NewOpenContractsSignal()
+					probe := signal.(*signalAdapter).probe.(*pgOpenSetProbe)
+					if seeded {
+						probe.initialized, probe.lastCount = true, 170000
+					}
+					beforeInitialized, beforeCount := probe.initialized, probe.lastCount
+					rows := test.rows
+					reads := 0
+					source := &syntheticSource{postgresFn: func(string) ([]Row, error) { reads++; return rows, nil }}
+					m := NewWithSignals(syntheticSettings(source), signal)
+					alerts, err, panicked := runRequiredAggregateSafely(m)
+					if panicked {
+						t.Error("unknown open-set aggregate panicked")
+					} else {
+						if err == nil {
+							t.Error("unknown open-set aggregate was accepted")
+						}
+						requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+					}
+					if probe.initialized != beforeInitialized || probe.lastCount != beforeCount || reads != 1 {
+						t.Error("unknown aggregate changed the open-set adjacent-sample state")
+					}
+					rows = []Row{{"160000", "1000", "0"}}
+					alerts, err = m.Run(context.Background())
+					if err != nil || reads != 2 || !probe.initialized || probe.lastCount != 160000 {
+						t.Fatal("valid continuation did not observe the next real count exactly once")
+					}
+					if seeded {
+						if len(alerts) != 0 {
+							t.Error("fall from the last valid count became a manufactured rise")
+						}
+					} else if len(alerts) != 1 || !strings.Contains(alerts[0].Symptom, "trend is warming up") {
+						t.Error("unknown first observation consumed the valid sample's trend warmup")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOpenContractsAggregateValidBands(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		counts []int
+		want   int
+	}{
+		{name: "observed zero", counts: []int{0}},
+		{name: "threshold equality", counts: []int{150000}},
+		{name: "warmup above threshold", counts: []int{150001}, want: 1},
+		{name: "rising", counts: []int{160000, 170000}, want: 1},
+		{name: "flat", counts: []int{170000, 170000}},
+		{name: "falling", counts: []int{170000, 160000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+				count := test.counts[reads]
+				reads++
+				return []Row{{strconv.Itoa(count), "0", "0"}}, nil
+			}}
+			signal := NewOpenContractsSignal()
+			m := NewWithSignals(syntheticSettings(source), signal)
+			var alerts Alerts
+			for range test.counts {
+				var err error
+				alerts, err = m.Run(context.Background())
+				if err != nil {
+					t.Fatal("valid open-set aggregate became unknown")
+				}
+			}
+			if len(alerts) != test.want || reads != len(test.counts) || signal.Cadence() != 5*time.Minute {
+				t.Fatal("valid open-set threshold, trend or cadence changed")
+			}
+			if test.want != 0 {
+				alert := requireAlertClass(t, alerts, "open-set-size")
+				if alert.SignalID != signal.ID() || alert.Target != "pg-1" || alert.Severity != SeverityWarn || alert.Sustain != 3 {
+					t.Error("valid open-set finding changed identity or escalation")
+				}
+			}
+		})
+	}
+}
+
 // Adjacent samples distinguish warmup, decline, rise, and flat high counts.
 func TestOpenContractsSignalSyntheticOpenSetBacklog(t *testing.T) {
 	counts := []int{160000, 159000, 161000, 161000}
@@ -45,7 +149,7 @@ func TestOpenContractsSignalSyntheticOpenSetBacklog(t *testing.T) {
 	if !strings.Contains(rising.Symptom, "rising (previous 159000)") ||
 		!strings.Contains(rising.Observed, "delta=2000") ||
 		!strings.Contains(rising.Observed, "older_5m=120000 older_30m=8000") ||
-		!strings.Contains(rising.Mechanism, "cohorts of up to 25,000") ||
+		!strings.Contains(rising.Mechanism, "independent open and disputed scans capped at 25,000 each") ||
 		!strings.Contains(rising.Mechanism, "older deployments used 100,000") ||
 		!strings.Contains(rising.Context, "retention-fanout") ||
 		!strings.Contains(rising.Verify, "older-than-five-minute cohort falls") {
@@ -133,6 +237,11 @@ func TestOpenContractsSignalActionRequiresCausalAttribution(t *testing.T) {
 			"count alone does not establish a retention defect",
 			"only after that cause is confirmed in the running path",
 			"Do not raise closer concurrency while PostgreSQL write/vacuum debt is present",
+			"complete stored error and next run time",
+			"underfunded disputed row",
+			"preserve its settlement guard and reservation",
+			"terminal-verified sibling progress",
+			"without inferring that cause from the backlog count",
 		} {
 			if !strings.Contains(alert.Action, want) {
 				t.Errorf("%s: emitted action omitted causal qualifier %q", c.name, want)
@@ -140,6 +249,11 @@ func TestOpenContractsSignalActionRequiresCausalAttribution(t *testing.T) {
 		}
 		if strings.Contains(alert.Action, "Fix or roll out the bounded retention path") {
 			t.Errorf("%s: emitted action still assumes an unproved retention cause", c.name)
+		}
+		if !strings.Contains(alert.Mechanism, "deduplicated union can contain up to 50,000 candidates") ||
+			!strings.Contains(alert.Context, "Filtered task-name logs can omit joined-error continuation lines") ||
+			!strings.Contains(alert.Verify, "unresolved financial rejection remains a task failure warning") {
+			t.Errorf("%s: checkpoint/financial unknown qualifiers missing", c.name)
 		}
 		if !strings.Contains(alert.Markdown(), "### Action\n\n"+alert.Action+"\n\n### Verify\n") {
 			t.Errorf("%s: Markdown did not preserve the qualified action", c.name)

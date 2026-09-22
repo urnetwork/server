@@ -2022,6 +2022,10 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	}
 }
 
+// Packet-sized singleton scratch avoids two TCP writes without retaining a
+// full 16 KiB batch for every sparse exchange sender.
+const exchangeSingletonWriteStorageByteCount = 2 * 1024
+
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
@@ -2038,6 +2042,9 @@ type ExchangeBuffer struct {
 	// buffer writes from a single goroutine, so the backing is reused across
 	// batches instead of allocating one per flush.
 	writeBuffers net.Buffers
+	// The single writer allocates this only for a non-empty message that fits.
+	// Receive-only, idle, and oversized-only senders retain no payload scratch.
+	writeStorage []byte
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
@@ -2098,8 +2105,22 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 // FIXME resident transport can have write backpressure timeout
 
 func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
+	if self.writeStorage == nil &&
+		0 < len(transferFrameBytes) &&
+		len(transferFrameBytes) <= exchangeSingletonWriteStorageByteCount-4 &&
+		len(transferFrameBytes) <= self.settings.FramerSettings.MaxMessageLen {
+		storageByteCount := exchangeSingletonWriteStorageByteCount
+		if self.settings.FramerSettings.MaxMessageLen < storageByteCount-4 {
+			storageByteCount = self.settings.FramerSettings.MaxMessageLen + 4
+		}
+		self.writeStorage = make([]byte, storageByteCount)
+	}
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	err := self.framer.Write(conn, transferFrameBytes)
+	err := self.framer.WriteBatchWithStorage(
+		conn,
+		[][]byte{transferFrameBytes},
+		self.writeStorage,
+	)
 	if err == nil {
 		recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
 	}

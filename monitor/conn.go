@@ -98,12 +98,14 @@ func (l *hostCommandLimiter) acquire(ctx context.Context, host string) (func(), 
 
 // host is one monitored host from the inventory (vault/<env>/monitor.yml).
 type host struct {
-	name        string
-	lanIp       string // resolved from config settings.yml routes (lan mode)
-	overlayIp   string // from monitor.yml (overlay mode)
-	roles       []string
-	sshUser     string // optional host-specific override
-	sshKeyPaths []string
+	scopeEndpoints []string
+	disabled       bool
+	name           string
+	lanIp          string // resolved from config settings.yml routes (lan mode)
+	overlayIp      string // from monitor.yml (overlay mode)
+	roles          []string
+	sshUser        string // optional host-specific override
+	sshKeyPaths    []string
 	// redis-cluster hosts only
 	redisEntryPort        int
 	redisPorts            []int
@@ -168,7 +170,10 @@ type monitorConfig struct {
 	sshKeyPaths []string
 	addressMode string
 
-	hosts []*host
+	hosts                 []*host
+	routers               []*host
+	disabledHosts         []*host
+	routerGenerationCheck func(context.Context) (bool, error)
 
 	pgPort        int
 	pgbouncerPort int
@@ -184,6 +189,7 @@ type monitorConfig struct {
 	expectedSourceIPv6 string
 	dnsAliases         DNSAliasSettings
 	mimirPublishers    MimirPublisherSettings
+	publicUdp          PublicUdpSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

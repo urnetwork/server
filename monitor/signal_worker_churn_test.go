@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+func TestWorkerChurnOptionalLifecycleErrorsStayPrivate(t *testing.T) {
+	testWorkerOptionalLifecycleErrorPrivacy(t, NewWorkerChurnSignal, "worker-cpu-allocation-churn")
+}
+
 func workerScorePhaseFixtureJSON(t *testing.T, now time.Time, host, block, instance string, complete bool) string {
 	t.Helper()
 	result := []any{}

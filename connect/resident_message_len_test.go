@@ -28,16 +28,19 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 	settings := DefaultExchangeSettings()
 
 	minLen := int(connect.DefaultClientSettings().MinimumMessageLenLimit())
-	const observedRuntimeHandshakeCarrierByteCount = 4950
+	// Use a synthetic carrier larger than the observed envelope that exceeded
+	// the old 8-KiB cap. The round trip below separately proves the complete
+	// bounded floor.
+	const syntheticHandshakeCarrierByteCount = 10 * 1024
 
 	// Preserve the integrated producer regression independently of the shared
 	// minimum. A smaller shared value would otherwise make this test round-trip
 	// that same smaller value and miss the original resident rejection.
-	if settings.FramerSettings.MaxMessageLen < observedRuntimeHandshakeCarrierByteCount {
+	if settings.FramerSettings.MaxMessageLen < syntheticHandshakeCarrierByteCount {
 		t.Fatalf(
-			"resident exchange framer MaxMessageLen %d < observed runtime handshake carrier %d",
+			"resident exchange framer MaxMessageLen %d < synthetic handshake carrier %d",
 			settings.FramerSettings.MaxMessageLen,
-			observedRuntimeHandshakeCarrierByteCount,
+			syntheticHandshakeCarrierByteCount,
 		)
 	}
 

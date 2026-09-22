@@ -266,6 +266,7 @@ DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS
     sudo -n docker build \
     --platform linux/amd64 \
     --provenance=false \
+    --no-cache \
     --pull=false \
     --network none \
     --cgroup-parent "$build_cgroup_parent" \

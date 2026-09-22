@@ -186,7 +186,9 @@ func TestVacuumHealthSignalExplainsBoundedCloseRecoveryWriter(t *testing.T) {
 		"bounded per-contract CloseExpiredContracts",
 		"not an old MVCC pin",
 		"open-contract signal is authoritative",
-		"25,000-contract task checkpoint",
+		"independent 25,000-row open and disputed scan caps",
+		"executor provenance proves the older limit",
+		"merged count above 25,000 alone does not prove an old artifact",
 		"Do not cancel the closer",
 		"Older open-contract buckets fall",
 	} {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
@@ -110,6 +111,80 @@ func TestFindProviders2SampleExport(t *testing.T) {
 	connect.AssertEqual(t, len(fp.ChosenClientIds), 2)
 	connect.AssertEqual(t, fp.ChosenClientIds[0], ids[3].Bytes())
 	connect.AssertEqual(t, fp.ChosenClientIds[1], ids[2].Bytes())
+}
+
+func TestFindProviders2OutcomeLabelsAreBoundedAndClassifyProductResult(t *testing.T) {
+	locationID := server.NewId()
+	groupID := server.NewId()
+	for _, tc := range []struct {
+		name         string
+		args         *FindProviders2Args
+		country      string
+		wantFamily   string
+		wantLocation string
+		wantBand     string
+	}{
+		{
+			name: "ordinary IPv6 group is a small list",
+			args: &FindProviders2Args{
+				Specs:    []*ProviderSpec{{LocationGroupId: &groupID}},
+				IpFamily: "v6-capable",
+			},
+			country: "US", wantFamily: "v6", wantLocation: "group", wantBand: "1-2",
+		},
+		{
+			name: "mixed request with malformed country remains bounded",
+			args: &FindProviders2Args{
+				Specs: []*ProviderSpec{{LocationId: &locationID}, {BestAvailable: true}},
+			},
+			country: "not-a-country", wantFamily: "any", wantLocation: "mixed", wantBand: "0",
+		},
+		{
+			name:    "fixed client request is direct",
+			args:    &FindProviders2Args{IpFamily: "v4-only"},
+			country: "ca", wantFamily: "v4", wantLocation: "direct", wantBand: "10+",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := findProviders2OutcomeIpFamily(tc.args.IpFamily); got != tc.wantFamily {
+				t.Fatalf("family = %q, want %q", got, tc.wantFamily)
+			}
+			if got := findProviders2OutcomeLocationKind(tc.args); got != tc.wantLocation {
+				t.Fatalf("location kind = %q, want %q", got, tc.wantLocation)
+			}
+			resultCount := 0
+			switch tc.wantBand {
+			case "1-2":
+				resultCount = 2
+			case "10+":
+				resultCount = 10
+			}
+			if got := findProviders2OutcomeCountBand(resultCount); got != tc.wantBand {
+				t.Fatalf("result band = %q, want %q", got, tc.wantBand)
+			}
+		})
+	}
+}
+
+func TestRecordFindProviders2OutcomeRecordsReturnedCountBand(t *testing.T) {
+	groupID := server.NewId()
+	args := &FindProviders2Args{
+		Specs:        []*ProviderSpec{{LocationGroupId: &groupID}},
+		RankMode:     RankModeSpeed,
+		IpFamily:     "v6-capable",
+		ForceMinimum: false,
+	}
+	counter, err := findProviders2OutcomesTotal.GetMetricWithLabelValues(
+		"v6", "group", "us", RankModeSpeed, "false", "1-2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := testutil.ToFloat64(counter)
+	recordFindProviders2Outcome(args, "US", 2)
+	if got := testutil.ToFloat64(counter); got != before+1 {
+		t.Fatalf("outcome counter = %v, want %v", got, before+1)
+	}
 }
 
 func TestTopFindProviders2CandidatesDoesNotSortWholePool(t *testing.T) {

@@ -6,6 +6,7 @@
 package monitor
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -28,7 +29,9 @@ type monitorYaml struct {
 		IdentityFiles []string `yaml:"identity_files"`
 		KeyPaths      []string `yaml:"key_paths"`
 	} `yaml:"ssh"`
-	AddressMode string `yaml:"address_mode"`
+	AddressMode string            `yaml:"address_mode"`
+	Routers     []RouterSettings  `yaml:"routers"`
+	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
 	Hosts       []struct {
 		Name             string   `yaml:"name"`
 		LANIp            string   `yaml:"lan_ip"`
@@ -260,6 +263,8 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	}
 	stConfiguration := loadSTConfigurationObservation(env)
 	settings := SignalSettings{
+		Routers:                cloneRouterSettings(y.Routers),
+		PublicUdp:              clonePublicUdpSettings(y.PublicUdp),
 		Environment:            env,
 		PublicDomain:           strings.TrimSpace(services.Domain),
 		WebsiteDomain:          activeWebsiteDomainFromServices(services),
@@ -302,11 +307,8 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	settings = settings.withDefaults()
 	routes := lanRoutes()
 	for _, configured := range y.Hosts {
-		if configured.Disabled {
-			continue
-		}
 		lanAddress := strings.TrimSpace(configured.LANIp)
-		if lanAddress == "" {
+		if lanAddress == "" && !configured.Disabled {
 			lanAddress = routes[configured.Name]
 		}
 		h := HostSettings{
@@ -319,6 +321,13 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
 			PublicLB:       clonePublicLBSettings(publicLBByHost[configured.Name]),
 			Proxy:          cloneProxyHostSettings(proxyByHost[configured.Name]),
+		}
+		if configured.Disabled {
+			if configured.Proxy != nil && configured.Proxy.PublicHostname != "" {
+				h.scopeEndpoints = append(h.scopeEndpoints, configured.Proxy.PublicHostname)
+			}
+			settings.disabledHosts = append(settings.disabledHosts, h)
+			continue
 		}
 		if grafanaHosts[configured.Name] {
 			h.Roles = appendRole(h.Roles, "grafana")
@@ -379,10 +388,39 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		}
 		settings.Hosts = append(settings.Hosts, h)
 	}
+	if len(settings.Routers) != 0 {
+		generation, err := routerDesiredInputGeneration(servicesResource)
+		if err != nil {
+			return SignalSettings{}, err
+		}
+		settings.routerDesiredGeneration = generation
+	}
 	if err := settings.validate(); err != nil {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// The existing narrow LB projection omits router intent. Compare complete
+// desired resource values only in memory; never render these fingerprints.
+func routerDesiredInputGeneration(servicesResource *server.SimpleResource) ([32]byte, error) {
+	inputs := map[string]any{}
+	if err := servicesResource.UnmarshalYamlE(&inputs); err != nil {
+		return [32]byte{}, errors.New("router desired services resource unavailable")
+	}
+	var settingsInput any
+	if resource, err := server.Config.SimpleResource("settings.yml"); err == nil {
+		if err := resource.UnmarshalYamlE(&settingsInput); err != nil {
+			return [32]byte{}, errors.New("router desired settings resource unavailable")
+		}
+	} else if !errors.Is(err, server.ErrResourceNotFound) {
+		return [32]byte{}, errors.New("router desired settings resource unavailable")
+	}
+	encoded, err := yaml.Marshal(map[string]any{"services": inputs, "settings": settingsInput})
+	if err != nil {
+		return [32]byte{}, errors.New("router desired resources invalid")
+	}
+	return sha256.Sum256(encoded), nil
 }
 
 func dnsAliasSettingsFromMonitorYaml(y monitorYaml) DNSAliasSettings {

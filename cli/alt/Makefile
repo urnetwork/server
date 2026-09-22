@@ -1,8 +1,8 @@
 GOBUILD=go build -trimpath
 
-.PHONY: all clean build init warp_build warp_build_image
+.PHONY: all clean build warp_build warp_build_image
 
-all: init clean build
+all: clean build
 
 clean:
 	rm -rf build
@@ -20,11 +20,8 @@ warp_build:
 warp_build_image:
 	docker buildx build --progress=plain \
 		--build-arg warp_env=${WARP_ENV} \
-		--platform linux/arm64/v8,linux/amd64 \
-		-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
-		--push \
-		.
-
-init:
-	go clean -cache
-	go clean -modcache
+	--platform linux/arm64/v8,linux/amd64 \
+	-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
+	--no-cache \
+	--push \
+	.

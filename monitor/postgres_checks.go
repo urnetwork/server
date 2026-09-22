@@ -56,9 +56,13 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
-	openCount := atoiRow(rows[0], 0)
-	olderFiveMinutes := atoiRow(rows[0], 1)
-	olderThirtyMinutes := atoiRow(rows[0], 2)
+	row, err := pgAggregateRow(rows, 3)
+	if err != nil {
+		return nil, err
+	}
+	openCount := atoiRow(row, 0)
+	olderFiveMinutes := atoiRow(row, 1)
+	olderThirtyMinutes := atoiRow(row, 2)
 
 	previous, trendReady := self.observe(openCount)
 	rising := trendReady && previous < openCount
@@ -73,14 +77,14 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			probeId: "pg/open-set-size", tier: tierWarn,
 			class: "open-set-size", target: target, sustain: 3,
 			symptom:   symptom,
-			mechanism: "CloseExpiredContracts settles contracts older than five minutes in checkpointed cohorts of up to 25,000 in current source (older deployments used 100,000). A growing old cohort means settlement throughput is below creation; a mostly-young spike instead points to demand or reconnect churn.",
+			mechanism: "CloseExpiredContracts selects contracts older than five minutes with independent open and disputed scans capped at 25,000 each in current source (older deployments used 100,000 per scan). Their deduplicated union can contain up to 50,000 candidates; selected rows are not verified closes. A growing old cohort means settlement throughput is below creation; a mostly-young spike instead points to demand or reconnect churn.",
 			baseline:  "10–50k healthy (29,981 steady state after 2026-07-17); growth = closes not keeping up, and the 2.3 landmine plan degrades linearly with this number",
 			observed:  observed,
 			evidence:  fmt.Sprintf("open age buckets: total=%d older_5m=%d older_30m=%d", openCount, olderFiveMinutes, olderThirtyMinutes),
-			context:   "Compare CloseExpiredContracts live/completed duration with the retention-fanout signal and transfer_contract autovacuum phase. A full cohort with sub-second worker transactions can still be delayed by persisted write/vacuum debt after the retention query itself clears.",
-			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
-			verify:    "The older-than-five-minute cohort falls on consecutive samples, close cohorts return to seconds, and the total open set drains toward 10–50k.",
-			playbook:  "SIGNALS.md 2.6 and 2.10",
+			context:   "Compare CloseExpiredContracts live/completed duration, complete stored error and next run time with the retention-fanout signal and transfer_contract autovacuum phase. A short accounting-rejected attempt can leave the singleton in long backoff despite independently committed siblings; a fast retry does not resolve the financial rejection. Filtered task-name logs can omit joined-error continuation lines. A full cohort with sub-second worker transactions can also be delayed by persisted write/vacuum debt after the retention query itself clears.",
+			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, complete stored error and next run time, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. If exact private evidence verifies an underfunded disputed row, preserve its settlement guard and reservation; distinguish terminal-verified sibling progress with a prompt accounted-for retry from a long global backoff, without inferring that cause from the backlog count. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
+			verify:    "The older-than-five-minute cohort falls on consecutive samples and the total open set drains toward 10–50k. Confirm terminal-verified sibling progress and bounded next attempts; any unresolved financial rejection remains a task failure warning even when retries are prompt. A failed whole batch is not a successful task completion.",
+			playbook:  "SIGNALS.md 1.2, 2.6, 2.10 and 5.7",
 		}}, nil
 	}
 	return []finding{healthyFinding("pg/open-set-size", tierWarn, "open-set-size", target)}, nil
@@ -291,7 +295,11 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err != nil {
 		return nil, err
 	}
-	count := int64(atoiRow(rows[0], 0))
+	row, err := pgAggregateRow(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	count := int64(atoiRow(row, 0))
 	rate, rateReady := self.observe(count, time.Now())
 	if !rateReady {
 		return []finding{
@@ -428,7 +436,11 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 	if err != nil {
 		return nil, err
 	}
-	gapS := atoiRow(rows[0], 0)
+	row, err := pgAggregateRow(rows, 1)
+	if err != nil {
+		return nil, err
+	}
+	gapS := atoiRow(row, 0)
 
 	if gapS < 0 || gapS > 90*60 {
 		activeLog, activeLogSource, activeLogErr := readTaskLifecycleLog(
@@ -805,7 +817,7 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			strings.Contains(lowerQuery, "set outcome") && strings.Contains(lowerQuery, "close_time") {
 			mechanism += " The selected horizon is one bounded per-contract CloseExpiredContracts transaction. During backlog recovery, many short committed closes legitimately create a new dead-row cohort; a seconds-old closer is workload evidence, not an old MVCC pin or the legacy multi-million-row retention fan-out."
 			context += " The open-contract signal is authoritative for whether the closer is draining. Compare its five- and 30-minute age buckets and the active close-task duration before attributing this dead-row wave to a stuck writer."
-			action = "Let the bounded close cohort and progressing autovacuum run, and roll out the 25,000-contract task checkpoint. Do not cancel the closer, raise its concurrency, or revive a draining backlog merely to reduce the current dead-tuple estimate."
+			action = "Let the bounded close cohort and progressing autovacuum run. Retain the independent 25,000-row open and disputed scan caps; roll out that existing checkpoint only where executor provenance proves the older limit. A merged count above 25,000 alone does not prove an old artifact. Do not cancel the closer, raise its concurrency, or revive a draining backlog merely to reduce the current dead-tuple estimate."
 			verify = "Older open-contract buckets fall, each close cohort checkpoints before its deadline, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples after the backlog drains."
 		} else if isPaymentPlannerVacuumHorizon(r.str(20)) {
 			mechanism += " The selected horizon is the Payout payment planner building its bounded temp_account_payment working set. This statement reads transfer_contract and can retain an MVCC snapshot while the plan runs, but it is not the unbounded transfer_contract retention writer that produced the dead-row wave."

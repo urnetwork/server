@@ -2243,21 +2243,14 @@ func (self *TaskWorker) EvalTasks(n int) (
 				// - target not found (deploy version skew): the count still
 				//   advances (visibility) but the exponent clamps low, so the
 				//   retry converges to ~16s instead of the backoff cap
-				errorCountDelta := 1
-				backoffMaxExponent := rescheduleBackoffMaxExponent
-				if errors.Is(err, ErrDrained) {
-					errorCountDelta = 0
-					backoffMaxExponent = 0
-				} else if errors.Is(err, ErrTargetNotFound) {
-					backoffMaxExponent = targetNotFoundBackoffMaxExponent
-				}
-				rescheduleTime := now.Add(errorRescheduleDelay(
-					RescheduleTimeout,
-					RescheduleBackoffMaxTimeout,
+				// A fully classified target can explicitly retain its existing
+				// cadence while preserving this same failing task and count.
+				delay, errorCountDelta := taskErrorRetryDelay(
+					err,
 					tasks[taskId].RescheduleErrorCount,
-					backoffMaxExponent,
 					mathrand.Float64(),
-				))
+				)
+				rescheduleTime := now.Add(delay)
 				batch.Queue(
 					`
 						UPDATE pending_task

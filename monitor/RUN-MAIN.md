@@ -750,6 +750,16 @@ that fails for the reproduced mechanism and passes for the fix. Keep a monitor
 probe as the production guard; do not move application behavior into
 `server/monitor`.
 
+A RED receipt must show that the exact expected causal assertion was reached;
+an expected test name with `action=fail`, or native exit 1 alone, is insufficient.
+Separately classify preflight, missing synthetic fixtures, compile failures,
+retry-wrapped setup panics and outer timeouts, and preserve those failed attempts
+without calling them reproductions. Pin the complete local-only resource profile
+and expose the first failure with the existing fail-fast gate setting; never use
+production resources to make a fixture pass. Any derived metric in an evidence
+receipt must carry its unit and expression so rates per second and per minute
+cannot be silently exchanged.
+
 For every iOS/Apple issue, cross-validate the same failure mechanism on Android,
 Windows, Linux, macOS, `mmm/ur.io`, and `extension` before closing the finding.
 This applies to the initial cause, adjacent defects, and the proposed fix.
