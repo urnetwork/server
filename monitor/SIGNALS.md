@@ -4676,12 +4676,16 @@ recorded baseline, §2.9 has complete current cache documents, and successful
 provider contracts recover. Do not clear Redis keys, weaken quality/reliability
 gates, or fabricate provider requests to manufacture recovery.
 
-Implementation convention: SIGNALS.md §2.9a (`provider-count`) maps to
-`signal_provider_count.go` and `signal_provider_count_test.go`. The probe
-queries only the bounded API outcome metric and compares it with a bounded
-rolling baseline. Synthetic tests must cover an effective-empty cohort, a
-small-list regression, a legitimate explicit exclusion, an IP-family-only
-failure, missing telemetry, and Markdown rendering with no identifiers.
+Implementation prerequisite: API export
+`urnetwork_findproviders2_outcomes_total` must be deployed before the monitor
+reducer can observe this signal. SIGNALS.md §2.9a (`provider-count`) then maps
+to `signal_provider_count.go` and `signal_provider_count_test.go`; until that
+probe is registered, this is an explicit active coverage gap, never a healthy
+provider-count result. The probe queries only the bounded API outcome metric
+and compares it with a bounded rolling baseline. Synthetic tests must cover an
+effective-empty cohort, a small-list regression, a legitimate explicit
+exclusion, an IP-family-only failure, missing telemetry, and Markdown rendering
+with no identifiers.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
