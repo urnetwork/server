@@ -1,0 +1,20 @@
+{{define "headline"}}UPDATE YOUR PROVIDER{{end}}
+{{define "why"}}You received this because this address administers a URnetwork
+network with a provider that appears to use older software and is failing
+current connection checks.{{end}}
+{{define "content"}}
+Network: {{.NetworkName}}
+
+One or more providers on this network appear to be using an older
+URnetwork version and are not passing current connection checks. They
+may be unable to serve traffic until updated.
+
+Please update URnetwork on each device providing for this network to
+the latest available version, then check that each provider reconnects.
+
+Get the latest version: https://ur.io/install
+
+Already updated, or need help finding the provider? Contact
+support@ur.io. We will never ask for your password or private keys by
+email.
+{{end}}
