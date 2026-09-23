@@ -18115,6 +18115,20 @@ least-privilege read-only allocation inventory surface before interpreting
 `proxy-path` readiness on these hosts; recheck the phase after any identity or
 runtime permission change.
 
+An undeployed, least-privilege repair is prepared in Xops: `run-edges.sh`
+will install a root-owned, no-argument `monitor-proxy-allocations` helper and
+an exact sudoers command on Crisp and Fireside only. The helper uses the
+local Docker socket to read only running Main Proxy names and their
+`WARP_PORTS`, then requests `/status` on the mapped loopback port. It emits
+only validated `name|ports|status` rows, never the inspected environment or
+Docker errors. The monitor prefers it when installed; before installation it
+retains the old read-only discovery path and current access-denied
+`cannot-observe` state. A present but unauthorized/failing helper is an
+observation failure, not a reason to fall back to broad Docker access. This
+preparation does not authorize an Xops rollout; after a separately approved
+deployment, prove current allocation rows and internal readiness on each
+host before evaluating the public handshake layers below.
+
 Proxy health has five layers; none substitutes for the next:
 
 1. **Current allocation readiness:** resolve the running container's current

@@ -101,6 +101,10 @@ const proxyAllocationMarker = "monitor-signal-14.5-allocations"
 
 func discoverProxyAllocations(ctx context.Context, env *probeEnv, target *host) ([]proxyAllocation, error) {
 	out, err := env.runner.shell(ctx, target, `# `+proxyAllocationMarker+`
+if [ -x /usr/local/sbin/monitor-proxy-allocations ]; then
+  /usr/bin/sudo -n /usr/local/sbin/monitor-proxy-allocations
+  exit $?
+fi
 names=$(docker ps --format '{{.Names}}')
 docker_status=$?
 if [ "$docker_status" -ne 0 ]; then

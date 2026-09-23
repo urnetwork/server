@@ -280,6 +280,31 @@ func TestProxyPathSignalReportsBlockWithNoReadyAllocation(t *testing.T) {
 	}
 }
 
+func TestProxyPathAllocationDiscoveryPrefersRestrictedHelper(t *testing.T) {
+	cfg := &monitorConfig{env: "main", addressMode: addressModeOverlay, commandTimeout: time.Second}
+	runner := newRunner(cfg)
+	runner.runSSH = func(_ context.Context, args []string, _ string) (string, string, error) {
+		command := args[len(args)-1]
+		helper := strings.Index(command, "/usr/bin/sudo -n /usr/local/sbin/monitor-proxy-allocations")
+		fallback := strings.Index(command, "names=$(docker ps")
+		if !strings.Contains(command, proxyAllocationMarker) ||
+			!strings.Contains(command, "if [ -x /usr/local/sbin/monitor-proxy-allocations ]; then") ||
+			helper < 0 || fallback <= helper ||
+			!strings.Contains(command, "exit $?") {
+			t.Fatal("allocation discovery did not prefer the restricted helper and stop on its failure")
+		}
+		return "main-proxy-g1-synthetic|80:12080,8080:12081|204\n", "", nil
+	}
+	target := &host{name: "synthetic-proxy", overlayIp: "192.0.2.91"}
+	allocations, err := discoverProxyAllocations(context.Background(), &probeEnv{cfg: cfg, runner: runner}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allocations) != 1 || allocations[0].block != "g1" || allocations[0].ports[80] != 12080 || allocations[0].internalStatus != 204 {
+		t.Fatalf("restricted helper output was not parsed: %+v", allocations)
+	}
+}
+
 func TestProxyPathToleratesUnreadyDrainingSiblingWhenBlockRemainsReady(t *testing.T) {
 	source := &syntheticSource{
 		localFn: func(name string, _ ...string) (string, error) {
