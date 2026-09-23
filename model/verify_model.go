@@ -426,14 +426,7 @@ func updateVerifyEligibleMembership(
 
 	eligible := false
 	server.Redis(ctx, func(r server.RedisClient) {
-		liveHashes := verifyLiveEgressHashes(ctx, r, clientId, nowMs)
-		if len(liveHashes) == 1 {
-			forward, err := r.Get(ctx, verifyEgressKeyFromHex(liveHashes[0])).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				server.Raise(err)
-			}
-			eligible = forward == clientId.String()
-		}
+		eligible = verifyClientHasLiveEgress(ctx, r, clientId, nowMs)
 	})
 
 	if eligible {
@@ -457,6 +450,20 @@ func updateVerifyEligibleMembership(
 			r.SRem(ctx, verifyEligibleKey, clientId.String())
 		}
 	})
+}
+
+// An eligible-set entry is only a candidate index. Expiry and connection
+// changes must pass the same exact-address bijection again before assignment.
+func verifyClientHasLiveEgress(ctx context.Context, r server.RedisClient, clientId server.Id, nowMs uint64) bool {
+	liveHashes := verifyLiveEgressHashes(ctx, r, clientId, nowMs)
+	if len(liveHashes) != 1 {
+		return false
+	}
+	forward, err := r.Get(ctx, verifyEgressKeyFromHex(liveHashes[0])).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		server.Raise(err)
+	}
+	return forward == clientId.String()
 }
 
 // ResolveVerifyEgress maps a request source ip to the provider currently
@@ -605,6 +612,13 @@ func SampleVerifyNextHop(
 			candidateId, err := server.ParseId(candidate)
 			if err != nil {
 				r.SRem(ctx, verifyEligibleKey, candidate)
+				continue
+			}
+			if !verifyClientHasLiveEgress(ctx, r, candidateId, uint64(server.NowUtc().UnixMilli())) {
+				// The set may outlive an address lease or race a disconnect.
+				// Never spend a token or assign an unattributable source.
+				server.Raise(r.SRem(ctx, verifyEligibleKey, candidate).Err())
+				excluded[candidate] = true
 				continue
 			}
 			provideModes, err := GetProvideModes(ctx, candidateId)
