@@ -46,8 +46,8 @@ func TestDefaultProxyDeviceManagerSettingsLoadsDeviceMemoryBudget(t *testing.T) 
 }
 
 // TestDefaultProxyDeviceManagerSettingsRejectsInvalidDeviceMemoryBudget pins
-// fail-fast startup for a malformed target; silently using the global carrier
-// budget recreates the production starvation failure.
+// fail-fast startup for a malformed target; silently changing a hosted
+// device's private budget could recreate carrier starvation.
 func TestDefaultProxyDeviceManagerSettingsRejectsInvalidDeviceMemoryBudget(t *testing.T) {
 	popConfig := server.Config.PushSimpleResource(
 		"proxy.yml",
@@ -63,8 +63,7 @@ func TestDefaultProxyDeviceManagerSettingsRejectsInvalidDeviceMemoryBudget(t *te
 }
 
 // TestDefaultProxyDeviceManagerSettingsRejectsZeroDeviceMemoryBudget prevents
-// an explicit zero from opting hosted devices back into process-global
-// admission state.
+// an explicit zero from disabling hosted devices' private admission bounds.
 func TestDefaultProxyDeviceManagerSettingsRejectsZeroDeviceMemoryBudget(t *testing.T) {
 	popConfig := server.Config.PushSimpleResource(
 		"proxy.yml",

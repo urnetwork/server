@@ -104,13 +104,12 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		ctx := context.Background()
 		now := server.NowUtc()
 
-		// five finalized epochs, one hour each, the latest ending an hour ago
+		// Five synthetic completed payout periods, independent of ST.
 		windows := []model.PointsEpochWindow{}
 		for i := 0; i < 5; i += 1 {
 			end := now.Add(-time.Duration(5-i) * time.Hour)
 			windows = append(windows, model.PointsEpochWindow{Epoch: uint64(i + 1), Start: end.Add(-1 * time.Hour), End: end})
 		}
-		inWindow := func(epoch uint64) time.Time { return windows[epoch-1].Start.Add(5 * time.Minute) }
 
 		ids := []server.Id{}
 		sessions := []*session.ClientSession{}
@@ -126,7 +125,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 			sessions = append(sessions, session.Testing_CreateClientSession(ctx, jwt.NewByJwt(networkId, userId, tokenName, false, false)))
 			// network i earns 10*(5-i) points in every epoch up to i+1
 			for epoch := uint64(1); epoch <= uint64(i+1); epoch += 1 {
-				model.Testing_InsertAccountPoint(ctx, networkId, model.PointsToNanoPoints(float64(10*(5-i))), inWindow(epoch))
+				model.Testing_InsertAccountPointForBlock(ctx, networkId, model.PointsToNanoPoints(float64(10*(5-i))), epoch, now)
 			}
 		}
 		anonymous := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
@@ -144,25 +143,9 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, empty.Me.NetworkName, "points_api_a")
 		connect.AssertEqual(t, empty.Me.Anonymous, true)
 
-		// windows are faked: the rebuild never touches the chain
-		pointsLeaderboardEpochWindowFunc = func(ctx context.Context, row *model.StEpoch) (time.Time, time.Time) {
-			return windows[row.Epoch-1].Start, windows[row.Epoch-1].End
-		}
-		defer func() { pointsLeaderboardEpochWindowFunc = snEpochWindow }()
-		testDeploymentKey := model.StDeploymentKey("test:points-leaderboard")
-		pointsLeaderboardDeploymentKeyFunc = func() (model.StDeploymentKey, bool) {
-			return testDeploymentKey, true
-		}
-		defer func() { pointsLeaderboardDeploymentKeyFunc = StDeploymentKey }()
-		for _, window := range windows {
-			finalized := now
-			model.UpsertStEpoch(ctx, testDeploymentKey, &model.StEpoch{
-				Epoch:         window.Epoch,
-				StartBlock:    window.Epoch * 100,
-				Status:        model.StEpochStatusFinalized,
-				FinalizedTime: &finalized,
-			})
-		}
+		// Pin the operator clock; no chain epoch rows or ST deployment exist.
+		pointsLeaderboardOperatorWindowFunc = func(time.Time) []model.PointsEpochWindow { return windows }
+		defer func() { pointsLeaderboardOperatorWindowFunc = pointsLeaderboardOperatorWindows }()
 		rebuilt, err := RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, rebuilt.TotalRanked, int64(5))
@@ -360,10 +343,8 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 	})
 }
 
-// Missing ST deployment/finalized epochs must not turn its structurally valid
-// zero values into measured zeroes. Total-points paging remains available,
-// while epoch-derived sorts fail explicitly. The main integration test above
-// is the available control, including networks with legitimate zero streaks.
+// Before operator block 1 closes there is no completed block to measure.
+// This is the only genuine unavailable-window case; ST status is irrelevant.
 func TestPointsLeaderboardUnavailableEpochMetrics(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -373,10 +354,8 @@ func TestPointsLeaderboardUnavailableEpochMetrics(t *testing.T) {
 		anonymous := session.NewLocalClientSession(ctx, "source.invalid:0", nil)
 		defer anonymous.Cancel()
 
-		pointsLeaderboardDeploymentKeyFunc = func() (model.StDeploymentKey, bool) {
-			return "", false
-		}
-		defer func() { pointsLeaderboardDeploymentKeyFunc = StDeploymentKey }()
+		pointsLeaderboardOperatorWindowFunc = func(time.Time) []model.PointsEpochWindow { return nil }
+		defer func() { pointsLeaderboardOperatorWindowFunc = pointsLeaderboardOperatorWindows }()
 
 		rebuilt, err := RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
 		connect.AssertEqual(t, err, nil)

@@ -40,6 +40,10 @@ type ProviderEgressProbeBatchArgs struct {
 	AllDestinations         bool `json:"all_destinations,omitempty" yaml:"all_destinations"`
 	Bandwidth               bool `json:"bandwidth,omitempty" yaml:"bandwidth"`
 	BandwidthTimeoutSeconds int  `json:"bandwidth_timeout_seconds,omitempty" yaml:"bandwidth_timeout_seconds"`
+	// Both zero copy default limit values into a fresh task/probe-kind owner.
+	// A positive pair selects explicit limits for that same private owner.
+	TransportBudgetByteCount connect.ByteCount `json:"transport_budget_byte_count,omitempty" yaml:"transport_budget_byte_count"`
+	TransportBudgetCount     int               `json:"transport_budget_count,omitempty" yaml:"transport_budget_count"`
 }
 
 // ProviderEgressProbeArgs is the complete, durable description of one shard
@@ -128,6 +132,10 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 	}
 	if args.Bandwidth && args.BandwidthTimeoutSeconds < 1 {
 		return fmt.Errorf("provider egress probe %s bandwidth timeout must be positive when bandwidth is enabled", name)
+	}
+	if args.TransportBudgetByteCount < 0 || args.TransportBudgetCount < 0 ||
+		(args.TransportBudgetByteCount == 0) != (args.TransportBudgetCount == 0) {
+		return fmt.Errorf("provider egress probe %s transport budget byte/count limits must both be zero or both be positive", name)
 	}
 	return nil
 }
@@ -711,6 +719,21 @@ func (self *providerEgressProbePass) run(
 	return result, errors.Join(errList...)
 }
 
+// One fresh task/probe-kind owner follows all drained batches. No unrelated
+// task or full/blackhole sibling inherits this mutable admission budget.
+func providerEgressProbeTunnelConfig(
+	base providertunnel.Config,
+	args ProviderEgressProbeBatchArgs,
+) providertunnel.Config {
+	byteCount, transportCount := args.TransportBudgetByteCount, args.TransportBudgetCount
+	if byteCount == 0 && transportCount == 0 {
+		limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
+		byteCount, transportCount = limits.TotalByteCount, limits.MaxTransportCount
+	}
+	base.PlatformTransportBudget = connect.NewPlatformTransportBudget(byteCount, transportCount)
+	return base
+}
+
 // Runtime-only identity, credentials, and clients are joined to the durable
 // arguments immediately before the bounded pass begins.
 func runProviderEgressProbe(
@@ -787,10 +810,10 @@ func runProviderEgressProbe(
 		},
 		submitBlackholeChecks: reporter.SubmitBlackholeChecks,
 		blackholeOptions: fleetprobe.BlackholeOptions{
-			TunnelConfig: tunnelConfig,
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Blackhole),
 		},
 		fullOptions: fleetprobe.FullOptions{
-			TunnelConfig:   tunnelConfig,
+			TunnelConfig:   providerEgressProbeTunnelConfig(tunnelConfig, args.Full),
 			Submit:         reporter,
 			Attempts:       guardedReporter,
 			HealthResults:  guardedReporter,

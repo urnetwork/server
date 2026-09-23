@@ -526,6 +526,37 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 	}
 }
 
+func TestMigrationArtifactCatalogPinsOperatorBlockRollupSchema(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 690 {
+		t.Fatalf("operator block rollup migrations are absent: head=%d", head)
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head), nil
+		}
+		normalized := strings.Join(strings.Fields(query), " ")
+		for _, want := range []string{
+			"to_regclass('public.account_payment_block') IS NOT NULL",
+			"definition = 'PRIMARY KEY (payment_id, block_number)'",
+			"column_name = 'block_rollup_complete' AND data_type = 'boolean' AND is_nullable = 'NO'",
+			"column_name = 'block_rollup_cursor' AND data_type = 'uuid' AND is_nullable = 'YES'",
+			"index_name = 'account_payment_block_number_payment'",
+			"index_name = 'account_payment_block_rollup_pending'",
+			"index_name = 'account_point_payment_rollup'",
+			"indisvalid AND indisready",
+		} {
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("operator block rollup schema check lacks %q", want)
+			}
+		}
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("operator block rollup artifact catalog is not coherent: %+v, %v", alerts, err)
+	}
+}
+
 func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 	head := server.MigrationCount()
 	if head < 675 {

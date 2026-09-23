@@ -1216,8 +1216,8 @@ func parsePanicLogObservation(line string) panicLogObservation {
 			observation.sqlstate = match[1]
 		}
 	}
-	for index, line := range stack {
-		line = strings.TrimSpace(line)
+	for index := 0; index < len(stack); index++ {
+		line := strings.TrimSpace(stack[index])
 		if !strings.HasPrefix(line, "github.com/urnetwork/") {
 			continue
 		}
@@ -1239,6 +1239,9 @@ func parsePanicLogObservation(line string) panicLogObservation {
 			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
 			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
+			// The next record is this wrapper's already-validated source line.
+			// A trimpath build can prefix it with the application module too.
+			index++
 			continue
 		}
 		if len(owner) <= panicLogOwnerMaxBytes {

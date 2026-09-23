@@ -741,16 +741,6 @@
           "refId": "B",
           "expr": "sum(urnetwork_proxy_device_memory_tracked_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
           "legendFormat": "tracked used bytes"
-        },
-        {
-          "refId": "C",
-          "expr": "sum(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
-          "legendFormat": "admission budget bytes"
-        },
-        {
-          "refId": "D",
-          "expr": "sum(urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
-          "legendFormat": "reserved admission bytes"
         }
       ]
     },
@@ -1092,8 +1082,8 @@
     {
       "id": 27,
       "type": "timeseries",
-      "title": "device memory admission refusals / s",
-      "description": "Device opens refused at the aggregate process memory ceiling. Existing devices remain installed; sustained refusals with a saturated budget require more per-process or hardware capacity after validating actual memory headroom.",
+      "title": "proxy devices live",
+      "description": "Installed hosted devices by process. Each owns an independent 24 MiB memory target; this is not a process-wide admission ceiling. Compare with host reserve and OOM telemetry when sizing hardware.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1107,16 +1097,16 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(urnetwork_proxy_device_admission_refused_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
-          "legendFormat": "refused opens/s"
+          "expr": "max by (block, host, instance) (urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
         }
       ]
     },
     {
       "id": 28,
       "type": "timeseries",
-      "title": "device admission budget saturation by process",
-      "description": "Reserved device targets divided by the configured aggregate budget for each process generation. A positive refusal counter is authoritative; a near-ceiling ratio is context because a remainder smaller than one complete reservation can refuse admission below 1. Zero or missing budget denotes disabled or unavailable admission telemetry and must not be read as spare capacity.",
+      "title": "tracked device memory / target by process",
+      "description": "Sum of private DeviceLocal tracked usage divided by the sum of their 24 MiB targets. This is not an aggregate admission gate or total process RSS; a low ratio must not be read as host spare capacity.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1130,7 +1120,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (block, host, instance) (urnetwork_proxy_device_memory_budget_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} / clamp_min(urnetwork_proxy_device_memory_budget_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}, 1))",
+          "expr": "max by (block, host, instance) (urnetwork_proxy_device_memory_tracked_used_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"} / clamp_min(urnetwork_proxy_device_memory_target_bytes{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}, 1))",
           "legendFormat": "{{host}} {{block}} {{instance}}"
         }
       ]

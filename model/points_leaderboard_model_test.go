@@ -165,9 +165,6 @@ func TestPointsLeaderboardDb(t *testing.T) {
 		ctx := context.Background()
 		now := server.NowUtc()
 		windows := pointsTestWindows(now, 3)
-		inWindow := func(epoch uint64) time.Time {
-			return windows[epoch-1].Start.Add(10 * time.Minute)
-		}
 
 		a, b, c, d := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		Testing_CreateNetwork(ctx, a, "points_a", server.NewId())
@@ -177,10 +174,10 @@ func TestPointsLeaderboardDb(t *testing.T) {
 
 		// a: 30 points across epochs 2 and 3 (streak 2); b: 20 points in epoch 3
 		// only; c: 10 points in epoch 1 only (streak 0); d: no points
-		Testing_InsertAccountPoint(ctx, a, PointsToNanoPoints(10), inWindow(2))
-		Testing_InsertAccountPoint(ctx, a, PointsToNanoPoints(20), inWindow(3))
-		Testing_InsertAccountPoint(ctx, b, PointsToNanoPoints(20), inWindow(3))
-		Testing_InsertAccountPoint(ctx, c, PointsToNanoPoints(10), inWindow(1))
+		Testing_InsertAccountPointForBlock(ctx, a, PointsToNanoPoints(10), 2, now)
+		Testing_InsertAccountPointForBlock(ctx, a, PointsToNanoPoints(20), 3, now)
+		Testing_InsertAccountPointForBlock(ctx, b, PointsToNanoPoints(20), 3, now)
+		Testing_InsertAccountPointForBlock(ctx, c, PointsToNanoPoints(10), 1, now)
 
 		// before any rebuild
 		connect.AssertEqual(t, GetLatestPointsLeaderboardSnapshot(ctx), (*PointsLeaderboardSnapshot)(nil))
@@ -288,7 +285,7 @@ func TestPointsLeaderboardDb(t *testing.T) {
 			Start: now.Add(-30 * time.Minute),
 			End:   now.Add(30 * time.Minute),
 		})
-		Testing_InsertAccountPoint(ctx, b, PointsToNanoPoints(5), now)
+		Testing_InsertAccountPointForBlock(ctx, b, PointsToNanoPoints(5), 4, now)
 		snapshot4, err := RebuildPointsLeaderboard(ctx, windows4)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, snapshot4.LatestEpoch, uint64(4))
@@ -304,6 +301,67 @@ func TestPointsLeaderboardDb(t *testing.T) {
 	})
 }
 
+func TestPointsLeaderboardCreditsEachPaidTrafficWeekDespiteLatePosting(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		genesis := SubnetBlockGenesis
+		week := SubnetBlockDuration
+		windows := []PointsEpochWindow{
+			{Epoch: 1, Start: genesis, End: genesis.Add(week)},
+			{Epoch: 2, Start: genesis.Add(week), End: genesis.Add(2 * week)},
+		}
+		posted := genesis.Add(2*week + 10*time.Hour)
+		multiWeekNetworkId := server.NewId()
+		singleWeekNetworkId := server.NewId()
+		Testing_CreateNetwork(ctx, multiWeekNetworkId, "points_multiweek", server.NewId())
+		Testing_CreateNetwork(ctx, singleWeekNetworkId, "points_singleweek", server.NewId())
+		Testing_InsertAccountPointForBlocks(ctx, multiWeekNetworkId, PointsToNanoPoints(10), posted, 1, 2)
+		Testing_InsertAccountPointForBlock(ctx, singleWeekNetworkId, PointsToNanoPoints(5), 2, posted)
+
+		snapshot, err := RebuildPointsLeaderboard(ctx, windows)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, snapshot.EpochMetricsAvailable, true)
+		connect.AssertEqual(t, snapshot.LatestEpoch, uint64(2))
+		multiWeek := GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, multiWeekNetworkId)
+		connect.AssertEqual(t, multiWeek.TotalNanoPoints, PointsToNanoPoints(10))
+		connect.AssertEqual(t, multiWeek.BlocksWithPoints, 2)
+		connect.AssertEqual(t, multiWeek.Streak, 2)
+		singleWeek := GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, singleWeekNetworkId)
+		connect.AssertEqual(t, singleWeek.BlocksWithPoints, 1)
+		connect.AssertEqual(t, singleWeek.Streak, 1)
+	})
+}
+
+func TestPointsLeaderboardWithholdsWeeklyMetricsUntilRollupComplete(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "points_rollup_pending", server.NewId())
+		Testing_InsertAccountPointForBlock(ctx, networkId, PointsToNanoPoints(3), 1, SubnetBlockGenesis.Add(8*24*time.Hour))
+		windows := []PointsEpochWindow{{Epoch: 1, Start: SubnetBlockGenesis, End: SubnetBlockGenesis.Add(SubnetBlockDuration)}}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE account_payment SET block_rollup_complete = false WHERE network_id = $1
+			`, networkId))
+		})
+		pending, err := RebuildPointsLeaderboard(ctx, windows)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, pending.EpochMetricsAvailable, false)
+		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, pending.SnapshotId, networkId).BlocksWithPoints, 0)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE account_payment SET block_rollup_complete = true WHERE network_id = $1
+			`, networkId))
+		})
+		complete, err := RebuildPointsLeaderboard(ctx, windows)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, complete.EpochMetricsAvailable, true)
+		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, complete.SnapshotId, networkId).BlocksWithPoints, 1)
+	})
+}
+
 // An empty finalized-epoch input is persisted as unavailable, rather than
 // letting the structurally valid zero values masquerade as measured zeroes.
 // A later snapshot with a real epoch is available even when one network has
@@ -313,7 +371,7 @@ func TestPointsLeaderboardSnapshotDistinguishesUnavailableFromZero(t *testing.T)
 		ctx := context.Background()
 		networkId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "points_availability", server.NewId())
-		Testing_InsertAccountPoint(ctx, networkId, PointsToNanoPoints(1), server.NowUtc().Add(-24*time.Hour))
+		Testing_InsertAccountPointForBlock(ctx, networkId, PointsToNanoPoints(1), 999, server.NowUtc())
 
 		unavailable, err := RebuildPointsLeaderboard(ctx, nil)
 		connect.AssertEqual(t, err, nil)

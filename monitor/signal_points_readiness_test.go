@@ -2,498 +2,435 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
-const syntheticPointsDeployment = "synthetic:deployment-alpha"
+var pointsStTableReferencePattern = regexp.MustCompile(`(?i)\b(?:from|join)\s+(?:[a-z_][a-z0-9_]*\.)?st_epoch\b`)
 
-func runPointsReadinessFixture(
-	t testing.TB,
-	settings SignalSettings,
-	snapshot []Row,
-	epochs []Row,
-) Alerts {
+// All identities and aggregates here are synthetic. Legacy ST queries return
+// no history so the unchanged signal compiles and reaches the semantic RED.
+func runPointsOperatorFixture(t testing.TB, settings SignalSettings, snapshot, source []Row) (Alerts, []string, error) {
 	t.Helper()
-	queries := 0
+	queries := []string{}
 	settings.Source = &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		queries++
+		queries = append(queries, query)
 		switch {
 		case strings.Contains(query, "FROM network_points_leaderboard_snapshot"):
-			for _, want := range []string{"latest.epoch_metrics_available", "network_points_leaderboard AS ranked", "count(ranked.network_id)", "clock_timestamp() AT TIME ZONE 'UTC'"} {
-				if !strings.Contains(query, want) {
-					t.Fatalf("snapshot query is missing %q: %s", want, query)
-				}
-			}
 			return snapshot, nil
-		case strings.Contains(query, "FROM st_epoch"):
-			for _, want := range []string{"clock_timestamp() AT TIME ZONE 'UTC'", "DISTINCT ON (deployment_key)", "latest_finalized.finalized_time IS NOT NULL", "status = 'finalized'", "GROUP BY deployment_key", "LIMIT 1001"} {
-				if !strings.Contains(query, want) {
-					t.Fatalf("epoch census query is missing %q: %s", want, query)
-				}
-			}
-			return epochs, nil
+		case pointsStTableReferencePattern.MatchString(query):
+			return nil, nil
+		case strings.Contains(query, "FROM account_point AS point"):
+			return source, nil
 		default:
-			t.Fatalf("unexpected points-readiness query: %s", query)
+			t.Fatalf("unexpected points query: %s", query)
 			return nil, nil
 		}
 	}}
 	alerts, err := NewPointsReadinessSignal().Run(context.Background(), settings)
+	return alerts, queries, err
+}
+
+func syntheticPointsSnapshot(age int64, block uint64, available bool, rows uint64, positive uint64) []Row {
+	return []Row{{fmt.Sprint(age), fmt.Sprint(block), fmt.Sprint(rows), fmt.Sprint(available), fmt.Sprint(rows), fmt.Sprint(positive), fmt.Sprint(positive), fmt.Sprint(positive)}}
+}
+
+func syntheticPointsOperatorSource(block uint64, closeAge int64, missing, pending uint64, pendingAge int64) []Row {
+	return []Row{{fmt.Sprint(block), fmt.Sprint(closeAge), fmt.Sprint(missing), fmt.Sprint(pending), fmt.Sprint(pendingAge)}}
+}
+
+func requirePointsOperatorNoPage(t testing.TB, alerts Alerts) {
+	t.Helper()
+	for _, alert := range alerts {
+		if alert.Severity == SeverityPage {
+			t.Fatalf("unproved operator handoff became PAGE: %s", alert.Markdown())
+		}
+	}
+}
+
+func TestPointsOperatorReadinessAvailableWithoutSt(t *testing.T) {
+	for _, status := range []STConfigurationStatus{STConfigurationExplicitDisabled, STConfigurationUnavailable, STConfigurationEnabledInvalid, STConfigurationEnabled} {
+		for _, positive := range []uint64{0, 4} {
+			settings := syntheticSettings(nil)
+			settings.STConfigStatus = status
+			settings.VerificationEnabled = status == STConfigurationEnabled || status == STConfigurationEnabledInvalid
+			if status == STConfigurationEnabled {
+				settings.STDeploymentKey = "synthetic:unrelated-st-deployment"
+			}
+			alerts, queries, err := runPointsOperatorFixture(t, settings,
+				syntheticPointsSnapshot(60, 12, true, 10, positive),
+				syntheticPointsOperatorSource(12, 10000, 0, 0, 0))
+			if err != nil || len(alerts) != 0 {
+				t.Fatalf("valid operator snapshot depends on ST state %s (positive=%d): alerts=%+v err=%v", status, positive, alerts, err)
+			}
+			if len(queries) != 2 || pointsStTableReferencePattern.MatchString(strings.Join(queries, "\n")) {
+				t.Fatal("operator readiness still reads chain epoch history")
+			}
+		}
+	}
+}
+
+func TestPointsOperatorReadinessPendingRollupIsNotStReadiness(t *testing.T) {
+	settings := syntheticSettings(nil)
+	settings.STConfigStatus = STConfigurationExplicitDisabled
+	alerts, _, err := runPointsOperatorFixture(t, settings,
+		syntheticPointsSnapshot(60, 0, false, 10, 0), syntheticPointsOperatorSource(12, 10000, 0, 3, 950400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queries == 0 || 2 < queries {
-		t.Fatalf("points-readiness query count = %d", queries)
-	}
-	return alerts
-}
-
-func syntheticPointsSettings() SignalSettings {
-	settings := syntheticSettings(nil)
-	settings.VerificationEnabled = true
-	settings.STConfigStatus = STConfigurationEnabled
-	settings.STDeploymentKey = syntheticPointsDeployment
-	return settings
-}
-
-func syntheticPointsSnapshot(
-	ageSeconds int64,
-	latestEpoch uint64,
-	totalRanked uint64,
-	epochAvailable bool,
-	rowCount uint64,
-	positiveBlocks uint64,
-	positiveStreak uint64,
-	positiveLongest uint64,
-) []Row {
-	return []Row{{
-		fmt.Sprint(ageSeconds), fmt.Sprint(latestEpoch), fmt.Sprint(totalRanked),
-		fmt.Sprint(epochAvailable), fmt.Sprint(rowCount), fmt.Sprint(positiveBlocks),
-		fmt.Sprint(positiveStreak), fmt.Sprint(positiveLongest),
-	}}
-}
-
-func syntheticPointsEpoch(
-	deployment string,
-	finalized uint64,
-	latest uint64,
-	ageKnown bool,
-	ageSeconds int64,
-) Row {
-	return Row{
-		deployment, fmt.Sprint(finalized), fmt.Sprint(latest),
-		fmt.Sprint(ageKnown), fmt.Sprint(ageSeconds),
-	}
-}
-
-func requireNoPointsAlertClass(t testing.TB, alerts Alerts, class string) {
-	t.Helper()
-	for _, alert := range alerts {
-		if alert.Class == class {
-			t.Fatalf("unexpected alert class %q: %s", class, alert.Markdown())
-		}
-	}
-}
-
-func TestPointsReadinessSignalDiagnosesUnavailableEpochMetrics(t *testing.T) {
-	settings := syntheticPointsSettings()
-	settings.VerificationEnabled = false
-	settings.STConfigStatus = STConfigurationExplicitDisabled
-	settings.STDeploymentKey = ""
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(300, 0, 25708, false, 25708, 0, 0, 0),
-		nil,
-	)
 	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
-	for _, want := range []string{
-		"st_enabled=false",
-		"st_configuration_status=explicit-disabled",
-		"Main ST configuration is explicitly disabled",
-		"total_ranked=25708",
-		"snapshot_epoch_metrics_available=false",
-		"positive_blocks=0",
-		"already implemented and deployed",
-		"obtain the first legitimate finalized epoch",
-		"Do not add or hand-edit the field",
-		"SIGNALS.md §17.6",
-	} {
+	requirePointsOperatorNoPage(t, alerts)
+	for _, want := range []string{"source=operator-paid-traffic", "pending_rollup_points=3", "oldest_pending_point_age_seconds=950400", "not stalled duration", "bounded rollup batches"} {
 		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("unavailable alert missing %q:\n%s", want, alert.Markdown())
+			t.Fatalf("rollup diagnosis missing %q: %s", want, alert.Markdown())
 		}
 	}
-	for _, stale := range []string{
-		"serializes unavailable values and ranks as numeric zero",
-		"Add an explicit epoch-metrics availability",
-	} {
-		if strings.Contains(alert.Markdown(), stale) {
-			t.Fatalf("unavailable alert retains stale software guidance %q:\n%s", stale, alert.Markdown())
+	for _, wrong := range []string{"because the Main ST", "finalized ST epoch", "obtain the first legitimate finalized epoch"} {
+		if strings.Contains(alert.Markdown(), wrong) {
+			t.Fatalf("operator diagnosis retained unrelated closure %q", wrong)
 		}
 	}
 }
 
-func TestPointsReadinessSignalKeepsEnabledInvalidConfigurationVisible(t *testing.T) {
-	settings := syntheticPointsSettings()
-	settings.STConfigStatus = STConfigurationEnabledInvalid
-	settings.STDeploymentKey = ""
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(300, 0, 10, false, 10, 0, 0, 0),
-		nil,
-	)
+func TestPointsOperatorReadinessMissingPaymentIsVisible(t *testing.T) {
+	alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+		syntheticPointsSnapshot(60, 0, false, 10, 0), syntheticPointsOperatorSource(12, 10000, 2, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
-	for _, want := range []string{
-		"st_enabled=true",
-		"st_configuration_status=enabled-invalid",
-		"enabled Main ST configuration has no valid deployment namespace",
-	} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("enabled-invalid alert missing %q:\n%s", want, alert.Markdown())
+	if !strings.Contains(alert.Observed, "missing_payment_points=2 pending_rollup_points=0") || !strings.Contains(alert.Action, "missing links require source diagnosis") {
+		t.Fatalf("missing payment evidence was lost: %s", alert.Markdown())
+	}
+	requirePointsOperatorNoPage(t, alerts)
+}
+
+func TestPointsOperatorReadinessNewPaymentDoesNotInvalidateSnapshot(t *testing.T) {
+	for _, block := range []uint64{11, 12} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+			syntheticPointsSnapshot(60, block, true, 10, 4), syntheticPointsOperatorSource(12, 10000, 0, 1, 30))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	requireAlertOmits(t, alert, syntheticMainSTCoordinator)
-}
-
-func TestPointsReadinessSignalTreatsFinalizedEpochZeroAsAvailable(t *testing.T) {
-	settings := syntheticPointsSettings()
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 0, 10, true, 10, 0, 0, 0),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 1, 0, true, 120)},
-	)
-	if len(alerts) != 0 {
-		t.Fatalf("finalized epoch zero produced alerts: %+v", alerts)
-	}
-}
-
-func TestPointsReadinessSignalDoesNotTreatAnOpenEpochAsAvailable(t *testing.T) {
-	settings := syntheticPointsSettings()
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 0, 10, false, 10, 0, 0, 0),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 0, 0, false, 0)},
-	)
-	requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
-}
-
-func TestPointsReadinessSignalPagesOnPersistedAvailabilityContradiction(t *testing.T) {
-	settings := syntheticPointsSettings()
-	settings.VerificationEnabled = false
-	settings.STConfigStatus = STConfigurationExplicitDisabled
-	settings.STDeploymentKey = ""
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 0, 10, true, 10, 0, 0, 0),
-		nil,
-	)
-	alert := requireAlertClass(t, alerts, "points-epoch-availability-drift")
-	if alert.Severity != SeverityPage {
-		t.Fatalf("availability contradiction severity = %s, want PAGE", alert.Severity)
-	}
-	for _, want := range []string{
-		"without finalized windows",
-		"snapshot_epoch_metrics_available=true",
-		"already implemented",
-		"normal transactional leaderboard rebuild",
-		"Do not edit the availability bit",
-	} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("availability contradiction missing %q:\n%s", want, alert.Markdown())
-		}
-	}
-	requireAlertOmits(t, alert, syntheticPointsDeployment)
-}
-
-func TestPointsReadinessSignalPagesWhenUnavailableSnapshotCarriesEpochPayload(t *testing.T) {
-	settings := syntheticPointsSettings()
-	settings.VerificationEnabled = false
-	settings.STConfigStatus = STConfigurationExplicitDisabled
-	settings.STDeploymentKey = ""
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 7, 10, false, 10, 3, 2, 1),
-		nil,
-	)
-	alert := requireAlertClass(t, alerts, "points-epoch-availability-drift")
-	if alert.Severity != SeverityPage || !strings.Contains(alert.Mechanism, "snapshot payload and its availability bit") {
-		t.Fatalf("unavailable payload contradiction = %+v", alert)
-	}
-	for _, want := range []string{"Do not edit the availability bit", "semantically unavailable"} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("unavailable payload contradiction missing %q:\n%s", want, alert.Markdown())
+		alert := requireAlertClass(t, alerts, "points-block-rollup-incomplete")
+		requirePointsOperatorNoPage(t, alerts)
+		if !strings.Contains(alert.Mechanism, "not invalidated by a later pending payment") {
+			t.Fatalf("immutable snapshot boundary is missing: %s", alert.Markdown())
 		}
 	}
 }
 
-func TestPointsReadinessSignalClassifiesFinalizeToRebuildBoundary(t *testing.T) {
-	tests := []struct {
-		name              string
-		snapshotAge       int64
-		snapshotAvailable bool
-		snapshotLatest    uint64
-		finalized         uint64
-		activeLatest      uint64
-		finalizedAge      int64
-		class             string
-		severity          Severity
-		provenance        string
-		mechanism         string
-	}{
-		{
-			name:        "first finalization is newer and within budget",
-			snapshotAge: 600, snapshotAvailable: false, snapshotLatest: 0,
-			finalized: 1, activeLatest: 0, finalizedAge: 60,
-			class: "points-epoch-rebuild-pending", severity: SeverityWarn,
-			provenance: "provenance=source-newer", mechanism: "separate transactions",
-		},
-		{
-			name:        "snapshot postdates first finalization within budget",
-			snapshotAge: 60, snapshotAvailable: false, snapshotLatest: 0,
-			finalized: 1, activeLatest: 0, finalizedAge: 600,
-			class: "points-epoch-rebuild-pending", severity: SeverityWarn,
-			provenance: "provenance=snapshot-newer", mechanism: "separate transactions",
-		},
-		{
-			name:        "first finalization is overdue",
-			snapshotAge: 60, snapshotAvailable: false, snapshotLatest: 0,
-			finalized: 1, activeLatest: 0, finalizedAge: 7300,
-			class: "points-epoch-availability-drift", severity: SeverityPage,
-			provenance: "provenance=snapshot-newer", mechanism: "older than the two-hour",
-		},
-		{
-			name:        "later finalization is newer and within budget",
-			snapshotAge: 600, snapshotAvailable: true, snapshotLatest: 8,
-			finalized: 9, activeLatest: 9, finalizedAge: 60,
-			class: "points-epoch-rebuild-pending", severity: SeverityWarn,
-			provenance: "provenance=source-newer", mechanism: "separate transactions",
-		},
-		{
-			name:        "snapshot postdates later finalization within budget",
-			snapshotAge: 60, snapshotAvailable: true, snapshotLatest: 8,
-			finalized: 9, activeLatest: 9, finalizedAge: 600,
-			class: "points-epoch-rebuild-pending", severity: SeverityWarn,
-			provenance: "provenance=snapshot-newer", mechanism: "separate transactions",
-		},
-		{
-			name:        "later finalization at exact budget",
-			snapshotAge: 60, snapshotAvailable: true, snapshotLatest: 8,
-			finalized: 9, activeLatest: 9, finalizedAge: int64(pointsSnapshotMaxAge / time.Second),
-			class: "points-epoch-rebuild-pending", severity: SeverityWarn,
-			provenance: "provenance=snapshot-newer", mechanism: "separate transactions",
-		},
-		{
-			name:        "later finalization is overdue",
-			snapshotAge: 8000, snapshotAvailable: true, snapshotLatest: 8,
-			finalized: 9, activeLatest: 9, finalizedAge: 7300,
-			class: "points-epoch-snapshot-drift", severity: SeverityPage,
-			provenance: "provenance=source-newer", mechanism: "older than the two-hour",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			alerts := runPointsReadinessFixture(t, syntheticPointsSettings(),
-				syntheticPointsSnapshot(
-					test.snapshotAge, test.snapshotLatest, 10, test.snapshotAvailable,
-					10, 0, 0, 0,
-				),
-				[]Row{syntheticPointsEpoch(
-					syntheticPointsDeployment, test.finalized, test.activeLatest,
-					true, test.finalizedAge,
-				)},
-			)
-			alert := requireAlertClass(t, alerts, test.class)
-			if alert.Severity != test.severity {
-				t.Fatalf("severity = %s, want %s", alert.Severity, test.severity)
+func TestPointsOperatorReadinessUnknownCompletionRemainsPending(t *testing.T) {
+	for _, available := range []bool{false, true} {
+		for _, snapshotAge := range []int64{60, 7300} {
+			block := uint64(0)
+			if available {
+				block = 11
 			}
-			if test.severity == SeverityWarn {
-				requireNoPointsAlertClass(t, alerts, "points-epoch-availability-drift")
-				requireNoPointsAlertClass(t, alerts, "points-epoch-snapshot-drift")
+			alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+				syntheticPointsSnapshot(snapshotAge, block, available, 10, 0), syntheticPointsOperatorSource(12, 604700, 0, 0, 0))
+			if err != nil {
+				t.Fatal(err)
 			}
-			for _, want := range []string{test.provenance, test.mechanism, "SIGNALS.md §17.6"} {
-				if !strings.Contains(alert.Markdown(), want) {
-					t.Fatalf("alert missing %q:\n%s", want, alert.Markdown())
-				}
-			}
-			requireAlertOmits(t, alert, syntheticPointsDeployment)
-		})
-	}
-}
-
-func TestPointsReadinessSignalAcceptsCompletedLaterEpochRebuild(t *testing.T) {
-	alerts := runPointsReadinessFixture(t, syntheticPointsSettings(),
-		syntheticPointsSnapshot(60, 9, 10, true, 10, 4, 3, 2),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 10, 9, true, 120)},
-	)
-	if len(alerts) != 0 {
-		t.Fatalf("completed later-epoch rebuild produced alerts: %+v", alerts)
-	}
-}
-
-func TestPointsReadinessSignalKeepsAmbiguousFinalizeOrderingPending(t *testing.T) {
-	tests := []struct {
-		name         string
-		snapshotAge  int64
-		ageKnown     bool
-		finalizedAge int64
-		wantStale    bool
-	}{
-		{name: "nullable finalized time", snapshotAge: 600, ageKnown: false},
-		{name: "future finalized time", snapshotAge: 600, ageKnown: true, finalizedAge: -1},
-		{name: "future snapshot time", snapshotAge: -1, ageKnown: true, finalizedAge: 60, wantStale: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			alerts := runPointsReadinessFixture(t, syntheticPointsSettings(),
-				syntheticPointsSnapshot(test.snapshotAge, 8, 10, true, 10, 0, 0, 0),
-				[]Row{syntheticPointsEpoch(
-					syntheticPointsDeployment, 9, 9, test.ageKnown, test.finalizedAge,
-				)},
-			)
 			alert := requireAlertClass(t, alerts, "points-epoch-rebuild-pending")
-			if alert.Severity != SeverityWarn || !strings.Contains(alert.Observed, "provenance=ambiguous") {
-				t.Fatalf("ambiguous boundary alert = %+v", alert)
+			requirePointsOperatorNoPage(t, alerts)
+			if !strings.Contains(alert.Observed, "rollup_completion_age=unknown") || !strings.Contains(alert.Mechanism, "old Sunday boundary cannot prove") {
+				t.Fatalf("completion provenance was promoted to certainty: %s", alert.Markdown())
 			}
-			requireNoPointsAlertClass(t, alerts, "points-epoch-snapshot-drift")
-			requireNoPointsAlertClass(t, alerts, "points-epoch-availability-drift")
-			if test.wantStale {
+			if snapshotAge > 7200 {
 				requireAlertClass(t, alerts, "points-leaderboard-stale")
-			} else {
-				requireNoPointsAlertClass(t, alerts, "points-leaderboard-stale")
 			}
-			requireAlertOmits(t, alert, syntheticPointsDeployment)
-		})
-	}
-}
-
-func TestPointsReadinessSignalPagesWhenSnapshotEpochIsAheadOfSource(t *testing.T) {
-	alerts := runPointsReadinessFixture(t, syntheticPointsSettings(),
-		syntheticPointsSnapshot(600, 10, 10, true, 10, 0, 0, 0),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 10, 9, true, 60)},
-	)
-	alert := requireAlertClass(t, alerts, "points-epoch-snapshot-drift")
-	if alert.Severity != SeverityPage || !strings.Contains(alert.Mechanism, "cannot publish an epoch") {
-		t.Fatalf("snapshot-ahead alert = %+v", alert)
-	}
-	requireAlertOmits(t, alert, syntheticPointsDeployment)
-}
-
-func TestPointsReadinessQueriesUseUtcDatabaseClock(t *testing.T) {
-	for name, query := range map[string]string{
-		"snapshot": pointsSnapshotQuery,
-		"epoch":    pointsEpochCensusQuery,
-	} {
-		if !strings.Contains(query, "clock_timestamp() AT TIME ZONE 'UTC'") {
-			t.Fatalf("%s query does not normalize the database clock to UTC: %s", name, query)
 		}
 	}
 }
 
-func TestParsePointsEpochCensusRejectsMalformedAgeEvidence(t *testing.T) {
-	tests := []struct {
-		name string
-		row  pgRow
-		want string
+func TestPointsOperatorReadinessFirstSundayTransition(t *testing.T) {
+	for _, state := range []struct {
+		closed    uint64
+		published uint64
+		available bool
+		wantClass string
 	}{
-		{
-			name: "nonnumeric age",
-			row:  pgRow{syntheticPointsDeployment, "1", "0", "true", "not-an-age"},
-			want: "invalid latest-finalization age",
-		},
-		{
-			name: "age without timestamp",
-			row:  pgRow{syntheticPointsDeployment, "1", "0", "false", "1"},
-			want: "age without timestamp provenance",
-		},
-		{
-			name: "empty source with provenance",
-			row:  pgRow{syntheticPointsDeployment, "0", "0", "true", "0"},
-			want: "contradictory empty-finalization evidence",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := parsePointsEpochCensus([]pgRow{test.row})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want %q", err, test.want)
+		{closed: 0, published: 0, available: false},
+		{closed: 1, published: 0, available: false, wantClass: "points-epoch-rebuild-pending"},
+		{closed: 1, published: 1, available: true},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+			syntheticPointsSnapshot(0, state.published, state.available, 10, 0), syntheticPointsOperatorSource(state.closed, 0, 0, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.wantClass == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("valid operator calendar state %+v alerted: %+v", state, alerts)
 			}
-		})
+		} else {
+			requireAlertClass(t, alerts, state.wantClass)
+		}
+		requirePointsOperatorNoPage(t, alerts)
 	}
 }
 
-func TestParsePointsSnapshotRejectsInvalidAvailability(t *testing.T) {
-	_, err := parsePointsSnapshot([]pgRow{{"120", "0", "10", "not-a-boolean", "10", "0", "0", "0"}})
-	if err == nil || !strings.Contains(err.Error(), "invalid epoch-metrics availability") {
-		t.Fatalf("invalid availability error = %v", err)
+func TestPointsOperatorReadinessInternalContradictionsStillPage(t *testing.T) {
+	for _, state := range []struct {
+		block     uint64
+		available bool
+		positive  uint64
+		class     string
+	}{
+		{block: 1, available: false, class: "points-epoch-availability-drift"},
+		{block: 0, available: false, positive: 1, class: "points-epoch-availability-drift"},
+		{block: 0, available: true, class: "points-epoch-availability-drift"},
+		{block: 13, available: true, class: "points-epoch-snapshot-drift"},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+			syntheticPointsSnapshot(60, state.block, state.available, 10, state.positive), syntheticPointsOperatorSource(12, 10000, 0, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, state.class)
+		if alert.Severity != SeverityPage {
+			t.Fatalf("same-snapshot/calendar contradiction was suppressed: %+v", alert)
+		}
 	}
 }
 
-func TestPointsReadinessSignalRejectsWrongDeploymentEvidenceWithoutLeakingIt(t *testing.T) {
-	settings := syntheticPointsSettings()
-	wrongDeployment := "synthetic:deployment-retired"
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 0, 10, false, 10, 0, 0, 0),
-		[]Row{syntheticPointsEpoch(wrongDeployment, 10, 9, true, 60)},
-	)
-	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
-	if !strings.Contains(alert.Observed, "active_deployment_present=false") {
-		t.Fatalf("wrong deployment alert = %+v", alert)
-	}
-	requireAlertOmits(t, alert, syntheticPointsDeployment, wrongDeployment)
-}
-
-func TestPointsReadinessSignalDetectsSnapshotEpochDrift(t *testing.T) {
-	settings := syntheticPointsSettings()
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(120, 8, 10, true, 10, 8, 7, 8),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 10, 9, true, 3*60*60)},
-	)
-	alert := requireAlertClass(t, alerts, "points-epoch-snapshot-drift")
-	if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, "active_latest_epoch=9 snapshot_latest_epoch=8") {
-		t.Fatalf("snapshot drift alert = %+v", alert)
-	}
-	requireAlertOmits(t, alert, syntheticPointsDeployment)
-}
-
-func TestPointsReadinessSignalDetectsIncompleteAndMissingSnapshots(t *testing.T) {
-	settings := syntheticPointsSettings()
-	tests := []struct {
-		name     string
+// These existing atomicity safeguards must pass even on the ST-coupled RED.
+func TestPointsOperatorReadinessAtomicControl(t *testing.T) {
+	for _, state := range []struct {
 		snapshot []Row
 		class    string
 	}{
-		{name: "missing", snapshot: nil, class: "points-leaderboard-unavailable"},
-		{name: "incomplete", snapshot: syntheticPointsSnapshot(60, 3, 10, true, 9, 2, 1, 2), class: "points-leaderboard-incomplete"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			alerts := runPointsReadinessFixture(t, settings, test.snapshot, nil)
-			requireAlertClass(t, alerts, test.class)
-		})
-	}
-}
-
-func TestPointsReadinessSignalReportsStaleSnapshotAlongsideHealthyEpochSource(t *testing.T) {
-	settings := syntheticPointsSettings()
-	alerts := runPointsReadinessFixture(t, settings,
-		syntheticPointsSnapshot(int64(pointsSnapshotMaxAge.Seconds())+1, 4, 10, true, 10, 2, 1, 2),
-		[]Row{syntheticPointsEpoch(syntheticPointsDeployment, 5, 4, true, 60)},
-	)
-	alert := requireAlertClass(t, alerts, "points-leaderboard-stale")
-	if alert.Sustain != 2 {
-		t.Fatalf("stale snapshot sustain = %d", alert.Sustain)
+		{snapshot: nil, class: "points-leaderboard-unavailable"},
+		{snapshot: []Row{{"60", "1", "10", "true", "9", "0", "0", "0"}}, class: "points-leaderboard-incomplete"},
+		{snapshot: syntheticPointsSnapshot(60, 1, false, 10, 1), class: "points-epoch-availability-drift"},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil), state.snapshot, syntheticPointsOperatorSource(12, 10000, 0, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireAlertClass(t, alerts, state.class)
 	}
 }
 
-func TestPointsReadinessSignalRejectsTruncatedDeploymentCensus(t *testing.T) {
-	settings := syntheticPointsSettings()
-	epochs := make([]Row, pointsEpochCensusMax+1)
-	for index := range epochs {
-		epochs[index] = syntheticPointsEpoch(fmt.Sprintf("synthetic:deployment-%d", index), 1, 0, true, 60)
+func TestPointsOperatorReadinessRetainsSnapshotIntegrityAndFreshness(t *testing.T) {
+	for _, state := range []struct {
+		snapshot []Row
+		class    string
+	}{
+		{snapshot: nil, class: "points-leaderboard-unavailable"},
+		{snapshot: []Row{{"60", "12", "10", "true", "9", "0", "0", "0"}}, class: "points-leaderboard-incomplete"},
+		{snapshot: syntheticPointsSnapshot(7201, 12, true, 10, 0), class: "points-leaderboard-stale"},
+		{snapshot: syntheticPointsSnapshot(-1, 12, true, 10, 0), class: "points-leaderboard-stale"},
+		{snapshot: syntheticPointsSnapshot(7200, 12, true, 10, 0)},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil), state.snapshot, syntheticPointsOperatorSource(12, 10000, 0, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.class == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("exact snapshot age boundary alerted: %+v", alerts)
+			}
+			continue
+		}
+		alert := requireAlertClass(t, alerts, state.class)
+		if state.class == "points-leaderboard-stale" && alert.Sustain != 2 {
+			t.Fatalf("stale snapshot sustain changed: %d", alert.Sustain)
+		}
 	}
+}
+
+func TestPointsOperatorReadinessMissingOrMalformedSourceFailsClosed(t *testing.T) {
+	for _, rows := range [][]Row{
+		nil,
+		{{"12", "30", "0", "0", "0"}, {"12", "30", "0", "0", "0"}},
+		{{"12", "30", "0", "0"}},
+		{{"synthetic-private-value", "30", "0", "0", "0"}},
+		{{"12", "-1", "0", "0", "0"}},
+		{{"12", "604800", "0", "0", "0"}},
+		{{"0", "1", "0", "0", "0"}},
+		{{"12", "30", "-1", "0", "0"}},
+		{{"12", "30", "0", "0", "1"}},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil), syntheticPointsSnapshot(60, 12, true, 10, 0), rows)
+		if err == nil || len(alerts) != 0 {
+			t.Fatalf("malformed/missing source became a verdict: alerts=%+v err=%v", alerts, err)
+		}
+		if strings.Contains(err.Error(), "synthetic-private-value") {
+			t.Fatal("malformed source content escaped through a parser error")
+		}
+	}
+}
+
+func TestPointsOperatorReadinessReadFailureNeverFallsBackToSt(t *testing.T) {
+	settings := syntheticSettings(nil)
+	settings.VerificationEnabled = true
+	settings.STConfigStatus = STConfigurationEnabled
+	settings.STDeploymentKey = "synthetic:unrelated-st-deployment"
+	readErr := errors.New("synthetic bounded rollup read failure")
 	settings.Source = &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM network_points_leaderboard_snapshot") {
-			return syntheticPointsSnapshot(120, 0, 10, true, 10, 0, 0, 0), nil
+			return syntheticPointsSnapshot(60, 12, true, 10, 0), nil
 		}
-		return epochs, nil
+		if pointsStTableReferencePattern.MatchString(query) {
+			t.Fatal("rollup read failure may not fall back to ST")
+		}
+		return nil, readErr
 	}}
-	_, err := NewPointsReadinessSignal().Run(context.Background(), settings)
-	if err == nil || !strings.Contains(err.Error(), "completeness cap") {
-		t.Fatalf("truncated deployment census error = %v", err)
+	alerts, err := NewPointsReadinessSignal().Run(context.Background(), settings)
+	if !errors.Is(err, readErr) || len(alerts) != 0 {
+		t.Fatalf("rollup read error became health: alerts=%+v err=%v", alerts, err)
+	}
+}
+
+func TestPointsOperatorStTableDiscriminator(t *testing.T) {
+	for _, state := range []struct {
+		query string
+		want  bool
+	}{
+		{query: "SELECT latest_epoch FROM network_points_leaderboard_snapshot", want: false},
+		{query: "SELECT latest_epoch FROM public.st_epoch", want: true},
+		{query: "SELECT epoch FROM\n st_epoch", want: true},
+		{query: "SELECT epoch FROM source JOIN st_epoch ON true", want: true},
+		{query: "SELECT latest_epoch FROM st_epoch_extra", want: false},
+	} {
+		if got := pointsStTableReferencePattern.MatchString(state.query); got != state.want {
+			t.Fatalf("ST table discriminator got %t want %t for synthetic query %q", got, state.want, state.query)
+		}
+	}
+}
+
+func TestPointsOperatorReadinessRejectsMalformedSnapshot(t *testing.T) {
+	for _, snapshot := range [][]Row{
+		{{"60", "12", "10", "synthetic-invalid", "10", "0", "0", "0"}},
+		{{"60", "12", "10", "true", "10", "11", "0", "0"}},
+		{{"60", "12", "10", "true", "10", "0", "0"}},
+	} {
+		alerts, queries, err := runPointsOperatorFixture(t, syntheticSettings(nil), snapshot, syntheticPointsOperatorSource(12, 30, 0, 0, 0))
+		if err == nil || len(alerts) != 0 || len(queries) != 1 {
+			t.Fatalf("malformed snapshot escaped: alerts=%+v queries=%d err=%v", alerts, len(queries), err)
+		}
+	}
+}
+
+// Capture the exact production statement through the public signal, then
+// shadow its tables with synthetic CTEs. No fixture writes or live data reads.
+func pointsOperatorSqlFixture(t testing.TB, clock time.Time, pointCte string) [5]int64 {
+	t.Helper()
+	if os.Getenv("WARP_ENV") != "local" {
+		t.Fatal("operator rollup SQL fixture requires the attested local test environment")
+	}
+	_, queries, err := runPointsOperatorFixture(t, syntheticSettings(nil), syntheticPointsSnapshot(60, 1, true, 10, 0), syntheticPointsOperatorSource(1, 60, 0, 0, 0))
+	if err != nil || len(queries) != 2 || !strings.Contains(queries[1], "FROM account_point AS point") {
+		t.Fatalf("operator source statement absent: queries=%d err=%v", len(queries), err)
+	}
+	query := strings.Replace(queries[1], "WITH lifecycle_clock AS MATERIALIZED", pointCte+", lifecycle_clock AS MATERIALIZED", 1)
+	query = strings.ReplaceAll(query, "clock_timestamp()", "timestamptz '"+clock.UTC().Format(time.RFC3339Nano)+"'")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var values [5]int64
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatal("operator source lost its single-row calendar aggregate")
+		}
+		if err := rows.Scan(&values[0], &values[1], &values[2], &values[3], &values[4]); err != nil {
+			t.Fatal(err)
+		}
+		if rows.Next() || rows.Err() != nil {
+			t.Fatalf("operator source row shape changed: %v", rows.Err())
+		}
+	})
+	return values
+}
+
+func TestPointsOperatorSourceSqlSundayCalendar(t *testing.T) {
+	const emptyPoints = `WITH account_payment(payment_id, block_rollup_complete) AS (
+	 SELECT 1, true WHERE false
+	), account_point(account_payment_id, point_value, create_time) AS (
+	 SELECT 1, 1, timestamp '2000-01-01' WHERE false
+	)`
+	genesis := model.SubnetBlockGenesis
+	for _, state := range []struct {
+		clock  time.Time
+		closed int64
+		age    int64
+	}{
+		{clock: genesis.Add(-time.Second), closed: 0, age: 0},
+		{clock: genesis, closed: 0, age: 0},
+		{clock: genesis.Add(model.SubnetBlockDuration - time.Microsecond), closed: 0, age: 0},
+		{clock: genesis.Add(model.SubnetBlockDuration), closed: 1, age: 0},
+		{clock: genesis.Add(2*model.SubnetBlockDuration - time.Second), closed: 1, age: 604799},
+		{clock: genesis.Add(2*model.SubnetBlockDuration + time.Second), closed: 2, age: 1},
+	} {
+		values := pointsOperatorSqlFixture(t, state.clock, emptyPoints)
+		if values != [5]int64{state.closed, state.age, 0, 0, 0} {
+			t.Fatalf("UTC operator boundary %s got %v, want closed=%d age=%d", state.clock, values, state.closed, state.age)
+		}
+	}
+}
+
+func TestPointsOperatorSourceSqlMatchesCompletenessEligibility(t *testing.T) {
+	genesis := model.SubnetBlockGenesis
+	pointCte := fmt.Sprintf(`WITH account_payment(payment_id, block_rollup_complete) AS (
+	 VALUES (1, true), (2, false)
+	), account_point(account_payment_id, point_value, create_time) AS (
+	 VALUES (1, 10, timestamp '%[1]s'),
+	        (2, 10, timestamp '%[2]s'),
+	        (3, 10, timestamp '%[2]s'),
+	        (NULL::integer, 10, timestamp '%[2]s'),
+	        (2, 10, timestamp '%[3]s'),
+	        (2, 0, timestamp '%[2]s'),
+	        (2, -10, timestamp '%[2]s')
+	)`, genesis.Format("2006-01-02 15:04:05"), genesis.Add(10*24*time.Hour).Format("2006-01-02 15:04:05"), genesis.Add(-time.Second).Format("2006-01-02 15:04:05"))
+	values := pointsOperatorSqlFixture(t, genesis.Add(21*24*time.Hour+time.Hour), pointCte)
+	if values != [5]int64{3, 3600, 2, 1, 11*24*3600 + 3600} {
+		t.Fatalf("rollup census lost missing/pending or post-genesis positive eligibility: %v", values)
+	}
+}
+
+func TestPointsOperatorReadinessDocumentation(t *testing.T) {
+	data, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	start := strings.Index(content, "### 17.6 ")
+	if start < 0 {
+		t.Fatal("points catalog section missing")
+	}
+	end := strings.Index(content[start:], "\n## 18.")
+	if end < 0 {
+		t.Fatal("points catalog section missing")
+	}
+	section := strings.Join(strings.Fields(content[start:start+end]), " ")
+	for _, want := range []string{
+		"Sunday-00 UTC", "seven-day", "operator paid-traffic", "ST is not a prerequisite",
+		"missing_payment_points", "pending_rollup_points", "no persisted completion timestamp",
+		"new pending payment does not invalidate an earlier snapshot", "points-block-rollup-incomplete",
+		"old Sunday boundary alone cannot prove an overdue rebuild", "source-version boundary",
+		"Do not enable ST", "signal_points_readiness_test.go",
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("operator readiness catalog missing %q", want)
+		}
+	}
+	for _, stale := range []string{"come only from **finalized epochs", "Closure requires the reviewed Main ST deployment", "only the reviewed ST/finalized-epoch operational closure"} {
+		if strings.Contains(section, stale) {
+			t.Fatalf("active catalog retains superseded ST closure %q", stale)
+		}
 	}
 }

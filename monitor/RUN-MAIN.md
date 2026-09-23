@@ -16,35 +16,36 @@ and continue until the operator ends the run or its requested duration expires.
 Use two explicit, long-lived agent roles for every pass; reuse the same agents
 so their evidence context and open causal boundaries remain intact:
 
-- A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution, the
-  monitor-test gates, and initial evidence work: preflight, immutable binary,
+- A `gpt-6-sol` agent at `medium` reasoning ("Sol Medium") owns monitor execution,
+  the monitor-test gates, and initial evidence work: preflight, immutable binary,
   authoritative watcher and tails, alert capture, bounded read-only failure
   fact collection, initial triage, evidence-authority checks, focused reruns,
   source identity, and every verification gate. The Go watcher remains
-  model-neutral; Terra
-  operates and interprets it. The primary agent must retain
-  the actual durable execution-session handle unless Terra remains active for
+  model-neutral; Sol operates and interprets it. The primary agent must retain
+  the actual durable execution-session handle unless Sol remains active for
   the entire watcher lifetime. Process ownership is not session ownership: a
   watcher started inside a sub-agent tool session can disappear when that agent
   returns even after its PID and tails passed a liveness check.
 - A `gpt-6-astra` agent at `max` reasoning ("Astra Max") owns all
   post-triage root-cause debugging, bounded read-only discriminator collection,
   and repair for every new, changed, or unresolved causal boundary. Astra
-  consumes Terra's initial alert/triage manifest, inspects bounded relevant
+  consumes Sol's initial alert/triage manifest, inspects bounded relevant
   source, collects only the precise missing production fact under the same
-  authority and privacy rules, and runs local deterministic controls.
+  authority and privacy rules, and runs local deterministic controls. Every
+  self-improvement fix to the probes, shared monitoring utilities, signal
+  catalog, or this harness also belongs to Astra Max.
 
-For each such boundary, Terra sends an initial deterministic delta and triage
+For each such boundary, Sol sends an initial deterministic delta and triage
 manifest referencing the prior ledger record and object hashes described below;
 group shared dependency/artifact/rollout failures and keep unrelated causes
 separate. Never paste full all-signal Markdown, logs, raw evidence, or test
 output into a model handoff. Astra pulls the complete Alert and only bounded
 relevant source objects by hash on demand, then records any precise additional
 fact it collects. Astra returns cause/patch/regressions/prerequisites/window;
-Terra returns independent gate manifests. Keep both agents and the watcher
+Sol returns independent gate manifests. Keep both agents and the watcher
 alive unless safe promotion requires a handoff.
 
-The primary agent owns the append-only run ledger. Terra and Astra produce
+The primary agent owns the append-only run ledger. Sol and Astra produce
 immutable, privacy-reviewed manifests and name the intended `prior_record`, but
 must not append ledger records themselves. This keeps process/session ownership,
 production mutation authority, and the single-writer chain in one place.
@@ -57,7 +58,7 @@ all gates; then verify the exact production boundary, checkpoint, promote
 without an observation gap, and continue.
 
 Every investigation and root-cause handoff must explicitly report
-`false_positive_qualifiers` and `false_negative_qualifiers`. Terra records
+`false_positive_qualifiers` and `false_negative_qualifiers`. Sol records
 initial authority/source-completeness boundaries; Astra records the
 post-triage candidate discriminator, its observation authority, source
 completeness, and healthy control, then decides whether the evidence establishes
@@ -70,7 +71,7 @@ qualifier from speculation, suppress the original symptom, or wait for the
 daily research pass to record a discriminator learned during an active
 incident.
 
-This is context-delivery optimization only: use Terra at medium to run the
+This is context-delivery optimization only: use Sol at medium to run the
 monitor tests, deterministic monitoring, initial failure fact collection, and
 triage; retain Astra at max for all post-triage debugging, bounded fact
 collection, and repair. Monitor tests are harness gates, never an implicit part
@@ -169,9 +170,9 @@ Before the first production command:
    topology; and
 5. resolve each host endpoint from its current owning inventory and verify its
    remote hostname before any privileged action; and
-6. have Terra run the local monitor tests before trusting a newly built
+6. have Sol run the local monitor tests before trusting a newly built
    detector; and
-7. have Terra capture and triage bounded initial facts for every failed gate or
+7. have Sol capture and triage bounded initial facts for every failed gate or
    alert before handing its manifest to Astra Max for debugging and repair.
 
 The normal workstation mode is `overlay`; use `lan` only from a host with the
@@ -489,12 +490,12 @@ historical producer already appended pretty-printed records, preserve those
 bytes: `jq -c . ledger.jsonl` can stream the whitespace-separated objects for
 recovery. Append a compact format-defect/correction record and use compact
 records thereafter; never rewrite or truncate the evidence ledger merely to
-make its old physical layout valid JSONL. Terra and Astra may prepare manifests;
+make its old physical layout valid JSONL. Sol and Astra may prepare manifests;
 they do not append. Do not allow two agents to append in parallel.
 
 The agent that owns the attached execution session must not return, complete,
 or release that session while its watcher is authoritative. Prefer a
-primary-agent-owned session handle with Terra validating the binary, parent,
+primary-agent-owned session handle with Sol validating the binary, parent,
 tails, files, and cadence through read-only checks. A handoff is complete only
 after the receiver can poll the exact session handle; sharing a PID, run
 directory, lock file, or narrative status is insufficient. If this execution
@@ -705,13 +706,13 @@ Research all three directions:
    observation failure are explicit candidates, but become probe rules only
    when a bounded discriminator and healthy control establish them.
 
-Terra Medium owns the reproducible crosswalk, registry/test inventory, current
+Sol Medium owns the reproducible crosswalk, registry/test inventory, current
 watcher delta, initial failure fact collection and triage, and independent test
 and verification manifests. Astra Max owns all post-triage bounded
 investigation/fact collection, root-cause debugging, causal discrimination,
 false-positive/false-negative boundaries, and every self-improvement repair to
 a probe, shared monitoring utility, signal catalog, or this harness. Astra
-writes the smallest source and deterministic-test correction; Terra reruns the
+writes the smallest source and deterministic-test correction; Sol reruns the
 relevant tests and verifies the repaired observation boundary independently.
 The primary agent reviews their manifests, writes the single chained ledger
 record, and owns all source and production authority decisions.
@@ -869,7 +870,7 @@ the catalog changes an automated diagnosis, action, or verification contract.
 
 Every confirmed problem needs an Astra Max-authored synthetic regression. The
 test should construct the smallest input that reproduces the causal failure
-without production access or wall-clock sleeps. Terra Medium runs the narrow,
+without production access or wall-clock sleeps. Sol Medium runs the narrow,
 package, race, and vet gates below and supplies the initial failure facts and
 triage manifest before Astra begins the repair. Cover, as applicable:
 
