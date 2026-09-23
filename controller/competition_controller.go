@@ -4475,15 +4475,14 @@ func (self PostgresStore) GetRound(ctx context.Context, settings *Settings, roun
 	return round, err
 }
 
-// Staging names the best statistically eligible job without creating review
+// Staging names the best placeable job without creating review
 // records. Shared controls use absolute latency; legacy rounds retain their
 // normalized ranking. The scalar subquery returns NULL when none is eligible.
 const stagingWinnerSql = `
 	SELECT (
 		SELECT job_id FROM competition_job
 		WHERE round_id = $1 AND state = 'succeeded'
-		  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
-		  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+		  AND score_json @> '{"placeable":true}'::jsonb
 		  AND jsonb_typeof(score_json->'gates') = 'object'
 		  AND score_json->'gates' <> '{}'::jsonb
 		  AND NOT EXISTS (
@@ -5989,7 +5988,8 @@ func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 
 // Keeps the production identity gate exact while allowing the staging era to
 // exercise a newly pinned evaluator from an authenticated prior containment
-// record. Staging scores never enter winner selection or source promotion.
+// record. Staging scores never enter production winner selection or source
+// promotion.
 func (self *Worker) selfCheck(ctx context.Context) (HostSelfCheck, error) {
 	hostCheck, checkErr := self.evaluator.SelfCheck(ctx, self.settings)
 	if checkErr == nil {
@@ -6727,9 +6727,12 @@ func validateApexLeaderboard(leaderboard LeaderboardResult) error {
 		if err := validateScore(&entry.Score); err != nil {
 			return fmt.Errorf("Apex reconciliation received an invalid leaderboard score: %w", err)
 		}
-		eligible := entry.Score.Placeable && entry.Score.TakeoverEligible &&
-			entry.Score.Significance.StatisticallySignificant &&
-			entry.Score.Significance.RecommendedNextEpochTakeoverMarginSupported && len(entry.Score.Gates) != 0
+		eligible := entry.Score.Placeable && len(entry.Score.Gates) != 0
+		if !leaderboard.Staging {
+			eligible = eligible && entry.Score.TakeoverEligible &&
+				entry.Score.Significance.StatisticallySignificant &&
+				entry.Score.Significance.RecommendedNextEpochTakeoverMarginSupported
+		}
 		for _, gate := range entry.Score.Gates {
 			eligible = eligible && gate.Passed
 		}

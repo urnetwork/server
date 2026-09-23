@@ -8233,4 +8233,77 @@ var migrations = []any{
 		END
 		$competition_round_honesty_review_gate$;
 	`),
+
+	// Staging exercises winner publication even when noise defeats significance.
+	// Production's honesty and statistical gates retain their published policy.
+	newSqlMigration(`
+		-- staging_best_safe_winner_v685
+		CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_honesty_review_gate$
+		DECLARE
+			expected_staging_winner uuid;
+		BEGIN
+			IF NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL THEN
+				IF EXISTS (
+					SELECT 1 FROM competition_job
+					WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+				) THEN
+					RAISE EXCEPTION 'competition epoch still has active evaluations';
+				END IF;
+				IF NEW.staging = true THEN
+					SELECT job_id INTO expected_staging_winner
+					FROM competition_job
+					WHERE round_id = NEW.round_id AND state = 'succeeded'
+					  AND score_json @> '{"placeable":true}'::jsonb
+					  AND jsonb_typeof(score_json->'gates') = 'object'
+					  AND score_json->'gates' <> '{}'::jsonb
+					  AND NOT EXISTS (
+					      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+					      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+					  )
+					ORDER BY CASE WHEN NOT EXISTS (
+					             SELECT 1 FROM competition_round_baseline WHERE round_id = NEW.round_id
+					         ) THEN (score_json->>'normalized_score')::numeric END DESC,
+					         (score_json->>'raw_score')::numeric ASC, submitted_at, job_id
+					LIMIT 1;
+					IF NEW.winner_job_id IS DISTINCT FROM expected_staging_winner THEN
+						RAISE EXCEPTION 'competition staging winner is not the highest-ranked eligible job';
+					END IF;
+					RETURN NEW;
+				END IF;
+				IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+					SELECT 1 FROM competition_candidate_review
+					WHERE round_id = NEW.round_id AND job_id = NEW.winner_job_id
+					  AND decision = 'approved'
+				) THEN
+					RAISE EXCEPTION 'competition winner has not passed honesty review';
+				END IF;
+				IF NEW.winner_job_id IS NULL AND EXISTS (
+					SELECT 1
+					FROM competition_job AS candidate
+					WHERE candidate.round_id = NEW.round_id AND candidate.state = 'succeeded'
+					  AND candidate.score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+					  AND candidate.score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+					  AND jsonb_typeof(candidate.score_json->'gates') = 'object'
+					  AND candidate.score_json->'gates' <> '{}'::jsonb
+					  AND NOT EXISTS (
+					      SELECT 1 FROM jsonb_each(candidate.score_json->'gates') AS gate
+					      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+					  )
+					  AND NOT EXISTS (
+					      SELECT 1 FROM competition_candidate_review AS review
+					      WHERE review.round_id = NEW.round_id
+					        AND review.job_id = candidate.job_id
+					        AND review.decision = 'rejected'
+					  )
+				) THEN
+					RAISE EXCEPTION 'competition epoch has an unresolved significant candidate';
+				END IF;
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_honesty_review_gate$;
+	`),
 }

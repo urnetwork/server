@@ -199,17 +199,19 @@ uses the same authenticated submission, immutable MinIO retention, canonical
 patch cache, Redis FIFO, isolated evaluator, scoring, embargo, and poll-result
 publication paths as production. It is fee-free, always evaluates against the
 frozen source epoch 0, and finalizes automatically after admission closes and
-all accepted work drains. The highest-ranked placeable, statistically
-significant candidate passing every gate becomes the named staging winner;
-if none qualifies, `winner_job_id` is null. The default production leaderboard
+all accepted work drains. The highest-ranked placeable candidate passing every
+gate becomes the named staging winner, regardless of statistical significance
+or takeover margin. If none qualifies, `winner_job_id` is null. The default
+production leaderboard
 excludes staging; `GET /competition/leaderboard?include_staging=true` exposes
 the same winner identity in the finalized staging round and its winning entry.
 Staging has no honesty-review pause or review records: even its winner is
 `honesty_review: not_reviewed`. A named staging winner is not an honesty or
 safety approval and never promotes source, changes the significance threshold,
 or creates a production winner. Previously finalized staging results remain
-unchanged. This control-plane follow-up is not yet deployed; see the dated
-[epoch-5 release record](launch/STAGING-5-RELEASE.md).
+unchanged. The best-safe staging policy requires migration 685, API, and worker
+rollout before epoch 8 closes; the [epoch-5 release record](launch/STAGING-5-RELEASE.md)
+describes its historical opening policy.
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and

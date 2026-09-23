@@ -32,11 +32,15 @@ func syntheticStagingGuardSources(t *testing.T) map[string]string {
 	}{
 		{name: "review", declaration: "CREATE FUNCTION competition_staging_candidate_review_guard()", delimiter: "$competition_staging_candidate_review_guard$"},
 		{name: "winner", declaration: "CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()", delimiter: "$competition_round_honesty_review_gate$", last: true},
+		{name: "previous_winner", declaration: "CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()", delimiter: "$competition_round_honesty_review_gate$"},
 		{name: "historical", declaration: "CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()", delimiter: "$competition_round_honesty_review_gate$"},
 	} {
 		position := strings.Index(source, guard.declaration)
 		if guard.last {
 			position = strings.LastIndex(source, guard.declaration)
+		} else if guard.name == "previous_winner" {
+			latest := strings.LastIndex(source, guard.declaration)
+			position = strings.LastIndex(source[:latest], guard.declaration)
 		}
 		if position < 0 {
 			t.Fatalf("missing published %s guard", guard.name)
@@ -58,11 +62,12 @@ func syntheticStagingGuardSources(t *testing.T) map[string]string {
 // of synthetic artifact booleans, including historical nullable lookups.
 func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 	guardNameDefinitions := syntheticStagingGuardSources(t)
-	for _, guard := range []struct{ name, delimiter string }{
-		{name: "review", delimiter: "$staging_review_body$"},
-		{name: "winner", delimiter: "$staging_winner_body$"},
+	for _, guard := range []struct{ name, delimiter, query string }{
+		{name: "review", delimiter: "$staging_review_body$", query: competitionStagingWinnerArtifactQuery},
+		{name: "previous_winner", delimiter: "$staging_winner_body$", query: competitionStagingWinnerArtifactQuery},
+		{name: "winner", delimiter: "$staging_winner_body$", query: competitionStagingBestWinnerArtifactQuery},
 	} {
-		_, remaining, ok := strings.Cut(competitionStagingWinnerArtifactQuery, guard.delimiter)
+		_, remaining, ok := strings.Cut(guard.query, guard.delimiter)
 		if !ok {
 			t.Fatalf("missing %s function expectation", guard.name)
 		}
@@ -76,8 +81,9 @@ func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 		if strings.Contains(query, "FROM migration_catalog") {
 			return syntheticMigrationCatalogRows(head), nil
 		}
-		if !strings.Contains(query, competitionStagingWinnerArtifactQuery) {
-			t.Fatal("migration query does not execute the automatic staging winner contract")
+		if !strings.Contains(query, competitionStagingWinnerArtifactQuery) ||
+			!strings.Contains(query, competitionStagingBestWinnerArtifactQuery) {
+			t.Fatal("migration query does not execute both staging winner contracts")
 		}
 		normalized := strings.Join(strings.Fields(query), " ")
 		for _, required := range []string{
@@ -103,8 +109,8 @@ func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 	}
 }
 
-// A coherent historical head remains behind, while only heads at or after 684
-// require the automatic winner contract; the initial staging policy stays retired.
+// Each head requires its own published guard; the initial staging policy stays
+// retired and the significance-gated winner guard is retired by head 685.
 func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 	for _, test := range []struct {
 		version int
@@ -115,12 +121,14 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 		{version: 683},
 		{version: 684},
 		{version: 684, missing: true},
+		{version: 685},
+		{version: 685, missing: true},
 	} {
 		row := syntheticMigrationArtifactRow(test.version)
 		for _, artifact := range migrationArtifacts {
 			if test.version < artifact.requiredVersion ||
 				artifact.removedVersion != 0 && artifact.removedVersion <= test.version ||
-				artifact.requiredVersion == 684 && test.missing {
+				artifact.requiredVersion == test.version && test.missing {
 				row[artifact.rowColumn] = "f"
 			}
 		}
@@ -142,7 +150,11 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 		if test.missing {
 			wantAlerts++
 			alert := requireAlertClass(t, alerts, "migration-schema-drift")
-			if !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v684") {
+			want := "competition staging automatic winner and review isolation@v684"
+			if test.version == 685 {
+				want = "competition staging best-safe winner and review isolation@v685"
+			}
+			if !strings.Contains(alert.Markdown(), want) {
 				t.Fatalf("missing staging winner contract was not identified: %s", alert.Markdown())
 			}
 		}
@@ -190,9 +202,9 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 		{name: "healthy"},
 		{name: "canonical whitespace"},
 		{name: "historical staging rejection"},
-		{name: "no eligibility", changed: `"placeable":true,"takeover_eligible":true`, replace: `"placeable":true`},
-		{name: "no significance", changed: `"statistically_significant":true`, replace: `"statistically_significant":false`},
-		{name: "no supported margin", changed: `"recommended_next_epoch_takeover_margin_supported":true`, replace: `"recommended_next_epoch_takeover_margin_supported":false`},
+		{name: "no staging placeability", changed: `AND score_json @> '{"placeable":true}'::jsonb`, replace: `AND score_json @> '{}'::jsonb`},
+		{name: "production significance bypass", changed: `"statistically_significant":true`, replace: `"statistically_significant":false`},
+		{name: "production margin bypass", changed: `"recommended_next_epoch_takeover_margin_supported":true`, replace: `"recommended_next_epoch_takeover_margin_supported":false`},
 		{name: "empty gates admitted", changed: "score_json->'gates' <> '{}'::jsonb", replace: "true"},
 		{name: "failed gates admitted", changed: "WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)", replace: "WHERE false"},
 		{name: "raw score reversed", changed: "(score_json->>'raw_score')::numeric ASC", replace: "(score_json->>'raw_score')::numeric DESC"},
@@ -265,7 +277,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 				if strings.Contains(query, "FROM migration_catalog") {
 					return syntheticMigrationCatalogRows(head), nil
 				}
-				if !strings.Contains(query, competitionStagingWinnerArtifactQuery) {
+				if !strings.Contains(query, competitionStagingBestWinnerArtifactQuery) {
 					t.Fatal("migration query omitted the tested staging winner expression")
 				}
 				var admitted bool
@@ -283,13 +295,13 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 							update_columns text[]
 						)
 					)
-					SELECT `+competitionStagingWinnerArtifactQuery, string(functionJson), string(triggerJson),
+					SELECT `+competitionStagingBestWinnerArtifactQuery, string(functionJson), string(triggerJson),
 				).Scan(&admitted)
 				if err != nil {
 					return nil, err
 				}
 				row := syntheticMigrationArtifactRow(head)
-				row[95] = fmt.Sprint(admitted)
+				row[96] = fmt.Sprint(admitted)
 				return []Row{row}, nil
 			}}
 			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
@@ -302,7 +314,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 				}
 			} else {
 				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v684") {
+				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging best-safe winner and review isolation@v685") {
 					t.Fatalf("%s lost the staging winner gate: %s", test.name, alerts.ToMarkdown())
 				}
 			}

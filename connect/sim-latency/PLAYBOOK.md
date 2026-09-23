@@ -1,30 +1,31 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-09-19
+Status date: 2026-09-23
 
 Evaluator/baseline qualification: **historical measured-product qualification
-preserved; staging epoch 4 finalized with four leaderboard entries;
-shared-baseline epoch-5 API/config deployed and round open;
-singleton worker running with authenticated host refreshes; live scoring proof pending**
+preserved; shared-baseline staging epoch 8 open with four completed jobs and a
+running singleton worker; results remain embargoed until finalization**
 
-Launch-control validation: **staging release deployed; production qualification and external launch actions pending**
+Launch-control validation: **staging API/evaluator active; best-safe staging
+winner policy requires migration 685, API, and worker rollout; production
+qualification and external launch actions pending**
 
-Automatic named staging winners are a control-plane follow-up, not yet
-deployed. After close and FIFO drain, staging selects the highest-ranked
-placeable, statistically significant candidate passing every gate, or no
-winner. There is no staging honesty review or review pause; all staging rows
+After close and FIFO drain, staging selects the highest-ranked placeable
+candidate passing every gate, regardless of significance or takeover margin,
+or no winner when none is placeable. There is no staging honesty review or
+review pause; all staging rows
 remain `honesty_review: not_reviewed`. Naming a winner neither approves its
 honesty/safety nor promotes source, config, thresholds, or a production winner.
 Production retains mandatory review. Historical finalized results stay intact.
 
-Rollout remains pending: deploy the current migration runner (`bringyourctl`
-or `competitiondbinit`) and apply migration 684 before new API readiness or
+Rollout remains pending for this policy: deploy the current migration runner
+(`bringyourctl` or `competitiondbinit`) and apply migration 685 before new API readiness or
 worker startup, then deploy the main API built with the updated `sn` contract
 and rebuild/deploy the competition worker on sille. Refresh the monitor CLI
 separately to observe the new migration guard. None of these requires an
 evaluator image rebuild, scoring-baseline reset, config-updater rollout, or
-frozen-source change. The currently recorded worker still forces a null
-staging winner until that control-plane rollout occurs.
+frozen-source change. The currently running worker still requires statistical
+significance for a staging winner until that control-plane rollout occurs.
 
 Deployment model: one authoritative 12-physical-core host; 10 evaluation cores,
 2 management cores; one content-addressed image per canonical submission patch.
@@ -212,7 +213,7 @@ has an owner and a recorded value.
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
-| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. The staging follow-up (rollout pending) adds an automatic eligible winner or null through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
+| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. Staging publishes its best placeable candidate passing every gate, or null when none qualifies, through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion; the best-safe policy requires migration 685/API/worker rollout. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `launch/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally

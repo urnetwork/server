@@ -47,8 +47,8 @@ const providerEgressHealthDeadlineIndexDefinition = "CREATE INDEX provider_egres
 
 const walletAuthChallengeAttemptAddressTimeIndexDefinition = "CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)"
 
-// Pin the operative trigger events and complete normalized bodies: staging names
-// its best eligible job automatically, while production still requires review.
+// Pin the operative trigger events and complete normalized bodies. The first
+// policy remains required at head 684; its best-safe successor begins at 685.
 const competitionStagingWinnerArtifactQuery = `(
 	NOT EXISTS (
 		SELECT 1 FROM (VALUES
@@ -153,6 +153,16 @@ const competitionStagingWinnerArtifactQuery = `(
 	)
 )`
 
+var competitionStagingBestWinnerArtifactQuery = func() string {
+	oldEligibility := `AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+							  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb`
+	newEligibility := `AND score_json @> '{"placeable":true}'::jsonb`
+	if strings.Count(competitionStagingWinnerArtifactQuery, oldEligibility) != 1 {
+		panic("staging winner monitor cannot locate its historical eligibility gate")
+	}
+	return strings.Replace(competitionStagingWinnerArtifactQuery, oldEligibility, newEligibility, 1)
+}()
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -248,7 +258,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
 	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
 	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
-	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, rowColumn: 95},
+	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, removedVersion: 685, rowColumn: 95},
+	{name: "competition staging best-safe winner and review isolation", requiredVersion: 685, rowColumn: 96},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1385,7 +1396,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
-		       `+competitionStagingWinnerArtifactQuery+`
+	       `+competitionStagingWinnerArtifactQuery+`,
+	       `+competitionStagingBestWinnerArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

@@ -38,8 +38,9 @@ Before production epoch 1, the API can expose a staging era with sequential
 `staging_round` epochs beginning at zero. Its submissions are fee-free and use
 the real retention, cache, FIFO, evaluator, scoring, embargo, and polling paths
 against frozen source epoch zero. After admission closes and the FIFO drains,
-a staging round automatically names its highest-ranked placeable, statistically
-significant candidate passing every gate, or no winner if none qualifies, then
+a staging round automatically names its highest-ranked placeable candidate
+passing every gate, regardless of significance or takeover margin, or no winner
+if none qualifies, then
 publishes each score or typed failure at the immutable job status URL. Its
 finalized result is also available through
 the opt-in `GET /competition/leaderboard?include_staging=true` view with

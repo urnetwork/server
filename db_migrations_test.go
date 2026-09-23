@@ -109,6 +109,34 @@ func TestCompetitionStagingWinnerMigrationAppendsWithoutChangingReviewPolicy(t *
 	}
 }
 
+// Staging's best-safe-winner policy must supersede, not rewrite, the applied
+// significant-winner migration and must leave production review unchanged.
+func TestCompetitionStagingBestWinnerMigrationPreservesProductionGate(t *testing.T) {
+	oldIndex := sqlMigrationIndex(t, "expected_staging_winner uuid")
+	newIndex := sqlMigrationIndex(t, "staging_best_safe_winner_v685")
+	if oldIndex != 683 || newIndex != 684 {
+		t.Fatalf("staging winner migration indices = %d/%d, want 683/684", oldIndex, newIndex)
+	}
+	oldMigration := migrations[oldIndex].(*SqlMigration)
+	newMigration := migrations[newIndex].(*SqlMigration)
+	oldSql := strings.Join(strings.Fields(oldMigration.sql), " ")
+	newSql := strings.Join(strings.Fields(newMigration.sql), " ")
+	if !strings.Contains(oldSql, `score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb`) ||
+		!strings.Contains(oldSql, `score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb`) {
+		t.Fatal("applied staging winner migration was changed")
+	}
+	stagingSection, productionSection, found := strings.Cut(newSql, "IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (")
+	if !found || !strings.Contains(stagingSection, `score_json @> '{"placeable":true}'::jsonb`) ||
+		strings.Contains(stagingSection, "statistically_significant") ||
+		strings.Contains(stagingSection, "takeover_eligible") {
+		t.Fatal("staging best-winner migration retains a statistical or takeover gate")
+	}
+	_, oldProduction, found := strings.Cut(oldSql, "IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (")
+	if !found || productionSection != oldProduction {
+		t.Fatal("staging best-winner migration changed production review")
+	}
+}
+
 func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }

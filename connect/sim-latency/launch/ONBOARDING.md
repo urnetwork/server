@@ -34,17 +34,19 @@ and follows the production admission, cache, FIFO, isolated evaluation,
 scoring, embargo, and authenticated polling paths against frozen source epoch
 zero. After admission closes and every accepted job is terminal, it finalizes
 automatically and makes each job's score or typed failure visible through its
-status URL. The highest-ranked placeable, statistically significant candidate
-passing every gate is the named staging winner; if none qualifies, there is
-no winner. Staging never pauses for honesty review.
+status URL. The highest-ranked placeable candidate passing every gate is the
+named staging winner, without a statistical-significance or takeover-margin
+requirement; if none qualifies, there is no winner. Staging never pauses for
+honesty review.
 `GET /competition/leaderboard?include_staging=true` also publishes a clearly
 marked staging epoch with the same `winner_job_id` and winning entry for
 adapter-path testing. Every staging entry has `honesty_review: not_reviewed`,
 including a winner: this is not an honesty or safety approval. It does not
 create a production leaderboard row, candidate review, or promotion, and does
 not change source epoch zero or its threshold. Historical finalized results
-are preserved. The named-winner control-plane follow-up is not yet deployed;
-see the dated [epoch-5 release record](STAGING-5-RELEASE.md).
+are preserved. The best-safe named-winner policy requires migration 685,
+API, and worker rollout before epoch 8 closes. See the dated
+[epoch-5 release record](STAGING-5-RELEASE.md).
 
 UR creates or retrieves each identity with `run-main.sh staging`, then uses
 `run-main.sh advance-staging` to stop admission, drain all accepted work,

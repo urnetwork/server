@@ -20,8 +20,9 @@ The process exits successfully after admission closes and the FIFO drains.
 Production significant candidates remain embargoed until the operator's
 honesty-review harness finalizes the epoch; the external controller promotes
 an approved winner (or records no winner) and starts the next epoch.
-Staging automatically finalizes with its highest-ranked eligible significant
-winner, or no winner. It never pauses for honesty review or promotes source.
+Staging automatically finalizes with its highest-ranked placeable candidate
+passing every gate, or no winner. It never pauses for honesty review or
+promotes source.
 
 Usage:
   competitionworker [--worker_id=<id>]

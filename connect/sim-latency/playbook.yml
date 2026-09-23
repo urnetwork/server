@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-09-19
-launch_state: shared_epoch_baseline_staging_epoch_5_open_live_scoring_pending
+status_date: 2026-09-23
+launch_state: shared_epoch_baseline_staging_epoch_8_open_best_safe_winner_rollout_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -60,16 +60,16 @@ honesty_review:
   public_before_finalization: false
 
 staging_winner_policy:
-  deployment: control_plane_follow_up_not_yet_deployed
-  deployment_order: current_migration_runner_apply_684_then_main_api_then_competition_worker
+  deployment: best_safe_control_plane_follow_up_pending
+  deployment_order: current_migration_runner_apply_685_then_main_api_then_competition_worker
   api_contract: updated_sn_api_competition_yml
-  pending_openapi_sha256: 63bd9640b900da35c5fa597d3c076a8ff47bd616208931cef686342e9807cd26
-  monitor_cli: refresh_separately_for_migration_684_guard
+  pending_openapi_sha256: bb4b57f8bf584211cc18f89be0ae43769213c39655804e360719d87ac95e4610
+  monitor_cli: refresh_separately_for_migration_685_guard
   evaluator_rebuild: not_required
   baseline_reset: not_required
   config_updater_rollout: not_required
   finalization: automatic_after_admission_close_and_fifo_drain
-  selection: highest_ranked_placeable_significant_candidate_passing_all_gates
+  selection: highest_ranked_placeable_candidate_passing_all_gates_without_significance_or_takeover_margin
   ordering: raw_score_asc_submitted_at_job_id
   no_eligible_candidate: null_winner
   honesty_review: not_reviewed_no_review_rows_or_pause

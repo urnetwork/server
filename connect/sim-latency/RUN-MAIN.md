@@ -25,8 +25,9 @@ not approve candidates, merge branches, or push source/config refs. These roles
 apply to all six epochs and must survive an agent handoff.
 
 Candidate honesty review and source promotion apply only to production.
-Staging automatically names the highest-ranked eligible significant candidate
-after close and drain, without a human-review pause or source promotion.
+Staging automatically names the highest-ranked placeable candidate passing
+every gate after close and drain, without a significance or takeover-margin
+requirement, human-review pause, or source promotion.
 
 ## Before starting
 
@@ -98,17 +99,19 @@ scheduled/open/grading round. Share its `round_id` with the Apex integration.
 Fee-free staging patches traverse the real FIFO, isolation, evaluation,
 scoring, embargo, and authenticated polling paths. Every staging epoch uses
 frozen source epoch zero and automatically finalizes once admission closes and
-the worker drains all accepted jobs. It names the highest-ranked placeable,
-statistically significant candidate passing every gate, or no winner if none
-qualifies. The default leaderboard remains production-only; its
+the worker drains all accepted jobs. It names the highest-ranked placeable
+candidate passing every gate, regardless of significance or takeover margin.
+If none qualifies, there is no winner. The default leaderboard remains
+production-only; its
 `include_staging=true` view publishes the finalized staging epoch with
 `staging: true`, its `winner_job_id`, and a matching winning entry. Staging
 entries, including the winner, retain `honesty_review: not_reviewed`. This
 creates no honesty-review, promotion, or production-winner state; a named
 staging winner is not an honesty or safety approval. Historical finalized
-results are unchanged. The automatic named-winner follow-up is not yet
-deployed; the [release record](launch/STAGING-5-RELEASE.md) retains the actual
-epoch-5 opening worker identity and policy.
+results are unchanged. The best-safe staging policy requires migration 685,
+API, and worker rollout before epoch 8 closes; the
+[release record](launch/STAGING-5-RELEASE.md) retains the historical epoch-5
+opening worker identity and policy.
 
 For the polling proof, record both compatibility `state` and additive
 `evaluation_status`. Before publication, `state` remains `completed` for both

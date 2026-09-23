@@ -127,8 +127,8 @@ func TestCompetitionStagingWinnerPreservesRankingAndReviewIsolation(t *testing.T
 	})
 }
 
-// Faster but ineligible jobs cannot win; an all-ineligible round remains null.
-// Each eligibility dimension is represented without changing score validation.
+// Faster but unplaceable jobs cannot win; an all-unplaceable round remains null.
+// Statistical significance and takeover margin are not staging gates.
 func TestCompetitionStagingWinnerRequiresEveryEligibilityGate(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -137,11 +137,6 @@ func TestCompetitionStagingWinnerRequiresEveryEligibilityGate(t *testing.T) {
 			fixture := newCompetitionRankingFixture(t, true)
 			for index, mutate := range []func(*ScoreResult){
 				func(score *ScoreResult) { score.Placeable, score.TakeoverEligible = false, false },
-				func(score *ScoreResult) { score.TakeoverEligible = false },
-				func(score *ScoreResult) {
-					score.TakeoverEligible = false
-					score.Significance = testScoreSignificance(false)
-				},
 				func(score *ScoreResult) {
 					score.Gates["G1"] = Gate{Passed: false, Details: map[string]any{}}
 				},
@@ -157,12 +152,43 @@ func TestCompetitionStagingWinnerRequiresEveryEligibilityGate(t *testing.T) {
 				expectedWinner = &job.JobId
 			}
 			fixture.now = fixture.round.ClosesAt.Add(time.Second)
-			assertStagingWinnerWriteRejected(t, fixture, &fixture.jobs[3].JobId, "highest-ranked eligible job")
+			assertStagingWinnerWriteRejected(t, fixture, &fixture.jobs[2].JobId, "highest-ranked eligible job")
 			finalized, err := fixture.store.FinalizeStagingRound(context.Background(), fixture.settings, fixture.round.Epoch)
 			if err != nil || finalized.FinalizedAt == nil || (finalized.WinnerJobId == nil) != (expectedWinner == nil) ||
 				expectedWinner != nil && *finalized.WinnerJobId != *expectedWinner {
 				t.Fatalf("include eligible=%t: winner=%+v, error=%v", includeEligible, finalized, err)
 			}
+		}
+	})
+}
+
+// The four-job epoch-8 shape must elect its fastest safe result even when
+// every candidate misses both significance and the production takeover bar.
+func TestCompetitionStagingWinnerIgnoresSignificanceAndTakeover(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		fixture := newCompetitionRankingFixture(t, true)
+		var bestJobId server.Id
+		for index, raw := range []float64{120, 130, 115, 110} {
+			score := competitionRankingScore(raw, 100)
+			score.TakeoverEligible = false
+			score.Significance = testScoreSignificance(false)
+			job := fixture.completeScore(t, score, true)
+			if index == 3 {
+				bestJobId = job.JobId
+			}
+		}
+		fixture.now = fixture.round.ClosesAt.Add(time.Second)
+		assertStagingWinnerWriteRejected(t, fixture, nil, "highest-ranked eligible job")
+		finalized, err := fixture.store.FinalizeStagingRound(context.Background(), fixture.settings, fixture.round.Epoch)
+		if err != nil || finalized.WinnerJobId == nil || *finalized.WinnerJobId != bestJobId {
+			t.Fatalf("non-significant staging winner = %+v, error=%v", finalized, err)
+		}
+		boards, err := fixture.store.Leaderboards(context.Background(), fixture.settings, true)
+		if err != nil || len(boards.Epochs) != 1 || boards.Epochs[0].WinnerJobId == nil ||
+			*boards.Epochs[0].WinnerJobId != bestJobId || !boards.Epochs[0].Entries[0].Winner {
+			t.Fatalf("non-significant staging leaderboard = %+v, error=%v", boards, err)
 		}
 	})
 }
@@ -320,6 +346,10 @@ func newStagingWinnerAdapterFixture(t testing.TB, staging bool) (*ApexAdapterFil
 func TestApexAdapterAcceptsAutomaticStagingAndReviewedProductionWinners(t *testing.T) {
 	for _, staging := range []bool{false, true} {
 		store, board, now := newStagingWinnerAdapterFixture(t, staging)
+		if staging {
+			board.Entries[0].Score.TakeoverEligible = false
+			board.Entries[0].Score.Significance = testScoreSignificance(false)
+		}
 		if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{board}}, now); err != nil {
 			t.Fatal(err)
 		}
@@ -359,6 +389,9 @@ func TestApexAdapterRejectsInconsistentAutomaticAndReviewedWinners(t *testing.T)
 			},
 			func(board *LeaderboardResult) { board.Entries[0].Score.RawScore = nil },
 		} {
+			if staging && (index == 6 || index == 7) {
+				continue
+			}
 			store, board, now := newStagingWinnerAdapterFixture(t, staging)
 			mutate(&board)
 			if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{board}}, now); err == nil {
