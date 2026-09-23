@@ -1672,11 +1672,12 @@ func createTransferEscrowInTx(
 	                transfer_byte_count,
 	                companion_contract_id,
 	                payer_network_id,
+	                usage_origin_is_source,
 	                create_time,
 	                priority
 	            )
 	            VALUES (
-	                $1, $2, $3, $4, $5, $6, $7, $8,
+	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
 	                clock_timestamp() AT TIME ZONE 'UTC',
 	                $9
 	            )
@@ -2199,6 +2200,21 @@ func CreateContractNoEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (contractId server.Id, returnErr error) {
+	return CreateContractNoEscrowWithUsageOrigin(ctx, sourceNetworkId, sourceId,
+		destinationNetworkId, destinationId, contractTransferByteCount, true)
+}
+
+// Preserves the service origin before a same-network companion is normalized
+// onto the no-escrow transport path. The funding mode never determines usage.
+func CreateContractNoEscrowWithUsageOrigin(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+	usageOriginIsSource bool,
+) (contractId server.Id, returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		contractId, returnErr = createContractNoEscrowInTx(
 			ctx,
@@ -2208,6 +2224,7 @@ func CreateContractNoEscrow(
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
+			usageOriginIsSource,
 		)
 	})
 	if returnErr != nil {
@@ -2228,6 +2245,7 @@ func createContractNoEscrowInTx(
 	destinationNetworkId server.Id,
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
+	usageOriginIsSource bool,
 ) (contractId server.Id, returnErr error) {
 	if err := lockActiveContractClientsInTx(
 		ctx,
@@ -2251,10 +2269,11 @@ func createContractNoEscrowInTx(
                     destination_network_id,
                     destination_id,
                     transfer_byte_count,
+                    usage_origin_is_source,
                     create_time
                 )
 	            VALUES (
-	                $1, $2, $3, $4, $5, $6,
+	                $1, $2, $3, $4, $5, $6, $7,
 	                clock_timestamp() AT TIME ZONE 'UTC'
 	            )
 	        `,
@@ -2264,6 +2283,7 @@ func createContractNoEscrowInTx(
 		destinationNetworkId,
 		destinationId,
 		contractTransferByteCount,
+		usageOriginIsSource,
 	))
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -2504,7 +2524,7 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 				}
 			} else {
 				// nothing to settle, just close the transaction
-				closed = claimContractOutcomeInTx(ctx, tx, contractId, ContractOutcomeSettled)
+				closed, returnErr = claimContractOutcomeInTx(ctx, tx, contractId, ContractOutcomeSettled)
 				if closed {
 					clockTransferByteCount = destinationUsedTransferByteCount
 				}
@@ -2541,14 +2561,19 @@ func claimContractOutcomeInTx(
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
-) bool {
+) (bool, error) {
+	usage, err := contractUsageSnapshotInTx(ctx, tx, contractId, outcome)
+	if err != nil {
+		return false, err
+	}
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
             UPDATE transfer_contract
             SET
                 outcome = $2,
-                close_time = $3
+                close_time = $3,
+                provider_usage = $4
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
@@ -2556,8 +2581,9 @@ func claimContractOutcomeInTx(
 		contractId,
 		outcome,
 		server.NowUtc(),
+		usage,
 	))
-	return tag.RowsAffected() == 1
+	return tag.RowsAffected() == 1, nil
 }
 
 // contractParticipantsInTx returns the service side of a contract: the
@@ -2575,6 +2601,17 @@ func contractParticipantsInTx(
 	originNetworkId server.Id,
 	returnErr error,
 ) {
+	return contractParticipantsWithUsageOriginInTx(ctx, tx, contractId, nil)
+}
+
+// Uses an explicit retained service direction for subnet accounting while the
+// billing caller keeps its existing payer/companion direction.
+func contractParticipantsWithUsageOriginInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	contractId server.Id,
+	usageOriginIsSource *bool,
+) (participants []ContractParticipant, originNetworkId server.Id, returnErr error) {
 	var sourceNetworkId server.Id
 	var sourceId server.Id
 	var destinationNetworkId server.Id
@@ -2647,6 +2684,9 @@ func contractParticipantsInTx(
 		originNetworkId = destinationNetworkId
 	}
 
+	if usageOriginIsSource != nil {
+		originIsSource = *usageOriginIsSource
+	}
 	originId := sourceId
 	egress := ContractParticipant{ClientId: destinationId, NetworkId: destinationNetworkId}
 	if !originIsSource {
@@ -3024,10 +3064,10 @@ func settleEscrowInTx(
 		sweepPayouts,
 	)
 
-	if !claimContractOutcomeInTx(ctx, tx, contractId, outcome) {
+	closed, returnErr = claimContractOutcomeInTx(ctx, tx, contractId, outcome)
+	if returnErr != nil || !closed {
 		return
 	}
-	closed = true
 	if 0 < clockTransferByteCount {
 		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
 	}
@@ -3819,7 +3859,9 @@ func ForceCloseOpenContractIds(
                     UPDATE transfer_contract
                     SET
                         outcome = $2,
-                        close_time = $3
+                        close_time = $3,
+                        usage_unverified = true,
+                        provider_usage = '{"version":1,"byte_count":0,"providers":[],"excluded_reason":"expired_unconfirmed"}'::jsonb
                     WHERE
                         contract_id = $1 AND
                         outcome IS NULL AND
@@ -3846,6 +3888,11 @@ func ForceCloseOpenContractIds(
 	}
 
 	closeContract := func(tag string, openContract *OpenContract) error {
+		// Expiry may synthesize a missing close or finalize a checkpoint. It
+		// settles billing but cannot invent bilateral subnet usage evidence.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true WHERE contract_id=$1 AND outcome IS NULL`, openContract.contractId))
+		}, server.TxReadCommitted)
 		if openContract.dispute {
 			// todo: improve this with better detection of th eroot causes
 			forceCloseContractCounter.WithLabelValues("dispute_both_sides").Inc()

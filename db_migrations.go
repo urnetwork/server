@@ -8176,4 +8176,22 @@ var migrations = []any{
 		END
 		$competition_round_honesty_review_gate$;
 	`),
+	// Subnet usage is independent of escrow/payment. NULL denotes legacy
+	// direction or usage that cannot be reconstructed safely after the fact.
+	newSqlMigration(`
+		ALTER TABLE transfer_contract
+			ADD COLUMN usage_origin_is_source boolean NULL,
+			ADD COLUMN usage_unverified boolean NOT NULL DEFAULT false,
+			ADD COLUMN provider_usage jsonb NULL;
+		ALTER TABLE transfer_contract
+			ADD CONSTRAINT transfer_contract_provider_usage_shape CHECK (
+				provider_usage IS NULL OR jsonb_typeof(provider_usage) = 'object'
+			) NOT VALID;
+	`),
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_closed_usage
+		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_closed_usage
+		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
+	),
 }

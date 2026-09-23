@@ -130,7 +130,7 @@ const (
 // Deposit sizing (PLAN.md §6 deposit policy): the automated per-epoch
 // deposit is `min(deposit_epoch_cap_rao, usage_gib × deposit_alpha_rao_per_gib)`
 // where usage is the previous epoch window's total settled payout bytes
-// (`transfer_escrow_sweep`). The rate is the off-chain reference rate of
+// (immutable completed-contract snapshots). The rate is the off-chain reference rate of
 // WHITEPAPER §7.1 expressed directly in rao per GiB — config, not oracle.
 type StConfig struct {
 	Profile                string
@@ -2486,7 +2486,7 @@ type StPayoutShare struct {
 // whose contributing verify client resolves (client_id -> ckey) to an active
 // head binding is dropped entirely, so a provider promoted to the head tier —
 // already paid natively by Yuma — never contributes to a pool payoutRoot
-// (never paid twice). Usage is per-network (transfer_escrow_sweep is not
+// (never paid twice). Legacy payout usage is aggregated per-network (it is not
 // client-attributed), so the network is the finest unit at which a promoted
 // provider can be removed; a promoted provider only ever earns a leaf when it
 // has verify confirmations, and those confirmations name the client_id, so the
@@ -3108,7 +3108,7 @@ func stComputeReleasePayout(
 
 // StComputeEpochPayout computes and stores the payout leaves for a closed
 // epoch (the StEpochClose step): map the epoch boundary blocks to a
-// wall-clock window, read usage (`transfer_escrow_sweep`) × reliability
+// wall-clock window, read payment-independent completed usage × reliability
 // (`verify_provider_stats`), join claim wallets, aggregate per coldkey,
 // allocate exactly 10,000 bps by largest remainder, and store the canonical leaf set. Returns the Merkle
 // root (zero when there are no leaves).
@@ -3153,7 +3153,10 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 		return stComputeReleasePayout(ctx, cfg, client, epoch, startTime, endTime, startBlock, closeBlock)
 	}
 
-	usages := model.GetStEpochNetworkUsage(ctx, startTime, endTime)
+	usages, err := model.GetStEpochNetworkUsage(ctx, startTime, endTime)
+	if err != nil {
+		return root, 0, err
+	}
 	reliabilities := model.GetStEpochClientReliability(ctx, startTime, endTime)
 	wallets := model.GetAllStWalletColdkeys(ctx)
 

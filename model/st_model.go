@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -1756,48 +1757,45 @@ func SetStChainCheckpoint(ctx context.Context, deploymentKey StDeploymentKey, ch
 	})
 }
 
-// StNetworkUsage is one network's summed provider payout bytes in an epoch
-// window, from `transfer_escrow_sweep` (written by `settleEscrowInTx`).
+// One network's payment-independent completed provider usage in an epoch.
 type StNetworkUsage struct {
 	NetworkId       server.Id
 	PayoutByteCount int64
 }
 
-// Settled payout traffic attributed to each actual provider. The settlement
-// snapshots client shares independently of network-level account payments.
+// Completed usage attributed to its retained provider identity. The legacy
+// PayoutByteCount field name is preserved for callers; no payment is implied.
 type StProviderUsage struct {
 	ClientId        server.Id
 	NetworkId       server.Id
 	PayoutByteCount int64
 }
 
-// GetStEpochNetworkUsage sums `transfer_escrow_sweep.payout_byte_count` per
-// provider network with `sweep_time` in [startTime, endTime).
-func GetStEpochNetworkUsage(ctx context.Context, startTime time.Time, endTime time.Time) []*StNetworkUsage {
-	usages := []*StNetworkUsage{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-                SELECT
-                    network_id,
-                    SUM(payout_byte_count) AS payout_byte_count
-                FROM transfer_escrow_sweep
-                WHERE $1 <= sweep_time AND sweep_time < $2
-                GROUP BY network_id
-            `,
-			startTime,
-			endTime,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				usage := &StNetworkUsage{}
-				server.Raise(result.Scan(&usage.NetworkId, &usage.PayoutByteCount))
-				usages = append(usages, usage)
-			}
-		})
-	})
-	return usages
+// The legacy network payout path consumes exactly the same validated usage
+// as per-provider release artifacts, including free and same-network traffic.
+func GetStEpochNetworkUsage(ctx context.Context, startTime time.Time, endTime time.Time) ([]*StNetworkUsage, error) {
+	providers, err := GetStEpochProviderUsage(ctx, startTime, endTime)
+	if err != nil {
+		return nil, err
+	}
+	byNetwork := map[server.Id]*StNetworkUsage{}
+	for _, provider := range providers {
+		usage := byNetwork[provider.NetworkId]
+		if usage == nil {
+			usage = &StNetworkUsage{NetworkId: provider.NetworkId}
+			byNetwork[provider.NetworkId] = usage
+		}
+		if provider.PayoutByteCount > math.MaxInt64-usage.PayoutByteCount {
+			return nil, fmt.Errorf("subnet network usage overflows")
+		}
+		usage.PayoutByteCount += provider.PayoutByteCount
+	}
+	usages := make([]*StNetworkUsage, 0, len(byNetwork))
+	for _, usage := range byNetwork {
+		usages = append(usages, usage)
+	}
+	slices.SortFunc(usages, func(a, b *StNetworkUsage) int { return a.NetworkId.Cmp(b.NetworkId) })
+	return usages, nil
 }
 
 // StClientReliability is one provider client's verification counters summed

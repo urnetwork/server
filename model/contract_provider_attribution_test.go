@@ -154,134 +154,26 @@ func addStProviderUsageTestSweep(t testing.TB, ctx context.Context, originNetwor
 
 // Legacy single-provider and current multi-provider history coexist in one
 // epoch. Half-open boundaries, unchanged network totals, and whole-row cleanup
-// remain exact without inventing an allocation for unrecorded legacy clients.
-func TestStEpochProviderUsageMixedLegacyAndCurrentHistory(t *testing.T) {
+// Historic billing allocations are not a substitute for the new usage proof,
+// including direct contracts whose normalized return direction was discarded.
+func TestStEpochProviderUsageRejectsHistoricalBillingFallback(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		start := time.Unix(1_700_000_000, 0).UTC()
-		end := start.Add(time.Hour)
-		originNetworkId, providerNetworkId := server.NewId(), server.NewId()
-		legacyId, firstId, secondId := contractPayoutTestId(1), contractPayoutTestId(2), contractPayoutTestId(3)
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, legacyId, start, nil)
-		modernContractId := addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, firstId, start.Add(time.Minute), []contractProviderPayout{
-			{ClientId: firstId, PayoutByteCount: 61, PayoutNanoCents: 61},
-			{ClientId: secondId, PayoutByteCount: 60, PayoutNanoCents: 60},
-		})
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, server.NewId(), start.Add(-time.Microsecond), nil)
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, server.NewId(), end, nil)
-		usages, err := GetStEpochProviderUsage(ctx, start, end)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := map[server.Id]int64{}
-		for _, usage := range usages {
-			got[usage.ClientId] = usage.PayoutByteCount
-		}
-		want := map[server.Id]int64{legacyId: 121, firstId: 61, secondId: 60}
-		if !maps.Equal(got, want) {
-			t.Fatalf("mixed history = %v, want %v", got, want)
-		}
-		networkUsage := GetStEpochNetworkUsage(ctx, start, end)
-		if len(networkUsage) != 1 || networkUsage[0].PayoutByteCount != 242 {
-			t.Fatalf("provider expansion changed network demand accounting: %+v", networkUsage)
-		}
+		contractId := addStProviderUsageTestSweep(t, ctx, server.NewId(), server.NewId(), server.NewId(), start, nil)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id = $1`, modernContractId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET close_time=$2, outcome='settled' WHERE contract_id=$1`, contractId, start))
 		})
-		if removed, _, done := SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 1); !done || removed != 1 {
-			t.Fatalf("orphan sweep removed=%d done=%t, want one completed row", removed, done)
-		}
-		usages, err = GetStEpochProviderUsage(ctx, start, end)
-		if err != nil || len(usages) != 1 || usages[0].ClientId != legacyId || usages[0].PayoutByteCount != 121 {
-			t.Fatalf("orphan cleanup left provider attribution behind: %+v, %v", usages, err)
-		}
-	})
-}
-
-// A pre-snapshot stream sweep may combine multiple same-network providers.
-// Reject that ambiguity even alongside valid history; the minimum stored
-// destination id is not evidence that its client carried every credited byte.
-func TestStEpochProviderUsageRejectsAmbiguousLegacyAggregate(t *testing.T) {
-	testEnv := server.DefaultTestEnv()
-	testEnv.RerunCount = 0
-	testEnv.Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		start := time.Unix(1_700_000_000, 0).UTC()
-		originNetworkId, providerNetworkId := server.NewId(), server.NewId()
-		firstId, secondId := contractPayoutTestId(2), contractPayoutTestId(3)
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, server.NewId(), start, nil)
-		contractId := addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, firstId, start, nil)
-		streamId := server.NewId()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET stream_id = $1 WHERE contract_id = $2`, streamId, contractId))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_participant (stream_id, client_id, network_id) VALUES ($1, $2, $3)`, streamId, secondId, providerNetworkId))
-		})
-		usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour))
-		if err == nil || !strings.Contains(err.Error(), "ambiguous") || usages != nil {
-			t.Fatalf("ambiguous legacy history produced partial credit: %+v, %v", usages, err)
-		}
-	})
-}
-
-// SetContractStream can republish an intermediary after its account network
-// changes. That current membership is not proof of which clients contributed
-// to an older aggregate; the legacy row must remain uncreditable.
-func TestStEpochProviderUsageRejectsLegacyStreamAfterMembershipRewrite(t *testing.T) {
-	testEnv := server.DefaultTestEnv()
-	testEnv.RerunCount = 0
-	testEnv.Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		start := time.Unix(1_700_000_000, 0).UTC()
-		originNetworkId, providerNetworkId := server.NewId(), server.NewId()
-		firstId, secondId := contractPayoutTestId(2), contractPayoutTestId(3)
-		addContractPayoutTestClients(ctx, map[server.Id]server.Id{firstId: providerNetworkId, secondId: providerNetworkId})
-		contractId := addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, firstId, start, nil)
-		streamId := server.NewId()
-		if err := SetContractStream(ctx, contractId, streamId, []server.Id{secondId}); err != nil {
-			t.Fatal(err)
-		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id = $1 WHERE client_id = $2`, server.NewId(), secondId))
-		})
-		if err := SetContractStream(ctx, contractId, streamId, []server.Id{secondId}); err != nil {
-			t.Fatal(err)
-		}
 		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
-			t.Fatalf("mutable membership laundered ambiguous legacy credit: %+v, %v", usages, err)
+			t.Fatalf("legacy billing acquired guessed subnet credit: %+v, %v", usages, err)
 		}
-	})
-}
-
-// Modern malformed allocations cannot masquerade as legacy data. Missing or
-// duplicate clients, negative/missing fields, and either conservation error
-// reject the entire epoch, including any otherwise valid rows.
-func TestStEpochProviderUsageRejectsInvalidAllocationsWithoutLegacyFallback(t *testing.T) {
-	testEnv := server.DefaultTestEnv()
-	testEnv.RerunCount = 0
-	testEnv.Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		start := time.Unix(1_700_000_000, 0).UTC()
-		originNetworkId, providerNetworkId := server.NewId(), server.NewId()
-		providerId := contractPayoutTestId(2)
-		addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, server.NewId(), start, nil)
-		contractId := addStProviderUsageTestSweep(t, ctx, originNetworkId, providerNetworkId, providerId, start, nil)
-		for _, value := range []string{
-			`[{"client_id":"` + providerId.String() + `","payout_byte_count":120,"payout_nano_cents":121}]`,
-			`[{"client_id":"` + providerId.String() + `","payout_byte_count":121,"payout_nano_cents":120}]`,
-			`[{"client_id":"` + providerId.String() + `","payout_byte_count":61,"payout_nano_cents":61},{"client_id":"` + providerId.String() + `","payout_byte_count":60,"payout_nano_cents":60}]`,
-			`[{"client_id":"00000000-0000-0000-0000-000000000000","payout_byte_count":121,"payout_nano_cents":121}]`,
-			`[{"client_id":"` + providerId.String() + `","payout_byte_count":-1,"payout_nano_cents":121}]`,
-			`[{"client_id":"` + providerId.String() + `","payout_byte_count":121}]`,
-			`[{"client_id":"not-a-client","payout_byte_count":121,"payout_nano_cents":121}]`,
-		} {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow_sweep SET provider_payouts = $1::jsonb WHERE contract_id = $2`, value, contractId))
-			})
-			if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
-				t.Fatalf("invalid allocation produced partial or legacy credit: %s: %+v, %v", value, usages, err)
-			}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET stream_id=$2 WHERE contract_id=$1`, contractId, server.NewId()))
+		})
+		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
+			t.Fatalf("legacy stream acquired guessed subnet credit: %+v, %v", usages, err)
 		}
 	})
 }

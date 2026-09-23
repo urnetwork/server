@@ -1146,6 +1146,17 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 				storedContract := &protocol.StoredContract{}
 				err := proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
 				connect.AssertEqual(t, err, nil)
+				// Transport normalization must preserve the original provider for
+				// subnet usage, even though no companion or escrow is stored.
+				contractId, err := server.IdFromBytes(storedContract.ContractId)
+				connect.AssertEqual(t, err, nil)
+				start := server.NowUtc()
+				connect.AssertEqual(t, model.CloseContract(ctx, contractId, source, 121, false), nil)
+				connect.AssertEqual(t, model.CloseContract(ctx, contractId, destination, 120, false), nil)
+				usages, usageErr := model.GetStEpochProviderUsage(ctx, start, start.Add(time.Hour))
+				if usageErr != nil || len(usages) != 1 || usages[0].ClientId != source || usages[0].PayoutByteCount != 120 {
+					t.Fatalf("normalized return lost its service origin: %+v, %v", usages, usageErr)
+				}
 				connect.AssertEqual(t, storedContract.Priority != nil, true)
 				if storedContract.Priority != nil {
 					connect.AssertEqual(t, int(*storedContract.Priority), int(model.TrustedPriority))
