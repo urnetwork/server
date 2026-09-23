@@ -18913,8 +18913,22 @@ discovery, but each owns its mutable JWT/refresh session, control client
 strategy (including DoH concurrency and dial pacing), and memory admission.
 The private strategy's idle sockets and DoH cache are not a hard-RSS component
 of the 24 MiB DeviceLocal target; compare host reserve and per-device RSS trend
-after deployment before claiming spare physical capacity. Use these aggregate,
-identity-free metrics:
+after deployment before claiming spare physical capacity.
+
+**Private-control lifecycle qualifier:** the strategy is device-owned, but its
+parent context must be the manager-owned NetworkSpace, not the DeviceLocal
+data-plane context. DeviceLocal cancels data flow before its generated clients
+join final contract retirement; canceling the strategy at that earlier edge
+can discard the final authenticated close/usage request and leave a running
+provider's contract under-settled until later cleanup. A synthetic request
+held across device cancellation fails under the old parent and succeeds with
+the corrected lifetime; the Proxy contract-churn acceptance test is the
+end-to-end accounting control. Do not interpret a low settled-byte total from
+one synthetic run as proof of compression or provider failure. Correlate
+one-sided contract closes, aged open reservations, and the actual owner
+generation before assigning an incident to this mechanism.
+
+Use these aggregate, identity-free metrics:
 
 - `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
   `urnetwork_proxy_devices_live * 24 MiB` in main.
