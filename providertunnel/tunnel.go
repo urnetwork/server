@@ -37,6 +37,9 @@ type Config struct {
 	// This is a reservation target, not a traffic quota: packet-size floors
 	// and the server's admission bounds still apply, and contracts renew.
 	ContractReservationByteCount connect.ByteCount
+	// Descendant carriers may share an explicitly supplied probe-owner budget.
+	// Nil gives this tunnel a fresh independent budget using default values.
+	PlatformTransportBudget *connect.PlatformTransportBudget
 }
 
 // ErrPinsRequired is returned by Open when Config.Pins is nil or empty. The
@@ -69,8 +72,11 @@ var createTun = func(ctx context.Context, resolver *connect.DnsResolverSettings)
 }
 
 // The control-plane strategy is a seam so the Open-path test can prove every
-// provider tunnel uses the shared IPv4-only constructor.
+// provider tunnel gets its own strategy from the IPv4-only constructor.
 var newControlplaneClientStrategy = controlplane.NewClientStrategy
+
+// Tests observe the actual generator settings without starting a provider.
+var newApiMultiClientGenerator = connect.NewApiMultiClientGenerator
 
 // The fixed-provider tunnel is itself the instrument used by the outer
 // geolocation/egress-health probe. Running RemoteUserNatMultiClient's ordinary
@@ -186,8 +192,21 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
 	dataCtx, cancelData := context.WithCancel(lifecycleCtx)
 	clientStrategy := newControlplaneClientStrategy(lifecycleCtx)
+	transportBudget := cfg.PlatformTransportBudget
+	if transportBudget == nil {
+		// Copy limits, never mutable ownership, from default settings. The
+		// same private root follows every window and replacement of this tunnel.
+		limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
+		transportBudget = connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
+	}
+	generatorSettings := connect.DefaultApiMultiClientGeneratorSettings()
+	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.PlatformTransportBudget = transportBudget
+		return settings
+	}
 
-	generator := connect.NewApiMultiClientGenerator(
+	generator := newApiMultiClientGenerator(
 		lifecycleCtx,
 		[]*connect.ProviderSpec{
 			{ClientId: &providerClientId},
@@ -205,9 +224,12 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		func() *connect.ClientSettings {
 			return providerTunnelClientSettings(cfg.ContractReservationByteCount)
 		},
-		connect.DefaultApiMultiClientGeneratorSettings(),
+		generatorSettings,
 	)
 
+	// Do not hoist the TUN or its DoH cache to the Taskworker pass: every full
+	// and blackhole provider probe needs an independently owned DNS cache and
+	// admission state. The constructor creates that cache for this TUN alone.
 	tun, err := createTun(dataCtx, inTunnelOnlyDnsResolverSettings())
 	if err != nil {
 		cancelData()
