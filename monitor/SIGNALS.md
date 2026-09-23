@@ -6969,6 +6969,32 @@ Require naturally restored admission, falling expired-open reservations, advanci
 measurements and product provider-list recovery. Quiet guard counters or provider
 evidence aging into unknown are not recovery.
 
+**DNS-family progress boundary:** deterministic two-Tun, remote-only RFC 8484
+tests reproduce a shared Connect defect: stream dialing waited for both A and
+AAAA, so a completed or cached usable answer could not start TCP while the other
+query remained pending. The correction feeds completed families into the
+existing 250 ms TCP fallback race, preserving ready/cached IPv6 preference,
+late-family fallback after TCP failure, explicit family selection, and custom
+resolver authority. UDP's full-list resolution policy is unchanged. The dial
+cancels and joins its `QueryResult` callers and TCP workers, closing losing
+connections; shared-cache HTTP transport tails retain their separate ownership
+until `cache.Close`, not necessarily until stream return.
+`TestTunDohProgress*`, `TestInternalDohProgress*`, and `TestDohDialProgress*`
+cover both stalled-family directions, cold/partial/full caches, failed first
+TCP, cancellation, late successful losers, and authoritative-empty versus
+unobservable results.
+
+False-positive qualifier: this proves the mechanism, not attribution of every
+production geolocation timeout. `pre-GotConn`/`connect_formation` is a fallback
+classification, not proof of a Connect-service or TLS-phase failure.
+False-negative qualifier: geolocation precedes health on the same initially
+cold tunnel/cache; later aggregate health success does not establish what
+happened to an individual failed source or exclude an earlier DNS-family stall.
+Compare the running artifact with the owning correction before recommending a
+rollout. Require fresh source outcomes and traffic-bearing full submissions,
+alongside the independent provider-list recovery gates; a code fix or quieter
+resolver-attempt logs alone do not prove recovery.
+
 The producer has a matching correctness boundary: `fleetprobe.RunBlackhole`
 discards an in-flight result if the owning context is canceled before that
 result can be retained. Otherwise canceled requests are rendered as
