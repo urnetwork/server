@@ -370,7 +370,7 @@ func TestEgressProbePassMetricDomainsArePreseeded(t *testing.T) {
 	}
 	for _, key := range []string{
 		"full/attempted", "full/submitted", "full/skipped", "full/failed",
-		"error/blackhole_due", "error/full_due", "error/pins", "error/blackhole_run", "error/blackhole_submit", "error/full_run", "error/canceled",
+		"error/blackhole_due", "error/full_due", "error/pins", "error/blackhole_run", "error/blackhole_submit", "error/full_run", "error/canceled", "error/funding_unavailable", "error/funding_unknown",
 	} {
 		if !seen[key] {
 			t.Fatalf("missing preseeded pass metric child %q", key)

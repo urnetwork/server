@@ -209,7 +209,7 @@ Staging has no honesty-review pause or review records: even its winner is
 `honesty_review: not_reviewed`. A named staging winner is not an honesty or
 safety approval and never promotes source, changes the significance threshold,
 or creates a production winner. Previously finalized staging results remain
-unchanged. The best-safe staging policy requires migration 685, API, and worker
+unchanged. The best-safe staging policy requires migration 691, API, and worker
 rollout before epoch 8 closes; the [epoch-5 release record](launch/STAGING-5-RELEASE.md)
 describes its historical opening policy.
 

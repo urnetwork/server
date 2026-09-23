@@ -63,8 +63,8 @@ const (
 type testConnectConfig struct {
 	enableH1Plus bool
 	// expectH1WebSocket verifies the negotiated client carrier while the
-	// fixture transports are live. It is used to pin the rollout-disabled H1
-	// path to ordinary RFC WebSocket rather than merely observing delivery.
+	// fixture transports are live. It is used to pin the opted-out H1 path to
+	// ordinary RFC WebSocket rather than merely observing delivery.
 	expectH1WebSocket     bool
 	oldH1Provider         bool
 	enableChaos           bool

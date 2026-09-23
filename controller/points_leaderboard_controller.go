@@ -19,7 +19,7 @@ import (
 
 // All-time points leaderboard api + rebuild task (android/POINTSLEADERBOARD.md).
 // The model owns the ranking rules and the snapshot table; this file owns the
-// wire shapes, the keyset cursor, the epoch windows and the scheduling.
+// wire shapes, the keyset cursor, the operator payout windows and scheduling.
 //
 // Every ranked network is listed, as one continuous list paged in chunks. A
 // network's name appears only when it turned on `points_leaderboard_public`
@@ -31,13 +31,9 @@ const (
 	pointsLeaderboardMaxLimit     = 200
 
 	// pointsLeaderboardRebuildInterval is the fallback cadence. Rebuilds are
-	// also triggered when an epoch finalizes and when a payout plan commits,
-	// the only times points change.
+	// also triggered when a payout plan commits and when a new operator week
+	// closes. ST finalization is not a points-leaderboard prerequisite.
 	pointsLeaderboardRebuildInterval = 1 * time.Hour
-
-	// pointsLeaderboardEpochLimit bounds the finalized epochs a rebuild reads.
-	// Epochs are days apart, so this is decades of history.
-	pointsLeaderboardEpochLimit = 100000
 
 	pointsLeaderboardEmojiTagMessage = "Use 1 to 6 emoji."
 )
@@ -467,6 +463,7 @@ type RebuildPointsLeaderboardResult struct {
 	TotalRanked           int64     `json:"total_ranked"`
 	LatestEpoch           uint64    `json:"latest_epoch"`
 	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
+	RollupBatches         int       `json:"rollup_batches"`
 }
 
 const (
@@ -478,13 +475,17 @@ const (
 // startup and re-armed by the post function. RunOnce merges into a pending
 // run (keeping the earlier run_at), so re-arming never duplicates.
 func ScheduleRebuildPointsLeaderboard(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleRebuildPointsLeaderboardAfter(clientSession, tx, pointsLeaderboardRebuildInterval)
+}
+
+func scheduleRebuildPointsLeaderboardAfter(clientSession *session.ClientSession, tx server.PgTx, delay time.Duration) {
 	task.ScheduleTaskInTx(
 		tx,
 		RebuildPointsLeaderboard,
 		&RebuildPointsLeaderboardArgs{},
 		clientSession,
 		task.RunOnce(rebuildPointsLeaderboardKey),
-		task.RunAt(server.NowUtc().Add(pointsLeaderboardRebuildInterval)),
+		task.RunAt(server.NowUtc().Add(delay)),
 		task.MaxTime(30*time.Minute),
 	)
 }
@@ -515,20 +516,24 @@ func TriggerRebuildPointsLeaderboard(ctx context.Context) {
 	})
 }
 
-// RebuildPointsLeaderboard writes a new snapshot from the current points and
-// finalized epochs.
+// RebuildPointsLeaderboard writes a new snapshot from current points and
+// completed seven-day operator payout blocks.
 func RebuildPointsLeaderboard(
 	args *RebuildPointsLeaderboardArgs,
 	clientSession *session.ClientSession,
 ) (*RebuildPointsLeaderboardResult, error) {
 	ctx := clientSession.Ctx
-	windows := pointsLeaderboardEpochWindows(ctx)
+	rollupBatches, err := model.AdvancePointsBlockRollup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	windows := pointsLeaderboardOperatorWindowFunc(server.NowUtc())
 	snapshot, err := model.RebuildPointsLeaderboard(ctx, windows)
 	if err != nil {
 		return nil, err
 	}
 	glog.Infof(
-		"[points]leaderboard snapshot %s: %d ranked networks, %d finalized epochs, latest epoch %d, epoch metrics available %t\n",
+		"[points]leaderboard snapshot %s: %d ranked networks, %d completed payout blocks, latest block %d, block metrics available %t\n",
 		snapshot.SnapshotId,
 		snapshot.TotalRanked,
 		len(windows),
@@ -540,6 +545,7 @@ func RebuildPointsLeaderboard(
 		TotalRanked:           snapshot.TotalRanked,
 		LatestEpoch:           snapshot.LatestEpoch,
 		EpochMetricsAvailable: snapshot.EpochMetricsAvailable,
+		RollupBatches:         rollupBatches,
 	}, nil
 }
 
@@ -549,34 +555,33 @@ func RebuildPointsLeaderboardPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRebuildPointsLeaderboard(clientSession, tx)
+	if result != nil && !result.EpochMetricsAvailable && result.RollupBatches > 0 {
+		// Backfill only bounded batches per run, then retry promptly without
+		// monopolizing payout transactions or a Taskworker for hours.
+		scheduleRebuildPointsLeaderboardAfter(clientSession, tx, time.Minute)
+	} else {
+		ScheduleRebuildPointsLeaderboard(clientSession, tx)
+	}
 	return nil
 }
 
-// pointsLeaderboardEpochWindowFunc resolves one finalized epoch's window;
-// tests replace it so the rebuild never touches the chain.
-var pointsLeaderboardEpochWindowFunc = snEpochWindow
-var pointsLeaderboardDeploymentKeyFunc = StDeploymentKey
+// Tests can pin the clock without changing the shared SubnetBlock clock.
+var pointsLeaderboardOperatorWindowFunc = pointsLeaderboardOperatorWindows
 
-// pointsLeaderboardEpochWindows lists every finalized epoch with its
-// wall-clock window.
-func pointsLeaderboardEpochWindows(ctx context.Context) []model.PointsEpochWindow {
-	deploymentKey, ok := pointsLeaderboardDeploymentKeyFunc()
-	if !ok {
+// pointsLeaderboardOperatorWindows lists every completed fixed Sunday-00 UTC
+// seven-day payout period since operator block 1. The open period does not
+// count; a late or split payout cannot move the period's boundaries.
+func pointsLeaderboardOperatorWindows(now time.Time) []model.PointsEpochWindow {
+	closedThrough := model.SubnetBlockStart(now.UTC())
+	if !model.SubnetBlockGenesis.Before(closedThrough) {
 		return nil
 	}
-	rows := model.GetFinalizedStEpochs(ctx, deploymentKey, pointsLeaderboardEpochLimit)
-	windows := make([]model.PointsEpochWindow, 0, len(rows))
-	for _, row := range rows {
-		start, end := pointsLeaderboardEpochWindowFunc(ctx, row)
-		if !start.Before(end) {
-			glog.Warningf("[points]epoch %d has an empty window [%s, %s); skipping\n", row.Epoch, start, end)
-			continue
-		}
+	count := int(closedThrough.Sub(model.SubnetBlockGenesis) / model.SubnetBlockDuration)
+	windows := make([]model.PointsEpochWindow, 0, count)
+	for i := 0; i < count; i++ {
+		start := model.SubnetBlockGenesis.Add(time.Duration(i) * model.SubnetBlockDuration)
 		windows = append(windows, model.PointsEpochWindow{
-			Epoch: row.Epoch,
-			Start: start,
-			End:   end,
+			Epoch: uint64(i + 1), Start: start, End: start.Add(model.SubnetBlockDuration),
 		})
 	}
 	return windows

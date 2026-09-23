@@ -8234,10 +8234,47 @@ var migrations = []any{
 		$competition_round_honesty_review_gate$;
 	`),
 
+	// The points leaderboard's seven-day operator blocks are independent of ST
+	// epochs and of the time a payout is posted. A payment can include paid
+	// traffic from several Sunday-to-Sunday blocks, so retain each payment's
+	// qualifying paid-sweep block once instead of rescanning the large
+	// transfer_escrow_sweep table on every hourly leaderboard rebuild.
+	newSqlMigration(`
+		CREATE TABLE account_payment_block (
+			payment_id uuid NOT NULL,
+			block_number bigint NOT NULL CHECK (block_number > 0),
+			PRIMARY KEY (payment_id, block_number)
+		)
+	`),
+	newSqlMigration(`
+		ALTER TABLE account_payment
+		ADD COLUMN block_rollup_complete boolean NOT NULL DEFAULT false
+	`),
+	newSqlMigration(`
+		ALTER TABLE account_payment
+		ADD COLUMN block_rollup_cursor uuid NULL
+	`),
+	newSqlMigration(`
+		CREATE INDEX account_payment_block_number_payment
+		ON account_payment_block (block_number, payment_id)
+	`),
+	newSqlMigration(`
+		CREATE INDEX account_payment_block_rollup_pending
+		ON account_payment (create_time, payment_id)
+		WHERE NOT block_rollup_complete
+	`),
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS account_point_payment_rollup
+		 ON account_point (account_payment_id)
+		 WHERE account_payment_id IS NOT NULL AND point_value > 0`,
+		`CREATE INDEX IF NOT EXISTS account_point_payment_rollup
+		 ON account_point (account_payment_id)
+		 WHERE account_payment_id IS NOT NULL AND point_value > 0`,
+	),
 	// Staging exercises winner publication even when noise defeats significance.
 	// Production's honesty and statistical gates retain their published policy.
 	newSqlMigration(`
-		-- staging_best_safe_winner_v685
+		-- staging_best_safe_winner_v691
 		CREATE OR REPLACE FUNCTION competition_round_honesty_review_guard()
 		RETURNS trigger
 		LANGUAGE plpgsql

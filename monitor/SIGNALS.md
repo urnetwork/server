@@ -1584,6 +1584,11 @@ as incidents. The parser accepts at most 64 KiB and 128 stack lines, recognizes
 an allowlist of application modules from Server's go.mod closure, skips known
 recovery/database wrappers, and strips compiler closure suffixes from
 module-relative function owners.
+Known recovery wrappers consume their function and already-validated source
+record as a pair. A `-trimpath` build can use an application-module prefix on
+that source path; it is not a second function or an unknown owner. Unsupported
+inner function records still stop attribution before a later caller can lend
+its apparent ownership.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, and a validated PostgreSQL SQLSTATE—not raw errors, stack
 arguments, source paths/line numbers, endpoints, or identities. Unknown or
@@ -1594,6 +1599,27 @@ The 2026-09-16 SQLSTATE 25006 incident exposed the previous empty owner and
 200-byte prefix truncation; the owner discriminator now survives a long error
 body without retaining it. Ownership identifies a call and recovery boundary,
 not proof of a process crash or failed primary operation (§4).
+
+On 2026-09-23 a bounded Taskworker stack control identified this trimpath
+attribution gap at `server/model.ForceCloseOpenContractIds`. The exact escrow
+insufficiency error at its dispute-settlement raise is a recovered accounting
+rejection, not evidence of a process crash or a DoH/geolocation failure. Keep
+the generic aggregate and owner PAGEs plus the separate accounting failure.
+Prove the emitting artifact and inspect preserved disputed reports/reservations;
+do not bypass the escrow guard, infer terminal progress from raw close counts,
+or connect the error to a full-probe pass without a same-attempt discriminator.
+
+The 2026-09-23 Main Taskworker sample also exposed a versioned-root
+attribution false positive: `server/v2026.HandleError` was counted as the
+owner because wrapper recognition handled only `server.HandleError`. The
+service-wide 12/min panic diagnostic remains valid, but that owner bucket is
+the recovery wrapper and does not identify the throwing function. Treat the
+underlying application owner as unknown until a bounded source stack proves
+it. The parser now recognizes recovery/database wrappers at a versioned
+Server or Connect module root, preserving the version on genuine application
+owners and the aggregate count. Verify the corrected owner only after the
+monitor binary is promoted and a fresh structured stack appears; do not
+reclassify a missing owner bucket as recovery.
 
 On 2026-09-18, the bounded API correlation for a generic five-per-minute
 `panic` PAGE retained six goroutine-stack records that were neither literal
@@ -4658,7 +4684,28 @@ healthy state can be catalog-audited. Real findings are the distinct
 classes below. Do not interpret absence of either real finding as healthy when
 the metric is unavailable: the probe returns an explicit observation error.
 
-The provider list is a product surface, not a diagnostic cache detail. A
+`provider-count-direct-unclassified` is a separate evidence-unknown WARN, never
+an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
+location, group, or best-available selector. In the emitting API's matching
+`FindProviders2` source, explicit ClientId specs are appended unless the final
+destination is excluded, without running discovery score, health, reliability,
+network-only, or IP-family filters. Empty specs or all-excluded explicit IDs can
+return zero; one or two requested IDs can correctly return one or two. The
+metric's default `quality` label does not mean ranking ran, and `unknown`
+caller-country is expected when this branch skips the IP-country lookup.
+
+The existing volume/ratio threshold crossing retains the direct cohort's exact
+response counts as this intent-unknown WARN. Do not infer either direct health
+or a provider failure: the metric lacks requested, nonexcluded, and expected
+explicit-result counts. Below-threshold direct-only traffic emits neither an
+additional low-volume WARN nor the discovery-healthy sentinel; absence remains
+unknown, not recovery. Coexisting discovery findings retain their own PAGE/WARN
+authority. Verify the exact emitting API artifact and correlate naturally
+occurring request-shape counts at the same completed-response boundary, keeping
+IDs private; do not add metric identities or generate production requests to
+classify intent.
+
+The discovery provider list is a product surface, not a diagnostic cache detail. A
 nonempty US zero-caller canary in §2.9 can remain healthy while a real caller
 gets few or no providers because its country target, location group, caller
 alias, requested IP family, final network-only filter, exclusion list, or API
@@ -4693,12 +4740,69 @@ silence:
   classification, or a changed bounded schema is unobservable. It is not zero
   providers and must not silently clear an existing degradation.
 
-False-positive qualifiers: a deliberate caller exclusion, an explicit pinned
-provider that is unavailable, a private/network-only request outside that
-network, a ForceMinimum diagnostic call, or a user-requested restrictive
-country/group can legitimately return a small list. The metric therefore
-separates ordinary from ForceMinimum requests and uses cohorts, not individual
-results. A global supply decline can also be real hardware/operations capacity:
+Implementation gap — WARN qualification: the desired fifteen-minute plus
+established-baseline rule above remains the contract. The current reducer
+queries one five-minute window and has no learned cohort baseline. It preserves
+`provider-count-small-list` WARN at 50 completed requests and at least 50% in
+the `0` plus `1-2` bands as a provisional observation, with
+`qualification=provisional baseline_state=unobserved`; it must not claim a
+measured regression. The five-minute effective-empty PAGE is independent and
+unchanged. A later behavioral correction must define baseline span, minimum
+traffic and material change, preserve a pre-incident reference, and avoid
+learning an active incident into normality. Do not silently replace the desired
+rule with the current implementation, or treat disappearance of the provisional
+WARN as proof that the desired rule or supply recovery was verified.
+
+Request-intent qualifier: `force_minimum=false` does not exclude
+`ForceCount=true`. Even a non-direct `location/quality` request can intentionally
+cap discovery selection at `Count=0`, `Count=1`, or `Count=2`; without ForceCount,
+the selector uses at least 20. Explicit ClientId additions, if present, remain
+separate from that discovery cap. The outcome metric lacks ForceCount and
+requested/effective count, so the broad five-minute small-list observation
+remains provisional without a request-intent denominator. Preserve the WARN;
+do not infer scarcity or suppress it merely because a cap is possible. The
+current Connect Go request type does not expose ForceCount, so this server-side
+possibility is not evidence that standard SDK callers used it.
+
+`caller_country=us` identifies the caller, not the requested/provider country;
+`location` combines different targets and can coexist with explicit ClientId
+specs. `ip_family=any` combines the empty and v4-capable request filters
+(dualstack then v4-only), not all address families. Compare natural request
+caps, target mix and exclusions before attributing a same-label distribution
+change to supply. Already-retained stats samples can expose ForceCount,
+requested/effective count, specification/exclusion counts and the post-filter
+candidate pool; they omit IP-family and target identity, may be sampled/dropped,
+and cannot alone reconstruct the exact outcome cohort or raw cache population.
+
+Traffic-bearing threshold-gap qualifier: a non-direct ordinary cohort with
+20–<50 completed responses can fall below the 80%-zero PAGE ratio while every
+response still contains at most two entries. This is threshold movement, not
+recovery. After PAGE precedence, retain `provider-count-small-list-unclassified`
+as a nonpaging, request-intent-unknown WARN when 20–<50 responses have at least
+50% in the zero-or-one-to-two bands. The finding must report
+`sample_state=below_warn_min request_intent=unknown baseline_state=unobserved`,
+never a scarcity diagnosis or a healthy sentinel for this band. The existing
+PAGE and >=50 provisional WARN thresholds remain unchanged. Direct cohorts and
+ForceMinimum diagnostics keep their existing separate treatment.
+
+This additional visibility can warn on legitimate caps or restrictive targets;
+the twenty-response floor limits low-traffic noise but does not establish a
+unique-caller or request-intent denominator. Absence below any volume floor,
+a lower zero share, or a disappearing alert identity cannot certify recovery.
+Preserve exact-class history: a PAGE replaced by this different WARN class is
+not an in-place severity transition. Synthetic controls cover the threshold
+gap, boundary precedence, healthy/direct/ForceMinimum cases and this distinct
+identity without changing the desired fifteen-minute learned-baseline rule.
+
+False-positive qualifiers: direct explicit-destination response shape does not
+measure available supply, and returning an explicit ID does not verify that
+provider's availability. Direct cohorts therefore retain intent-unknown rather
+than scarcity findings. A deliberate caller exclusion, a private/network-only
+request outside that network, a ForceMinimum diagnostic call, or a
+user-requested restrictive country/group can also legitimately return a small
+discovery list. ForceMinimum is separated, but the bounded cohort does not
+fully distinguish the remaining restrictions; volume alone does not prove
+their absence. A global supply decline can also be real hardware/operations capacity:
 when active-provider headroom and proxy device ceilings are exhausted, adding
 software retries cannot create providers; add capacity while preserving the
 software selection diagnosis.
@@ -4723,10 +4827,15 @@ production cohort. SIGNALS.md §2.9a (`provider-count`) maps to
 `signal_provider_count.go` and `signal_provider_count_test.go`; until the API
 export appears, the registered probe reports explicit visibility loss, never a
 healthy provider-count result. The probe queries only the bounded API outcome
-metric and compares its completed response cohort with the fixed page/warn
-bands above. Synthetic tests cover an effective-empty cohort, a small-list
-regression, a ForceMinimum control, missing telemetry, and Markdown rendering
-with no identifiers.
+metric. It implements the fixed five-minute PAGE and the provisional
+five-minute WARN described in the implementation-gap note, not the desired
+fifteen-minute learned-baseline WARN qualification. Synthetic tests cover an
+effective-empty cohort, a provisional small-list observation, a ForceMinimum
+control, missing telemetry, and Markdown rendering
+with no identifiers. Direct-cohort controls additionally preserve a healthy
+one/two-explicit-ID response shape as unknown intent, prohibit direct paging,
+retain a real discovery PAGE alongside direct uncertainty, and prevent a
+below-threshold direct-only observation from emitting discovery health.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
@@ -6478,7 +6587,8 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   converge it; never clone, delete, or rewrite pending rows by hand.
 - `egress-probe-config-drift` (WARN after two samples): an explicit active
   `provider_egress_probe.yml` differs from the one complete durable task
-  snapshot, including enablement, shard/batch geometry, deadlines, modes, or
+  snapshot, including enablement, shard/batch geometry, deadlines, modes,
+  paired `transport_budget_byte_count` / `transport_budget_count`, or
   endpoints. Endpoint equality is checked in memory and endpoint values never
   enter the alert. Deploy config-updater first, then Taskworker so every
   executor mounts the completed configuration version; allow successful
@@ -6492,6 +6602,13 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   optional resource remains unarmed for this comparison rather than being
   confused with the Taskworker's built-in defaults. This observation gap does
   not suppress shard, liveness, fairness, or measured-rate findings.
+  Both transport-budget values absent/zero copy default limit values into
+  separate full/blackhole task owners, never a shared process root. Positive
+  pairs override those private owners' limits; partial/negative pairs are invalid.
+  Default limits are not multiplied by probe concurrency and do not prove
+  adequate admission capacity for the configured batch.
+  Configuration equality does not prove live admission, usable provider paths,
+  or adequate memory headroom.
 - `egress-full-stalled` (PAGE after two samples): a shard has full-probe due
   non-dark candidates but no location/attempt/health progress inside the
   derived bound. The newest-activity clock excludes current-dark candidates so
@@ -6866,6 +6983,23 @@ An error can follow a successful write whose acknowledgment was lost; the new
 metrics do not prove non-persistence or authorize retries. Returned errors and
 the prober's existing non-fatal behavior are unchanged.
 
+Independent positive traffic control:
+`urnetwork_egress_probe_health_checks_total{result="ok"}` records a validated
+fetch on that full probe's provider tunnel: the HTTP request and the destination's
+status/body contract passed before the health report API call. It is not a byte
+counter or a report acknowledgment. A fresh same-process positive delta proves
+carried probe traffic, not a join to an individual failed geolocation source,
+new contract admission, or customer-route recovery. Health runs after geolocation
+on the same initially cold tunnel, so later success cannot exclude an earlier
+formation failure.
+
+`urnetwork_egress_probe_geolocation_diagnostics_total` contains source outcomes
+only from diagnostic-bearing `no_consensus` probes, including any source that
+succeeded within that failed probe. It is not an all-source request denominator
+or a fleet-wide DNS/TLS failure rate. Missing or newly created auxiliary series
+are unknown, not healthy zero. These auxiliary controls are not added to the
+fixed admission query or its alert thresholds.
+
 The reusable probe runs once per minute using one fixed nine-family Mimir
 instant query through an inventory services gateway. It returns values plus
 their underlying source timestamps, with a 15-second request limit and 2 MiB
@@ -6907,6 +7041,119 @@ shared control-plane, credit, identity, or task-context failure can attempt a
 whole full batch, submit none, and leave existing blackhole verdicts stale. A
 constructed tunnel is not proof that its data path became usable.
 
+The shared admission guard also preseeds the fixed steps `funding_unavailable`
+and `funding_unknown`. A pass uses the existing admission formula: sum the
+nonnegative remainder of each active, in-window PostgreSQL balance after its
+nonnegative Redis reservation. It requires the server's initial contract minimum
+before a pass and every batch, and rechecks before negative blackhole, full-health
+or failed-attempt publication. A failed read is unknown, never funded. A failure
+is latched for that bounded pass so a later recovery cannot retroactively validate
+its earlier negative measurements. Successful traffic, locations, attempts and
+actual TLS authentication failures remain independently valid evidence. Prior
+negative verdicts are retained, not cleared or relaxed, and an ordinary provider
+timeout with funded observation retains its existing behavior.
+
+Only a failure composed entirely of the typed insufficient-credit cause receives
+the shard's existing idle-delay retry through `task.WithRetryDelay`; the task and
+its increasing error count remain intact. Mixed errors, datastore uncertainty,
+and cancellation retain ordinary backoff. This avoids an accumulated funding
+failure parking the same task for an hour after cleanup makes credit available.
+It does not grant credit, change escrow or payout guards, retry financial writes,
+or alter the six-hour bootstrap funding policy.
+
+Any complete advancing `funding_unavailable` delta yields `egress-prober-unfunded`
+PAGE even when the guard prevents every new provider attempt. A
+`funding_unknown` delta yields `egress-prober-funding-unobservable` WARN without
+asserting credit exhaustion. Both remain additive to incomplete process evidence.
+Missing either new fixed zero series remains `egress-admission-unobservable`,
+including older Taskworker artifacts during rollout.
+
+The 2026-09-22 bounded discriminator established exhausted admission credit on
+all 36 eligible prober balances, with all 36 Redis mirrors exactly matching
+durable outstanding reservations in the subsequent check. That check found
+45,875 distinct open payer contracts, all older than the five-minute expiry
+threshold, with no unresolved dispute, missing contract join or terminal-unsettled
+residual in that eligible-balance population. A later complete close-shape sample
+found 31,484 source-final, zero-use contracts among 43,952 open payer contracts.
+An unused prefetched contract is unknown to the destination and correctly awaits
+expiry rather than receiving invented bilateral settlement. The already-running
+cleanup backlog therefore holds genuine reservations; changing the Redis mirror
+or manually funding the account would not repair that mechanism. Bootstrap's
+last successful grant and an unexpired token did not establish current affordability.
+
+The owning Operator Proxy correction gives only the cheap blackhole tunnel a
+private 1 MiB contract-reservation ramp target using fresh client settings. It
+avoids the ordinary large unused successors for this small measurement; full
+geolocation and bandwidth tunnels keep their defaults. This is a per-request
+target, not a total quota or a hard cap: a larger legal message floor still wins,
+and an independent provider's return-companion prefetch is not governed by the
+probing client's setting. `TestProviderTunnelContractReservationRequests` observes
+the real serialized `CreateContract` requests for opening and later sequences,
+including ordinary and network-peer lanes, and retains the default ramp and
+larger-message controls. Settings-isolation and blackhole-only wiring tests
+prevent the short-probe policy from changing other traffic or financial guards.
+
+False-positive qualifiers: these finite checks do not acquire a reservation or
+prove atomic continuity across PostgreSQL, Redis and the measurement. An unfunded
+snapshot does not prove every provider is healthy, and independent positive or
+TLS-integrity evidence remains valid. False-negative qualifiers: transient
+exhaustion between checks or rejection of a larger later contract can escape this
+initial-minimum guard; missing authority and old producer telemetry remain unknown.
+Require naturally restored admission, falling expired-open reservations, advancing
+measurements and product provider-list recovery. Quiet guard counters or provider
+evidence aging into unknown are not recovery.
+
+**DNS-family progress boundary:** deterministic two-Tun, remote-only RFC 8484
+tests reproduce a shared Connect defect: stream dialing waited for both A and
+AAAA, so a completed or cached usable answer could not start TCP while the other
+query remained pending. The correction feeds completed families into the
+existing 250 ms TCP fallback race, preserving ready/cached IPv6 preference,
+late-family fallback after TCP failure, explicit family selection, and custom
+resolver authority. UDP's full-list resolution policy is unchanged. The dial
+cancels and joins its `QueryResult` callers and TCP workers, closing losing
+connections; shared-cache HTTP transport tails retain their separate ownership
+until `cache.Close`, not necessarily until stream return.
+`TestTunDohProgress*`, `TestInternalDohProgress*`, and `TestDohDialProgress*`
+cover both stalled-family directions, cold/partial/full caches, failed first
+TCP, cancellation, late successful losers, and authoritative-empty versus
+unobservable results.
+
+**Per-probe DoH ownership:** Taskworker's full and blackhole Operator Proxy
+checks each open a new `providertunnel.Tunnel`. Each tunnel constructs its own
+TUN and in-tunnel DoH cache and closes that cache with the tunnel; neither the
+task nor a shared transport-budget owner owns probe DNS state. The synthetic
+`TestProviderProbesOwnIndependentDohCaches` opens two simultaneous probes with
+one explicit transport owner and verifies distinct DoH caches and control
+strategies, including independent teardown. A later probe-concurrency change
+must preserve this boundary. This is a construction invariant, not a claim
+that a DoH-attempt timeout proves a whole logical DNS lookup failed. The
+Operator Proxy control-plane API/WebSocket dial uses a private per-tunnel
+strategy but currently resolves its host names outside the in-tunnel DoH path;
+do not confuse that bootstrap resolution with provider egress DNS.
+
+False-positive qualifier: this proves the mechanism, not attribution of every
+production geolocation timeout. `pre-GotConn`/`connect_formation` is a fallback
+classification, not proof of a Connect-service or TLS-phase failure.
+That fallback includes manual TLS inside the custom `DialTLSContext`; a generic
+timeout at this stage is not a DNS-specific verdict.
+False-negative qualifier: geolocation precedes health on the same initially
+cold tunnel/cache; later aggregate health success does not establish what
+happened to an individual failed source or exclude an earlier DNS-family stall.
+A timed-out DoH socket with `resolver_outcome=answer` rules out failure of its
+initiating resolver call only, not the provider probe or another record family.
+Conversely, `resolver_outcome=canceled` can follow a real outer Tun dial
+deadline: the dial race returns a timeout and cancels workers, while
+`Tun.dialCtx` forwards caller termination through a plain cancel function.
+The nested resolver can therefore record cancellation rather than timeout.
+Even fresh same-process `timeout` delta zero does not exclude this deadline
+path. Successful races also cancel unused families, so cancellation alone
+proves neither a harmless losing hedge nor provider failure. Retain unknown
+attribution without the owning pass/attempt outcome and source-stage control.
+Compare the running artifact with the owning correction before recommending a
+rollout. Require fresh source outcomes and traffic-bearing full submissions,
+alongside the independent provider-list recovery gates; a code fix or quieter
+resolver-attempt logs alone do not prove recovery.
+
 The producer has a matching correctness boundary: `fleetprobe.RunBlackhole`
 discards an in-flight result if the owning context is canceled before that
 result can be retained. Otherwise canceled requests are rendered as
@@ -6929,6 +7176,16 @@ verdicts, relax selection gates, or alter escrow from this aggregate. Recovery
 requires two complete traffic-bearing intervals with submitted full results
 plus independent §2.19, §2.23, and product-list recovery; quiet work or a
 newly constructed tunnel is not recovery.
+
+Rollout comparison qualifier: full-probe batches are not matched provider
+cohorts. `GetProviderEgressLocationDueShardedWithDiagnostics` prioritizes the
+oldest location/health expiry before unlocated providers and excludes attempts
+reported within the six-hour retry floor. Accepted attempt reports therefore
+rotate the next eligible cohort. Different shards and successive windows can
+have different provider difficulty even with valid same-process counters and
+zero funding errors. An improved submitted/attempted ratio alone does not prove
+a release effect; retain exact artifact ancestry, source-stage evidence, and
+these selection differences in the conclusion.
 
 Action: first prove exact API/Taskworker artifact ancestry and executable
 capabilities. Deploy approved owning builds only when the capability is proved
@@ -7697,6 +7954,14 @@ not resolved by adding Proxy hardware. Hardware raises the independent active
 client ceiling but cannot repair a prober credential, balance, API path,
 classifier, or persistence invariant.
 
+For the confirmed shared-credit boundary in §2.19a, retain this distribution as
+historical/current provider evidence while the producer withholds new invalid
+negative measurements. It must not be rewritten into healthy results. A current
+bootstrap success, zero local tunnel-constructor failures, or lower failed-attempt
+volume after the guard closes cannot establish restored provider traffic. Verify
+the admission formula and durable reservations separately, then require ordinary
+replacement success evidence through the due windows above.
+
 Implementation convention: SIGNALS.md §2.23 (`egress-outcomes`) maps to
 `signal_egress_outcomes.go` and `signal_egress_outcomes_test.go`. Synthetic
 tests cover the exact 90%/20-observation boundaries, survivor-bias controls,
@@ -7729,8 +7994,7 @@ inside PostgreSQL to:
 
 The description is claimed metadata, not runtime attestation. It cannot by
 itself establish a protocol failure. Join each eligible provider to its latest
-blackhole verdict and require a behavioral negative control before causal
-attribution:
+blackhole verdict and compare the bounded behavioral cohorts:
 
 - at least 20 claimed-legacy providers have a current verdict;
 - at least 90% of that checked legacy cohort is dark;
@@ -7744,17 +8008,38 @@ legacy-network count, and aggregate current pass/dark counts. Raw descriptions,
 versions beyond the fixed numeric boundary, provider IDs, network IDs,
 endpoints, contracts, and failure text never leave PostgreSQL.
 
-- `contract-hmac-incompatible` (PAGE): standard signing is active and both
-  behavioral cohorts meet the causal thresholds. The compatible cohort rules
-  out a shared prober credential, tunnel, or API failure; old receivers reject
-  the new contract before payload forwarding.
+- `contract-hmac-incompatible` (PAGE): the configured standard-signing cutoff
+  is active and both cohorts meet the behavioral thresholds. An actual
+  legacy-only receiver rejects standard-signed contracts before payload
+  forwarding. The aggregate matches that pattern; it does not attest the
+  running receiver or signer or prove every dark provider has that cause.
 - `contract-hmac-readiness` (WARN after two samples): a claimed-legacy cohort
   remains within 30 days before the cutoff or after it, but coverage or the
-  compatible control is insufficient for the causal page. Unknown metadata is
+  compatible control is insufficient for the pattern PAGE. Unknown metadata is
   never treated as compatible, and claimed legacy metadata alone is never
   reported as proof of the live process version.
 
-If a later compatible control falls below the causal threshold, the current
+False-positive qualifiers: passing claimed-compatible checks exclude only a
+universal shared-path failure. Even at the PAGE threshold, concurrent or
+cohort-specific prober, API, contract, route, or destination failures may
+coexist. A dark verdict can be synchronous tunnel construction, TLS
+authentication, or `all_destinations_failed`; this aggregate does not read that
+stored failure class. `all_destinations_failed` means no sampled response met
+its status/content contract, not necessarily zero bytes. Successful tunnel
+construction does not establish later API, contract, or route usability.
+Preserve separate integrity failures and use bounded fixed-enum evidence plus
+exact receiver/signer authority before per-provider attribution or quarantine.
+
+False-negative qualifiers: unknown descriptions can conceal legacy receivers;
+missing or stale checks leave part of the claimed cohort unobserved. A small
+passing destination sample does not establish generalized route capacity.
+Checks cover a three-hour window and need not share an artifact generation.
+The ingest clock permits one minute of future skew relative to API time; the
+current query has no upper DB-time bound, so separately count future-dated
+verdicts before treating them as current causal evidence. Neither absent
+metadata nor a threshold-driven alert-class change proves recovery.
+
+If a later compatible control falls below the behavioral threshold, the current
 sample fails closed from `contract-hmac-incompatible` PAGE to
 `contract-hmac-readiness` WARN. That class reassignment is not a severity
 downgrade of one Alert identity, does not prove receiver recovery, and cannot
@@ -7763,7 +8048,9 @@ Diagnose the compatible-cohort degradation as a separate boundary while
 retaining the prior HMAC incident until its full closure gate passes. This
 prevents a shared capacity or reachability regression from hiding an already
 proved legacy-protocol failure without weakening the current-sample causal
-threshold.
+threshold. The reverse WARN-to-PAGE reassignment can also be caused solely by
+the compatible pass share crossing its threshold; it does not by itself prove
+new legacy failure onset.
 
 Closure requires an explicit security/availability decision:
 
@@ -12097,6 +12384,13 @@ This is the version-to-artifact contract checked by the probe:
 | 681 | exact valid/ready `network_extender_latency_extender_id_create_time` Extender lookup index |
 | 682 | `network_extender_activation` history table with exact column types, nullability, defaults, and activation primary key |
 | 683 | exact valid/ready `network_extender_activation_extender_id_activate_time` history lookup index |
+| 684 | staging-winner and candidate-review guards select the highest-ranked eligible staging result without weakening production honesty review |
+| 685 | `account_payment_block` paid-traffic-week table and composite primary key |
+| 686 | required `account_payment.block_rollup_complete` with false default |
+| 687 | nullable `account_payment.block_rollup_cursor` UUID |
+| 688 | valid/ready `account_payment_block_number_payment` lookup index |
+| 689 | valid/ready partial `account_payment_block_rollup_pending` index |
+| 690 | valid/ready partial `account_point_payment_rollup` index |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -17832,6 +18126,31 @@ shortcut. This is an observation-access prerequisite, not evidence that the
 public Proxy path is down. The 2026-09-15 residual access-denied cohort in §1.5
 does not by itself distinguish these phases.
 
+On 2026-09-23, bounded read-only phase checks on both Crisp and Fireside
+established that the configured overlay SSH identity completed `true`, while
+`docker ps --format '{{.Names}}'` failed with Docker-socket permission denied.
+For this observed cohort, the immediate visibility root cause is remote
+container-runtime authorization, not SSH authentication. This discriminator
+does not prove the current allocation count or Proxy readiness, and it does
+not authorize broad Docker-group membership. Restore a reviewed,
+least-privilege read-only allocation inventory surface before interpreting
+`proxy-path` readiness on these hosts; recheck the phase after any identity or
+runtime permission change.
+
+An undeployed, least-privilege repair is prepared in Xops: `run-edges.sh`
+will install a root-owned, no-argument `monitor-proxy-allocations` helper and
+an exact sudoers command on Crisp and Fireside only. The helper uses the
+local Docker socket to read only running Main Proxy names and their
+`WARP_PORTS`, then requests `/status` on the mapped loopback port. It emits
+only validated `name|ports|status` rows, never the inspected environment or
+Docker errors. The monitor prefers it when installed; before installation it
+retains the old read-only discovery path and current access-denied
+`cannot-observe` state. A present but unauthorized/failing helper is an
+observation failure, not a reason to fall back to broad Docker access. This
+preparation does not authorize an Xops rollout; after a separately approved
+deployment, prove current allocation rows and internal readiness on each
+host before evaluating the public handshake layers below.
+
 Proxy health has five layers; none substitutes for the next:
 
 1. **Current allocation readiness:** resolve the running container's current
@@ -18648,9 +18967,27 @@ stop enumeration or retry.
 
 Current proxy builds give each hosted DeviceLocal one private carrier budget
 derived from `config/main/proxy.yml: device_memory_budget` (24 MiB in main).
-Devices share one manager-lifetime NetworkSpace/client strategy, but not
-mutable JWT/refresh sessions or memory admission. Use these aggregate,
-identity-free metrics:
+Devices share one manager-lifetime NetworkSpace for immutable metadata and
+discovery, but each owns its mutable JWT/refresh session, control client
+strategy (including DoH concurrency and dial pacing), and memory admission.
+The private strategy's idle sockets and DoH cache are not a hard-RSS component
+of the 24 MiB DeviceLocal target; compare host reserve and per-device RSS trend
+after deployment before claiming spare physical capacity.
+
+**Private-control lifecycle qualifier:** the strategy is device-owned, but its
+parent context must be the manager-owned NetworkSpace, not the DeviceLocal
+data-plane context. DeviceLocal cancels data flow before its generated clients
+join final contract retirement; canceling the strategy at that earlier edge
+can discard the final authenticated close/usage request and leave a running
+provider's contract under-settled until later cleanup. A synthetic request
+held across device cancellation fails under the old parent and succeeds with
+the corrected lifetime; the Proxy contract-churn acceptance test is the
+end-to-end accounting control. Do not interpret a low settled-byte total from
+one synthetic run as proof of compression or provider failure. Correlate
+one-sided contract closes, aged open reservations, and the actual owner
+generation before assigning an incident to this mechanism.
+
+Use these aggregate, identity-free metrics:
 
 - `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
   `urnetwork_proxy_devices_live * 24 MiB` in main.
@@ -19733,62 +20070,52 @@ maps to `signal_proxy_cache.go` and `signal_proxy_cache_test.go`; synthetic
 cases pin legacy-image blindness, invalid capacity, sustained near-capacity
 pressure, and newest-generation selection during rollout.
 
-### 14.7d Proxy aggregate device admission
-Probe: `proxy-device-admission`
+### 14.7d Proxy private device memory targets
+Probe: `proxy-device-target`
 
-Each Proxy process exports the monotonic
-`urnetwork_proxy_device_admission_refused_total` counter and the contextual
-`urnetwork_proxy_device_memory_budget_bytes` and
-`urnetwork_proxy_device_memory_budget_used_bytes` gauges. The counter advances
-only when the atomic process-wide reservation cannot fit one complete new
-DeviceLocal memory target. The rejected device is not constructed and existing
-devices are not evicted. It counts attempts, not unique devices, customers,
-flows, or bytes, so retries may amplify a single demand boundary.
+Every hosted Proxy `DeviceLocal` owns its own 24 MiB steady-state memory target
+and private transport admission budget. No manager-wide sum of targets may
+reject an otherwise valid device open. This is **not** a 24 MiB hard cap on
+each device's RSS, and removing the old process-wide gate does not create
+physical RAM. Device count and host reserve must be considered together; more
+hardware or rebalancing is required when the active-client load cannot fit.
 
-Once per minute, issue one Mimir instant query pinned to one evaluation time.
-Join each family and its source timestamp with fresh
-`process_resident_memory_bytes` and `process_start_time_seconds` on exact
-`env`, `host`, `block`, and `instance`. The active services.yml Proxy
-host-by-block topology is the denominator. Keep all fresh process generations
-for refusal evidence while using the newest generation for current telemetry
-completeness. A current quiet generation is healthy only after its counter has
-one reset-free, source-time-bracketed ten-minute window; a younger generation
-with a positive counter is immediately observable from process start.
+Once per minute, join fresh `urnetwork_proxy_devices_live`,
+`urnetwork_proxy_device_memory_target_bytes`, and
+`urnetwork_proxy_device_memory_tracked_used_bytes` with the current
+`process_start_time_seconds` on `env`, `host`, `block`, and `instance`.
+Use the active services.yml Proxy host/block topology as denominator, select
+the newest fresh generation per slot, and require fresh source timestamps.
+For each process, the aggregate target must equal live devices × 24 MiB. The
+aggregate is observation only; it is not an admission budget.
+Also query the former `urnetwork_proxy_device_memory_budget_bytes` metric as
+optional rollout evidence. A fresh positive value on the newest process
+generation means that process still enforces the retired shared admission gate,
+even if the private target arithmetic happens to be correct. Historical
+series from an older generation must not implicate the replacement.
 
-PAGE `proxy-device-admission-refused` immediately with sustain 1 for any
-positive same-generation refusal delta. Budget utilization is context only and
-must never trigger the page. In particular, the default 8 GiB process budget
-holds 341 complete 24 MiB reservations (8,184 MiB), leaving 8 MiB and a ratio
-of 0.9990234375: the next reservation is refused below a ratio of 1. A later
-gauge decrease does not erase the counter delta, and a healthy newest process
-does not erase a refusal from a still-fresh overlap generation.
+WARN `proxy-device-target-mismatch` if the target identity is inconsistent or
+non-integral. WARN `proxy-device-target-unobservable` if a current expected
+slot or metric is missing or stale. WARN `proxy-device-target-pressure` if
+tracked use exceeds the summed target, but do **not** infer host OOM or an
+individual offending device from that alone. WARN
+`proxy-device-shared-admission` for the fresh positive retired gate metric;
+verify and complete the Proxy rollout rather than raising the old ceiling.
+Query/decode failures remain
+generic `cannot-observe`. Cross-check direct host RSS, MemAvailable, swap,
+OOM, UDP loss, rollout overlap, and ordinary Proxy acceptance under §14.7
+before changing placement or hardware. A low tracked-use ratio is not spare
+physical capacity because runtime, WireGuard, pools, and other process memory
+are outside that sum.
 
-WARN `proxy-device-admission-unobservable` immediately when an expected
-current host/block, process identity, required metric, source timestamp, or
-complete quiet-window bracket is absent or stale. Missing gauges do not hide
-an independently proved counter delta. WARN
-`proxy-device-admission-disabled` for the explicit coherent zero-budget state;
-zero means the aggregate admission gate is disabled, never spare capacity.
-WARN `proxy-device-admission-invalid` for resets, malformed counters, future or
-impossible process identity, or gauges whose used bytes exceed budget. Query,
-decode, or service-gateway failure remains the generic `cannot-observe` path.
-
-A refusal proves that one configured process ceiling rejected an attempt. It
-does not prove host or fleet physical-memory exhaustion, unique rejected users,
-or a hardware shortage. Preserve the process generation and interval, compare
-siblings, then apply §14.7's direct host RSS, MemAvailable, swap, OOM, UDP-loss,
-and rollout-reserve gates before changing placement, the process budget, RAM,
-or hosts. Do not restart away evidence, disable the budget, evict live devices,
-or raise the budget blindly. Recover only after every expected newest process
-is complete and stable, refusal counters remain flat for ten minutes, and
-§14.7 host reserve plus ordinary Proxy acceptance are healthy.
-
-SIGNALS.md §14.7d (`proxy-device-admission`) maps to
-`signal_proxy_device_admission.go` and
-`signal_proxy_device_admission_test.go`. Synthetic cases pin the below-one
-remainder boundary, overlap-generation retention, missing contextual gauges,
-disabled and invalid states, young-generation semantics, topology completeness,
-and cancellation propagation without embedding production identities.
+The former `proxy-device-admission` probe and its three process-wide admission
+metrics are retired with the shared gate. Historical refusals are useful
+incident evidence but must not be expected from new Proxy generations.
+SIGNALS.md §14.7d (`proxy-device-target`) maps to
+`signal_proxy_device_target.go` and `signal_proxy_device_target_test.go`.
+Synthetic cases cover healthy multiple devices, missing target bytes, stale
+visibility, newest-generation selection during rollout, a live retired shared
+gate, and over-target tracked use without production identities.
 
 ---
 
@@ -21793,150 +22120,105 @@ block verification/import. Keep this hardware/headroom class distinct from
 the later target-fallback observation error. Current capacity decisions need
 a new qualified one-hour window, not the historical 35-day estimate.
 
-### 17.6 Points leaderboard finalized-epoch readiness
+### 17.6 Points leaderboard operator-block readiness
 
 Probe: `points-readiness`
 
-The all-time points leaderboard has two independent input planes. Total points
-come from `account_point`; Blocks, current Streak, Longest Streak, and their
-ranks come only from **finalized epochs for the exact active ST deployment**.
-An hourly snapshot rebuild can therefore succeed and publish valid total-point
-ranks while the epoch-derived plane is unavailable. An open epoch, a finalized
-row from a retired deployment, or a legacy payout period is not a substitute.
+Total points come from `account_point`; Blocks, current Streak, Longest
+Streak, and their ranks use the **operator paid-traffic rollup**, not chain
+epochs. ST is not a prerequisite. Operator blocks are fixed Sunday-00 UTC
+seven-day periods, 1-based from the operator genesis in
+`model.SubnetBlockGenesis`. Only completed periods count; an open period or
+a later payout cannot move the period boundaries. Each qualifying paid sweep's
+`sweep_time` places its linked payment into `account_payment_block`; a
+contract with paid sweeps in two periods can earn in both.
 
-Read the latest `network_points_leaderboard_snapshot` header, its persisted
-`epoch_metrics_available` bit, and its exact ranked-row census in one bounded
-PostgreSQL statement. Require header `total_ranked` to equal its snapshot row
-count and age to be at most two hours; epoch finalization and point writes
-trigger rebuilds, with an hourly fallback. Independently enumerate the bounded
-`st_epoch` deployment census, then compare the configured deployment key in
-memory. Never render that key, contract address, network identity, or any
-ranked network identifier into an alert.
+The storage/API names `latest_epoch` and `epoch_metrics_available` remain
+for compatibility. They now identify the latest completed operator block and
+whether the immutable snapshot incorporated complete block-rollup input.
+They are not a chain deployment identity or readiness gate. A valid available
+snapshot may have zero positive Blocks/Streak rows: measured zero is not
+unavailable. Before the first operator period closes, unavailable block metrics
+with no affirmative block payload are expected.
 
-For Main, obtain that configuration fact from a narrow typed desired-state
-view of the unprefixed `enabled`, `chain_id`, and `coordinator_address` fields
-in `st.yml`. `explicit-disabled` means the source flag is exactly false;
-`enabled-invalid` means it is true but `chain_id` is not the Main protocol
-value 964 or the chain/coordinator namespace is otherwise missing or invalid;
-`enabled` means the namespace can be derived. A missing,
-non-Boolean, or malformed `enabled` value is `unavailable`, never disabled.
-Only the safe status is rendered. The derived namespace remains in memory for
-the exact census comparison, and enabled intent arms the subnet credential
-requirements even when its namespace is invalid. Do not use the controller's
-fail-soft `StEnabled()` result for this distinction: it intentionally reduces
-missing and invalid runtime configuration to false. The Main monitor launcher
-sets `WARP_ENV` only; deployed host settings own `URNETWORK_ST_PROFILE`, so its
-absence from the watcher is not evidence of a deployed profile defect and the
-monitor must neither require nor synthesize it.
+Read the latest snapshot header and exact ranked-row census in one bounded
+PostgreSQL statement. Preserve the existing atomic row-count and two-hour
+freshness checks. A second single-output-row, command-deadline-bounded query
+uses a UTC-normalized database clock and the owning model's calendar constants.
+It counts positive post-genesis `account_point` rows whose linked
+`account_payment` is absent (`missing_payment_points`) or whose existing
+payment has `block_rollup_complete=false` (`pending_rollup_points`).
+This is the exact model completeness predicate, including points in the current
+open period. Counts are point rows, not unique payments or contracts.
+A missing linked payment is not silently equated with a resumable linked-payment
+backfill. Only counts, ages, block numbers and booleans are returned; no
+network, payment, chain deployment or contract identity is rendered.
 
-Availability is not encoded by `latest_epoch != 0`: epoch zero is a legitimate
-finalized epoch. Before the enabled exact active deployment has any finalized
-row, the persisted bit must be false. Stored numeric measure/rank columns are
-then inert and semantically unavailable; the contract does not require every
-physical column to be absent. The false-bit snapshot must not carry an
-affirmative latest epoch or positive Blocks/Streak payload. Once at least one
-finalized row has been incorporated by a rebuild, the bit must be true and the
-snapshot's latest epoch must equal that deployment's maximum finalized epoch.
-Zero Blocks or Streak can then be a meaningful measurement for a network and
-must not alert merely for being zero.
+The rollup uses bounded resumable batches outside payout write transactions.
+While incomplete, a new snapshot preserves total-point ranks but marks block
+metrics unavailable. Snapshot publication and source progress are separate
+reads/transactions: a new pending payment does not invalidate an earlier snapshot.
+The rollup has no persisted completion timestamp. `oldest_pending_point_age`
+is the source point's age, not the time the rollup has been stalled.
+Similarly, zero pending rows now does not prove how long readiness has held;
+an old Sunday boundary alone cannot prove an overdue rebuild.
+Keep these handoffs WARN, not corruption PAGE. The independent stale-snapshot
+warning still detects a missing publication cadence, but this query does not
+prove sustained rollup progress or a completion-to-publication deadline.
 
-Finalization and snapshot publication are separate transactions joined by an
-asynchronous durable task. The bounded source census therefore includes only a
-nullable latest-finalization timestamp, reduced in PostgreSQL to an age with a
-UTC-normalized database clock; it never exports the timestamp or deployment
-key. A source maximum ahead of the snapshot is
-`points-epoch-rebuild-pending` WARN while the latest finalization is at most two
-hours old. This remains WARN even when the snapshot create time is newer: the
-rebuild reads epoch inputs before it assigns create time, so a concurrent
-finalization can legitimately be omitted from a later-published snapshot. Null
-timestamp provenance, a future application timestamp, or an ordering inside
-the complete command-timeout plus one-second quantization bound also stays WARN.
-It becomes PAGE only when a known latest-finalization age exceeds two hours. A
-snapshot epoch ahead of its active finalized source is immediately impossible
-and PAGE.
+- `points-leaderboard-unavailable` warns when no snapshot exists.
+- `points-leaderboard-incomplete` pages when the latest header and its exact
+  ranked-row census disagree.
+- `points-leaderboard-stale` warns after two observations when a snapshot
+  is future-dated or older than two hours.
+- `points-epoch-metrics-unavailable` warns when completed operator periods
+  exist but the snapshot is unavailable and the current source has missing
+  payment links or incomplete rollups. Diagnose those owning boundaries,
+  not ST node, keys, funding, coordinator or finalization readiness.
+- `points-block-rollup-incomplete` warns when the current source has missing
+  links or incomplete rollups while an earlier block snapshot is available.
+  Preserve that snapshot; do not relabel this as affirmative corruption.
+- `points-epoch-rebuild-pending` warns when the rollup is currently complete
+  and the snapshot is unavailable or behind the completed operator calendar.
+  Completion age is unknown even when the latest calendar boundary is old;
+  inspect normal task progress and repeated observations.
+- `points-epoch-availability-drift` pages on an internal snapshot
+  contradiction: a false availability bit with affirmative block payload, or
+  a true bit with no 1-based completed block number.
+- `points-epoch-snapshot-drift` pages when the snapshot block is ahead of
+  the completed operator calendar. Verify source-version and application-clock
+  boundaries before attributing this to stored-data corruption.
 
-- `points-leaderboard-unavailable` warns immediately when no snapshot exists.
-- `points-leaderboard-incomplete` pages immediately when the latest header and
-  ranked-row census disagree; snapshot publication is intended to be atomic.
-- `points-leaderboard-stale` warns after two consecutive observations when the
-  latest snapshot is future-dated or older than two hours.
-- `points-epoch-metrics-unavailable` warns immediately when ranked total points
-  exist but the ST subsystem/deployment/finalized-epoch source is unavailable
-  and the snapshot bit is correctly false. Its safe ST configuration status
-  distinguishes explicit disable, enabled-invalid namespace, and unavailable
-  source observation. This is not evidence that every network measured zero
-  Blocks or Streak.
-- `points-epoch-rebuild-pending` warns immediately when the active finalized
-  source is newer than the immutable snapshot within the two-hour rebuild
-  budget, or nullable/future/bounded-skew evidence cannot prove ordering. Let
-  the normal idempotent task finish; do not edit either source by hand.
-- `points-epoch-availability-drift` pages immediately when the persisted bit
-  is true without an exact active finalized source, a false-bit snapshot carries
-  affirmative epoch-derived values, or a first-finalization rebuild is
-  affirmatively overdue. Preserve the snapshot and repair the
-  active-source/rebuild boundary; never flip the bit or rows by hand.
-- `points-epoch-snapshot-drift` pages immediately when the snapshot is ahead of
-  its exact active finalized source, or when a source-newer epoch mismatch is
-  older than the rebuild budget.
+The source-version boundary matters during rollout. The owning rollup
+migrations and operator-source rebuild must be verified before adopting this
+probe. Missing tables/columns, malformed aggregate rows or read failures remain
+observation failures, never healthy and never a fallback to `st_epoch`.
+The compatibility fields do not record a source-version identifier, so this
+aggregate monitor alone cannot attest the running artifact or distinguish
+coincident old/new block numbers. Nor does it recompute every network's ranks
+or independently audit every paid-sweep materialization.
 
-The unavailable class now has only an operational closure. The
-snapshot-consistent bit is implemented and deployed through the Server API,
-shared SDK, and apps; clients label or hide Blocks, Streak, Longest Streak, and
-their ranks while it is false, while preserving usable total points. Do not use
-`latest_epoch == 0` as a sentinel or ask operators to add the existing field.
-Closure requires the reviewed Main ST deployment, caught-up node path,
-contract/policy identity, keys, funding, migrations, and at least one
-legitimately finalized epoch, followed by a normal snapshot rebuild. Another
-Server/API/Taskworker deployment cannot invent that history; do not enable an
-unready deployment or insert synthetic `st_epoch` rows to silence the signal.
-This can require operator, finance, network, or additional node hardware work
-that software alone cannot provide.
+Repair the owning payment linkage, bounded rollup, migration or rebuild task,
+then let the normal idempotent path publish a replacement. Do not enable ST,
+fabricate chain history, insert synthetic payment blocks, flip completion or
+availability flags, or rewrite snapshot rows to clear the alert. Preserve the
+API/SDK distinction between unavailable metrics and legitimate zero values,
+and the existing total-points read path.
 
-The implemented software contract persists the snapshot-level
-`epoch_metrics_available` bit from the actual finalized-window input, returns
-it from both rebuild and read APIs, and rejects Blocks/Streak paging while it
-is false. The shared SDK preserves total points, renders every epoch-derived
-value and rank as unavailable, rejects those two sort changes, and re-emits
-authoritative state so optimistic native adapters return to Points. Android,
-Apple, Windows, and `mmm/ur.io` consume those preformatted SDK fields; Linux
-does not currently expose this points board. Synthetic Server tests distinguish
-missing history from a legitimate zero on an available epoch, and the shared
-SDK test covers unavailable presentation, sort rejection, and later recovery.
+Historical qualification: the 2026-09-08 through 2026-09-12 observations
+correctly described the then-implemented ST-dependent rebuild and false
+availability bit. Their recommendation that only ST activation/finalization
+could restore Blocks/Streak was a source-architecture error, superseded by the
+operator-rollup correction. Those observations are not current operational
+authority to activate ST. Separate subnet/ST signals retain their own
+configuration and deployment checks.
+
 Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
 `signal_points_readiness.go` and `signal_points_readiness_test.go`.
-
-The 2026-09-11 deployed control returned `total_ranked=25708` with
-`epoch_metrics_available=false` from a live public points request, and Blocks
-and Streak sorts explicitly rejected the request as unavailable. The bounded
-direct monitor census simultaneously found ST disabled and unconfigured with
-`finalized_epochs=0`. That joins the public behavior to the persisted contract:
-the software availability correction is deployed, and the current correctly
-false state has only the reviewed ST/finalized-epoch operational closure.
-
-A 2026-09-12 source audit corrected the configuration attribution in that
-control. Main's `st.yml` was valid and explicitly set `enabled: false`, while
-the authoritative watcher intentionally had no `URNETWORK_ST_PROFILE`. The
-old monitor called the controller loader, whose required-profile failure was
-recovered as nil, and therefore happened to render false/empty without proving
-the explicit source disable. The direct Main desired-state inspection above
-now reports `explicit-disabled` independently of the watcher environment;
-synthetic controls retain enabled-invalid visibility and subnet credential
-requirements, and prove that an absent local profile cannot erase a valid
-enabled namespace. The public false-bit conclusion remains valid, but the old
-controller-derived configuration evidence must not be reused as source proof.
-
-On 2026-09-08 the public API and direct database snapshot agreed: the latest
-snapshot contained 25,708 ranked networks with populated positive total points,
-`latest_epoch=0`, and zero positive Blocks, Streak, or Longest Streak rows. All
-25 retained hourly rebuild tasks had succeeded, and `account_point` remained
-populated, ruling out a rebuild failure or lost point producers. The global
-`st_epoch` census contained zero rows, while Main's selected ST configuration
-was disabled and its deployment block/netuid remained unset. The pure compute
-path intentionally maps an empty epoch-window list to numeric zeros, with a
-deterministic pre-existing regression. Thus the immediate cause was absent
-finalized-epoch input, and the correctness defect was representing unavailable
-data as measured zero. Main's Subtensor nodes were still syncing and not
-cutover-ready, so enabling ST was not an appropriate repair.
+Deterministic controls cover ST-disabled healthy/meaningful-zero snapshots,
+Sunday boundaries, exact rollup eligibility, incomplete and missing payment
+links, asynchronous snapshot/source handoffs, observation failures, stale and
+incomplete snapshots, and genuine internal/calendar contradictions.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

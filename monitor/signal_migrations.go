@@ -48,7 +48,7 @@ const providerEgressHealthDeadlineIndexDefinition = "CREATE INDEX provider_egres
 const walletAuthChallengeAttemptAddressTimeIndexDefinition = "CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)"
 
 // Pin the operative trigger events and complete normalized bodies. The first
-// policy remains required at head 684; its best-safe successor begins at 685.
+// policy remains required through head 690; its best-safe successor begins at 691.
 const competitionStagingWinnerArtifactQuery = `(
 	NOT EXISTS (
 		SELECT 1 FROM (VALUES
@@ -258,8 +258,14 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
 	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
 	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
-	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, removedVersion: 685, rowColumn: 95},
-	{name: "competition staging best-safe winner and review isolation", requiredVersion: 685, rowColumn: 96},
+	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, removedVersion: 691, rowColumn: 95},
+	{name: "account_payment_block paid-traffic week table", requiredVersion: 685, rowColumn: 96},
+	{name: "account_payment.block_rollup_complete", requiredVersion: 686, rowColumn: 97},
+	{name: "account_payment.block_rollup_cursor", requiredVersion: 687, rowColumn: 98},
+	{name: "account_payment_block_number_payment", requiredVersion: 688, rowColumn: 99},
+	{name: "account_payment_block_rollup_pending", requiredVersion: 689, rowColumn: 100},
+	{name: "account_point_payment_rollup", requiredVersion: 690, rowColumn: 101},
+	{name: "competition staging best-safe winner and review isolation", requiredVersion: 691, rowColumn: 102},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1396,8 +1402,69 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
-	       `+competitionStagingWinnerArtifactQuery+`,
-	       `+competitionStagingBestWinnerArtifactQuery+`
+		       `+competitionStagingWinnerArtifactQuery+`,
+		       (
+		           to_regclass('public.account_payment_block') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+		                   ('payment_id', 'uuid', 'NO'),
+		                   ('block_number', 'bigint', 'NO')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'account_payment_block'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'account_payment_block'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (payment_id, block_number)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'account_payment'
+		             AND column_name = 'block_rollup_complete'
+		             AND data_type = 'boolean' AND is_nullable = 'NO'
+		             AND column_default IN ('false', 'false::boolean')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'account_payment'
+		             AND column_name = 'block_rollup_cursor'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'account_payment_block'
+		             AND index_name = 'account_payment_block_number_payment'
+		             AND definition = 'CREATE INDEX account_payment_block_number_payment ON public.account_payment_block USING btree (block_number, payment_id)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'account_payment'
+		             AND index_name = 'account_payment_block_rollup_pending'
+		             AND definition = 'CREATE INDEX account_payment_block_rollup_pending ON public.account_payment USING btree (create_time, payment_id) WHERE (NOT block_rollup_complete)'
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'account_point'
+		             AND index_name = 'account_point_payment_rollup'
+		             AND definition = 'CREATE INDEX account_point_payment_rollup ON public.account_point USING btree (account_payment_id) WHERE ((account_payment_id IS NOT NULL) AND (point_value > 0))'
+		             AND indisvalid AND indisready
+		       ),
+		       `+competitionStagingBestWinnerArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

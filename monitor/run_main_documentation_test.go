@@ -146,14 +146,15 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Terra and Astra may prepare manifests; they do not append",
+		"Sol and Astra may prepare manifests; they do not append",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
 		}
 	}
-	if strings.Contains(documentation, "The ledger has one writer: the long-lived Terra runner") {
-		t.Fatal("RUN-MAIN.md assigns the primary ledger to Terra")
+	if strings.Contains(documentation, "The ledger has one writer: the long-lived Sol runner") ||
+		strings.Contains(documentation, "The ledger has one writer: the long-lived Terra runner") {
+		t.Fatal("RUN-MAIN.md assigns the primary ledger to a test runner")
 	}
 }
 
@@ -161,19 +162,19 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-5.6-terra` agent at `medium` reasoning owns monitor execution, the",
+		"A `gpt-6-sol` agent at `medium` reasoning (\"Sol Medium\") owns monitor execution",
 		"monitor-test gates",
 		"bounded read-only failure fact collection, initial triage",
 		"A `gpt-6-astra` agent at `max` reasoning (\"Astra Max\") owns all",
-		"Astra consumes Terra's initial",
+		"Astra consumes Sol's initial",
 		"every self-improvement repair to a probe, shared monitoring utility, signal catalog, or this harness",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
 		}
 	}
-	if strings.Contains(documentation, "gpt-5.6-sol") {
-		t.Fatal("RUN-MAIN.md still assigns the diagnosis role to Sol")
+	if strings.Contains(documentation, "gpt-5.6-terra") {
+		t.Fatal("RUN-MAIN.md still assigns the test and initial-triage role to Terra")
 	}
 }
 
@@ -215,6 +216,44 @@ func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T)
 			if !strings.Contains(strings.ToLower(documentation), strings.ToLower(required)) {
 				t.Errorf("%s does not retain qualifier guidance %q", path, required)
 			}
+		}
+	}
+}
+
+// Keeps actual probe traffic distinct from report acceptance and conditional
+// failure diagnostics, without promoting either aggregate to a per-pass join.
+func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, section, found := strings.Cut(string(data), "### 2.19a ")
+	if !found {
+		t.Fatal("SIGNALS.md lost the egress admission section")
+	}
+	section, _, found = strings.Cut(section, "\n### 2.20 ")
+	if !found {
+		t.Fatal("SIGNALS.md lost the egress admission section boundary")
+	}
+	documentation := strings.Join(strings.Fields(section), " ")
+	for _, required := range []string{
+		"`urnetwork_egress_probe_health_checks_total{result=\"ok\"}` records a validated fetch",
+		"status/body contract passed before the health report API call",
+		"not a byte counter or a report acknowledgment",
+		"fresh same-process positive delta proves carried probe traffic",
+		"not a join to an individual failed geolocation source",
+		"later success cannot exclude an earlier formation failure",
+		"`urnetwork_egress_probe_geolocation_diagnostics_total` contains source outcomes only from diagnostic-bearing `no_consensus` probes",
+		"including any source that succeeded within that failed probe",
+		"not an all-source request denominator or a fleet-wide DNS/TLS failure rate",
+		"Missing or newly created auxiliary series are unknown, not healthy zero",
+		"not added to the fixed admission query or its alert thresholds",
+		"fallback includes manual TLS inside the custom `DialTLSContext`",
+		"timeout at this stage is not a DNS-specific verdict",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("SIGNALS.md lost the egress evidence boundary %q", required)
 		}
 	}
 }

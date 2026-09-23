@@ -370,7 +370,7 @@ func preseedEgressProbePassMetrics() {
 	for _, result := range []string{"attempted", "submitted", "skipped", "failed"} {
 		egressProbePassProvidersTotal.WithLabelValues("full", result)
 	}
-	for _, step := range []string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled"} {
+	for _, step := range []string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled", "funding_unavailable", "funding_unknown"} {
 		egressProbePassErrorsTotal.WithLabelValues(step)
 	}
 }

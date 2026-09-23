@@ -447,7 +447,8 @@ func init() {
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	// platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
-		H1PlusStats: defaultConnectH1PlusStats,
+		EnableH1Plus: true,
+		H1PlusStats:  defaultConnectH1PlusStats,
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
@@ -496,8 +497,9 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
-	// The custom carrier is opt-in until the deployment/device rollout gates
-	// in connect/H1PLUS.md are qualified. WebSocket remains accepted.
+	// Accepts the custom H1+ carrier (connect/H1PLUS.md) in addition to
+	// WebSocket. On by default; false opts out, and clients fall back to
+	// WebSocket.
 	EnableH1Plus     bool
 	H1PlusStats      *connect.H1PlusStats
 	MinPingTimeout   time.Duration

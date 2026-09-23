@@ -113,9 +113,9 @@ func TestCompetitionStagingWinnerMigrationAppendsWithoutChangingReviewPolicy(t *
 // significant-winner migration and must leave production review unchanged.
 func TestCompetitionStagingBestWinnerMigrationPreservesProductionGate(t *testing.T) {
 	oldIndex := sqlMigrationIndex(t, "expected_staging_winner uuid")
-	newIndex := sqlMigrationIndex(t, "staging_best_safe_winner_v685")
-	if oldIndex != 683 || newIndex != 684 {
-		t.Fatalf("staging winner migration indices = %d/%d, want 683/684", oldIndex, newIndex)
+	newIndex := sqlMigrationIndex(t, "staging_best_safe_winner_v691")
+	if oldIndex != 683 || newIndex != 690 {
+		t.Fatalf("staging winner migration indices = %d/%d, want 683/690", oldIndex, newIndex)
 	}
 	oldMigration := migrations[oldIndex].(*SqlMigration)
 	newMigration := migrations[newIndex].(*SqlMigration)

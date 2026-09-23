@@ -40,6 +40,10 @@ type ProviderEgressProbeBatchArgs struct {
 	AllDestinations         bool `json:"all_destinations,omitempty" yaml:"all_destinations"`
 	Bandwidth               bool `json:"bandwidth,omitempty" yaml:"bandwidth"`
 	BandwidthTimeoutSeconds int  `json:"bandwidth_timeout_seconds,omitempty" yaml:"bandwidth_timeout_seconds"`
+	// Both zero copy default limit values into a fresh task/probe-kind owner.
+	// A positive pair selects explicit limits for that same private owner.
+	TransportBudgetByteCount connect.ByteCount `json:"transport_budget_byte_count,omitempty" yaml:"transport_budget_byte_count"`
+	TransportBudgetCount     int               `json:"transport_budget_count,omitempty" yaml:"transport_budget_count"`
 }
 
 // ProviderEgressProbeArgs is the complete, durable description of one shard
@@ -128,6 +132,10 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 	}
 	if args.Bandwidth && args.BandwidthTimeoutSeconds < 1 {
 		return fmt.Errorf("provider egress probe %s bandwidth timeout must be positive when bandwidth is enabled", name)
+	}
+	if args.TransportBudgetByteCount < 0 || args.TransportBudgetCount < 0 ||
+		(args.TransportBudgetByteCount == 0) != (args.TransportBudgetCount == 0) {
+		return fmt.Errorf("provider egress probe %s transport budget byte/count limits must both be zero or both be positive", name)
 	}
 	return nil
 }
@@ -343,7 +351,11 @@ func ProviderEgressProbe(
 	if args.ShardCount != settings.ShardCount || settings.ShardCount <= args.ShardIndex {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
-	return executeProviderEgressProbe(clientSession.Ctx, args)
+	result, err := executeProviderEgressProbe(clientSession.Ctx, args)
+	if providerEgressProbeUnfundedOnly(err) {
+		err = task.WithRetryDelay(err, time.Duration(args.IdleDelaySeconds)*time.Second)
+	}
+	return result, err
 }
 
 // ProviderEgressProbePost checkpoints one batch before scheduling its
@@ -392,6 +404,7 @@ func readProviderEgressOperatorSecret() (string, error) {
 // the two independent probe schedules cannot starve each other when one fails.
 // It is safe for concurrent use after construction.
 type providerEgressProbePass struct {
+	readiness             *providerEgressProbeReadiness
 	blackholeDue          func(context.Context, int) ([]string, error)
 	fullDue               func(context.Context, int) ([]string, error)
 	loadPins              func(context.Context) (map[string][]string, error)
@@ -432,6 +445,10 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	concurrency int,
 	clientIds []string,
 ) (fleetprobe.BlackholeSummary, error) {
+	if err := self.readiness.check(ctx); err != nil {
+		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+		return fleetprobe.BlackholeSummary{}, err
+	}
 	options := self.blackholeOptions
 	options.Pins = pinSource
 	options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
@@ -445,15 +462,43 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 		return fleetprobe.BlackholeSummary{}, fmt.Errorf("run blackhole batch: %w", runErr)
 	}
 
-	egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
+	var measurementErr error
+	for _, check := range summary.Checks {
+		if !check.OK && check.Failure != egresshealth.FailureTLSAuthentication {
+			measurementErr = self.readiness.check(ctx)
+			break
+		}
+	}
+	if measurementErr != nil {
+		// Credit can run out during a batch. Keep successful traffic and
+		// authenticated TLS failures, but retain previous provider state for
+		// negative reachability measured across this shared admission failure.
+		checks := make([]ingest.BlackholeCheck, 0, len(summary.Checks))
+		summary.Dark = 0
+		summary.TunnelFailed = 0
+		for _, check := range summary.Checks {
+			if check.OK || check.Failure == egresshealth.FailureTLSAuthentication {
+				checks = append(checks, check)
+				if !check.OK {
+					summary.Dark++
+				}
+			}
+		}
+		summary.Checks = checks
+		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+	} else {
+		egressProbePassesTotal.WithLabelValues("blackhole", "ok").Inc()
+	}
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(len(summary.Checks)))
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(summary.Dark))
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
-	if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
-		egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
-		return summary, fmt.Errorf("submit blackhole batch: %w", submitErr)
+	if len(summary.Checks) > 0 {
+		if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+			egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
+			return summary, errors.Join(measurementErr, fmt.Errorf("submit blackhole batch: %w", submitErr))
+		}
 	}
-	return summary, nil
+	return summary, measurementErr
 }
 
 func (self *providerEgressProbePass) runFullBatch(
@@ -462,6 +507,10 @@ func (self *providerEgressProbePass) runFullBatch(
 	pinSource fleetprobe.PinSource,
 	clientIds []string,
 ) providerEgressFullOutcome {
+	if err := self.readiness.check(ctx); err != nil {
+		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+		return providerEgressFullOutcome{err: err}
+	}
 	options := self.fullOptions
 	options.Pins = pinSource
 	options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
@@ -476,13 +525,18 @@ func (self *providerEgressProbePass) runFullBatch(
 		return providerEgressFullOutcome{err: fmt.Errorf("run full-probe batch: %w", runErr)}
 	}
 
-	egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
+	measurementErr := self.readiness.err()
+	if measurementErr != nil {
+		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
+	} else {
+		egressProbePassesTotal.WithLabelValues("full", "ok").Inc()
+	}
 	egressProbePassProvidersTotal.WithLabelValues("full", "attempted").Add(float64(summary.Attempted))
 	egressProbePassProvidersTotal.WithLabelValues("full", "submitted").Add(float64(summary.Submitted))
 	egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
 	egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
 	recordEgressProbeGeolocationDiagnostics(summary)
-	return providerEgressFullOutcome{summary: summary}
+	return providerEgressFullOutcome{summary: summary, err: measurementErr}
 }
 
 // drainBlackhole runs the already-selected batch and, while a concurrent full
@@ -553,6 +607,9 @@ func (self *providerEgressProbePass) run(
 				self.refreshFleet(ctx)
 			}
 		}()
+	}
+	if err := self.readiness.check(ctx); err != nil {
+		return &ProviderEgressProbeResult{}, err
 	}
 	errList := []error{}
 	blackholeClientIds, err := self.blackholeDue(ctx, args.Blackhole.Limit)
@@ -662,6 +719,21 @@ func (self *providerEgressProbePass) run(
 	return result, errors.Join(errList...)
 }
 
+// One fresh task/probe-kind owner follows all drained batches. No unrelated
+// task or full/blackhole sibling inherits this mutable admission budget.
+func providerEgressProbeTunnelConfig(
+	base providertunnel.Config,
+	args ProviderEgressProbeBatchArgs,
+) providertunnel.Config {
+	byteCount, transportCount := args.TransportBudgetByteCount, args.TransportBudgetCount
+	if byteCount == 0 && transportCount == 0 {
+		limits := connect.DefaultPlatformTransportSettings().PlatformTransportBudget.Stats()
+		byteCount, transportCount = limits.TotalByteCount, limits.MaxTransportCount
+	}
+	base.PlatformTransportBudget = connect.NewPlatformTransportBudget(byteCount, transportCount)
+	return base
+}
+
 // Runtime-only identity, credentials, and clients are joined to the durable
 // arguments immediately before the bounded pass begins.
 func runProviderEgressProbe(
@@ -669,7 +741,7 @@ func runProviderEgressProbe(
 	args *ProviderEgressProbeArgs,
 ) (*ProviderEgressProbeResult, error) {
 	identity := model.GetProberIdentity(ctx)
-	if identity == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
+	if identity == nil || identity.NetworkId == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
 		return nil, fmt.Errorf("provider egress prober identity is not bootstrapped")
 	}
 	operatorSecret, err := readProviderEgressOperatorSecret()
@@ -696,6 +768,11 @@ func runProviderEgressProbe(
 	// every finding the prober submits passes through the metrics reporter
 	// first (see provider_egress_probe_metrics.go), then to the operator
 	reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
+	readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
+	guardedReporter := &providerEgressProbeReadinessReporter{
+		egressProbeIngest: reporter,
+		readiness:         readiness,
+	}
 
 	var bandwidthSampler *bandwidth.Sampler
 	bandwidthTargets := []bandwidth.Target{}
@@ -721,6 +798,7 @@ func runProviderEgressProbe(
 	}
 
 	pass := &providerEgressProbePass{
+		readiness:    readiness,
 		blackholeDue: operator.BlackholeDue,
 		fullDue:      operator.Due,
 		loadPins: func(ctx context.Context) (map[string][]string, error) {
@@ -732,13 +810,13 @@ func runProviderEgressProbe(
 		},
 		submitBlackholeChecks: reporter.SubmitBlackholeChecks,
 		blackholeOptions: fleetprobe.BlackholeOptions{
-			TunnelConfig: tunnelConfig,
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Blackhole),
 		},
 		fullOptions: fleetprobe.FullOptions{
-			TunnelConfig:   tunnelConfig,
+			TunnelConfig:   providerEgressProbeTunnelConfig(tunnelConfig, args.Full),
 			Submit:         reporter,
-			Attempts:       reporter,
-			HealthResults:  reporter,
+			Attempts:       guardedReporter,
+			HealthResults:  guardedReporter,
 			Bandwidth:      bandwidthSampler,
 			BandwidthHosts: bandwidth.TargetHosts(bandwidthTargets),
 		},
@@ -747,6 +825,9 @@ func runProviderEgressProbe(
 		refreshFleet: refreshEgressProbeFleetMetrics,
 	}
 	result, err := pass.run(ctx, args)
+	if result == nil {
+		return nil, err
+	}
 
 	log.Printf(
 		"provider-egress task: shard=%d/%d full_due=%d attempted=%d submitted=%d failed=%d blackhole_due=%d checked=%d dark=%d tunnel_failed=%d backlog=%t",

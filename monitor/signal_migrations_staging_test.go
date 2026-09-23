@@ -110,7 +110,7 @@ func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 }
 
 // Each head requires its own published guard; the initial staging policy stays
-// retired and the significance-gated winner guard is retired by head 685.
+// retired and the significance-gated winner guard is retired by head 691.
 func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 	for _, test := range []struct {
 		version int
@@ -122,7 +122,9 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 		{version: 684},
 		{version: 684, missing: true},
 		{version: 685},
-		{version: 685, missing: true},
+		{version: 690},
+		{version: 691},
+		{version: 691, missing: true},
 	} {
 		row := syntheticMigrationArtifactRow(test.version)
 		for _, artifact := range migrationArtifacts {
@@ -151,8 +153,8 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 			wantAlerts++
 			alert := requireAlertClass(t, alerts, "migration-schema-drift")
 			want := "competition staging automatic winner and review isolation@v684"
-			if test.version == 685 {
-				want = "competition staging best-safe winner and review isolation@v685"
+			if test.version == 691 {
+				want = "competition staging best-safe winner and review isolation@v691"
 			}
 			if !strings.Contains(alert.Markdown(), want) {
 				t.Fatalf("missing staging winner contract was not identified: %s", alert.Markdown())
@@ -301,7 +303,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 					return nil, err
 				}
 				row := syntheticMigrationArtifactRow(head)
-				row[96] = fmt.Sprint(admitted)
+				row[102] = fmt.Sprint(admitted)
 				return []Row{row}, nil
 			}}
 			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
@@ -314,7 +316,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 				}
 			} else {
 				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging best-safe winner and review isolation@v685") {
+				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging best-safe winner and review isolation@v691") {
 					t.Fatalf("%s lost the staging winner gate: %s", test.name, alerts.ToMarkdown())
 				}
 			}

@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -21,66 +20,10 @@ import (
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout:        1 * time.Minute,
-		SequenceBufferSize:                 2048,
-		DeviceMemoryTargetByteCount:        proxyDeviceMemoryTargetByteCountFromConfig(),
-		ProcessDeviceMemoryBudgetByteCount: ProxyProcessDeviceMemoryBudgetByteCountFromConfig(),
+		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
+		SequenceBufferSize:          2048,
+		DeviceMemoryTargetByteCount: proxyDeviceMemoryTargetByteCountFromConfig(),
 	}
-}
-
-// defaultProxyProcessDeviceMemoryBudgetByteCount bounds the SUM of installed
-// device targets in this process. It is derived from the deployment rather
-// than chosen round: vault/main/services.yml runs the proxy as ten blocks on
-// each of two hosts with no container memory_limit (so warp exports no
-// GOMEMLIMIT either), and the only per-instance memory ceiling this process
-// already declares for itself is the 8 GiB message-pool budget in
-// cli/proxy/main.go. Matching that gives the device plane an equal, explicit
-// second ceiling: 8 GiB / 24 MiB = 341 devices per instance, 3,410 per host,
-// and a declared per-instance envelope of about 16 GiB plus overhead against
-// the 80 GiB per host the pool budget alone already assumes.
-//
-// If the number is wrong for a host it is wrong in a visible, recoverable
-// direction. Too large for a small host: the aggregate never binds and the
-// host can still overcommit, exactly as it does today, so this is never worse
-// than the status quo. Too small for demand: admission refuses new devices
-// while existing ones keep running, which shows up as
-// urnetwork_proxy_device_admission_refused_total rising with
-// urnetwork_proxy_device_memory_budget_used_bytes pinned at the total. Both
-// are tunable per environment with process_device_memory_budget in proxy.yml
-// without a code change; 0 disables the budget and restores today's unbounded
-// admission.
-const defaultProxyProcessDeviceMemoryBudgetByteCount = model.ByteCount(8 * model.Gib)
-
-// ProxyProcessDeviceMemoryBudgetByteCountFromConfig loads the aggregate device
-// budget. An explicit 0 disables admission control; a negative or unparseable
-// value fails startup, matching device_memory_budget.
-func ProxyProcessDeviceMemoryBudgetByteCountFromConfig() model.ByteCount {
-	resource, err := server.Config.SimpleResource("proxy.yml")
-	if err != nil {
-		return defaultProxyProcessDeviceMemoryBudgetByteCount
-	}
-	values := resource.String("process_device_memory_budget")
-	if len(values) == 0 {
-		return defaultProxyProcessDeviceMemoryBudgetByteCount
-	}
-	if len(values) != 1 {
-		panic(fmt.Errorf("proxy.yml: process_device_memory_budget must have exactly one value"))
-	}
-	byteCount, err := model.ParseByteCount(values[0])
-	if err != nil {
-		panic(fmt.Errorf(
-			"proxy.yml: invalid process_device_memory_budget %q: %w",
-			values[0],
-			err,
-		))
-	}
-	if byteCount < 0 {
-		panic(fmt.Errorf(
-			"proxy.yml: process_device_memory_budget must not be negative, got %q",
-			values[0],
-		))
-	}
-	return byteCount
 }
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(24 * model.Mib)
@@ -88,7 +31,7 @@ const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(24 * model.Mib)
 // proxyDeviceMemoryTargetByteCountFromConfig loads the single DeviceLocal
 // steady-state target. Older environments without proxy.yml retain the 24 MiB
 // default; a present but invalid value fails startup instead of silently
-// restoring the process-global carrier budget.
+// changing each hosted device's private target.
 func proxyDeviceMemoryTargetByteCountFromConfig() model.ByteCount {
 	resource, err := server.Config.SimpleResource("proxy.yml")
 	if err != nil {
@@ -122,9 +65,6 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 	DeviceMemoryTargetByteCount model.ByteCount
-	// ProcessDeviceMemoryBudgetByteCount bounds the sum of installed device
-	// targets. 0 disables admission control.
-	ProcessDeviceMemoryBudgetByteCount model.ByteCount
 	// HoldWindowIdentityRestore keeps a replacement from restoring identities
 	// while its predecessor is still draining. Fresh lazy-open identities are
 	// buffered and become durable when ReleaseWindowIdentityRestore runs.
@@ -158,20 +98,16 @@ type ProxyDeviceManager struct {
 	joinOnce      sync.Once
 	closeDone     chan struct{}
 
-	// Every production device borrows one manager-owned NetworkSpace. Its API
-	// request core and client strategy are shared; sdk.DeviceLocal isolates the
-	// mutable hosted credential session and all memory budgets per device.
+	// Every production device borrows one manager-owned NetworkSpace for
+	// immutable network metadata and discovery. sdk.DeviceLocal owns its API
+	// credential session, control strategy, and memory budgets per device.
 	networkSpaceOnce    sync.Once
 	networkSpace        *sdk.NetworkSpace
 	networkSpaceBuilder func(context.Context) *sdk.NetworkSpace
 	networkSpaceCloser  func(*sdk.NetworkSpace)
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
-	// deviceMemoryBudget bounds the aggregate of installed device targets.
-	// One fixed reservation per device is taken before construction and
-	// released when the device closes. nil disables admission control.
-	deviceMemoryBudget *connect.TransferMemoryBudget
-	windowIdentityGate *windowIdentityRestoreGate
+	windowIdentityGate  *windowIdentityRestoreGate
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -184,7 +120,8 @@ type ProxyDeviceManager struct {
 	// The ip lock, memoized. ValidCaller runs on EVERY accepted connection, so reading
 	// the device config from redis each time would put a round-trip on the accept path.
 	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
-	// observed during the whole process lifetime.
+	// observed during the whole process lifetime. Its capacity only evicts memoized
+	// lookups; it never admits or rejects a hosted device or its traffic.
 	lockCache *proxyLockCache
 
 	// Converts observed device lifetime counters into identity-free process
@@ -229,13 +166,6 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace.Close()
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
-	if 0 < settings.ProcessDeviceMemoryBudgetByteCount {
-		manager.deviceMemoryBudget = connect.NewTransferMemoryBudget(
-			connect.ByteCount(settings.ProcessDeviceMemoryBudgetByteCount),
-		)
-		proxyDeviceMemoryBudgetBytesGauge.Set(float64(settings.ProcessDeviceMemoryBudgetByteCount))
-		proxyDeviceMemoryBudgetUsedBytesGauge.Set(0)
-	}
 	return manager
 }
 
@@ -261,7 +191,10 @@ func newProxyDeviceManagerNetworkSpace(ctx context.Context) *sdk.NetworkSpace {
 }
 
 // networkSpaceForDevice returns the single manager-owned NetworkSpace. sync.Once
-// makes simultaneous cold device opens share exactly one strategy/API core.
+// makes simultaneous cold device opens reuse its metadata and directory. The
+// space still owns its own background strategy, but hosted DeviceLocal gives
+// every proxy device a private control strategy (including DoH cache and
+// admission state) and a private API session.
 func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 	self.networkSpaceOnce.Do(func() {
 		if self.networkSpace == nil {
@@ -274,49 +207,6 @@ func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 		}
 	})
 	return self.networkSpace
-}
-
-// ErrProxyDeviceMemoryBudget is returned when admitting another device would
-// exceed the aggregate device memory budget for this process. The device is
-// not created; existing devices are never evicted to make room (see
-// tryReserveDeviceMemory).
-var ErrProxyDeviceMemoryBudget = errors.New("proxy device memory budget exhausted")
-
-// tryReserveDeviceMemory takes one device-sized reservation from the aggregate
-// budget. Admission REFUSES rather than evicting: a hosted device carries a
-// live tunnel (wg peer flows, established socks/http connections, an attached
-// device-rpc session), and the manager cannot distinguish a device that is
-// merely quiet between bursts from one that is finished. The idle reaper
-// (CheckProxyDeviceIdleTimeout, see startProxyDevice) already reclaims
-// genuinely idle devices and releases their reservation, so capacity recovers
-// on its own without a second eviction policy that could cut live traffic.
-func (self *ProxyDeviceManager) tryReserveDeviceMemory() bool {
-	budget := self.deviceMemoryBudget
-	if budget == nil {
-		return true
-	}
-	if !budget.TryReserve(connect.ByteCount(self.deviceMemoryReservationByteCount())) {
-		proxyDeviceAdmissionRefusedCounter.Inc()
-		return false
-	}
-	proxyDeviceMemoryBudgetUsedBytesGauge.Set(float64(budget.UsedByteCount()))
-	return true
-}
-
-// releaseDeviceMemory returns one device-sized reservation.
-func (self *ProxyDeviceManager) releaseDeviceMemory() {
-	budget := self.deviceMemoryBudget
-	if budget == nil {
-		return
-	}
-	budget.Release(connect.ByteCount(self.deviceMemoryReservationByteCount()))
-	proxyDeviceMemoryBudgetUsedBytesGauge.Set(float64(budget.UsedByteCount()))
-}
-
-// deviceMemoryReservationByteCount is the per-device target, the same value
-// each DeviceLocal is given, so the aggregate is exactly the sum of targets.
-func (self *ProxyDeviceManager) deviceMemoryReservationByteCount() model.ByteCount {
-	return self.settings.DeviceMemoryTargetByteCount
 }
 
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
@@ -333,6 +223,9 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		// fast path: an existing entry, read concurrently (the common case)
 		self.stateLock.RLock()
 		pdState, ok := self.proxyDevices[proxyId]
+		if ok {
+			pdState.users.Add(1)
+		}
 		self.stateLock.RUnlock()
 		if ok {
 			return pdState
@@ -345,8 +238,10 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			pdState = &proxyDeviceState{}
 			self.proxyDevices[proxyId] = pdState
 		}
+		pdState.users.Add(1)
 		return pdState
 	}()
+	defer self.releaseProxyDeviceState(proxyId, pdState)
 
 	for {
 		pdState.StateLock.Lock()
@@ -388,16 +283,9 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		pdState.creating = c
 		pdState.StateLock.Unlock()
 
-		// Admission precedes construction: a device that cannot be afforded is
-		// never built, so no gVisor stack or tun is allocated for it.
-		var pd *ProxyDevice
-		var err error
-		reserved := self.tryReserveDeviceMemory()
-		if reserved {
-			pd, err = self.proxyDeviceBuilder(proxyId)
-		} else {
-			err = ErrProxyDeviceMemoryBudget
-		}
+		// Each new device owns the configured 24 MiB target. Other devices
+		// cannot consume or reject this device's admission budget.
+		pd, err := self.proxyDeviceBuilder(proxyId)
 
 		accepted := false
 		pdState.StateLock.Lock()
@@ -421,10 +309,6 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			if pd != nil {
 				_ = pd.Close()
 			}
-			// the reservation outlives construction only for an installed device
-			if reserved {
-				self.releaseDeviceMemory()
-			}
 		}
 
 		// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
@@ -436,6 +320,23 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			return nil, err
 		}
 		return pd, nil
+	}
+}
+
+// An opener may retain a state pointer while construction or teardown runs
+// without the manager map lock. Remove an empty entry only after the last such
+// opener releases it; otherwise another opener could publish a device into a
+// detached state that the manager can no longer close.
+func (self *ProxyDeviceManager) releaseProxyDeviceState(proxyId server.Id, pdState *proxyDeviceState) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if pdState.users.Add(-1) != 0 || self.proxyDevices[proxyId] != pdState {
+		return
+	}
+	pdState.StateLock.Lock()
+	defer pdState.StateLock.Unlock()
+	if pdState.ProxyDevice == nil && pdState.creating == nil {
+		delete(self.proxyDevices, proxyId)
 	}
 }
 
@@ -488,13 +389,12 @@ func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDev
 					// drop the empty entry to keep the map bounded under churn, but
 					// only when nothing is installed and no creation is in flight (a
 					// concurrent opener may hold this pdState, about to publish).
-					if pdState.ProxyDevice == nil && pdState.creating == nil {
+					if pdState.ProxyDevice == nil && pdState.creating == nil && pdState.users.Load() == 0 {
 						delete(self.proxyDevices, proxyId)
 					}
 				}
 			}()
 			pd.Close()
-			self.releaseDeviceMemory()
 		}()
 		pd.Run()
 	})
@@ -719,6 +619,10 @@ func (self *ProxyDeviceManager) CloseAndWait(ctx context.Context) error {
 type proxyDeviceState struct {
 	StateLock   sync.Mutex
 	ProxyDevice *ProxyDevice
+	// users counts OpenProxyDevice callers retaining this state pointer. A
+	// lookup increments it under manager.stateLock before teardown may remove
+	// the map entry; its zero check is performed with that lock held.
+	users atomic.Int64
 	// creating is non-nil while an opener is creating a device for this proxy id.
 	// Other openers wait on it instead of creating a duplicate, and without
 	// holding StateLock across the (slow) creation.
@@ -1133,7 +1037,7 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 // deliverWireGuardReturn preserves the device-side Tun loss model: provider
 // NAT has already consumed upstream TCP bytes and cannot reconstruct a segment
 // dropped here. This callback belongs to one DeviceLocal, so waiting on the
-// fixed process queue propagates bounded backpressure only into that device;
+// peer receive queue propagates bounded backpressure only into that device;
 // cancellation or an attachment change still releases it immediately.
 func observeElapsedSeconds(start time.Time, now func() time.Time, observe func(float64)) {
 	observe(now().Sub(start).Seconds())

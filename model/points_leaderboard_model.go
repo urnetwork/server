@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"github.com/urnetwork/sdk"
 	"sort"
 	"time"
@@ -12,8 +13,8 @@ import (
 // All-time points leaderboard (android/POINTSLEADERBOARD.md).
 //
 // Every network with any points is ranked on three dimensions -- total points,
-// finalized epochs ("blocks") with points, and the current streak of
-// consecutive finalized epochs with points -- into a snapshot table that a
+// completed operator payout periods ("blocks") with points, and the current
+// streak of consecutive payout periods with points -- into a snapshot table that a
 // rebuild task rewrites whenever points can have changed. Reads page the
 // newest snapshot with a keyset cursor and join `network` for the name, the
 // emoji tag and the two public flags, so a toggle shows on the next request
@@ -34,9 +35,9 @@ const (
 // resolves to the rows it was paging.
 const PointsLeaderboardRetainedSnapshots = 2
 
-// PointsEpochWindow is one finalized epoch's wall-clock [Start, End) window. A
-// network has points in the epoch when the sum of its account points created
-// inside the window is positive.
+// PointsEpochWindow is one completed operator payout block's [Start, End)
+// window. Epoch is retained as the API/storage field name for compatibility;
+// it is the 1-based operator block number, not an ST chain epoch.
 type PointsEpochWindow struct {
 	Epoch uint64
 	Start time.Time
@@ -86,8 +87,8 @@ type PointsNetworkInput struct {
 	NetworkId       server.Id
 	TotalNanoPoints NanoPoints
 	CreateTime      time.Time
-	// EpochsWithPoints holds the finalized epochs in which the network earned
-	// points.
+	// EpochsWithPoints holds the operator payout blocks in which the network
+	// earned points.
 	EpochsWithPoints map[uint64]bool
 }
 
@@ -201,10 +202,20 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks
 
 // RebuildPointsLeaderboard aggregates every network's points, ranks them and
 // writes a new snapshot, pruning to the retained count. `windows` are the
-// finalized epochs (any order). Concurrent rebuilds serialize on an advisory
+// completed operator payout blocks (any order). Concurrent rebuilds serialize on an advisory
 // lock at write time; each still produces a complete snapshot, so the worst
 // case of a race is one extra snapshot that the next prune removes.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
+	if 0 < len(windows) {
+		complete, err := pointsBlockRollupComplete(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !complete {
+			// Never publish a partial historical backfill as measured zeroes.
+			windows = nil
+		}
+	}
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
 		return nil, err
@@ -367,8 +378,45 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	return snapshot, nil
 }
 
+// The migration leaves older payments unprocessed. New plans mark completion
+// transactionally after their block rows are stored. A positive post-genesis
+// point whose linked payment is absent or unprocessed makes the entire weekly
+// metric unavailable until the bounded backfill catches up.
+func pointsBlockRollupComplete(ctx context.Context) (complete bool, returnErr error) {
+	complete = true
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM account_point AS point
+				LEFT JOIN account_payment AS payment
+					ON payment.payment_id = point.account_payment_id
+				WHERE point.create_time >= $1
+					AND point.point_value > 0
+					AND (point.account_payment_id IS NULL OR
+						payment.payment_id IS NULL OR
+						NOT payment.block_rollup_complete)
+			)
+		`, SubnetBlockGenesis)
+		server.WithPgResult(result, err, func() {
+			if err != nil {
+				returnErr = err
+				return
+			}
+			if !result.Next() {
+				returnErr = fmt.Errorf("points block-rollup completeness query returned no row")
+				return
+			}
+			var missing bool
+			if returnErr = result.Scan(&missing); returnErr == nil {
+				complete = !missing
+			}
+		})
+	})
+	return complete, returnErr
+}
+
 // loadPointsNetworkInputs reads every network's all-time total and, per
-// finalized epoch window, whether it earned points inside the window.
+// completed operator payout block, whether a payout plan earned points there.
 func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (inputs []PointsNetworkInput, returnErr error) {
 	byNetwork := map[server.Id]*PointsNetworkInput{}
 	// stats read: tolerates replica delay
@@ -409,28 +457,22 @@ func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (
 	}
 	if 0 < len(windows) && 0 < len(byNetwork) {
 		epochs := make([]int64, len(windows))
-		starts := make([]time.Time, len(windows))
-		ends := make([]time.Time, len(windows))
 		for i, window := range windows {
 			epochs[i] = int64(window.Epoch)
-			starts[i] = window.Start.UTC()
-			ends[i] = window.End.UTC()
 		}
 		server.ReplicaDb(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
 				ctx,
 				`
-					SELECT w.epoch, account_point.network_id
-					FROM unnest($1::bigint[], $2::timestamp[], $3::timestamp[]) AS w(epoch, start_time, end_time)
+					SELECT payment_block.block_number, account_point.network_id
+					FROM account_payment_block AS payment_block
 					INNER JOIN account_point ON
-						w.start_time <= account_point.create_time AND
-						account_point.create_time < w.end_time
-					GROUP BY w.epoch, account_point.network_id
+						account_point.account_payment_id = payment_block.payment_id
+					WHERE payment_block.block_number = ANY($1::bigint[])
+					GROUP BY payment_block.block_number, account_point.network_id
 					HAVING 0 < SUM(account_point.point_value)
 				`,
 				epochs,
-				starts,
-				ends,
 			)
 			server.WithPgResult(result, err, func() {
 				if err != nil {
@@ -776,8 +818,8 @@ func SetNetworkEmojiTag(ctx context.Context, networkId server.Id, emojiTag strin
 	})
 }
 
-// Testing_InsertAccountPoint writes one point row at an explicit create time,
-// so a test can place points inside or outside an epoch window.
+// Testing_InsertAccountPoint writes an unlinked point row at an explicit
+// posting time. It contributes to totals but has no provable earning block.
 func Testing_InsertAccountPoint(ctx context.Context, networkId server.Id, nanoPoints NanoPoints, createTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -792,5 +834,52 @@ func Testing_InsertAccountPoint(ctx context.Context, networkId server.Id, nanoPo
 			nanoPoints,
 			createTime.UTC(),
 		))
+	})
+}
+
+// Testing_InsertAccountPointForBlock records a synthetic point award and its
+// completed payment block with a separate posting time. It catches regressions
+// that bucket points by the Sunday payout job instead of earned traffic.
+func Testing_InsertAccountPointForBlock(
+	ctx context.Context,
+	networkId server.Id,
+	nanoPoints NanoPoints,
+	blockNumber uint64,
+	posted time.Time,
+) {
+	Testing_InsertAccountPointForBlocks(ctx, networkId, nanoPoints, posted, blockNumber)
+}
+
+// A single payment can earn in several operator weeks. This synthetic helper
+// keeps one point row and one payment while seeding all qualifying blocks.
+func Testing_InsertAccountPointForBlocks(
+	ctx context.Context,
+	networkId server.Id,
+	nanoPoints NanoPoints,
+	posted time.Time,
+	blockNumbers ...uint64,
+) {
+	planId := server.NewId()
+	paymentId := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO account_payment (
+				payment_id, payment_plan_id, network_id, wallet_id,
+				payout_byte_count, payout_nano_cents, min_sweep_time,
+				create_time, block_rollup_complete
+			) VALUES ($1, $2, $3, NULL, 1, 1, $4, $5, true)
+		`, paymentId, planId, networkId, posted.UTC().Add(-time.Hour), posted.UTC()))
+		for _, blockNumber := range blockNumbers {
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO account_payment_block (payment_id, block_number)
+				VALUES ($1, $2)
+			`, paymentId, int64(blockNumber)))
+		}
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO account_point (
+				account_point_id, network_id, event, point_value,
+				payment_plan_id, account_payment_id, create_time
+			) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, server.NewId(), networkId, AccountPointEventPayout, nanoPoints, planId, paymentId, posted.UTC()))
 	})
 }

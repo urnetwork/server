@@ -76,7 +76,7 @@ type egressAdmissionSnapshot struct {
 var egressAdmissionLanes = [...]string{"no-location", "stale-location", "stale-health", "missing-health"}
 var egressAdmissionOutcomes = [...]string{"acknowledged", "unsupported", "canceled", "error_or_unknown"}
 var egressAdmissionFullResults = [...]string{"attempted", "submitted", "skipped", "failed"}
-var egressAdmissionPassErrors = [...]string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled"}
+var egressAdmissionPassErrors = [...]string{"blackhole_due", "full_due", "pins", "blackhole_run", "blackhole_submit", "full_run", "canceled", "funding_unavailable", "funding_unknown"}
 
 // One bounded instant query returns fixed families and their actual source
 // timestamps. The instant evaluation timestamp alone cannot prove freshness.
@@ -318,6 +318,30 @@ func (self *egressAdmissionProbe) observe(now time.Time, processes map[egressAdm
 	findings := []finding{}
 	if unobservable > 0 || roles["api"] == 0 || roles["taskworker"] == 0 {
 		findings = append(findings, egressAdmissionUnobservable("incomplete-mixed-reset-or-warming", complete, unobservable))
+	}
+	if unfunded := deltas["pass_error/funding_unavailable"]; unfunded > 0 {
+		findings = append(findings, finding{
+			probeId: self.id(), tier: tierPage, class: "egress-prober-unfunded", target: "egress-fleet", frame: "shared-prober", sustain: 1,
+			symptom:   "The shared egress prober cannot fund an initial transfer contract",
+			mechanism: "The owning Taskworker observed available prober credit below the server's initial contract minimum using active PostgreSQL balances minus Redis escrow reservations. The pass stops new batches and withholds negative reachability, health and attempt-backoff publications across that shared failure; prior provider evidence is retained. This is a confirmed admission failure, not proof that every provider failed.",
+			baseline:  "Every admitted probe pass can fund its initial transfer contract",
+			observed:  fmt.Sprintf("unfunded_pass_observations=%.0f complete_process_intervals=%d", unfunded, complete),
+			action:    "Compare bounded durable outstanding reservations with the Redis mirror and inspect the existing expired-contract cleanup and prober bootstrap chains. Distinguish genuinely reserved credit from stale mirror state. Do not fund accounts, release escrow, delete verdicts or weaken provider gates from this alert. Check the owning blackhole reservation footprint separately from full and bandwidth probes.",
+			verify:    "Require naturally recovered admission availability, advancing cleanup and two complete traffic-bearing intervals with successful provider measurements and full submissions. A quiet guarded pass or elapsed idle retry is not recovery. Follow direct provider-list and verdict freshness through their ordinary due windows.",
+			playbook:  "SIGNALS.md §2.19a, §2.23, and §1.2",
+		})
+	}
+	if unknown := deltas["pass_error/funding_unknown"]; unknown > 0 {
+		findings = append(findings, finding{
+			probeId: self.id(), tier: tierWarn, class: "egress-prober-funding-unobservable", target: "egress-fleet", frame: "shared-prober", sustain: 1,
+			symptom:   "The egress prober could not observe its admission credit",
+			mechanism: "A PostgreSQL or Redis observation failed at the producer's shared readiness boundary. Negative measurements remain unpublished and prior provider evidence is retained. Missing authority is unknown; it does not establish insufficient credit or provider failure.",
+			baseline:  "The prober's existing admission-credit read completes before interpreting negative measurements",
+			observed:  fmt.Sprintf("unknown_funding_pass_observations=%.0f complete_process_intervals=%d", unknown, complete),
+			action:    "Inspect bounded PostgreSQL and Redis read availability and the exact Taskworker artifact. Preserve this unknown boundary separately from any confirmed unfunded process; do not correct balances or infer healthy providers from missing measurements.",
+			verify:    "Require complete successful admission observations and fresh traffic-bearing measurements after the read path recovers. Zero attempted work while the guard is closed is not recovery.",
+			playbook:  "SIGNALS.md §2.19a and §2.23",
+		})
 	}
 	for _, lane := range egressAdmissionLanes {
 		if expired := deltas["selected/"+lane+"/true"]; expired > 0 {

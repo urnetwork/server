@@ -1135,6 +1135,7 @@ const (
 // Only source symbols from the application's go.mod module closure can become
 // owner frames. Arguments, paths, line numbers and compiler closures never do.
 var panicLogFunctionRe = regexp.MustCompile(`^github\.com/urnetwork/((?:server|connect|sdk|proxy|operator-proxy|userwireguard|warp)(?:/[A-Za-z_][A-Za-z0-9_-]*)*)\.((?:\(\*?[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?\)|[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?|\.[0-9]+)*)(?:-fm)?\(`)
+var panicLogVersionedRootRe = regexp.MustCompile(`^(server|connect)/v[0-9]+$`)
 var panicLogClosureRe = regexp.MustCompile(`\.(?:(?:func|gowrap)[0-9]+|[0-9]+)(?:\.|$)`)
 var panicLogSourceRe = regexp.MustCompile(`(?:^|/)[A-Za-z_][A-Za-z0-9_]*\.go:[0-9]+(?: \+0x[0-9a-f]+)?$`)
 var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
@@ -1216,8 +1217,8 @@ func parsePanicLogObservation(line string) panicLogObservation {
 			observation.sqlstate = match[1]
 		}
 	}
-	for index, line := range stack {
-		line = strings.TrimSpace(line)
+	for index := 0; index < len(stack); index++ {
+		line := strings.TrimSpace(stack[index])
 		if !strings.HasPrefix(line, "github.com/urnetwork/") {
 			continue
 		}
@@ -1233,12 +1234,21 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 		function = strings.NewReplacer("(*", "", "(", "", ")", "").Replace(function)
 		owner := match[1] + "." + function
-		switch owner {
+		wrapperOwner := owner
+		if versionedRoot := panicLogVersionedRootRe.FindStringSubmatch(match[1]); len(versionedRoot) == 2 {
+			// A release-specific module root is still the same recovery
+			// wrapper. Preserve its version only for an actual application owner.
+			wrapperOwner = versionedRoot[1] + "." + function
+		}
+		switch wrapperOwner {
 		case "server.HandleError", "server.HandleError1", "server.HandleError2", "server.HandleErrorWithReturn",
 			"server.Raise", "server.RaisePgResult", "server.WithPgResult",
 			"server.Db", "server.ReplicaDb", "server.MaintenanceDb", "server.dbWithPool",
 			"server.Tx", "server.MaintenanceTx", "server.txWithPool",
 			"connect.HandleError", "connect.HandleError1", "connect.HandleError2", "connect.Raise":
+			// The next record is this wrapper's already-validated source line.
+			// A trimpath build can prefix it with the application module too.
+			index++
 			continue
 		}
 		if len(owner) <= panicLogOwnerMaxBytes {

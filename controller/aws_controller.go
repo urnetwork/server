@@ -114,6 +114,18 @@ func (self *NetworkWelcomeTemplate) Name() string {
 	return "network_welcome"
 }
 
+// ProviderUpgradeNoticeTemplate is an email-only draft for an admin of a
+// network with behaviorally confirmed provider compatibility failures. No
+// sender is wired to this template until recipient selection is reviewed.
+type ProviderUpgradeNoticeTemplate struct {
+	NetworkName string
+	BaseTemplate
+}
+
+func (self *ProviderUpgradeNoticeTemplate) Name() string {
+	return "provider_upgrade_notice"
+}
+
 type SubscriptionTransferBalanceCodeTemplate struct {
 	Secret           string
 	BalanceByteCount model.ByteCount

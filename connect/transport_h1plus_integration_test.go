@@ -33,8 +33,8 @@ func TestConnectH1PlusOldProvider(t *testing.T) {
 	})
 }
 
-// The client rollout gate is independent of server capability. With it off,
-// a server that supports H1+ must still receive an ordinary RFC WebSocket
+// The client opt-out is independent of server capability. With H1+ off, a
+// server that supports H1+ must still receive an ordinary RFC WebSocket
 // session and carry the full encrypted Connect exchange.
 func TestConnectH1ClientH1PlusDisabledUsesWebSocket(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -101,4 +101,11 @@ func TestConnectH1PlusAuthenticationBefore101(t *testing.T) {
 			t.Fatalf("inactive client rejection=%v", err)
 		}
 	})
+}
+
+// H1+ is opt-out: the default handler accepts the custom carrier.
+func TestDefaultConnectHandlerSettingsAcceptH1Plus(t *testing.T) {
+	if !DefaultConnectHandlerSettings().EnableH1Plus {
+		t.Fatal("default connect handler opted out of H1+")
+	}
 }

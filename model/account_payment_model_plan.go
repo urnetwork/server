@@ -960,6 +960,11 @@ func (self *PaymentPlanner) finalizePayments() {
 				sweep.network_id = payment_network_ids.network_id
 		`,
 	))
+
+	// The leaderboard's per-week paid-traffic attribution is processed by a
+	// separate bounded task after this payout transaction commits. A full plan
+	// can contain millions of sweeps; joining every contract here would hold
+	// the payout write lock for an unbounded duration.
 }
 
 // points are proportional to payout

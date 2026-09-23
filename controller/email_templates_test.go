@@ -28,6 +28,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&AuthPasswordResetTemplate{ResetCode: strings.Repeat("ab", 64)}, true},
 		{&AuthPasswordSetTemplate{}, true},
 		{&NetworkWelcomeTemplate{}, true},
+		{&ProviderUpgradeNoticeTemplate{NetworkName: "Synthetic network"}, false},
 		{&EpochEarningsTemplate{
 			Epoch:          42,
 			Points:         1234.5,
@@ -123,6 +124,37 @@ func TestEmailTemplatesRender(t *testing.T) {
 			}
 		} else if sms != bodyText {
 			t.Errorf("%s: template without an sms body must fall back to the text part", name)
+		}
+	}
+}
+
+func TestProviderUpgradeNoticeTemplateDraft(t *testing.T) {
+	subject, bodyHtml, bodyText, err := RenderEmailTemplate(&ProviderUpgradeNoticeTemplate{
+		NetworkName: "Synthetic & <script>network</script>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subject != "Action needed: update your URnetwork provider" {
+		t.Fatalf("provider notice subject = %q", subject)
+	}
+	for _, want := range []string{"Synthetic &amp; &lt;script&gt;network&lt;/script&gt;", "https://ur.io/install", "support@ur.io", "failing current connection checks"} {
+		if !strings.Contains(bodyHtml, want) {
+			t.Errorf("provider notice HTML missing %q", want)
+		}
+	}
+	if strings.Contains(bodyHtml, "<script>network</script>") {
+		t.Fatal("network name was not HTML-escaped")
+	}
+	normalText := strings.Join(strings.Fields(bodyText), " ")
+	for _, want := range []string{"Synthetic & <script>network</script>", "https://ur.io/install", "support@ur.io", "failing current connection checks"} {
+		if !strings.Contains(normalText, want) {
+			t.Errorf("provider notice text missing %q", want)
+		}
+	}
+	for _, unsupported := range []string{"verified binary", "will be quarantined", "deadline"} {
+		if strings.Contains(strings.ToLower(bodyText), unsupported) {
+			t.Errorf("provider notice overstates unproved action %q", unsupported)
 		}
 	}
 }

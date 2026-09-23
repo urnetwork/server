@@ -1919,7 +1919,7 @@ func TestProxyMemoryDescriptorsRemainInMetricInventory(t *testing.T) {
 	}
 }
 
-func TestProxyDashboardCoversAggregateDeviceAdmissionBudget(t *testing.T) {
+func TestProxyDashboardCoversPrivateDeviceMemoryTargets(t *testing.T) {
 	dashboard := readTestDashboard(t, "proxy.json")
 	documentBytes, err := dashboardsFs.ReadFile("dashboards/proxy.json")
 	if err != nil {
@@ -1927,39 +1927,38 @@ func TestProxyDashboardCoversAggregateDeviceAdmissionBudget(t *testing.T) {
 	}
 	document := string(documentBytes)
 	for _, metric := range []string{
-		"urnetwork_proxy_device_admission_refused_total",
-		"urnetwork_proxy_device_memory_budget_bytes",
-		"urnetwork_proxy_device_memory_budget_used_bytes",
+		"urnetwork_proxy_devices_live",
+		"urnetwork_proxy_device_memory_target_bytes",
+		"urnetwork_proxy_device_memory_tracked_used_bytes",
 	} {
 		if !strings.Contains(document, metric) {
-			t.Errorf("proxy dashboard omits aggregate admission metric %s", metric)
+			t.Errorf("proxy dashboard omits device ownership metric %s", metric)
 		}
 	}
-	refusals := dashboardPanelById(dashboard, 27)
-	if refusals == nil || len(refusals.Targets) != 1 ||
-		!strings.Contains(refusals.Targets[0].Expr, "rate(urnetwork_proxy_device_admission_refused_total") {
-		t.Fatal("proxy dashboard does not render device admission refusals as a reset-aware rate")
+	if strings.Contains(document, "urnetwork_proxy_device_admission_refused_total") ||
+		strings.Contains(document, "urnetwork_proxy_device_memory_budget_bytes") {
+		t.Fatal("proxy dashboard still queries removed process-wide admission metrics")
 	}
-	saturation := dashboardPanelById(dashboard, 28)
-	if saturation == nil || len(saturation.Targets) != 1 {
-		t.Fatal("proxy dashboard does not render per-process device admission saturation")
+	devices := dashboardPanelById(dashboard, 27)
+	if devices == nil || len(devices.Targets) != 1 ||
+		!strings.Contains(devices.Targets[0].Expr, "urnetwork_proxy_devices_live") {
+		t.Fatal("proxy dashboard does not render current private device count")
+	}
+	usage := dashboardPanelById(dashboard, 28)
+	if usage == nil || len(usage.Targets) != 1 {
+		t.Fatal("proxy dashboard does not render private device target usage")
 	}
 	for _, required := range []string{
 		"max by (block, host, instance)",
-		"urnetwork_proxy_device_memory_budget_used_bytes",
-		"clamp_min(urnetwork_proxy_device_memory_budget_bytes",
+		"urnetwork_proxy_device_memory_tracked_used_bytes",
+		"clamp_min(urnetwork_proxy_device_memory_target_bytes",
 	} {
-		if !strings.Contains(saturation.Targets[0].Expr, required) {
-			t.Errorf("device admission saturation query omits %q: %s", required, saturation.Targets[0].Expr)
+		if !strings.Contains(usage.Targets[0].Expr, required) {
+			t.Errorf("private device target query omits %q: %s", required, usage.Targets[0].Expr)
 		}
 	}
-	if !strings.Contains(saturation.Description, "must not be read as spare capacity") {
-		t.Fatal("device admission saturation panel does not preserve the missing-telemetry boundary")
-	}
-	for _, required := range []string{"positive refusal counter is authoritative", "can refuse admission below 1"} {
-		if !strings.Contains(saturation.Description, required) {
-			t.Errorf("device admission saturation panel omits the ratio boundary %q", required)
-		}
+	if !strings.Contains(usage.Description, "must not be read as host spare capacity") {
+		t.Fatal("device target panel does not preserve the physical memory boundary")
 	}
 }
 

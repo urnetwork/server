@@ -113,7 +113,7 @@ func NewSignals() []Signal {
 		NewProxyTransportSignal(),
 		NewProxyRuntimeSignal(),
 		NewProxyCacheSignal(),
-		NewProxyDeviceAdmissionSignal(),
+		NewProxyDeviceTargetSignal(),
 		NewKeyPublicationSignal(),
 		NewPublicUdpSignal(),
 		NewSubtensorSignal(),

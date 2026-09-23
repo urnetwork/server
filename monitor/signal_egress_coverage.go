@@ -41,12 +41,14 @@ func (egressCoverageProbe) tier() string           { return tierWarn }
 func (egressCoverageProbe) cadence() time.Duration { return 5 * time.Minute }
 
 type egressCoverageBatchArgs struct {
-	Limit                   int  `json:"limit"`
-	Concurrency             int  `json:"concurrency"`
-	ProbeTimeoutSeconds     int  `json:"probe_timeout_seconds"`
-	AllDestinations         bool `json:"all_destinations,omitempty"`
-	Bandwidth               bool `json:"bandwidth,omitempty"`
-	BandwidthTimeoutSeconds int  `json:"bandwidth_timeout_seconds,omitempty"`
+	Limit                    int   `json:"limit"`
+	Concurrency              int   `json:"concurrency"`
+	ProbeTimeoutSeconds      int   `json:"probe_timeout_seconds"`
+	AllDestinations          bool  `json:"all_destinations,omitempty"`
+	Bandwidth                bool  `json:"bandwidth,omitempty"`
+	BandwidthTimeoutSeconds  int   `json:"bandwidth_timeout_seconds,omitempty"`
+	TransportBudgetByteCount int64 `json:"transport_budget_byte_count,omitempty"`
+	TransportBudgetCount     int   `json:"transport_budget_count,omitempty"`
 }
 
 type egressCoverageTaskArgs struct {
@@ -99,19 +101,23 @@ type egressCoverageDesiredConfig struct {
 // four-slot geometry, and an omitted full-bandwidth flag is not false. The
 // current zero-valued optional batch modes retain their serialization defaults.
 type egressCoverageDesiredBatchYAML struct {
-	Limit                   int            `yaml:"limit"`
-	Concurrency             int            `yaml:"concurrency"`
-	ProbeTimeoutSeconds     int            `yaml:"probe_timeout_seconds"`
-	AllDestinations         bool           `yaml:"all_destinations"`
-	Bandwidth               *bool          `yaml:"bandwidth"`
-	BandwidthTimeoutSeconds *int           `yaml:"bandwidth_timeout_seconds"`
-	Unknown                 map[string]any `yaml:",inline"`
+	Limit                    int            `yaml:"limit"`
+	Concurrency              int            `yaml:"concurrency"`
+	ProbeTimeoutSeconds      int            `yaml:"probe_timeout_seconds"`
+	AllDestinations          bool           `yaml:"all_destinations"`
+	Bandwidth                *bool          `yaml:"bandwidth"`
+	BandwidthTimeoutSeconds  *int           `yaml:"bandwidth_timeout_seconds"`
+	TransportBudgetByteCount int64          `yaml:"transport_budget_byte_count"`
+	TransportBudgetCount     int            `yaml:"transport_budget_count"`
+	Unknown                  map[string]any `yaml:",inline"`
 }
 
 func (batch egressCoverageDesiredBatchYAML) args() egressCoverageBatchArgs {
 	args := egressCoverageBatchArgs{
 		Limit: batch.Limit, Concurrency: batch.Concurrency,
 		ProbeTimeoutSeconds: batch.ProbeTimeoutSeconds, AllDestinations: batch.AllDestinations,
+		TransportBudgetByteCount: batch.TransportBudgetByteCount,
+		TransportBudgetCount:     batch.TransportBudgetCount,
 	}
 	if batch.Bandwidth != nil {
 		args.Bandwidth = *batch.Bandwidth
@@ -273,6 +279,8 @@ func egressCoverageConfigChanges(desired, durable egressCoverageConfig) []string
 		note(batch.name+".all_destinations", batch.want.AllDestinations, batch.have.AllDestinations)
 		note(batch.name+".bandwidth", batch.want.Bandwidth, batch.have.Bandwidth)
 		note(batch.name+".bandwidth_timeout_seconds", batch.want.BandwidthTimeoutSeconds, batch.have.BandwidthTimeoutSeconds)
+		note(batch.name+".transport_budget_byte_count", batch.want.TransportBudgetByteCount, batch.have.TransportBudgetByteCount)
+		note(batch.name+".transport_budget_count", batch.want.TransportBudgetCount, batch.have.TransportBudgetCount)
 	}
 	// Names are fixed; values are deliberately excluded even from diagnostics.
 	note("api_url", desired.apiURL, durable.apiURL)
@@ -290,6 +298,7 @@ func egressCoverageSafeSettings(prefix string, config egressCoverageConfig) stri
 	}{{"full", config.full}, {"blackhole", config.blackhole}} {
 		name := prefix + "_" + batch.name
 		fields = append(fields, fmt.Sprintf("%s_limit=%d %s_concurrency_per_shard=%d %s_probe_timeout_seconds=%d %s_all_destinations=%t %s_bandwidth=%t %s_bandwidth_timeout_seconds=%d", name, batch.args.Limit, name, batch.args.Concurrency, name, batch.args.ProbeTimeoutSeconds, name, batch.args.AllDestinations, name, batch.args.Bandwidth, name, batch.args.BandwidthTimeoutSeconds))
+		fields = append(fields, fmt.Sprintf("%s_transport_budget_byte_count=%d %s_transport_budget_count=%d", name, batch.args.TransportBudgetByteCount, name, batch.args.TransportBudgetCount))
 	}
 	return strings.Join(fields, " ")
 }
@@ -561,7 +570,9 @@ func decodeEgressCoverageTaskArgs(raw string) (egressCoverageTaskArgs, error) {
 
 func validEgressCoverageBatchArgs(args egressCoverageBatchArgs) bool {
 	return 0 < args.Limit && 0 < args.Concurrency && args.Concurrency <= args.Limit &&
-		0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds)
+		0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds) &&
+		0 <= args.TransportBudgetByteCount && 0 <= args.TransportBudgetCount &&
+		(args.TransportBudgetByteCount == 0) == (args.TransportBudgetCount == 0)
 }
 
 // Deadline feasibility depends on every cumulative deadline prefix, not the

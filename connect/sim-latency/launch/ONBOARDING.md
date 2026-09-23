@@ -44,7 +44,7 @@ adapter-path testing. Every staging entry has `honesty_review: not_reviewed`,
 including a winner: this is not an honesty or safety approval. It does not
 create a production leaderboard row, candidate review, or promotion, and does
 not change source epoch zero or its threshold. Historical finalized results
-are preserved. The best-safe named-winner policy requires migration 685,
+are preserved. The best-safe named-winner policy requires migration 691,
 API, and worker rollout before epoch 8 closes. See the dated
 [epoch-5 release record](STAGING-5-RELEASE.md).
 
