@@ -162,7 +162,7 @@ Options:
   --shard=<i/n>          Fleet shard index/count.
   --api-url=<url>        Api url (fleet).
   --ws-urls=<urls>       Comma-separated exchange ws urls (fleet).
-  --run=<path>           A run artifact; score accepts comma-separated candidate CSV replicates.
+  --run=<path>           A run artifact; score, score-baseline and score-progress require comma-separated results CSV paths with run-manifest sidecars.
   --runs=<paths>         Comma-separated existing replicate artifacts (csv or run.json);
                          without it, baseline measures --replicates fresh runs itself.
   --replicates=<n>       Baseline replicate runs to measure [default: 5].

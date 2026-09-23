@@ -33,6 +33,22 @@ func TestConnectH1PlusOldProvider(t *testing.T) {
 	})
 }
 
+// The client rollout gate is independent of server capability. With it off,
+// a server that supports H1+ must still receive an ordinary RFC WebSocket
+// session and carry the full encrypted Connect exchange.
+func TestConnectH1ClientH1PlusDisabledUsesWebSocket(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		testConnect(t, contractTestNone, &testConnectConfig{
+			transportMode:         connectlib.TransportModeH1,
+			enableH1Plus:          false,
+			expectH1WebSocket:     true,
+			enableEncryption:      true,
+			enableTransportReform: true,
+			enableNack:            true,
+		})
+	})
+}
+
 func TestConnectH1PlusEncryptedWithExtender(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		testConnect(t, contractTestNone, &testConnectConfig{

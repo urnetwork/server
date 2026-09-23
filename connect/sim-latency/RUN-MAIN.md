@@ -9,18 +9,18 @@ Neither evaluation nor promotion changes the operator's product checkouts.
 
 ## Agent model roles
 
-Use Terra (`gpt-5.6-terra`) with medium reasoning for all test execution,
+Use Sol (`gpt-6-sol`) with medium reasoning for all test execution,
 including preflight, submission validation, post-promotion smoke tests, and
 reruns. A test failure or suspected flake must be handed to Astra (`gpt-6-astra`)
 with max reasoning to diagnose the root cause, implement the correction, and add
-a deterministic regression test. Terra medium then reruns the affected test and
+a deterministic regression test. Sol medium then reruns the affected test and
 required suite; do not accept an Astra-run test as the independent completion
 result.
 
 Astra with max reasoning owns code evaluation, each winning-submission honesty
 and safety code review, the approve/reject decision, every winner promotion,
 and all source or config merge/push operations. It must review the exact
-materialized patch and score evidence before invoking this harness. Terra must
+materialized patch and score evidence before invoking this harness. Sol must
 not approve candidates, merge branches, or push source/config refs. These roles
 apply to all six epochs and must survive an agent handoff.
 
@@ -138,7 +138,7 @@ branch omitted a database fix already present in the qualified baseline and
 on `main`. Pulling the API/worker cannot repair such an evaluator.
 
 For the approved epoch-5 repair, Astra max owns the source pull/merge and release
-review; Terra medium owns independent regression and image validation. Require
+review; Sol medium owns independent regression and image validation. Require
 the relevant tests to exist and pass in the image build, review all ten
 pinned repositories, and retain the new source-lock and image digests. Do not
 change active source aliases, configuration, or installed evaluator commands
@@ -148,7 +148,7 @@ to create that next round against the old pin. Preserve every historical
 round's policy and outcomes, and require a fresh production rebaseline before
 public launch.
 
-Before qualifying the repaired evaluator, Terra medium must independently
+Before qualifying the repaired evaluator, Sol medium must independently
 exercise the deterministic regressions for process-group cancellation,
 retained-evidence memory budgeting, PostgreSQL/Redis failure detection, terminal
 candidate exits, typed cancellation classification, and durable failed-attempt
