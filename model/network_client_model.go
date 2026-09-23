@@ -2947,7 +2947,8 @@ func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
 					for egressHashHex := range entries {
 						// Atomic compare-delete: a recycled address may already
 						// belong to another client, which must not be clobbered.
-						server.RedisRemoveIfEqual(pipe, ctx, verifyEgressKeyFromHex(egressHashHex), []byte(clientId.String()))
+						removeVerifyEgressAddressForClient(ctx, pipe, clientId, egressHashHex)
+						pipe.Del(ctx, verifyClientEgressLeaseKey(clientId, egressHashHex))
 						forwardEntryCount++
 					}
 				}
@@ -2987,9 +2988,8 @@ func clearReleasedProxyEgress(ctx context.Context, released []releasedProxyEgres
 			// The HMAC key is deliberately unavailable in the model cleanup
 			// layer. The reverse index is authoritative and lets release remove
 			// every keyed entry for this client without guessing a namespace.
-			// Any surviving direct connection is fail-closed briefly and restores
-			// its observed egress on its next bounded refresh.
-			RemoveVerifyEgressForClient(ctx, item.ClientID)
+			// Direct transports own independent leases and survive allocation release.
+			clearVerifyProxyEgressForClient(ctx, item.ClientID)
 			cleared[item.ClientID] = true
 		}
 	}

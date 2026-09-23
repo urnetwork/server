@@ -420,27 +420,14 @@ func (self *ConnectionAnnounce) run() {
 	// verify egress feeder (observed source ip, sn/VALIDATOR.md §8): while
 	// connected, this client's observed address is a candidate provider
 	// egress for `/verify` source-ip attribution. Feed on connect,
-	// ttl-refresh while connected, clear on disconnect. The bijection gate in
+	// ttl-refresh while connected, release only this connection on disconnect.
+	// Overlapping H1/H3 connections retain independent leases. The bijection gate in
 	// the model excludes shared or ambiguous ips (§8.2).
 	verifySettings, verifyEnabled := connectionVerifySettings()
 	verifyEgressIp, verifyEgressOk := netip.Addr{}, false
 	if verifyEnabled {
 		verifyEgressIp, verifyEgressOk = model.ParseVerifyEgressIp(self.clientAddress)
 	}
-	if verifyEgressOk {
-		model.FeedVerifyEgress(self.ctx, self.clientId, verifyEgressIp, verifySettings)
-		self.startWorker(func() {
-			for {
-				select {
-				case <-self.ctx.Done():
-					return
-				case <-time.After(verifySettings.EgressRefreshInterval):
-				}
-				model.FeedVerifyEgress(self.ctx, self.clientId, verifyEgressIp, verifySettings)
-			}
-		})
-	}
-
 	cleanup = func() {
 		server.HandleError(func() {
 			// The transport is normally canceled before cleanup begins. Preserve
@@ -450,10 +437,24 @@ func (self *ConnectionAnnounce) run() {
 			defer cleanupCancel()
 			model.DisconnectNetworkClient(cleanupCtx, connectionId)
 			if verifyEgressOk {
-				model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp, verifySettings)
+				model.ClearVerifyConnectionEgress(cleanupCtx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}
 			if glog.V(1) {
 				glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
+			}
+		})
+	}
+
+	if verifyEgressOk {
+		model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+		self.startWorker(func() {
+			for {
+				select {
+				case <-self.ctx.Done():
+					return
+				case <-time.After(verifySettings.EgressRefreshInterval):
+				}
+				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}
 		})
 	}
