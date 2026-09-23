@@ -18092,6 +18092,17 @@ shortcut. This is an observation-access prerequisite, not evidence that the
 public Proxy path is down. The 2026-09-15 residual access-denied cohort in §1.5
 does not by itself distinguish these phases.
 
+On 2026-09-23, bounded read-only phase checks on both Crisp and Fireside
+established that the configured overlay SSH identity completed `true`, while
+`docker ps --format '{{.Names}}'` failed with Docker-socket permission denied.
+For this observed cohort, the immediate visibility root cause is remote
+container-runtime authorization, not SSH authentication. This discriminator
+does not prove the current allocation count or Proxy readiness, and it does
+not authorize broad Docker-group membership. Restore a reviewed,
+least-privilege read-only allocation inventory surface before interpreting
+`proxy-path` readiness on these hosts; recheck the phase after any identity or
+runtime permission change.
+
 Proxy health has five layers; none substitutes for the next:
 
 1. **Current allocation readiness:** resolve the running container's current
