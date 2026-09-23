@@ -52,6 +52,10 @@ func newWireGuardTransport(ctx context.Context, proxyHost string, config *wireGu
 	if err != nil || !clientIPv4.Is4() {
 		return nil, nil, fmt.Errorf("WireGuard client IPv4 is invalid")
 	}
+	dnsServer, err := wireGuardProfileDNS(config.Config)
+	if err != nil {
+		return nil, nil, err
+	}
 	endpoint, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(proxyHost, strconv.Itoa(config.ProxyPort)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve WireGuard endpoint: %w", err)
@@ -72,6 +76,8 @@ func newWireGuardTransport(ctx context.Context, proxyHost string, config *wireGu
 		clientDevice.Close()
 		return nil, nil, fmt.Errorf("create WireGuard netstack: %w", err)
 	}
+	clientStack.dnsServer = dnsServer
+	clientStack.resolver = &net.Resolver{PreferGo: true, Dial: clientStack.dialDNSContext}
 
 	zeroPort := 0
 	keepalive := 25 * time.Second
@@ -128,8 +134,86 @@ type wireGuardStack struct {
 	stack      *stack.Stack
 	nicID      tcpip.NICID
 	clientIPv4 netip.Addr
+	dnsServer  netip.Addr
+	resolver   *net.Resolver
 	statsLock  sync.Mutex
 	stats      wireGuardPacketStats
+}
+
+// The provisioned wg-quick profile specifies the resolver used by a real
+// full-tunnel client. Do not silently substitute host DNS: that both bypasses
+// the tunnel under test and makes a healthy tunnel fail during host DNS churn.
+// This IPv4-only client uses the first IPv4 DNS server in [Interface].
+func wireGuardProfileDNS(profile string) (netip.Addr, error) {
+	interfaceSection := false
+	for _, line := range strings.Split(profile, "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			interfaceSection = strings.EqualFold(line, "[Interface]")
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if !interfaceSection || !found || !strings.EqualFold(strings.TrimSpace(key), "DNS") {
+			continue
+		}
+		for _, item := range strings.Split(value, ",") {
+			if address, err := netip.ParseAddr(strings.TrimSpace(item)); err == nil && address.Is4() && !address.IsUnspecified() && !address.IsMulticast() {
+				return address, nil
+			}
+		}
+	}
+	// Never include the profile here: it contains private key material.
+	return netip.Addr{}, fmt.Errorf("WireGuard profile has no IPv4 DNS server")
+}
+
+type wireGuardDNSConn struct {
+	net.Conn
+	stopCancel func() bool
+}
+
+func (c *wireGuardDNSConn) Close() error {
+	c.stopCancel()
+	return c.Conn.Close()
+}
+
+// Preserve net.PacketConn on UDP. net.Resolver uses that interface to choose
+// datagram DNS framing; exposing it on TCP would break truncated-UDP fallback.
+type wireGuardDNSPacketConn struct {
+	*wireGuardDNSConn
+}
+
+func (c *wireGuardDNSPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	return c.Conn.(net.PacketConn).ReadFrom(buffer)
+}
+
+func (c *wireGuardDNSPacketConn) WriteTo(buffer []byte, address net.Addr) (int, error) {
+	return c.Conn.(net.PacketConn).WriteTo(buffer, address)
+}
+
+func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	address := tcpip.FullAddress{NIC: s.nicID, Addr: tcpip.AddrFromSlice(s.dnsServer.AsSlice()), Port: 53}
+	var connection net.Conn
+	var err error
+	switch network {
+	case "udp", "udp4":
+		connection, err = gonet.DialUDP(s.stack, nil, &address, ipv4.ProtocolNumber)
+	case "tcp", "tcp4":
+		connection, err = gonet.DialContextTCP(ctx, s.stack, address, ipv4.ProtocolNumber)
+	default:
+		return nil, fmt.Errorf("unsupported WireGuard DNS network %q", network)
+	}
+	if err != nil {
+		return nil, err
+	}
+	wrapped := &wireGuardDNSConn{Conn: connection, stopCancel: context.AfterFunc(ctx, func() { connection.Close() })}
+	if _, datagram := connection.(net.PacketConn); datagram {
+		return &wireGuardDNSPacketConn{wireGuardDNSConn: wrapped}, nil
+	}
+	return wrapped, nil
 }
 
 type wireGuardPacketDirectionStats struct {
@@ -948,8 +1032,21 @@ func (s *wireGuardStack) DialContext(ctx context.Context, network, address strin
 
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+		if s.resolver == nil {
+			return nil, fmt.Errorf("WireGuard tunnel DNS is not configured")
+		}
+		// Treat target names as absolute, without the host's DNS search suffixes.
+		ips, err := s.resolver.LookupIP(ctx, "ip4", strings.TrimSuffix(host, ".")+".")
 		if err != nil {
+			var dnsError *net.DNSError
+			if errors.As(err, &dnsError) {
+				// Resolver's custom Dial overrides its system-selected server; keep
+				// errors attributed to the server that actually received the query.
+				copyError := *dnsError
+				copyError.Name = host
+				copyError.Server = net.JoinHostPort(s.dnsServer.String(), "53")
+				return nil, &copyError
+			}
 			return nil, err
 		}
 		if len(ips) == 0 {
