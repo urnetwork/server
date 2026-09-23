@@ -145,6 +145,8 @@ func NewSignals() []Signal {
 		NewVPNSessionsSignal(),
 		NewHostpowerSignal(),
 		NewSubnetCoverageSignal(),
+		NewConnectH1PlusSignal(),
+		NewProxyH1PlusSignal(),
 	}
 }
 

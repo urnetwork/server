@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -252,6 +253,10 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	logServiceHosts, err := activeLogServiceHostsFromServices(services)
+	if err != nil {
+		return SignalSettings{}, err
+	}
 	grafanaHosts, err := activeServiceHostsFromServices(services, "grafana")
 	if err != nil {
 		return SignalSettings{}, err
@@ -271,6 +276,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		ManagerHostname:        activeManagerHostnameFromServices(services),
 		LogServices:            logServices,
 		LogServiceBlocks:       logServiceBlocks,
+		LogServiceHosts:        logServiceHosts,
 		ProxyPathExpectedHosts: len(proxyByHost),
 		VerificationEnabled:    stConfiguration.configuredEnabled,
 		STConfigStatus:         stConfiguration.status,
@@ -1184,6 +1190,49 @@ func activeLogServicesFromServices(services servicesYaml) ([]string, error) {
 	}
 	sort.Strings(logServices)
 	return logServices, nil
+}
+
+// Keep desired placement even for hosts disabled in the monitor inventory.
+// Only the active version supplies authority; historic placements do not fill gaps.
+// Match warp/services.HostsForService: seed LB hosts, apply host_services
+// exclusions when present, then the service's optional hosts restriction.
+func activeLogServiceHostsFromServices(services servicesYaml) (map[string][]string, error) {
+	active, err := activeLogServicesFromServices(services)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]string, len(active))
+	version := services.Versions[0]
+	for _, service := range active {
+		serviceConfig, ok := version.Services[service]
+		if !ok {
+			return nil, fmt.Errorf("services.yml: ambiguous active service key")
+		}
+		result[service] = []string{}
+		seen := map[string]bool{}
+		for configuredHost := range version.LB.Interfaces {
+			if enabled, present := version.HostServices[configuredHost]; present && !slices.Contains(enabled, service) {
+				continue
+			}
+			if restricted := serviceConfig.Hosts; len(restricted) != 0 && !slices.Contains(restricted, configuredHost) {
+				continue
+			}
+			name := strings.TrimSpace(configuredHost)
+			if domain := strings.TrimSpace(services.Domain); domain != "" {
+				name = strings.TrimSuffix(name, "."+domain)
+			}
+			if name == "" {
+				return nil, fmt.Errorf("services.yml: empty active service host")
+			}
+			if seen[name] {
+				return nil, fmt.Errorf("services.yml: ambiguous active service host")
+			}
+			seen[name] = true
+			result[service] = append(result[service], name)
+		}
+		sort.Strings(result[service])
+	}
+	return result, nil
 }
 
 func activeLogServiceBlocksFromServices(services servicesYaml) (map[string][]string, error) {

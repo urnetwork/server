@@ -361,6 +361,10 @@ type SignalSettings struct {
 	// overlap uses it for bounded per-block continuation when the result cap is
 	// reached.
 	LogServiceBlocks map[string][]string
+	// LogServiceHosts is active services.yml placement, independent of monitor
+	// host exclusions. Hosts × blocks is the desired service-slot inventory;
+	// missing placement remains unknown rather than an observed-series count.
+	LogServiceHosts map[string][]string
 	// ProxyPathExpectedHosts is the active services.yml proxy-host count. It
 	// lets §14.5 distinguish an environment with no proxy service from a
 	// broken inventory join that would otherwise produce a silent green run.
@@ -530,6 +534,18 @@ func (s SignalSettings) validate() error {
 			seenBlocks[block] = struct{}{}
 		}
 	}
+	for service, hosts := range s.LogServiceHosts {
+		if _, ok := seenLogServices[service]; !ok {
+			return fmt.Errorf("monitor: log hosts configured for unknown service %q", service)
+		}
+		seen := map[string]bool{}
+		for _, name := range hosts {
+			if name == "" || strings.TrimSpace(name) != name || seen[name] {
+				return fmt.Errorf("monitor: invalid or duplicate service host")
+			}
+			seen[name] = true
+		}
+	}
 	if _, err := ExcludeHosts(s); err != nil {
 		return err
 	}
@@ -582,6 +598,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		managerHostname:        settings.ManagerHostname,
 		logServices:            append([]string(nil), settings.LogServices...),
 		logServiceBlocks:       cloneLogServiceBlocks(settings.LogServiceBlocks),
+		logServiceHosts:        cloneLogServiceBlocks(settings.LogServiceHosts),
 		proxyPathExpectedHosts: settings.ProxyPathExpectedHosts,
 		verificationEnabled:    settings.VerificationEnabled,
 		stConfigStatus:         settings.STConfigStatus.normalized(),

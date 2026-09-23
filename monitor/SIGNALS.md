@@ -24009,3 +24009,104 @@ Implementation acceptance for each proposed family is mandatory:
    code/fixture pins and actual test results. Peer-review alerts against on-chain
    evidence before enabling production paging. This documentation has coverage
    regression tests, **not** an implemented or qualified subnet probe battery.
+
+## 23. H1+ authenticated HTTP/1.1 carriers — Main
+
+`connect/H1PLUS.md` is the protocol and rollout contract. Connect's compact
+`urnetwork-framer/1` and hosted Proxy device RPC's `urnetwork-framerxl/1` are
+independent carriers. A WebSocket 101, source enablement, or registered
+collector alone does **not** establish use. These probes are passive, bounded
+Mimir observations; never manufacture unauthenticated public upgrades.
+
+Coverage comes from active `services.yml` `LogServiceHosts` ×
+`LogServiceBlocks`, not observed metric counts. Placement follows Warp's
+LB-host seed, optional `host_services` exclusions and service `hosts`
+restriction; historical versions cannot fill active inventory gaps.
+Desired disabled/excluded hosts
+and zero-weight blocks are not silently removed. Missing placement, an unknown
+host, an excluded slot, or ambiguous slot/process ownership leaves visibility
+unknown; this is not an exact running-image census. Verify artifact ancestry
+separately. At most 64 configured slots per service are supported without a
+bound review. One 15-second query per signal returns eight fixed fields
+(process start plus seven counters), value and producer timestamp, at now and
+15 minutes earlier: 32 samples/process. The response budget permits four
+rollout generations/slot at 1 KiB/sample (minimum 64 KiB, maximum 8 MiB).
+Oversize/truncated/error/annotated responses fail visibility closed; no raw
+process identities or response labels are rendered in alerts.
+
+For each configured host/block, select the newest observed **current process**
+before checking its counter completeness. A complete older/draining generation
+cannot replace a missing, stale or warming newer generation; equal-start
+identities are ambiguous. Every field at both bounds must be present, finite,
+nonnegative, source-fresh (at most 90 seconds old, at most 30 seconds ahead),
+and from the same producer scrape as its positive process-start gauge.
+The start must precede its source sample, remain unchanged across bounds, and
+source time must advance. Counter resets, restarts, mixed scrapes or missing
+pairs remain unknown, never zero. This same-process two-bound observation is
+not continuous coverage: a missed restart with indistinguishable identity,
+start and counter values cannot be excluded from two samples alone.
+Remote-write ingestion can temporarily interleave scrapes; the conservative
+coherence check reports visibility unknown until a complete scrape arrives,
+not a carrier failure. Independent H1PlusStats atomic loads/increments can
+make accepted_delta exceed attempts_delta across the chosen window without a
+reset; only each counter's own monotonicity is a valid counter check, not a
+cross-counter outcome ratio.
+
+Findings are block-local. Full current-slot visibility plus a positive
+**accepted lifetime** count and increasing messages **and payload bytes on
+one same process** is a use witness for that block. A long-lived accepted
+connection need not have a new accepted upgrade during the 15-minute window.
+A traffic-bearing sibling block does not certify an idle block, and partial
+coverage cannot be greened by one busy slot. Not every slot needs traffic:
+this is an existential use witness with full telemetry coverage, not proof
+that every slot carried traffic, achieved a particular uptake, or runs the
+intended artifact.
+
+The payload counters record successful **server-side framed writes** only.
+Message counts can include zero-length heartbeat frames; bytes exclude frame
+headers, so messages without bytes are not application-payload evidence.
+Successful writes do not prove peer application receipt, bidirectional health,
+client live-connection count, or customer tunnel/route success. Receive-only
+traffic can be real while these write counters stay zero.
+
+### 23.1 Connect compact H1+ negotiation and application traffic
+Probe: `connect-h1plus`
+
+Observe `urnetwork_connect_h1plus_{attempts,accepted,messages,bytes,auth_failures,handshake_failures,fallbacks}_total{job="connect",protocol="urnetwork-framer/1"}`
+with the process/source authority above. Check current Connect artifact
+ancestry, `EnableH1Plus`/emergency-disable settings and the `/connect` handler;
+TLS ingress must forward HTTP/1.1 `Upgrade` and `Connection` and permit
+long-lived streams.
+
+Missing exact-protocol collectors are `h1plus-telemetry-missing` WARN, not
+zero traffic. Partial inventory/fields/pairs, ambiguous generations and warmup
+are `h1plus-telemetry-incomplete`; an entirely source-stale block is
+`h1plus-telemetry-stale`. Mixed missing/stale causes remain incomplete with
+fixed per-cause slot counts. Full visibility but no positive payload witness
+for two five-minute checks is `h1plus-activity-unverified` WARN, not feature
+failure. An all-zero fresh cohort remains explicitly unverified.
+
+Eligible demand means **native H1 selection**, not all native connections:
+successful H3 traffic need not attempt H1+. Browser/JS and configured
+HTTP-proxy clients use WebSocket; idle, old, opted-out, disabled and
+receive-only cohorts can also lack H1+ writes. Server `attempts` omit some
+early rejections (including disabled/malformed paths), so they are not a
+complete offered-upgrade or native-demand denominator. Server `fallbacks`
+are not client-side WebSocket selection and can remain zero during genuine
+fallback. Rising auth/handshake errors need their own admission/ingress
+discriminator; never infer no client fallback or an H1+ outage from these
+partial counters alone.
+
+### 23.2 Hosted Proxy RPC XL H1+ negotiation and application traffic
+Probe: `proxy-h1plus`
+
+Observe `urnetwork_proxy_h1plus_{attempts,accepted,messages,bytes,auth_failures,handshake_failures,fallbacks}_total{job="proxy",protocol="urnetwork-framerxl/1"}`
+with the same current-process coverage, source freshness, long-lived payload
+criterion and nonpaging uncertainty classes. Compact carrier activity cannot
+satisfy this signal. Verify current Proxy artifact ancestry,
+`EnableDeviceRpcH1Plus`/emergency-disable settings, signed proxy-ID admission
+before 101, the 3-MiB RPC message cap, and `/device-rpc` ingress/idle handling.
+A positive XL server-write witness is device RPC activity, not downstream
+customer data-plane success. Some early admission/capacity rejections occur
+before these counters. Keep client selection/fallback evidence separate and
+do not weaken authentication or TLS to make compatibility appear healthy.

@@ -160,6 +160,7 @@ type monitorConfig struct {
 	managerHostname        string              // configured manager alias, when exposed
 	logServices            []string            // active services.yml service inventory
 	logServiceBlocks       map[string][]string // active blocks and expected-process denominators
+	logServiceHosts        map[string][]string // active host placements, including excluded hosts
 	proxyPathExpectedHosts int                 // active services.yml proxy placements
 	verificationEnabled    bool
 	stConfigStatus         STConfigurationStatus
