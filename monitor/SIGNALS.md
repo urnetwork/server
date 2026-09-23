@@ -1609,6 +1609,18 @@ Prove the emitting artifact and inspect preserved disputed reports/reservations;
 do not bypass the escrow guard, infer terminal progress from raw close counts,
 or connect the error to a full-probe pass without a same-attempt discriminator.
 
+The 2026-09-23 Main Taskworker sample also exposed a versioned-root
+attribution false positive: `server/v2026.HandleError` was counted as the
+owner because wrapper recognition handled only `server.HandleError`. The
+service-wide 12/min panic diagnostic remains valid, but that owner bucket is
+the recovery wrapper and does not identify the throwing function. Treat the
+underlying application owner as unknown until a bounded source stack proves
+it. The parser now recognizes recovery/database wrappers at a versioned
+Server or Connect module root, preserving the version on genuine application
+owners and the aggregate count. Verify the corrected owner only after the
+monitor binary is promoted and a fresh structured stack appears; do not
+reclassify a missing owner bucket as recovery.
+
 On 2026-09-18, the bounded API correlation for a generic five-per-minute
 `panic` PAGE retained six goroutine-stack records that were neither literal
 `panic:` lines nor structured `ErrorJson` records. Its privacy-reduced

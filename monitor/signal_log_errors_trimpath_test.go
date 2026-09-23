@@ -53,6 +53,48 @@ func TestPanicOwnerTrimpathWrappersRetainApplicationOwner(t *testing.T) {
 	}
 }
 
+// Versioned server module roots must not turn a recovery wrapper into the
+// owning application frame; the service-wide panic count remains unchanged.
+func TestPanicOwnerVersionedRootSkipsRecoveryWrapper(t *testing.T) {
+	line := panicOwnerTrimpathTestLine(t,
+		"github.com/urnetwork/server/model.SyntheticWrite.func1",
+		"github.com/urnetwork/server/model/synthetic_write.go:123 +0x99",
+	)
+	line = strings.ReplaceAll(line, "github.com/urnetwork/server", "github.com/urnetwork/server/v2026")
+	observation := parsePanicLogObservation(line)
+	if observation.owner != "server/v2026/model.SyntheticWrite" || observation.errorType != "*errors.errorString" {
+		t.Fatalf("versioned root owner = %#v", observation)
+	}
+	tailer := newLogTailer("taskworker", nil)
+	for range 5 {
+		tailer.classify(line)
+	}
+	frames := map[string]bool{}
+	for _, finding := range tailer.drainWindow() {
+		if finding.class != "panic" || finding.healthy {
+			continue
+		}
+		alert := alertFromFinding(syntheticSettings(nil), "1.5", "log-errors", "Log error-class rates", finding)
+		if alert.Severity != SeverityPage || alert.Target != "taskworker" || alert.SignalID != "logs/panic" {
+			t.Fatal("versioned recovery wrapper changed service-wide panic visibility")
+		}
+		frames[alert.Frame] = true
+	}
+	if len(frames) != 2 || !frames[""] || !frames["server/v2026/model.SyntheticWrite"] {
+		t.Fatalf("versioned root panic frames = %#v, want aggregate and application owner", frames)
+	}
+}
+
+func TestPanicOwnerVersionedConnectRootSkipsRecoveryWrapper(t *testing.T) {
+	line := panicOwnerTestLine(t, "*errors.errorString=synthetic-private-error",
+		"github.com/urnetwork/connect/v42.HandleError1[...].func1",
+		"github.com/urnetwork/server/model.SyntheticWrite",
+	)
+	if owner := panicLogOwner(line); owner != "server/model.SyntheticWrite" {
+		t.Fatalf("versioned Connect wrapper owner = %q, want application frame", owner)
+	}
+}
+
 // The recovered accounting rejection is still a failure. Neither this parser
 // repair nor recognition of the recovery boundary may lower its existing page.
 func TestPanicOwnerTrimpathPreservesAccountingAggregateAndOwnerPages(t *testing.T) {
