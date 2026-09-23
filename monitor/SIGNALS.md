@@ -22143,8 +22143,18 @@ with no affirmative block payload are expected.
 
 Read the latest snapshot header and exact ranked-row census in one bounded
 PostgreSQL statement. Preserve the existing atomic row-count and two-hour
-freshness checks. A second single-output-row, command-deadline-bounded query
-uses a UTC-normalized database clock and the owning model's calendar constants.
+freshness checks. A second catalog-only, command-deadline-bounded preflight
+checks the physical `account_payment.block_rollup_complete` contract: boolean,
+NOT NULL, false default. When that shape is absent or not visible, emit
+`points-operator-schema-unavailable` WARN and skip the dependent data query.
+This known readiness state is not a probe execution error: a one-shot retains
+the warning and can complete. Stale/incomplete total-point snapshot findings
+remain independent; no operator-readiness healthy sentinel or ST fallback is
+emitted. Preflight read errors or malformed rows still fail closed as
+observation errors.
+
+When the preflight passes, a third single-output-row, command-deadline-bounded
+query uses a UTC-normalized database clock and the owning model's calendar constants.
 It counts positive post-genesis `account_point` rows whose linked
 `account_payment` is absent (`missing_payment_points`) or whose existing
 payment has `block_rollup_complete=false` (`pending_rollup_points`).
@@ -22171,6 +22181,10 @@ prove sustained rollup progress or a completion-to-publication deadline.
   ranked-row census disagree.
 - `points-leaderboard-stale` warns after two observations when a snapshot
   is future-dated or older than two hours.
+- `points-operator-schema-unavailable` warns that the compiled monitor's
+  completion-column prerequisite is absent, differently shaped, or not visible.
+  This can be an intentionally staged rollout; it is not proof of a payout
+  outage and does not authorize applying migrations to make the monitor pass.
 - `points-epoch-metrics-unavailable` warns when completed operator periods
   exist but the snapshot is unavailable and the current source has missing
   payment links or incomplete rollups. Diagnose those owning boundaries,
@@ -22190,9 +22204,15 @@ prove sustained rollup progress or a completion-to-publication deadline.
   boundaries before attributing this to stored-data corruption.
 
 The source-version boundary matters during rollout. The owning rollup
-migrations and operator-source rebuild must be verified before adopting this
-probe. Missing tables/columns, malformed aggregate rows or read failures remain
-observation failures, never healthy and never a fallback to `st_epoch`.
+migrations and operator-source rebuild must be verified before claiming that
+the operator readiness boundary is deployed. Migration 686 supplies the
+completion column, but that one physical column does not prove full migration
+coherence or running API/Taskworker ancestry. Correlate §8.9 with exact deployed
+artifacts and the approved rollout plan; local code head ahead of the database
+is readiness evidence, not automatic permission or necessity to migrate.
+The specifically absent completion-column preflight is a nonfatal visibility
+WARN. Other missing tables/columns, malformed aggregate rows or read failures
+remain observation errors, never healthy and never a fallback to `st_epoch`.
 The compatibility fields do not record a source-version identifier, so this
 aggregate monitor alone cannot attest the running artifact or distinguish
 coincident old/new block numbers. Nor does it recompute every network's ranks
@@ -22218,7 +22238,9 @@ Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
 Deterministic controls cover ST-disabled healthy/meaningful-zero snapshots,
 Sunday boundaries, exact rollup eligibility, incomplete and missing payment
 links, asynchronous snapshot/source handoffs, observation failures, stale and
-incomplete snapshots, and genuine internal/calendar contradictions.
+incomplete snapshots, absent/present/malformed schema preflights, one-shot
+completion with a readiness warning, and genuine internal/calendar
+contradictions once the operator schema is observable.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

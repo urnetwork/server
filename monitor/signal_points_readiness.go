@@ -51,6 +51,35 @@ const pointsSnapshotQuery = `
 
 const pointsSnapshotMaxAge = 2 * time.Hour
 
+// The monitor may run ahead of the service/schema rollout. Read catalog
+// metadata before issuing SQL that names an append-only column; CASE around
+// the absent field would still fail PostgreSQL parse/analysis.
+const pointsOperatorSchemaQuery = `
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'account_payment'
+          AND column_name = 'block_rollup_complete'
+          AND data_type = 'boolean' AND is_nullable = 'NO'
+          AND column_default IN ('false', 'false::boolean')
+    );
+`
+
+func pointsOperatorSchemaFinding(target string) finding {
+	return finding{
+		probeId: "pg/points-readiness", tier: tierWarn,
+		class: "points-operator-schema-unavailable", target: target, sustain: 1,
+		symptom:   "The monitor cannot observe operator-block rollup readiness because its required completion-column schema is unavailable.",
+		mechanism: "The compiled probe can be ahead of a deliberately staged service/schema rollout. A catalog-only preflight did not confirm account_payment.block_rollup_complete as a required boolean with false default, so the dependent rollup query was not issued. This is a readiness/visibility boundary, not proof that running payout services are failing.",
+		baseline:  "The physical completion-column contract is visible before querying operator-rollup state; deployed service ancestry and full migration coherence are verified separately.",
+		observed:  "operator_schema_ready=false required_column=account_payment.block_rollup_complete minimum_column_migration=686 operator_rollup_readiness=unknown",
+		evidence:  "A bounded read-only information_schema query returned false. No account-point or payment data was scanned by the dependent rollup query.",
+		context:   "Missing or differently shaped schema and catalog-visibility restrictions can produce this result. The retained total-point snapshot checks remain independent. Migration 686 supplies this column, but column presence alone does not attest all migrations, a deployed operator-rollup writer, or snapshot source provenance. No healthy readiness sentinel or ST fallback is emitted.",
+		action:    "Correlate §8.9 physical artifacts and successful migration head with exact running API/Taskworker source ancestry and the approved rollout plan. Do not apply migrations merely to clear this monitor warning, enable ST, or change payment/snapshot flags.",
+		verify:    "After the reviewed schema/service rollout boundary is established, the preflight is true and the ordinary bounded rollup query returns valid source evidence; preserve meaningful unavailable and zero states.",
+		playbook:  "SIGNALS.md §17.6 and §8.9",
+	}
+}
+
 // One output row, bounded by the monitor command deadline. The eligibility
 // predicate matches model.pointsBlockRollupComplete, including current-period
 // positive points. Pending counts are point rows, not payments or contracts.
@@ -222,7 +251,7 @@ func pointsOperatorFinding(target, tier, class, symptom, mechanism, action strin
 			source.oldestPendingAge, snapshot.epochAvailable, snapshot.latestEpoch, snapshot.ageSeconds,
 			snapshot.totalRanked, snapshot.positiveBlocks, snapshot.positiveStreak, snapshot.positiveLongest,
 		),
-		evidence: "Two bounded read-only PostgreSQL statements returned a snapshot header/row census and UTC operator-calendar/positive-point rollup census. Only counts, ages, block numbers and booleans are rendered; no network or payment identity is returned.",
+		evidence: "Three bounded read-only PostgreSQL statements returned a snapshot header/row census, physical completion-column preflight and UTC operator-calendar/positive-point rollup census. Only counts, ages, block numbers and booleans are rendered; no network or payment identity is returned.",
 		context:  "Rollup completion has no persisted completion timestamp. A new pending payment can follow a valid immutable snapshot, and a just-completed backfill can precede a still-unavailable snapshot. Current source state alone cannot prove either snapshot corruption or an overdue completion-to-rebuild handoff.",
 		action:   action,
 		verify:   "After the bounded normal rollup and rebuild complete, a fresh internally consistent snapshot records the latest completed operator block with availability true. Meaningful zero Blocks/Streak values remain valid. Do not edit snapshot bits, payment completion flags or rollup rows by hand, and do not enable ST to repair this plane.",
@@ -282,6 +311,21 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			verify:    "Two successive hourly boundaries publish fresh complete snapshots.",
 			playbook:  "SIGNALS.md §17.6",
 		})
+	}
+
+	schemaRows, err := env.runner.pg(ctx, pointsOperatorSchemaQuery)
+	if err != nil {
+		return nil, err
+	}
+	if len(schemaRows) != 1 || len(schemaRows[0]) != 1 {
+		return nil, fmt.Errorf("points operator schema preflight returned an invalid shape")
+	}
+	schemaReady, err := strconv.ParseBool(schemaRows[0].str(0))
+	if err != nil {
+		return nil, fmt.Errorf("points operator schema preflight returned an invalid readiness value")
+	}
+	if !schemaReady {
+		return append(findings, pointsOperatorSchemaFinding(target)), nil
 	}
 
 	sourceRows, err := env.runner.pg(ctx, pointsOperatorSourceQuery())

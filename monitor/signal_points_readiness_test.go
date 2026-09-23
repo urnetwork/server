@@ -28,6 +28,8 @@ func runPointsOperatorFixture(t testing.TB, settings SignalSettings, snapshot, s
 			return snapshot, nil
 		case pointsStTableReferencePattern.MatchString(query):
 			return nil, nil
+		case strings.Contains(query, "FROM information_schema.columns"):
+			return []Row{{"true"}}, nil
 		case strings.Contains(query, "FROM account_point AS point"):
 			return source, nil
 		default:
@@ -71,7 +73,7 @@ func TestPointsOperatorReadinessAvailableWithoutSt(t *testing.T) {
 			if err != nil || len(alerts) != 0 {
 				t.Fatalf("valid operator snapshot depends on ST state %s (positive=%d): alerts=%+v err=%v", status, positive, alerts, err)
 			}
-			if len(queries) != 2 || pointsStTableReferencePattern.MatchString(strings.Join(queries, "\n")) {
+			if len(queries) != 3 || pointsStTableReferencePattern.MatchString(strings.Join(queries, "\n")) {
 				t.Fatal("operator readiness still reads chain epoch history")
 			}
 		}
@@ -284,6 +286,9 @@ func TestPointsOperatorReadinessReadFailureNeverFallsBackToSt(t *testing.T) {
 		if pointsStTableReferencePattern.MatchString(query) {
 			t.Fatal("rollup read failure may not fall back to ST")
 		}
+		if strings.Contains(query, "FROM information_schema.columns") {
+			return []Row{{"true"}}, nil
+		}
 		return nil, readErr
 	}}
 	alerts, err := NewPointsReadinessSignal().Run(context.Background(), settings)
@@ -330,10 +335,10 @@ func pointsOperatorSqlFixture(t testing.TB, clock time.Time, pointCte string) [5
 		t.Fatal("operator rollup SQL fixture requires the attested local test environment")
 	}
 	_, queries, err := runPointsOperatorFixture(t, syntheticSettings(nil), syntheticPointsSnapshot(60, 1, true, 10, 0), syntheticPointsOperatorSource(1, 60, 0, 0, 0))
-	if err != nil || len(queries) != 2 || !strings.Contains(queries[1], "FROM account_point AS point") {
+	if err != nil || len(queries) != 3 || !strings.Contains(queries[2], "FROM account_point AS point") {
 		t.Fatalf("operator source statement absent: queries=%d err=%v", len(queries), err)
 	}
-	query := strings.Replace(queries[1], "WITH lifecycle_clock AS MATERIALIZED", pointCte+", lifecycle_clock AS MATERIALIZED", 1)
+	query := strings.Replace(queries[2], "WITH lifecycle_clock AS MATERIALIZED", pointCte+", lifecycle_clock AS MATERIALIZED", 1)
 	query = strings.ReplaceAll(query, "clock_timestamp()", "timestamptz '"+clock.UTC().Format(time.RFC3339Nano)+"'")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
