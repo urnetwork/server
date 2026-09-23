@@ -7994,8 +7994,7 @@ inside PostgreSQL to:
 
 The description is claimed metadata, not runtime attestation. It cannot by
 itself establish a protocol failure. Join each eligible provider to its latest
-blackhole verdict and require a behavioral negative control before causal
-attribution:
+blackhole verdict and compare the bounded behavioral cohorts:
 
 - at least 20 claimed-legacy providers have a current verdict;
 - at least 90% of that checked legacy cohort is dark;
@@ -8009,17 +8008,38 @@ legacy-network count, and aggregate current pass/dark counts. Raw descriptions,
 versions beyond the fixed numeric boundary, provider IDs, network IDs,
 endpoints, contracts, and failure text never leave PostgreSQL.
 
-- `contract-hmac-incompatible` (PAGE): standard signing is active and both
-  behavioral cohorts meet the causal thresholds. The compatible cohort rules
-  out a shared prober credential, tunnel, or API failure; old receivers reject
-  the new contract before payload forwarding.
+- `contract-hmac-incompatible` (PAGE): the configured standard-signing cutoff
+  is active and both cohorts meet the behavioral thresholds. An actual
+  legacy-only receiver rejects standard-signed contracts before payload
+  forwarding. The aggregate matches that pattern; it does not attest the
+  running receiver or signer or prove every dark provider has that cause.
 - `contract-hmac-readiness` (WARN after two samples): a claimed-legacy cohort
   remains within 30 days before the cutoff or after it, but coverage or the
-  compatible control is insufficient for the causal page. Unknown metadata is
+  compatible control is insufficient for the pattern PAGE. Unknown metadata is
   never treated as compatible, and claimed legacy metadata alone is never
   reported as proof of the live process version.
 
-If a later compatible control falls below the causal threshold, the current
+False-positive qualifiers: passing claimed-compatible checks exclude only a
+universal shared-path failure. Even at the PAGE threshold, concurrent or
+cohort-specific prober, API, contract, route, or destination failures may
+coexist. A dark verdict can be synchronous tunnel construction, TLS
+authentication, or `all_destinations_failed`; this aggregate does not read that
+stored failure class. `all_destinations_failed` means no sampled response met
+its status/content contract, not necessarily zero bytes. Successful tunnel
+construction does not establish later API, contract, or route usability.
+Preserve separate integrity failures and use bounded fixed-enum evidence plus
+exact receiver/signer authority before per-provider attribution or quarantine.
+
+False-negative qualifiers: unknown descriptions can conceal legacy receivers;
+missing or stale checks leave part of the claimed cohort unobserved. A small
+passing destination sample does not establish generalized route capacity.
+Checks cover a three-hour window and need not share an artifact generation.
+The ingest clock permits one minute of future skew relative to API time; the
+current query has no upper DB-time bound, so separately count future-dated
+verdicts before treating them as current causal evidence. Neither absent
+metadata nor a threshold-driven alert-class change proves recovery.
+
+If a later compatible control falls below the behavioral threshold, the current
 sample fails closed from `contract-hmac-incompatible` PAGE to
 `contract-hmac-readiness` WARN. That class reassignment is not a severity
 downgrade of one Alert identity, does not prove receiver recovery, and cannot
@@ -8028,7 +8048,9 @@ Diagnose the compatible-cohort degradation as a separate boundary while
 retaining the prior HMAC incident until its full closure gate passes. This
 prevents a shared capacity or reachability regression from hiding an already
 proved legacy-protocol failure without weakening the current-sample causal
-threshold.
+threshold. The reverse WARN-to-PAGE reassignment can also be caused solely by
+the compatible pass share crossing its threshold; it does not by itself prove
+new legacy failure onset.
 
 Closure requires an explicit security/availability decision:
 
