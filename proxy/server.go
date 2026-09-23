@@ -98,6 +98,7 @@ func DefaultProxySettings() *ProxySettings {
 	// dial failure can recover inside an ordinary client request deadline.
 	httpProxySettings := proxy.DefaultHttpProxySettings()
 	return &ProxySettings{
+		EnableDeviceRpcH1Plus:    true,
 		DeviceRpcH1PlusStats:     defaultDeviceRpcH1PlusStats,
 		SocksPort:                InternalSocksPort,
 		HttpPort:                 InternalHttpPort,
@@ -145,7 +146,7 @@ func DefaultProxySettings() *ProxySettings {
 
 type ProxySettings struct {
 	// EnableDeviceRpcH1Plus accepts authenticated urnetwork-framerxl/1 in
-	// addition to WebSocket. Default false supports staged deployment.
+	// addition to WebSocket. On by default; false opts out.
 	EnableDeviceRpcH1Plus bool
 	DeviceRpcH1PlusStats  *connect.H1PlusStats
 	// Ingress ports are settings instead of constructor-local constants so

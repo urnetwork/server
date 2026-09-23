@@ -24,7 +24,6 @@ func TestProxyDeviceRpcH1Plus(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		opts := defaultProxyTestOptions()
 		opts.enableDeviceRpc = true
-		opts.enableDeviceRpcH1Plus = true
 		opts.deviceRpcH1PlusStats = &connect.H1PlusStats{}
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
@@ -46,11 +45,8 @@ func TestProxyDeviceRpcH1Plus(t *testing.T) {
 		}
 		conn.Close()
 
-		// Activate only this newly created native session; the process default
-		// returns to disabled immediately after its immutable settings snapshot.
-		sdk.SetDeviceRpcH1PlusEnabled(true)
+		// A native session offers XL by default (H1+ is opt-out).
 		remote, err := sdk.NewPlatformDeviceRemote(h.networkSpace, h.pdByClientJwt, h.deviceRpcUrl, h.signedProxyId, sdk.RequireIdFromBytes(h.pdInstanceId.Bytes()))
-		sdk.SetDeviceRpcH1PlusEnabled(false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,4 +76,11 @@ func TestProxyDeviceRpcH1Plus(t *testing.T) {
 		}
 		ws.Close()
 	})
+}
+
+// H1+ is opt-out: the default proxy accepts XL device RPC.
+func TestDefaultProxySettingsAcceptDeviceRpcH1Plus(t *testing.T) {
+	if !DefaultProxySettings().EnableDeviceRpcH1Plus {
+		t.Fatal("default proxy opted out of device RPC H1+")
+	}
 }
