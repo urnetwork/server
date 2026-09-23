@@ -130,6 +130,7 @@ type fullTunPath struct {
 	deviceCarrierTun             *clientconnect.Tun
 	deviceCarrierNode            string
 	multiClient                  *clientconnect.RemoteUserNatMultiClient
+	multiClientCancel            context.CancelFunc
 	apiGenerator                 *clientconnect.ApiMultiClientGenerator
 	deviceTransports             *platformTransportOwner
 	deviceClient                 *atomic.Pointer[clientconnect.Client]
@@ -4128,8 +4129,10 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageApplicationTun); err != nil {
 		return nil, err
 	}
+	multiClientCtx, multiClientCancel := context.WithCancel(ctx)
+	path.multiClientCancel = multiClientCancel
 	multiClient := clientconnect.NewRemoteUserNatMultiClient(
-		ctx,
+		multiClientCtx,
 		generator,
 		func(
 			source clientconnect.TransferPath,
@@ -4172,51 +4175,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		path.streamP2pStats = append(path.streamP2pStats, providerStats)
 		path.streamP2pRouteTraces = append(path.streamP2pRouteTraces, providerRouteStateTrace)
 	}
-	path.bridgeWaitGroup.Add(1)
-	go func() {
-		defer path.bridgeWaitGroup.Done()
-		packets := make([][]byte, max(1, resources.BatchSize))
-		sendPacketBatch := func(packetBatch [][]byte) int {
-			return multiClient.SendPacketBatch(
-				clientconnect.SourceId(deviceId),
-				protocol.ProvideMode_Network,
-				packetBatch,
-				-1,
-			)
-		}
-		if resources.SingularBridgeSend {
-			sendPacketBatch = func(packetBatch [][]byte) int {
-				sentPacketCount := 0
-				for _, packet := range packetBatch {
-					if multiClient.SendPacket(
-						clientconnect.SourceId(deviceId),
-						protocol.ProvideMode_Network,
-						packet,
-						-1,
-					) {
-						sentPacketCount += 1
-					} else {
-						clientconnect.MessagePoolReturn(packet)
-					}
-				}
-				return sentPacketCount
-			}
-		}
-		for {
-			packetCount, readErr := appTun.ReadBatch(packets)
-			if readErr != nil {
-				return
-			}
-			sendFullTunBridgeBatch(
-				bridgeSends,
-				packets[:packetCount],
-				resources.AppDelay,
-				time.Sleep,
-				sendPacketBatch,
-			)
-		}
-	}()
-	path.bridgeStarted = true
+	path.startBridge(resources, appTun.ReadBatch)
 	if err := afterStage(fullTunConstructionStageBridge); err != nil {
 		return nil, err
 	}
@@ -4305,6 +4264,59 @@ func tryNewFullTunPathWithTopologyHooks(
 		return nil, err
 	}
 	return owner.commit(), nil
+}
+
+// The read seam lets rollback tests park the actual bridge in a no-provider
+// send without constructing live exchanges, database records, or device TUNs.
+func (self *fullTunPath) startBridge(
+	resources tunResourceProfile,
+	readBatch func([][]byte) (int, error),
+) {
+	self.bridgeWaitGroup.Add(1)
+	go func() {
+		defer self.bridgeWaitGroup.Done()
+		packets := make([][]byte, max(1, resources.BatchSize))
+		sendPacketBatch := func(packetBatch [][]byte) int {
+			return self.multiClient.SendPacketBatch(
+				clientconnect.SourceId(self.deviceClientId),
+				protocol.ProvideMode_Network,
+				packetBatch,
+				-1,
+			)
+		}
+		if resources.SingularBridgeSend {
+			sendPacketBatch = func(packetBatch [][]byte) int {
+				sentPacketCount := 0
+				for _, packet := range packetBatch {
+					if self.multiClient.SendPacket(
+						clientconnect.SourceId(self.deviceClientId),
+						protocol.ProvideMode_Network,
+						packet,
+						-1,
+					) {
+						sentPacketCount += 1
+					} else {
+						clientconnect.MessagePoolReturn(packet)
+					}
+				}
+				return sentPacketCount
+			}
+		}
+		for {
+			packetCount, readErr := readBatch(packets)
+			if readErr != nil {
+				return
+			}
+			sendFullTunBridgeBatch(
+				self.bridgeSends,
+				packets[:packetCount],
+				resources.AppDelay,
+				time.Sleep,
+				sendPacketBatch,
+			)
+		}
+	}()
+	self.bridgeStarted = true
 }
 
 // Auto readiness is stronger than PlatformTransport.IsConnected: both direct
@@ -4956,9 +4968,15 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 	for _, sendRoutes := range self.platformSendRoutes {
 		sendRoutes.setDisabled(false)
 	}
-	// Closing the application TUN stops bridge admission. Join the bridge
-	// before flushing or closing its multi-client consumer so every pooled
-	// packet read before Close has one live ownership handoff or local return.
+	// Closing the application TUN stops bridge admission. Cancel the owned
+	// multi-client context before joining: a bridge SendPacket[Batch](-1)
+	// cannot otherwise leave its no-provider wait until the fixture parent
+	// expires, silently overrunning the rollback deadline. Cancellation only
+	// releases pending sends here; defer destructive consumer cleanup until
+	// every pooled packet has a terminal handoff or local return.
+	if self.multiClientCancel != nil {
+		self.multiClientCancel()
+	}
 	self.bridgeWaitGroup.Wait()
 	if self.bridgeStarted {
 		complete(fullTunConstructionResourceBridge, nil)
