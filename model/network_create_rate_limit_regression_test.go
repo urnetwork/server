@@ -290,7 +290,7 @@ func TestSeedphraseSignupRefusedForTermsDoesNotConsumeBudget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("terms-not-accepted signup %d returned a transport error: %v", i+1, err)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
+			if result.Error == nil || result.Error.Error() != "400 "+AgreeToTerms {
 				t.Fatalf("terms-not-accepted signup %d returned %+v, want the AgreeToTerms body error", i+1, result)
 			}
 		}
@@ -356,7 +356,7 @@ func TestEmailSignupValidationMistakesDoNotConsumeTheAuthBudget(t *testing.T) {
 					i+1, err,
 				)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
+			if result.Error == nil || result.Error.Error() != "400 "+AgreeToTerms {
 				t.Fatalf("terms mistake %d returned %+v, want the AgreeToTerms body error", i+1, result)
 			}
 		}
@@ -672,7 +672,7 @@ func TestAbandonedSsoSignupsDoNotSpendTheAddressWideAuthBudget(t *testing.T) {
 					i+1, err,
 				)
 			}
-			if result.Error == nil || result.Error.Message != "400 "+AgreeToTerms {
+			if result.Error == nil || result.Error.Error() != "400 "+AgreeToTerms {
 				t.Fatalf("sso signup %d returned %+v, want the AgreeToTerms body error", i+1, result)
 			}
 		}
