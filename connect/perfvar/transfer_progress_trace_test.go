@@ -23,15 +23,24 @@ func perfvarProgressTraceEnabled() bool {
 // The fixed tail exists only on opt-in. TryLock prevents diagnostic contention
 // from feeding backpressure into a production callback.
 type perfvarProgressTrace struct {
-	mutex   sync.Mutex
-	events  []clientconnect.TransferProgressEvent
-	next    uint64
-	seen    atomic.Uint64
-	dropped atomic.Uint64
-	dumped  sync.Once
+	mutex          sync.Mutex
+	events         []clientconnect.TransferProgressEvent
+	next           uint64
+	seen           atomic.Uint64
+	dropped        atomic.Uint64
+	dumped         sync.Once
+	observeForTest func(clientconnect.TransferProgressEvent)
+	dumpForTest    func(testing.TB, string)
 }
 
+// The opt-in one-cell diagnostic installs this before constructing clients
+// and restores it after their joins. Canonical execution leaves it nil.
+var newPerfvarProgressTraceForTest func() *perfvarProgressTrace
+
 func newPerfvarProgressTrace() *perfvarProgressTrace {
+	if newPerfvarProgressTraceForTest != nil {
+		return newPerfvarProgressTraceForTest()
+	}
 	if !perfvarProgressTraceEnabled() {
 		return nil
 	}
@@ -48,6 +57,10 @@ func (self *perfvarProgressTrace) configure(settings *clientconnect.ClientSettin
 }
 
 func (self *perfvarProgressTrace) observe(event clientconnect.TransferProgressEvent) {
+	if self.observeForTest != nil {
+		self.observeForTest(event)
+		return
+	}
 	self.seen.Add(1)
 	if !self.mutex.TryLock() {
 		self.dropped.Add(1)
@@ -84,6 +97,10 @@ func (self *perfvarProgressTrace) dump(t testing.TB, role string) {
 		return
 	}
 	self.dumped.Do(func() {
+		if self.dumpForTest != nil {
+			self.dumpForTest(t, role)
+			return
+		}
 		events, overwritten, dropped := self.snapshot()
 		header, _ := json.Marshal(map[string]any{
 			"record_type": "diagnostic", "kind": "transfer-progress-header", "role": role,
