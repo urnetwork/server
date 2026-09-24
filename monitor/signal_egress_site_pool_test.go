@@ -163,13 +163,13 @@ func (self *egressSitePoolFixture) source(t *testing.T) *syntheticSource {
 			}
 		},
 		hostFn: func(host HostSettings, command string) (string, error) {
-			if host.Name != "metrics-1" || !strings.Contains(command, "/prometheus/api/v1/query?query=") {
+			if host.Name != "metrics-1" || !strings.Contains(command, "/prometheus/api/v1/query") {
 				t.Fatalf("unexpected Mimir command on %s: %s", host.Name, command)
 			}
 			if self.mimirDown {
 				return "", fmt.Errorf("synthetic Mimir refused")
 			}
-			return self.mimirResponse(), nil
+			return sitePoolCoverageTestResponse(t, self, command, nil), nil
 		},
 	}
 }
@@ -178,6 +178,11 @@ func (self *egressSitePoolFixture) source(t *testing.T) *syntheticSource {
 func testEgressSitePoolSettings(source SignalSource) SignalSettings {
 	settings := syntheticSettings(source)
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
+	settings.Hosts = append(settings.Hosts,
+		HostSettings{Name: "api-a.example"}, HostSettings{Name: "api-b.example"}, HostSettings{Name: "worker-a.example"})
+	settings.LogServices = []string{"api", "taskworker"}
+	settings.LogServiceHosts = map[string][]string{"api": {"api-a.example", "api-b.example"}, "taskworker": {"worker-a.example"}}
+	settings.LogServiceBlocks = map[string][]string{"api": {"blue"}, "taskworker": {"blue"}}
 	return settings
 }
 

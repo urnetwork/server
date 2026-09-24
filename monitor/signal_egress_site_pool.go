@@ -2,10 +2,8 @@ package monitor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +64,7 @@ type EgressSitePoolSettings struct {
 	CountryUnreachableShare float64
 	// the most failing sites, places or countries one cadence lists
 	MaxListed int
-	// the largest Mimir answer read: three families of a handful of series
+	// the largest Mimir answer, including bounded per-slot source coverage
 	MaxResponseBytes int
 }
 
@@ -80,7 +78,7 @@ func DefaultEgressSitePoolSettings() *EgressSitePoolSettings {
 		ProberFaultMinClassLoads: 100,
 		CountryUnreachableShare:  0.9,
 		MaxListed:                20,
-		MaxResponseBytes:         64 * 1024,
+		MaxResponseBytes:         2 * 1024 * 1024,
 	}
 }
 
@@ -203,11 +201,14 @@ type egressSitePoolClassLoads struct {
 // backfill window, and guard trips per schedule over the guard window.
 // observable is false when it could not be read.
 type egressSitePoolMetrics struct {
-	observable bool
-	reason     string
-	borrowed   map[string]float64
-	answered   map[string]float64
-	guardTrips map[string]float64
+	observable       bool
+	reason           string
+	coverage         string
+	backfillComplete bool
+	guardComplete    bool
+	borrowed         map[string]float64
+	answered         map[string]float64
+	guardTrips       map[string]float64
 }
 
 // One cadence's evidence.
@@ -627,69 +628,6 @@ func queryEgressSitePool(
 	return observation, nil
 }
 
-// One bounded instant query for the backfill and guard families, each tagged
-// with the part it is.
-func egressSitePoolMetricsQuery(environment string, settings *EgressSitePoolSettings) string {
-	window := func(duration time.Duration) string {
-		return strconv.FormatInt(int64(duration/time.Second), 10) + "s"
-	}
-	env := strconv.Quote(environment)
-	part := func(expression string, name string, label string) string {
-		return fmt.Sprintf(`label_replace(%s,"monitor_egress_part",%s,%s,".*")`, expression, strconv.Quote(name), strconv.Quote(label))
-	}
-	return strings.Join([]string{
-		part(fmt.Sprintf(`sum by (rank_mode) (increase(urnetwork_provider_backfill_sum{env=%s}[%s]))`, env, window(settings.BackfillWindow)), "borrowed", "rank_mode"),
-		part(fmt.Sprintf(`sum by (rank_mode) (increase(urnetwork_provider_answered_total{env=%s}[%s]))`, env, window(settings.BackfillWindow)), "answered", "rank_mode"),
-		part(fmt.Sprintf(`sum by (schedule) (increase(urnetwork_egress_probe_batch_guard_trips_total{env=%s}[%s]))`, env, window(settings.GuardTripWindow)), "guard_trips", "schedule"),
-	}, " or ")
-}
-
-// Reads the Mimir half. A failed or malformed answer is an observation gap for
-// the two conditions that need it, never their health.
-func readEgressSitePoolMetrics(ctx context.Context, env *probeEnv, settings *EgressSitePoolSettings) egressSitePoolMetrics {
-	metrics := egressSitePoolMetrics{
-		borrowed:   map[string]float64{},
-		answered:   map[string]float64{},
-		guardTrips: map[string]float64{},
-	}
-	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(egressSitePoolMetricsQuery(env.cfg.env, settings))
-	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil,
-		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(settings.MaxResponseBytes)+" '"+queryUrl+"'")
-	if err != nil || out == "" || settings.MaxResponseBytes < len(out) {
-		metrics.reason = "bounded-source-unavailable"
-		return metrics
-	}
-	var response struct {
-		mimirInstantResponse
-		Warnings []string `json:"warnings"`
-	}
-	if json.Unmarshal([]byte(out), &response) != nil || response.Status != "success" ||
-		response.Data.ResultType != "vector" || 0 < len(response.Warnings) {
-		metrics.reason = "invalid-source-response"
-		return metrics
-	}
-	for _, series := range response.Data.Result {
-		_, value, err := mimirInstantValue(series.Value)
-		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			metrics.reason = "invalid-source-response"
-			return metrics
-		}
-		switch series.Metric["monitor_egress_part"] {
-		case "borrowed":
-			metrics.borrowed[series.Metric["rank_mode"]] += value
-		case "answered":
-			metrics.answered[series.Metric["rank_mode"]] += value
-		case "guard_trips":
-			metrics.guardTrips[series.Metric["schedule"]] += value
-		default:
-			metrics.reason = "invalid-source-response"
-			return metrics
-		}
-	}
-	metrics.observable = true
-	return metrics
-}
-
 // A finding of one class with the section's playbook.
 func egressSitePoolFinding(class string, target string, frame string, sustain int) finding {
 	return finding{
@@ -889,46 +827,42 @@ func evaluateEgressSitePool(
 		emit("egress-country-unreachable", failing)
 	}
 
-	// backfill sustained and prober fault's guard half read Mimir
-	if !observation.metrics.observable {
+	// A parsed vector is not evidence of complete fleet or window coverage.
+	if !observation.metrics.backfillComplete || !observation.metrics.guardComplete {
 		f := egressSitePoolFinding("egress-site-pool-unobservable", target, "metrics", 2)
-		f.symptom = "The backfill and batch-guard series cannot be read, so the backfill and guard conditions are not evaluated"
-		f.mechanism = "The borrowed share of FindProviders2 answers and the guard trips are process metrics (urnetwork_provider_backfill, urnetwork_egress_probe_batch_guard_trips_total); without Mimir those conditions report neither a fault nor health."
-		f.baseline = "One bounded instant query answers with the three families."
-		f.observed = "reason=" + observation.metrics.reason
-		f.action = "Check Mimir on the services hosts (§1.4) and the api and taskworker scrape targets."
-		f.verify = "The next cadence reads the series and evaluates both conditions."
+		f.symptom = "Backfill or guard recovery is unverified because the complete process window is not observable"
+		f.mechanism = "Unreadable, empty, partial, stale, restarted or excluded sources cannot supply healthy zeros. Valid positive observations remain visible, but no healthy sentinel resolves their class without complete paired coverage."
+		f.baseline = "Every desired API and Taskworker slot has one generation throughout the window, fresh coherent counter/start pairs, no resets, all fixed children and positive answer denominators."
+		f.observed = "reason=" + observation.metrics.reason + " " + observation.metrics.coverage
+		f.context = "API rank-mode children are lazy: absence is not zero. Idle answers do not establish a healthy backfill share. Source claims and process timestamps do not attest executable ancestry."
+		f.action = "Restore bounded Mimir coverage and active services.yml/monitor inventory agreement; let new processes complete the window. Do not clear incidents by treating absent children or excluded hosts as healthy."
+		f.verify = "Complete paired same-generation coverage returns; traffic-bearing backfill is below the threshold, and zero guards have a measured passing-class control."
 		findings = append(findings, f)
 	} else {
 		findings = append(findings, healthyFinding(egressSitePoolProbeId, tierWarn, "egress-site-pool-unobservable", target))
+	}
+	{
 		failing := []finding{}
-		rankModes := []string{}
-		for rankMode := range observation.metrics.answered {
-			rankModes = append(rankModes, rankMode)
-		}
-		sort.Strings(rankModes)
-		for _, rankMode := range rankModes {
-			answered := observation.metrics.answered[rankMode]
-			borrowed := observation.metrics.borrowed[rankMode]
-			if answered <= 0 || borrowed <= settings.BackfillShare*answered {
-				continue
-			}
-			// only a rank mode FindProviders2 answers becomes a frame, never
-			// an unexpected label
-			if rankMode != "quality" && rankMode != "speed" {
+		for _, rankMode := range []string{"quality", "speed"} {
+			answered, answeredSeen := observation.metrics.answered[rankMode]
+			borrowed, borrowedSeen := observation.metrics.borrowed[rankMode]
+			if !answeredSeen || !borrowedSeen || answered <= 0 || borrowed <= settings.BackfillShare*answered {
 				continue
 			}
 			f := egressSitePoolFinding("egress-backfill-sustained", target, rankMode, 2)
-			f.symptom = fmt.Sprintf("More than half of the providers FindProviders2 answered %s requests with were borrowed from another bucket over the last %s", rankMode, settings.BackfillWindow)
-			f.mechanism = "Backfill makes every answer look full: a bucket short of the request's count is filled from the others. The answers hide an emptied bucket from users by design, and this is where the operator sees it."
-			f.baseline = fmt.Sprintf("Borrowed providers at most BackfillShare=%.2f of answered providers per rank mode over %s.", settings.BackfillShare, settings.BackfillWindow)
-			f.observed = fmt.Sprintf("rank_mode=%s borrowed=%.0f answered=%.0f share=%.3f", rankMode, borrowed, answered, borrowed/answered)
-			f.evidence = "urnetwork_provider_backfill_sum against urnetwork_provider_answered_total from the api processes; bounded rank modes only."
-			f.action = "Find the cause, never close this on the answers looking full: read the exclusion-reason and index panels. A wave of unprobed is the prober or its capacity (§2.19, §2.19a); a wave over the one-in-ten line with the pool healthy is the exits; a wave in one place is the place's pool or its route."
-			f.verify = "The borrowed share falls under half for an hour with its cause identified."
+			f.symptom = fmt.Sprintf("The observed %s answers borrowed more than half their providers from another bucket over %s", rankMode, settings.BackfillWindow)
+			f.mechanism = "Backfill can conceal a thin native bucket in returned answer sizes. This observed ratio is diagnostic; partial exporter coverage cannot establish the whole fleet's ratio or recovery."
+			f.baseline = fmt.Sprintf("Borrowed providers at most BackfillShare=%.2f of answered providers per rank mode over %s, with complete coverage before recovery.", settings.BackfillShare, settings.BackfillWindow)
+			f.observed = fmt.Sprintf("rank_mode=%s borrowed=%.0f answered=%.0f share=%.3f %s", rankMode, borrowed, answered, borrowed/answered, observation.metrics.coverage)
+			f.evidence = "PromQL increases for urnetwork_provider_backfill_sum and urnetwork_provider_answered_total; rounded/extrapolated observations, not exact request counts."
+			f.context = "A valid positive subset is retained alongside incomplete-coverage findings. No independent request-intent, target-location, caller or delivered-route join is present."
+			f.action = "Inspect exclusion-reason, probe coverage and bucket-index evidence. Do not diagnose supply from answer size alone or clear this finding while Mimir coverage is missing."
+			f.verify = "Both rank modes have traffic-bearing complete paired windows and the borrowed shares remain at or below the configured threshold for the resolution cadences."
 			failing = append(failing, f)
 		}
-		emit("egress-backfill-sustained", failing)
+		if len(failing) > 0 || observation.metrics.backfillComplete {
+			emit("egress-backfill-sustained", failing)
+		}
 	}
 
 	// retry queue starved
@@ -952,6 +886,7 @@ func evaluateEgressSitePool(
 	{
 		failing := []finding{}
 		allAbove := true
+		passingClass := false
 		observed := []string{}
 		for _, class := range model.ProviderEgressSiteClasses {
 			loads := observation.classLoads[class]
@@ -963,6 +898,7 @@ func evaluateEgressSitePool(
 			share := float64(loads.total-loads.ok) / float64(loads.total)
 			if share <= siteSettings.SiteProberFaultShare {
 				allAbove = false
+				passingClass = true
 			}
 			observed = append(observed, fmt.Sprintf("%s=%d/%d", class, loads.total-loads.ok, loads.total))
 		}
@@ -999,7 +935,9 @@ func evaluateEgressSitePool(
 				failing = append(failing, f)
 			}
 		}
-		emit("egress-prober-fault", failing)
+		if len(failing) > 0 || observation.metrics.guardComplete && passingClass {
+			emit("egress-prober-fault", failing)
+		}
 	}
 	return findings
 }

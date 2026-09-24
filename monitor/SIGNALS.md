@@ -7389,10 +7389,33 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a request-shape or
   capacity fault on the prober, to be read together with §2.19a.
 
-The backfill and guard series come from Mimir; when they cannot be read the
-signal reports `egress-site-pool-unobservable` and evaluates neither
-condition, since a healthy finding would resolve an open alert on no
-evidence.
+The backfill and guard series come from Mimir. Unreadable, empty, partial,
+stale, restarted or excluded coverage reports `egress-site-pool-unobservable`;
+it cannot resolve either class. Valid partial positive counter evidence and
+independent database failures remain visible. Recovery requires every desired
+API/Taskworker host/block slot from active service inventory, one process
+generation over the lookback (including a range-presence witness), fresh
+source-time/start pairs at both bounds, coherent scrapes, zero observed counter
+resets, and all fixed children. Disabled or unenrolled desired slots remain
+unknown; a sibling cannot supply their coverage. These are source claims,
+not executable-artifact attestation.
+
+API rank-mode children are lazy: absence is not zero. Both rank modes need
+positive answer denominators before backfill recovery; idle traffic remains
+unverified. Prober-fault recovery requires complete zero-guard evidence and a
+measured passing-class control at the existing minimum load threshold.
+Insufficient class samples cannot resolve a prior failure. Mixed scrapes or
+rollout windows can conservatively delay recovery, and between-scrape losses
+remain invisible. PromQL increases are rounded/extrapolated observations, not
+an exact request census; a partial positive backfill ratio is not a fleet
+ratio or a same-call request-policy, location or delivered-route join.
+
+One inventory-bound query uses a 15-second deadline, a 2 MiB default response
+cap, at most 64 desired slots and 4,096 response rows (budgeted for four
+generations per slot). Exceeding the body/row/inventory bound fails closed;
+there is no retry or label/body disclosure. The query requests only enabled
+slots. Positive recovery may therefore remain unknown until inventory,
+traffic and complete same-generation windows provide the required controls.
 
 For refresh retry findings, execution state is unobserved: a stored error
 can remain during an actively claimed retry. The legacy `task-parked`
