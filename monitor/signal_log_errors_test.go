@@ -335,6 +335,8 @@ func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
 		markdown := alert.Markdown()
 		for _, want := range []string{
 			"rate=10/min", "logical DNS outcome is unknown",
+			"sampled outbound dial-leg lines are neither resolver-call failures nor user-request failures",
+			"fanout, hedging, and replacement ownership can add legs",
 			"path=unknown attempted_family=unknown resolver_outcome=unknown",
 			"count neither unique attempts nor failed logical DNS queries",
 			"success-only DoH result callback", "Do not restart Redis",
@@ -343,6 +345,9 @@ func TestLogErrorsSignalDohDialTimeoutIsPrivateAttemptEvidence(t *testing.T) {
 			if !strings.Contains(markdown, want) {
 				t.Errorf("%s: resolver attempt guidance omitted %q", testCase.name, want)
 			}
+		}
+		if strings.Contains(markdown, "volume is retry amplification") {
+			t.Errorf("%s: DoH leg volume was mislabeled as retry amplification", testCase.name)
 		}
 		for _, private := range []string{
 			"synthetic-proxy.example", "synthetic-block", "synthetic-private-correlation",

@@ -2411,6 +2411,9 @@ func (self *logTailer) drainWindow() []finding {
 			broken = true
 			tier := c.tier
 			baseline := "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)"
+			if c.name == "doh-dial-timeout" {
+				baseline = "healthy ~0/min; sampled outbound dial-leg lines are neither resolver-call failures nor user-request failures; fanout, hedging, and replacement ownership can add legs"
+			}
 			observed := fmt.Sprintf("rate=%d/min class=%s", count, c.name)
 			if c.pageRateThreshold > 0 {
 				observed += fmt.Sprintf(" page_threshold=%d/min", c.pageRateThreshold)
