@@ -9,12 +9,19 @@ import (
 	"time"
 
 	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/operator-proxy/prober"
 )
 
+// Tests of the blackhole batch: the fixed worker pool, cancellation, due order,
+// defaults, not-measured counting and places.
+
+// A PinSource with one complete pin.
 func testPins() map[string][]string {
 	return map[string][]string{"source.invalid": {"leaf", "intermediate"}}
 }
 
+// A batch runs on exactly Concurrency workers: a fourth provider does not
+// start while three are blocked.
 func TestRunBlackholeUsesFixedWorkerCount(t *testing.T) {
 	const concurrency = 3
 	started := make(chan struct{}, 100)
@@ -26,16 +33,17 @@ func TestRunBlackholeUsesFixedWorkerCount(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := RunBlackhole(context.Background(), providerClientIds, BlackholeOptions{
+		_, err := RunBlackhole(context.Background(), ProvidersFromClientIds(providerClientIds), BlackholeOptions{
 			Pins:        testPins,
 			Timeout:     time.Second,
 			Concurrency: concurrency,
-			CheckOne: func(_ context.Context, providerClientId string) BlackholeResult {
+			CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+				providerClientId := provider.ClientId
 				started <- struct{}{}
 				<-release
 				return BlackholeResult{Check: ingest.BlackholeCheck{
 					ClientId:  providerClientId,
-					OK:        true,
+					Ok:        true,
 					CheckedAt: time.Unix(1, 0).UTC(),
 				}}
 			},
@@ -57,6 +65,8 @@ func TestRunBlackholeUsesFixedWorkerCount(t *testing.T) {
 	}
 }
 
+// A job admitted to the channel before the batch was cancelled is not started
+// after it.
 func TestRunBlackholeDoesNotStartAdmittedWorkAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{})
@@ -65,18 +75,19 @@ func TestRunBlackholeDoesNotStartAdmittedWorkAfterCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = RunBlackhole(ctx, []string{"first", "second", "third"}, BlackholeOptions{
+		_, _ = RunBlackhole(ctx, ProvidersFromClientIds([]string{"first", "second", "third"}), BlackholeOptions{
 			Pins:        testPins,
 			Timeout:     time.Second,
 			Concurrency: 1,
-			CheckOne: func(_ context.Context, providerClientId string) BlackholeResult {
+			CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+				providerClientId := provider.ClientId
 				if calls.Add(1) == 1 {
 					close(entered)
 				}
 				<-release
 				return BlackholeResult{Check: ingest.BlackholeCheck{
 					ClientId:  providerClientId,
-					OK:        true,
+					Ok:        true,
 					CheckedAt: time.Unix(1, 0).UTC(),
 				}}
 			},
@@ -102,15 +113,16 @@ func TestRunBlackholeDoesNotPersistInFlightFailureAfterCancellation(t *testing.T
 	release := make(chan struct{})
 	done := make(chan BlackholeSummary, 1)
 	go func() {
-		summary, err := RunBlackhole(ctx, []string{"synthetic-provider"}, BlackholeOptions{
+		summary, err := RunBlackhole(ctx, ProvidersFromClientIds([]string{"synthetic-provider"}), BlackholeOptions{
 			Pins:        testPins,
 			Timeout:     time.Second,
 			Concurrency: 1,
-			CheckOne: func(_ context.Context, providerClientId string) BlackholeResult {
+			CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+				providerClientId := provider.ClientId
 				close(entered)
 				<-release
 				return BlackholeResult{
-					Check:   ingest.BlackholeCheck{ClientId: providerClientId, OK: false, Failure: "all_destinations_failed", CheckedAt: time.Unix(1, 0).UTC()},
+					Check:   ingest.BlackholeCheck{ClientId: providerClientId, Ok: false, Failure: "all_destinations_failed", CheckedAt: time.Unix(1, 0).UTC()},
 					Dark:    true,
 					Details: "synthetic canceled control-plane request",
 				}
@@ -131,6 +143,7 @@ func TestRunBlackholeDoesNotPersistInFlightFailureAfterCancellation(t *testing.T
 	}
 }
 
+// The summary keeps the due list's order whatever order the checks finish in.
 func TestRunBlackholePreservesDueOrder(t *testing.T) {
 	providerClientIds := []string{"third", "first", "second"}
 	var stateLock sync.Mutex
@@ -141,18 +154,19 @@ func TestRunBlackholePreservesDueOrder(t *testing.T) {
 
 	done := make(chan BlackholeSummary, 1)
 	go func() {
-		summary, _ := RunBlackhole(context.Background(), providerClientIds, BlackholeOptions{
+		summary, _ := RunBlackhole(context.Background(), ProvidersFromClientIds(providerClientIds), BlackholeOptions{
 			Pins:        testPins,
 			Timeout:     time.Second,
 			Concurrency: len(providerClientIds),
-			CheckOne: func(_ context.Context, providerClientId string) BlackholeResult {
+			CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+				providerClientId := provider.ClientId
 				stateLock.Lock()
 				release := releaseByProviderClientId[providerClientId]
 				stateLock.Unlock()
 				<-release
 				return BlackholeResult{Check: ingest.BlackholeCheck{
 					ClientId:  providerClientId,
-					OK:        true,
+					Ok:        true,
 					CheckedAt: time.Unix(1, 0).UTC(),
 				}}
 			},
@@ -174,13 +188,81 @@ func TestRunBlackholePreservesDueOrder(t *testing.T) {
 	}
 }
 
-func TestRunBlackholeRejectsZeroConcurrency(t *testing.T) {
-	_, err := RunBlackhole(context.Background(), []string{"provider"}, BlackholeOptions{
+// Zero concurrency is the default, sized for tunnels that mostly wait; only a
+// negative value is refused.
+func TestRunBlackholeConcurrencyDefaultsAndRejectsNegative(t *testing.T) {
+	_, err := RunBlackhole(context.Background(), ProvidersFromClientIds([]string{"provider"}), BlackholeOptions{
 		Pins:        testPins,
 		Timeout:     time.Second,
-		Concurrency: 0,
+		Concurrency: -1,
 	})
 	if err == nil {
-		t.Fatal("zero concurrency was accepted; the job channel would have no reader")
+		t.Fatal("negative concurrency was accepted; the job channel would have no reader")
+	}
+	if got := (BlackholeOptions{}).concurrency(); got != DefaultBlackholeConcurrency || DefaultBlackholeConcurrency != 16 {
+		t.Fatalf("zero concurrency = %d (default %d), want the default of 16", got, DefaultBlackholeConcurrency)
+	}
+	var checked []string
+	summary, err := RunBlackhole(context.Background(), ProvidersFromClientIds([]string{"a", "b"}), BlackholeOptions{
+		Timeout: time.Second,
+		CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+			checked = append(checked, provider.ClientId)
+			return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: provider.ClientId, Ok: true, CheckedAt: time.Unix(1, 0).UTC()}}
+		},
+	})
+	if err != nil || len(summary.Checks) != 2 {
+		t.Fatalf("a batch with no concurrency and no pins set: %+v %v", summary, err)
+	}
+}
+
+// A check that measured nothing is submitted as not measured and counted
+// apart: it is never dark, and never tunnel-failed.
+func TestRunBlackholeCountsNotMeasuredApart(t *testing.T) {
+	summary, err := RunBlackhole(context.Background(), ProvidersFromClientIds([]string{"lost", "dark", "ok"}), BlackholeOptions{
+		Timeout:     time.Second,
+		Concurrency: 1,
+		CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+			at := time.Unix(1, 0).UTC()
+			switch provider.ClientId {
+			case "lost":
+				return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: "lost", Failure: "not_measured", NotMeasured: true, CheckedAt: at}, NotMeasured: true}
+			case "dark":
+				return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: "dark", Failure: "all_destinations_failed", CheckedAt: at}, Dark: true}
+			default:
+				return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: "ok", Ok: true, CheckedAt: at}}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBlackhole: %v", err)
+	}
+	if len(summary.Checks) != 3 || summary.Dark != 1 || summary.NotMeasured != 1 || summary.TunnelFailed != 0 {
+		t.Fatalf("summary = %+v, want 3 checks, 1 dark, 1 not measured", summary)
+	}
+}
+
+// The places a due list carries reach the per-provider check.
+func TestRunBlackholePassesEachProvidersPlace(t *testing.T) {
+	providers := ProvidersFromDue([]ingest.DueProvider{
+		{ClientId: "a", CountryCode: " US ", Region: "Texas"},
+		{ClientId: "b"},
+	})
+	seen := map[string]prober.Provider{}
+	_, err := RunBlackhole(context.Background(), providers, BlackholeOptions{
+		Timeout:     time.Second,
+		Concurrency: 1,
+		CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
+			seen[provider.ClientId] = provider
+			return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: provider.ClientId, Ok: true, CheckedAt: time.Unix(1, 0).UTC()}}
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBlackhole: %v", err)
+	}
+	if got := seen["a"].Place; got.Country != "us" || got.Region != "Texas" {
+		t.Errorf("provider a place = %+v, want us/Texas", got)
+	}
+	if got := seen["b"].Place; got.Country != "" || got.Region != "" {
+		t.Errorf("provider b place = %+v, want none", got)
 	}
 }

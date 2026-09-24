@@ -14,48 +14,51 @@ import (
 	"time"
 )
 
-// ErrBlackholeUnsupported reports that the server has no blackhole endpoints
+// The blackhole endpoints: which providers are due a check, and the batched
+// submission of a pass.
+
+// Reports that the server has no blackhole endpoints
 // (404), for the same reason ErrDueUnsupported exists: the prober still works
 // against a server that has not deployed them. The sweep is simply skipped, and
 // says so once rather than every pass.
 var ErrBlackholeUnsupported = errors.New("ingest: the server does not implement the provider-blackhole endpoints")
 
-// MaxBlackholeFailureLen is the width of the server's failure column
-// (varchar(64)). The server REJECTS an oversized value rather than truncating
+// The width of the server's failure column
+// (varchar(64)). The server rejects an oversized value rather than truncating
 // it, and a rejected batch is a lost sweep, so truncate before sending.
 const MaxBlackholeFailureLen = 64
 
-// blackholeDueURL resolves the due endpoint from ServerURL.
-func (c *Client) blackholeDueURL() string {
-	return strings.TrimRight(c.ServerURL, "/") + "/network/provider-blackhole-due"
+// Resolves the due endpoint from ServerUrl.
+func (self *Client) blackholeDueUrl() string {
+	return strings.TrimRight(self.ServerUrl, "/") + "/network/provider-blackhole-due"
 }
 
-// BlackholeDue asks which providers to check next: never checked first, then
+// Asks which providers to check next: never checked first, then
 // least recently checked.
 //
 // Unlike Due there is no attempt backoff on the server side, by design: a
 // provider that failed last hour must be re-checked this hour, because that is
 // how it returns to the public list once it recovers.
-func (c *Client) BlackholeDue(ctx context.Context, limit int) ([]string, error) {
+func (self *Client) BlackholeDue(ctx context.Context, limit int) ([]DueProvider, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("ingest: blackhole due limit must be positive (got %d)", limit)
 	}
-	if 1 < c.ShardCount && (c.ShardIndex < 0 || c.ShardCount <= c.ShardIndex) {
+	if 1 < self.ShardCount && (self.ShardIndex < 0 || self.ShardCount <= self.ShardIndex) {
 		return nil, fmt.Errorf(
 			"ingest: shard index %d is out of range for shard count %d",
-			c.ShardIndex, c.ShardCount,
+			self.ShardIndex, self.ShardCount,
 		)
 	}
 
-	u, err := url.Parse(c.blackholeDueURL())
+	u, err := url.Parse(self.blackholeDueUrl())
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
 	q.Set("limit", strconv.Itoa(limit))
-	if 1 < c.ShardCount {
-		q.Set("shard_count", strconv.Itoa(c.ShardCount))
-		q.Set("shard_index", strconv.Itoa(c.ShardIndex))
+	if 1 < self.ShardCount {
+		q.Set("shard_count", strconv.Itoa(self.ShardCount))
+		q.Set("shard_index", strconv.Itoa(self.ShardIndex))
 	}
 	u.RawQuery = q.Encode()
 
@@ -63,9 +66,9 @@ func (c *Client) BlackholeDue(ctx context.Context, limit int) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-UR-Operator-Secret", c.OperatorSecret)
+	req.Header.Set("X-UR-Operator-Secret", self.OperatorSecret)
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := self.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -86,22 +89,30 @@ func (c *Client) BlackholeDue(ctx context.Context, limit int) ([]string, error) 
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
-	return out.ClientIds, nil
+	return out.due(), nil
 }
 
-// BlackholeCheck is one provider's result, as submitted.
+// One provider's result, as submitted.
 type BlackholeCheck struct {
-	ClientId  string    `json:"client_id"`
-	OK        bool      `json:"ok"`
-	Failure   string    `json:"failure,omitempty"`
-	CheckedAt time.Time `json:"checked_at"`
+	ClientId string `json:"client_id"`
+	Ok       bool   `json:"ok"`
+	Failure  string `json:"failure,omitempty"`
+	// Marks a check none of whose loads could be measured: its
+	// tunnel was gone and could not be re-created within their attempts. It
+	// is not a verdict either way -- OK is false and Failure is
+	// "not_measured" only because the fields must say something -- and the
+	// server stores it as not measured and only reschedules: it neither counts
+	// a failure against the provider nor clears one.
+	NotMeasured bool      `json:"not_measured,omitempty"`
+	CheckedAt   time.Time `json:"checked_at"`
 }
 
+// The wire body of a blackhole pass.
 type blackholeChecksBody struct {
 	Checks []BlackholeCheck `json:"checks"`
 }
 
-// SubmitBlackholeChecks reports a whole pass in one request.
+// Reports a whole pass in one request.
 //
 // Batched because a sweep produces hundreds of one-bit answers and a request
 // each would spend more on http than on the checks themselves.
@@ -110,7 +121,7 @@ type blackholeChecksBody struct {
 // malformed entry loses the whole pass. Everything that can be fixed locally is
 // fixed here rather than sent and rejected: a zero CheckedAt is refused, and an
 // over-long failure class is truncated to the column width.
-func (c *Client) SubmitBlackholeChecks(ctx context.Context, checks []BlackholeCheck) error {
+func (self *Client) SubmitBlackholeChecks(ctx context.Context, checks []BlackholeCheck) error {
 	if len(checks) == 0 {
 		return nil
 	}
@@ -122,14 +133,15 @@ func (c *Client) SubmitBlackholeChecks(ctx context.Context, checks []BlackholeCh
 			// server's freshness bound and could pin a stale verdict
 			return fmt.Errorf("ingest: blackhole check for %s has a zero CheckedAt", check.ClientId)
 		}
-		if !check.OK && strings.TrimSpace(check.Failure) == "" {
+		if !check.Ok && strings.TrimSpace(check.Failure) == "" {
 			// the server rejects this, and a rejected batch is a lost sweep
 			return fmt.Errorf("ingest: failed blackhole check for %s names no failure class", check.ClientId)
 		}
-		if check.OK {
+		if check.Ok {
 			check.Failure = ""
+			check.NotMeasured = false
 		}
-		check.Failure = truncateUTF8(check.Failure, MaxBlackholeFailureLen)
+		check.Failure = truncateUtf8(check.Failure, MaxBlackholeFailureLen)
 		body.Checks = append(body.Checks, check)
 	}
 
@@ -138,15 +150,15 @@ func (c *Client) SubmitBlackholeChecks(ctx context.Context, checks []BlackholeCh
 		return err
 	}
 
-	url := strings.TrimRight(c.ServerURL, "/") + "/network/provider-blackhole-checks"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	checksUrl := strings.TrimRight(self.ServerUrl, "/") + "/network/provider-blackhole-checks"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, checksUrl, bytes.NewReader(buf))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-UR-Operator-Secret", c.OperatorSecret)
+	req.Header.Set("X-UR-Operator-Secret", self.OperatorSecret)
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := self.httpClient().Do(req)
 	if err != nil {
 		return err
 	}

@@ -47,7 +47,7 @@ func TestProberCredentialDecodesTheServedCredential(t *testing.T) {
 		&secret, nil)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 	cred, err := c.ProberCredential(context.Background())
 	if err != nil {
 		t.Fatalf("ProberCredential err = %v", err)
@@ -64,15 +64,15 @@ func TestProberCredentialDecodesTheServedCredential(t *testing.T) {
 }
 
 // TestProberCredentialTrailingSlashServerURL: the other methods all build
-// their url with strings.TrimRight(ServerURL, "/"), and an -api-url written
+// their url with strings.TrimRight(ServerUrl, "/"), and an -api-url written
 // with a trailing slash is an ordinary way to configure a deployment.
 func TestProberCredentialTrailingSlashServerURL(t *testing.T) {
 	srv := credentialServer(t, http.StatusOK, `{"by_client_jwt":"j","client_id":"c"}`, nil, nil)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL + "/", OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: srv.URL + "/", OperatorSecret: "s3cret"}
 	if _, err := c.ProberCredential(context.Background()); err != nil {
-		t.Fatalf("ProberCredential err = %v; a trailing slash on ServerURL must not produce a double slash the server 404s", err)
+		t.Fatalf("ProberCredential err = %v; a trailing slash on ServerUrl must not produce a double slash the server 404s", err)
 	}
 }
 
@@ -89,7 +89,7 @@ func TestProberCredentialNotReadyOn404(t *testing.T) {
 	srv := credentialServer(t, http.StatusNotFound, "", nil, nil)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 	cred, err := c.ProberCredential(context.Background())
 	if cred != nil {
 		t.Errorf("ProberCredential returned a credential %+v alongside the 404", cred)
@@ -118,7 +118,7 @@ func TestProberCredentialUnauthorizedOn401(t *testing.T) {
 	srv := credentialServer(t, http.StatusUnauthorized, "", nil, nil)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "wrong"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "wrong"}
 	cred, err := c.ProberCredential(context.Background())
 	if cred != nil {
 		t.Errorf("ProberCredential returned a credential %+v alongside the 401", cred)
@@ -166,7 +166,7 @@ func TestProberCredentialRejectsAnUnusableBody(t *testing.T) {
 			srv := credentialServer(t, http.StatusOK, tc.body, nil, nil)
 			defer srv.Close()
 
-			c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+			c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 			cred, err := c.ProberCredential(context.Background())
 			if err == nil {
 				t.Fatalf("body %s returned credential %+v and no error; a 200 that carries no usable jwt must not read as a successful fetch", tc.body, cred)
@@ -196,7 +196,7 @@ func TestProberCredentialRetryableOnServerErrors(t *testing.T) {
 		http.StatusNoContent,
 	} {
 		srv := credentialServer(t, status, "upstream is having a moment", nil, nil)
-		c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+		c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 		_, err := c.ProberCredential(context.Background())
 		srv.Close()
 
@@ -212,7 +212,7 @@ func TestProberCredentialRetryableOnServerErrors(t *testing.T) {
 // An unreachable server is retryable too: the prober may well start before the
 // api does.
 func TestProberCredentialFailsOnAnUnreachableServer(t *testing.T) {
-	c := &Client{ServerURL: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
 	cred, err := c.ProberCredential(context.Background())
 	if err == nil {
 		t.Fatalf("an unreachable server returned credential %+v and no error", cred)
@@ -233,7 +233,7 @@ func TestProberCredentialPreservesTheTransportCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 	_, err := c.ProberCredential(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want it to wrap context.Canceled so an interrupted wait is distinguishable from an unreachable server", err)

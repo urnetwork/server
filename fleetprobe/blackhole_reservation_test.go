@@ -17,7 +17,7 @@ import (
 func TestBlackholeContractReservationIsLocalToProbe(t *testing.T) {
 	for _, configured := range []connect.ByteCount{0, 64 * 1024 * 1024} {
 		shared := providertunnel.Config{
-			ApiURL:                       "https://api.invalid",
+			ApiUrl:                       "https://api.invalid",
 			ContractReservationByteCount: configured,
 		}
 		full := FullOptions{TunnelConfig: shared}

@@ -4,26 +4,29 @@ Operator tooling for urnetwork network operators.
 
 ## egress-prober
 
-Determines each provider's **egress** location without paying for a commercial
-IP-geolocation database.
+Measures what each provider's exit actually carries, and where it is, without
+asking anyone but the operator's own server.
 
-For every provider, the prober opens a tunnel pinned to that provider, runs
-geolocation lookups **through** it against three independent free sources, takes
-a consensus, and submits the result to the operator's server.
+For every due provider, the prober opens a tunnel pinned to that provider and
+runs one **egress-health run** through it: first the operator's own `/ip` echo
+(`GET <api>/my-ip-info`) — the warm-up, whose answer is the provider's exit
+address — then a random sample of real sites from the server's destination
+pool, every load shaped like a browser and retried at spaced intervals. The run
+is submitted as the provider's egress health, and the exit address as its
+probed location; the server places the address with its own GeoLite2. No
+ip-intelligence source is consulted for anything (GEOMAP §11.3).
 
-- A probe request never receives a host-network dialer. Every lookup egresses
+- A probe request never receives a host-network dialer. Every request egresses
   through the selected provider, including DNS; the allowlist is closed and
   there is no local fallback. Main runs the library from durable taskworker
   shards on hosts with ordinary LAN egress. The standalone command retains the
   confinement check below as defense in depth.
-- The lookups are TLS-pinned (to pins the server observed directly), so a
-  provider on the path cannot forge a location.
-- Country is the trusted output. City is recorded only when at least two sources
-  agree (free sources disagree on city often), otherwise the location is
-  country-granular. The same two-source bar applies to the ASN/Org and to the
-  `hosting`/`proxy`/`mobile` flags: anything only one source asserts is left
-  unset, so a single bad api cannot mark the whole fleet.
-- A provider that refuses to carry the probe is simply not located; the server
+- Every host is verified by WebPKI, and a host the server serves a certificate
+  pin for is pinned on top (see "Certificate pinning").
+- A tunnel that dies part-way is re-created for the loads it had not finished
+  (at most `TunnelRecreateAttempts`, 2, per run); a load whose tunnel could not
+  be re-created in time is **not measured**, never failed.
+- A provider that refuses to carry the probe is simply not placed; the server
   falls back to its own database.
 
 ### Build
@@ -47,7 +50,7 @@ go build ./cmd/egress-prober
   -api-url https://api.example.net \
   -platform-url wss://connect.example.net \
   -operator-secret "$UR_OPERATOR_SECRET" \
-  -concurrency 4 \
+  -public-api-url https://api.example.net \
   -cache-ttl 24h \
   -interval 1h
 ```
@@ -82,25 +85,34 @@ stops it at startup instead of leaving a prober that looks healthy and probes
 nothing.
 
 `-operator-secret` must match `ingest_secret` in the server's
-`provider_egress.yml` vault resource — it authenticates the credential fetch and
-the pin fetch as well as ingest, so a wrong secret stops the prober at startup
-rather than only having its submissions rejected.
+`provider_egress.yml` vault resource — it authenticates the credential fetch,
+the pin fetch and the pool fetch as well as ingest, so a wrong secret stops the
+prober at startup rather than only having its submissions rejected.
 
-The server must have observed the geolocation certificate pins before the
-prober can start: it fetches them at startup and **refuses to run without a
-complete set** (see "Certificate pinning" below).
+The prober fetches the server's certificate pins at startup and **refuses to
+run if the fetch fails**; an empty set is fine (see "Certificate pinning").
+Each pass then fetches the destination pool (`-pool-url`, default
+`<api-url>/network/provider-egress-destinations`) and runs the built-in table
+for that pass if it cannot. The `/ip` echo (`-ip-echo-url`) is reached
+**through** each provider's tunnel, so it must be the api's public address: it
+defaults to `<public-api-url>/my-ip-info`, or `<api-url>/my-ip-info` when
+`-public-api-url` is empty.
 
 Run `./egress-prober -h` for the full flag list, including `-probe-timeout`
-(per-provider probe timeout, must be positive) and `-interval 0` (run a
-single pass and exit, useful for driving the prober from an external
-cron/systemd timer instead of its own sleep loop; `-interval` must not be
-negative).
+(the cold-start allowance: the warm-up's own timeout and the ceiling of any
+request; each load attempt gets the smaller of it and 10s, so it must be at
+least 10s) and `-interval 0` (run a single pass and exit, useful for driving
+the prober from an external cron/systemd timer instead of its own sleep loop;
+`-interval` must not be negative). `-concurrency` and `-blackhole-concurrency`
+default to 16 each: a run spends most of its wall clock waiting out spaced
+retries, so tunnels mostly wait, and what bounds the number is the host's
+**memory** — every tunnel carries its own network stack.
 
 ### Confinement (required)
 
 The prober **refuses to start** unless it is confined: at startup it attempts a
-direct TCP connection to every geolocation endpoint and exits non-zero if any of
-them accepts one.
+direct TCP connection to every probe destination of the built-in table and
+exits non-zero if any of them accepts one.
 
 The confinement itself is supplied by the deployment, not by this process —
 under Docker Compose a restricted network, otherwise a systemd unit with
@@ -113,11 +125,17 @@ IPAddressAllow=<the operator's api/platform addresses>
 Both mechanisms are outside this process and neither is portably inspectable, so
 the prober tests the *property* instead of the mechanism: if a direct connection
 succeeds, the confinement is missing and the prober will not run. Without it, a
-probe that fails to tunnel would fall back to the host's own egress and record
-**the operator's** location for that provider — and hand the operator's address
-to third-party APIs. The addresses tested are derived from
-`geolocate.SourceHosts()` **and** `egresshealth.DestinationHosts()`, so there is
-no second endpoint list to drift.
+probe that fails to tunnel could fall back to the host's own egress and measure
+**the operator's** reachability for that provider — certifying a provider that
+carries nothing as healthy. The addresses tested are derived from
+`egresshealth.DestinationHosts()`, so there is no second endpoint list to drift.
+The server's pool is fetched per pass, after this check, and changes daily;
+the built-in table is its seed, so a host confined against the table's hosts is
+confined against essentially everything the pool holds, and a pooled host
+beyond it is kept off the direct route by the Go-level boundary every request
+has (the tunnel client is the only dialer a probe gets). The operator's own api
+host, the `/ip` echo included, is deliberately not tested: a deployment may let
+the prober reach it directly, and the echo only ever goes through a tunnel.
 
 **Inability to verify is not evidence of confinement.** The check only reports a
 pass when it obtained real evidence, and refuses to start otherwise:
@@ -138,23 +156,20 @@ pass when it obtained real evidence, and refuses to start otherwise:
 
 For a jail where DNS legitimately cannot work, supply the addresses instead of
 disabling the check: `-confinement-address <ip:port>`, repeated once per probe
-endpoint — every geolocation source *and* every egress-health destination (the
-error message lists them all; `egresshealth.DestinationHosts()` is the source of
-truth for the second half). Resolution is then skipped
-and exactly those addresses are dialed. The host part must be an IP literal — a
-name there would put the same hole back.
+endpoint — every egress-health destination of the built-in table (the error
+message lists them all; `egresshealth.DestinationHosts()` is the source of
+truth). Resolution is then skipped and exactly those addresses are dialed. The
+host part must be an IP literal — a name there would put the same hole back.
 
-That list is **143 endpoints** since the egress-health table went wide (3
-geolocation sources + 140 destinations), and the self-check dials every
-resolved address for them **sequentially** with `-confinement-timeout` each.
-Against a firewall that REJECTs (or a docker `internal: true` network, where
-there is no route at all) each dial fails immediately and startup is quick.
-Against one that silently DROPs, startup now costs up to 143 × the timeout
-before the first probe, and `-confinement-address` is no longer something an
-operator can reasonably maintain by hand at that size — prefer a deployment
-where resolution works, or where refusals are immediate. The whole table is
-covered because **any** destination can be drawn on any run (see sampling
-below).
+That list is **139 destinations**, and the self-check dials every resolved
+address for them **sequentially** with `-confinement-timeout` each. Against a
+firewall that REJECTs (or a docker `internal: true` network, where there is no
+route at all) each dial fails immediately and startup is quick. Against one
+that silently DROPs, startup costs up to 139 × the timeout before the first
+probe, and `-confinement-address` is no longer something an operator can
+reasonably maintain by hand at that size — prefer a deployment where resolution
+works, or where refusals are immediate. The whole table is covered because
+**any** destination can be drawn on any run (see sampling below).
 
 `-skip-confinement-check` disables it. It defaults to **false**, logs two
 `WARNING` lines when set, and exists only for an operator running a one-shot
@@ -170,45 +185,82 @@ stays connected 24/7 while blackholing every byte therefore scores perfectly and
 stays selectable — observed on mainnet: one provider accepted 87 KB and returned
 0 bytes with `connected = true AND valid = true`.
 
-So each pass also runs an **egress-health check over the same tunnel** the
-geolocation probe already opened (never a second one). The table is **140
-destinations**; a run fetches a bounded **random sample** of each class — 30
-requests — and logs one line per provider:
+So every probe is an **egress-health run over the provider's tunnel**. The
+built-in table is **139 destinations**, the seed of the server's pool; a run
+draws a bounded **random sample** of each class — **50 loads**, the minimum the
+server's one-in-ten rule and egress index read (GEOMAP §10.5) — and logs one
+line per provider:
 
 ```
-egress-health: provider=<id> ok=25/26 dns=4/4 connectivity=5/5 cdn=4/5 site=12/12 reputation=1/4 table=140 failed=cachefly reputation-failed=akamai,etsy,canva
+egress-health: provider=<id> ok=47/50 dns=6/6 connectivity=8/8 cdn=9/10 site=24/26 table=139 retried=4 failed=cachefly,reddit,etsy
 ```
 
-The classes are what make a partial failure diagnosable. `dns=4/4 cdn=0/5` is a
-provider whose egress range is refused by CDNs — the client-visible failure the
-geolocation probe cannot see, since geolocation APIs do not care where a request
-came from. `ok=0/26` is a blackhole. A flat count could not tell them apart, and
-neither could a probe that only ever talks to three geolocation APIs.
+The classes are what make a partial failure diagnosable. `dns=6/6 cdn=0/10`
+is a provider whose egress range is refused by CDNs; `ok=0/50` is a blackhole.
+A flat count could not tell them apart.
 
 | class | table | per run | what it proves |
 | --- | --- | --- | --- |
-| `dns` | 7 | 4 | DoH JSON across seven operators, two of them Chinese. The **answer is parsed**: a 200 with a body proves nothing, since a captive portal returns exactly that. |
-| `connectivity` | 14 | 5 | The OS captive-portal endpoints (`generate_204`, `success.txt`, …) and the echo services. Unauthenticated, no anti-bot, 8–69 bytes — the cheapest useful signal in the table. |
-| `cdn` | 18 | 5 | CDN edges, distribution mirrors and bulk-download hosts. The class that fails when an egress range is on a CDN blocklist. |
-| `site` | 93 | 12 | Ordinary web properties, including the regional ones. `site=0/12` means the tunnel is not carrying ordinary web traffic. |
-| `reputation` | 8 | 4 | **Not scored.** See below. |
+| `dns` | 7 | 6 | DoH JSON across seven operators, two of them Chinese. The **answer is parsed**: a 200 with a body proves nothing, since a captive portal returns exactly that. |
+| `connectivity` | 14 | 8 | The OS captive-portal endpoints (`generate_204`, `success.txt`, …) and the echo services. Unauthenticated, no anti-bot, 8–69 bytes — the cheapest useful signal in the table. |
+| `cdn` | 18 | 10 | CDN edges, distribution mirrors and bulk-download hosts. The class that fails when an egress range is on a CDN blocklist. |
+| `site` | 100 | 26 | Ordinary web properties, including the regional ones and the large sites that refuse addresses they take for datacenters. |
 
-**Sampling, not a smaller table.** Fetching all 140 at the 1 KiB cap would cost
-128 KiB per provider per run — fine for beta's ~40 providers, ~12 GB a pass at
-100k. The sample costs **25,856 bytes ≈ 25 KiB**, below the 33 KiB the previous
-31-entry fixed table cost, and coverage accumulates across runs and across the
-fleet instead of being paid every run. There is **one sampling constant for
-every deployment** — no beta/mainstream branch, because a knob only one
-environment exercises is a knob nobody tests.
+**Every class is scored.** The eight sites that used to form an unscored
+"reputation" class (akamai, ecosia, reddit, etsy, stack-overflow, reuters,
+canva, epic-games) are ordinary site destinations now, with their contracts
+unchanged: a site a user cannot reach through an exit counts against it,
+whatever the site's reason.
 
-It is also a security gain over any fixed table: the draw happens at run time
-from the prober's own crypto-seeded randomness, so **a provider cannot know
-which destinations it will be asked for**. Whitelisting a handful of well-known
-hosts no longer passes the check — to pass reliably a provider has to carry
-traffic to essentially the whole table, which is the thing being measured.
-Sample sizes never go below **3** per class: below that, one flaky endpoint is
-half the class and `cdn=1/2` says nothing, while `cdn=0/3` means three
-independently operated endpoints all refused in the same run.
+**Every load gets its tries, spaced.** A destination is fetched up to 3 times
+(`LoadAttempts`) and fails only when every attempt failed. After a failed
+attempt the next waits a random delay — exponential, mean 5 minutes
+(`LoadRetryMeanInterval`), capped at three times the mean — so a momentary
+block, a rate limit or a flapping path is not hit three times in one second,
+and the requests to a site look like a person coming back to it. A
+TLS-authentication failure is terminal: a forged certificate is a failure
+whatever a retry does. The loads interleave (a load waiting to retry holds no
+concurrency slot), so a run whose loads all pass takes one round, and one with a
+site that keeps failing about ten to fifteen minutes; its budget is derived
+from the schedule (about 35 minutes worst case at the defaults).
+
+**The warm-up.** The first fetch of every run is the operator's `/ip` echo,
+with its own timeout (`-probe-timeout`). A tunnel's open returns before any
+path to the provider exists; the warm-up pays that cold start, so no scored
+load does. Its answer is the exit address, the only thing the location
+submission carries. A tunnel re-created mid-run is warmed up again before its
+loads use it.
+
+**Browser-shaped requests.** Every request carries a current desktop browser's
+top-level navigation headers (a Firefox user agent, Accept, Accept-Language,
+the Sec-Fetch family, Upgrade-Insecure-Requests); the profile is data, served
+with the pool so it can follow browser releases. `Accept-Encoding` is left to
+Go's transport, which asks for gzip and decodes it transparently, and **no
+request carries a `Range` header** — a byte-range request is one of the things
+bot managers refuse. The TLS fingerprint and the HTTP version (1.1) stay Go's.
+
+**Where a site does not work.** A destination can carry `incompatible` places
+(countries, or country and region), and a provider published there is never
+asked to load it; the sample sizes are met from the compatible destinations,
+and a class too thin for a place is reported as `short=` on the line (and to
+the server) rather than padded. A destination the server marks `canary` is
+loaded from its incompatible places anyway, unscored, so the server can tell
+when it works there again.
+
+**A tunnel that dies part-way is re-created.** The next attempt of every
+pending load re-opens the tunnel to the same provider — once for all of them,
+at most twice a run — and continues through it. A load whose last attempt had
+no live tunnel under it is **not measured**: out of every count, reported as
+`not_measured=` and to the server by name. A run that measured nothing is not
+submitted at all.
+
+**Sampling, not a smaller table.** The draw happens at run time from the
+prober's own crypto-seeded randomness, so **a provider cannot know which
+destinations it will be asked for**: to pass reliably it has to carry traffic to
+essentially the whole table, which is the thing being measured. There is **one
+sampling constant for every deployment** — no beta/mainstream branch, because a
+knob only one environment exercises is a knob nobody tests. Sample sizes never
+go below **3** per class: below that, one flaky endpoint is half the class.
 
 The `dns` class is **DoH over 443**, not resolvers as such. The 23 bare resolver
 addresses in the source list (`8.8.8.8`, `1.1.1.1`, …) are ignored: a resolver
@@ -235,65 +287,37 @@ are providers in arbitrary countries. Those, plus `timesofindia`, are pointed at
 `/robots.txt` — a real body that does not move — rather than having a
 geography-dependent status declared for them.
 
-**`reputation` is measured and never scored.** Six of its eight destinations
-refuse a datacenter IP outright (403, or 401 for Reuters) and are expected to return
-clean from a residential or cellular exit, so a failure says "this exit looks
-like a datacenter to bot-management vendors", not "this provider is broken".
-Folding it into `ok=N/M` would make every hosted provider read as degraded and
-bury the health signal. One caveat is recorded in the code and constrains how
-far it can be read: `www.reddit.com` answered **403** to curl's default agent,
-**200** to the Go prober, and **206** to curl carrying the prober's user-agent —
-same host, same address, same day. That is client fingerprinting as much as IP
-reputation, so the class needs field data before anyone treats it as an
-IP-quality score. Two of the eight do not currently discriminate and are noted
-in the code so a log line is not misread: `stackoverflow` answers 302 to
-everyone (a zero-body issue, never a refusal — before its status was declared it
-failed every run, which reads exactly like an IP refusal and is not one), and
-`ecosia` refused this host on the day the table was built while the staged runs
-recorded it clean.
-
-- **Nothing is submitted and there is no server endpoint yet.** Storage and the
-  "healthy enough to select" verdict are separate work; shipping a verdict
-  before the signal has been watched in the field is how a probe starts
-  de-listing working providers.
+- Runs are **submitted** (`POST /network/provider-egress-health`) over the loads
+  they measured: `ok_count`/`total_count` mean "passed on some attempt" and
+  "loaded, after every retry", which is what the server's index and one-in-ten
+  rule count. The reputation fields stay on the wire, zero, for one release.
 - Destinations are spread across **different operators within each class**, so a
   provider that whitelists one vendor cannot pass a class.
-- Each check is a small GET with a **per-destination** body cap (768 B for DoH,
-  256 B for connectivity, 1 KiB for everything else, and never above 1 KiB), so
-  a run costs at most **25,856 bytes ≈ 25 KiB** of body — *less* than the 33 KiB
-  of the 31-destination table it replaces, from a table four and a half times
-  wider. Under 0.2% of one 16 MiB active bandwidth probe. A `Range` header holds
-  the larger destinations to ~1 KiB where it is honoured, but several hosts
-  ignore it (measured: `www.wikipedia.org`, `www.atlassian.com`,
-  `cloud.google.com`, `apnews.com`, `www.baidu.com`; earlier, jsDelivr and
-  BootstrapCDN), so the `io.LimitReader` cap — not the header — is what actually
-  bounds the cost. A full run against a completely unresponsive provider costs
-  at most one extra `-probe-timeout` of wall clock per provider — the whole run
-  shares that one budget, divided across however many concurrent rounds the run
-  actually takes (5 rounds of 6 for a sample, 14 rounds of 10 for the full
-  table under `-egress-health-all`) — so a blackholing provider costs about
-  2× `-probe-timeout` in total rather than 4×. The per-request slice is
-  therefore shorter under `-egress-health-all`; deriving it from the sampled
-  round count and then spending it over the full table's rounds is what made
-  the shipped default draw 2.8× its stated budget.
-- The health destinations are reached **unpinned** but under ordinary WebPKI
-  verification. Pinning 140 leaves that rotate on 140 schedules would turn every
-  routine certificate rotation into a failure indistinguishable from the
-  provider blackholing the destination. The geolocation sources stay pinned —
-  which is why `ipinfo.io` is *not* in the health table despite being on the
-  source list: a host cannot be both.
-- A run is skipped, and logged as skipped, when the probe has no budget left: a
-  run on an expired deadline would fail every destination and read as a
-  blackhole.
+- Each attempt is a small GET with a **per-destination** body cap (768 B for
+  DoH, 256 B for connectivity, 1 KiB for everything else, never above 1 KiB),
+  read and then closed: one attempt of every sampled load reads at most
+  **43,520 bytes ≈ 42.5 KiB**, and a run in which every load fails every
+  attempt at most three times that. Without `Range` the cap bounds what is
+  *kept*, not what is sent: a server can put up to one TCP window in flight
+  before the close, which matters for the two large CDN assets (cachefly's
+  10 MB test file and the AWS SDK bundle) — the first entries the pool should
+  replace.
+- The destinations are reached under ordinary **WebPKI** verification, pinned
+  only where the server serves a pin (see below). Pinning 139 leaves that
+  rotate on 139 schedules would turn every routine certificate rotation into a
+  failure indistinguishable from the provider refusing the destination.
+- A run is skipped, and logged as skipped, when the probe has no budget left,
+  and a run the pass's context ends under is discarded, not submitted: a run
+  on a dead deadline would fail every destination and read as a blackhole.
 
-`egresshealth.DestinationHosts()` is the one place the destination hosts are
+`egresshealth.DestinationHosts()` is the one place the built-in hosts are
 written down — the confinement check and `-confinement-address` guidance both
 derive from it.
 
 ### Active bandwidth measurement
 
-After a successful geolocation probe, the same tunnel carries a throughput
-measurement — never a second tunnel — against **two independent targets**:
+After a successful probe, the same tunnel carries a throughput measurement —
+never a second tunnel — against **two independent targets**:
 
 | target | url | source tag |
 | --- | --- | --- |
@@ -402,8 +426,11 @@ explicitly at both ends: a measurement opens exactly `bandwidth.StreamCount`
 streams and this package has no path to more, and the prober runs
 `-concurrency` provider tunnels at a time. Worst case simultaneous transfers
 served by the api is therefore `StreamCount × -concurrency` — **8 × 2 = 16** at
-beta's deployed `-concurrency=2`, and 32 at the flag's default of 4. It scales
-with `-concurrency`, not with fleet size.
+beta's deployed `-concurrency=2`, and up to 128 at the flag's default of 16,
+though measurements only coincide when runs finish together (a run takes
+minutes, a measurement seconds). It scales with `-concurrency`, not with fleet
+size; lower `-concurrency`, or set `-skip-bandwidth`, where the api cannot take
+it.
 
 Flags: `-skip-bandwidth` turns it off, `-bandwidth-timeout` (default 5s) is the
 per-target cap so the added wall clock per provider is at most twice it, and
@@ -430,25 +457,19 @@ so it survives a prober restart instead of re-probing the whole population after
 one. `-due-limit` (default 100, server-clamped to 500) sizes the batch;
 `-due-url` overrides the derived endpoint.
 
+The due list carries each provider's place (`country_code`, `region`), which
+decides the destinations its sample may draw from; a server that predates that
+sends bare `client_ids`, which read as providers with no place.
+
 The prober reports **every attempt** back to
 `POST /network/provider-egress-attempt`, success or failure, with a short failure
-class (`tunnel_failed`, `no_consensus`, `locate_failed`, `not_confident`,
+class (`tunnel_failed`, `health_not_run`, `run_not_measured`, `no_exit_ip`,
 `submit_failed`). This is load-bearing, not telemetry: the server defers a
 provider from the due queue when a probe was recently *attempted*, and a
 provider that can never be probed successfully never gets a location row — so
 without the report it sorts to the head of the queue on every poll forever and
 starves every healthy provider, silently, because the endpoint keeps returning a
 full plausible batch.
-
-When a batch contains diagnostic-bearing `no_consensus` results, the scheduler
-also emits exactly one bounded `geolocate-source-outcomes` aggregate. Its groups
-contain only the three compile-time source aliases (or `other`), fixed
-result/stage classes, bounded elapsed buckets, and counts. Per-provider detail
-is suppressed for those results. Raw errors, URLs, status codes, headers,
-bodies, certificates and pins, tokens, and provider IDs never enter this
-diagnostic. This distinguishes a cold tunnel-formation timeout from DNS,
-TLS/pin, HTTP-status, response-read/size, parse, and successful source outcomes
-without changing the probe deadline, quorum, submission, or retry behavior.
 
 If the due endpoint returns **404** the server has not deployed it, and the
 prober falls back to enumerating providers itself (below) with the `-cache-ttl`
@@ -476,12 +497,15 @@ server blip rather than die.
 
 ### Certificate pinning
 
-The prober's outbound geolocation requests are TLS-pinned to the geolocation
-source hosts (`geolocate/sources.go`: `api.i.pn`, `free.freeipapi.com`,
-`ipinfo.io`). This is a closed allowlist enforced by the `providertunnel`
-package: a tunnel opened with an empty pin set refuses to open at all, and any
-https host reached through a tunnel that isn't in the pin map is refused
-outright.
+Every request a probe makes rides the tunnel of the provider being measured,
+so the provider is on the path of every TLS handshake. Ordinary **WebPKI**
+verification already means it cannot answer for a host without a certificate a
+public CA issued for that host — which is the bar every destination, pooled or
+built-in, and the operator's own `/ip` echo are held to by default. A
+**certificate pin** narrows that, for a host the server serves one for, to the
+keys the server itself observed for it on a direct connection, so even a
+mis-issued, chain-valid certificate from another issuer is refused. No host is
+required to carry one: the three geolocation sources that were are gone.
 
 **The pins come from the server, not from this repository.** At startup the
 prober fetches them from `GET /network/geolocation-source-pins` (operator
@@ -490,32 +514,26 @@ secret, the same header as the due list) and re-fetches every
 six hours, by connecting to each host **directly** — its own network, no
 provider anywhere in the path — under full WebPKI, and recording the leaf and
 issuing-intermediate SPKI from the *verified* chain. That is what makes a
-server-chosen pin trustworthy for a lookup that rides a provider's tunnel: a
-provider cannot influence what the server saw.
+server-chosen pin trustworthy for a request that rides a provider's tunnel: a
+provider cannot influence what the server saw. The one host most worth
+pinning now is the operator's own api host, whose `/ip` answer places the
+provider; the server serves a pin for it once its observation job covers it.
 
-This replaced a hardcoded map in `cmd/egress-prober/main.go`, which took the
-whole fleet's probing offline on 2026-08-02 when two sources changed at once
-(`ip.pn` moved its json endpoint to `api.i.pn`, and `ipinfo.io` rotated both its
-leaf and its intermediate). Routine CA changes now self-heal within six hours
-instead of needing a redeploy.
+**The contract:**
 
-**It fails closed, in every direction:**
-
-- No pin set at startup — server unreachable, 404, 401, 500, or an empty table
-  — and the prober **does not start probing**. It exits; it does not fall back
-  to unpinned, to an empty map, or to any built-in set.
-- A source host in `geolocate.SourceHosts()` with no usable pin in the served
-  set is a **hard error**, not a silently-unpinned host. This matters because
-  `providertunnel`'s pin check skips a host that is not a key in the map: a
-  partial set would not merely leave that source unprotected, it would probe it
-  unpinned, and the source would go on answering normally.
-- A **refresh** failure keeps the last good set and logs. It never blanks the
-  set and never degrades to unpinned. A stale pin still rejects a provider
-  substituting its own certificate; what it eventually stops doing is matching
-  the legitimate host after a CA change, which fails closed and loudly.
-- A host the server serves that is **not** a geolocation source is dropped: the
-  pin map is also the tunnel's allowlist, and a set fetched over the network
-  must not be able to widen it.
+- A pin set that cannot be fetched at startup — server unreachable, 404, 401,
+  500 — and the prober **does not start probing**: a pin the server serves is
+  one it wants enforced, and starting without the set would drop every one. An
+  **empty** set is a valid answer.
+- Half a pin (no leaf or no intermediate) makes the whole set an error; the
+  server never writes one, so the shape means something is wrong upstream.
+- A **refresh** failure keeps the last good set and logs. A stale pin still
+  rejects a provider substituting its own certificate; what it eventually stops
+  doing is matching the legitimate host after a CA change, which fails closed
+  and loudly.
+- The served set can never widen a tunnel's allowlist: the pin map is part of
+  it, so each probe cuts the set down to the hosts it dials (its pool's, the
+  echo's, the bandwidth targets') before the tunnel opens.
 
 Each host's entry lists a leaf pin and an intermediate-CA pin, and
 `providertunnel`'s pin check accepts a match against **either** — it walks
@@ -527,15 +545,13 @@ intermediate trusts that CA, not one specific certificate, for that host.
 
 ### Design
 
-This tool geolocates a network provider by routing HTTPS geolocation
-lookups *through that provider's own tunnel*, rather than trusting the
-provider to self-report a location: the prober host never queries a
-geolocation api directly, only through a tunnel pinned to exactly one
-provider (see "Certificate pinning" above), so each lookup's response
-reflects that provider's actual egress point. Results from the three
-independent sources are reconciled into a consensus (see `geolocate/`) and
-submitted to the operator's server (see `ingest/`), which can then correct
-its own record of that provider's location. There is no separate design
-document in the server repo; this README plus the package doc comments in
-`geolocate/`, `providertunnel/`, `prober/`, and `ingest/` are the design
-reference.
+This tool measures a network provider by routing HTTPS requests *through that
+provider's own tunnel*, rather than trusting the provider to self-report: the
+prober host never reaches a probe destination directly, only through a tunnel
+pinned to exactly one provider, so each answer reflects that provider's actual
+egress. The operator's own `/ip` echo gives the exit address, which the server
+places with its own GeoLite2; the sampled real sites give the egress health
+the server's index and one-in-ten rule read. Both are submitted to the
+operator's server (see `ingest/`). The spec is `connect/GEOMAP.md` §11; this
+README plus the package doc comments in `egresshealth/`, `fleetprobe/`,
+`providertunnel/`, `prober/`, and `ingest/` are the design reference.

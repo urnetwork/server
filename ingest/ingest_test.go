@@ -9,203 +9,110 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/urnetwork/operator-proxy/geolocate"
 )
 
-// TestSubmitPostsContractShape locks down the wire shape of submitBody
-// against the server's fixed contract (controller.SubmitProviderEgressLocationArgs).
-// Every one of the 13 JSON fields is asserted both for presence/absence per
-// its omitempty semantics and for a round-tripped, distinctive value, so a
-// silent field rename or dropped assignment is caught here rather than as a
-// server-side zero-value that fails with no error anywhere.
-func TestSubmitPostsContractShape(t *testing.T) {
+// Tests of the location submission: the wire shape, local refusals and the
+// status contract.
+
+// Locks down the wire shape of submitBody against
+// the server's contract (controller.SubmitProviderEgressLocationArgs): the
+// exit address the /ip echo saw and when, with the vendor-consensus fields
+// present for one release and empty, and country_confident false. A field
+// renamed or dropped here is a server-side zero value that fails with no
+// error anywhere, so every key is asserted.
+func TestSubmitPostsTheExitAddress(t *testing.T) {
 	var got map[string]any
-	var gotSecret string
+	var gotSecret, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotSecret = r.Header.Get("X-UR-Operator-Secret")
+		gotPath = r.URL.Path
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &got)
 		_, _ = w.Write([]byte(`{"location_id":"019f0000-0000-0000-0000-000000000000"}`))
 	}))
 	defer srv.Close()
 
-	probedAt := time.Date(2026, 7, 25, 12, 34, 56, 0, time.UTC)
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryCode:      "us",
-		Country:          "United States",
-		CountryConfident: true,
-		City:             "Fremont",
-		Region:           "California",
-		CityConfident:    true,
-		ASN:              401486,
-		Org:              "RAVNIX LLC",
-		Hosting:          true,
-		Proxy:            true,
-		Mobile:           true,
-		ProbedAt:         probedAt,
-	})
-	if err != nil {
+	observedAt := time.Date(2026, 9, 23, 12, 34, 56, 0, time.UTC)
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()}
+	if err := c.Submit(context.Background(), "00000000-0000-0000-0000-000000000001", " 2001:DB8::7 ", observedAt); err != nil {
 		t.Fatalf("Submit err = %v", err)
 	}
-	if gotSecret != "s3cret" {
-		t.Fatalf("operator secret header = %q", gotSecret)
+	if gotSecret != "s3cret" || gotPath != "/network/provider-egress-location" {
+		t.Fatalf("secret = %q path = %q", gotSecret, gotPath)
 	}
-
-	// All 13 wire fields must be present (every field is non-zero in this input).
-	for _, k := range []string{
-		"client_id", "country_code", "country", "region", "city",
-		"asn", "org", "hosting", "proxy", "mobile",
-		"country_confident", "city_confident", "observed_at",
-	} {
-		if _, ok := got[k]; !ok {
-			t.Fatalf("body missing %q: %v", k, got)
+	if got["client_id"] != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("client_id = %v", got["client_id"])
+	}
+	// Canonical form: the server stores nothing of the address but its
+	// place, and a stable spelling keeps the two ends from disagreeing.
+	if got["exit_ip"] != "2001:db8::7" {
+		t.Errorf("exit_ip = %v, want the canonical 2001:db8::7", got["exit_ip"])
+	}
+	if got["country_confident"] != false {
+		t.Errorf("country_confident = %v, want false: the prober no longer places the exit", got["country_confident"])
+	}
+	// The consensus fields ride along empty for one release: the two with no
+	// omitempty are present and blank, the rest absent.
+	for _, key := range []string{"country_code", "country"} {
+		if value, present := got[key]; !present || value != "" {
+			t.Errorf("%s = %v (present %t), want present and empty for one release", key, value, present)
 		}
 	}
-
-	// Every field's value must round-trip from the input ConsensusLocation.
-	wantString := map[string]string{
-		"client_id":    "019f8835-158d-6fd8-e9dd-fd0e4c6d6792",
-		"country_code": "us",
-		"country":      "United States",
-		"region":       "California",
-		"city":         "Fremont",
-		"org":          "RAVNIX LLC",
-	}
-	for k, want := range wantString {
-		if got[k] != want {
-			t.Fatalf("%s = %v, want %q", k, got[k], want)
-		}
-	}
-	if got["asn"] != float64(401486) {
-		t.Fatalf("asn = %v, want %v", got["asn"], 401486)
-	}
-	wantBool := map[string]bool{
-		"hosting":           true,
-		"proxy":             true,
-		"mobile":            true,
-		"country_confident": true,
-		"city_confident":    true,
-	}
-	for k, want := range wantBool {
-		if got[k] != want {
-			t.Fatalf("%s = %v, want %v", k, got[k], want)
+	for _, key := range []string{"region", "city", "asn", "org", "hosting", "proxy", "mobile", "city_confident"} {
+		if value, present := got[key]; present {
+			t.Errorf("%s = %v; the prober no longer fills it", key, value)
 		}
 	}
 	gotObservedAt, ok := got["observed_at"].(string)
 	if !ok {
-		t.Fatalf("observed_at = %v, want RFC3339 string", got["observed_at"])
+		t.Fatalf("observed_at = %v, want an RFC 3339 string", got["observed_at"])
 	}
-	parsed, err := time.Parse(time.RFC3339, gotObservedAt)
-	if err != nil {
-		t.Fatalf("observed_at = %q not parseable: %v", gotObservedAt, err)
+	if parsed, err := time.Parse(time.RFC3339, gotObservedAt); err != nil || !parsed.Equal(observedAt) {
+		t.Fatalf("observed_at = %q (%v), want %v", gotObservedAt, err, observedAt)
 	}
-	if !parsed.Equal(probedAt) {
-		t.Fatalf("observed_at = %v, want %v", parsed, probedAt)
-	}
-}
-
-// TestSubmitOmitsCityAndFalseBooleansWhenNotSet covers the non-confident /
-// zero-value shape: city, region and city_confident are only sent when
-// CityConfident is true (the client's own rule), and the omitempty boolean
-// and numeric fields are absent from the wire when false/zero.
-func TestSubmitOmitsCityAndFalseBooleansWhenNotSet(t *testing.T) {
-	var got map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &got)
-		_, _ = w.Write([]byte(`{"location_id":"019f0000-0000-0000-0000-000000000000"}`))
-	}))
-	defer srv.Close()
-
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryCode:      "us",
-		Country:          "United States",
-		CountryConfident: true,
-		CityConfident:    false,
-		City:             "should-not-be-sent",
-		Region:           "should-not-be-sent",
-		ProbedAt:         time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("Submit err = %v", err)
-	}
-
-	for _, k := range []string{"city", "region", "city_confident", "asn", "org", "hosting", "proxy", "mobile"} {
-		if v, ok := got[k]; ok {
-			t.Fatalf("body must omit %q when unset/false, got %v", k, v)
-		}
-	}
-	// Required fields still present.
-	for _, k := range []string{"client_id", "country_code", "country", "country_confident", "observed_at"} {
-		if _, ok := got[k]; !ok {
-			t.Fatalf("body missing %q: %v", k, got)
-		}
+	if len(got) != 6 {
+		t.Errorf("body carries %d keys (%v), want exactly client_id, exit_ip, country_code, country, country_confident and observed_at", len(got), got)
 	}
 }
 
-func TestSubmitRefusesNotCountryConfident(t *testing.T) {
+// The address is the whole submission,
+// so a missing or unparseable one -- and a zero observation time, which would
+// defeat the server's age check -- is refused before any request.
+func TestSubmitRefusesWithoutAnExitAddress(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 	defer srv.Close()
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s", Http: srv.Client()}
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryConfident: false,
-	})
-	if err == nil {
-		t.Fatal("a non-country-confident result must not be submitted")
+	for _, exitIp := range []string{"", "   ", "not-an-address", "203.0.113.7:443", "<html>"} {
+		if err := c.Submit(context.Background(), "p", exitIp, time.Now()); !errors.Is(err, ErrMissingExitIp) {
+			t.Errorf("exit %q: err = %v, want ErrMissingExitIp", exitIp, err)
+		}
+	}
+	if err := c.Submit(context.Background(), "p", "203.0.113.7", time.Time{}); !errors.Is(err, ErrMissingProbedAt) {
+		t.Errorf("zero observation time: err = %v, want ErrMissingProbedAt", err)
 	}
 	if called {
-		t.Fatal("must not reach the server at all")
+		t.Fatal("a doomed submission reached the server")
 	}
 }
 
-// TestSubmitRefusesMissingProbedAt covers FIX 2: Submit must not fabricate an
-// "observed now" timestamp when loc.ProbedAt is zero. It must refuse before
-// any network call, the same way TestSubmitRefusesNotCountryConfident does.
-func TestSubmitRefusesMissingProbedAt(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	}))
-	defer srv.Close()
-
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryCode:      "us",
-		Country:          "United States",
-		CountryConfident: true,
-		// ProbedAt intentionally left zero.
-	})
-	if err == nil {
-		t.Fatal("a zero ProbedAt must not be submitted")
-	}
-	if called {
-		t.Fatal("must not reach the server at all")
-	}
-}
-
+// A 400 from the server surfaces as ErrRejected.
 func TestSubmitSurfacesRejection(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown client.", http.StatusBadRequest)
 	}))
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryCode: "us", Country: "United States", CountryConfident: true, ProbedAt: time.Now().UTC(),
-	})
-	if err == nil {
-		t.Fatal("a 400 must surface as an error")
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s", Http: srv.Client()}
+	if err := c.Submit(context.Background(), "p", "203.0.113.7", time.Now().UTC()); !errors.Is(err, ErrRejected) {
+		t.Fatalf("a 400 surfaced as %v, want ErrRejected", err)
 	}
 }
 
-// TestSubmitMaps401ToErrUnauthorized: every other method on this client maps
+// Every other method on this client maps
 // 401, and the CLI keys its remediation advice ("check -operator-secret
 // against ingest_secret") off the sentinel. Submit was the one that did not,
 // and the gap is reachable: against a server without the due endpoint the
@@ -218,80 +125,8 @@ func TestSubmitMaps401ToErrUnauthorized(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "wrong", HTTP: srv.Client()}
-	err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", &geolocate.ConsensusLocation{
-		CountryCode: "us", Country: "United States", CountryConfident: true, ProbedAt: time.Now().UTC(),
-	})
-	if !errors.Is(err, ErrUnauthorized) {
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "wrong", Http: srv.Client()}
+	if err := c.Submit(context.Background(), "p", "203.0.113.7", time.Now().UTC()); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want it to wrap ErrUnauthorized", err)
-	}
-}
-
-// TestSubmitRefusesIncompleteCountry is the last-gate half of the F2 fix.
-// geolocate's consensus no longer produces these shapes, but Submit is the
-// boundary that owns the wire contract, and the cost of letting one through
-// is not a single failed POST: the scheduler caches successes only, so a
-// server rejection ("Country code must be alpha-2." / "Missing country.")
-// makes the provider re-probe and re-fail on every pass, forever. Both shapes
-// must be refused locally, without touching the network.
-func TestSubmitRefusesIncompleteCountry(t *testing.T) {
-	cases := []struct {
-		name string
-		loc  *geolocate.ConsensusLocation
-	}{
-		{
-			name: "empty country name",
-			loc: &geolocate.ConsensusLocation{
-				CountryCode:      "xk", // Kosovo: real, two characters, absent from ISO 3166-1
-				CountryConfident: true,
-				ProbedAt:         time.Now().UTC(),
-			},
-		},
-		{
-			name: "whitespace-only country name",
-			loc: &geolocate.ConsensusLocation{
-				CountryCode:      "us",
-				Country:          "   ",
-				CountryConfident: true,
-				ProbedAt:         time.Now().UTC(),
-			},
-		},
-		{
-			name: "non alpha-2 country code",
-			loc: &geolocate.ConsensusLocation{
-				CountryCode:      "usa",
-				Country:          "United States",
-				CountryConfident: true,
-				ProbedAt:         time.Now().UTC(),
-			},
-		},
-		{
-			name: "empty country code",
-			loc: &geolocate.ConsensusLocation{
-				CountryCode:      "",
-				Country:          "United States",
-				CountryConfident: true,
-				ProbedAt:         time.Now().UTC(),
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			called := false
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				called = true
-			}))
-			defer srv.Close()
-
-			c := &Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
-			err := c.Submit(context.Background(), "019f8835-158d-6fd8-e9dd-fd0e4c6d6792", tc.loc)
-			if !errors.Is(err, ErrIncompleteCountry) {
-				t.Fatalf("err = %v, want it to wrap ErrIncompleteCountry", err)
-			}
-			if called {
-				t.Fatal("must not reach the server at all: a doomed POST here is retried on every pass forever")
-			}
-		})
 	}
 }

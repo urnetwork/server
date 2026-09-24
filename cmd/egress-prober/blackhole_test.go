@@ -38,7 +38,7 @@ func TestBlackholeSweepDoesNotQueueOneGoroutinePerProvider(t *testing.T) {
 	release := make(chan struct{})
 	var calls atomic.Int32
 	s := &blackholeSweeper{
-		operator:    &ingest.Client{ServerURL: srv.URL, OperatorSecret: "secret", HTTP: srv.Client()},
+		operator:    &ingest.Client{ServerUrl: srv.URL, OperatorSecret: "secret", Http: srv.Client()},
 		pins:        &pinSet{pins: map[string][]string{"source.invalid": {"leaf", "intermediate"}}},
 		timeout:     time.Second,
 		concurrency: 1,

@@ -38,7 +38,7 @@ func selfSigned(t *testing.T, host string) (*x509.Certificate, *ecdsa.PrivateKey
 
 // selfSignedCA generates a minimal self-signed CA certificate, for building
 // a multi-certificate chain in tests below. It follows the same pattern as
-// generateTestCA in tunnel_test.go, but lives here (rather than being
+// generateTestCa in tunnel_test.go, but lives here (rather than being
 // shared) because these tests never install it as a trusted root -- checkPin
 // parses and pins raw certificates directly, it does not perform chain
 // verification, so there is no need for the CA to be trusted by the process.
@@ -148,8 +148,8 @@ func TestPinnedTLSConfigAcceptsIntermediateMatchOnLeafRotation(t *testing.T) {
 	const host = "pinned.example"
 	leaf, intermediate := issueChain(t, host)
 
-	cfg := PinnedTLSConfig(map[string][]string{
-		host: {SPKIPin(intermediate)}, // only the intermediate is pinned
+	cfg := PinnedTlsConfig(map[string][]string{
+		host: {SpkiPin(intermediate)}, // only the intermediate is pinned
 	})
 	cfg.ServerName = host
 
@@ -171,7 +171,7 @@ func TestPinnedTLSConfigRejectsWhenNeitherLeafNorIntermediateMatch(t *testing.T)
 	const host = "pinned.example"
 	leaf, intermediate := issueChain(t, host)
 
-	cfg := PinnedTLSConfig(map[string][]string{
+	cfg := PinnedTlsConfig(map[string][]string{
 		host: {"not-a-real-pin-for-this-chain"},
 	})
 	cfg.ServerName = host
@@ -194,8 +194,8 @@ func TestPinnedTLSConfigRejectsWhenNeitherLeafNorIntermediateMatch(t *testing.T)
 // this must fail closed.
 func TestCheckPinRejectsAnEmptyVerifiedChain(t *testing.T) {
 	cert, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfigForHost(map[string][]string{
-		"pinned.example": {SPKIPin(cert)},
+	cfg := PinnedTlsConfigForHost(map[string][]string{
+		"pinned.example": {SpkiPin(cert)},
 	}, "pinned.example")
 
 	// The pin matches the presented certificate -- the ONLY thing missing is
@@ -208,21 +208,21 @@ func TestCheckPinRejectsAnEmptyVerifiedChain(t *testing.T) {
 func TestSPKIPinStableAndDistinct(t *testing.T) {
 	a, _ := selfSigned(t, "a.example")
 	b, _ := selfSigned(t, "b.example")
-	if SPKIPin(a) == "" {
+	if SpkiPin(a) == "" {
 		t.Fatal("pin must not be empty")
 	}
-	if SPKIPin(a) != SPKIPin(a) {
+	if SpkiPin(a) != SpkiPin(a) {
 		t.Fatal("pin must be stable for the same cert")
 	}
-	if SPKIPin(a) == SPKIPin(b) {
+	if SpkiPin(a) == SpkiPin(b) {
 		t.Fatal("different keys must produce different pins")
 	}
 }
 
 func TestPinnedTLSConfigAcceptsMatchingPin(t *testing.T) {
 	cert, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfig(map[string][]string{
-		"pinned.example": {SPKIPin(cert)},
+	cfg := PinnedTlsConfig(map[string][]string{
+		"pinned.example": {SpkiPin(cert)},
 	})
 	cfg.ServerName = "pinned.example"
 	err := cfg.VerifyPeerCertificate([][]byte{cert.Raw}, chainOf(cert))
@@ -234,8 +234,8 @@ func TestPinnedTLSConfigAcceptsMatchingPin(t *testing.T) {
 func TestPinnedTLSConfigRejectsWrongPin(t *testing.T) {
 	good, _ := selfSigned(t, "pinned.example")
 	evil, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfig(map[string][]string{
-		"pinned.example": {SPKIPin(good)},
+	cfg := PinnedTlsConfig(map[string][]string{
+		"pinned.example": {SpkiPin(good)},
 	})
 	cfg.ServerName = "pinned.example"
 	err := cfg.VerifyPeerCertificate([][]byte{evil.Raw}, chainOf(evil))
@@ -246,7 +246,7 @@ func TestPinnedTLSConfigRejectsWrongPin(t *testing.T) {
 
 func TestPinnedTLSConfigIgnoresUnpinnedHost(t *testing.T) {
 	cert, _ := selfSigned(t, "other.example")
-	cfg := PinnedTLSConfig(map[string][]string{
+	cfg := PinnedTlsConfig(map[string][]string{
 		"pinned.example": {"someotherpin"},
 	})
 	cfg.ServerName = "other.example"
@@ -256,7 +256,7 @@ func TestPinnedTLSConfigIgnoresUnpinnedHost(t *testing.T) {
 }
 
 // TestPinnedTLSConfigCloneWithDifferentServerNameFailsClosed reproduces the
-// critical fail-open defect: PinnedTLSConfig returns a template, a later
+// critical fail-open defect: PinnedTlsConfig returns a template, a later
 // caller does the idiomatic-looking `clone := template.Clone(); clone.ServerName
 // = host`, and presents a certificate with the WRONG key for a pinned host.
 // Under the old implementation the closure still read the ORIGINAL template's
@@ -265,8 +265,8 @@ func TestPinnedTLSConfigIgnoresUnpinnedHost(t *testing.T) {
 func TestPinnedTLSConfigCloneWithDifferentServerNameFailsClosed(t *testing.T) {
 	good, _ := selfSigned(t, "pinned.example")
 	evil, _ := selfSigned(t, "pinned.example")
-	template := PinnedTLSConfig(map[string][]string{
-		"pinned.example": {SPKIPin(good)},
+	template := PinnedTlsConfig(map[string][]string{
+		"pinned.example": {SpkiPin(good)},
 	})
 
 	perHost := template.Clone()
@@ -280,8 +280,8 @@ func TestPinnedTLSConfigCloneWithDifferentServerNameFailsClosed(t *testing.T) {
 
 func TestPinnedTLSConfigForHostAcceptsMatchingPin(t *testing.T) {
 	cert, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfigForHost(map[string][]string{
-		"pinned.example": {SPKIPin(cert)},
+	cfg := PinnedTlsConfigForHost(map[string][]string{
+		"pinned.example": {SpkiPin(cert)},
 	}, "pinned.example")
 
 	if cfg.ServerName != "pinned.example" {
@@ -298,8 +298,8 @@ func TestPinnedTLSConfigForHostAcceptsMatchingPin(t *testing.T) {
 func TestPinnedTLSConfigForHostRejectsWrongKey(t *testing.T) {
 	good, _ := selfSigned(t, "pinned.example")
 	evil, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfigForHost(map[string][]string{
-		"pinned.example": {SPKIPin(good)},
+	cfg := PinnedTlsConfigForHost(map[string][]string{
+		"pinned.example": {SpkiPin(good)},
 	}, "pinned.example")
 
 	err := cfg.VerifyPeerCertificate([][]byte{evil.Raw}, chainOf(evil))
@@ -309,13 +309,13 @@ func TestPinnedTLSConfigForHostRejectsWrongKey(t *testing.T) {
 }
 
 // TestPinnedTLSConfigForHostSurvivesCloneMutation demonstrates that, unlike
-// PinnedTLSConfig, a config built by PinnedTLSConfigForHost is safe to
+// PinnedTlsConfig, a config built by PinnedTlsConfigForHost is safe to
 // Clone() and does not depend on the clone's ServerName field at all: the
 // verifier closes over its own immutable copy of the host.
 func TestPinnedTLSConfigForHostSurvivesCloneMutation(t *testing.T) {
 	good, _ := selfSigned(t, "pinned.example")
-	cfg := PinnedTLSConfigForHost(map[string][]string{
-		"pinned.example": {SPKIPin(good)},
+	cfg := PinnedTlsConfigForHost(map[string][]string{
+		"pinned.example": {SpkiPin(good)},
 	}, "pinned.example")
 
 	clone := cfg.Clone()
@@ -368,7 +368,7 @@ func TestSPKIPinStableAcrossReissuance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if SPKIPin(cert1) != SPKIPin(cert2) {
+	if SpkiPin(cert1) != SpkiPin(cert2) {
 		t.Fatal("same key across re-issuance must produce an identical SPKI pin")
 	}
 }
@@ -383,8 +383,8 @@ func TestNormalizePinsMergesCollidingKeys(t *testing.T) {
 	rotated, _ := selfSigned(t, "pinned.example")
 
 	normalized := normalizePins(map[string][]string{
-		"pinned.example":     {SPKIPin(leaf)},
-		"PINNED.EXAMPLE:443": {SPKIPin(rotated)},
+		"pinned.example":     {SpkiPin(leaf)},
+		"PINNED.EXAMPLE:443": {SpkiPin(rotated)},
 	})
 
 	allowed := normalized["pinned.example"]
@@ -393,9 +393,9 @@ func TestNormalizePinsMergesCollidingKeys(t *testing.T) {
 	}
 	// Both certificates must now verify under the single normalized key.
 	for name, cert := range map[string]*x509.Certificate{"leaf": leaf, "rotated": rotated} {
-		cfg := PinnedTLSConfigForHost(map[string][]string{
-			"pinned.example":     {SPKIPin(leaf)},
-			"PINNED.EXAMPLE:443": {SPKIPin(rotated)},
+		cfg := PinnedTlsConfigForHost(map[string][]string{
+			"pinned.example":     {SpkiPin(leaf)},
+			"PINNED.EXAMPLE:443": {SpkiPin(rotated)},
 		}, "pinned.example")
 		if err := cfg.VerifyPeerCertificate([][]byte{cert.Raw}, chainOf(cert)); err != nil {
 			t.Errorf("%s certificate rejected after key collision: %v", name, err)

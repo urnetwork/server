@@ -73,7 +73,7 @@ type ProberCredential struct {
 //	401  -> ErrUnauthorized          (stop; the deployment is misconfigured)
 //	else -> ErrCredentialUnavailable (retry)
 func (c *Client) ProberCredential(ctx context.Context) (*ProberCredential, error) {
-	url := strings.TrimRight(c.ServerURL, "/") + "/network/prober-credential"
+	url := strings.TrimRight(c.ServerUrl, "/") + "/network/prober-credential"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrCredentialUnavailable, err)

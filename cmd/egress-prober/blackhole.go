@@ -7,22 +7,34 @@ import (
 	"log"
 	"time"
 
+	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/operator-proxy/fleetprobe"
 	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/operator-proxy/providertunnel"
 )
 
-// blackholeSweeper runs the cheap liveness check across the whole fleet on its
+// The standalone command's blackhole sweep: bounded sweeps of the whole fleet
+// on their own cadence, beside the full passes.
+
+// Runs the cheap liveness check across the whole fleet on its
 // own cadence in the standalone command. Server deployments use the same
 // fleetprobe pass from recurring taskworker shards instead.
 type blackholeSweeper struct {
-	operator    *ingest.Client
-	tunnelCfg   providertunnel.Config
-	pins        *pinSet
+	operator  *ingest.Client
+	tunnelCfg providertunnel.Config
+	pins      *pinSet
+	// Fetched at the start of every sweep, which is this loop's
+	// pass; a failed fetch sweeps the built-in table.
+	poolUrl string
+	// The operator's /ip echo, every check's warm-up.
+	ipEchoUrl string
+	// Bounds each load attempt of a check; echoTimeout its warm-up.
 	timeout     time.Duration
+	echoTimeout time.Duration
 	concurrency int
 	limit       int
-	// checkOneFn is the deterministic test seam for the bounded worker pool.
+	// The deterministic test seam for the bounded worker pool.
 	// Production leaves it nil and fleetprobe opens the real tunnel.
 	checkOneFn func(context.Context, string) blackholeResult
 }
@@ -31,42 +43,54 @@ type blackholeSweeper struct {
 // prevents a misbehaving due endpoint from holding one command pass forever.
 const maxBlackholeRounds = 40
 
+// One provider's check as the test seam returns it.
 type blackholeResult struct {
-	check   ingest.BlackholeCheck
-	dark    bool
-	tunnel  bool
-	details string
+	check        ingest.BlackholeCheck
+	dark         bool
+	tunnelFailed bool
+	details      string
 }
 
-// sweep asks what is due, runs one fixed-worker-pool batch, and submits the
+// Asks what is due, runs one fixed-worker-pool batch, and submits the
 // whole result atomically.
 func (self *blackholeSweeper) sweep(ctx context.Context) (checked int, err error) {
-	providerClientIds, err := self.operator.BlackholeDue(ctx, self.limit)
+	due, err := self.operator.BlackholeDue(ctx, self.limit)
 	if err != nil {
 		return 0, err
 	}
-	if len(providerClientIds) == 0 {
+	if len(due) == 0 {
 		return 0, nil
 	}
 
 	var checker fleetprobe.BlackholeChecker
 	if self.checkOneFn != nil {
-		checker = func(ctx context.Context, providerClientId string) fleetprobe.BlackholeResult {
-			result := self.checkOneFn(ctx, providerClientId)
+		checker = func(ctx context.Context, provider prober.Provider) fleetprobe.BlackholeResult {
+			result := self.checkOneFn(ctx, provider.ClientId)
 			return fleetprobe.BlackholeResult{
 				Check:        result.check,
 				Dark:         result.dark,
-				TunnelFailed: result.tunnel,
+				TunnelFailed: result.tunnelFailed,
 				Details:      result.details,
 			}
 		}
 	}
-	summary, err := fleetprobe.RunBlackhole(ctx, providerClientIds, fleetprobe.BlackholeOptions{
-		TunnelConfig: self.tunnelCfg,
-		Pins:         self.pins.get,
-		Timeout:      self.timeout,
-		Concurrency:  self.concurrency,
-		CheckOne:     checker,
+	var pool fleetprobe.PoolSource
+	if self.poolUrl != "" {
+		loaded, err := fleetprobe.LoadPool(ctx, self.operator.Http, self.poolUrl, self.operator.OperatorSecret)
+		if err != nil {
+			log.Printf("blackhole: sweeping the built-in destination table: %s", err)
+		}
+		pool = func() *egresshealth.Pool { return loaded }
+	}
+	summary, err := fleetprobe.RunBlackhole(ctx, fleetprobe.ProvidersFromDue(due), fleetprobe.BlackholeOptions{
+		TunnelConfig:  self.tunnelCfg,
+		Pins:          self.pins.get,
+		Pool:          pool,
+		Timeout:       self.timeout,
+		IpEchoUrl:     self.ipEchoUrl,
+		IpEchoTimeout: self.echoTimeout,
+		Concurrency:   self.concurrency,
+		CheckOne:      checker,
 	})
 	if err != nil {
 		return 0, err
@@ -79,16 +103,17 @@ func (self *blackholeSweeper) sweep(ctx context.Context) (checked int, err error
 	}
 
 	log.Printf(
-		"blackhole: pass checked=%d dark=%d (tunnel_failed=%d) ok=%d",
+		"blackhole: pass checked=%d dark=%d (tunnel_failed=%d) not_measured=%d ok=%d",
 		len(summary.Checks),
 		summary.Dark,
 		summary.TunnelFailed,
-		len(summary.Checks)-summary.Dark,
+		summary.NotMeasured,
+		len(summary.Checks)-summary.Dark-summary.NotMeasured,
 	)
 	return len(summary.Checks), nil
 }
 
-// run repeats complete bounded sweeps until cancellation. Taskworker mode does
+// Repeats complete bounded sweeps until cancellation. Taskworker mode does
 // not use this loop; its durable post-step owns repetition instead.
 func (self *blackholeSweeper) run(ctx context.Context, interval time.Duration) {
 	for {

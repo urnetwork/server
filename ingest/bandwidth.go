@@ -38,7 +38,7 @@ func (c *Client) ReserveBandwidth(ctx context.Context, providerClientId string, 
 		return err
 	}
 
-	url := strings.TrimRight(c.ServerURL, "/") + "/network/provider-bandwidth-reserve"
+	url := strings.TrimRight(c.ServerUrl, "/") + "/network/provider-bandwidth-reserve"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return err
@@ -100,7 +100,7 @@ func (c *Client) SubmitBandwidth(
 		return err
 	}
 
-	url := strings.TrimRight(c.ServerURL, "/") + "/network/provider-bandwidth-result"
+	url := strings.TrimRight(c.ServerUrl, "/") + "/network/provider-bandwidth-result"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return err

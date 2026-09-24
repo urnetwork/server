@@ -15,18 +15,23 @@ import (
 	"github.com/urnetwork/operator-proxy/providertunnel"
 )
 
+// Tests of provider selection and the prober the CLI builds: the due list, the
+// enumeration fallback, the schedulers, and the wiring of every reporter.
+
+// A dueLister answering due and err, counting calls.
 type stubDueLister struct {
-	ids   []string
+	due   []ingest.DueProvider
 	err   error
 	calls int
 }
 
-func (s *stubDueLister) Due(ctx context.Context, limit int) ([]string, error) {
-	s.calls++
-	return s.ids, s.err
+// Implements dueLister.
+func (self *stubDueLister) Due(ctx context.Context, limit int) ([]ingest.DueProvider, error) {
+	self.calls++
+	return self.due, self.err
 }
 
-// enumerationServer stands in for the old enumeration path: one location, one
+// Stands in for the old enumeration path: one location, one
 // provider. It records whether it was called at all, which is what the 401
 // test asserts on.
 func enumerationServer(t *testing.T, called *bool) *httptest.Server {
@@ -45,28 +50,37 @@ func enumerationServer(t *testing.T, called *bool) *httptest.Server {
 	}))
 }
 
+// When the server answers the due list, it is what the pass probes, places
+// included, and the enumeration path is never touched.
 func TestSelectProvidersUsesTheServerDueList(t *testing.T) {
 	var enumCalled bool
 	srv := enumerationServer(t, &enumCalled)
 	defer srv.Close()
 
-	due := &stubDueLister{ids: []string{"due-1", "due-2"}}
-	ids, serverDriven, err := selectProviders(context.Background(), due, 100, srv.URL, "jwt")
+	due := &stubDueLister{due: []ingest.DueProvider{{ClientId: "due-1", CountryCode: "DE", Region: "Bavaria"}, {ClientId: "due-2"}}}
+	providers, serverDriven, err := selectProviders(context.Background(), due, 100, srv.URL, "jwt")
 	if err != nil {
 		t.Fatalf("selectProviders err = %v", err)
 	}
 	if !serverDriven {
 		t.Error("serverDriven = false, want true when the due endpoint answered")
 	}
-	if len(ids) != 2 || ids[0] != "due-1" {
-		t.Fatalf("ids = %v, want the server's due list", ids)
+	if len(providers) != 2 || providers[0].ClientId != "due-1" {
+		t.Fatalf("providers = %v, want the server's due list", providers)
+	}
+	// each provider's place rides along, normalised, to pick its sample
+	if got := providers[0].Place; got.Country != "de" || got.Region != "Bavaria" {
+		t.Errorf("place = %+v, want de/Bavaria", got)
+	}
+	if got := providers[1].Place; got.Country != "" || got.Region != "" {
+		t.Errorf("place = %+v, want none for a provider the server gave no place", got)
 	}
 	if enumCalled {
 		t.Error("the enumeration path ran even though the server supplied a due list")
 	}
 }
 
-// TestSelectProvidersFallsBackWhenTheEndpointIsMissing keeps the prober working
+// Keeps the prober working
 // against a server that has not deployed the due endpoint.
 func TestSelectProvidersFallsBackWhenTheEndpointIsMissing(t *testing.T) {
 	var enumCalled bool
@@ -74,7 +88,7 @@ func TestSelectProvidersFallsBackWhenTheEndpointIsMissing(t *testing.T) {
 	defer srv.Close()
 
 	due := &stubDueLister{err: ingest.ErrDueUnsupported}
-	ids, serverDriven, err := selectProviders(context.Background(), due, 100, srv.URL, "jwt")
+	providers, serverDriven, err := selectProviders(context.Background(), due, 100, srv.URL, "jwt")
 	if err != nil {
 		t.Fatalf("selectProviders err = %v", err)
 	}
@@ -84,12 +98,12 @@ func TestSelectProvidersFallsBackWhenTheEndpointIsMissing(t *testing.T) {
 	if !enumCalled {
 		t.Fatal("the enumeration fallback did not run; the prober would do nothing against an older server")
 	}
-	if len(ids) != 1 || ids[0] != "enumerated-1" {
-		t.Fatalf("ids = %v, want the enumerated provider", ids)
+	if len(providers) != 1 || providers[0].ClientId != "enumerated-1" {
+		t.Fatalf("providers = %v, want the enumerated provider", providers)
 	}
 }
 
-// TestSelectProvidersDoesNotFallBackOnUnauthorized: a 401 is a wrong operator
+// A 401 is a wrong operator
 // secret, not an old server. Falling back would hide a misconfigured
 // deployment behind a full-looking pass whose every submission is then
 // rejected by that same secret.
@@ -108,7 +122,7 @@ func TestSelectProvidersDoesNotFallBackOnUnauthorized(t *testing.T) {
 	}
 }
 
-// TestSelectProvidersDoesNotFallBackOnOtherErrors: a transient 500 or a dropped
+// A transient 500 or a dropped
 // connection is not "this server is old". Falling back would mask a broken
 // server behind an expensive full enumeration on every pass.
 func TestSelectProvidersDoesNotFallBackOnOtherErrors(t *testing.T) {
@@ -125,35 +139,35 @@ func TestSelectProvidersDoesNotFallBackOnOtherErrors(t *testing.T) {
 	}
 }
 
-// TestServerDrivenSchedulerIgnoresTheLocalTTL: when the server picks the batch
+// When the server picks the batch
 // it owns the schedule -- observed_at and attempt_at in the database, which
 // survive a restart. Re-filtering that batch through the in-memory ttl would
 // drop providers the server just said were due, and the two schedules would
 // disagree with no way to tell which won.
-func TestServerDrivenSchedulerIgnoresTheLocalTTL(t *testing.T) {
+func TestServerDrivenSchedulerIgnoresTheLocalTtl(t *testing.T) {
 	dueScheduler, enumScheduler := newSchedulers(&prober.Prober{}, 4, 24*time.Hour)
-	if dueScheduler.CacheTTL != 0 {
-		t.Errorf("server-driven scheduler CacheTTL = %s, want 0 (the server owns the schedule)", dueScheduler.CacheTTL)
+	if dueScheduler.CacheTtl != 0 {
+		t.Errorf("server-driven scheduler CacheTtl = %s, want 0 (the server owns the schedule)", dueScheduler.CacheTtl)
 	}
-	if enumScheduler.CacheTTL != 24*time.Hour {
-		t.Errorf("fallback scheduler CacheTTL = %s, want the configured -cache-ttl", enumScheduler.CacheTTL)
+	if enumScheduler.CacheTtl != 24*time.Hour {
+		t.Errorf("fallback scheduler CacheTtl = %s, want the configured -cache-ttl", enumScheduler.CacheTtl)
 	}
 	if dueScheduler == enumScheduler {
 		t.Error("the two schedulers must be distinct so the fallback keeps its own cache")
 	}
 }
 
-// TestNewProberReportsAttempts: the prober the CLI actually builds must have an
+// The prober the CLI actually builds must have an
 // attempt reporter. Without one the server's starvation fix is inert -- every
 // provider that always fails to probe stays at the head of the due queue
 // forever, and nothing about the pass output would say so.
 func TestNewProberReportsAttempts(t *testing.T) {
-	operator := &ingest.Client{ServerURL: "http://unused.invalid"}
-	p := newProber(providertunnel.Config{}, &pinSet{}, time.Minute, operator, false, nil, nil)
+	operator := &ingest.Client{ServerUrl: "http://unused.invalid"}
+	p := newProber(providertunnel.Config{}, &pinSet{}, &poolSet{}, time.Minute, "https://api.example.net/my-ip-info", operator, false, nil, nil)
 	if p.Attempts == nil {
 		t.Fatal("newProber built a Prober with no attempt reporter; the server-side due backoff would never be told a probe happened")
 	}
-	if p.Submit == nil || p.Open == nil || p.Locate == nil {
+	if p.Submit == nil || p.Open == nil || p.Health == nil {
 		t.Fatal("newProber left a dependency unset")
 	}
 	// HealthResults too: without it the health check still runs and still
@@ -167,15 +181,15 @@ func TestNewProberReportsAttempts(t *testing.T) {
 	}
 }
 
-// TestNewProberWiresBandwidthWhenEnabled: with a sampler configured the hook
-// has to be installed, or every provider is probed for geolocation and none is
+// With a sampler configured the hook
+// has to be installed, or every provider is probed for health and none is
 // ever measured -- silently, since nothing else in the pass output would say so.
 func TestNewProberWiresBandwidthWhenEnabled(t *testing.T) {
-	operator := &ingest.Client{ServerURL: "http://unused.invalid"}
+	operator := &ingest.Client{ServerUrl: "http://unused.invalid"}
 	targets := bandwidth.DefaultTargets("https://api.example.net", "secret")
 	sampler := &bandwidth.Sampler{Targets: targets, Reserve: operator, Submit: operator}
 
-	p := newProber(providertunnel.Config{}, &pinSet{}, time.Minute, operator, false, sampler, bandwidth.TargetHosts(targets))
+	p := newProber(providertunnel.Config{}, &pinSet{}, &poolSet{}, time.Minute, "https://api.example.net/my-ip-info", operator, false, sampler, bandwidth.TargetHosts(targets))
 	if p.Bandwidth == nil {
 		t.Fatal("newProber did not install the bandwidth hook, so no provider would ever be measured")
 	}
@@ -187,7 +201,7 @@ func TestNewProberWiresBandwidthWhenEnabled(t *testing.T) {
 	}
 }
 
-// TestDueLimitIsSentToTheServer guards the flag actually reaching the wire.
+// Guards the flag actually reaching the wire.
 func TestDueLimitIsSentToTheServer(t *testing.T) {
 	var gotLimit string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +210,7 @@ func TestDueLimitIsSentToTheServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &ingest.Client{ServerURL: srv.URL, OperatorSecret: "s", HTTP: srv.Client()}
+	c := &ingest.Client{ServerUrl: srv.URL, OperatorSecret: "s", Http: srv.Client()}
 	if _, _, err := selectProviders(context.Background(), c, 42, srv.URL, "jwt"); err != nil {
 		t.Fatalf("selectProviders err = %v", err)
 	}

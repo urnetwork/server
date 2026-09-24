@@ -31,7 +31,7 @@ func TestGeolocationPinsDecodesTheServedSet(t *testing.T) {
 		&secret)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 	pins, err := c.GeolocationPins(context.Background())
 	if err != nil {
 		t.Fatalf("GeolocationPins err = %v", err)
@@ -69,7 +69,7 @@ func TestGeolocationPinsFailsClosedOnEveryNon200(t *testing.T) {
 		http.StatusNoContent,
 	} {
 		srv := pinServer(t, status, `{"ipinfo.io":{"leaf":"l","intermediate":"i"}}`, nil)
-		c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+		c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 		pins, err := c.GeolocationPins(context.Background())
 		srv.Close()
 
@@ -96,7 +96,7 @@ func TestGeolocationPinsNames401(t *testing.T) {
 	srv := pinServer(t, http.StatusUnauthorized, "", nil)
 	defer srv.Close()
 
-	c := &Client{ServerURL: srv.URL, OperatorSecret: "wrong"}
+	c := &Client{ServerUrl: srv.URL, OperatorSecret: "wrong"}
 	_, err := c.GeolocationPins(context.Background())
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("err = %v, want it to wrap ErrUnauthorized so the operator is told which secret to check", err)
@@ -105,7 +105,7 @@ func TestGeolocationPinsNames401(t *testing.T) {
 
 // An unreachable server is the startup case the prober must not probe through.
 func TestGeolocationPinsFailsOnAnUnreachableServer(t *testing.T) {
-	c := &Client{ServerURL: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
 	pins, err := c.GeolocationPins(context.Background())
 	if err == nil {
 		t.Fatalf("an unreachable server returned pins %v and no error", pins)
@@ -123,7 +123,7 @@ func TestGeolocationPinsFailsOnAnUnreachableServer(t *testing.T) {
 func TestGeolocationPinsPreservesTheTransportCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c := &Client{ServerURL: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
+	c := &Client{ServerUrl: "http://127.0.0.1:1", OperatorSecret: "s3cret"}
 	_, err := c.GeolocationPins(ctx)
 	if !errors.Is(err, ErrPinsUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrPinsUnavailable", err)
@@ -139,7 +139,7 @@ func TestGeolocationPinsPreservesTheTransportCause(t *testing.T) {
 func TestGeolocationPinsRejectsANullBody(t *testing.T) {
 	for _, body := range []string{"null", ""} {
 		srv := pinServer(t, http.StatusOK, body, nil)
-		c := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret"}
+		c := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret"}
 		pins, err := c.GeolocationPins(context.Background())
 		srv.Close()
 		if err == nil {

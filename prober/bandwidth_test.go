@@ -5,21 +5,25 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-
-	"github.com/urnetwork/operator-proxy/geolocate"
 )
 
-// stubAttempts records the failure class reported for each probe, which is the
+// Tests of the bandwidth sample riding a probe: the same tunnel, never failing
+// the probe, and skipped after a failed one.
+
+// Records the failure class reported for each probe, which is the
 // server-visible record of whether the probe succeeded.
 type stubAttempts struct {
 	failures []string
 }
 
-func (s *stubAttempts) ReportAttempt(ctx context.Context, id string, probeFailure string) error {
-	s.failures = append(s.failures, probeFailure)
+// Implements AttemptReporter.
+func (self *stubAttempts) ReportAttempt(ctx context.Context, id string, probeFailure string) error {
+	self.failures = append(self.failures, probeFailure)
 	return nil
 }
 
+// Returns a prober whose every probe succeeds over one tunnel client, and that
+// client.
 func bandwidthProber(t *testing.T, sub *stubSubmitter) (*Prober, *http.Client) {
 	t.Helper()
 	tunnelClient := &http.Client{}
@@ -27,15 +31,13 @@ func bandwidthProber(t *testing.T, sub *stubSubmitter) (*Prober, *http.Client) {
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return tunnelClient, func() error { return nil }, nil
 		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
+		Health: answers(exitResult()),
 		Submit: sub,
 	}, tunnelClient
 }
 
-// TestProbeOneRunsBandwidthOverTheSameTunnel: the measurement must reuse the
-// client the geolocation lookups already ran over. A second tunnel would put
+// The measurement must reuse the
+// client the health run already went over. A second tunnel would put
 // the provider under contract twice and would measure a different session than
 // the one the location came from.
 func TestProbeOneRunsBandwidthOverTheSameTunnel(t *testing.T) {
@@ -51,7 +53,7 @@ func TestProbeOneRunsBandwidthOverTheSameTunnel(t *testing.T) {
 		gotClient = client
 	}
 
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
 		t.Fatalf("ProbeOne err = %v", err)
 	}
 	if calls != 1 {
@@ -61,11 +63,11 @@ func TestProbeOneRunsBandwidthOverTheSameTunnel(t *testing.T) {
 		t.Errorf("sampler got provider %q", gotProvider)
 	}
 	if gotClient != tunnelClient {
-		t.Error("the bandwidth sampler was handed a different client than the geolocation lookups used -- it must ride the same tunnel")
+		t.Error("the bandwidth sampler was handed a different client than the health run used -- it must ride the same tunnel")
 	}
 }
 
-// TestProbeOneBandwidthOutcomeNeverFailsTheProbe is the property the task
+// The property the task
 // requires of a budget skip: a provider skipped for lack of byte budget is a
 // clean skip, not a failed probe. The same must hold for any other bandwidth
 // outcome, so a sampler that measured nothing at all and one that blew up
@@ -99,35 +101,35 @@ func TestProbeOneBandwidthOutcomeNeverFailsTheProbe(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			sub := &stubSubmitter{}
-			p, _ := bandwidthProber(t, sub)
-			attempts := &stubAttempts{}
-			p.Attempts = attempts
-			p.Bandwidth = c.sampler
+		sub := &stubSubmitter{}
+		p, _ := bandwidthProber(t, sub)
+		attempts := &stubAttempts{}
+		p.Attempts = attempts
+		p.Bandwidth = c.sampler
 
-			if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
-				t.Fatalf("ProbeOne err = %v, want nil: a bandwidth outcome must not fail the probe", err)
-			}
-			if sub.calls != 1 {
-				t.Errorf("submit calls = %d, want 1", sub.calls)
-			}
-			if len(attempts.failures) != 1 || attempts.failures[0] != "" {
-				t.Errorf("reported failure classes = %q, want exactly one success (\"\")", attempts.failures)
-			}
-		})
+		if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
+			t.Fatalf("%s: ProbeOne err = %v, want nil: a bandwidth outcome must not fail the probe", c.name, err)
+		}
+		if sub.calls != 1 {
+			t.Errorf("%s: submit calls = %d, want 1", c.name, sub.calls)
+		}
+		if len(attempts.failures) != 1 || attempts.failures[0] != "" {
+			t.Errorf("%s: reported failure classes = %q, want exactly one success (\"\")", c.name, attempts.failures)
+		}
 	}
 }
 
-// TestProbeOneSkipsBandwidthWhenTheProbeFailed: the byte budget is scarce and
+// The byte budget is scarce and
 // each measurement is real paid traffic, so it is not spent on a tunnel that
-// has already failed to carry three small geolocation lookups.
+// has already failed to carry the probe.
 func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
+	noExit := exitResult()
+	noExit.ExitIp, noExit.IpEchoErr = "", "the /ip echo answered status 502"
 	cases := []struct {
-		name  string
-		open  TunnelOpener
-		loc   Locator
-		submi error
+		name   string
+		open   TunnelOpener
+		health EgressHealthChecker
+		submi  error
 	}{
 		{
 			name: "tunnel failed",
@@ -136,10 +138,8 @@ func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
 			},
 		},
 		{
-			name: "no consensus",
-			loc: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-				return nil, geolocate.ErrNoConsensus
-			},
+			name:   "no exit address",
+			health: answers(noExit),
 		},
 		{
 			name:  "submission rejected",
@@ -148,22 +148,20 @@ func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			sub := &stubSubmitter{err: c.submi}
-			p, _ := bandwidthProber(t, sub)
-			if c.open != nil {
-				p.Open = c.open
-			}
-			if c.loc != nil {
-				p.Locate = c.loc
-			}
-			p.Bandwidth = func(ctx context.Context, id string, client *http.Client) {
-				t.Error("bandwidth must not be sampled for a probe that did not succeed")
-			}
+		sub := &stubSubmitter{err: c.submi}
+		p, _ := bandwidthProber(t, sub)
+		if c.open != nil {
+			p.Open = c.open
+		}
+		if c.health != nil {
+			p.Health = c.health
+		}
+		p.Bandwidth = func(ctx context.Context, id string, client *http.Client) {
+			t.Errorf("%s: bandwidth must not be sampled for a probe that did not succeed", c.name)
+		}
 
-			if err := p.ProbeOne(context.Background(), "provider-1"); err == nil {
-				t.Fatal("expected the probe to fail")
-			}
-		})
+		if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+			t.Fatalf("%s: expected the probe to fail", c.name)
+		}
 	}
 }

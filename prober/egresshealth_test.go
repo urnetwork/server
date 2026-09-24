@@ -12,10 +12,12 @@ import (
 	"testing"
 
 	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/geolocate"
 )
 
-// captureLog redirects the standard logger for the duration of a test.
+// Tests of the health step of a probe: the same tunnel client, the log line,
+// and runs that measured nothing or did not run.
+
+// Redirects the standard logger for the duration of a test.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}
@@ -29,50 +31,47 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
-// healthResult is a provider whose tunnel works, which two CDNs refuse, and
-// which two reputation vendors treat as a datacenter -- the ordinary shape of a
-// hosted provider. The reputation failures must show in the log line and must
-// NOT be inside ok=N/M.
-//
-// It is shaped like a SAMPLED run, which is what a real one is: the tallies are
-// over the destinations this run drew, and TableTotal is what they were drawn
-// from. A reader of the log line has to be able to tell dns=3/3 (three of a
-// hundred-and-forty-entry table, drawn today) from a three-entry class.
+// A provider whose tunnel works, which two CDNs refuse, one of
+// whose sites could not be measured when its tunnel died, and which loaded one
+// canary that failed. It is shaped like a sampled run, which is what a real
+// one is: the tallies are over the destinations this run drew and measured,
+// and TableTotal is what they were drawn from.
 func healthResult() *egresshealth.Result {
 	return &egresshealth.Result{
 		Checks: []egresshealth.CheckResult{
-			{Name: "cloudflare-doh", Class: egresshealth.ClassDNS, OK: true},
-			{Name: "google-doh", Class: egresshealth.ClassDNS, OK: true},
-			{Name: "adguard-doh", Class: egresshealth.ClassDNS, OK: true},
-			{Name: "google-generate-204", Class: egresshealth.ClassConnectivity, OK: true},
-			{Name: "cloudflare-cp-204", Class: egresshealth.ClassConnectivity, OK: true},
-			{Name: "cloudflare-cdn", Class: egresshealth.ClassCDN, OK: true},
-			{Name: "jsdelivr-fastly-mirror", Class: egresshealth.ClassCDN},
-			{Name: "amazon-cloudfront", Class: egresshealth.ClassCDN},
-			{Name: "wikipedia", Class: egresshealth.ClassSite, OK: true},
-			{Name: "github", Class: egresshealth.ClassSite, OK: true},
-			{Name: "naver", Class: egresshealth.ClassSite, OK: true},
-			{Name: "akamai", Class: egresshealth.ClassReputation},
-			{Name: "etsy", Class: egresshealth.ClassReputation},
-			{Name: "reddit", Class: egresshealth.ClassReputation, OK: true},
+			{Name: "cloudflare-doh", Class: egresshealth.ClassDns, Ok: true},
+			{Name: "google-doh", Class: egresshealth.ClassDns, Ok: true},
+			{Name: "adguard-doh", Class: egresshealth.ClassDns, Ok: true},
+			{Name: "google-generate-204", Class: egresshealth.ClassConnectivity, Ok: true},
+			{Name: "cloudflare-cp-204", Class: egresshealth.ClassConnectivity, Ok: true},
+			{Name: "cloudflare-cdn", Class: egresshealth.ClassCdn, Ok: true},
+			{Name: "jsdelivr-fastly-mirror", Class: egresshealth.ClassCdn},
+			{Name: "amazon-cloudfront", Class: egresshealth.ClassCdn},
+			{Name: "wikipedia", Class: egresshealth.ClassSite, Ok: true},
+			{Name: "github", Class: egresshealth.ClassSite, Ok: true},
+			{Name: "naver", Class: egresshealth.ClassSite, Ok: true, Attempts: 2},
+			{Name: "reddit", Class: egresshealth.ClassSite, NotMeasured: true},
+			{Name: "etsy", Class: egresshealth.ClassSite, Canary: true},
 		},
-		OKCount: 9,
-		Total:   11,
+		ExitIp:         "203.0.113.7",
+		ExitObservedAt: exitObservedAt,
+		OkCount:        9,
+		Total:          11,
+		NotMeasured:    1,
 		ByClass: map[egresshealth.Class]egresshealth.ClassSummary{
-			egresshealth.ClassDNS:          {OK: 3, Total: 3},
-			egresshealth.ClassConnectivity: {OK: 2, Total: 2},
-			egresshealth.ClassCDN:          {OK: 1, Total: 3},
-			egresshealth.ClassSite:         {OK: 3, Total: 3},
+			egresshealth.ClassDns:          {Ok: 3, Total: 3},
+			egresshealth.ClassConnectivity: {Ok: 2, Total: 2},
+			egresshealth.ClassCdn:          {Ok: 1, Total: 3},
+			egresshealth.ClassSite:         {Ok: 3, Total: 3},
 		},
-		Reputation: egresshealth.ClassSummary{OK: 1, Total: 3},
-		TableTotal: 140,
+		TableTotal: 139,
 	}
 }
 
-// TestEgressHealthRunsOnTheSameTunnelClient is the property the whole wiring
-// turns on: the check must reuse the client the tunnel already handed back, not
-// prompt a second tunnel (double the contract cost, and a different session
-// from the one the geolocation verdict describes).
+// The property the whole wiring
+// turns on: the check must reuse the client the tunnel already handed back,
+// not prompt a second tunnel (double the contract cost, and a different
+// session from the one the exit address describes).
 func TestEgressHealthRunsOnTheSameTunnelClient(t *testing.T) {
 	logs := captureLog(t)
 	tunnelClient := &http.Client{}
@@ -85,16 +84,13 @@ func TestEgressHealthRunsOnTheSameTunnelClient(t *testing.T) {
 			opens++
 			return tunnelClient, func() error { return nil }, nil
 		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
-		Submit: sub,
-		Health: func(ctx context.Context, c *http.Client) (*egresshealth.Result, error) {
+		Health: func(ctx context.Context, c *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
 			seen = c
 			return healthResult(), nil
 		},
+		Submit: sub,
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
 		t.Fatalf("ProbeOne err = %v", err)
 	}
 	if opens != 1 {
@@ -104,95 +100,74 @@ func TestEgressHealthRunsOnTheSameTunnelClient(t *testing.T) {
 		t.Fatal("the health check ran on a different client than the tunnel's")
 	}
 
-	// The reputation figure rides alongside ok=N/M and its failures are listed
-	// under their own key: 9/11 is the health verdict, and the two vendors that
-	// refused the exit do not subtract from it.
-	want := "egress-health: provider=provider-1 ok=9/11 dns=3/3 connectivity=2/2 cdn=1/3 site=3/3 reputation=1/3 table=140 failed=jsdelivr-fastly-mirror,amazon-cloudfront reputation-failed=akamai,etsy"
+	// The failed list is measured, scored failures only; the load the dead
+	// tunnel took and the canary are named apart.
+	want := "egress-health: provider=provider-1 ok=9/11 dns=3/3 connectivity=2/2 cdn=1/3 site=3/3 table=139 retried=1 not_measured=1 canary=0/1 failed=jsdelivr-fastly-mirror,amazon-cloudfront not-measured=reddit canary-failed=etsy"
 	if got := strings.TrimSpace(logs.String()); got != want {
 		t.Fatalf("log line =\n%q\nwant\n%q", got, want)
 	}
 }
 
-// TestEgressHealthRunsEvenWhenGeolocationFailed: the provider whose geolocation
-// failed is exactly the one whose egress pattern is worth having.
-func TestEgressHealthRunsEvenWhenGeolocationFailed(t *testing.T) {
+// A run whose tunnel could not be
+// re-created for any of its loads measured nothing. It is not submitted --
+// 0/0 is not evidence -- no location is submitted either, and the probe fails
+// as not measured so the attempt backoff brings the provider round again.
+func TestNothingMeasuredIsNotSubmitted(t *testing.T) {
 	logs := captureLog(t)
-	ran := false
-	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { return nil }, nil
-		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return nil, geolocate.ErrNoConsensus
-		},
-		Submit: &stubSubmitter{},
-		Health: func(ctx context.Context, c *http.Client) (*egresshealth.Result, error) {
-			ran = true
-			return healthResult(), nil
-		},
+	reporter := &stubHealthReporter{}
+	sub := &stubSubmitter{}
+	unmeasured := &egresshealth.Result{
+		Checks:      []egresshealth.CheckResult{{Name: "google", Class: egresshealth.ClassSite, NotMeasured: true}},
+		ExitIp:      "203.0.113.7",
+		NotMeasured: 1,
+		ByClass:     map[egresshealth.Class]egresshealth.ClassSummary{},
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); !errors.Is(err, geolocate.ErrNoConsensus) {
-		t.Fatalf("err = %v, want ErrNoConsensus", err)
+	p := &Prober{Open: okOpen, Health: answers(unmeasured), Submit: sub, HealthResults: reporter}
+	err := p.ProbeOne(context.Background(), provider("p1"))
+	if !errors.Is(err, ErrNotMeasured) {
+		t.Fatalf("err = %v, want ErrNotMeasured", err)
 	}
-	if !ran {
-		t.Fatal("the health check did not run after a failed geolocation; that is the case it is most useful in")
+	if reporter.calls != 0 || sub.calls != 0 {
+		t.Fatalf("health submitted %d, location submitted %d; a run that measured nothing submits nothing", reporter.calls, sub.calls)
 	}
-	if !strings.Contains(logs.String(), "egress-health: provider=provider-1") {
-		t.Fatalf("no health line logged.\n--- log ---\n%s", logs.String())
+	if !strings.Contains(logs.String(), "nothing measured; not submitted") {
+		t.Errorf("the log does not say why nothing was submitted:\n%s", logs.String())
 	}
 }
 
-// TestEgressHealthNeverChangesTheProbeOutcome: the failure classes reported to
-// the server describe geolocation. A diagnostic must not be able to rewrite the
-// record of whether a location was obtained.
-func TestEgressHealthNeverChangesTheProbeOutcome(t *testing.T) {
+// A run that measured some loads and not
+// others is a measurement of the ones it did, and is submitted as one.
+func TestPartlyMeasuredRunIsSubmitted(t *testing.T) {
 	captureLog(t)
+	reporter := &stubHealthReporter{}
 	sub := &stubSubmitter{}
-	rep := &stubAttemptReporter{}
-	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { return nil }, nil
-		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
-		Submit:   sub,
-		Attempts: rep,
-		Health: func(ctx context.Context, c *http.Client) (*egresshealth.Result, error) {
-			return nil, errors.New("health check exploded")
-		},
+	p := &Prober{Open: okOpen, Health: answers(healthResult()), Submit: sub, HealthResults: reporter}
+	if err := p.ProbeOne(context.Background(), provider("p1")); err != nil {
+		t.Fatalf("ProbeOne err = %v", err)
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
-		t.Fatalf("a failing health check must not fail the probe: %v", err)
+	if reporter.calls != 1 || reporter.last.NotMeasured != 1 {
+		t.Fatalf("health submitted %d time(s) with %+v", reporter.calls, reporter.last)
 	}
 	if sub.calls != 1 {
-		t.Fatalf("submit calls = %d, want 1", sub.calls)
-	}
-	if got := rep.failures(); len(got) != 1 || got[0] != "" {
-		t.Fatalf("reported failure classes = %v, want one success (\"\")", got)
+		t.Fatalf("location submitted %d time(s), want once", sub.calls)
 	}
 }
 
-// TestEgressHealthStructuralFailureIsNotLoggedAsAScore: a check that did not
+// A check that did not
 // run must not be rendered as ok=0/N, which is the blackhole reading. Framing
 // the prober's own fault as the provider's is how a good provider gets a bad
 // record.
 func TestEgressHealthStructuralFailureIsNotLoggedAsAScore(t *testing.T) {
 	logs := captureLog(t)
 	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { return nil }, nil
-		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
-		Submit: &stubSubmitter{},
-		Health: func(ctx context.Context, c *http.Client) (*egresshealth.Result, error) {
+		Open: okOpen,
+		Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
 			return nil, egresshealth.ErrNilClient
 		},
+		Submit: &stubSubmitter{},
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
-		t.Fatalf("ProbeOne err = %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatal("a health run that did not happen reported success")
 	}
 	out := logs.String()
 	if !strings.Contains(out, "did not run") {
@@ -203,28 +178,23 @@ func TestEgressHealthStructuralFailureIsNotLoggedAsAScore(t *testing.T) {
 	}
 }
 
-// TestEgressHealthSkippedWhenNoBudgetLeft: same defect, reached the other way.
+// Same defect, reached the other way.
 // If the probe's context is already done, a run would report 0/N for reasons
 // that have nothing to do with the provider.
 func TestEgressHealthSkippedWhenNoBudgetLeft(t *testing.T) {
 	logs := captureLog(t)
 	ran := false
 	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { return nil }, nil
-		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return nil, context.DeadlineExceeded
-		},
-		Submit: &stubSubmitter{},
-		Health: func(ctx context.Context, c *http.Client) (*egresshealth.Result, error) {
+		Open: okOpen,
+		Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
 			ran = true
 			return healthResult(), nil
 		},
+		Submit: &stubSubmitter{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = p.ProbeOne(ctx, "provider-1")
+	_ = p.ProbeOne(ctx, provider("provider-1"))
 
 	if ran {
 		t.Fatal("the health check ran on an already-dead context; it would report 0/N and read as a blackhole")
@@ -238,43 +208,48 @@ func TestEgressHealthSkippedWhenNoBudgetLeft(t *testing.T) {
 	}
 }
 
-// TestNilHealthCheckerIsSkipped: the hook is optional, and a prober without it
-// must behave exactly as before.
-func TestNilHealthCheckerIsSkipped(t *testing.T) {
-	logs := captureLog(t)
-	sub := &stubSubmitter{}
-	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { return nil }, nil
-		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
-		Submit: sub,
-	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
-		t.Fatalf("ProbeOne err = %v", err)
-	}
-	if strings.Contains(logs.String(), "egress-health") {
-		t.Fatalf("a nil health checker logged something.\n--- log ---\n%s", logs.String())
-	}
-}
-
-// stubAttemptReporter records the failure class of every reported attempt.
+// Records the failure class of every reported attempt.
 type stubAttemptReporter struct {
-	mu   sync.Mutex
-	seen []string
+	stateLock sync.Mutex
+	seen      []string
 }
 
-func (s *stubAttemptReporter) ReportAttempt(ctx context.Context, id string, failure string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seen = append(s.seen, failure)
+// Implements AttemptReporter.
+func (self *stubAttemptReporter) ReportAttempt(ctx context.Context, id string, failure string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.seen = append(self.seen, failure)
 	return nil
 }
 
-func (s *stubAttemptReporter) failures() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.seen...)
+// Returns the failure classes reported so far.
+func (self *stubAttemptReporter) failures() []string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]string(nil), self.seen...)
+}
+
+// The failure classes
+// reported to the server describe the probe; a health submission that failed
+// must not be able to rewrite whether the exit was recorded.
+func TestHealthSubmissionFailureNeverChangesTheProbeOutcome(t *testing.T) {
+	captureLog(t)
+	sub := &stubSubmitter{}
+	rep := &stubAttemptReporter{}
+	p := &Prober{
+		Open:          okOpen,
+		Health:        answers(healthResult()),
+		Submit:        sub,
+		Attempts:      rep,
+		HealthResults: &stubHealthReporter{err: errors.New("health endpoint exploded")},
+	}
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
+		t.Fatalf("a failing health submission failed the probe: %v", err)
+	}
+	if sub.calls != 1 {
+		t.Fatalf("submit calls = %d, want 1", sub.calls)
+	}
+	if got := rep.failures(); len(got) != 1 || got[0] != "" {
+		t.Fatalf("reported failure classes = %v, want one success (\"\")", got)
+	}
 }

@@ -2,179 +2,99 @@ package prober
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log"
-	"sort"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/urnetwork/operator-proxy/geolocate"
 )
 
-// maxLoggedDistinctErrors caps how many DISTINCT probe error messages are
-// logged in detail during a single Run (I2). Without a cap, a pass where
-// every provider fails the same way (a wrong -platform-url, a revoked jwt)
-// would flood the log with the same message hundreds of times, drowning
-// out anything that could distinguish it from a handful of unrelated
-// failures. 10 is chosen as "enough to see the shape of what's failing
-// (one pin mismatch, one auth error, a few dial timeouts) without a flood";
-// Run still logs a one-line notice once the cap is hit, and the pass's
-// total Failed count is always visible via the Summary the caller logs.
-const maxLoggedDistinctErrors = 10
+// The scheduler: one pass over a batch of providers, with bounded
+// concurrency, a success cache, and capped per-error logging.
 
-// maxGeolocationSourceOutcomeGroups bounds the one safe diagnostic line per
-// scheduler pass. The live source set has only three aliases, but stages and
-// elapsed buckets can differ across a large provider batch. Keeping the most
-// frequent groups preserves the failure shape without allowing one line to
-// grow with fleet size.
-const maxGeolocationSourceOutcomeGroups = 24
-
-// GeolocationSourceOutcomeCount is one bounded group in the no-consensus
-// diagnostic. Every string comes from a compile-time enum in geolocate; it
-// contains no provider id, URL, status code, raw error, or response material.
-type GeolocationSourceOutcomeCount struct {
-	Source  string
-	Class   string
-	Stage   string
-	Elapsed string
-	Count   int
-}
-
-// Summary reports one scheduler run.
+// Reports one scheduler run.
 type Summary struct {
 	Attempted int
 	Submitted int
 	Skipped   int
 	Failed    int
-
-	// GeolocationSourceOutcomes describes only diagnostic-bearing
-	// ErrNoConsensus failures. Groups and underlying results omitted from the
-	// bounded tail remain explicit rather than disappearing silently.
-	GeolocationSourceOutcomes       []GeolocationSourceOutcomeCount
-	GeolocationSourceGroupsOmitted  int
-	GeolocationSourceResultsOmitted int
+	// Counts the probes, among Failed, whose run measured nothing
+	// because the tunnel died and could not be re-created in time (see
+	// ErrNotMeasured): the prober's lost path, not the providers' traffic, and
+	// worth watching apart from ordinary failures -- a pass full of them is a
+	// churning fleet or a prober that cannot hold tunnels up.
+	NotMeasured int
 }
 
-type geolocationSourceOutcomeKey struct {
-	source  string
-	class   string
-	stage   string
-	elapsed string
-}
-
-func geolocationSourceOutcomeKeyFromDiagnostic(diagnostic geolocate.SourceDiagnostic) geolocationSourceOutcomeKey {
-	return geolocationSourceOutcomeKey{
-		source:  diagnostic.Source,
-		class:   string(diagnostic.Class),
-		stage:   string(diagnostic.Stage),
-		elapsed: string(diagnostic.Elapsed),
-	}
-}
-
-func boundedGeolocationSourceOutcomes(counts map[geolocationSourceOutcomeKey]int) ([]GeolocationSourceOutcomeCount, int, int) {
-	outcomes := make([]GeolocationSourceOutcomeCount, 0, len(counts))
-	for key, count := range counts {
-		outcomes = append(outcomes, GeolocationSourceOutcomeCount{
-			Source: key.source, Class: key.class, Stage: key.stage, Elapsed: key.elapsed, Count: count,
-		})
-	}
-	sort.Slice(outcomes, func(i, j int) bool {
-		if outcomes[i].Count != outcomes[j].Count {
-			return outcomes[j].Count < outcomes[i].Count
-		}
-		left := strings.Join([]string{outcomes[i].Source, outcomes[i].Class, outcomes[i].Stage, outcomes[i].Elapsed}, "/")
-		right := strings.Join([]string{outcomes[j].Source, outcomes[j].Class, outcomes[j].Stage, outcomes[j].Elapsed}, "/")
-		return left < right
-	})
-	if len(outcomes) <= maxGeolocationSourceOutcomeGroups {
-		return outcomes, 0, 0
-	}
-	omittedResults := 0
-	for _, outcome := range outcomes[maxGeolocationSourceOutcomeGroups:] {
-		omittedResults += outcome.Count
-	}
-	return outcomes[:maxGeolocationSourceOutcomeGroups], len(outcomes) - maxGeolocationSourceOutcomeGroups, omittedResults
-}
-
-func renderGeolocationSourceOutcomes(outcomes []GeolocationSourceOutcomeCount, omittedGroups, omittedResults int) string {
-	groups := make([]string, 0, len(outcomes))
-	for _, outcome := range outcomes {
-		groups = append(groups, fmt.Sprintf(
-			"%s/%s/%s/%s=%d",
-			outcome.Source, outcome.Class, outcome.Stage, outcome.Elapsed, outcome.Count,
-		))
-	}
-	return fmt.Sprintf(
-		"groups=%s omitted_groups=%d omitted_results=%d",
-		strings.Join(groups, ","), omittedGroups, omittedResults,
-	)
-}
-
-// Scheduler probes a set of providers with bounded concurrency, skipping any
-// provider probed within CacheTTL. Only successful probes are cached, so a
+// Probes a set of providers with bounded concurrency, skipping any
+// provider probed within CacheTtl. Only successful probes are cached, so a
 // failure is retried on the next run.
 type Scheduler struct {
 	Prober      *Prober
 	Concurrency int
-	CacheTTL    time.Duration
-	// Now defaults to time.Now; tests override it to advance the clock.
+	CacheTtl    time.Duration
+	// Defaults to time.Now; tests override it to advance the clock.
 	Now func() time.Time
 
-	mu     sync.Mutex
-	probed map[string]time.Time
+	stateLock sync.Mutex
+	probed    map[string]time.Time
 }
 
-func (s *Scheduler) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
+// Returns the time on the scheduler's clock: Now, or the wall clock.
+func (self *Scheduler) now() time.Time {
+	if self.Now != nil {
+		return self.Now()
 	}
 	return time.Now()
 }
 
-func (s *Scheduler) recentlyProbed(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	last, ok := s.probed[id]
+// Reports whether id was probed successfully within CacheTtl. The clock is
+// read before the lock is taken: Now is the caller's function.
+func (self *Scheduler) recentlyProbed(id string) bool {
+	now := self.now()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	last, ok := self.probed[id]
 	if !ok {
 		return false
 	}
-	return s.now().Sub(last) < s.CacheTTL
+	return now.Sub(last) < self.CacheTtl
 }
 
-func (s *Scheduler) markProbed(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.probed == nil {
-		s.probed = map[string]time.Time{}
+// Records a successful probe of id at the current time.
+func (self *Scheduler) markProbed(id string) {
+	now := self.now()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.probed == nil {
+		self.probed = map[string]time.Time{}
 	}
-	s.probed[id] = s.now()
+	self.probed[id] = now
 }
 
-// prune evicts entries from probed older than CacheTTL (M2). Without this,
+// Evicts entries from probed older than CacheTtl (M2). Without this,
 // probed only ever grows: markProbed adds an entry per successfully probed
 // provider and nothing ever removed one, so a long-lived process (this
 // scheduler is driven from an infinite loop in cmd/egress-prober) would
 // accumulate one map entry per provider ever seen, forever. An entry past
-// CacheTTL no longer affects recentlyProbed's decision anyway (its age
+// CacheTtl no longer affects recentlyProbed's decision anyway (its age
 // already exceeds the cache window), so evicting it changes no behavior --
 // it only bounds memory. Pruning is O(n) over probed and runs once per Run
 // call, which is cheap relative to the network calls Run is about to make.
-func (s *Scheduler) prune() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.probed == nil {
+func (self *Scheduler) prune() {
+	now := self.now()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.probed == nil {
 		return
 	}
-	now := s.now()
-	for id, last := range s.probed {
-		if s.CacheTTL <= now.Sub(last) {
-			delete(s.probed, id)
+	for id, last := range self.probed {
+		if self.CacheTtl <= now.Sub(last) {
+			delete(self.probed, id)
 		}
 	}
 }
 
-// Run probes each provider that is not cached, with at most Concurrency
+// Probes each provider that is not cached, with at most Concurrency
 // tunnels open at once.
 //
 // Per-provider failures are logged as they occur (I2): before this, ProbeOne's
@@ -183,49 +103,55 @@ func (s *Scheduler) prune() {
 // produced an identical `failed=N` with nothing to distinguish them --
 // making a broken prober running unattended on a VPS undebuggable without
 // adding print statements and redeploying. To avoid flooding the log when
-// every provider fails the same way, only the first maxLoggedDistinctErrors
-// DISTINCT error messages are logged in detail (each with the provider id
+// every provider fails the same way, only the first Prober.MaxLoggedDistinctErrors
+// distinct error messages are logged in detail (each with the provider id
 // that first produced it); beyond that, one notice is logged noting further
-// detail is suppressed. Diagnostic-bearing no-consensus failures are the one
-// exception: their raw errors and provider ids are replaced by one bounded
-// per-source aggregate after the entire batch. The total failure count is
-// unaffected and always visible via the returned Summary.
-func (s *Scheduler) Run(ctx context.Context, providerClientIds []string) Summary {
-	s.prune()
+// detail is suppressed. The total failure count -- and among it the runs that
+// measured nothing -- is unaffected and always visible via the returned
+// Summary.
+func (self *Scheduler) Run(ctx context.Context, providers []Provider) Summary {
+	self.prune()
 	// Re-arm the prober's per-pass error-log gates (and report what the last
 	// pass withheld). Their cap is only safe because every pass starts clean:
 	// a permanent cap would let ten transient errors silence a later fault
 	// that breaks every provider.
-	if s.Prober != nil {
-		s.Prober.ResetErrorLogging()
+	if self.Prober != nil {
+		self.Prober.ResetErrorLogging()
 	}
 
-	concurrency := s.Concurrency
+	concurrency := self.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
 	}
 
-	var mu sync.Mutex
+	maxLoggedDistinctErrors := self.Prober.maxLoggedDistinctErrors()
+
+	// Guards the tallies and the per-pass log dedup below. Nothing is logged
+	// with it held.
+	var stateLock sync.Mutex
 	var sum Summary
-	geolocationSourceOutcomeCounts := map[geolocationSourceOutcomeKey]int{}
 	loggedErrors := map[string]bool{}
 	suppressedNoted := false
+	skip := func(n int) {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		sum.Skipped += n
+	}
 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	// recentlyProbed only becomes true once a probe COMPLETES, so a duplicate
+	// recentlyProbed only becomes true once a probe completes, so a duplicate
 	// id inside one batch would otherwise open two tunnels to the same
 	// provider simultaneously and pay the contract cost twice. The enumeration
 	// path de-duplicates before it gets here; the due path is whatever the
 	// server sent.
 	seen := map[string]bool{}
 
-	for i, id := range providerClientIds {
+	for i, provider := range providers {
+		id := provider.ClientId
 		if seen[id] {
-			mu.Lock()
-			sum.Skipped++
-			mu.Unlock()
+			skip(1)
 			continue
 		}
 		seen[id] = true
@@ -239,14 +165,12 @@ func (s *Scheduler) Run(ctx context.Context, providerClientIds []string) Summary
 		// exiting non-zero blaming the providers) when the truth is that the
 		// operator sent SIGTERM. The explicit Err check runs first because
 		// select chooses randomly among ready cases: with the semaphore free
-		// AND the context dead, the select below may still pick the
+		// and the context dead, the select below may still pick the
 		// semaphore.
 		cancelled := ctx.Err() != nil
 		if !cancelled {
-			if s.recentlyProbed(id) {
-				mu.Lock()
-				sum.Skipped++
-				mu.Unlock()
+			if self.recentlyProbed(id) {
+				skip(1)
 				continue
 			}
 			select {
@@ -256,66 +180,64 @@ func (s *Scheduler) Run(ctx context.Context, providerClientIds []string) Summary
 			}
 		}
 		if cancelled {
-			remaining := len(providerClientIds) - i
-			mu.Lock()
-			sum.Skipped += remaining
-			mu.Unlock()
+			remaining := len(providers) - i
+			skip(remaining)
 			log.Printf("prober: run cancelled (%v); skipping the %d remaining provider(s) in this pass", ctx.Err(), remaining)
 			break
 		}
 
 		wg.Add(1)
-		go func(id string) {
+		go func(provider Provider) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			id := provider.ClientId
 
-			mu.Lock()
-			sum.Attempted++
-			mu.Unlock()
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				sum.Attempted++
+			}()
 
-			err := s.Prober.ProbeOne(ctx, id)
-			sourceDiagnostics := geolocate.SourceDiagnostics(err)
+			err := self.Prober.ProbeOne(ctx, provider)
 
-			mu.Lock()
-			if err != nil {
+			// The tallies and the dedup decision under the lock, the log line
+			// after it.
+			logDetail, logSuppressed := false, false
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				if err == nil {
+					sum.Submitted++
+					return
+				}
 				sum.Failed++
-				if len(sourceDiagnostics) == 0 {
-					msg := err.Error()
-					if !loggedErrors[msg] {
-						if len(loggedErrors) < maxLoggedDistinctErrors {
-							loggedErrors[msg] = true
-							log.Printf("prober: probe failed provider=%s: %s", id, err)
-						} else if !suppressedNoted {
-							suppressedNoted = true
-							log.Printf("prober: %d+ distinct probe errors this pass; suppressing further per-error detail (see the pass's failed count for the total)", maxLoggedDistinctErrors)
-						}
-					}
+				if errors.Is(err, ErrNotMeasured) {
+					sum.NotMeasured++
 				}
-				for _, diagnostic := range sourceDiagnostics {
-					geolocationSourceOutcomeCounts[geolocationSourceOutcomeKeyFromDiagnostic(diagnostic)]++
+				msg := err.Error()
+				if loggedErrors[msg] {
+					return
 				}
-			} else {
-				sum.Submitted++
+				if len(loggedErrors) < maxLoggedDistinctErrors {
+					loggedErrors[msg] = true
+					logDetail = true
+				} else if !suppressedNoted {
+					suppressedNoted = true
+					logSuppressed = true
+				}
+			}()
+			switch {
+			case logDetail:
+				log.Printf("prober: probe failed provider=%s: %s", id, err)
+			case logSuppressed:
+				log.Printf("prober: %d+ distinct probe errors this pass; suppressing further per-error detail (see the pass's failed count for the total)", maxLoggedDistinctErrors)
 			}
-			mu.Unlock()
 
 			if err == nil {
-				s.markProbed(id)
+				self.markProbed(id)
 			}
-		}(id)
+		}(provider)
 	}
 	wg.Wait()
-	sum.GeolocationSourceOutcomes, sum.GeolocationSourceGroupsOmitted, sum.GeolocationSourceResultsOmitted =
-		boundedGeolocationSourceOutcomes(geolocationSourceOutcomeCounts)
-	if len(sum.GeolocationSourceOutcomes) != 0 {
-		log.Printf(
-			"geolocate-source-outcomes: %s",
-			renderGeolocationSourceOutcomes(
-				sum.GeolocationSourceOutcomes,
-				sum.GeolocationSourceGroupsOmitted,
-				sum.GeolocationSourceResultsOmitted,
-			),
-		)
-	}
 	return sum
 }

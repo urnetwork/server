@@ -134,7 +134,7 @@ func TestMeasureExcludesWarmup(t *testing.T) {
 
 	start := time.Now()
 	sample, err := MeasureTarget(context.Background(), srv.Client(),
-		Target{Name: "test", URL: srv.URL}, 10*time.Second)
+		Target{Name: "test", Url: srv.URL}, 10*time.Second)
 	wallClock := time.Since(start)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
@@ -184,7 +184,7 @@ func TestMeasureFastTransferInsideWarmupReportsLowerBound(t *testing.T) {
 	defer srv.Close()
 
 	sample, err := MeasureTarget(context.Background(), srv.Client(),
-		Target{Name: "test", URL: srv.URL}, 5*time.Second)
+		Target{Name: "test", Url: srv.URL}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
@@ -215,7 +215,7 @@ func TestMeasureRequestsTheByteParameter(t *testing.T) {
 	defer srv.Close()
 
 	if _, err := MeasureTarget(context.Background(), srv.Client(),
-		Target{Name: "test", URL: srv.URL}, 5*time.Second); err != nil {
+		Target{Name: "test", Url: srv.URL}, 5*time.Second); err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
 	if want := strconv.Itoa(StreamBytes); got.Load() != want {
@@ -343,8 +343,8 @@ func TestSamplerReportsTargetsSeparately(t *testing.T) {
 	submitter := &recordingSubmitter{}
 	sampler := &Sampler{
 		Targets: []Target{
-			{Name: "operator", Source: SourceOperator, URL: fast.URL},
-			{Name: "cdn", Source: SourceCDN, URL: slow.URL},
+			{Name: "operator", Source: SourceOperator, Url: fast.URL},
+			{Name: "cdn", Source: SourceCdn, Url: slow.URL},
 		},
 		Reserve: reserver,
 		Submit:  submitter,
@@ -363,7 +363,7 @@ func TestSamplerReportsTargetsSeparately(t *testing.T) {
 	}
 
 	operator, cdn := results[0], results[1]
-	if operator.Target.Source != SourceOperator || cdn.Target.Source != SourceCDN {
+	if operator.Target.Source != SourceOperator || cdn.Target.Source != SourceCdn {
 		t.Fatalf("results carry the wrong sources: %q, %q", operator.Target.Source, cdn.Target.Source)
 	}
 	if operator.Sample.BytesPerSecond <= cdn.Sample.BytesPerSecond {
@@ -392,7 +392,7 @@ func TestSamplerReportsTargetsSeparately(t *testing.T) {
 		bySource[s.source] = s
 	}
 	if len(bySource) != 2 {
-		t.Fatalf("submissions carry %d distinct sources, want 2 (%s and %s)", len(bySource), SourceOperator, SourceCDN)
+		t.Fatalf("submissions carry %d distinct sources, want 2 (%s and %s)", len(bySource), SourceOperator, SourceCdn)
 	}
 	for _, r := range results {
 		s, ok := bySource[r.Target.Source]
@@ -469,8 +469,8 @@ func TestSamplerSkipsCleanlyWhenBudgetExhausted(t *testing.T) {
 			submitter := &recordingSubmitter{}
 			sampler := &Sampler{
 				Targets: []Target{
-					{Name: "operator", Source: SourceOperator, URL: srv.URL},
-					{Name: "cdn", Source: SourceCDN, URL: srv.URL},
+					{Name: "operator", Source: SourceOperator, Url: srv.URL},
+					{Name: "cdn", Source: SourceCdn, Url: srv.URL},
 				},
 				Reserve: &recordingReserver{err: c.reserveErr},
 				Submit:  submitter,
@@ -516,7 +516,7 @@ func TestSamplerSkipsWhenTheProbeHasNoTimeLeft(t *testing.T) {
 
 	reserver := &recordingReserver{}
 	sampler := &Sampler{
-		Targets: []Target{{Name: "operator", Source: SourceOperator, URL: srv.URL}},
+		Targets: []Target{{Name: "operator", Source: SourceOperator, Url: srv.URL}},
 		Reserve: reserver,
 		Submit:  &recordingSubmitter{},
 	}
@@ -554,7 +554,7 @@ func TestSamplerSkipsWhenTheDeadlineCannotCoverTheMeasurement(t *testing.T) {
 
 	reserver := &recordingReserver{}
 	sampler := &Sampler{
-		Targets: []Target{{Name: "operator", Source: SourceOperator, URL: srv.URL}},
+		Targets: []Target{{Name: "operator", Source: SourceOperator, Url: srv.URL}},
 		Reserve: reserver,
 		Submit:  &recordingSubmitter{},
 		Timeout: 5 * time.Second,
@@ -583,7 +583,7 @@ func TestSamplerSkipsWhenTheDeadlineCannotCoverTheMeasurement(t *testing.T) {
 // budget was reached").
 func TestSummary(t *testing.T) {
 	operator := Target{Name: "operator", Source: SourceOperator}
-	cdn := Target{Name: "cdn", Source: SourceCDN}
+	cdn := Target{Name: "cdn", Source: SourceCdn}
 
 	cases := []struct {
 		name    string
@@ -703,7 +703,7 @@ func TestMeasureOpensStreamCountConnections(t *testing.T) {
 	})
 
 	sample, err := MeasureTarget(context.Background(), b.srv.Client(),
-		Target{Name: "test", URL: b.srv.URL}, 30*time.Second)
+		Target{Name: "test", Url: b.srv.URL}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
@@ -738,7 +738,7 @@ func TestMeasureAggregatesAcrossParallelStreams(t *testing.T) {
 	defer srv.Close()
 
 	// baseline: one connection, StreamBytes, same handler, timed by hand
-	sizedOne, err := sizedURL(srv.URL, StreamBytes)
+	sizedOne, err := sizedUrl(srv.URL, StreamBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +755,7 @@ func TestMeasureAggregatesAcrossParallelStreams(t *testing.T) {
 	singleRate := float64(singleBytes) / time.Since(singleStart).Seconds()
 
 	sample, err := MeasureTarget(context.Background(), srv.Client(),
-		Target{Name: "test", URL: srv.URL}, 30*time.Second)
+		Target{Name: "test", Url: srv.URL}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
@@ -864,7 +864,7 @@ func TestMeasureBurstAfterWarmupBoundaryIsNotASteadyFigure(t *testing.T) {
 
 	measureStart := time.Now()
 	sample, err := MeasureTarget(context.Background(), client,
-		Target{Name: "test", URL: "https://stub.example/download"}, 30*time.Second)
+		Target{Name: "test", Url: "https://stub.example/download"}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
@@ -906,7 +906,7 @@ func TestMeasureWideStallBurstBoundsSteadyInflation(t *testing.T) {
 	}}
 
 	sample, err := MeasureTarget(context.Background(), client,
-		Target{Name: "test", URL: "https://stub.example/download"}, 30*time.Second)
+		Target{Name: "test", Url: "https://stub.example/download"}, 30*time.Second)
 	if err != nil {
 		t.Fatalf("MeasureTarget: %s", err)
 	}
@@ -1065,7 +1065,7 @@ func TestMeasureCapsEachStreamOnItsRemainingAllowance(t *testing.T) {
 	client := &http.Client{Transport: tr}
 
 	sample, err := MeasureTarget(context.Background(), client,
-		Target{Name: "test", URL: "https://stub.example/download"}, 30*time.Second)
+		Target{Name: "test", Url: "https://stub.example/download"}, 30*time.Second)
 	// The stub delivers from memory, so the whole 16 MiB can complete inside
 	// one coarse clock tick; the byte accounting under test is valid either
 	// way, so an unmeasurable duration is tolerated -- any other error is not.

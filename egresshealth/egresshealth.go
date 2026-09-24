@@ -18,33 +18,37 @@
 // provider accepting 87 KB and returning 0 bytes while connected = true and
 // valid = true.
 //
-// The geolocation probe (see geolocate/) is not a sufficient answer, because it
-// only ever touches one class of destination: three geolocation APIs. A
-// provider needs to serve exactly those three hosts to look healthy, and the
-// other client-visible failure -- CDNs and large sites rejecting datacenter IP
-// ranges -- is invisible to it, since the geolocation APIs do not care where
-// the request came from.
+// It is also, since GEOMAP step 7, the prober's only instrument. What real
+// sites do with an exit is the only verdict the prober records about it: no
+// ip-intelligence source is consulted for anything (D24). Where the exit is
+// comes from the run's warm-up -- the operator's own /ip echo, whose address
+// the server places with its own GeoLite2 -- and nothing else.
 //
 // # Classes
 //
-// Destinations are grouped so a PARTIAL failure is diagnosable. "ok=14/26"
-// alone says nothing; "dns=4/4 cdn=0/5 site=12/12" says the tunnel carries
-// bytes and resolves names but is being refused by content providers, which is
-// the datacenter-IP-rejection case -- a completely different fault from a total
-// blackhole (ok=0/26), and a different fault again from one flaky destination.
+// Destinations are grouped so a partial failure is diagnosable. "ok=44/50"
+// alone says nothing; "dns=6/6 cdn=0/10 site=26/26" says the tunnel carries
+// bytes and resolves names but is being refused by content providers, which
+// is the datacenter-IP-rejection case -- a completely different fault from a
+// total blackhole (ok=0/50), and a different fault again from one flaky
+// destination.
 //
-// The table deliberately spreads across DIFFERENT operators within each class,
+// The table deliberately spreads across different operators within each class,
 // so a provider that special-cases one vendor's ranges cannot pass a class.
 //
-// ClassReputation is scored SEPARATELY and deliberately excluded from
-// OKCount/Total -- see its doc comment below, which is the one thing in this
-// package most likely to be "fixed" into a bug.
+// Every class is scored. The sites that used to form an unscored "reputation"
+// class -- large properties known to refuse addresses they take for
+// datacenters -- are ordinary site destinations now, sampled and scored like
+// the rest, and their refusals are failures like any other: a site a user
+// cannot reach through an exit is a site a user cannot reach, whatever the
+// site's reason (GEOMAP §10.3).
 //
 // # Sampling: the table is large, a run is not
 //
-// The table is 140 destinations. A run fetches a bounded RANDOM SAMPLE of each
+// The table is 139 destinations. A run fetches a bounded random sample of each
 // class rather than the whole thing (see sampleSizes for the arithmetic), so
-// coverage accumulates across runs instead of being paid on every one.
+// coverage accumulates across runs instead of being paid on every one. The
+// server's pool (see Pool), when there is one, is sampled the same way.
 //
 // This is one code path with one set of constants for every deployment. There
 // is no "small table for mainstream, big table for beta" switch and there must
@@ -61,19 +65,44 @@
 // the whole table, which is the thing being measured. That is a reason to
 // prefer sampling a wide table over simply carrying a narrow one.
 //
+// # Every load gets its tries, spaced
+//
+// A destination is fetched up to Options.LoadAttempts times (default 3) and
+// fails only when every attempt failed. After a failed attempt the next one
+// waits a random delay drawn from an exponential distribution with mean
+// Options.LoadRetryMeanInterval (default 5 minutes), capped at three times the
+// mean, so a site's momentary block, a rate limit or a flapping path is not hit
+// three times in one second, and the requests to any one site look like a
+// person coming back to it rather than a scanner. A TLS-authentication failure
+// is terminal: a forged certificate is a failure whatever a retry does.
+//
+// Each load's retry chain is its own goroutine and holds a concurrency slot
+// only while it fetches, so the loads of a run interleave rather than queue: a
+// run whose loads all pass finishes in its first round, and one with a site
+// that keeps failing spans about ten to fifteen minutes. Its tunnel stays open
+// that long and mostly idle, which is what the prober's per-shard concurrency
+// is sized against (see fleetprobe).
+//
+// # The warm-up
+//
+// The first fetch of every run, and of every blackhole check, is the
+// operator's /ip echo (Options.IpEchoUrl) with its own timeout -- see warmUp
+// for why the tunnel needs it. It is never scored. Its answer is the exit
+// address (Result.ExitIp), which is all the location submission carries.
+//
 // # DNS
 //
 // The dns class is seven DNS-over-HTTPS endpoints. It is not, and cannot
 // currently be, a test of resolvers as such: the owner's list names 23 bare
-// resolver ADDRESSES (8.8.8.8, 1.1.1.1, ...), and a resolver is queried over
+// resolver addresses (8.8.8.8, 1.1.1.1, ...), and a resolver is queried over
 // UDP/53 or TCP/53, which this package has no way to reach -- the tunnel is
 // exposed to it as an *http.Client and nothing else. Genuine resolver coverage
 // needs a UDP path through the tunnel, which is a different piece of work; the
 // bare-IP rows are ignored here rather than fetched over http, which would test
 // something else entirely and pass or fail for reasons unrelated to resolution.
 //
-// What the DoH entries do prove is that a name was resolved END TO END through
-// the tunnel, because every one of them parses its answer (see verifyDNSJSON).
+// What the DoH entries do prove is that a name was resolved end to end through
+// the tunnel, because every one of them parses its answer (see verifyDnsJson).
 // A captive portal answers 200 with bytes; only an answer section proves
 // resolution.
 //
@@ -82,53 +111,46 @@
 // Name resolution is a shared precondition: the tunnel resolves every hostname
 // through in-tunnel DoH (connect's DefaultDnsResolverSettings, which uses
 // 1.1.1.1, 8.8.8.8, 9.9.9.9 and 208.67.222.222), and providertunnel
-// deliberately disables the off-tunnel fallback. So a run that comes back 0/26
+// deliberately disables the off-tunnel fallback. So a run that comes back 0/50
 // is "this provider carried nothing useful", which covers both a blackhole and
 // an in-tunnel DoH failure. The per-check Err strings are what separate them:
 // a resolution failure names the lookup, a blackhole times out on the request.
-// Do not read 0/26 as proof of a blackhole without them.
+// Do not read 0/50 as proof of a blackhole without them.
 //
 // # Byte budget
 //
-// Each check is a small GET whose body read is capped -- per destination via
-// Destination.MaxBytes, and never above MaxBodyBytes, which is 1024 bytes.
+// Each attempt is a small GET whose body read is capped -- per destination via
+// Destination.MaxBytes, and never above MaxBodyBytes, which is 1024 bytes --
+// and then closed. The arithmetic for one attempt of every sampled load is on
+// sampleSizes and is asserted by TestWorstCaseBytesPerRunFitsTheBudget:
 //
-// Fetching the whole table at that cap would cost 128 KiB per provider per run
-// (the same table fetched UNCAPPED was measured at 36,960 KiB, because several
-// front pages are 1.5-2.4 MB). 128 KiB is affordable for beta's ~40 providers
-// and is ~12 GB per pass at 100k providers, which is far outside the budget
-// this rides -- so the run samples, and the SAMPLE is what the budget is
-// computed on. The arithmetic is on sampleSizes and is asserted by
-// TestWorstCaseBytesPerRunFitsTheBudget:
-//
-//	dns           4 x  768 =  3072
-//	connectivity  5 x  256 =  1280
-//	cdn           5 x 1024 =  5120
-//	site         12 x 1024 = 12288
+//	dns           6 x  768 =  4608
+//	connectivity  8 x  256 =  2048
+//	cdn          10 x 1024 = 10240
+//	site         26 x 1024 = 26624
 //	                        ------
-//	health                 = 21760
-//	reputation    4 x 1024 =  4096
-//	                        ------
-//	per run                = 25856 bytes = 25.25 KiB
+//	per attempt round      = 43520 bytes = 42.5 KiB
 //
-// That is below the 33.25 KiB of the 31-entry fixed table this replaces, from a
-// table four and a half times wider. Adding TLS handshakes, request/response
-// headers and the DoH lookups behind them, a run stays well under 128 KiB.
+// A retry reads at most the same cap again, so a run in which every load fails
+// every attempt after reading its whole cap reads at most three times that,
+// 127.5 KiB, plus the warm-up's maxIpEchoBytes.
 //
-// Where it is honored, a Range header holds the larger destinations to ~1 KiB
-// on the wire. Many hosts IGNORE it -- measured on this table: www.wikipedia.org,
-// www.atlassian.com, cloud.google.com, apnews.com and www.baidu.com all
-// returned 200 and the whole asset, and jsDelivr and BootstrapCDN did the same
-// in an earlier round -- so the header is an optimisation, and io.LimitReader
-// is what actually bounds the cost. A server that ignores Range can still put
-// up to one TCP receive window in flight before the capped read closes the
-// body, which is the one place these figures can be exceeded on the wire.
+// No request carries a Range header any more (see neverSent), so the capped
+// read is the only bound, and it bounds what is kept rather than what is sent:
+// a server can put up to one TCP receive window in flight before the capped
+// read closes the connection. For most of the table that is the whole response
+// anyway -- front pages and robots.txt files a few KiB long, gzip-encoded now
+// that the transport may ask for it -- but two cdn entries are large assets
+// (cachefly's 10 MB test file and the AWS SDK bundle), and each can cost one
+// window on the provider's link when it is drawn. That is the price of not
+// sending byte-range requests, which bot managers refuse.
 //
 // This rides the same budget as the server's active bandwidth probe, which
 // spends model.MaxProviderBandwidthBytesPerProbe = 16 MiB per probe (8
 // parallel streams of 2 MiB -- see bandwidth.StreamCount for why one stream
-// measured the congestion window rather than the provider). A full
-// egress-health run is under 0.2% of one bandwidth probe.
+// measured the congestion window rather than the provider). A health run's
+// capped reads are under 1% of one bandwidth probe; its wire cost, with the
+// windows above, stays a small fraction of one.
 package egresshealth
 
 import (
@@ -147,174 +169,137 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
-// Class groups destinations so a partial failure is diagnosable: a provider
+// Groups destinations so a partial failure is diagnosable: a provider
 // that serves DNS but fails every CDN is the datacenter-IP-blocking case,
 // which is a different fault from a total blackhole.
 type Class string
 
 const (
-	ClassDNS Class = "dns"
-	// ClassConnectivity is the purpose-built captive-portal-detection endpoints
+	ClassDns Class = "dns"
+	// The purpose-built captive-portal-detection endpoints
 	// every operating system already ships with, plus the echo services that
 	// answer with the exit address. They are unauthenticated, carry no anti-bot
 	// machinery, and answer in tens of bytes -- the cheapest useful signal in
 	// the table, and the class least likely to fail for a reason that has
 	// nothing to do with the provider.
 	ClassConnectivity Class = "connectivity"
-	// ClassCDN is CDN edges, distribution mirrors and bulk-download hosts: the
+	// CDN edges, distribution mirrors and bulk-download hosts: the
 	// operators whose business is serving static bytes. This is the class that
 	// fails when a provider's egress range is on a CDN blocklist.
-	ClassCDN Class = "cdn"
-	// ClassSite is ordinary web properties -- search, social, video, commerce,
+	ClassCdn Class = "cdn"
+	// Ordinary web properties -- search, social, video, commerce,
 	// news, reference, developer infrastructure, and the regional properties
-	// that carry the same traffic outside the US and EU.
+	// that carry the same traffic outside the US and EU -- including the large
+	// sites that refuse addresses they take for datacenters, which used to sit
+	// in an unscored class of their own.
 	//
 	// The regional entries (qq.com, taobao, vk, naver, globo, ...) are
-	// deliberately NOT a class of their own, even though the source list groups
+	// deliberately not a class of their own, even though the source list groups
 	// them that way. A "regional" class would fail on healthy providers for
 	// geographic reasons -- an exit in one country reaching another country's
-	// properties slowly or not at all -- which is the ClassReputation trap
-	// reintroduced INSIDE the health score. Mixed into site, they widen the
+	// properties slowly or not at all -- and a class-level verdict would then
+	// be about geography rather than the exit. Mixed into site, they widen the
 	// operator spread without inventing a verdict the data cannot support.
 	ClassSite Class = "site"
-
-	// ClassReputation measures something the other classes do not, and is
-	// EXCLUDED FROM THE HEALTH SCORE ON PURPOSE. Do not fold it into
-	// Result.OKCount/Total. Six of its eight entries were measured refusing a
-	// datacenter IP outright -- 403, 401 -- in four consecutive runs from a
-	// hosted host, and again when this table was built. On a residential or
-	// cellular exit those same endpoints return clean. So a
-	// failure here says "this exit is treated as a datacenter by bot-management
-	// vendors", which is genuinely useful (a provider that passes is more useful
-	// to a real user, because that is what the user will hit) but is NOT a
-	// statement that the provider is broken. Scoring it would make every hosted
-	// provider read as degraded and destroy the signal the health classes carry.
-	//
-	// One caveat that constrains how far this can be read, recorded because it
-	// is measured rather than assumed. Three observations of www.reddit.com from
-	// the SAME host and IP, within a day:
-	//
-	//	curl, default user-agent          -> 403 (4/4 runs)
-	//	the Go prober through a provider  -> 200
-	//	curl, this package's UserAgent    -> 206
-	//
-	// Same address, three different clients, three different answers. That is
-	// TLS/client fingerprinting at least as much as it is IP reputation. So a
-	// reputation failure is evidence about the CLIENT-AND-IP PAIR, not about the
-	// address alone, and this class needs field data across many providers
-	// before anyone treats it as a clean IP-quality score. It is a diagnostic
-	// under observation, not a metric.
-	//
-	// Two entries in it do not currently discriminate, and both are recorded on
-	// the entries themselves so a log line is not misread: stackoverflow answers
-	// 302 to everyone (a zero-body issue, never an ip refusal), and ecosia's
-	// answer differed between the staged runs and the one that built this table.
-	ClassReputation Class = "reputation"
 )
 
-// Classes is the declared order the SCORED classes are reported in.
-// Result.ByClass is a map, so iterating it directly would render a different
-// summary line on every pass; every ordered rendering goes through this slice
-// instead.
-//
-// ClassReputation is deliberately absent: it is not part of the health score
-// and is reported on its own (Result.Reputation). See its doc comment.
-var Classes = []Class{ClassDNS, ClassConnectivity, ClassCDN, ClassSite}
+// The declared order the classes are reported in. Result.ByClass
+// is a map, so iterating it directly would render a different summary line on
+// every pass; every ordered rendering goes through this slice instead. It is
+// also the closed set a pooled destination's class must come from.
+var Classes = []Class{ClassDns, ClassConnectivity, ClassCdn, ClassSite}
 
-// unscoredClasses are the classes kept out of Result.OKCount/Total/ByClass.
-//
-// A class is scored unless it is named here, so a class added later lands in
-// the health score by default -- which is the safe direction: a new class that
-// should not be scored is a visible number nobody can miss, whereas a health
-// class silently omitted from the score would be a signal quietly turned off.
-var unscoredClasses = map[Class]bool{ClassReputation: true}
-
-// scored reports whether a class counts towards the health score.
-func scored(c Class) bool { return !unscoredClasses[c] }
-
-// sampleSizes is how many destinations of each class one run draws. It is a
+// How many destinations of each class one run draws. It is a
 // package constant, identical in every deployment -- see the package comment on
 // why there is no per-environment knob.
 //
-// Two constraints fix these numbers, and it is worth recording which one binds.
+// The sizes are set by what the server reads, not by what a run can afford.
+// The one-in-ten rule and the egress index read runs of at least 50 scored
+// loads (GEOMAP §10.5, MinScoredLoads): at the 26 loads a run used to draw, the
+// one-in-ten line was a two-failure line, and one site's policy was a
+// provider's verdict. So the sizes sum to 50, roughly doubling the old
+// 4/5/5/12:
 //
-// The BYTE budget: at the 1024-byte cap a run may spend about 33 KiB per
-// provider (what the 31-entry fixed table cost), which would buy ~33
-// destinations. The arithmetic for the sizes below is on the package comment
-// and comes to 25.25 KiB.
+//	dns 6 of 7, connectivity 8 of 14, cdn 10 of 18, site 26 of 100
 //
-// The WALL-CLOCK budget binds first, and is why the sizes stop short of what
-// the bytes would allow: a whole run has to fit in one -probe-timeout, which
-// means ceil(n/DefaultConcurrency) * DefaultPerRequestTimeout <= DefaultBudget.
-// At n = 30 that is ceil(30/6) = 5 rounds x 10s = 50s against a 60s budget.
-// Raising site to 18 would spend the spare bytes and put the run at 6 rounds =
-// 60s, with no margin for a slow round. Bytes are cheap here; a probe that
-// overruns its deadline charges a healthy provider with a blackhole.
+// dns stops at six because the class holds seven: a sample must be drawn from
+// more than it takes, or it is a fixed table wearing a sample's name
+// (TestSampleSizesAreDeclaredForEveryClass), and six of seven still leaves a
+// provider unable to know which DoH operator it will not be asked for. The
+// site class takes what dns cannot, being the widest pool and the class whose
+// verdict the index weighs most directly.
 //
-// THREE IS THE FLOOR for any class, and none of these is below four. A class
+// The wall clock no longer binds these numbers. It used to -- a whole run had
+// to fit in one probe timeout -- but a run now spans minutes by design (every
+// load gets its spaced tries), and a load holds a concurrency slot only while
+// it fetches. A first round of 50 at DefaultConcurrency is ceil(50/6) = 9
+// rounds, 90 seconds at the worst, against a run that waits five minutes
+// between attempts. Options.RunBudget is the whole bound.
+//
+// Bytes stay cheap: 43,520 bytes for one attempt of every load, on the package
+// comment.
+//
+// Three is the floor for any class, and none of these is near it. A class
 // verdict has to separate one flaky endpoint from a class-wide fault: at 1 the
 // class is a single destination wearing a class name, at 2 one flake is half
 // the class and cdn=1/2 says nothing, and at 3 "cdn=0/3" means three
 // independently operated endpoints all refused in the same run -- which is a
-// statement. The sizes above the floor buy spread rather than certainty: dns
-// draws 4 of 7 so a run usually spans more than one jurisdiction, and site
-// draws 12 because it is the widest pool and its verdict would otherwise rest
-// on the narrowest evidence.
+// statement.
 //
-// Coverage is a RATE, not a promise: site draws 12 of 93, so a given site
-// destination is asked for on about one run in eight. That is not "the table is
-// covered in eight runs" -- drawing 12 at a time from 93 until every entry has
-// been seen takes on the order of 40 runs (93/12 * H(93) ~= 40). What
-// accumulates quickly is fleet-wide coverage, because every provider draws
-// independently.
+// Coverage is a rate, not a promise: site draws 26 of 100, so a given site
+// destination is asked for on about one run in four. What accumulates quickly
+// is fleet-wide coverage, because every provider draws independently.
 //
-// A class with no entry here is probed WHOLE. That is the safe direction: a
+// A class with no entry here is probed whole. That is the safe direction: a
 // class added to the table without a sample size costs visible bytes rather
 // than silently never being probed.
 var sampleSizes = map[Class]int{
-	ClassDNS:          4,
-	ClassConnectivity: 5,
-	ClassCDN:          5,
-	ClassSite:         12,
-	ClassReputation:   4,
+	ClassDns:          6,
+	ClassConnectivity: 8,
+	ClassCdn:          10,
+	ClassSite:         26,
 }
 
-// Expect declares what "success" means for one destination. The default,
+// Declares what "success" means for one destination. The default,
 // ExpectBody, is the original rule and the reason this check catches
 // blackholes; ExpectStatus exists for the endpoints where an empty body is the
 // correct answer.
+//
+// On the wire (a pooled Destination) it is a word, not the number: "body",
+// "status" or "reachable". A stored integer would silently change meaning the
+// first time these constants were reordered, and an unknown word is refused
+// when the pool is decoded rather than judged as something else.
 type Expect int
 
 const (
-	// ExpectBody requires a 2xx AND a non-empty body. This is the default (the
+	// Requires a 2xx and a non-empty body. This is the default (the
 	// zero value) and must stay that way: a status line with no data behind it
 	// is exactly what a blackholing provider produces, so a 200 with an empty
-	// body is a FAILURE. TestEmptyBodyIs200Failure guards it.
+	// body is a failure. TestEmptyBodyIs200Failure guards it.
 	ExpectBody Expect = iota
-	// ExpectStatus requires exactly Destination.Status and permits an empty
+	// Requires exactly Destination.Status and permits an empty
 	// body. It exists because 21 of the 143 endpoints measured from a real
 	// datacenter host are reachable while legitimately returning zero bytes --
 	// every generate_204 connectivity check, and many 3xx redirects -- and the
 	// ExpectBody rule would score all of them as failures.
 	//
-	// Note that this is STRICTER than ExpectBody about the status, not looser:
+	// Note that this is stricter than ExpectBody about the status, not looser:
 	// the status must match exactly. A provider that synthesizes a bare 200 does
 	// not pass an ExpectStatus 204 destination. Relaxing this to "any 2xx" would
 	// turn the class into a hole in the blackhole rule.
 	//
-	// It is still the WEAKER contract in one respect that matters, and no entry
+	// It is still the weaker contract in one respect that matters, and no entry
 	// should take it without cause: a bare status line proves only that
 	// something answered, while a body proves bytes crossed. That is why a 4xx
 	// is never declared here (a refusal must stay a failure), and why a
 	// destination that could be pointed at a url returning a real body is
 	// pointed there instead of being declared.
 	ExpectStatus
-	// ExpectReachable accepts ANY 2xx or 3xx, with or without a body. It exists
-	// for consumer sites that redirect based on the CLIENT'S GEOGRAPHY, which
+	// Accepts any 2xx or 3xx, with or without a body. It exists
+	// for consumer sites that redirect based on the client's geography, which
 	// this probe sees from a different exit country on every provider.
 	//
 	// Measured: microsoft.com answers 206/1024B to a datacenter host in the US
@@ -327,68 +312,173 @@ const (
 	// This is the weakest contract and must stay confined to ClassSite, where
 	// the question being asked is "did the provider carry my request to this
 	// host and bring back a valid HTTP response" -- which is exactly the
-	// "basic functionality" bar. It does NOT weaken the blackhole rule: a
+	// "basic functionality" bar. It does not weaken the blackhole rule: a
 	// blackholing provider returns no response at all, so it fails this too.
 	// A 4xx/5xx is still a failure here, so a refusal stays a refusal.
 	ExpectReachable
 )
 
-// Destination is one endpoint to check.
-type Destination struct {
-	Name  string
-	Class Class
-	URL   string
-	// Headers are sent with the request, and exist because destinations cannot
-	// be checked without them: cloudflare-dns.com answers 400 to the DoH JSON GET
-	// form without an Accept header, and the larger assets need a Range header to
-	// keep them from putting more than a couple of KiB on the wire. See also
-	// UserAgent, which every request carries.
-	Headers map[string]string
-	// Expect declares the success contract. The zero value is ExpectBody.
-	Expect Expect
-	// Status is the required status code, and is only read when Expect is
-	// ExpectStatus. Leaving it zero there is a misconfiguration and is reported
-	// as a failed check rather than silently accepting anything.
-	Status int
-	// MaxBytes caps the body read for this destination. Zero means MaxBodyBytes,
-	// and a value above MaxBodyBytes is clamped to it -- the package-level cap is
-	// the one documented in the byte budget and cannot be raised per entry.
-	MaxBytes int
-	// Verify optionally proves the body is what the destination is supposed to
-	// serve, and is the answer to a class of failure a status code cannot see: a
-	// captive portal or an interception box happily returns 200 with a body.
-	// Only parsing it proves the request was actually served by whom it was
-	// addressed to. It runs after the status/body rules, on the (capped) body.
-	Verify func(body []byte) error
+// Expect's wire spelling, in declaration order.
+var expectWords = map[Expect]string{
+	ExpectBody:      "body",
+	ExpectStatus:    "status",
+	ExpectReachable: "reachable",
 }
 
-// MaxBodyBytes is the ceiling on any single body read, and the clamp on
-// Destination.MaxBytes. It is a cap on the READ, applied with io.LimitReader: a
-// hostile or merely huge response cannot blow the byte budget documented on the
-// package -- www.canva.com answers a 403 with 1.4 MB and apnews.com a 200 with
-// 2.3 MB.
+// Implements fmt.Stringer: the wire spelling, or Expect(n) for a value that
+// has none.
+func (self Expect) String() string {
+	if word, ok := expectWords[self]; ok {
+		return word
+	}
+	return fmt.Sprintf("Expect(%d)", int(self))
+}
+
+// Refuses a value with no wire spelling rather than inventing one,
+// so a corrupted table cannot be served as a pool.
+func (self Expect) MarshalText() ([]byte, error) {
+	if word, ok := expectWords[self]; ok {
+		return []byte(word), nil
+	}
+	return nil, fmt.Errorf("egresshealth: expect %d has no wire spelling", int(self))
+}
+
+// Accepts exactly the wire spellings. An unknown word fails the
+// decode, and with it the whole pool (see FetchPool): judging a contract the
+// prober does not know as some contract it does would be a guess about a
+// provider's traffic.
+func (self *Expect) UnmarshalText(text []byte) error {
+	for value, word := range expectWords {
+		if string(text) == word {
+			*self = value
+			return nil
+		}
+	}
+	return fmt.Errorf("egresshealth: unknown expect %q; want body, status or reachable", text)
+}
+
+// Names a check that proves a body is what its destination
+// serves.
+type BodyCheckKind string
+
+const (
+	// Requires a DoH JSON answer section with data (see
+	// verifyDnsJson).
+	BodyCheckDnsJson BodyCheckKind = "dns_json"
+	// Requires the body to be one ip address (see verifyIpText).
+	BodyCheckIpText BodyCheckKind = "ip_text"
+	// Requires the body to contain BodyCheck.Text (see
+	// verifyContains).
+	BodyCheckContains BodyCheckKind = "contains"
+)
+
+// The answer to a class of failure a status code cannot see: a
+// captive portal or an interception box happily returns 200 with a body. Only
+// parsing the body proves the request was served by whom it was addressed to.
+// It runs after the status and body rules, on the capped body.
+//
+// It is data rather than a function so a pooled destination carries the same
+// proof a built-in one does; a pool whose dns entries arrived without their
+// check would pass every portal. The zero value is "no check".
+type BodyCheck struct {
+	Kind BodyCheckKind `json:"kind"`
+	// What BodyCheckContains looks for; unused by the others.
+	Text string `json:"text,omitempty"`
+}
+
+// Reports whether the check can be run as declared. An unknown kind is
+// an error, never "no check": treating a check the prober cannot run as
+// passing would be the portal hole BodyCheck exists to close.
+func (self BodyCheck) valid() error {
+	switch self.Kind {
+	case "", BodyCheckDnsJson, BodyCheckIpText:
+		return nil
+	case BodyCheckContains:
+		if self.Text == "" {
+			return errors.New("body check \"contains\" names no text; it would accept any body")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown body check %q", self.Kind)
+	}
+}
+
+// Runs the declared check on body. The zero value accepts.
+func (self BodyCheck) check(body []byte) error {
+	switch self.Kind {
+	case "":
+		return nil
+	case BodyCheckDnsJson:
+		return verifyDnsJson(body)
+	case BodyCheckIpText:
+		return verifyIpText(body)
+	case BodyCheckContains:
+		return verifyContains(body, self.Text)
+	default:
+		// valid() refuses this at the pool boundary; failing here too keeps a
+		// hand-built Destination from passing a check nobody can run.
+		return fmt.Errorf("unknown body check %q", self.Kind)
+	}
+}
+
+// One endpoint to check. The json tags are the pool's wire
+// format (see Pool): the server stores and serves destinations in exactly this
+// shape.
+type Destination struct {
+	Name  string `json:"name"`
+	Class Class  `json:"class"`
+	Url   string `json:"url"`
+	// Sent with the request, over the RequestProfile. They exist because
+	// some destinations cannot be checked without them:
+	// cloudflare-dns.com answers 400 to the DoH JSON GET form without an
+	// Accept header. Range and Accept-Encoding are dropped whatever sets them
+	// (see neverSent).
+	Headers map[string]string `json:"headers,omitempty"`
+	// Declares the success contract. The zero value is ExpectBody.
+	Expect Expect `json:"expect"`
+	// The required status code, read only when Expect is
+	// ExpectStatus. Leaving it zero there is a misconfiguration and is reported
+	// as a failed check rather than silently accepting anything.
+	Status int `json:"status,omitempty"`
+	// Caps the body read for this destination. Zero means MaxBodyBytes,
+	// and a value above MaxBodyBytes is clamped to it -- the package-level cap is
+	// the one documented in the byte budget and cannot be raised per entry.
+	MaxBytes int `json:"max_bytes,omitempty"`
+	// Optionally proves the body is what the destination is supposed to
+	// serve. See BodyCheck.
+	Verify BodyCheck `json:"verify,omitzero"`
+	// Where the destination is known not to work from: a
+	// provider published in one of these places is never asked to load it, so
+	// a site blocked in a country never counts against that country's exits
+	// (GEOMAP §11.3). The server learns and maintains the list (§11.4).
+	Incompatible []Place `json:"incompatible,omitempty"`
+	// Set by the server on a destination incompatible with some place, asks
+	// for it to be loaded from there anyway -- unscored, reported apart
+	// (CheckResult.Canary) -- so the server can tell when the site works there
+	// again. Where the destination is compatible it changes nothing.
+	Canary bool `json:"canary,omitempty"`
+}
+
+// The ceiling on any single body read, and the clamp on
+// Destination.MaxBytes. It is a cap on the read, applied with io.LimitReader,
+// after which the body is closed: a hostile or merely huge response cannot
+// blow the byte budget documented on the package -- www.canva.com answers a
+// 403 with 1.4 MB and apnews.com a 200 with 2.3 MB.
 //
 // It is 1024 bytes, down from 4096. Nothing in the table needs more: the point
-// of a read is that bytes arrived and, where Verify is set, that they parse,
-// and every verifier in this package works on far less than a kilobyte. Hitting
-// the cap is NOT by itself a signal that anything is wrong -- most destinations
-// serve far more than this when healthy.
+// of a read is that bytes arrived and, where a body check is declared, that
+// they parse, and every check in this package works on far less than a
+// kilobyte. Hitting the cap is not by itself a signal that anything is wrong --
+// most destinations serve far more than this when healthy.
 const MaxBodyBytes = 1024
 
-// rangeFirst1KiB is the Range header sent with every body-bearing destination
-// outside the two classes that are small by construction. Where it is honored
-// the response is a 206 of ~1 KiB instead of the whole asset; where it is
-// ignored the response is a 200 and the capped read applies. It is an
-// optimisation on the WIRE cost, never the bound -- see the package comment for
-// the hosts measured ignoring it.
-const rangeFirst1KiB = "bytes=0-1023"
-
-// acceptDNSJSON is the Accept header for the DoH JSON GET form. Cloudflare
+// The Accept header for the DoH JSON GET form. Cloudflare
 // answers 400 without it. The others serve JSON with no header at all; sending
-// it is harmless and keeps the seven entries identical in shape.
-const acceptDNSJSON = "application/dns-json"
+// it is harmless and keeps the seven entries identical in shape. It replaces
+// the navigation Accept of the RequestProfile for these entries.
+const acceptDnsJson = "application/dns-json"
 
-// dnsQuery is the query every DoH destination asks. example.com is an IANA
+// The query every DoH destination asks. example.com is an IANA
 // reserved name that will not disappear, and its A record is short.
 const dnsQuery = "?name=example.com&type=A"
 
@@ -396,54 +486,42 @@ const dnsQuery = "?name=example.com&type=A"
 // from each class, so the byte budget on the package is real arithmetic rather
 // than a hope.
 const (
-	maxDNSBytes          = 768  // largest measured: doh.dns.sb, 579 B (it returns DNSSEC records)
-	maxConnectivityBytes = 256  // largest measured that must PARSE: captive.apple.com, 69 B
+	maxDnsBytes          = 768  // largest measured: doh.dns.sb, 579 B (it returns DNSSEC records)
+	maxConnectivityBytes = 256  // largest measured that must parse: captive.apple.com, 69 B
 	maxAssetBytes        = 1024 // = MaxBodyBytes; everything else
 )
 
-// UserAgent identifies this probe to every destination. It is deliberately
-// descriptive rather than a browser impersonation: these are other people's
-// servers, and an automated client that will not say who it is has no business
-// on them.
-//
-// It is also load-bearing, not courtesy. Go's default "Go-http-client/1.1" is
-// refused outright by Wikimedia's robot policy -- measured, not assumed: the
-// same URL answered 403 `Please set a user-agent and respect our robot policy`
-// under the default agent and 200 under this one, from the same host in the
-// same minute. A destination that fails for every provider is not a signal, it
-// is noise that would read as site=11/12 across the entire fleet forever.
-//
-// It also demonstrably changes what ClassReputation measures -- see that
-// class's comment, where the same host got 403 under curl's default agent and
-// 206 under this one.
-const UserAgent = "urnetwork-egress-prober/0.1 (+https://github.com/urnetwork/operator-proxy; operator egress health probe)"
-
-// destinations is the production table: the owner's curated 159-row list,
+// The built-in table: the owner's curated 159-row list,
 // minus the rows that cannot be checked over an *http.Client, plus the seven
-// DoH endpoints. A run does not fetch it -- see sampleSizes.
+// DoH endpoints. A run does not fetch it -- see sampleSizes. It is the seed the
+// server's pool starts from and the fallback when the pool cannot be fetched
+// (see Pool); a run over the pool follows every rule below, which
+// Destination.Validate restates for data.
 //
 // Every URL is https and on the default port 443. That is a hard requirement,
 // not a coincidence -- the confinement self-check dials one fixed port
 // (cmd/egress-prober's confinementPort), so a destination on any other port
-// would silently fall outside the check. TestEveryDestinationIsHTTPSOn443
+// would silently fall outside the check. TestEveryDestinationIsHttpsOn443
 // enforces it.
 //
-// Every entry was measured from a datacenter host with this package's
-// UserAgent, and its contract is what that measurement says: a 200 with a body
-// takes the default ExpectBody rule, and 202/204/3xx declare their status. The
-// rules the measurements forced, in the order they matter:
+// Every entry was measured from a datacenter host with the identifying user
+// agent this package used to send, and its contract is what that measurement
+// says: a 200 with a body takes the default ExpectBody rule, and 202/204/3xx
+// declare their status. The rules the measurements forced, in the order they
+// matter:
 //
-//   - A 4xx or 5xx is NEVER declared with ExpectStatus. Six reputation entries
-//     answer 403/401 from a datacenter exit; declaring those would convert the
-//     class's entire signal into a pass.
+//   - A 4xx or 5xx is never declared with ExpectStatus. Six of the site
+//     entries that came from the dissolved reputation class answer 403/401
+//     from a datacenter exit; declaring those would turn a refusal into a
+//     pass, which is the one thing a site load must never do.
 //
-//   - A 200 with a ZERO-LENGTH body cannot be declared either, because it is
+//   - A 200 with a zero-length body cannot be declared either, because it is
 //     the blackhole signature itself. Two endpoints measured that way
 //     (d1.awsstatic.com and cachefly.cachefly.net's bare host); both are
 //     re-pointed at a url on the same operator that serves a real body, and
 //     neither is whitelisted by status. See their entries.
 //
-//   - A destination whose STATUS is not stable cannot be declared, and this is
+//   - A destination whose status is not stable cannot be declared, and this is
 //     not hypothetical. Three of the owner's 21 zero-body endpoints answered
 //     differently when this table was built, from the same host and address
 //     days later: netflix 302 -> 200, cnn 302 -> 200, hulu 302 -> 301. A
@@ -457,7 +535,7 @@ const UserAgent = "urnetwork-egress-prober/0.1 (+https://github.com/urnetwork/op
 //
 //   - Redirects are declared, never chased: the production client refuses to
 //     follow them (providertunnel's CheckRedirect), which is what makes a 3xx
-//     an answer about THIS url rather than about wherever it pointed.
+//     an answer about this url rather than about wherever it pointed.
 //
 // Other choices worth recording, because the obvious pick was wrong in a way
 // only measurement showed:
@@ -473,16 +551,16 @@ const UserAgent = "urnetwork-egress-prober/0.1 (+https://github.com/urnetwork/op
 //
 //   - ifconfig.me is asked for /ip, not /. The bare host serves an HTML page to
 //     anything that does not look like curl -- measured, 10915 bytes of it --
-//     and /ip always answers with the address, which is what verifyIPText can
+//     and /ip always answers with the address, which is what verifyIpText can
 //     actually prove.
 //
 //   - one.one.one.one and speed.cloudflare.com are in ClassSite rather than
 //     ClassConnectivity, where the source list files them. They answer with an
 //     ordinary web page rather than a fixed portal-detection token, so they
-//     cannot carry this class's Verify contract, and a connectivity entry
-//     without one would pass for a captive portal.
+//     cannot carry this class's body check, and a connectivity entry without
+//     one would pass for a captive portal.
 //
-//   - dns.alidns.com serves the JSON form on /resolve ONLY. Its /dns-query path
+//   - dns.alidns.com serves the JSON form on /resolve only. Its /dns-query path
 //     answers `400 no 'dns' query parameter found` -- it is wire-format only.
 //     doh.dns.sb is the mirror image: /dns-query serves JSON, /resolve is a 301.
 //     The path is not interchangeable between operators and cannot be guessed.
@@ -491,81 +569,82 @@ const UserAgent = "urnetwork-egress-prober/0.1 (+https://github.com/urnetwork/op
 //     DoH entries. Quad9 and Mullvad serve only RFC 8484 wire format on 443
 //     (400 to a JSON GET) and Quad9's JSON API is on port 5053, which breaks the
 //     443-only rule above; Control D answers 200 with a non-JSON body, which is
-//     precisely the shape Verify exists to reject.
+//     precisely the shape a body check exists to reject.
 //
 //   - Operators repeat inside a class, and that is tolerated here where the
 //     narrow table refused it: connectivity carries three Google-operated
 //     generate_204 hostnames and three Cloudflare-operated endpoints, because
 //     the owner's list carries them and dropping them would narrow the pool a
-//     sample is drawn from. What protects the class is the draw: five of
+//     sample is drawn from. What protects the class is the draw: eight of
 //     fourteen, chosen per run, so no single operator can be relied on to
 //     appear. Do not read "14 destinations" as "14 operators".
 var destinations = []Destination{
-	// DNS-over-HTTPS, JSON GET form, SEVEN distinct operators including two
+	// DNS-over-HTTPS, JSON GET form, seven distinct operators including two
 	// Chinese ones (dns.alidns.com, doh.pub) for deliberate jurisdictional
 	// diversity: a provider whose upstream filters western resolvers, or the
 	// reverse, shows up as a partial class rather than a clean pass. A provider
 	// that blocks DoH breaks name resolution for every client that uses it.
 	//
-	// Every entry carries Verify: a 200 with bytes is not proof that a name was
-	// resolved, because a captive portal or an interception box returns exactly
-	// that. Only a parseable answer is. No Range header: these bodies are small
-	// and a truncated one would not parse.
+	// Every entry carries a dns_json body check: a 200 with bytes is not proof
+	// that a name was resolved, because a captive portal or an interception box
+	// returns exactly that. Only a parseable answer is. These bodies are small,
+	// and the cap is sized so a whole answer always fits: a truncated one would
+	// not parse.
 	{
 		Name:     "cloudflare-doh",
-		Class:    ClassDNS,
-		URL:      "https://cloudflare-dns.com/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://cloudflare-dns.com/dns-query" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "google-doh",
-		Class:    ClassDNS,
-		URL:      "https://dns.google/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://dns.google/resolve" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "adguard-doh",
-		Class:    ClassDNS,
-		URL:      "https://dns.adguard-dns.com/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://dns.adguard-dns.com/resolve" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "dnssb-doh",
-		Class:    ClassDNS,
-		URL:      "https://doh.dns.sb/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://doh.dns.sb/dns-query" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "nextdns-doh",
-		Class:    ClassDNS,
-		URL:      "https://dns.nextdns.io/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://dns.nextdns.io/dns-query" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "alidns-doh",
-		Class:    ClassDNS,
-		URL:      "https://dns.alidns.com/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://dns.alidns.com/resolve" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	{
 		Name:     "dnspod-doh",
-		Class:    ClassDNS,
-		URL:      "https://doh.pub/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDNSJSON},
-		MaxBytes: maxDNSBytes,
-		Verify:   verifyDNSJSON,
+		Class:    ClassDns,
+		Url:      "https://doh.pub/dns-query" + dnsQuery,
+		Headers:  map[string]string{"Accept": acceptDnsJson},
+		MaxBytes: maxDnsBytes,
+		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
 	},
 	// Connectivity checks: the endpoints operating systems use to detect captive
 	// portals, plus the echo services that answer with the exit address. None is
@@ -573,22 +652,22 @@ var destinations = []Destination{
 	// well under 256 bytes.
 	//
 	// The generate_204 entries are the reason Expect exists: 204 with no body is
-	// the CORRECT answer, and the ExpectBody rule would have scored all of them
+	// the correct answer, and the ExpectBody rule would have scored all of them
 	// as failures. They are also the strictest entries in the table -- an exact
 	// status match, so a provider that synthesizes a bare 200 fails them.
 	//
-	// Every body-bearing entry carries Verify, for the captive-portal case these
-	// endpoints were literally designed to detect: a portal returns 200 with a
-	// login page, which is non-empty and would otherwise pass. That rule is what
-	// moved one.one.one.one and speed.cloudflare.com out of this class -- they
-	// answer with an ordinary page there is nothing fixed to check.
+	// Every body-bearing entry carries a body check, for the captive-portal case
+	// these endpoints were literally designed to detect: a portal returns 200
+	// with a login page, which is non-empty and would otherwise pass. That rule
+	// is what moved one.one.one.one and speed.cloudflare.com out of this class
+	// -- they answer with an ordinary page there is nothing fixed to check.
 	//
-	// No Range header anywhere here: these bodies are smaller than the cap
-	// already, and a 206 would buy nothing.
+	// These bodies are smaller than the cap already, so the capped read takes
+	// them whole.
 	{
 		Name:     "google-generate-204",
 		Class:    ClassConnectivity,
-		URL:      "https://www.google.com/generate_204",
+		Url:      "https://www.google.com/generate_204",
 		Expect:   ExpectStatus,
 		Status:   204,
 		MaxBytes: maxConnectivityBytes,
@@ -596,7 +675,7 @@ var destinations = []Destination{
 	{
 		Name:     "google-connectivitycheck",
 		Class:    ClassConnectivity,
-		URL:      "https://connectivitycheck.gstatic.com/generate_204",
+		Url:      "https://connectivitycheck.gstatic.com/generate_204",
 		Expect:   ExpectStatus,
 		Status:   204,
 		MaxBytes: maxConnectivityBytes,
@@ -604,7 +683,7 @@ var destinations = []Destination{
 	{
 		Name:     "gstatic-204",
 		Class:    ClassConnectivity,
-		URL:      "https://www.gstatic.com/generate_204",
+		Url:      "https://www.gstatic.com/generate_204",
 		Expect:   ExpectStatus,
 		Status:   204,
 		MaxBytes: maxConnectivityBytes,
@@ -612,14 +691,14 @@ var destinations = []Destination{
 	{
 		Name:     "apple-captive-portal",
 		Class:    ClassConnectivity,
-		URL:      "https://captive.apple.com/hotspot-detect.html",
+		Url:      "https://captive.apple.com/hotspot-detect.html",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyContains("Success"),
+		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "Success"},
 	},
 	{
 		Name:     "ubuntu-connectivity-check",
 		Class:    ClassConnectivity,
-		URL:      "https://connectivity-check.ubuntu.com",
+		Url:      "https://connectivity-check.ubuntu.com",
 		Expect:   ExpectStatus,
 		Status:   204,
 		MaxBytes: maxConnectivityBytes,
@@ -627,21 +706,21 @@ var destinations = []Destination{
 	{
 		Name:     "firefox-detectportal",
 		Class:    ClassConnectivity,
-		URL:      "https://detectportal.firefox.com/success.txt",
+		Url:      "https://detectportal.firefox.com/success.txt",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyContains("success"),
+		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "success"},
 	},
 	{
 		Name:     "gnome-nm-check",
 		Class:    ClassConnectivity,
-		URL:      "https://nmcheck.gnome.org/check_network_status.txt",
+		Url:      "https://nmcheck.gnome.org/check_network_status.txt",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyContains("online"),
+		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "online"},
 	},
 	{
 		Name:     "cloudflare-cp-204",
 		Class:    ClassConnectivity,
-		URL:      "https://cp.cloudflare.com/generate_204",
+		Url:      "https://cp.cloudflare.com/generate_204",
 		Expect:   ExpectStatus,
 		Status:   204,
 		MaxBytes: maxConnectivityBytes,
@@ -649,51 +728,49 @@ var destinations = []Destination{
 	{
 		Name:     "cloudflare-trace",
 		Class:    ClassConnectivity,
-		URL:      "https://1.1.1.1/cdn-cgi/trace",
+		Url:      "https://1.1.1.1/cdn-cgi/trace",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyContains("ip="),
+		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "ip="},
 	},
 	{
 		Name:     "aws-checkip",
 		Class:    ClassConnectivity,
-		URL:      "https://checkip.amazonaws.com",
+		Url:      "https://checkip.amazonaws.com",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyIPText,
+		Verify:   BodyCheck{Kind: BodyCheckIpText},
 	},
 	{
 		Name:     "ifconfig-me",
 		Class:    ClassConnectivity,
-		URL:      "https://ifconfig.me/ip",
+		Url:      "https://ifconfig.me/ip",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyIPText,
+		Verify:   BodyCheck{Kind: BodyCheckIpText},
 	},
 	{
 		Name:     "icanhazip",
 		Class:    ClassConnectivity,
-		URL:      "https://icanhazip.com",
+		Url:      "https://icanhazip.com",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyIPText,
+		Verify:   BodyCheck{Kind: BodyCheckIpText},
 	},
 	{
 		Name:     "ipify",
 		Class:    ClassConnectivity,
-		URL:      "https://api.ipify.org",
+		Url:      "https://api.ipify.org",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyIPText,
+		Verify:   BodyCheck{Kind: BodyCheckIpText},
 	},
-	// The list's ipinfo row is NOT here, and the reason is structural rather
-	// than about the endpoint: ipinfo.io is a PINNED geolocation source
-	// (geolocate/sources.go), and the health destinations are deliberately
-	// reached unpinned. A host that is both would either weaken the pin or make
-	// a routine leaf rotation read as the provider blackholing a destination.
-	// cmd/egress-prober's TestEgressHealthDestinationsAreNotPinned enforces it.
-	// The class keeps four other echo services.
+	// The list's ipinfo row is not here. ipinfo.io is an ip-intelligence
+	// vendor, and the prober consults no ip-intelligence source for anything
+	// (GEOMAP D24) -- not even as a reachability target, where a vendor that
+	// classifies the exit on sight could answer it differently from the echo
+	// services beside it. The class keeps four other echo services.
 	{
 		Name:     "example-com-https",
 		Class:    ClassConnectivity,
-		URL:      "https://example.com",
+		Url:      "https://example.com",
 		MaxBytes: maxConnectivityBytes,
-		Verify:   verifyContains("Example Domain"),
+		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "Example Domain"},
 	},
 
 	// Content delivery: CDN edges, distribution mirrors and bulk-download hosts.
@@ -708,148 +785,142 @@ var destinations = []Destination{
 	// and a permanent false failure. If one named entry fails across the whole
 	// fleet while its class passes, suspect the URL before suspecting the
 	// providers. They are asset urls rather than front pages because a CDN entry
-	// should prove the EDGE serves bytes, which a marketing page fronted by the
+	// should prove the edge serves bytes, which a marketing page fronted by the
 	// same CDN does not do as directly.
 	{
 		Name:     "cloudflare-cdn",
-		Class:    ClassCDN,
-		URL:      "https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "cloudflare-sized-1kb",
-		Class:    ClassCDN,
-		URL:      "https://speed.cloudflare.com/__down?bytes=1024",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://speed.cloudflare.com/__down?bytes=1024",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "fastly",
-		Class:    ClassCDN,
-		URL:      "https://www.fastly.net",
+		Class:    ClassCdn,
+		Url:      "https://www.fastly.net",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "jsdelivr-fastly-mirror",
-		Class:    ClassCDN,
-		URL:      "https://fastly.jsdelivr.net/npm/normalize.css@8.0.1/normalize.min.css",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://fastly.jsdelivr.net/npm/normalize.css@8.0.1/normalize.min.css",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "unpkg",
-		Class:    ClassCDN,
-		URL:      "https://unpkg.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://unpkg.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "google-hosted-libraries",
-		Class:    ClassCDN,
-		URL:      "https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "microsoft-azure-cdn",
-		Class:    ClassCDN,
-		URL:      "https://ajax.aspnetcdn.com",
+		Class:    ClassCdn,
+		Url:      "https://ajax.aspnetcdn.com",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
 	},
 	{
-		// d1.awsstatic.com, which the list names, answered 200 with a ZERO-LENGTH
+		// d1.awsstatic.com, which the list names, answered 200 with a zero-length
 		// body on every measurement -- indistinguishable from the blackhole
 		// signature, so it cannot be judged by status and must not be
 		// whitelisted into one. Its /robots.txt answers 403. This is the same
 		// operator (CloudFront) on the url the previous table measured serving a
-		// real body, with Range honored (206, 1024 bytes).
+		// real body. It is a multi-megabyte bundle, so without a Range header the
+		// edge starts sending all of it: the capped read keeps the first KiB and
+		// closes, and up to one receive window of the rest can still cross the
+		// provider's link first (see the byte budget on the package). A smaller
+		// CloudFront-served object in the server's pool would retire that cost.
 		Name:     "amazon-cloudfront",
-		Class:    ClassCDN,
-		URL:      "https://sdk.amazonaws.com/js/aws-sdk-2.1691.0.min.js",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://sdk.amazonaws.com/js/aws-sdk-2.1691.0.min.js",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "keycdn",
-		Class:    ClassCDN,
-		URL:      "https://www.keycdn.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://www.keycdn.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "cdn77",
-		Class:    ClassCDN,
-		URL:      "https://www.cdn77.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://www.cdn77.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
-		// Re-pointed at robots.txt: the bare host IGNORES Range and returns
+		// Re-pointed at robots.txt: the bare host ignores Range and returns
 		// 399,407 B. Measured on the beta fleet it was the single largest source
 		// of failures (14 of 40 providers) -- not because those providers were
 		// unhealthy, but because moving 390 KB inside the per-request timeout is
-		// a bandwidth test wearing a health test's clothes. robots.txt honors
-		// Range (206, 24 B).
+		// a bandwidth test wearing a health test's clothes. robots.txt is 24
+		// bytes, so the capped read takes it whole.
 		Name:     "sucuri-cdn",
-		Class:    ClassCDN,
-		URL:      "https://www.sucuri.net/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://www.sucuri.net/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		// The list's bare host answered 200 with a zero-length body. CacheFly's own
-		// test asset exists to be fetched and honors Range (206, 1024 bytes), so
-		// the 10 MB behind it never leaves their edge.
+		// test asset exists to be fetched. It used to be asked for with a Range
+		// header, which it honors (206, 1024 bytes), so the 10 MB behind it never
+		// left their edge. Without one the capped read still keeps only the first
+		// KiB, but up to one receive window of the file can cross the provider's
+		// link before the close lands -- the largest wire cost left in the table,
+		// and the first entry the server's pool should replace with a small
+		// object on the same edge.
 		Name:     "cachefly",
-		Class:    ClassCDN,
-		URL:      "https://cachefly.cachefly.net/10mb.test",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://cachefly.cachefly.net/10mb.test",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "ovh-proof-eu",
-		Class:    ClassCDN,
-		URL:      "https://proof.ovh.net",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://proof.ovh.net",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "kernel-org-mirrors",
-		Class:    ClassCDN,
-		URL:      "https://mirrors.kernel.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://mirrors.kernel.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "debian-cdn",
-		Class:    ClassCDN,
-		URL:      "https://deb.debian.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://deb.debian.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "ubuntu-archive-plain-http",
-		Class:    ClassCDN,
-		URL:      "https://archive.ubuntu.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://archive.ubuntu.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "alpine-cdn",
-		Class:    ClassCDN,
-		URL:      "https://dl-cdn.alpinelinux.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassCdn,
+		Url:      "https://dl-cdn.alpinelinux.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "fedora-downloads",
-		Class:    ClassCDN,
-		URL:      "https://dl.fedoraproject.org",
+		Class:    ClassCdn,
+		Url:      "https://dl.fedoraproject.org",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -857,13 +928,12 @@ var destinations = []Destination{
 
 	// Ordinary web properties: search, social, video, commerce, developer
 	// infrastructure, news, reference, productivity, gaming, and the regional
-	// properties that carry the same traffic outside the US and EU. site=0/12
+	// properties that carry the same traffic outside the US and EU. site=0/26
 	// means the tunnel is not carrying ordinary web traffic at all.
 	//
-	// Chosen for availability rather than for discrimination -- every one of them
-	// answered on four consecutive runs from a datacenter host, and the
-	// "rejects datacenter ranges" role this class used to carry has moved to
-	// ClassReputation, where it is not scored.
+	// Chosen for availability -- every one of them answered on four consecutive
+	// runs from a datacenter host -- with the exception of the last eight,
+	// below, which were chosen for the opposite reason.
 	//
 	// The 3xx entries here declare the status they were measured answering. Read
 	// the rule on the table above before adding another: a declared status is
@@ -872,148 +942,127 @@ var destinations = []Destination{
 	{
 		Name:     "cloudflare-one-one-one-one",
 		Class:    ClassSite,
-		URL:      "https://one.one.one.one",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://one.one.one.one",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "cloudflare-speed-test",
 		Class:    ClassSite,
-		URL:      "https://speed.cloudflare.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://speed.cloudflare.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "google",
 		Class:    ClassSite,
-		URL:      "https://www.google.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.google.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "bing",
 		Class:    ClassSite,
-		URL:      "https://www.bing.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.bing.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "yahoo",
 		Class:    ClassSite,
-		URL:      "https://www.yahoo.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.yahoo.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "duckduckgo",
 		Class:    ClassSite,
-		URL:      "https://duckduckgo.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://duckduckgo.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "baidu",
 		Class:    ClassSite,
-		URL:      "https://www.baidu.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.baidu.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "yandex",
 		Class:    ClassSite,
-		URL:      "https://yandex.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://yandex.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "facebook",
 		Class:    ClassSite,
-		URL:      "https://www.facebook.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.facebook.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "instagram",
 		Class:    ClassSite,
-		URL:      "https://www.instagram.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.instagram.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "twitter-x",
 		Class:    ClassSite,
-		URL:      "https://x.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://x.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "linkedin",
 		Class:    ClassSite,
-		URL:      "https://www.linkedin.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.linkedin.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "tiktok",
 		Class:    ClassSite,
-		URL:      "https://www.tiktok.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.tiktok.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "pinterest",
 		Class:    ClassSite,
-		URL:      "https://www.pinterest.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.pinterest.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "snapchat",
 		Class:    ClassSite,
-		URL:      "https://www.snapchat.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.snapchat.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "discord",
 		Class:    ClassSite,
-		URL:      "https://discord.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://discord.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "telegram",
 		Class:    ClassSite,
-		URL:      "https://telegram.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://telegram.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "whatsapp",
 		Class:    ClassSite,
-		URL:      "https://www.whatsapp.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.whatsapp.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "mastodon",
 		Class:    ClassSite,
-		URL:      "https://mastodon.social",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://mastodon.social",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "bluesky",
 		Class:    ClassSite,
-		URL:      "https://bsky.app",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://bsky.app",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "youtube",
 		Class:    ClassSite,
-		URL:      "https://www.youtube.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.youtube.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
@@ -1025,26 +1074,23 @@ var destinations = []Destination{
 		// real body and does not move.
 		Name:     "netflix",
 		Class:    ClassSite,
-		URL:      "https://www.netflix.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.netflix.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "twitch",
 		Class:    ClassSite,
-		URL:      "https://www.twitch.tv",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.twitch.tv",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "vimeo",
 		Class:    ClassSite,
-		URL:      "https://vimeo.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://vimeo.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
-		// hulu answers 302-with-empty-body on BOTH the bare host and
+		// hulu answers 302-with-empty-body on both the bare host and
 		// /robots.txt, so it can never satisfy ExpectBody. Declared as the
 		// redirect it actually is. Measured on the beta fleet: 4 of 40
 		// providers failed on this entry alone before the fix.
@@ -1053,86 +1099,74 @@ var destinations = []Destination{
 		// declared. Reachability is the question this class actually asks.
 		Name:     "hulu",
 		Class:    ClassSite,
-		URL:      "https://www.hulu.com",
+		Url:      "https://www.hulu.com",
 		Expect:   ExpectReachable,
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "disney",
 		Class:    ClassSite,
-		URL:      "https://www.disneyplus.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.disneyplus.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "spotify",
 		Class:    ClassSite,
-		URL:      "https://open.spotify.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://open.spotify.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "soundcloud",
 		Class:    ClassSite,
-		URL:      "https://soundcloud.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://soundcloud.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "dailymotion",
 		Class:    ClassSite,
-		URL:      "https://www.dailymotion.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.dailymotion.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "amazon",
 		Class:    ClassSite,
-		URL:      "https://www.amazon.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.amazon.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "ebay",
 		Class:    ClassSite,
-		URL:      "https://www.ebay.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.ebay.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "walmart",
 		Class:    ClassSite,
-		URL:      "https://www.walmart.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.walmart.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "alibaba",
 		Class:    ClassSite,
-		URL:      "https://www.alibaba.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.alibaba.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "aliexpress",
 		Class:    ClassSite,
-		URL:      "https://www.aliexpress.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.aliexpress.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "target",
 		Class:    ClassSite,
-		URL:      "https://www.target.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.target.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "shopify",
 		Class:    ClassSite,
-		URL:      "https://www.shopify.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.shopify.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
@@ -1140,36 +1174,32 @@ var destinations = []Destination{
 		// tunnels: a locale redirect keyed on the exit ip. See ExpectReachable.
 		Name:     "microsoft",
 		Class:    ClassSite,
-		URL:      "https://www.microsoft.com",
+		Url:      "https://www.microsoft.com",
 		Expect:   ExpectReachable,
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "apple",
 		Class:    ClassSite,
-		URL:      "https://www.apple.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.apple.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "github",
 		Class:    ClassSite,
-		URL:      "https://github.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://github.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "github-api",
 		Class:    ClassSite,
-		URL:      "https://api.github.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://api.github.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "gitlab",
 		Class:    ClassSite,
-		URL:      "https://gitlab.com",
+		Url:      "https://gitlab.com",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
@@ -1177,84 +1207,73 @@ var destinations = []Destination{
 	{
 		Name:     "cloudflare",
 		Class:    ClassSite,
-		URL:      "https://www.cloudflare.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.cloudflare.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "aws",
 		Class:    ClassSite,
-		URL:      "https://aws.amazon.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://aws.amazon.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "google-cloud",
 		Class:    ClassSite,
-		URL:      "https://cloud.google.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://cloud.google.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "digitalocean",
 		Class:    ClassSite,
-		URL:      "https://www.digitalocean.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.digitalocean.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "docker-hub",
 		Class:    ClassSite,
-		URL:      "https://hub.docker.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://hub.docker.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "npm-registry",
 		Class:    ClassSite,
-		URL:      "https://registry.npmjs.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://registry.npmjs.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "pypi",
 		Class:    ClassSite,
-		URL:      "https://pypi.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://pypi.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "rubygems",
 		Class:    ClassSite,
-		URL:      "https://rubygems.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://rubygems.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "python-org",
 		Class:    ClassSite,
-		URL:      "https://www.python.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.python.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "go-dev",
 		Class:    ClassSite,
-		URL:      "https://go.dev",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://go.dev",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "kernel-org",
 		Class:    ClassSite,
-		URL:      "https://www.kernel.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.kernel.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "mdn",
 		Class:    ClassSite,
-		URL:      "https://developer.mozilla.org",
+		Url:      "https://developer.mozilla.org",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -1264,28 +1283,25 @@ var destinations = []Destination{
 		// measured here as 200 with 4.9 MB.
 		Name:     "cnn",
 		Class:    ClassSite,
-		URL:      "https://www.cnn.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.cnn.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "bbc",
 		Class:    ClassSite,
-		URL:      "https://www.bbc.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.bbc.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "new-york-times",
 		Class:    ClassSite,
-		URL:      "https://www.nytimes.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.nytimes.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "the-guardian",
 		Class:    ClassSite,
-		URL:      "https://www.theguardian.com",
+		Url:      "https://www.theguardian.com",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -1293,28 +1309,25 @@ var destinations = []Destination{
 	{
 		Name:     "ap-news",
 		Class:    ClassSite,
-		URL:      "https://apnews.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://apnews.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "al-jazeera",
 		Class:    ClassSite,
-		URL:      "https://www.aljazeera.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.aljazeera.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "deutsche-welle",
 		Class:    ClassSite,
-		URL:      "https://www.dw.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.dw.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "france-24",
 		Class:    ClassSite,
-		URL:      "https://www.france24.com",
+		Url:      "https://www.france24.com",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -1322,25 +1335,23 @@ var destinations = []Destination{
 	{
 		// The favicon, not the front page: the front page is 120 KB and Wikimedia's
 		// ATS does not honor Range (measured: 200, whole asset), so it is the one
-		// destination that would routinely exceed the WIRE budget even though the
+		// destination that would routinely exceed the wire budget even though the
 		// read cap bounds what is kept.
 		Name:     "wikipedia",
 		Class:    ClassSite,
-		URL:      "https://www.wikipedia.org/static/favicon/wikipedia.ico",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.wikipedia.org/static/favicon/wikipedia.ico",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "wordpress",
 		Class:    ClassSite,
-		URL:      "https://wordpress.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://wordpress.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "imdb",
 		Class:    ClassSite,
-		URL:      "https://www.imdb.com",
+		Url:      "https://www.imdb.com",
 		Expect:   ExpectStatus,
 		Status:   202,
 		MaxBytes: maxAssetBytes,
@@ -1348,42 +1359,37 @@ var destinations = []Destination{
 	{
 		Name:     "internet-archive",
 		Class:    ClassSite,
-		URL:      "https://archive.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://archive.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "noaa-weather",
 		Class:    ClassSite,
-		URL:      "https://www.weather.gov",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.weather.gov",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "qq",
 		Class:    ClassSite,
-		URL:      "https://www.qq.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.qq.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "sina",
 		Class:    ClassSite,
-		URL:      "https://www.sina.com.cn",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.sina.com.cn",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "taobao",
 		Class:    ClassSite,
-		URL:      "https://www.taobao.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.taobao.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "jd-com",
 		Class:    ClassSite,
-		URL:      "https://www.jd.com",
+		Url:      "https://www.jd.com",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
@@ -1391,14 +1397,13 @@ var destinations = []Destination{
 	{
 		Name:     "mail-ru",
 		Class:    ClassSite,
-		URL:      "https://mail.ru",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://mail.ru",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "vk",
 		Class:    ClassSite,
-		URL:      "https://vk.com",
+		Url:      "https://vk.com",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -1406,14 +1411,13 @@ var destinations = []Destination{
 	{
 		Name:     "naver",
 		Class:    ClassSite,
-		URL:      "https://www.naver.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.naver.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "line",
 		Class:    ClassSite,
-		URL:      "https://line.me",
+		Url:      "https://line.me",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
@@ -1424,42 +1428,37 @@ var destinations = []Destination{
 		// direction (it is absent from the zero-body list).
 		Name:     "times-of-india",
 		Class:    ClassSite,
-		URL:      "https://timesofindia.indiatimes.com/robots.txt",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://timesofindia.indiatimes.com/robots.txt",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "globo",
 		Class:    ClassSite,
-		URL:      "https://www.globo.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.globo.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "mercadolibre",
 		Class:    ClassSite,
-		URL:      "https://www.mercadolibre.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.mercadolibre.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "abc-australia",
 		Class:    ClassSite,
-		URL:      "https://www.abc.net.au",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.abc.net.au",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "news24",
 		Class:    ClassSite,
-		URL:      "https://www.news24.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.news24.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "zoom",
 		Class:    ClassSite,
-		URL:      "https://zoom.us",
+		Url:      "https://zoom.us",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
@@ -1467,21 +1466,19 @@ var destinations = []Destination{
 	{
 		Name:     "slack",
 		Class:    ClassSite,
-		URL:      "https://slack.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://slack.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "dropbox",
 		Class:    ClassSite,
-		URL:      "https://www.dropbox.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.dropbox.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "notion",
 		Class:    ClassSite,
-		URL:      "https://www.notion.so",
+		Url:      "https://www.notion.so",
 		Expect:   ExpectStatus,
 		Status:   307,
 		MaxBytes: maxAssetBytes,
@@ -1489,35 +1486,31 @@ var destinations = []Destination{
 	{
 		Name:     "trello",
 		Class:    ClassSite,
-		URL:      "https://trello.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://trello.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "atlassian",
 		Class:    ClassSite,
-		URL:      "https://www.atlassian.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.atlassian.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "figma",
 		Class:    ClassSite,
-		URL:      "https://www.figma.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.figma.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "steam",
 		Class:    ClassSite,
-		URL:      "https://store.steampowered.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://store.steampowered.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "playstation",
 		Class:    ClassSite,
-		URL:      "https://www.playstation.com",
+		Url:      "https://www.playstation.com",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
@@ -1525,7 +1518,7 @@ var destinations = []Destination{
 	{
 		Name:     "xbox",
 		Class:    ClassSite,
-		URL:      "https://www.xbox.com",
+		Url:      "https://www.xbox.com",
 		Expect:   ExpectStatus,
 		Status:   307,
 		MaxBytes: maxAssetBytes,
@@ -1533,7 +1526,7 @@ var destinations = []Destination{
 	{
 		Name:     "nintendo",
 		Class:    ClassSite,
-		URL:      "https://www.nintendo.com",
+		Url:      "https://www.nintendo.com",
 		Expect:   ExpectStatus,
 		Status:   301,
 		MaxBytes: maxAssetBytes,
@@ -1541,105 +1534,104 @@ var destinations = []Destination{
 	{
 		Name:     "roblox",
 		Class:    ClassSite,
-		URL:      "https://www.roblox.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Url:      "https://www.roblox.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "riot-games",
 		Class:    ClassSite,
-		URL:      "https://www.riotgames.com",
+		Url:      "https://www.riotgames.com",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
 	},
 
-	// Reputation. NOT PART OF THE HEALTH SCORE -- see ClassReputation. Six of
-	// these eight refused this datacenter exit outright (403, except reuters at
-	// 401) and on a residential or cellular exit are expected to return clean. A
-	// provider that passes them is more useful to a real user; a provider that
-	// fails them is a hosted exit, not a broken one.
+	// The former reputation class, dissolved into site (GEOMAP §11.3) with its
+	// contracts unchanged. Six of these eight refused a datacenter exit outright
+	// when the table was built (403, except reuters at 401), and on main they
+	// refused over 2,600 of 6,577 healthy providers each under the probe's old
+	// self-describing request. They were kept out of the score as a verdict on
+	// a vendor's ip feed rather than on the exit. They are scored now because
+	// that distinction does not survive contact with a user: a site the exit
+	// cannot reach is a site the user cannot reach, whatever the reason, and
+	// the index pays for it exactly as it would for a site that timed out. The
+	// browser-shaped request and the spaced retries are what should separate a
+	// refusal of the exit from a refusal of the probe; the field data will say
+	// which these were.
 	//
-	// The remaining two are kept because they keep the class honest about what it
-	// measures, and both carry a note: reddit is the endpoint that produced the
-	// three contradictory readings quoted on ClassReputation, and stackoverflow
-	// never refused anything -- it redirects.
+	// Two carry a note. reddit answered three different ways from one host and
+	// address in one day (403 to curl's default agent, 200 to the Go prober
+	// through a provider, 206 to curl carrying the prober's old agent): it is
+	// the clearest case of a site judging the client as much as the address.
+	// stackoverflow never refused anything -- it redirects everyone.
 	{
 		Name:     "akamai",
-		Class:    ClassReputation,
-		URL:      "https://www.akamai.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.akamai.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
-		// The staged runs recorded ecosia as NOT refusing; this host measured 403
-		// with 4472 bytes on the same day the table was built. Left where the
-		// owner classified it -- a vendor whose answer differs run to run is
-		// exactly what an unscored diagnostic class is for.
+		// The staged runs recorded ecosia as not refusing; this host measured 403
+		// with 4472 bytes on the same day the table was built. An answer that
+		// differs run to run is what the retries are for.
 		Name:     "ecosia",
-		Class:    ClassReputation,
-		URL:      "https://www.ecosia.org",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.ecosia.org",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "reddit",
-		Class:    ClassReputation,
-		URL:      "https://www.reddit.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.reddit.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "etsy",
-		Class:    ClassReputation,
-		URL:      "https://www.etsy.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.etsy.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
-		// 302 with an empty body, four staged runs and one here. Recorded because
-		// it constrains how this class is read: stackoverflow is marked reputation
-		// but did NOT refuse this datacenter exit -- it redirects everyone. Before
+		// 302 with an empty body, four staged runs and one here, and it keeps
+		// that declared contract. stackoverflow did not refuse the datacenter
+		// exit it was filed under reputation for -- it redirects everyone. Before
 		// this entry declared its status it failed every run, which reads in a log
-		// exactly like an ip-reputation refusal and is not one. Do not interpret a
-		// stack-overflow failure as reputation without checking the status first.
+		// exactly like a refusal of the exit and is not one. Check the status
+		// before reading a stack-overflow failure as anything about the exit.
 		Name:     "stack-overflow",
-		Class:    ClassReputation,
-		URL:      "https://stackoverflow.com",
+		Class:    ClassSite,
+		Url:      "https://stackoverflow.com",
 		Expect:   ExpectStatus,
 		Status:   302,
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "reuters",
-		Class:    ClassReputation,
-		URL:      "https://www.reuters.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.reuters.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "canva",
-		Class:    ClassReputation,
-		URL:      "https://www.canva.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.canva.com",
 		MaxBytes: maxAssetBytes,
 	},
 	{
 		Name:     "epic-games",
-		Class:    ClassReputation,
-		URL:      "https://www.epicgames.com",
-		Headers:  map[string]string{"Range": rangeFirst1KiB},
+		Class:    ClassSite,
+		Url:      "https://www.epicgames.com",
 		MaxBytes: maxAssetBytes,
 	},
 }
 
-// verifyDNSJSON proves a DoH response actually resolved the name, which a
+// Proves a DoH response actually resolved the name, which a
 // status code cannot: a captive portal, a transparent proxy or an interception
 // box all answer 200 with a body. Only an answer section proves resolution.
 //
-// It decodes ONLY the Answer field, on purpose. The seven operators disagree
+// It decodes only the Answer field, on purpose. The seven operators disagree
 // about the rest of the document -- dns.alidns.com returns Question as an
-// OBJECT where every other operator returns an array, so a struct that declared
+// object where every other operator returns an array, so a struct that declared
 // Question would fail to unmarshal AliDNS's perfectly good answer and score a
 // working resolver as a captive portal.
 //
@@ -1647,7 +1639,7 @@ var destinations = []Destination{
 // entirely, and Go would leave it at 0 -- which happens to equal NOERROR, so a
 // check on it would be passing by accident rather than by evidence. A non-empty
 // answer with non-empty data is the evidence.
-func verifyDNSJSON(body []byte) error {
+func verifyDnsJson(body []byte) error {
 	var doc struct {
 		Answer []struct {
 			Data string `json:"data"`
@@ -1667,10 +1659,10 @@ func verifyDNSJSON(body []byte) error {
 	return errors.New("every record in the dns answer section is empty")
 }
 
-// verifyIPText proves an echo endpoint returned an address rather than a
+// Proves an echo endpoint returned an address rather than a
 // portal's html. TrimSpace first: checkip.amazonaws.com terminates with a
 // newline.
-func verifyIPText(body []byte) error {
+func verifyIpText(body []byte) error {
 	text := strings.TrimSpace(string(body))
 	if net.ParseIP(text) == nil {
 		return fmt.Errorf("%q is not an ip address; this endpoint returns one, so something else answered", truncate(text, 64))
@@ -1678,27 +1670,25 @@ func verifyIPText(body []byte) error {
 	return nil
 }
 
-// verifyContains proves a fixed-text endpoint returned its fixed text.
+// Proves a fixed-text endpoint returned its fixed text.
 //
-// Substring, after TrimSpace, NOT equality: detectportal.firefox.com serves
+// Substring, after TrimSpace, not equality: detectportal.firefox.com serves
 // "success\n" -- eight bytes for a seven-character word -- so an equality check
 // would fail for every provider forever, which is noise dressed as signal.
 //
-// Every want below is measured to appear within the first maxConnectivityBytes
-// of its endpoint's body, which is what makes a substring test on a CAPPED read
-// meaningful: cloudflare's trace document puts ip= in its first 40 bytes, and
-// example.com's title in its first 60.
-func verifyContains(want string) func([]byte) error {
-	return func(body []byte) error {
-		text := strings.TrimSpace(string(body))
-		if !strings.Contains(text, want) {
-			return fmt.Errorf("the body does not contain %q (got %q); a captive portal answers 200 with a page", want, truncate(text, 64))
-		}
-		return nil
+// Every want in the table is measured to appear within the first
+// maxConnectivityBytes of its endpoint's body, which is what makes a substring
+// test on a capped read meaningful: cloudflare's trace document puts ip= in its
+// first 40 bytes, and example.com's title in its first 60.
+func verifyContains(body []byte, want string) error {
+	text := strings.TrimSpace(string(body))
+	if !strings.Contains(text, want) {
+		return fmt.Errorf("the body does not contain %q (got %q); a captive portal answers 200 with a page", want, truncate(text, 64))
 	}
+	return nil
 }
 
-// truncate keeps an unexpected body from filling the log with someone's login
+// Keeps an unexpected body from filling the log with someone's login
 // page.
 func truncate(s string, n int) string {
 	if len(s) <= n {
@@ -1707,262 +1697,509 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// CheckResult is one destination's outcome. It is recorded for failures as
-// fully as for successes -- especially ByteCount, which is what separates "the
-// destination refused us with a page of explanation" (bytes flowed; the tunnel
-// works, the content provider said no) from "nothing came back at all" (the
-// blackhole signature). Losing that distinction would defeat the point of
-// grouping by class.
+// One destination's outcome, after its retries. It is recorded
+// for failures as fully as for successes -- especially ByteCount, which is what
+// separates "the destination refused us with a page of explanation" (bytes
+// flowed; the tunnel works, the content provider said no) from "nothing came
+// back at all" (the blackhole signature). Losing that distinction would defeat
+// the point of grouping by class.
+//
+// StatusCode, ByteCount, Latency and Err describe the last attempt made;
+// Attempts and LastFailure say how it got there.
 type CheckResult struct {
 	Name                     string
 	Class                    Class
-	OK                       bool
+	Ok                       bool
 	StatusCode               int   // 0 when the request never produced a response
 	ByteCount                int64 // bytes of body actually read, capped; set on failures too
 	Latency                  time.Duration
 	Err                      string // "" when OK
-	TLSAuthenticationFailure bool   // the peer's certificate could not authenticate the requested host
+	TlsAuthenticationFailure bool   // the peer's certificate could not authenticate the requested host
+	// How many times the destination was fetched: 1 when the
+	// first attempt passed, Options.LoadAttempts when every attempt failed,
+	// fewer after a terminal TLS failure or when the run ran out, 0 when the
+	// run ended before the first attempt could start.
+	Attempts int
+	// The most recent failed attempt's error: on a failure it
+	// equals Err, and on a load that passed after a retry it is why the retry
+	// was needed. "" when the first attempt passed.
+	LastFailure string
+	// Set on a load whose tunnel was not there for its last
+	// attempt: the tunnel died under the attempt, or it could not be
+	// re-created in time (see Path). It is neither a pass nor a failure -- a
+	// tunnel that went away says nothing about the site -- and it is left out
+	// of every tally and reported on its own, so the server can leave it out
+	// of total_count. Attempts and LastFailure still say what happened.
+	NotMeasured bool
+	// Set on a destination loaded from a place it is incompatible with, on
+	// the server's request (Destination.Canary): unscored, and reported apart
+	// so the server keeps it out of the counts.
+	Canary bool
 }
 
-// ClassSummary is the ok/total tally for one class.
+// The ok/total tally for one class.
 type ClassSummary struct {
-	OK    int
+	Ok    int
 	Total int
 }
 
-// Result is one full run.
+// One full run.
 type Result struct {
+	// Every sampled destination's outcome after retries, in table
+	// order.
 	Checks []CheckResult
-	// TLSAuthenticationFailure is true when any sampled HTTPS peer failed
+	// The address the operator's /ip echo saw the warm-up come
+	// from: the provider's exit, in canonical form, and the only thing the
+	// location submission carries. "" when no echo was configured or it did
+	// not answer (IpEchoErr says why).
+	ExitIp string
+	// When the echo answered, on the Options clock.
+	ExitObservedAt time.Time
+	// Why the warm-up yielded no exit address; "" when it did,
+	// or when no echo was configured.
+	IpEchoErr string
+	// True when any sampled HTTPS peer -- or the
+	// warm-up's, which is the operator's own api host -- failed
 	// certificate-chain or hostname verification. It is intentionally separate
 	// from the score: one forged identity is a hard integrity failure and must
 	// not be diluted by unrelated successful destinations.
-	TLSAuthenticationFailure bool
-	// OKCount and Total cover the SCORED classes only, and only the
-	// destinations this run SAMPLED. A datacenter provider that fails every
-	// reputation destination still reads as fully healthy here, which is the
-	// intended behaviour -- see ClassReputation.
-	OKCount int
-	Total   int
-	// ByClass is the per-class tally for the scored classes only, over the
-	// sample.
+	TlsAuthenticationFailure bool
+	// The loads that passed on some attempt. With Total it covers every
+	// class, over the destinations this run sampled and measured, after every
+	// load's retries: Total - OkCount is the loads that failed every attempt,
+	// which is what the index and the one-in-ten rule count. Loads that were
+	// not measured, and canaries, are in neither.
+	OkCount int
+	// The loads this run sampled and measured; see OkCount.
+	Total int
+	// How many loads the run could not measure because their
+	// tunnel was gone and could not be re-created in time (see
+	// CheckResult.NotMeasured). The run is still a measurement of the loads it
+	// did measure.
+	NotMeasured int
+	// Lists, in Classes order, the classes that had fewer
+	// destinations compatible with the provider's place than their sample
+	// size: the run took all of them rather than pad from sites known not to
+	// work there. It is the pool's signal (a place too thin for a class), not
+	// the provider's.
+	ShortClasses []Class
+	// The per-class tally, over the sample.
 	ByClass map[Class]ClassSummary
-	// Reputation is the tally for ClassReputation, reported ALONGSIDE the score
-	// and never inside it, so a log line can carry reputation=2/4 without that
-	// figure contaminating ok=N/M.
-	Reputation ClassSummary
-	// TableTotal is the size of the full table the sample was drawn from, all
-	// classes included, and is rendered as table=N so nobody reads "dns=4/4" as
-	// "the table holds four resolvers". Zero when the run was not sampled (a
-	// test driving check() directly), and then omitted from Summary.
+	// The size of the table (or pool) the sample was drawn from,
+	// rendered as table=N so nobody reads "dns=6/6" as "the table holds
+	// six resolvers". Zero when the run was not sampled (a test driving check()
+	// directly), and then omitted from Summary.
 	TableTotal int
 }
 
-// Options tunes a single Check call. The zero value is valid and uses the
-// defaults below.
+// Tunes a single Check or Blackhole call. The zero value is valid and
+// uses the defaults below.
 type Options struct {
-	// PerRequestTimeout bounds each individual request. Zero or negative uses
-	// DefaultPerRequestTimeout.
+	// Bounds each attempt of each load. Zero or negative
+	// uses DefaultPerRequestTimeout.
 	PerRequestTimeout time.Duration
-	// Budget bounds the whole run, so a provider that swallows every request
-	// cannot hold the pass open for Concurrency-batched multiples of the
-	// per-request timeout. Zero or negative uses DefaultBudget.
+	// Bounds the whole run, so a provider that swallows every request
+	// cannot hold the tunnel open indefinitely. Zero or negative uses
+	// RunBudget, the longest the retry schedule can take -- see there for why
+	// the default is derived rather than fixed.
 	Budget time.Duration
-	// Concurrency caps simultaneous requests. Zero or negative uses
-	// DefaultConcurrency.
+	// Caps simultaneous fetches over the one tunnel. A load
+	// waiting out its retry spacing does not count against it. Zero or
+	// negative uses DefaultConcurrency.
 	Concurrency int
-	// Rand draws this run's sample. Nil -- which is what production passes --
-	// means a fresh generator seeded from crypto/rand for every run, which is
-	// the whole anti-gaming property: the provider cannot know what it will be
-	// asked for. Tests set it to make a run reproducible.
+	// Draws this run's sample and its retry spacing. Nil -- which is
+	// what production passes -- means a fresh generator seeded from
+	// crypto/rand for every run, which is the whole anti-gaming property: the
+	// provider cannot know what it will be asked for, or when it will be asked
+	// again. Tests set it to make a run reproducible.
 	//
-	// It must not be SHARED between concurrent runs: math/rand.Rand is stateful
+	// It must not be shared between concurrent runs: math/rand.Rand is stateful
 	// and not goroutine-safe, and the prober probes several providers at once.
-	// Leaving it nil is what makes that safe, so production leaves it nil.
+	// Within one run it is drawn from behind a lock. Leaving it nil is what
+	// makes the cross-run case safe, so production leaves it nil.
 	Rand *rand.Rand
 
-	// AllDestinations runs EVERY destination in the table instead of drawing a
+	// Runs every destination in the table instead of drawing a
 	// sample. It exists for operator-run diagnostics -- "show me the complete
 	// picture for this fleet right now" -- and is deliberately not the default.
 	//
 	// Two things change when it is set, and the caller owns both:
 	//
 	//   1. Cost. The sample is bounded by construction; the full table is not.
-	//      At the current table it is ~4.5x the bytes and ~4.5x the requests.
-	//   2. The anti-gaming property is LOST. A fixed, fully-enumerable
+	//      At the current table it is ~2.8x the bytes and ~2.8x the requests.
+	//   2. The anti-gaming property is lost. A fixed, fully-enumerable
 	//      destination list is exactly what a provider can whitelist. Random
 	//      sampling is what makes that impractical, so scheduled production
 	//      passes must keep sampling; this is for on-demand inspection.
 	//
-	// Concurrency must be raised to AllConcurrency to match, and the
-	// per-request timeout sized against RoundsForAllDestinations, or the run
-	// is cut off mid-table and destinations fail for a reason that has
-	// nothing to do with the provider. Note the direction cmd/egress-prober
-	// takes: it holds the whole-run Budget at one -probe-timeout and lowers
-	// the per-request timeout, rather than growing the budget -- growing it
-	// is how the health check came to cost 2.8x its stated budget.
+	// Concurrency should be raised to AllConcurrency to match; RunBudget grows
+	// with the table on its own.
 	AllDestinations bool
+
+	// The table the run draws from. Nil means the built-in
+	// table, which stays the seed of the server's pool and the fallback when
+	// the pool cannot be fetched (see Pool, fleetprobe.LoadPool).
+	Destinations []Destination
+	// The browser shape every request carries. Nil -- or one with
+	// no user agent -- means DefaultRequestProfile. See RequestProfile.
+	Profile *RequestProfile
+
+	// How many times a load is tried before it counts as
+	// failed. Zero or negative uses DefaultLoadAttempts; 1 disables retries.
+	LoadAttempts int
+	// The mean of the random spacing between a
+	// failed attempt and the next (exponential, capped at three times the
+	// mean). Zero or negative uses DefaultLoadRetryMeanInterval.
+	LoadRetryMeanInterval time.Duration
+
+	// The operator's /ip echo, fetched first, as the warm-up, on
+	// every run and every blackhole check: <api url> + IpEchoPath, reached
+	// through the tunnel. Empty skips the warm-up, and with it the exit
+	// address -- tests use that; the prober always sets it.
+	IpEchoUrl string
+	// Bounds the warm-up alone. It is its own setting because
+	// it absorbs the cold start (see warmUp), which a load's timeout is not
+	// sized for. Zero or negative uses DefaultIpEchoTimeout.
+	IpEchoTimeout time.Duration
+
+	// When set, the tunnel the run rides and a way to re-create it when it
+	// dies part-way (see Path); the client passed to Check or
+	// Blackhole is then ignored. Nil means that client, as it is, for the
+	// whole run.
+	Path Path
+	// Caps how many times one run or check may
+	// re-create its tunnel. Every re-creation is a new proxy device and a new
+	// contract with the provider, so a provider that cannot hold a tunnel up
+	// must not be able to cost one per load; past the cap the pending loads
+	// are not measured. Zero or negative uses DefaultTunnelRecreateAttempts.
+	TunnelRecreateAttempts int
+	// Where the provider is published. Destinations
+	// incompatible with it are left out of the sample, and canaries for it
+	// are loaded besides (see Destination.Incompatible, Destination.Canary).
+	// The zero Place excludes nothing.
+	ProviderPlace Place
+
+	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
+	// selects on time.After and the context. Tests inject both so a run whose
+	// loads wait minutes between attempts finishes in microseconds, and so the
+	// spacing a run asked for can be read back.
+	Now func() time.Time
+	// The run's wait, with Now. It must return the context's error, and
+	// return early, when the context ends first.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // Defaults for Options. They are vars so tests can lower them.
-//
-// The three are one piece of arithmetic, not three independent knobs:
-//
-//	rounds = ceil(SamplePerRun()/DefaultConcurrency) = ceil(30/6) = 5
-//	rounds * DefaultPerRequestTimeout = 5 * 10s = 50s <= DefaultBudget
-//
-// Changing any one of them -- or raising a sample size -- without the others
-// either cuts off the last round (destinations fail for a reason the provider
-// had nothing to do with) or lets a swallowing provider stall the pass for
-// longer than one probe timeout. cmd/egress-prober derives the same ratio from
-// -probe-timeout, and TestEgressHealthAddsAtMostOneProbeTimeout holds it.
 var (
-	// DefaultPerRequestTimeout is generous because every probe runs over a COLD
-	// tunnel: nothing is warm, keep-alives are disabled, and each request pays
-	// an in-tunnel DoH resolution plus a full TLS handshake. Treat it as a floor
-	// rather than a preference -- it is what forced DefaultConcurrency up when
-	// the table grew.
+	// Bounds one attempt of one load. By the time a
+	// load starts the warm-up has brought the path up, so it no longer has to
+	// cover a cold start -- only an in-tunnel DoH resolution, a TCP connect and
+	// a TLS handshake per request, since keep-alives are disabled. Treat it as
+	// a floor rather than a preference: a load that times out is retried, but
+	// only minutes later.
 	DefaultPerRequestTimeout = 10 * time.Second
-	// DefaultBudget bounds a whole run: rounds * DefaultPerRequestTimeout, so a
-	// run that is going to be a total loss ends rather than stalling the pass,
-	// and a healthy one is never cut off mid-round.
-	DefaultBudget = 60 * time.Second
-	// DefaultConcurrency was 3 while the table held 9 destinations. It is 6
-	// because the per-request timeout is a floor: at 3, a 60s probe budget
-	// spread over ceil(30/3) = 10 rounds leaves 6s per request, which is BELOW
-	// the cold-tunnel figure above, and cold-start timeouts would then be
-	// charged to providers as blackholes.
+	// Caps simultaneous fetches over one tunnel. It is 6
+	// because simultaneous TLS handshakes over one gvisor tunnel with
+	// keep-alives disabled contend with each other and inflate every latency.
+	// It is not raised with the sample: waiting loads hold no slot, so the
+	// first round of 50 takes nine slots-worth of fetches and the retries,
+	// spread over minutes, rarely contend at all.
 	//
-	// Note that this is sized against the SAMPLE, not the table: sampling is
-	// what keeps a 140-destination table costing 30 requests. The constraint it
-	// trades against is about handshakes rather than bytes -- simultaneous TLS
-	// handshakes over one cold gvisor tunnel with keep-alives disabled contend
-	// with each other and inflate every latency.
-	//
-	// The field signal that this is set too high is specific: first-round
-	// timeouts spread evenly across ALL classes, on providers whose geolocation
-	// succeeded. That means lower it (and lengthen -probe-timeout to keep the
-	// arithmetic above), not that the providers are bad.
+	// The field signal that this is set too high is specific: first-attempt
+	// timeouts spread evenly across all classes, on providers whose warm-up
+	// succeeded. That means lower it, not that the providers are bad.
 	DefaultConcurrency = 6
+	// How many times a load is tried (GEOMAP §11.3).
+	// Three independent failures of a destination that answers 93 % of the
+	// time in the field are rare enough to mean something; one was not.
+	DefaultLoadAttempts = 3
+	// The mean spacing between a failed
+	// attempt and the next (GEOMAP §11.3). Five minutes is long enough for a
+	// rate limit or a flapping path to clear, and makes the requests to any
+	// one site look like a person coming back to it.
+	DefaultLoadRetryMeanInterval = 5 * time.Minute
+	// How many times a run or a check may
+	// re-create a tunnel that died under it. Two covers a provider that
+	// reconnects once or twice in a fifteen-minute run; one that needs more is
+	// not holding a path up, and what it leaves unmeasured is honest.
+	DefaultTunnelRecreateAttempts = 2
+	// Bounds the warm-up. It is the cold-start budget --
+	// the provider window, the contract, the in-tunnel DNS resolution and the
+	// TLS handshake of a tunnel whose open returned before any path existed --
+	// and is sized like the per-source geolocation deadline that used to
+	// absorb the same cost, not like a load's.
+	DefaultIpEchoTimeout = 60 * time.Second
 )
 
-// ErrNilClient is returned when client is nil. Checks run in spawned
+// Returned when client is nil. Checks run in spawned
 // goroutines, where a nil-client panic could not be recovered by the caller, so
-// it is rejected up front. Mirrors geolocate.ErrNilClient.
+// it is rejected up front.
 var ErrNilClient = errors.New("egresshealth: client must not be nil")
 
-// ErrNoDestinations is returned when the destination table is empty, which
+// Returned when the destination table is empty, which
 // would make a run vacuous: 0/0 checks passed is not evidence of anything.
 var ErrNoDestinations = errors.New("egresshealth: at least one destination is required")
 
-// ErrNoBudget is returned when the context is already done on entry. This is a
-// STRUCTURAL failure and must not be reported as a run, because a run started
+// Returned when the context is already done on entry. This is a
+// structural failure and must not be reported as a run, because a run started
 // on a dead context returns 0/N -- identical to a total blackhole. The caller
 // (see prober) is expected to check for it and log "skipped" rather than a
 // verdict.
 var ErrNoBudget = errors.New("egresshealth: the context was already done before any check ran")
 
-// ErrUnsupported reports that the server does not implement the egress-health
+// Returned when the caller's context ended while the run was
+// still going. It is ErrNoBudget's twin, and matters more now that a run spans
+// minutes: the loads in flight at that moment fail on the dead context and the
+// loads waiting to retry never retry, so the partial outcome is the prober's
+// own deadline or shutdown, not anything the provider did. Reporting it as a
+// run would charge a working provider with failed sites. The run's own budget
+// (Options.Budget) ending is different: that bound is part of the
+// measurement, and its outcome is a result.
+var ErrInterrupted = errors.New("egresshealth: the caller's context ended before the run finished")
+
+// Reports that the server does not implement the egress-health
 // ingest endpoint (it answers 404). It lives here rather than in ingest for the
 // same reason bandwidth.ErrUnsupported lives in bandwidth: the prober
 // classifies the outcome, and it must be able to tell "this deployment has not
 // shipped the endpoint yet" from a real submission failure without importing
 // the submitter implementation its interfaces exist to keep out.
 //
-// It is a clean SKIP, not a failure. A prober pointed at an older server keeps
+// It is a clean skip, not a failure. A prober pointed at an older server keeps
 // probing and keeps logging health; it simply records none.
 var ErrUnsupported = errors.New("egresshealth: the server does not implement the provider egress health endpoint")
 
-// Check runs a random sample of the production destinations through client and
-// returns the full pattern of what worked.
+// Runs a random sample of the destination table through client and
+// returns the full pattern of what worked, after every load's tries.
 //
-// The sample is drawn per call and per class (see sampleDestinations and
-// sampleSizes): the same provider probed twice is asked for different
-// destinations, and no provider can know in advance which ones. Coverage of
-// the table accumulates across runs and across the fleet rather than being
-// paid on every run.
+// The table is Options.Destinations -- the server's pool, when the caller has
+// one -- or the built-in table. The sample is drawn per call and per class
+// (see sampleDestinations and sampleSizes): the same provider probed twice is
+// asked for different destinations, and no provider can know in advance which
+// ones. Coverage of the table accumulates across runs and across the fleet
+// rather than being paid on every run.
 //
-// One destination failing never aborts the run: the pattern of failures IS the
+// One destination failing never aborts the run: the pattern of failures is the
 // value, so every sampled destination is attempted and every outcome recorded.
 // An error is returned only when something structural stopped the run from
-// happening at all (see ErrNilClient, ErrNoDestinations, ErrNoBudget) -- so
-// `err == nil && OKCount == 0` is a real, trustworthy total-blackhole reading,
-// distinguishable from a run that never took place.
+// happening, or from finishing (see ErrNilClient, ErrNoDestinations,
+// ErrNoBudget, ErrInterrupted) -- so `err == nil && OkCount == 0` is a real,
+// trustworthy total-blackhole reading, distinguishable from a run that never
+// took place.
 //
 // In production client egresses through one provider's tunnel, so what this
 // measures is that provider's willingness and ability to carry ordinary
 // traffic.
 func Check(ctx context.Context, client *http.Client, opts Options) (*Result, error) {
+	table := opts.table()
+	// One generator for the whole run, drawn first for the sample and then
+	// for the retry spacing, so a caller-supplied seed reproduces both.
+	opts.Rand = opts.rng()
+	compatible, canaries := forPlace(table, opts.ProviderPlace)
 	var chosen []Destination
+	var shortClasses []Class
 	if opts.AllDestinations {
-		chosen = append([]Destination(nil), destinations...)
+		chosen = compatible
 	} else {
-		chosen = sampleDestinations(destinations, sampleSizes, opts.rng())
+		chosen = sampleDestinations(compatible, sampleSizes, opts.Rand)
+		// The classes whose compatible pool is smaller than their declared
+		// sample size -- the classes a run for this place could not fill -- in
+		// Classes order.
+		compatibleClassCounts := map[Class]int{}
+		for _, d := range compatible {
+			compatibleClassCounts[d.Class]++
+		}
+		for _, c := range Classes {
+			if size, declared := sampleSizes[c]; declared && compatibleClassCounts[c] < size {
+				shortClasses = append(shortClasses, c)
+			}
+		}
+	}
+	if 0 < len(canaries) {
+		// The sample and the canaries in table order: Checks, FailedNames and
+		// the log line read in the order the table declares whatever was
+		// drawn, canaries included.
+		pickedNames := map[string]bool{}
+		for _, d := range chosen {
+			pickedNames[d.Name] = true
+		}
+		for _, d := range canaries {
+			pickedNames[d.Name] = true
+		}
+		chosen = make([]Destination, 0, len(pickedNames))
+		for _, d := range table {
+			if pickedNames[d.Name] {
+				chosen = append(chosen, d)
+			}
+		}
 	}
 	res, err := check(ctx, client, chosen, opts)
 	if res != nil {
-		res.TableTotal = len(destinations)
+		res.TableTotal = len(table)
+		res.ShortClasses = shortClasses
 	}
 	return res, err
 }
 
-// SamplePerRun is how many requests one run makes: the sum of the per-class
-// sample sizes, bounded by what the table actually holds.
-//
-// It is exported because cmd/egress-prober sizes a SAMPLED run's per-request
-// deadline from it -- rounds = ceil(SamplePerRun()/DefaultConcurrency). A
-// full-table run uses RoundsForAllDestinations instead, and because that
-// divides one probe timeout across many more rounds, the prober refuses to
-// start when the result falls below DefaultPerRequestTimeout rather than
-// charging honest providers with cold-start timeouts.
-// AllConcurrency is the concurrency an AllDestinations run uses. It is raised
+// The concurrency an AllDestinations run uses. It is raised
 // above DefaultConcurrency because otherwise the round count -- and with it
 // the wall clock -- grows linearly with the table. It is not raised further:
-// every request rides the SAME provider tunnel, so concurrency here is load on
+// every request rides the same provider tunnel, so concurrency here is load on
 // the provider under test, and a diagnostic that overloads its subject
 // measures the overload.
 const AllConcurrency = 10
 
-// RoundsForAllDestinations is how many sequential rounds a full-table run
-// takes at AllConcurrency. A caller sizing a per-request timeout to fit a
-// fixed budget needs this number, not the sampled round count: dividing a
-// budget by the sampled rounds and then spending it over these rounds is how
-// the shipped -egress-health-all default came to draw 2.8x its stated
-// budget.
+// How many sequential rounds one attempt of every
+// destination in the built-in table takes at AllConcurrency.
 func RoundsForAllDestinations() int {
 	return (len(destinations) + AllConcurrency - 1) / AllConcurrency
 }
 
+// How many loads one run of the built-in table makes: the sum
+// of the per-class sample sizes, bounded by what the table actually holds.
 func SamplePerRun() int {
+	return SamplePerRunOf(destinations)
+}
+
+// Like SamplePerRun, for any table, such as a pool.
+func SamplePerRunOf(dests []Destination) int {
 	n := 0
-	for _, c := range tableClasses(destinations) {
-		n += sampleCount(destinations, c, sampleSizes)
+	for _, c := range tableClasses(dests) {
+		n += sampleCount(dests, c, sampleSizes)
 	}
 	return n
 }
 
-func (o Options) perRequestTimeout() time.Duration {
-	if 0 < o.PerRequestTimeout {
-		return o.PerRequestTimeout
+// The longest a run of loads loads can take under these options,
+// and what Budget defaults to: the warm-up, then every load's every attempt in
+// rounds of Concurrency -- as if every retry landed at the same moment, the
+// worst the random spacing can produce -- and the longest spacing between
+// attempts, which is the cap. At the defaults and a 50-load sample that is
+// 60s + 3 x 9 x 10s + 2 x 15m, about 35 minutes; a run that passes everything
+// takes its first round, and one with a site that keeps failing about ten to
+// fifteen minutes.
+//
+// It is derived rather than fixed because the bound has to move with the
+// settings it bounds. A fixed budget shorter than the schedule would cut the
+// last attempt off every chain that drew long delays -- a load failed for the
+// prober's arithmetic, not the provider's traffic -- and one far longer would
+// hold a swallowing provider's tunnel open for nothing.
+func (self Options) RunBudget(loads int) time.Duration {
+	if loads < 1 {
+		loads = 1
+	}
+	concurrency := self.concurrency()
+	rounds := (loads + concurrency - 1) / concurrency
+	attempts := self.loadAttempts()
+	budget := time.Duration(attempts*rounds) * self.perRequestTimeout()
+	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
+	if self.IpEchoUrl != "" {
+		budget += self.ipEchoTimeout()
+	}
+	return budget
+}
+
+// Returns the per-attempt timeout, or DefaultPerRequestTimeout when unset.
+func (self Options) perRequestTimeout() time.Duration {
+	if 0 < self.PerRequestTimeout {
+		return self.PerRequestTimeout
 	}
 	return DefaultPerRequestTimeout
 }
 
-func (o Options) budget() time.Duration {
-	if 0 < o.Budget {
-		return o.Budget
+// Returns the whole run's bound, or RunBudget(loads) when unset.
+func (self Options) budget(loads int) time.Duration {
+	if 0 < self.Budget {
+		return self.Budget
 	}
-	return DefaultBudget
+	return self.RunBudget(loads)
 }
 
-func (o Options) concurrency() int {
-	if 0 < o.Concurrency {
-		return o.Concurrency
+// Returns the fetch concurrency, or DefaultConcurrency when unset.
+func (self Options) concurrency() int {
+	if 0 < self.Concurrency {
+		return self.Concurrency
 	}
 	return DefaultConcurrency
 }
 
-// rng is the randomness one run's sample is drawn from.
+// Returns the attempts per load, or DefaultLoadAttempts when unset.
+func (self Options) loadAttempts() int {
+	if 0 < self.LoadAttempts {
+		return self.LoadAttempts
+	}
+	return DefaultLoadAttempts
+}
+
+// Returns the mean retry spacing, or DefaultLoadRetryMeanInterval when unset.
+func (self Options) loadRetryMeanInterval() time.Duration {
+	if 0 < self.LoadRetryMeanInterval {
+		return self.LoadRetryMeanInterval
+	}
+	return DefaultLoadRetryMeanInterval
+}
+
+// Returns the tunnel re-creation cap, or DefaultTunnelRecreateAttempts when
+// unset.
+func (self Options) tunnelRecreateAttempts() int {
+	if 0 < self.TunnelRecreateAttempts {
+		return self.TunnelRecreateAttempts
+	}
+	return DefaultTunnelRecreateAttempts
+}
+
+// Returns the warm-up's timeout, or DefaultIpEchoTimeout when unset.
+func (self Options) ipEchoTimeout() time.Duration {
+	if 0 < self.IpEchoTimeout {
+		return self.IpEchoTimeout
+	}
+	return DefaultIpEchoTimeout
+}
+
+// Returns the table a run draws from: Destinations, or the built-in table.
+func (self Options) table() []Destination {
+	if self.Destinations != nil {
+		return self.Destinations
+	}
+	return destinations
+}
+
+// Returns the profile every request carries: Profile, or the default profile
+// when there is none or it has no user agent.
+func (self Options) profile() RequestProfile {
+	if self.Profile != nil {
+		return self.Profile.orDefault()
+	}
+	return DefaultRequestProfile()
+}
+
+// Returns the time on the run's clock: Now, or the wall clock.
+func (self Options) now() time.Time {
+	if self.Now != nil {
+		return self.Now()
+	}
+	return time.Now()
+}
+
+// Waits d on the run's clock, or until ctx ends, whichever comes first, and
+// says which: Sleep, or the production wait. The production wait selects on
+// time.After rather than a timer the caller must stop: it is always bounded by
+// d, and nothing here needs to reset or reuse it.
+func (self Options) sleep(ctx context.Context, d time.Duration) error {
+	if self.Sleep != nil {
+		return self.Sleep(ctx, d)
+	}
+	if d <= 0 {
+		return ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// The randomness one run's sample and spacing are drawn from.
 //
 // A caller-supplied generator is used as given, which is what makes a test
 // reproducible. Otherwise a fresh one is built per run and seeded from
@@ -1971,9 +2208,9 @@ func (o Options) concurrency() int {
 // will be asked for, and a clock seed is predictable to anyone who knows
 // roughly when the pass started. The global generator is avoided for a duller
 // reason: it is shared process-wide state that any other package can reseed.
-func (o Options) rng() *rand.Rand {
-	if o.Rand != nil {
-		return o.Rand
+func (self Options) rng() *rand.Rand {
+	if self.Rand != nil {
+		return self.Rand
 	}
 	var b [8]byte
 	if _, err := crand.Read(b[:]); err != nil {
@@ -1985,16 +2222,16 @@ func (o Options) rng() *rand.Rand {
 	return rand.New(rand.NewSource(int64(binary.BigEndian.Uint64(b[:]))))
 }
 
-// maxBytes is the body read cap for this destination: its own, clamped to the
+// The body read cap for this destination: its own, clamped to the
 // package ceiling so no single entry can raise the documented budget.
-func (d Destination) maxBytes() int64 {
-	if 0 < d.MaxBytes && d.MaxBytes < MaxBodyBytes {
-		return int64(d.MaxBytes)
+func (self Destination) maxBytes() int64 {
+	if 0 < self.MaxBytes && self.MaxBytes < MaxBodyBytes {
+		return int64(self.MaxBytes)
 	}
 	return MaxBodyBytes
 }
 
-// tableClasses lists the classes present in dests, in TABLE order and without
+// Lists the classes present in dests, in table order and without
 // repeats.
 //
 // Table order, never map iteration order, and that is load-bearing rather than
@@ -2014,7 +2251,7 @@ func tableClasses(dests []Destination) []Class {
 	return out
 }
 
-// sampleCount is how many destinations of class c a run draws: the declared
+// How many destinations of class c a run draws: the declared
 // size, or the whole class when it is smaller than that or has no declared size
 // at all. See sampleSizes for why "no declared size" means "probe it all".
 func sampleCount(dests []Destination, c Class, sizes map[Class]int) int {
@@ -2031,11 +2268,11 @@ func sampleCount(dests []Destination, c Class, sizes map[Class]int) int {
 	return n
 }
 
-// sampleDestinations draws each class's sample for one run.
+// Draws each class's sample for one run.
 //
 // It is a partial Fisher-Yates over each class's indices, so every subset of a
 // class is equally likely and no destination is drawn twice. The result is
-// returned in TABLE order (the indices are sorted afterwards) so that Checks,
+// returned in table order (the indices are sorted afterwards) so that Checks,
 // FailedNames and the log line keep reading in the order the table declares,
 // whatever the draw was -- a summary that reordered itself per run would be
 // undiffable.
@@ -2053,7 +2290,7 @@ func sampleDestinations(dests []Destination, sizes map[Class]int, r *rand.Rand) 
 	for _, c := range tableClasses(dests) {
 		idx := byClass[c]
 		n := sampleCount(dests, c, sizes)
-		if n >= len(idx) {
+		if len(idx) <= n {
 			picked = append(picked, idx...)
 			continue
 		}
@@ -2073,11 +2310,11 @@ func sampleDestinations(dests []Destination, sizes map[Class]int, r *rand.Rand) 
 	return out
 }
 
-// check is the seam Check is built on, taking the destination table explicitly
-// so tests can drive httptest servers instead of the real internet. Same shape
-// as geolocate's locate().
+// The seam Check is built on, taking the destinations explicitly so
+// tests can drive httptest servers instead of the real internet.
 func check(ctx context.Context, client *http.Client, dests []Destination, opts Options) (*Result, error) {
-	if client == nil {
+	path := opts.path(client)
+	if current, _ := path.Current(); current == nil {
 		return nil, ErrNilClient
 	}
 	if len(dests) == 0 {
@@ -2087,113 +2324,98 @@ func check(ctx context.Context, client *http.Client, dests []Destination, opts O
 		return nil, fmt.Errorf("%w: %w", ErrNoBudget, err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, opts.budget())
+	parent := ctx
+	budget := opts.budget(len(dests))
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	perRequest := opts.perRequestTimeout()
-	results := make([]CheckResult, len(dests))
-	sem := make(chan struct{}, opts.concurrency())
-	var wg sync.WaitGroup
-	for i := range dests {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[i] = fetch(ctx, client, dests[i], perRequest)
-		}(i)
-	}
-	wg.Wait()
+	res := &Result{}
+	exit := &exitRecord{}
+	r := newRun(path, opts, opts.concurrency(), budget, opts.rng(), exit)
+	r.warmUp(ctx)
 
-	// ByClass and Reputation are seeded from the SAMPLE, not from the results
-	// that happened to come back, so a class in which every single check failed
-	// still appears as 0/n. Accumulating only from successes would make the
-	// datacenter-IP case -- the whole reason the class dimension exists --
-	// vanish from the map at exactly the moment it matters.
-	byClass := map[Class]ClassSummary{}
-	var reputation ClassSummary
-	total := 0
-	for _, d := range dests {
-		if !scored(d.Class) {
-			reputation.Total++
+	res.Checks = r.loadAll(ctx, dests)
+	if err := parent.Err(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInterrupted, err)
+	}
+	res.ExitIp, res.ExitObservedAt, res.IpEchoErr, res.TlsAuthenticationFailure = exit.read()
+
+	// ByClass is seeded from the sample, not from the results that happened to
+	// come back, so a class in which every single check failed still appears
+	// as 0/n. Accumulating only from successes would make the datacenter-IP
+	// case -- the whole reason the class dimension exists -- vanish from the
+	// map at exactly the moment it matters. A load that was not measured, or a
+	// canary, is in no tally.
+	res.ByClass = map[Class]ClassSummary{}
+	for i := range res.Checks {
+		c := &res.Checks[i]
+		c.Canary = dests[i].Canary && dests[i].IncompatibleWith(opts.ProviderPlace)
+		if c.TlsAuthenticationFailure {
+			res.TlsAuthenticationFailure = true
+		}
+		switch {
+		case c.Canary:
+			continue
+		case c.NotMeasured:
+			res.NotMeasured++
 			continue
 		}
-		total++
-		s := byClass[d.Class]
+		s := res.ByClass[c.Class]
 		s.Total++
-		byClass[d.Class] = s
+		res.Total++
+		if c.Ok {
+			s.Ok++
+			res.OkCount++
+		}
+		res.ByClass[c.Class] = s
 	}
-
-	okCount := 0
-	tlsAuthenticationFailure := false
-	for _, r := range results {
-		if r.TLSAuthenticationFailure {
-			tlsAuthenticationFailure = true
-		}
-		if !r.OK {
-			continue
-		}
-		// An unscored class contributes to its own tally and to NOTHING else.
-		// Folding it into okCount would make every hosted provider read as
-		// degraded; see ClassReputation.
-		if !scored(r.Class) {
-			reputation.OK++
-			continue
-		}
-		okCount++
-		s := byClass[r.Class]
-		s.OK++
-		byClass[r.Class] = s
-	}
-
-	return &Result{
-		Checks:                   results,
-		TLSAuthenticationFailure: tlsAuthenticationFailure,
-		OKCount:                  okCount,
-		Total:                    total,
-		ByClass:                  byClass,
-		Reputation:               reputation,
-	}, nil
+	return res, nil
 }
 
-// fetch performs one destination's check. It never returns an error: a failed
-// destination is a RESULT, and the run keeps going.
-func fetch(ctx context.Context, client *http.Client, d Destination, timeout time.Duration) CheckResult {
+// The Path a run rides: the caller's, or its one client as it is.
+func (self Options) path(client *http.Client) Path {
+	if self.Path != nil {
+		return self.Path
+	}
+	return staticPath{client: client}
+}
+
+// Performs one attempt of one destination's check. It never returns an
+// error: a failed attempt is a result, and the run keeps going.
+func fetch(ctx context.Context, client *http.Client, d Destination, timeout time.Duration, profile RequestProfile, now func() time.Time) CheckResult {
 	r := CheckResult{Name: d.Name, Class: d.Class}
-	start := time.Now()
+	start := now()
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.Url, nil)
 	if err != nil {
-		r.Latency = time.Since(start)
+		r.Latency = now().Sub(start)
 		r.Err = err.Error()
 		return r
 	}
-	// Set first, so a destination's own Headers can still override it.
-	req.Header.Set("User-Agent", UserAgent)
-	for k, v := range d.Headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, profile, d.Headers)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		r.Latency = time.Since(start)
+		r.Latency = now().Sub(start)
 		r.Err = err.Error()
-		r.TLSAuthenticationFailure = isTLSAuthenticationFailure(err)
+		r.TlsAuthenticationFailure = isTlsAuthenticationFailure(err)
 		return r
 	}
+	// Closed after the capped read, whatever is left on the wire: the first
+	// kilobyte is the whole question (see MaxBodyBytes and neverSent).
 	defer resp.Body.Close()
 	r.StatusCode = resp.StatusCode
 
 	// The body is read even on an error status, and ByteCount is recorded
 	// either way: a 403 with a page of explanation proves the tunnel carried
-	// bytes in both directions and the CONTENT PROVIDER refused, which is a
+	// bytes in both directions and the content provider refused, which is a
 	// different fault from nothing coming back at all.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, d.maxBytes()))
 	r.ByteCount = int64(len(body))
-	r.Latency = time.Since(start)
+	r.Latency = now().Sub(start)
 
 	if readErr != nil {
 		r.Err = readErr.Error()
@@ -2203,11 +2425,11 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 		r.Err = err.Error()
 		return r
 	}
-	r.OK = true
+	r.Ok = true
 	return r
 }
 
-// isTLSAuthenticationFailure identifies certificate-chain and hostname
+// Identifies certificate-chain and hostname
 // verification failures without parsing their human-readable text. These are
 // qualitatively different from timeouts, refused connections, HTTP statuses,
 // and content mismatches: a provider returned a TLS identity that does not
@@ -2217,7 +2439,7 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 // fallbacks cover transports with a custom VerifyPeerCertificate callback,
 // including the provider tunnel's pinning path, which can return the underlying
 // verification error directly.
-func isTLSAuthenticationFailure(err error) bool {
+func isTlsAuthenticationFailure(err error) bool {
 	var verificationErr *tls.CertificateVerificationError
 	if errors.As(err, &verificationErr) {
 		return true
@@ -2234,22 +2456,22 @@ func isTLSAuthenticationFailure(err error) bool {
 	return errors.As(err, &hostnameErr)
 }
 
-// judge applies the destination's success contract to what came back. It is
+// Applies the destination's success contract to what came back. It is
 // separated from the transport so the rule can be read -- and reasoned about --
 // without an http server in the way.
-func (d Destination) judge(status int, body []byte) error {
-	switch d.Expect {
+func (self Destination) judge(status int, body []byte) error {
+	switch self.Expect {
 	case ExpectStatus:
-		if d.Status <= 0 {
+		if self.Status <= 0 {
 			// A misconfigured entry must fail loudly rather than accept anything:
 			// "expect exactly nothing in particular" is how ExpectStatus would
 			// become a hole in the blackhole rule.
 			return fmt.Errorf("destination declares ExpectStatus with no Status; it cannot be judged")
 		}
-		if status != d.Status {
+		if status != self.Status {
 			// Exact, not "any 2xx". A provider that synthesizes a bare 200 must
 			// not pass a destination that is supposed to answer 204.
-			return fmt.Errorf("status %d, want exactly %d", status, d.Status)
+			return fmt.Errorf("status %d, want exactly %d", status, self.Status)
 		}
 	case ExpectReachable:
 		// Any 2xx or 3xx: the host answered through the provider. A 4xx/5xx is
@@ -2258,7 +2480,7 @@ func (d Destination) judge(status int, body []byte) error {
 		if status < 200 || 400 <= status {
 			return fmt.Errorf("status %d, want any 2xx or 3xx", status)
 		}
-	default: // ExpectBody
+	case ExpectBody:
 		if status < 200 || 300 <= status {
 			// 3xx counts as a failure, not a redirect to follow. The production
 			// client refuses redirects outright (providertunnel's CheckRedirect),
@@ -2268,53 +2490,56 @@ func (d Destination) judge(status int, body []byte) error {
 			return fmt.Errorf("status %d", status)
 		}
 		if len(body) == 0 {
-			// THE blackhole signature, and the reason this rule is spelled out: a
+			// The blackhole signature, and the reason this rule is spelled out: a
 			// status line with no body is exactly what a provider that terminates
 			// the connection itself, or one whose upstream returns a stub,
 			// produces. Counting it as success would let the failure this package
-			// exists to catch pass the check. This stays the DEFAULT contract; an
+			// exists to catch pass the check. This stays the default contract; an
 			// endpoint where an empty body is correct must say so with
 			// ExpectStatus.
 			return fmt.Errorf("status %d with an empty body", status)
 		}
+	default:
+		// Only a hand-built Destination can get here; the pool decoder
+		// refuses an unknown contract. Accepting it would be a guess.
+		return fmt.Errorf("destination declares %s, which cannot be judged", self.Expect)
 	}
-	if d.Verify == nil {
-		return nil
-	}
-	if err := d.Verify(body); err != nil {
+	if err := self.Verify.check(body); err != nil {
 		return fmt.Errorf("status %d but the body did not verify: %w", status, err)
 	}
 	return nil
 }
 
-// DestinationHosts returns the host of every production destination,
-// de-duplicated and in table order.
+// Returns the host of every destination in the built-in
+// table, de-duplicated and in table order.
 //
-// This mirrors geolocate.SourceHosts and exists for the same reason: nothing
-// outside this package should keep a second copy of the endpoint list. The
-// prober's container cannot resolve DNS, so the operator passes explicit
-// addresses to the confinement self-check with -confinement-address, and this
-// is how they obtain the host list to translate. A hand-maintained copy would
-// drift on the first table change while the check kept reporting success.
+// Nothing outside this package should keep a second copy of the endpoint
+// list. The prober's container cannot resolve DNS, so the operator passes
+// explicit addresses to the confinement self-check with -confinement-address,
+// and this is how they obtain the host list to translate. A hand-maintained
+// copy would drift on the first table change while the check kept reporting
+// success.
 //
-// It covers the WHOLE table, not a sample: any destination can be drawn on any
+// It covers the whole table, not a sample: any destination can be drawn on any
 // run, so the confinement check has to prove every one of them unreachable
 // directly, and the tunnel client has to be allowed to reach every one of them.
-// This list is therefore now ~140 hosts rather than ~30 -- see the README on
-// what that means for an operator maintaining -confinement-address by hand.
-//
-// Reputation hosts are included: they are reached through the tunnel like any
-// other destination, so the confinement check must prove them unreachable
-// directly. Being excluded from the SCORE has nothing to do with confinement.
+// The hosts of a server pool are HostsOf that pool.
+func DestinationHosts() []string {
+	return HostsOf(destinations)
+}
+
+// Returns the host of every destination in dests, de-duplicated and in
+// order. It is the tunnel allowlist a run over dests needs.
 //
 // A URL that does not parse, or carries no host, is skipped rather than
-// panicking -- but destinations is a compile-time constant table and
-// TestDestinationHostsCoversEveryDestination fails if any entry goes missing.
-func DestinationHosts() []string {
+// panicking -- the built-in table is a compile-time constant that
+// TestDestinationHostsCoversEveryDestination holds, and a pool is refused at
+// FetchPool unless every url parses.
+func HostsOf(dests []Destination) []string {
 	seen := map[string]bool{}
-	hosts := make([]string, 0, len(destinations))
-	for _, d := range destinations {
-		u, err := url.Parse(d.URL)
+	hosts := make([]string, 0, len(dests))
+	for _, d := range dests {
+		u, err := url.Parse(d.Url)
 		if err != nil {
 			continue
 		}
@@ -2328,14 +2553,14 @@ func DestinationHosts() []string {
 	return hosts
 }
 
-// Destinations returns a copy of the production table -- all of it, not one
+// Returns a copy of the built-in table -- all of it, not one
 // run's sample.
 //
 // A copy, not the table: a caller that mutated it -- or the Headers map inside
 // an entry -- would silently change what every subsequent probe measures, and
 // the drift would be invisible in the table's own source. Callers that only
-// need the host list want DestinationHosts; callers sizing a run's budget want
-// SamplePerRun.
+// need the host list want DestinationHosts; callers sizing a run want
+// SamplePerRun. The server seeds its pool from this.
 func Destinations() []Destination {
 	out := make([]Destination, len(destinations))
 	for i, d := range destinations {
@@ -2347,105 +2572,147 @@ func Destinations() []Destination {
 			}
 			out[i].Headers = headers
 		}
+		if d.Incompatible != nil {
+			out[i].Incompatible = append([]Place(nil), d.Incompatible...)
+		}
 	}
 	return out
 }
 
-// Summary renders the one-line, per-pass form:
+// Counts the loads that passed only after a failed attempt: the
+// flakes the retries absorbed, which a single-attempt run would have counted
+// as failed sites.
+func (self *Result) Retried() int {
+	if self == nil {
+		return 0
+	}
+	n := 0
+	for _, c := range self.Checks {
+		if c.Ok && 1 < c.Attempts && !c.Canary {
+			n++
+		}
+	}
+	return n
+}
+
+// Renders the one-line, per-pass form:
 //
-//	ok=25/26 dns=4/4 connectivity=5/5 cdn=4/5 site=12/12 reputation=1/4 table=140
+//	ok=48/50 dns=6/6 connectivity=8/8 cdn=9/10 site=25/26 table=139 retried=3
 //
-// Every figure except table= is over the destinations this run SAMPLED, which
-// is why the table size is on the line: dns=4/4 is four of seven asked and
-// answered, not a four-entry class.
-//
-// The reputation figure sits OUTSIDE ok=N/M on purpose and is never added into
-// it: it measures how the exit's address-and-client pair is treated by
-// bot-management vendors, not whether the provider works. See ClassReputation.
+// Every figure except table= is over the destinations this run sampled and
+// measured, after every load's retries, which is why the table size is on the
+// line: dns=6/6 is six of seven asked and answered, not a six-entry class. The
+// rest appear only when there is something to say: retried= counts the loads
+// that passed only on a later attempt; not_measured= the loads whose tunnel
+// was gone for their last attempt and could not be re-created in time (they
+// are in no tally); short= the classes too thin, for the provider's place, to
+// fill their sample; canary=passed/loaded the unscored canaries; and
+// exit=unobserved says the warm-up yielded no exit address. The address itself
+// is never on the line: the server does not store it either, and a log is a
+// worse place for it.
 //
 // Class order is Classes, never map iteration order, so successive passes are
 // diffable. Classes absent from the sample are omitted; a class present in the
 // sample but absent from Classes is appended in sorted order rather than
 // silently dropped.
-func (r *Result) Summary() string {
-	if r == nil {
+func (self *Result) Summary() string {
+	if self == nil {
 		return "ok=0/0"
 	}
+	// The classes present in ByClass: the declared ones first, in Classes
+	// order, then any others sorted, so a class added to the table but not to
+	// Classes still shows up.
+	orderedClasses := make([]Class, 0, len(self.ByClass))
+	declaredClasses := map[Class]bool{}
+	for _, c := range Classes {
+		declaredClasses[c] = true
+		if _, ok := self.ByClass[c]; ok {
+			orderedClasses = append(orderedClasses, c)
+		}
+	}
+	var extraClassNames []string
+	for c := range self.ByClass {
+		if !declaredClasses[c] {
+			extraClassNames = append(extraClassNames, string(c))
+		}
+	}
+	sort.Strings(extraClassNames)
+	for _, name := range extraClassNames {
+		orderedClasses = append(orderedClasses, Class(name))
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "ok=%d/%d", r.OKCount, r.Total)
-	for _, c := range r.orderedClasses() {
-		s := r.ByClass[c]
-		fmt.Fprintf(&b, " %s=%d/%d", c, s.OK, s.Total)
+	fmt.Fprintf(&b, "ok=%d/%d", self.OkCount, self.Total)
+	for _, c := range orderedClasses {
+		s := self.ByClass[c]
+		fmt.Fprintf(&b, " %s=%d/%d", c, s.Ok, s.Total)
 	}
-	if 0 < r.Reputation.Total {
-		fmt.Fprintf(&b, " %s=%d/%d", ClassReputation, r.Reputation.OK, r.Reputation.Total)
+	if 0 < self.TableTotal {
+		fmt.Fprintf(&b, " table=%d", self.TableTotal)
 	}
-	if 0 < r.TableTotal {
-		fmt.Fprintf(&b, " table=%d", r.TableTotal)
+	if retried := self.Retried(); 0 < retried {
+		fmt.Fprintf(&b, " retried=%d", retried)
 	}
-	if r.TLSAuthenticationFailure {
+	if 0 < self.NotMeasured {
+		fmt.Fprintf(&b, " not_measured=%d", self.NotMeasured)
+	}
+	if 0 < len(self.ShortClasses) {
+		short := make([]string, 0, len(self.ShortClasses))
+		for _, c := range self.ShortClasses {
+			short = append(short, string(c))
+		}
+		fmt.Fprintf(&b, " short=%s", strings.Join(short, ","))
+	}
+	if canaries := len(self.CanaryPassedNames()) + len(self.CanaryFailedNames()); 0 < canaries {
+		fmt.Fprintf(&b, " canary=%d/%d", len(self.CanaryPassedNames()), canaries)
+	}
+	if self.IpEchoErr != "" {
+		b.WriteString(" exit=unobserved")
+	}
+	if self.TlsAuthenticationFailure {
 		b.WriteString(" tls_authentication_failure=true")
 	}
 	return b.String()
 }
 
-// orderedClasses lists the classes present in ByClass: the declared ones first,
-// in Classes order, then any others sorted, so a class added to the table but
-// not to Classes still shows up.
-func (r *Result) orderedClasses() []Class {
-	out := make([]Class, 0, len(r.ByClass))
-	declared := map[Class]bool{}
-	for _, c := range Classes {
-		declared[c] = true
-		if _, ok := r.ByClass[c]; ok {
-			out = append(out, c)
-		}
-	}
-	var extra []string
-	for c := range r.ByClass {
-		if !declared[c] {
-			extra = append(extra, string(c))
-		}
-	}
-	sort.Strings(extra)
-	for _, c := range extra {
-		out = append(out, Class(c))
-	}
-	return out
+// Lists the measured, scored destinations that failed every
+// attempt, in table order. The summary line says how many failed; this says
+// which, which is what turns a log line into something actionable -- and with
+// a sampled table it is the only way to know which destinations a run actually
+// asked for. It is also what the server's per-site failure share is computed
+// from (GEOMAP §11.4), which is why a load that was not measured, or a canary,
+// is never in it.
+func (self *Result) FailedNames() []string {
+	return self.names(func(c CheckResult) bool { return !c.Ok && !c.NotMeasured && !c.Canary })
 }
 
-// FailedNames lists the SCORED destinations that did not pass, in table order.
-// The summary line says how many failed; this says which, which is what turns a
-// log line into something actionable -- and with a sampled table it is the only
-// way to know WHICH destinations a run actually asked for.
-//
-// Reputation failures are not here, because they are not failures of the thing
-// ok=N/M reports; ReputationFailedNames lists those separately so a log line
-// can keep the two apart.
-func (r *Result) FailedNames() []string {
-	if r == nil {
+// Lists the loads the run could not measure, in table order.
+func (self *Result) NotMeasuredNames() []string {
+	return self.names(func(c CheckResult) bool { return c.NotMeasured && !c.Canary })
+}
+
+// Lists the canaries that passed, in table order: with CanaryFailedNames,
+// what the server reads to tell whether a site works again from a place it is
+// marked incompatible with. A canary that was not measured is in neither.
+func (self *Result) CanaryPassedNames() []string {
+	return self.names(func(c CheckResult) bool { return c.Canary && c.Ok })
+}
+
+// Lists the canaries that were measured and did not pass, in table order; see
+// CanaryPassedNames.
+func (self *Result) CanaryFailedNames() []string {
+	return self.names(func(c CheckResult) bool { return c.Canary && !c.Ok && !c.NotMeasured })
+}
+
+// Lists the names of the checks want selects, in table order; nil for a nil
+// result.
+func (self *Result) names(want func(CheckResult) bool) []string {
+	if self == nil {
 		return nil
 	}
 	var names []string
-	for _, c := range r.Checks {
-		if !c.OK && scored(c.Class) {
-			names = append(names, c.Name)
-		}
-	}
-	return names
-}
-
-// ReputationFailedNames lists the reputation destinations that refused this
-// exit, in table order. Which vendor refused is the whole content of the
-// signal -- "akamai,etsy" and "reuters" say different things about what the
-// exit looks like from outside.
-func (r *Result) ReputationFailedNames() []string {
-	if r == nil {
-		return nil
-	}
-	var names []string
-	for _, c := range r.Checks {
-		if !c.OK && !scored(c.Class) {
+	for _, c := range self.Checks {
+		if want(c) {
 			names = append(names, c.Name)
 		}
 	}

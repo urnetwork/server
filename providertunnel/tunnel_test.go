@@ -28,22 +28,26 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// testCACert and testCAKey are a self-signed test CA, installed as a
+// Tests of the tunnel client: the dial path, the https-only allowlist and the
+// pin check through real handshakes, the loss signal, the lifecycle of Open
+// and Close, the in-tunnel-only resolver, and one connection per request.
+
+// A self-signed test CA, testCaCert and testCaKey, installed as a
 // trusted root for this test binary only (see TestMain). The two TLS
 // end-to-end tests below issue leaf certificates signed by this CA, so that
 // normal certificate-chain verification succeeds and the pin check --
-// PinnedTLSConfigForHost's VerifyPeerCertificate -- is what actually
+// PinnedTlsConfigForHost's VerifyPeerCertificate -- is what actually
 // isolates pass/fail. A bare self-signed leaf (no CA in the chain) would
 // always be rejected at the chain-trust step, regardless of whether the pin
 // matched, and would not prove pinning does anything.
 var (
-	testCACert *x509.Certificate
-	testCAKey  *ecdsa.PrivateKey
+	testCaCert *x509.Certificate
+	testCaKey  *ecdsa.PrivateKey
 
-	// attackerCACert/attackerCAKey model a SECOND CA that is also in the
+	// A second CA, attackerCaCert and attackerCaKey, that is also in the
 	// trust store -- exactly like the real world, where the system trust
 	// store contains hundreds of independent, unrelated CAs, and a leaf
-	// issued by ANY of them chains successfully. It exists only for
+	// issued by any of them chains successfully. It exists only for
 	// TestCheckPinBypassViaDeadWeightIntermediate and
 	// TestCheckPinBypassViaDeadWeightIntermediate_FixedRejects below: those
 	// tests hold this "attacker" CA (standing in for some other publicly
@@ -52,11 +56,11 @@ var (
 	// pinned host's identity by padding the wire chain with an unrelated,
 	// legitimately pinned certificate that was never actually part of the
 	// validated path.
-	attackerCACert *x509.Certificate
-	attackerCAKey  *ecdsa.PrivateKey
+	attackerCaCert *x509.Certificate
+	attackerCaKey  *ecdsa.PrivateKey
 )
 
-// TestMain installs testCACert as a trusted root for this process by
+// Installs testCaCert as a trusted root for this process by
 // pointing SSL_CERT_FILE at it before any test runs. crypto/x509's Linux
 // loader (root_unix.go) honors SSL_CERT_FILE to build the system root pool,
 // and that pool is loaded lazily and cached for the life of the process, so
@@ -67,19 +71,19 @@ var (
 // not a replacement for it) and without relying on any real, publicly
 // trusted certificate for a fake test host.
 func TestMain(m *testing.M) {
-	cert, key, err := generateTestCA()
+	cert, key, err := generateTestCa()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "generate test CA:", err)
 		os.Exit(1)
 	}
-	testCACert, testCAKey = cert, key
+	testCaCert, testCaKey = cert, key
 
-	attCert, attKey, err := generateTestCA()
+	attCert, attKey, err := generateTestCa()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "generate attacker test CA:", err)
 		os.Exit(1)
 	}
-	attackerCACert, attackerCAKey = attCert, attKey
+	attackerCaCert, attackerCaKey = attCert, attKey
 
 	dir, err := os.MkdirTemp("", "providertunnel-test-ca")
 	if err != nil {
@@ -89,7 +93,7 @@ func TestMain(m *testing.M) {
 	caPath := filepath.Join(dir, "ca.pem")
 	// Both CAs are concatenated into one PEM file: crypto/x509's SSL_CERT_FILE
 	// loader (root_unix.go) accepts a file containing multiple concatenated
-	// PEM blocks via CertPool.AppendCertsFromPEM, so this installs BOTH as
+	// PEM blocks via CertPool.AppendCertsFromPEM, so this installs both as
 	// independently trusted roots for this test binary -- modelling a real
 	// trust store, which trusts many unrelated CAs at once, not just the one
 	// this package's pins are meant to track.
@@ -107,7 +111,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// requireInjectedSystemTrust skips a test that needs testCACert to be a
+// Skips a test that needs testCaCert to be a
 // trusted system root. TestMain installs it via SSL_CERT_FILE, which
 // crypto/x509 honors only on Linux (root_unix.go); Windows and macOS use
 // their platform verifiers, so there every handshake against the test CA
@@ -122,7 +126,9 @@ func requireInjectedSystemTrust(t *testing.T) {
 	}
 }
 
-func generateTestCA() (*x509.Certificate, *ecdsa.PrivateKey, error) {
+// Generates a self-signed CA certificate and its key, valid for an hour
+// around now.
+func generateTestCa() (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -147,7 +153,7 @@ func generateTestCA() (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	return cert, key, nil
 }
 
-// issueLeaf mints a certificate for host, signed by testCACert/testCAKey,
+// Mints a certificate for host, signed by testCaCert/testCaKey,
 // so it chains to a trusted root under the SSL_CERT_FILE override installed
 // by TestMain.
 func issueLeaf(t *testing.T, host string) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -165,7 +171,7 @@ func issueLeaf(t *testing.T, host string) (*x509.Certificate, *ecdsa.PrivateKey)
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, testCACert, &key.PublicKey, testCAKey)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, testCaCert, &key.PublicKey, testCaKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,10 +182,10 @@ func issueLeaf(t *testing.T, host string) (*x509.Certificate, *ecdsa.PrivateKey)
 	return cert, key
 }
 
-// issueLeafSignedBy mints a certificate for host, signed directly by the
+// Mints a certificate for host, signed directly by the
 // given CA cert/key, generalizing issueLeaf (which always signs with
-// testCACert) to any CA -- used by the C1 bypass tests below to mint a leaf
-// signed by attackerCACert instead.
+// testCaCert) to any CA -- used by the C1 bypass tests below to mint a leaf
+// signed by attackerCaCert instead.
 func issueLeafSignedBy(t *testing.T, host string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -206,9 +212,9 @@ func issueLeafSignedBy(t *testing.T, host string, caCert *x509.Certificate, caKe
 	return cert, key
 }
 
-// issueIntermediateSignedBy mints an intermediate CA certificate signed by
+// Mints an intermediate CA certificate signed by
 // the given parent CA cert/key. Used by the C1 bypass tests to build a
-// "legit" intermediate (signed by testCACert) that plays the role of a
+// "legit" intermediate (signed by testCaCert) that plays the role of a
 // real, publicly downloadable intermediate like a Let's Encrypt issuer:
 // something an attacker can freely obtain and append to a Certificate
 // message without ever holding its private key.
@@ -238,16 +244,16 @@ func issueIntermediateSignedBy(t *testing.T, cn string, caCert *x509.Certificate
 	return cert, key
 }
 
-// httpClientOverDialer is the contract Tunnel.HTTPClient must satisfy: every
+// httpClientOverDialer is the contract Tunnel.HttpClient must satisfy: every
 // request is dialed through the supplied dialer (the tunnel), never the host
 // network. https is the only scheme the client will carry (see
-// TestHTTPClientRefusesPlainHTTP), so the wiring is proven by watching the
+// TestHttpClientRefusesPlainHttp), so the wiring is proven by watching the
 // dialer get invoked for an allowlisted https host; the handshake then
 // failing against the plaintext stub is expected and irrelevant to the
 // property -- what matters is that the connection attempt rode the supplied
 // dialer at all. This keeps the test free of the trust-injection harness,
 // so it runs on every platform.
-func TestHTTPClientUsesSuppliedDialer(t *testing.T) {
+func TestHttpClientUsesSuppliedDialer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -280,14 +286,14 @@ func TestHTTPClientUsesSuppliedDialer(t *testing.T) {
 	}
 }
 
-// TestHTTPClientRefusesPlainHTTP: the allowlist and the pins are enforced
+// The allowlist and the pins are enforced
 // in DialTLSContext, which only https traffic reaches. A plain http:// URL
 // would otherwise ride the raw tunnel dialer in cleartext -- unpinned,
 // un-allowlisted, and forgeable by the provider being measured -- so the
 // transport must refuse the scheme outright, before any bytes traverse the
 // tunnel. Even an allowlisted host is refused: the allowlist grants pinned
 // https, not the host.
-func TestHTTPClientRefusesPlainHTTP(t *testing.T) {
+func TestHttpClientRefusesPlainHttp(t *testing.T) {
 	dialed := 0
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		dialed++
@@ -300,25 +306,25 @@ func TestHTTPClientRefusesPlainHTTP(t *testing.T) {
 		resp.Body.Close()
 		t.Fatal("plain http through the tunnel succeeded; it must be refused")
 	}
-	if !errors.Is(err, ErrPlainHTTPRefused) {
-		t.Fatalf("err = %v, want it to wrap ErrPlainHTTPRefused", err)
+	if !errors.Is(err, ErrPlainHttpRefused) {
+		t.Fatalf("err = %v, want it to wrap ErrPlainHttpRefused", err)
 	}
 	if dialed != 0 {
 		t.Fatalf("the tunnel dialer was invoked %d time(s) for a plain-http request; the refusal must happen before any bytes traverse the tunnel", dialed)
 	}
 }
 
-// TestHTTPClientAppliesPinnedTLSPerHost asserts the transport is wired to
+// Asserts the transport is wired to
 // dial through the tunnel and to build its TLS config per host (via
 // DialTLSContext), rather than sharing one mutated *tls.Config template
 // across hosts -- the latter is exactly the fail-open shape Task 1's
 // security review found (see ErrPinHostUnknown doc in pinning.go) and
-// PinnedTLSConfigForHost exists to avoid.
-func TestHTTPClientAppliesPinnedTLSPerHost(t *testing.T) {
+// PinnedTlsConfigForHost exists to avoid.
+func TestHttpClientAppliesPinnedTlsPerHost(t *testing.T) {
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		return nil, context.Canceled // never actually connects
 	}
-	client := httpClientOverDialer(dial, map[string][]string{"ipinfo.io": {"pin"}}, time.Second)
+	client := httpClientOverDialer(dial, map[string][]string{"pinned.example": {"pin"}}, time.Second)
 	tr, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
@@ -331,11 +337,11 @@ func TestHTTPClientAppliesPinnedTLSPerHost(t *testing.T) {
 	}
 }
 
-// startTLSTestServer serves plain 200 responses over TLS using cert/key,
+// Serves plain 200 responses over TLS using cert/key,
 // on a random loopback port, and returns the raw (non-TLS-wrapping)
 // net.Listener address to dial. The server owns the listener and is torn
 // down by the returned cleanup func.
-func startTLSTestServer(t *testing.T, cert *x509.Certificate, key *ecdsa.PrivateKey) (addr string, cleanup func()) {
+func startTlsTestServer(t *testing.T, cert *x509.Certificate, key *ecdsa.PrivateKey) (addr string, cleanup func()) {
 	t.Helper()
 	tlsCert := tls.Certificate{
 		Certificate: [][]byte{cert.Raw},
@@ -356,7 +362,7 @@ func startTLSTestServer(t *testing.T, cert *x509.Certificate, key *ecdsa.Private
 	return ln.Addr().String(), func() { _ = ln.Close() }
 }
 
-// startTLSTestServerChain is startTLSTestServer generalized to present an
+// Like startTlsTestServer, generalized to present an
 // arbitrary, caller-controlled Certificate message: chain[0] is the leaf
 // (served with leafKey) and any further entries are sent as-is, in order,
 // exactly as crypto/tls sends whatever is in tls.Certificate.Certificate on
@@ -365,7 +371,7 @@ func startTLSTestServer(t *testing.T, cert *x509.Certificate, key *ecdsa.Private
 // server pads its Certificate message with a certificate that plays no
 // role in the validated path -- modelling an attacker appending a
 // legitimate, publicly obtainable certificate as inert dead weight.
-func startTLSTestServerChain(t *testing.T, chain []*x509.Certificate, leafKey *ecdsa.PrivateKey) (addr string, cleanup func()) {
+func startTlsTestServerChain(t *testing.T, chain []*x509.Certificate, leafKey *ecdsa.PrivateKey) (addr string, cleanup func()) {
 	t.Helper()
 	raw := make([][]byte, len(chain))
 	for i, c := range chain {
@@ -390,28 +396,28 @@ func startTLSTestServerChain(t *testing.T, chain []*x509.Certificate, leafKey *e
 	return ln.Addr().String(), func() { _ = ln.Close() }
 }
 
-// dialerToAddr returns a dial func that ignores the requested host:port and
+// Returns a dial func that ignores the requested host:port and
 // always connects to addr, modelling "the tunnel decides where bytes
 // actually go" -- exactly like the stub dialer in
-// TestHTTPClientUsesSuppliedDialer, but reused for the TLS tests below.
+// TestHttpClientUsesSuppliedDialer, but reused for the TLS tests below.
 func dialerToAddr(addr string) dialContextFunc {
 	return func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return net.Dial("tcp", addr)
 	}
 }
 
-// TestHTTPClientRejectsWrongKeyCertForPinnedHost is the pinning regression
+// The pinning regression
 // test at the http.Client layer: Task 1's own tests only prove the verifier
 // rejects a mismatched pin in isolation (calling VerifyPeerCertificate
 // directly). This proves the same thing through the actual client
 // httpClientOverDialer builds -- a real TLS handshake, dialed through the
 // tunnel's dial func, against a server presenting a certificate whose key
-// does NOT match the configured pin for a pinned host, must fail the
+// does not match the configured pin for a pinned host, must fail the
 // request. This is the layer a wiring mistake (e.g. accidentally using an
 // unpinned config, or the clone-and-mutate bug Task 1's review caught)
-// would actually bite: a malicious provider MITMing its own geolocation
-// lookup to forge a favorable country.
-func TestHTTPClientRejectsWrongKeyCertForPinnedHost(t *testing.T) {
+// would actually bite: a malicious provider MITMing a pinned host with a
+// chain-valid certificate from another issuer to forge its answer.
+func TestHttpClientRejectsWrongKeyCertForPinnedHost(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 
@@ -419,16 +425,16 @@ func TestHTTPClientRejectsWrongKeyCertForPinnedHost(t *testing.T) {
 	// verification succeeds under the SSL_CERT_FILE override from
 	// TestMain, isolating the pin check as the thing under test.
 	serverCert, serverKey := issueLeaf(t, pinnedHost)
-	// The pin set trusts a DIFFERENT key for the same host -- simulating a
+	// The pin set trusts a different key for the same host -- simulating a
 	// MITM presenting a chain-valid certificate the pin set does not trust
 	// (e.g. issued by a different, also-trusted CA for a key it controls).
 	trustedCert, _ := issueLeaf(t, pinnedHost)
 
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
 	client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-		pinnedHost: {SPKIPin(trustedCert)},
+		pinnedHost: {SpkiPin(trustedCert)},
 	}, 5*time.Second)
 
 	resp, err := client.Get("https://" + pinnedHost + "/json")
@@ -441,21 +447,21 @@ func TestHTTPClientRejectsWrongKeyCertForPinnedHost(t *testing.T) {
 	}
 }
 
-// TestHTTPClientAcceptsMatchingPinnedCert is the positive counterpart: with
+// The positive counterpart: with
 // the correct pin configured, the same real TLS handshake through the same
 // client construction succeeds. Without this, a bug that made pinning
 // reject everything (fail-closed but broken, e.g. wrong host normalization)
 // would not be caught by the rejection test above.
-func TestHTTPClientAcceptsMatchingPinnedCert(t *testing.T) {
+func TestHttpClientAcceptsMatchingPinnedCert(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 
 	serverCert, serverKey := issueLeaf(t, pinnedHost)
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
 	client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-		pinnedHost: {SPKIPin(serverCert)},
+		pinnedHost: {SpkiPin(serverCert)},
 	}, 5*time.Second)
 
 	resp, err := client.Get("https://" + pinnedHost + "/json")
@@ -468,150 +474,143 @@ func TestHTTPClientAcceptsMatchingPinnedCert(t *testing.T) {
 	}
 }
 
-// TestHTTPClientRefusesUnknownHostAllowlist is the FIX 1 regression test: the
-// geolocation endpoint set is closed and known (geolocate/sources.go), so an
-// https host with no entry in the pin map must be a loud, refused
-// connection -- never a silent pass. Each case here reproduces a way a
-// wiring mistake in a later "wire the real pins" task could leave a source
-// effectively unpinned: a nil map, an empty map, a typo'd host key, and a
-// map that only pins some other host. Before FIX 1 these all connected with
+// The fix 1 regression test: the
+// set of hosts a probe dials is closed and known, so an https host outside it
+// -- no entry in the pin map and not among the client's extra hosts -- must be
+// a loud, refused connection, never a silent pass. Each case here reproduces a
+// way a wiring mistake could leave a host reachable that nothing asked for: a
+// nil map, an empty map, a typo'd host key, and a map that only pins some
+// other host. Before fix 1 these all connected with
 // pinning silently disabled (checkPin's "absent host passes" contract,
 // which is correct for pinning.go's general callers, was being reached
 // directly by an untrusted dial path that never should have allowed it).
 // The dial func here fails the test if it is ever invoked, proving the
 // allowlist rejects the host before any TCP connection is attempted, not
 // merely at the TLS verification step.
-func TestHTTPClientRefusesUnknownHostAllowlist(t *testing.T) {
+func TestHttpClientRefusesUnknownHostAllowlist(t *testing.T) {
 	cases := []struct {
 		name string
 		pins map[string][]string
 		host string
 	}{
-		{name: "nil pin map", pins: nil, host: "free.freeipapi.com"},
-		{name: "empty pin map", pins: map[string][]string{}, host: "free.freeipapi.com"},
+		{name: "nil pin map", pins: nil, host: "api.pinned.example"},
+		{name: "empty pin map", pins: map[string][]string{}, host: "api.pinned.example"},
 		{
 			name: "typo'd host key",
-			pins: map[string][]string{"freeipapi.com": {"somepin"}},
-			host: "free.freeipapi.com",
+			pins: map[string][]string{"pinned.example": {"somepin"}},
+			host: "api.pinned.example",
 		},
 		{
 			name: "host absent from a populated map",
-			pins: map[string][]string{"ip.pn": {"somepin"}},
-			host: "ipinfo.io",
+			pins: map[string][]string{"other.example": {"somepin"}},
+			host: "unlisted.example",
 		},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dialed := false
-			dial := func(ctx context.Context, network, address string) (net.Conn, error) {
-				dialed = true
-				return nil, fmt.Errorf("dial must not be reached for an unlisted host")
-			}
+		dialed := false
+		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialed = true
+			return nil, fmt.Errorf("dial must not be reached for an unlisted host")
+		}
 
-			client := httpClientOverDialer(dial, tc.pins, 5*time.Second)
-			resp, err := client.Get("https://" + tc.host + "/json")
-			if err == nil {
-				resp.Body.Close()
-				t.Fatal("FAIL-OPEN: request to a host absent from the pin map succeeded")
-			}
-			if !errors.Is(err, ErrPinHostUnknown) {
-				t.Fatalf("err = %v, want it to wrap ErrPinHostUnknown", err)
-			}
-			if dialed {
-				t.Fatal("dial must not be reached: an unlisted host must be refused before the TCP dial")
-			}
-		})
+		client := httpClientOverDialer(dial, tc.pins, 5*time.Second)
+		resp, err := client.Get("https://" + tc.host + "/json")
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("%s: FAIL-OPEN: request to a host absent from the pin map succeeded", tc.name)
+		}
+		if !errors.Is(err, ErrPinHostUnknown) {
+			t.Fatalf("%s: err = %v, want it to wrap ErrPinHostUnknown", tc.name, err)
+		}
+		if dialed {
+			t.Fatalf("%s: dial must not be reached: an unlisted host must be refused before the TCP dial", tc.name)
+		}
 	}
 }
 
-// TestHTTPClientPortSuffixedPinKeyIsNormalized is the FIX 1 regression test
+// The fix 1 regression test
 // for the "key mistakenly includes a port" case the reviewer found (e.g.
-// Pins["ipinfo.io:443"] instead of Pins["ipinfo.io"]). Lookup normalization
+// Pins["api.example:443"] instead of Pins["api.example"]). Lookup normalization
 // strips a :port suffix from both the dialed host and pin-map keys, so a
 // port-suffixed key matches the real (portless) dialed host and pinning
-// actually applies to it -- it neither silently misses (the pre-FIX-1 bug)
+// actually applies to it -- it neither silently misses (the pre-fix-1 bug)
 // nor spuriously fails closed for a merely-oddly-formatted, otherwise
 // correct key.
-func TestHTTPClientPortSuffixedPinKeyIsNormalized(t *testing.T) {
+func TestHttpClientPortSuffixedPinKeyIsNormalized(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 	serverCert, serverKey := issueLeaf(t, pinnedHost)
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
-	t.Run("correct pin under a port-suffixed key connects", func(t *testing.T) {
-		client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-			pinnedHost + ":443": {SPKIPin(serverCert)},
-		}, 5*time.Second)
+	// The correct pin under a port-suffixed key connects.
+	client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
+		pinnedHost + ":443": {SpkiPin(serverCert)},
+	}, 5*time.Second)
+	resp, err := client.Get("https://" + pinnedHost + "/json")
+	if err != nil {
+		t.Fatalf("get err = %v, want success: a port-suffixed key must normalize to match the dialed host", err)
+	}
+	resp.Body.Close()
 
-		resp, err := client.Get("https://" + pinnedHost + "/json")
-		if err != nil {
-			t.Fatalf("get err = %v, want success: a port-suffixed key must normalize to match the dialed host", err)
-		}
-		defer resp.Body.Close()
-	})
-
-	t.Run("wrong pin under a port-suffixed key is refused, not silently bypassed", func(t *testing.T) {
-		wrongCert, _ := issueLeaf(t, pinnedHost)
-		client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-			pinnedHost + ":443": {SPKIPin(wrongCert)},
-		}, 5*time.Second)
-
-		resp, err := client.Get("https://" + pinnedHost + "/json")
-		if err == nil {
-			resp.Body.Close()
-			t.Fatal("FAIL-OPEN: a port-suffixed key must not let an unmatched pin through")
-		}
-	})
+	// A wrong pin under a port-suffixed key is refused, not silently bypassed.
+	wrongCert, _ := issueLeaf(t, pinnedHost)
+	client = httpClientOverDialer(dialerToAddr(addr), map[string][]string{
+		pinnedHost + ":443": {SpkiPin(wrongCert)},
+	}, 5*time.Second)
+	resp, err = client.Get("https://" + pinnedHost + "/json")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("FAIL-OPEN: a port-suffixed key must not let an unmatched pin through")
+	}
 }
 
-// TestCheckPinBypassViaDeadWeightIntermediate is the C1 teeth-check: it
+// The C1 teeth-check: it
 // reproduces, with a real TLS handshake, the exact bypass a reviewer
 // demonstrated -- a rawCerts-based pin check (matching against whatever the
-// PEER SENT) can be defeated by an attacker who holds a leaf for the
-// pinned host issued by ANY CA in the trust store, and who simply appends
+// peer sent) can be defeated by an attacker who holds a leaf for the
+// pinned host issued by any CA in the trust store, and who simply appends
 // the real, publicly downloadable pinned intermediate to the Certificate
 // message as inert dead weight.
 //
 // Setup, mirroring the reviewer's report:
-//   - attackerCACert is a second CA independently trusted alongside
-//     testCACert (installed by TestMain), standing in for "any CA in the
+//   - attackerCaCert is a second CA independently trusted alongside
+//     testCaCert (installed by TestMain), standing in for "any CA in the
 //     system trust store" -- the attacker does not need to compromise the
 //     CA this host's real certificate happens to chain to, just obtain a
-//     certificate from SOME publicly trusted CA.
-//   - legitIntermediate is signed by testCACert and its SPKI is the ONLY
+//     certificate from some publicly trusted CA.
+//   - legitIntermediate is signed by testCaCert and its SPKI is the only
 //     configured pin for pinnedHost -- modelling pinning a real issuing
-//     intermediate (as cmd/egress-prober/main.go does for ip.pn,
-//     free.freeipapi.com, and ipinfo.io).
+//     intermediate, as a pin the server serves for a host would.
 //   - The attacker never holds legitIntermediate's private key and never
-//     needs to: their leaf is signed directly by attackerCACert, so the
+//     needs to: their leaf is signed directly by attackerCaCert, so the
 //     TLS handshake presents [attackerLeaf, legitIntermediate] and
 //     verifies successfully via the attacker's own path (attackerLeaf ->
-//     attackerCACert), with legitIntermediate contributing nothing to that
+//     attackerCaCert), with legitIntermediate contributing nothing to that
 //     path -- exactly the "dead weight" the reviewer's report describes.
 //
 // A pin check that scans rawCerts (the wire message the peer controls)
 // finds legitIntermediate's SPKI sitting there, unused, and wrongly
 // accepts. A pin check that scans verifiedChains (what crypto/tls actually
-// validated: attackerLeaf + attackerCACert) never sees legitIntermediate
-// at all and correctly rejects. THIS TEST MUST FAIL against the old
-// rawCerts-based checkPin and PASS against the verifiedChains-based fix --
+// validated: attackerLeaf + attackerCaCert) never sees legitIntermediate
+// at all and correctly rejects. This test must fail against the old
+// rawCerts-based checkPin and pass against the verifiedChains-based fix --
 // see the task report for the before/after run showing exactly that.
 func TestCheckPinBypassViaDeadWeightIntermediate(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 
-	legitIntermediate, _ := issueIntermediateSignedBy(t, "legit test intermediate CA", testCACert, testCAKey)
-	attackerLeaf, attackerLeafKey := issueLeafSignedBy(t, pinnedHost, attackerCACert, attackerCAKey)
+	legitIntermediate, _ := issueIntermediateSignedBy(t, "legit test intermediate CA", testCaCert, testCaKey)
+	attackerLeaf, attackerLeafKey := issueLeafSignedBy(t, pinnedHost, attackerCaCert, attackerCaKey)
 
 	// Wire order matches a real handshake: leaf first, then whatever else
 	// the attacker chooses to append.
-	addr, cleanup := startTLSTestServerChain(t, []*x509.Certificate{attackerLeaf, legitIntermediate}, attackerLeafKey)
+	addr, cleanup := startTlsTestServerChain(t, []*x509.Certificate{attackerLeaf, legitIntermediate}, attackerLeafKey)
 	defer cleanup()
 
 	client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-		pinnedHost: {SPKIPin(legitIntermediate)}, // ONLY the legit intermediate is pinned
+		pinnedHost: {SpkiPin(legitIntermediate)}, // Only the legit intermediate is pinned
 	}, 5*time.Second)
 
 	resp, err := client.Get("https://" + pinnedHost + "/json")
@@ -625,14 +624,14 @@ func TestCheckPinBypassViaDeadWeightIntermediate(t *testing.T) {
 	}
 }
 
-// TestCheckPinAcceptsRotatedLeafThroughRealHandshake is the positive
-// counterpart to the bypass test above, exercised through the SAME real
+// The positive
+// counterpart to the bypass test above, exercised through the same real
 // handshake path (not just a direct checkPin/VerifyPeerCertificate call):
 // the leaf has rotated (its own pin is absent from the allowed set, as
 // happens routinely -- Let's Encrypt roughly every 90 days) but it is
 // properly, honestly chained through the pinned intermediate to a trusted
-// root. This must be ACCEPTED. Without this test, a fix that makes
-// checkPin match ONLY chain[0] (the leaf) of each verified chain -- rather
+// root. This must be accepted. Without this test, a fix that makes
+// checkPin match only chain[0] (the leaf) of each verified chain -- rather
 // than every certificate in it -- would pass the bypass test above but
 // silently break the documented intermediate-rotation contract each time a
 // real leaf rotates, and nothing here would catch it.
@@ -640,16 +639,16 @@ func TestCheckPinAcceptsRotatedLeafThroughRealHandshake(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 
-	legitIntermediate, legitIntermediateKey := issueIntermediateSignedBy(t, "legit test intermediate CA", testCACert, testCAKey)
+	legitIntermediate, legitIntermediateKey := issueIntermediateSignedBy(t, "legit test intermediate CA", testCaCert, testCaKey)
 	rotatedLeaf, rotatedLeafKey := issueLeafSignedBy(t, pinnedHost, legitIntermediate, legitIntermediateKey)
 
 	// A real handshake presents the leaf and the intermediate that issued
-	// it, honestly chaining to testCACert (trusted via SSL_CERT_FILE).
-	addr, cleanup := startTLSTestServerChain(t, []*x509.Certificate{rotatedLeaf, legitIntermediate}, rotatedLeafKey)
+	// it, honestly chaining to testCaCert (trusted via SSL_CERT_FILE).
+	addr, cleanup := startTlsTestServerChain(t, []*x509.Certificate{rotatedLeaf, legitIntermediate}, rotatedLeafKey)
 	defer cleanup()
 
 	client := httpClientOverDialer(dialerToAddr(addr), map[string][]string{
-		pinnedHost: {SPKIPin(legitIntermediate)}, // only the intermediate is pinned; the new leaf's pin is absent
+		pinnedHost: {SpkiPin(legitIntermediate)}, // only the intermediate is pinned; the new leaf's pin is absent
 	}, 5*time.Second)
 
 	resp, err := client.Get("https://" + pinnedHost + "/json")
@@ -662,44 +661,183 @@ func TestCheckPinAcceptsRotatedLeafThroughRealHandshake(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsNilOrEmptyPins is the second half of FIX 1: Open itself
-// refuses to build a tunnel with no pins at all, since the closed
-// geolocation endpoint set (geolocate/sources.go) could never be pinned
-// through it -- every request the tunnel ever carried would be unpinned.
-func TestOpenRejectsNilOrEmptyPins(t *testing.T) {
-	cases := []struct {
-		name string
-		pins map[string][]string
-	}{
-		{name: "nil pins", pins: nil},
-		{name: "empty pins", pins: map[string][]string{}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{
-				ApiURL:            "http://127.0.0.1:0",
-				PlatformURL:       "http://127.0.0.1:0",
-				ByJwt:             "test-jwt",
-				ClientId:          connect.NewId(),
-				Pins:              tc.pins,
-				DeviceDescription: "test",
-				DeviceSpec:        "test",
-				Version:           "0.0.0-test",
-			}
-			tun, err := Open(context.Background(), cfg, connect.NewId())
-			if tun != nil {
-				tun.Close()
-				t.Fatal("Open must not return a tunnel when Pins is nil/empty")
-			}
-			if !errors.Is(err, ErrPinsRequired) {
-				t.Fatalf("err = %v, want it to wrap ErrPinsRequired", err)
-			}
-		})
+// Pins are optional now that no host is required to
+// carry one -- a host without a pin is verified by WebPKI -- so a tunnel opens
+// without any. What stays closed is the allowlist: with no pins and no extra
+// hosts, its client can reach nothing at all.
+func TestOpenAcceptsNoPins(t *testing.T) {
+	for _, pins := range []map[string][]string{nil, {}} {
+		cfg := dummyOpenConfig()
+		cfg.Pins = pins
+		tun, err := Open(context.Background(), cfg, connect.NewId())
+		if err != nil {
+			t.Fatalf("Open with pins %v: %v", pins, err)
+		}
+		resp, err := tun.HttpClientForHosts(time.Second, nil).Get("https://unlisted.example/json")
+		if err == nil {
+			resp.Body.Close()
+			t.Error("a client with no pins and no extra hosts reached a host")
+		} else if !errors.Is(err, ErrPinHostUnknown) {
+			t.Errorf("err = %v, want the allowlist refusal", err)
+		}
+		if err := tun.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
 	}
 }
 
-// dummyOpenConfig is a Config that lets Open build a real tunnel entirely
+// Lost is live while the tunnel is open, and a
+// deliberate Close ends it with ErrTunnelClosed -- never ErrTunnelLost, which
+// would read as the provider going away.
+func TestLostEndsOnCloseAsClosed(t *testing.T) {
+	tun, err := Open(context.Background(), dummyOpenConfig(), connect.NewId())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := tun.Lost().Err(); err != nil {
+		t.Fatalf("Lost is already done on a fresh tunnel: %v", context.Cause(tun.Lost()))
+	}
+	if err := tun.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-tun.Lost().Done():
+	case <-time.After(time.Second):
+		t.Fatal("Close did not end Lost")
+	}
+	cause := context.Cause(tun.Lost())
+	if !errors.Is(cause, ErrTunnelClosed) || errors.Is(cause, ErrTunnelLost) {
+		t.Fatalf("Lost's cause after Close = %v, want ErrTunnelClosed and not ErrTunnelLost", cause)
+	}
+}
+
+// A connect.MultiClientMonitor the test drives by hand.
+type fakeMonitor struct {
+	stateLock sync.Mutex
+	events    map[connect.Id]*connect.ProviderEvent
+	callbacks []connect.MonitorEventFunction
+}
+
+// Returns a monitor with no providers and no callbacks.
+func newFakeMonitor() *fakeMonitor {
+	return &fakeMonitor{events: map[connect.Id]*connect.ProviderEvent{}}
+}
+
+// Implements connect.MultiClientMonitor.
+func (self *fakeMonitor) AddMonitorEventCallback(callback connect.MonitorEventFunction) func() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.callbacks = append(self.callbacks, callback)
+	index := len(self.callbacks) - 1
+	return func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.callbacks[index] = nil
+	}
+}
+
+// Implements connect.MultiClientMonitor.
+func (self *fakeMonitor) Events() (*connect.WindowExpandEvent, map[connect.Id]*connect.ProviderEvent) {
+	return &connect.WindowExpandEvent{}, self.ProviderEvents()
+}
+
+// Implements connect.MultiClientMonitor.
+func (self *fakeMonitor) WindowExpandEvent() *connect.WindowExpandEvent {
+	return &connect.WindowExpandEvent{}
+}
+
+// Implements connect.MultiClientMonitor.
+func (self *fakeMonitor) ProviderEvents() map[connect.Id]*connect.ProviderEvent {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	out := map[connect.Id]*connect.ProviderEvent{}
+	for id, event := range self.events {
+		out[id] = event
+	}
+	return out
+}
+
+// Records a provider state the way the monitor does -- a terminal state
+// leaves the current set -- and delivers it.
+func (self *fakeMonitor) emit(clientId connect.Id, state connect.ProviderState) {
+	event := &connect.ProviderEvent{ClientId: clientId, State: state}
+	var callbacks []connect.MonitorEventFunction
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if state.IsTerminal() {
+			delete(self.events, clientId)
+		} else {
+			self.events[clientId] = event
+		}
+		callbacks = append([]connect.MonitorEventFunction(nil), self.callbacks...)
+	}()
+	// Delivered with no lock held, as the monitor does.
+	for _, callback := range callbacks {
+		if callback != nil {
+			callback(&connect.WindowExpandEvent{}, map[connect.Id]*connect.ProviderEvent{clientId: event}, false)
+		}
+	}
+}
+
+// The path is lost
+// when the provider, once added, is no longer added at all -- and not before.
+// A provider still in evaluation, or one that never made it in, is a tunnel
+// that never had a path, not one that lost it; and an ordinary rotation, which
+// adds the replacement before the old client leaves, never empties the set.
+func TestWatchProviderPathLosesOnlyAfterTheProviderWasAdded(t *testing.T) {
+	lostCtx, lose := context.WithCancelCause(context.Background())
+	monitor := newFakeMonitor()
+	unwatch := watchProviderPath(monitor, lose)
+	defer unwatch()
+
+	first, second, third := connect.NewId(), connect.NewId(), connect.NewId()
+	monitor.emit(first, connect.ProviderStateInEvaluation)
+	monitor.emit(first, connect.ProviderStateEvaluationFailed)
+	if lostCtx.Err() != nil {
+		t.Fatal("a provider that never got added counted as a lost path")
+	}
+
+	monitor.emit(second, connect.ProviderStateInEvaluation)
+	monitor.emit(second, connect.ProviderStateAdded)
+	// rotation: the replacement lands before the old client leaves
+	monitor.emit(third, connect.ProviderStateAdded)
+	monitor.emit(second, connect.ProviderStateRemoved)
+	if lostCtx.Err() != nil {
+		t.Fatal("a make-before-break rotation counted as a lost path")
+	}
+
+	monitor.emit(third, connect.ProviderStateRemoved)
+	if lostCtx.Err() == nil {
+		t.Fatal("the provider left with nothing added in its place, and the path was not lost")
+	}
+	if cause := context.Cause(lostCtx); !errors.Is(cause, ErrTunnelLost) {
+		t.Fatalf("cause = %v, want ErrTunnelLost", cause)
+	}
+}
+
+// A tun read failing under a live tunnel
+// is the path going away; the same failure after Close canceled the data path
+// is teardown.
+func TestPumpStoppedIsALossOnlyWhileLive(t *testing.T) {
+	readErr := errors.New("tun read: endpoint closed")
+
+	live, lose := context.WithCancelCause(context.Background())
+	pumpStopped(context.Background(), readErr, lose)
+	if cause := context.Cause(live); !errors.Is(cause, ErrTunnelLost) || !errors.Is(cause, readErr) {
+		t.Fatalf("cause = %v, want ErrTunnelLost carrying the read error", cause)
+	}
+
+	notLost, lose := context.WithCancelCause(context.Background())
+	dataCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pumpStopped(dataCtx, readErr, lose)
+	if notLost.Err() != nil {
+		t.Fatalf("a read failing after the data path was canceled counted as a loss: %v", context.Cause(notLost))
+	}
+}
+
+// A Config that lets Open build a real tunnel entirely
 // offline: every construction step it drives (CreateTunWithResolver,
 // NewApiMultiClientGenerator, NewRemoteUserNatMultiClient) only
 // allocates in-process state (a private gvisor stack, in-memory structs) --
@@ -707,11 +845,11 @@ func TestOpenRejectsNilOrEmptyPins(t *testing.T) {
 // server is needed to open and close a tunnel.
 func dummyOpenConfig() Config {
 	return Config{
-		ApiURL:            "http://127.0.0.1:0",
-		PlatformURL:       "http://127.0.0.1:0",
+		ApiUrl:            "http://127.0.0.1:0",
+		PlatformUrl:       "http://127.0.0.1:0",
 		ByJwt:             "test-jwt",
 		ClientId:          connect.NewId(),
-		Pins:              map[string][]string{"ipinfo.io": {"testpin"}},
+		Pins:              map[string][]string{"pinned.example": {"testpin"}},
 		DeviceDescription: "test",
 		DeviceSpec:        "test",
 		Version:           "0.0.0-test",
@@ -789,13 +927,13 @@ func TestReportTunReadErrorPreservesLiveTunnelFailure(t *testing.T) {
 	}
 }
 
-// TestOpenCloseGoroutineLifecycle is the FIX 2 regression test: Open/Close
+// The fix 2 regression test: Open/Close
 // had zero coverage on the theory that exercising them needs a live
 // provider. They do not -- every step Open drives is local construction
 // (see dummyOpenConfig), so this runs offline in well under a second. It
 // asserts the goroutine count returns to its pre-Open baseline after
 // Close(), which would catch a missing cancel(), a leaked tun on an error
-// path, or the packet-pump goroutine (FIX 5) failing to exit. It also
+// path, or the packet-pump goroutine (fix 5) failing to exit. It also
 // asserts a second Close() is safe, since Tunnel.Close is documented as
 // idempotent.
 func TestOpenCloseGoroutineLifecycle(t *testing.T) {
@@ -848,6 +986,8 @@ func TestOpenCloseGoroutineLifecycle(t *testing.T) {
 	}
 }
 
+// A close owner that records the order it was closed in, and fails with err
+// and whatever check reports.
 type recordingCloseWaiter struct {
 	name  string
 	order *[]string
@@ -855,12 +995,13 @@ type recordingCloseWaiter struct {
 	check func() error
 }
 
-func (c *recordingCloseWaiter) CloseAndWait(context.Context) error {
-	*c.order = append(*c.order, c.name)
-	if c.check != nil {
-		return errors.Join(c.err, c.check())
+// Implements closeAndWaiter.
+func (self *recordingCloseWaiter) CloseAndWait(context.Context) error {
+	*self.order = append(*self.order, self.name)
+	if self.check != nil {
+		return errors.Join(self.err, self.check())
 	}
-	return c.err
+	return self.err
 }
 
 // A RemoteUserNatMultiClient does not own the generated transport clients; its
@@ -938,7 +1079,7 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 	}
 }
 
-// assertInTunnelOnlyResolver asserts that s permits exactly one resolution
+// Asserts that s permits exactly one resolution
 // path -- remote DoH, dialed through the tun -- and no host-side or cleartext
 // path of any kind.
 //
@@ -951,7 +1092,7 @@ func TestCloseTunnelPartsAttemptsEveryOwnerAfterError(t *testing.T) {
 func assertInTunnelOnlyResolver(t *testing.T, s *connect.DnsResolverSettings) {
 	t.Helper()
 	if s == nil {
-		t.Fatal("resolver settings are nil, so connect's defaults apply: EnableLocalDns is true there, which resolves the geolocation hostnames off-tunnel in plaintext from the operator's own IP")
+		t.Fatal("resolver settings are nil, so connect's defaults apply: EnableLocalDns is true there, which resolves the probe's destination hostnames off-tunnel in plaintext from the operator's own IP")
 	}
 
 	v := reflect.ValueOf(*s)
@@ -985,16 +1126,16 @@ func assertInTunnelOnlyResolver(t *testing.T, s *connect.DnsResolverSettings) {
 	}
 }
 
-// TestInTunnelOnlyDnsResolverSettings pins the resolver literal itself.
+// Pins the resolver literal itself.
 func TestInTunnelOnlyDnsResolverSettings(t *testing.T) {
 	assertInTunnelOnlyResolver(t, inTunnelOnlyDnsResolverSettings())
 }
 
-// TestOpenUsesInTunnelOnlyDnsResolution is the regression test for the
+// The regression test for the
 // off-tunnel plaintext DNS leak: Open used to call
 // connect.CreateTunWithDefaults, which inherits EnableLocalDns: true, so a
 // failed in-tunnel DoH lookup silently fell back to a cleartext port-53 query
-// for "ipinfo.io" (etc.) issued from the operator's own IP. The TCP that
+// for a probe destination issued from the operator's own IP. The TCP that
 // followed still went through the tunnel, so no existing test could see it --
 // the location stayed correct and nothing was logged.
 //
@@ -1037,7 +1178,7 @@ func TestOpenUsesInTunnelOnlyDnsResolution(t *testing.T) {
 	assertInTunnelOnlyResolver(t, captured)
 }
 
-// issueSelfSignedLeaf mints a leaf that chains to NOTHING in the trust store:
+// Mints a leaf that chains to nothing in the trust store:
 // it is its own issuer, and neither test CA signed it. Used below to prove that
 // an allowed-but-unpinned host still gets full WebPKI chain verification -- the
 // property the whole "unpinned is safe enough for a health check" argument
@@ -1068,17 +1209,17 @@ func issueSelfSignedLeaf(t *testing.T, host string) (*x509.Certificate, *ecdsa.P
 	return cert, key
 }
 
-// TestHTTPClientForHostsAllowsTheExtraHosts: without this the egress-health
+// Without this the egress-health
 // probe dies at the tunnel's allowlist with ErrPinHostUnknown for every
 // destination, and nothing but a live probe against a real provider would
 // reveal it -- every package-level test would still be green while the feature
 // was completely dead in production.
-func TestHTTPClientForHostsAllowsTheExtraHosts(t *testing.T) {
+func TestHttpClientForHostsAllowsTheExtraHosts(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const healthHost = "health.example"
 
 	serverCert, serverKey := issueLeaf(t, healthHost)
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
 	client := httpClientOverDialerWithHosts(
@@ -1104,17 +1245,17 @@ func TestHTTPClientForHostsAllowsTheExtraHosts(t *testing.T) {
 	}
 }
 
-// TestHTTPClientForHostsStillVerifiesTheChain: "allowed without a pin" must
+// "allowed without a pin" must
 // mean ordinary WebPKI verification, not no verification. If this failed, a
 // provider on the path could forge a healthy-looking response for every
 // egress-health destination with a self-signed certificate, and the probe would
 // certify a blackholing provider as healthy -- the precise inversion of its
 // purpose.
-func TestHTTPClientForHostsStillVerifiesTheChain(t *testing.T) {
+func TestHttpClientForHostsStillVerifiesTheChain(t *testing.T) {
 	const healthHost = "health.example"
 
 	serverCert, serverKey := issueSelfSignedLeaf(t, healthHost)
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
 	client := httpClientOverDialerWithHosts(
@@ -1135,24 +1276,24 @@ func TestHTTPClientForHostsStillVerifiesTheChain(t *testing.T) {
 	}
 }
 
-// TestHTTPClientForHostsDoesNotUnpinAPinnedHost: naming a host in the extra
-// list must never remove its pin. Otherwise adding an entry to the health table
-// that happens to share a host with a geolocation source would silently drop
-// pinning for the geolocation lookup, which is the one place a provider CAN
-// forge a durable, user-visible result.
-func TestHTTPClientForHostsDoesNotUnpinAPinnedHost(t *testing.T) {
+// Naming a host in the extra
+// list must never remove its pin. Otherwise a destination in the health table
+// or the server's pool that happens to share a host the server pins -- the
+// operator's own /ip echo, say, whose answer places the provider -- would
+// silently drop the pin it was given.
+func TestHttpClientForHostsDoesNotUnpinAPinnedHost(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const pinnedHost = "pinned.example"
 
 	serverCert, serverKey := issueLeaf(t, pinnedHost)
 	trustedCert, _ := issueLeaf(t, pinnedHost) // a different key: the pin must not match
 
-	addr, cleanup := startTLSTestServer(t, serverCert, serverKey)
+	addr, cleanup := startTlsTestServer(t, serverCert, serverKey)
 	defer cleanup()
 
 	client := httpClientOverDialerWithHosts(
 		dialerToAddr(addr),
-		map[string][]string{pinnedHost: {SPKIPin(trustedCert)}},
+		map[string][]string{pinnedHost: {SpkiPin(trustedCert)}},
 		[]string{pinnedHost, "PINNED.example"}, // also exercises normalization
 		5*time.Second,
 	)
@@ -1167,7 +1308,7 @@ func TestHTTPClientForHostsDoesNotUnpinAPinnedHost(t *testing.T) {
 	}
 }
 
-// countingListener counts every connection the server accepts. Connections,
+// Counts every connection the server accepts. Connections,
 // not requests: the thing the bandwidth probe depends on is that N concurrent
 // requests are N transport connections, and a request counter cannot tell that
 // apart from N HTTP/2 streams sharing one.
@@ -1176,16 +1317,16 @@ type countingListener struct {
 	conns atomic.Int64
 }
 
-func (l *countingListener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
+// Implements net.Listener, counting every accepted connection.
+func (self *countingListener) Accept() (net.Conn, error) {
+	c, err := self.Listener.Accept()
 	if err == nil {
-		l.conns.Add(1)
+		self.conns.Add(1)
 	}
 	return c, err
 }
 
-// TestHTTPClientForHostsOpensOneConnectionPerConcurrentRequest is the
-// regression test for the whole point of the parallel bandwidth probe.
+// The regression test for the whole point of the parallel bandwidth probe.
 //
 // bandwidth.measure opens bandwidth.StreamCount requests at once because one
 // TCP flow cannot exceed (connect's 1 MiB window / RTT), and N flows get N
@@ -1195,10 +1336,10 @@ func (l *countingListener) Accept() (net.Conn, error) {
 // with every test in the bandwidth package still passing, because the requests
 // really are all being made.
 //
-// So this asserts on ACCEPTED CONNECTIONS, and the test server advertises h2
+// So this asserts on accepted connections, and the test server advertises h2
 // first in ALPN: if this client ever starts offering ALPN protocols, the
 // server selects h2, the connection count collapses to 1, and this fails.
-func TestHTTPClientForHostsOpensOneConnectionPerConcurrentRequest(t *testing.T) {
+func TestHttpClientForHostsOpensOneConnectionPerConcurrentRequest(t *testing.T) {
 	requireInjectedSystemTrust(t)
 	const bandwidthHost = "bandwidth.example"
 	const streams = 8
@@ -1209,7 +1350,7 @@ func TestHTTPClientForHostsOpensOneConnectionPerConcurrentRequest(t *testing.T) 
 			Certificate: [][]byte{serverCert.Raw},
 			PrivateKey:  serverKey,
 		}},
-		// h2 offered FIRST, so a client that negotiates ALPN at all will end
+		// h2 offered first, so a client that negotiates ALPN at all will end
 		// up multiplexing. This is the trap the assertion below is set for.
 		NextProtos: []string{"h2", "http/1.1"},
 	})
@@ -1277,13 +1418,13 @@ func TestHTTPClientForHostsOpensOneConnectionPerConcurrentRequest(t *testing.T) 
 	}
 }
 
-// TestOpenCopiesThePinMap: Open must not alias the caller's map. The cmd
+// Open must not alias the caller's map. The cmd
 // layer refreshes pins on a timer, so a caller mutating its own map after
 // Open would race the per-dial reads in DialTLSContext -- and the copy had no
 // coverage at all: reverting it left the whole suite green.
 func TestOpenCopiesThePinMap(t *testing.T) {
 	cfg := dummyOpenConfig()
-	pins := map[string][]string{"ipinfo.io": {"originalpin"}}
+	pins := map[string][]string{"pinned.example": {"originalpin"}}
 	cfg.Pins = pins
 
 	tun, err := Open(context.Background(), cfg, connect.NewId())
@@ -1293,11 +1434,11 @@ func TestOpenCopiesThePinMap(t *testing.T) {
 	defer tun.Close()
 
 	// The refresh the cmd layer performs, done the unsafe way.
-	pins["ipinfo.io"] = []string{"rotatedpin"}
+	pins["pinned.example"] = []string{"rotatedpin"}
 	pins["added.example"] = []string{"newpin"}
 
-	if got := tun.pins["ipinfo.io"]; len(got) != 1 || got[0] != "originalpin" {
-		t.Errorf("tunnel pins for ipinfo.io = %v after the caller mutated its map, want [originalpin]: Open aliased the caller's map", got)
+	if got := tun.pins["pinned.example"]; len(got) != 1 || got[0] != "originalpin" {
+		t.Errorf("tunnel pins for pinned.example = %v after the caller mutated its map, want [originalpin]: Open aliased the caller's map", got)
 	}
 	if _, added := tun.pins["added.example"]; added {
 		t.Error("a host added to the caller's map after Open appeared in the tunnel's allowlist")

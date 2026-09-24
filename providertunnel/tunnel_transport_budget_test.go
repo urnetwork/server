@@ -14,7 +14,7 @@ import (
 // stops before Tun construction and never starts provider or API traffic.
 func probeTransportBudgetTestConfig() Config {
 	return Config{
-		ApiURL: "https://api.probe.example", PlatformURL: "wss://platform.probe.example",
+		ApiUrl: "https://api.probe.example", PlatformUrl: "wss://platform.probe.example",
 		ByJwt: "synthetic-probe-token", ClientId: connect.NewId(),
 		Pins:              map[string][]string{"geo.probe.example": {"synthetic-pin"}},
 		DeviceDescription: "synthetic probe", DeviceSpec: "synthetic", Version: "test",

@@ -6,96 +6,154 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/urnetwork/operator-proxy/geolocate"
+	"github.com/urnetwork/operator-proxy/egresshealth"
 )
 
-// stubSubmitter is shared by prober_test.go (single-goroutine callers) and
+// Tests of one probe's flow: the exit submitted, the provider's place, and the
+// early exits.
+
+// A Submitter shared by prober_test.go (single-goroutine callers) and
 // schedule_test.go (concurrent callers via Scheduler.Run), so its fields must
 // be safe for concurrent access.
 type stubSubmitter struct {
-	mu    sync.Mutex
-	calls int
-	last  *geolocate.ConsensusLocation
-	err   error
+	stateLock sync.Mutex
+	calls     int
+	lastIp    string
+	lastAt    time.Time
+	err       error
 }
 
-func (s *stubSubmitter) Submit(ctx context.Context, id string, loc *geolocate.ConsensusLocation) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls++
-	s.last = loc
-	return s.err
+// Implements Submitter.
+func (self *stubSubmitter) Submit(ctx context.Context, id string, exitIp string, observedAt time.Time) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.calls++
+	self.lastIp, self.lastAt = exitIp, observedAt
+	return self.err
 }
 
-func TestProbeOneHappyPathSubmitsAndCloses(t *testing.T) {
+// When the stub runs' warm-ups answered.
+var exitObservedAt = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+
+// The smallest run a probe can succeed on: one measured load and
+// the exit address its warm-up saw.
+func exitResult() *egresshealth.Result {
+	return &egresshealth.Result{
+		Checks:         []egresshealth.CheckResult{{Name: "google", Class: egresshealth.ClassSite, Ok: true, Attempts: 1}},
+		ExitIp:         "203.0.113.7",
+		ExitObservedAt: exitObservedAt,
+		OkCount:        1,
+		Total:          1,
+		ByClass:        map[egresshealth.Class]egresshealth.ClassSummary{egresshealth.ClassSite: {Ok: 1, Total: 1}},
+	}
+}
+
+// A Health checker that returns res for every provider.
+func answers(res *egresshealth.Result) EgressHealthChecker {
+	return func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
+		return res, nil
+	}
+}
+
+// A provider with no place.
+func provider(id string) Provider {
+	return Provider{ClientId: id}
+}
+
+// A probe whose health run measured and whose warm-up saw an exit submits
+// that exit, at the warm-up's time, and closes the tunnel.
+func TestProbeOneHappyPathSubmitsTheExitAndCloses(t *testing.T) {
 	closed := false
 	sub := &stubSubmitter{}
 	p := &Prober{
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return &http.Client{}, func() error { closed = true; return nil }, nil
 		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return &geolocate.ConsensusLocation{CountryCode: "us", CountryConfident: true}, nil
-		},
+		Health: answers(exitResult()),
 		Submit: sub,
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err != nil {
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
 		t.Fatalf("ProbeOne err = %v", err)
 	}
-	if sub.calls != 1 {
-		t.Fatalf("submit calls = %d, want 1", sub.calls)
+	if sub.calls != 1 || sub.lastIp != "203.0.113.7" || !sub.lastAt.Equal(exitObservedAt) {
+		t.Fatalf("submitted %d time(s) exit %q at %s, want once, the warm-up's address and time", sub.calls, sub.lastIp, sub.lastAt)
 	}
 	if !closed {
 		t.Fatal("the tunnel must be closed after the probe")
 	}
 }
 
-func TestProbeOneNoConsensusDoesNotSubmit(t *testing.T) {
-	closed := false
-	sub := &stubSubmitter{}
+// The place the due list carries
+// is what the health run draws its sample against.
+func TestProbeOnePassesTheProvidersPlaceToTheRun(t *testing.T) {
+	var got egresshealth.Place
 	p := &Prober{
-		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
-			return &http.Client{}, func() error { closed = true; return nil }, nil
+		Open: okOpen,
+		Health: func(ctx context.Context, c *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
+			got = place
+			return exitResult(), nil
 		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			return nil, geolocate.ErrNoConsensus
-		},
-		Submit: sub,
+		Submit: &stubSubmitter{},
 	}
-	err := p.ProbeOne(context.Background(), "provider-1")
-	if !errors.Is(err, geolocate.ErrNoConsensus) {
-		t.Fatalf("err = %v, want ErrNoConsensus", err)
+	want := egresshealth.Place{Country: "de", Region: "Bavaria"}
+	if err := p.ProbeOne(context.Background(), Provider{ClientId: "p1", Place: want}); err != nil {
+		t.Fatalf("ProbeOne err = %v", err)
 	}
-	if sub.calls != 0 {
-		t.Fatal("must not submit without consensus")
-	}
-	if !closed {
-		t.Fatal("the tunnel must be closed even when the probe fails")
+	if got != want {
+		t.Fatalf("the run was drawn for %+v, want %+v", got, want)
 	}
 }
 
-// TestProbeOneTunnelFailureSkipsLocateAndSubmit: a tunnel that will not open
-// must short-circuit the probe. (The ATTEMPT reporting for this case is
-// covered by TestProbeOneReportsATunnelFailure in attempt_test.go, which
-// wires a reporter; this test deliberately has none, so its old name promised
-// an assertion it never made.)
-func TestProbeOneTunnelFailureSkipsLocateAndSubmit(t *testing.T) {
+// A warm-up that never got
+// an answer leaves nothing to place the provider by. The probe fails with
+// no_exit_ip and submits no location.
+func TestProbeOneWithoutAnExitDoesNotSubmitALocation(t *testing.T) {
+	res := exitResult()
+	res.ExitIp, res.IpEchoErr = "", "the /ip echo answered status 502"
+	sub := &stubSubmitter{}
+	p := &Prober{Open: okOpen, Health: answers(res), Submit: sub}
+	err := p.ProbeOne(context.Background(), provider("p1"))
+	if err == nil {
+		t.Fatal("a probe with no exit address succeeded")
+	}
+	if sub.calls != 0 {
+		t.Fatal("a location was submitted with no exit address")
+	}
+}
+
+// A tunnel that will not open
+// must short-circuit the probe.
+func TestProbeOneTunnelFailureSkipsHealthAndSubmit(t *testing.T) {
 	sub := &stubSubmitter{}
 	p := &Prober{
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return nil, nil, errors.New("no route to provider")
 		},
-		Locate: func(ctx context.Context, c *http.Client) (*geolocate.ConsensusLocation, error) {
-			t.Fatal("Locate must not run when the tunnel fails")
+		Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
+			t.Fatal("Health must not run when the tunnel fails")
 			return nil, nil
 		},
 		Submit: sub,
 	}
-	if err := p.ProbeOne(context.Background(), "provider-1"); err == nil {
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
 		t.Fatal("expected a tunnel error")
 	}
 	if sub.calls != 0 {
 		t.Fatal("must not submit when the tunnel fails")
+	}
+}
+
+// The exit address comes from the
+// health run's warm-up, so a prober without one has nothing to probe with.
+func TestProbeOneWithoutAHealthCheckerFails(t *testing.T) {
+	sub := &stubSubmitter{}
+	p := &Prober{Open: okOpen, Submit: sub}
+	if err := p.ProbeOne(context.Background(), provider("p1")); err == nil {
+		t.Fatal("a prober with no health checker reported success")
+	}
+	if sub.calls != 0 {
+		t.Fatal("a location was submitted without a health run")
 	}
 }

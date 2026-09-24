@@ -45,7 +45,7 @@ func TestReserveBandwidthMapsStatusToOutcome(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret", HTTP: srv.Client()}
+			client := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()}
 			err := client.ReserveBandwidth(context.Background(), "provider-1", bandwidth.MaxSampleBytes)
 
 			if c.wantErr == nil {
@@ -82,7 +82,7 @@ func TestSubmitBandwidthCarriesTheSource(t *testing.T) {
 		source string
 	}{
 		{name: "operator target", source: bandwidth.SourceOperator},
-		{name: "cdn target", source: bandwidth.SourceCDN},
+		{name: "cdn target", source: bandwidth.SourceCdn},
 	}
 
 	for _, c := range cases {
@@ -97,7 +97,7 @@ func TestSubmitBandwidthCarriesTheSource(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret", HTTP: srv.Client()}
+			client := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()}
 			if err := client.SubmitBandwidth(context.Background(), "provider-1", c.source, 12_345_678, 5*1024*1024); err != nil {
 				t.Fatalf("SubmitBandwidth err = %v", err)
 			}
@@ -136,8 +136,8 @@ func TestSubmitBandwidthMapsStatusToOutcome(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := &Client{ServerURL: srv.URL, OperatorSecret: "s3cret", HTTP: srv.Client()}
-			err := client.SubmitBandwidth(context.Background(), "provider-1", bandwidth.SourceCDN, 1, 1)
+			client := &Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()}
+			err := client.SubmitBandwidth(context.Background(), "provider-1", bandwidth.SourceCdn, 1, 1)
 			if c.wantErr == nil {
 				if err != nil {
 					t.Fatalf("SubmitBandwidth err = %v, want nil", err)

@@ -1,4 +1,6 @@
-// Package ingest submits probed provider locations to the operator's server.
+// Package ingest submits what the prober measured -- the exit address, the
+// egress-health runs, the blackhole checks, bandwidth -- to the operator's
+// server, and asks it which providers are due.
 package ingest
 
 import (
@@ -8,68 +10,40 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/urnetwork/operator-proxy/geolocate"
 )
 
-// ErrNotConfident is returned when a result is not country-confident. Such a
-// result is never submitted: the server keeps its own fallback, which is better
-// than recording a guess.
-var ErrNotConfident = errors.New("ingest: result is not country-confident")
+// Returned when a location submission carries no parseable
+// exit address. It is refused before any request is made: the address is the
+// whole submission now, and the server rejects one without it, so a doomed
+// POST would only be a slower way to the same answer.
+var ErrMissingExitIp = errors.New("ingest: the location submission needs the exit address the /ip echo saw")
 
-// ErrIncompleteCountry is returned when a country-confident result does not
-// carry a complete, usable country record: the code must be alpha-2 and the
-// name must be non-empty, or the server rejects the POST outright ("Country
-// code must be alpha-2." / "Missing country."). geolocate's consensus already
-// degrades such a result to not-country-confident; this is the last gate
-// before the wire, and it matters because the scheduler caches successes
-// only -- a rejected submission is retried on every pass, forever, so a
-// doomed POST is not a one-off cost. Failing locally turns that permanent
-// loop into a clean skip.
-var ErrIncompleteCountry = errors.New("ingest: country-confident result needs an alpha-2 code and a non-empty country name")
-
-// ErrRejected is returned when the server rejects a submission.
+// Returned when the server rejects a submission.
 var ErrRejected = errors.New("ingest: server rejected the submission")
 
-// ErrMissingProbedAt is returned when loc.ProbedAt is zero. Submit never
-// fabricates an "observed now" timestamp: doing so would defeat the
+// Returned when the observation time is zero. Submit
+// never fabricates an "observed now" timestamp: doing so would defeat the
 // server's age check and could permanently pin a stale or wrong location,
 // since the server's monotonic upsert would then reject later genuine
 // probes and its expiry sweep would never remove it.
-var ErrMissingProbedAt = errors.New("ingest: loc.ProbedAt is zero")
+var ErrMissingProbedAt = errors.New("ingest: the exit observation time is zero")
 
-// isAlpha2 reports whether code is exactly two ASCII letters, the shape the
-// server requires of country_code.
-func isAlpha2(code string) bool {
-	if len(code) != 2 {
-		return false
-	}
-	for i := 0; i < len(code); i++ {
-		c := code[i]
-		if c < 'a' || 'z' < c {
-			if c < 'A' || 'Z' < c {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// Client talks to the server's operator endpoints: it posts probed locations,
+// Talks to the server's operator endpoints: it posts probed locations,
 // reports probe attempts, and asks which providers are due. All three
 // authenticate with the same X-UR-Operator-Secret header -- one secret, one
 // mechanism, one thing for a deployment to get right.
 type Client struct {
-	ServerURL      string
+	ServerUrl      string
 	OperatorSecret string
-	HTTP           *http.Client
-	// DueURL overrides the due endpoint derived from ServerURL. Empty means
-	// "<ServerURL>/network/provider-egress-due".
-	DueURL string
-	// ShardIndex/ShardCount select one slice of the due queue for this worker.
+	Http           *http.Client
+	// Overrides the due endpoint derived from ServerUrl. Empty means
+	// "<ServerUrl>/network/provider-egress-due".
+	DueUrl string
+	// Select, with ShardCount, one slice of the due queue for this worker.
 	//
 	// The queue hands work out but does not claim it: the server's dedupe only
 	// bites once an attempt row lands, which is at submit time, minutes after a
@@ -85,13 +59,23 @@ type Client struct {
 	ShardCount int
 }
 
+// The wire body of a location submission.
 type submitBody struct {
-	ClientId         string    `json:"client_id"`
+	ClientId string `json:"client_id"`
+	// The address the operator's own /ip echo saw the probe come
+	// from through the provider's tunnel. It is the whole submission now: the
+	// server places it with its own GeoLite2 (GEOMAP §11.3), and nothing
+	// about the exit is asked of anyone else.
+	ExitIp string `json:"exit_ip"`
+	// The fields below are what the prober's vendor consensus used to fill.
+	// They stay on the wire for one release so a server that still declares
+	// them keeps decoding the body, and are always sent empty -- the prober no
+	// longer knows any of them, and country_confident false says so.
 	CountryCode      string    `json:"country_code"`
 	Country          string    `json:"country"`
 	Region           string    `json:"region,omitempty"`
 	City             string    `json:"city,omitempty"`
-	ASN              int       `json:"asn,omitempty"`
+	Asn              int       `json:"asn,omitempty"`
 	Org              string    `json:"org,omitempty"`
 	Hosting          bool      `json:"hosting,omitempty"`
 	Proxy            bool      `json:"proxy,omitempty"`
@@ -101,56 +85,44 @@ type submitBody struct {
 	ObservedAt       time.Time `json:"observed_at"`
 }
 
-// Submit posts one probed location. The body shape is the fixed contract of
-// the server's controller.SubmitProviderEgressLocationArgs
-// (POST /network/provider-egress-location, X-UR-Operator-Secret header).
+// Posts one provider's exit address. The body shape is the contract of
+// the server's controller.SubmitProviderEgressLocationArgs (POST
+// /network/provider-egress-location, X-UR-Operator-Secret header): exit_ip
+// and observed_at, with the old consensus fields present and empty for one
+// release.
 //
-// Submit refuses to contact the server at all when loc is not
-// CountryConfident: the server prefers a stored submission over its own geo
-// database, so a low-confidence guess must never be recorded. It likewise
-// refuses a country-confident result whose country record is incomplete (see
-// ErrIncompleteCountry), which the server would reject anyway.
-func (c *Client) Submit(ctx context.Context, providerClientId string, loc *geolocate.ConsensusLocation) error {
-	if loc == nil || !loc.CountryConfident {
-		return ErrNotConfident
+// Submit refuses to contact the server at all when the address does not parse
+// or the observation time is zero (ErrMissingExitIp, ErrMissingProbedAt): the
+// server would reject both, and the scheduler would only retry the same doomed
+// POST.
+func (self *Client) Submit(ctx context.Context, providerClientId string, exitIp string, observedAt time.Time) error {
+	ip := net.ParseIP(strings.TrimSpace(exitIp))
+	if ip == nil {
+		return fmt.Errorf("%w (got %q)", ErrMissingExitIp, exitIp)
 	}
-	if loc.ProbedAt.IsZero() {
+	if observedAt.IsZero() {
 		return ErrMissingProbedAt
-	}
-	if !isAlpha2(loc.CountryCode) || strings.TrimSpace(loc.Country) == "" {
-		return fmt.Errorf("%w: code=%q name=%q", ErrIncompleteCountry, loc.CountryCode, loc.Country)
 	}
 	body := submitBody{
 		ClientId:         providerClientId,
-		CountryCode:      loc.CountryCode,
-		Country:          loc.Country,
-		ASN:              loc.ASN,
-		Org:              loc.Org,
-		Hosting:          loc.Hosting,
-		Proxy:            loc.Proxy,
-		Mobile:           loc.Mobile,
-		CountryConfident: true,
-		CityConfident:    loc.CityConfident,
-		ObservedAt:       loc.ProbedAt,
-	}
-	if loc.CityConfident {
-		body.City = loc.City
-		body.Region = loc.Region
+		ExitIp:           ip.String(),
+		CountryConfident: false,
+		ObservedAt:       observedAt,
 	}
 
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	url := strings.TrimRight(c.ServerURL, "/") + "/network/provider-egress-location"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	locationUrl := strings.TrimRight(self.ServerUrl, "/") + "/network/provider-egress-location"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, locationUrl, bytes.NewReader(buf))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-UR-Operator-Secret", c.OperatorSecret)
+	req.Header.Set("X-UR-Operator-Secret", self.OperatorSecret)
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := self.httpClient().Do(req)
 	if err != nil {
 		return err
 	}

@@ -1,9 +1,10 @@
 // Package confinement verifies at startup that this process cannot reach a
-// geolocation api directly.
+// probe destination directly.
 //
-// The prober's entire guarantee is that every geolocation lookup egresses
-// through a provider, so the api reports the provider's address and never the
-// operator's. That is enforced outside this process -- a restricted network
+// The prober's entire guarantee is that every probe request egresses through
+// a provider, so a destination sees the provider's address and never the
+// operator's, and what the prober measures is the provider's traffic, not its
+// own host's. That is enforced outside this process -- a restricted network
 // under docker compose, systemd IPAddressDeny/IPAddressAllow otherwise -- and
 // the mechanism differs per deployment.
 //
@@ -20,8 +21,8 @@
 // that cannot learn anything must refuse to run rather than report success.
 //
 // This is a precondition check, not the enforcement. The Go-level enforcement
-// (every lookup is issued on an http.Client bound to a provider tunnel, and
-// providertunnel refuses any host outside the pin allowlist) stays exactly as
+// (every request is issued on an http.Client bound to a provider tunnel, and
+// providertunnel refuses any host outside its allowlist) stays exactly as
 // it was; this only refuses to start when the outer confinement that backs it
 // is absent.
 package confinement
@@ -35,7 +36,7 @@ import (
 	"time"
 )
 
-// MinTimeout is the smallest per-address timeout Verify accepts.
+// The smallest per-address timeout Verify accepts.
 //
 // The check reads a failed dial as "the packet did not get through", which is
 // only sound if the budget was long enough that a connection could plausibly
@@ -47,55 +48,55 @@ import (
 // startup.
 const MinTimeout = 500 * time.Millisecond
 
-// ErrNotConfined reports that a direct connection succeeded.
-var ErrNotConfined = errors.New("confinement: a direct connection to a geolocation address succeeded; this process is not confined")
+// Reports that a direct connection succeeded.
+var ErrNotConfined = errors.New("confinement: a direct connection to a probe address succeeded; this process is not confined")
 
-// ErrNoAddresses reports an empty address list, which would make the check
+// Reports an empty address list, which would make the check
 // vacuous.
 var ErrNoAddresses = errors.New("confinement: at least one address is required")
 
-// ErrNoEvidence reports that hosts were offered but not one of them resolved,
+// Reports that hosts were offered but not one of them resolved,
 // so no direct connection could be attempted and the check learned nothing.
 //
 // This is distinct from ErrNotConfined: it does not say the process is
 // unconfined, it says the check cannot tell. Both refuse to start, because a
 // check that obtained no evidence must not be reported as a pass.
-var ErrNoEvidence = errors.New("confinement: not one geolocation host could be resolved, so no direct connection was attempted and the check has no evidence this process is confined; allow dns resolution for this process, or supply the addresses to dial explicitly")
+var ErrNoEvidence = errors.New("confinement: not one probe host could be resolved, so no direct connection was attempted and the check has no evidence this process is confined; allow dns resolution for this process, or supply the addresses to dial explicitly")
 
-// ErrNoHosts reports an empty host list passed to Addresses. Same defect as
+// Reports an empty host list passed to Addresses. Same defect as
 // ErrNoAddresses, one step earlier.
 var ErrNoHosts = errors.New("confinement: at least one host is required")
 
-// ErrNoDialer reports a nil dial function.
+// Reports a nil dial function.
 var ErrNoDialer = errors.New("confinement: a dial function is required")
 
-// ErrNoLookup reports a nil lookup function. Addresses does not quietly
+// Reports a nil lookup function. Addresses does not quietly
 // substitute the real resolver: this package's whole job is refusing to
 // proceed on an assumption, and resolving through a resolver the caller never
 // passed is exactly that. Verify rejects a nil dialer for the same reason.
 var ErrNoLookup = errors.New("confinement: a lookup function is required")
 
-// ErrInterrupted reports that the caller's context was cancelled or expired
+// Reports that the caller's context was cancelled or expired
 // while the check ran. Every remaining dial then fails in microseconds with
 // a context error, which is indistinguishable at the dial site from a
 // refusal -- so counting those dials would produce a vacuous pass on a host
 // that might have full egress. An interrupted check refuses instead.
 var ErrInterrupted = errors.New("confinement: the check was interrupted before it finished; an interrupted check is not evidence of confinement")
 
-// ErrInvalidTimeout reports a per-address timeout below MinTimeout. A budget
+// Reports a per-address timeout below MinTimeout. A budget
 // that expires before a connection could have completed makes every dial fail
 // for a reason unrelated to confinement, and the check passes vacuously. A
 // zero or negative duration is the extreme case: context.WithTimeout produces
 // an already-expired context.
 var ErrInvalidTimeout = errors.New("confinement: the per-address timeout is too short to be evidence of confinement")
 
-// DialFunc matches net.Dialer.DialContext.
+// The signature of net.Dialer.DialContext.
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
-// LookupFunc matches net.Resolver.LookupHost.
+// The signature of net.Resolver.LookupHost.
 type LookupFunc func(ctx context.Context, host string) ([]string, error)
 
-// Verify returns nil only when every address refuses a direct connection.
+// Returns nil only when every address refuses a direct connection.
 //
 // A dial error is the expected, healthy outcome. A successful connection means
 // the confinement is missing and returns ErrNotConfined. A timeout counts as
@@ -104,13 +105,13 @@ type LookupFunc func(ctx context.Context, host string) ([]string, error)
 // unresolved carries the hosts Addresses could not resolve. They are not
 // dialed -- a bare hostname handed to the production dialer resolves through
 // the same resolver that just failed, so it is a guaranteed failure carrying no
-// signal -- but they are not ignored either: when they are the ONLY thing the
+// signal -- but they are not ignored either: when they are the only thing the
 // caller had, addrs is empty and Verify returns ErrNoEvidence rather than nil.
 // That is the deny-all deployment where dns is blocked too, in which the old
 // hostname fallback made the check verify nothing and always pass.
 //
 // Every address is attempted even after one refuses, because partial
-// confinement -- one allow rule too many, one endpoint added to geolocate
+// confinement -- one allow rule too many, one endpoint added to the table
 // after the firewall was written -- is the realistic failure, not a wholesale
 // absence.
 func Verify(ctx context.Context, dial DialFunc, addrs []string, unresolved []string, timeout time.Duration) error {
@@ -121,7 +122,7 @@ func Verify(ctx context.Context, dial DialFunc, addrs []string, unresolved []str
 		return fmt.Errorf("%w (got %s, minimum %s): every dial would expire before a connection could complete, so each address would look blocked whether or not it is", ErrInvalidTimeout, timeout, MinTimeout)
 	}
 	if len(addrs) == 0 {
-		if len(unresolved) > 0 {
+		if 0 < len(unresolved) {
 			return fmt.Errorf("%w (unresolved: %s)", ErrNoEvidence, strings.Join(unresolved, " "))
 		}
 		return ErrNoAddresses
@@ -136,14 +137,14 @@ func Verify(ctx context.Context, dial DialFunc, addrs []string, unresolved []str
 			}
 			return fmt.Errorf("%w: %s", ErrNotConfined, addr)
 		}
-		// The dial failed -- but if it failed FOR the caller's reason rather
+		// The dial failed -- but if it failed for the caller's reason rather
 		// than the network's, it is not evidence. Counting it as "refused"
 		// would let a cancelled or short-deadlined run pass having tested
 		// nothing, through a path the MinTimeout floor cannot see (the floor
 		// validates the parameter, not the context it nests in).
 		//
 		// The error must actually carry the parent's cause: a context that
-		// dies in the window AFTER a genuine refusal came back is a check
+		// dies in the window after a genuine refusal came back is a check
 		// that did finish, and discarding its real evidence would report
 		// "interrupted before it finished" about a run that was not.
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
@@ -153,11 +154,11 @@ func Verify(ctx context.Context, dial DialFunc, addrs []string, unresolved []str
 	return nil
 }
 
-// Addresses resolves hosts into the dialable "ip:port" addresses Verify should
+// Resolves hosts into the dialable "ip:port" addresses Verify should
 // test, de-duplicated and in host order, and separately reports the hosts that
 // could not be resolved.
 //
-// Only genuine ip literals are returned. A host that will not resolve is NEVER
+// Only genuine ip literals are returned. A host that will not resolve is never
 // emitted as a bare "host:port": handing that to the production dialer just
 // resolves it through the resolver that already failed, so the dial fails at
 // resolution and proves nothing about whether the address behind the name is
@@ -176,6 +177,30 @@ func Addresses(ctx context.Context, lookup LookupFunc, hosts []string, port stri
 	}
 	if lookup == nil {
 		return nil, nil, ErrNoLookup
+	}
+
+	// Reports whether ip is RFC1918 / ULA / CGNAT space. These are global
+	// unicast, so IsGlobalUnicast alone does not exclude them, and a public
+	// probe destination never legitimately resolves to one.
+	//
+	// They matter in the dangerous direction, not the vacuous one. AdGuard
+	// Home's "Custom IP" blocking mode and most corporate split-horizon
+	// resolvers answer a blocked or internal name with a LAN address rather
+	// than 0.0.0.0. If the router's admin UI happens to listen on 443, the dial
+	// succeeds, and the prober exits refusing to start -- "a direct connection
+	// to a probe address succeeded" -- on a host that is correctly confined.
+	// That is a false accusation that reads like a real one, and it takes the
+	// deployment down.
+	isSiteLocal := func(ip net.IP) bool {
+		if ip.IsPrivate() { // RFC1918 and ULA (fc00::/7)
+			return true
+		}
+		// CGNAT (100.64.0.0/10). Not private by Go's definition, equally
+		// never a public probe destination.
+		if v4 := ip.To4(); v4 != nil {
+			return v4[0] == 100 && 64 <= v4[1] && v4[1] <= 127
+		}
+		return false
 	}
 
 	seen := map[string]bool{}
@@ -221,8 +246,8 @@ func Addresses(ctx context.Context, lookup LookupFunc, hosts []string, port stri
 		// A dead context here is the same defect Verify refuses on, one step
 		// earlier. The resolution budget is shared across all hosts, so a
 		// resolver that hangs on the first one leaves every remaining host
-		// failing instantly for the CALLER's reason and landing in
-		// unresolved -- and the caller then logs a degraded WARNING and
+		// failing instantly for the caller's reason and landing in
+		// unresolved -- and the caller then logs a degraded warning and
 		// proceeds, having proven confinement for whatever handful resolved
 		// before the clock ran out. That is a pass obtained by not looking.
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -230,27 +255,4 @@ func Addresses(ctx context.Context, lookup LookupFunc, hosts []string, port stri
 		}
 	}
 	return addrs, unresolved, nil
-}
-
-// isSiteLocal reports whether ip is RFC1918 / ULA / CGNAT space. These are
-// global unicast, so IsGlobalUnicast alone does not exclude them, and a
-// geolocation api never legitimately resolves to one.
-//
-// They matter in the DANGEROUS direction, not the vacuous one. AdGuard Home's
-// "Custom IP" blocking mode and most corporate split-horizon resolvers answer
-// a blocked or internal name with a LAN address rather than 0.0.0.0. If the
-// router's admin UI happens to listen on 443, the dial SUCCEEDS, and the
-// prober exits refusing to start -- "a direct connection to a geolocation
-// address succeeded" -- on a host that is correctly confined. That is a false
-// accusation that reads like a real one, and it takes the deployment down.
-func isSiteLocal(ip net.IP) bool {
-	if ip.IsPrivate() { // RFC1918 and ULA (fc00::/7)
-		return true
-	}
-	// CGNAT (100.64.0.0/10). Not private by Go's definition, equally never a
-	// public geolocation endpoint.
-	if v4 := ip.To4(); v4 != nil {
-		return v4[0] == 100 && 64 <= v4[1] && v4[1] <= 127
-	}
-	return false
 }
