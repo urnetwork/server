@@ -2084,8 +2084,8 @@ func TestForceCloseMalformedContractRemovesStreamAndReturnsError(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, `SELECT provider_usage FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&usageData))
 		})
 		snapshot, usageErr := decodeContractUsageSnapshot(usageData)
-		if usageErr != nil || snapshot.ByteCount != 0 || snapshot.ExcludedReason != "expired_unconfirmed" {
-			t.Fatalf("quarantined contract gained subnet credit: %s, %v", usageData, usageErr)
+		if usageErr != nil || snapshot.ByteCount != escrowByteCount || snapshot.Expiry == nil || snapshot.ExcludedReason != "" {
+			t.Fatalf("billing quarantine changed bounded original usage: %s, %v", usageData, usageErr)
 		}
 	})
 }

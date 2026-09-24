@@ -286,3 +286,50 @@ func TestStContractUsageExpiryProofRollback(t *testing.T) {
 		}
 	})
 }
+
+// A billing failure cannot revoke a validated original proof or make the
+// same bounded delivered bytes worth less than those on a free contract.
+func TestStContractUsageExpiryBillingQuarantinePreservesProof(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		payerNetwork, providerNetwork := server.NewId(), server.NewId()
+		origin, provider := contractPayoutTestId(1), contractPayoutTestId(2)
+		addContractPayoutTestClients(ctx, map[server.Id]server.Id{origin: payerNetwork, provider: providerNetwork})
+		addContractPayoutTestBalance(ctx, payerNetwork, 100)
+		paid, err := CreateTransferEscrow(ctx, payerNetwork, origin, providerNetwork, provider, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		free, err := CreateContractNoEscrow(ctx, payerNetwork, origin, providerNetwork, provider, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []server.Id{paid.ContractId, free} {
+			if err := CloseContract(ctx, id, origin, 200, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := CloseContract(ctx, id, provider, 200, true); err != nil {
+				t.Fatal(err)
+			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				_, err := prepareContractExpiryInTx(ctx, tx, id, server.NowUtc().Add(time.Hour))
+				server.Raise(err)
+			})
+		}
+		before, snapshot := readContractExpiryTestSnapshot(t, ctx, paid.ContractId)
+		if snapshot.ByteCount != 100 {
+			t.Fatalf("fixture lacks bounded proof: %s", before)
+		}
+		count, err := ForceCloseOpenContractIds(ctx, server.NowUtc().Add(time.Hour), 10, 1, 0, 0)
+		if err == nil || count != 2 {
+			t.Fatalf("billing error was suppressed: %d, %v", count, err)
+		}
+		after, paidUsage := readContractExpiryTestSnapshot(t, ctx, paid.ContractId)
+		_, freeUsage := readContractExpiryTestSnapshot(t, ctx, free)
+		if !bytes.Equal(before, after) || paidUsage.ByteCount != freeUsage.ByteCount || paidUsage.ByteCount != 100 {
+			t.Fatalf("billing changed original usage: before=%s, after=%s, free=%+v", before, after, freeUsage)
+		}
+	})
+}
