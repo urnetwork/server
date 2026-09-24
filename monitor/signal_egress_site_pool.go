@@ -61,8 +61,8 @@ type EgressSitePoolSettings struct {
 	// failed share is judged
 	GuardTripWindow          time.Duration
 	ProberFaultMinClassLoads int
-	// country unreachable: every active site fails at least this share of a
-	// country's exits, over at least the region minimum of runs
+	// country failure pattern: every observed active scored site fails at
+	// least this share of its loads, over the region minimum of runs
 	CountryUnreachableShare float64
 	// the most failing sites, places or countries one cadence lists
 	MaxListed int
@@ -165,7 +165,8 @@ type egressSitePoolThinPlace struct {
 	sampleSize      int64
 }
 
-// One country where every active site fails its exits.
+// One country where every observed active scored site has a high failed-load
+// share. Sites without a load tally are not represented.
 type egressSitePoolUnreachableCountry struct {
 	country      string
 	sites        int64
@@ -765,21 +766,23 @@ func evaluateEgressSitePool(
 			failing = append(failing, f)
 		case 0 < observation.task.failingRows:
 			f := egressSitePoolFinding("egress-site-refresh-not-running", target, "task-parked", 2)
-			f.symptom = "The pool refresh's pending_task row is failing and parked on its error backoff"
-			f.mechanism = "A refresh that raises -- an unusable egress-sites.yml, a database error -- is retried with exponential backoff, so the pool is judged late or not at all."
+			f.symptom = "The pool refresh's pending_task row retains an error from an earlier retry"
+			f.mechanism = "A stored reschedule error records a failed attempt and can remain while a later retry is actively claimed. A failed refresh can delay pool maintenance, but this sample does not establish that execution has stopped."
 			f.baseline = "The RefreshEgressDestinations row carries no reschedule error."
-			f.observed = fmt.Sprintf("pending_task_rows=%d failing_rows=%d max_reschedule_error_count=%d threshold=no_reschedule_error", observation.task.rows, observation.task.failingRows, observation.task.maxRescheduleCount)
+			f.observed = fmt.Sprintf("pending_task_rows=%d failing_rows=%d max_reschedule_error_count=%d threshold=no_reschedule_error execution_state=unobserved", observation.task.rows, observation.task.failingRows, observation.task.maxRescheduleCount)
+			f.context = "The legacy task-parked frame preserves ticket identity only. This query reads no claim heartbeat or attempt phase; a separate RunPost task is not joined to this row."
 			f.action = "Read the row's reschedule error and the taskworker's [egresssites] log lines; an unusable egress-sites.yml names its first bad entry. Repair it and let the chain retry."
 			f.verify = "The reschedule error clears and a refresh runs."
 			failing = append(failing, f)
 		case cadenceSeconds < observation.task.overdueSeconds:
 			f := egressSitePoolFinding("egress-site-refresh-not-running", target, "stale-run", 2)
-			f.symptom = "The pool refresh last ran more than twice its cadence ago"
-			f.mechanism = "Each run schedules the next one SiteRefreshInterval out, so a row a whole cadence past its run time means the last run is more than two cadences old: the task is not being claimed."
+			f.symptom = "The pool refresh's current pending schedule is more than one cadence overdue"
+			f.mechanism = "The current run_at is a due anchor, not an observed last completion. An old schedule can accompany a delayed claim, active long run, retry or separate post phase; this aggregate does not distinguish them."
 			f.baseline = fmt.Sprintf("The row is never more than SiteRefreshInterval=%ds past its run time.", cadenceSeconds)
-			f.observed = fmt.Sprintf("overdue_seconds=%d threshold=%ds", observation.task.overdueSeconds, cadenceSeconds)
-			f.action = "Check taskworker liveness and claims for RefreshEgressDestinations (§1.2, §8.9); a refresh that exceeds its max time is retried."
-			f.verify = "The row's run time moves a cadence ahead after a run."
+			f.observed = fmt.Sprintf("overdue_seconds=%d threshold=%ds schedule_anchor=run_at execution_state=unobserved", observation.task.overdueSeconds, cadenceSeconds)
+			f.context = "Rescheduling can mask older delay; claim heartbeat, last completed run, RunPost linkage and running artifact remain unobserved here."
+			f.action = "Correlate the schedule with bounded taskworker claim/heartbeat and completed refresh evidence (§1.2, §8.9) before diagnosing worker absence or changing the chain."
+			f.verify = "A completed refresh advances pool judgement and schedules the next run. Moving run_at alone is not proof that the pool was refreshed."
 			failing = append(failing, f)
 		}
 		emit("egress-site-refresh-not-running", failing)
@@ -873,14 +876,14 @@ func evaluateEgressSitePool(
 		failing := []finding{}
 		for _, unreachableCountry := range observation.unreachableCountries {
 			f := egressSitePoolFinding("egress-country-unreachable", target, unreachableCountry.country, 2)
-			f.symptom = fmt.Sprintf("Every active site fails at least %.0f%% of the exits of %s", 100*settings.CountryUnreachableShare, unreachableCountry.country)
-			f.mechanism = "When every site fails in one country at once, it is not the sites: it is the prober's route to that country's exits, the capacity toward them, or the operator's /ip echo blocked there. Marking sites would only hide it, so the refresh never marks a place where every site fails."
-			f.baseline = fmt.Sprintf("No country with at least SiteRegionMinSamples=%d runs over the window has every active site failing %.0f%% of its exits.", siteSettings.SiteRegionMinSamples, 100*settings.CountryUnreachableShare)
-			f.observed = fmt.Sprintf("country=%s sites=%d loads=%d failed=%d runs=%d echo_failures=%d", unreachableCountry.country, unreachableCountry.sites, unreachableCountry.loads, unreachableCountry.failures, unreachableCountry.runs, unreachableCountry.echoFailures)
-			f.evidence = "The site and place tallies over the refresh window, all exits healthy or not; the country code is bounded and no provider identity is read."
-			f.context = "Read with §2.19a: a route or admission fault toward one country shows there as tunnel or submission failures."
-			f.action = "Check the prober's reachability of that country's providers and the /ip echo from there before touching the pool; never answer this by marking sites."
-			f.verify = "Sites pass again from the country, or its exits' runs stop failing wholesale, for a window."
+			f.symptom = fmt.Sprintf("Every observed active scored site fails at least %.0f%% of its measured loads from %s", 100*settings.CountryUnreachableShare, unreachableCountry.country)
+			f.mechanism = "A shared failed-load pattern does not isolate its cause. Correlated site policy, provider paths, shared route or admission capacity, and the operator's /ip echo remain alternatives; unobserved active sites are not part of this denominator."
+			f.baseline = fmt.Sprintf("No country with at least SiteRegionMinSamples=%d runs has all observed active scored sites failing %.0f%% of their measured loads.", siteSettings.SiteRegionMinSamples, 100*settings.CountryUnreachableShare)
+			f.observed = fmt.Sprintf("country=%s sites=%d loads=%d failed=%d runs=%d echo_failures=%d coverage=observed-sites-only", unreachableCountry.country, unreachableCountry.sites, unreachableCountry.loads, unreachableCountry.failures, unreachableCountry.runs, unreachableCountry.echoFailures)
+			f.evidence = "Only active non-probation sites with positive load tallies in the refresh window are included. Loads and runs are not distinct-provider counts; the country code is bounded and no provider identity is read."
+			f.context = "The legacy country-unreachable class names an observed pattern, not universal reachability. Read with §2.19a, but category overlap is not a same-provider or same-attempt join."
+			f.action = "Establish coverage and compare bounded site-specific, provider-route, admission and /ip echo controls before changing the pool. Do not mark all sites incompatible or rule out the sites from this aggregate alone."
+			f.verify = "Later comparable observed-site loads improve with coverage retained. A country or failing site disappearing from the tally is not proof of recovery."
 			failing = append(failing, f)
 		}
 		emit("egress-country-unreachable", failing)

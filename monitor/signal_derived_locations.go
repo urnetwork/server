@@ -278,6 +278,9 @@ type derivedLocationsState struct {
 	taskRows           int64
 	failingTaskRows    int64
 	maxRescheduleCount int64
+	// Age past the current run_at, negative before it is due. Rescheduling
+	// changes this anchor; it is not creation age or proof of a parked task.
+	taskOverdueSeconds int64
 	// bounded at the settings' minimums: "at least this many"
 	activeExtenders    int64
 	connectedProviders int64
@@ -495,7 +498,9 @@ SELECT
     WHERE pk.client_id = ncc.client_id AND pk.provide_mode = %[3]d
    )
    LIMIT %[4]d
-  ) AS connected_provider);
+  ) AS connected_provider),
+ (SELECT COALESCE(max(floor(extract(epoch FROM (now() AT TIME ZONE 'utc') - run_at)))::bigint, 0)
+  FROM pending_task WHERE function_name = '%[1]s') AS task_overdue_seconds;
 `,
 		deriveLocationsTaskFunction,
 		max(1, settings.DeriveSupplyMinExtenders),
@@ -588,11 +593,11 @@ func queryDerivedLocationsState(ctx context.Context, env *probeEnv, settings *De
 	if err != nil {
 		return derivedLocationsState{}, err
 	}
-	row, err := pgAggregateRow(rows, 5)
+	row, err := pgAggregateRow(rows, 6)
 	if err != nil {
 		return derivedLocationsState{}, fmt.Errorf("derived-location state: %w", err)
 	}
-	values := [5]int64{}
+	values := [6]int64{}
 	for i := range values {
 		value, err := parseStrictInt64(row.str(i))
 		if err != nil {
@@ -606,6 +611,7 @@ func queryDerivedLocationsState(ctx context.Context, env *probeEnv, settings *De
 		maxRescheduleCount: values[2],
 		activeExtenders:    values[3],
 		connectedProviders: values[4],
+		taskOverdueSeconds: values[5],
 	}, nil
 }
 
@@ -727,10 +733,11 @@ func evaluateDerivedLocations(
 		}
 		if 0 < state.failingTaskRows {
 			f := derivedLocationsFinding("derive-not-running", "task-parked", 2)
-			f.symptom = "The derive job's pending_task row is failing and parked on its error backoff"
-			f.mechanism = "A derivation that raises is rescheduled with exponential backoff, so it retries late and the published rows age toward the sweep."
+			f.symptom = "The derive job's pending_task row retains an error from an earlier retry"
+			f.mechanism = "A stored reschedule error records a failed attempt and can remain while a later retry is actively claimed. It does not establish that execution has stopped; delayed successful derivations can still let published rows age toward the sweep."
 			f.baseline = "The DeriveLocations row carries no reschedule error."
-			f.observed = fmt.Sprintf("pending_task_rows=%d failing_rows=%d max_reschedule_error_count=%d threshold=no_reschedule_error", state.taskRows, state.failingTaskRows, state.maxRescheduleCount)
+			f.observed = fmt.Sprintf("pending_task_rows=%d failing_rows=%d max_reschedule_error_count=%d threshold=no_reschedule_error execution_state=unobserved", state.taskRows, state.failingTaskRows, state.maxRescheduleCount)
+			f.context = "The legacy task-parked frame preserves ticket identity only. This query reads no claim heartbeat or attempt phase; a separate RunPost task is not joined to this row."
 			f.action = "Read the DeriveLocations reschedule error and the taskworker's [derive] log lines; repair the failing dependency (database, Redis, the place list) and let the chain retry."
 			f.verify = "The row's reschedule error clears and a derivation is recorded."
 			failing = append(failing, f)
@@ -757,7 +764,23 @@ func evaluateDerivedLocations(
 			f.verify = "A new derivation is recorded and its age falls under the threshold."
 			failing = append(failing, f)
 		}
-		emit("derive-not-running", failing)
+		if lastRunAgeSeconds < 0 && 0 < state.taskRows && maxRunAgeSeconds < state.taskOverdueSeconds {
+			f := derivedLocationsFinding("derive-not-running", "first-run-overdue", 2)
+			f.symptom = "No derive completion is visible and the pending row is past its current due time by more than the run-age limit"
+			f.mechanism = "An empty history and no table update do not prove a successful first run. An overdue pending schedule is a bounded liveness warning, not proof that the job has never run or stopped executing."
+			f.baseline = fmt.Sprintf("Without a visible completion, the current run_at is no more than DeriveMaxRunAge=%s overdue; a new first run remains warming, not healthy.", settings.DeriveMaxRunAge)
+			f.observed = fmt.Sprintf("pending_task_rows=%d task_overdue_seconds=%d completion_source=unobserved threshold=DeriveMaxRunAge=%ds execution_state=unobserved", state.taskRows, state.taskOverdueSeconds, maxRunAgeSeconds)
+			f.evidence = "A count-only PostgreSQL aggregate of the exact DeriveLocations function's current run_at, combined with the absence of observable run history or table update."
+			f.context = "The anchor is run_at, not task creation: rescheduling can mask older delay. This does not prove the task is parked; claim heartbeat, current attempt, RunPost phase and deployed source lineage remain unjoined."
+			f.action = "Inspect bounded DeriveLocations schedule, claim and completed-run evidence under §1.2 before changing the chain. Do not infer worker absence or manually insert a replacement task from this observation."
+			f.verify = "A recorded fresh derivation or fresh table update establishes activity. Moving run_at alone leaves completion unobserved and does not clear an existing not-running ticket."
+			failing = append(failing, f)
+		}
+		if 0 < len(failing) || 0 <= lastRunAgeSeconds {
+			emit("derive-not-running", failing)
+		}
+		// Before a visible completion, a pending first run is warming. No
+		// healthy sentinel may resolve an older not-running ticket.
 	}
 
 	// supply gone

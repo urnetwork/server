@@ -164,13 +164,17 @@ func (self *derivedLocationsFixture) source(t testing.TB) *syntheticSource {
 				return rows, nil
 			case strings.Contains(query, "monitor-signal-2.19c-derived-locations-state"):
 				state := self.state
-				return []Row{{
+				row := Row{
 					strconv.FormatInt(state.taskRows, 10),
 					strconv.FormatInt(state.failingTaskRows, 10),
 					strconv.FormatInt(state.maxRescheduleCount, 10),
 					strconv.FormatInt(state.activeExtenders, 10),
 					strconv.FormatInt(state.connectedProviders, 10),
-				}}, nil
+				}
+				if strings.Contains(query, "task_overdue_seconds") {
+					row = append(row, "-3600")
+				}
+				return []Row{row}, nil
 			case strings.Contains(query, "monitor-signal-2.19c-derived-locations-partitions"):
 				partitions := self.partitions
 				return []Row{{
@@ -335,7 +339,7 @@ func TestDerivedLocationsSignalConditions(t *testing.T) {
 			want: []string{"derive-not-running/task-missing"},
 		},
 		{
-			name: "not running: the row is parked on its error backoff",
+			name: "not running: the row retains a retry error",
 			edit: func(fixture *derivedLocationsFixture) {
 				fixture.state.failingTaskRows = 1
 				fixture.state.maxRescheduleCount = 4
@@ -788,7 +792,8 @@ func TestDerivedLocationsSignalUnobservableHistory(t *testing.T) {
 	}
 
 	// an empty history is observable: the first derivation after a deploy is
-	// eight hours out, and nothing is wrong before it
+	// eight hours out, and nothing is wrong before it. This is warming rather
+	// than a healthy not-running sentinel; the authority test covers tickets.
 	fixture = healthyDerivedLocationsFixture()
 	fixture.runs = nil
 	fixture.table = derivedLocationsTable{medianResidualKm: -1, medianReputation: -1, lastUpdateAgeSeconds: -1}

@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server/model"
@@ -292,7 +293,7 @@ func egressOutcomeObserved(snapshot egressOutcomeSnapshot) string {
 }
 
 func egressCommonModeFinding(target string, snapshot egressOutcomeSnapshot, diagnosis *model.ProbeFleetDiagnosis) finding {
-	return finding{
+	f := finding{
 		probeId: "pg/egress-outcomes", tier: tierPage, class: "egress-common-mode", target: target, sustain: 1,
 		symptom: fmt.Sprintf(
 			"%d of %d currently eligible providers share the egress-probe failure class %s",
@@ -307,6 +308,13 @@ func egressCommonModeFinding(target string, snapshot egressOutcomeSnapshot, diag
 		verify:    egressOutcomeVerify(),
 		playbook:  "SIGNALS.md §2.23, §2.19, and §8.9",
 	}
+	if diagnosis.DominantClass == "no_exit_ip" {
+		f.mechanism = "At least 20 outcomes are observed and no_exit_ip covers at least 90% of the complete current eligible population. This establishes a shared failed observation stage, but does not isolate echo service, provider tunnel admission, provider-specific route, shared route or response-validation cause. Unobserved and inconsistent providers remain in the denominator."
+		f.baseline = "No_exit_ip covers less than 90% of the complete eligible population; at least 20 observed outcomes are required to report the pattern, not to establish a causal component."
+		f.context = "Same class is not a same-attempt phase trace or proof of a deployed artifact. A direct healthy echo control alone does not certify its provider-tunnel path, and retained failure aging is not recovery."
+		f.verify = strings.Replace(f.verify, "After repairing the proved shared boundary,", "After identifying and repairing the failed stage,", 1)
+	}
+	return f
 }
 
 func egressCommonModeAction(class string) string {
@@ -318,7 +326,7 @@ func egressCommonModeAction(class string) string {
 		// attempts written before that release still carry them
 		return "These classes come only from probers that predate the operator's own /ip echo; confirm every Taskworker runs the current prober, whose runs report no_exit_ip instead. Do not investigate individual provider locations."
 	case "no_exit_ip":
-		return "Every run's warm-up fetches the operator's /ip echo on the public api address through the provider's tunnel (public_api_url); a common failure is that echo -- its reachability from the open internet, its certificate, or the api behind it -- not the providers. Check it from outside the operator network before anything else."
+		return "The run fetches the operator's /ip echo through the provider's tunnel (public_api_url). Compare bounded same-attempt tunnel admission, route and echo response/validation evidence with independent echo reachability and certificate controls. The aggregate does not isolate the echo or exonerate providers; do not change gates or routes before the failing stage is established."
 	case "health_not_run", "run_not_measured":
 		return "A run that did not start or measured nothing is the prober's, not the provider's: inspect the Taskworker pass errors, the transport and tunnel re-creation budgets, platform reachability, and whether the shard's max time still covers a run at the load rules (§2.19)."
 	case model.ProbeRunBatchGuardClass:

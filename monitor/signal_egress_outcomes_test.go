@@ -323,6 +323,6 @@ func TestEgressOutcomesKnowsTheCurrentProberClasses(t *testing.T) {
 	})
 	alert := requireAlertClass(t, alerts, "egress-common-mode")
 	if !strings.Contains(alert.Markdown(), "/ip echo") || !strings.Contains(alert.Observed, "no_exit_ip=19") {
-		t.Fatalf("a common no_exit_ip failure was not attributed to the echo:\n%s", alert.Markdown())
+		t.Fatalf("a common no_exit_ip observation lost its echo-stage context:\n%s", alert.Markdown())
 	}
 }

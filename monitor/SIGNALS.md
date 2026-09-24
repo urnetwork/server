@@ -7337,9 +7337,9 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
 - **refresh not running** (`egress-site-refresh-not-running`, frames
   `task-missing`, `task-parked`, `stale-run`): the `pending_task` row for
   `github.com/urnetwork/server/taskworker/work.RefreshEgressDestinations`
-  is missing, parked on a reschedule error, or a whole cadence past its run
-  time — each run schedules the next one `SiteRefreshInterval` out, so that
-  is a last run more than twice its cadence ago;
+  is missing, retains a stored retry error, or its current `run_at` is more
+  than a whole `SiteRefreshInterval` overdue; the schedule is not a measured
+  last-completion time or evidence that no worker holds the task;
 - **pool thin** (`egress-site-pool-thin`, frames `<class>/below-pool-size`
   and `<class>/candidates-exhausted`): a class's active pool is below
   `SitePoolSize` for that class, or no candidate is left to promote, so the
@@ -7360,12 +7360,13 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   cannot draw a representative sample; the candidate list needs sites that
   work from that place;
 - **country unreachable** (`egress-country-unreachable`, frame the country
-  code): every active site fails at least 90 % of the exits of one country
-  over the window, healthy or not, over at least `SiteRegionMinSamples` runs
-  — not a site fault but the prober's route to that country's exits, its
-  capacity toward them, or the `/ip` echo blocked there (the finding carries
-  the echo failures), to be read with §2.19a and never answered by marking
-  sites;
+  code): all observed active scored sites with positive load tallies fail
+  at least 90 % of their measured loads from one country over the window,
+  over at least `SiteRegionMinSamples` runs. Coverage is observed-sites-only:
+  unobserved active sites and distinct-provider counts are not in this
+  denominator. This pattern does not isolate site policy, provider paths,
+  shared route/admission capacity or the `/ip` echo. Retain the legacy class
+  as a diagnostic pattern, not proof of universal unreachability;
 - **backfill sustained** (`egress-backfill-sustained`, frame the rank mode):
   more than half of the providers FindProviders2 answered with for a rank
   mode over the last hour were borrowed from another bucket
@@ -7392,6 +7393,16 @@ The backfill and guard series come from Mimir; when they cannot be read the
 signal reports `egress-site-pool-unobservable` and evaluates neither
 condition, since a healthy finding would resolve an open alert on no
 evidence.
+
+For refresh retry findings, execution state is unobserved: a stored error
+can remain during an actively claimed retry. The legacy `task-parked`
+frame preserves ticket identity only; there is no claim heartbeat,
+same-attempt or separate `RunPost` join. An overdue current `run_at` does
+not establish the last completed run, and rescheduling can mask older delay.
+For the country pattern, later comparable observed-site loads must improve
+with coverage retained; a country or failing site disappearing from the
+tally is not proof of recovery. Establish bounded site, route, admission
+and echo controls before changing the pool or declaring a common cause.
 
 Every finding is a bounded reason and a site name, a class, a country code
 or a region name; provider ids, task ids and credentials are never exported.
@@ -7486,10 +7497,11 @@ Alert, WARN tier, fifteen-minute cadence, when any of these thirteen
 conditions holds (every threshold a setting with the default given):
 
 - **not running** (`derive-not-running`, parts `stale-run`, `task-missing`,
-  `task-parked`): `derive_last_run_seconds` is older than twice
+  `task-parked`, `first-run-overdue`): `derive_last_run_seconds` is older than twice
   `DeriveInterval` (16 hours), or the `pending_task` row for
   `github.com/urnetwork/server/taskworker/work.DeriveLocations` is missing or
-  parked;
+  retains a stored retry error. With no visible completion, a current
+  `run_at` more than `DeriveMaxRunAge` overdue also warns;
 - **supply gone** (`derive-supply-gone`): fewer than
   `DeriveMinCosignedPerHour` (100) co-signed pings in the last hour while
   providers and extenders are connected — the pingers, the reporters or the
@@ -7610,6 +7622,17 @@ read, or that holds a record the signal cannot parse, is
 `derive-run-history-unobservable` (WARN, two probes): the comparisons across
 runs then report neither a fault nor health, and "not running" falls back to
 the table's newest `update_time`.
+
+With neither visible run history nor a table update, a newly scheduled
+first run is warming: it emits no healthy `derive-not-running` sentinel
+and no first-run warning until the current `run_at` is more than the
+existing `DeriveMaxRunAge` overdue. `first-run-overdue` uses that current
+due anchor only: `pending_task` has no creation timestamp, rescheduling can mask
+older delay, and this does not prove the job has never run or is parked.
+The legacy `task-parked` frame denotes stored retry state only; current
+claim heartbeat, same-attempt execution and separate `RunPost` linkage are
+unobserved. Moving `run_at` alone cannot resolve a prior not-running ticket;
+a recorded fresh completion or fresh table update supplies the positive control.
 
 The thresholds the conditions above leave open are settings too, with these
 defaults: a share over the hour's pings is judged on at least
@@ -8403,8 +8426,9 @@ The only exported outcome vocabulary is success, `tunnel_failed`, legacy
 `no_consensus`, `locate_failed` and `not_confident` are the retired vendor
 consensus's and appear only on attempts written before connect/GEOMAP.md
 §11.3; `health_not_run` and `run_not_measured` are runs that did not start or
-measured nothing, `no_exit_ip` a warm-up the operator's `/ip` echo never
-answered, and `run_batch_guard` a full batch the run guard held back. Raw
+measured nothing, `no_exit_ip` a run without a usable exit-IP observation
+from the operator's `/ip` echo, and `run_batch_guard` a full batch the run
+guard held back. Raw
 failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
 the total failure share but can never become the dominant common class because
 several distinct raw values may have collapsed into that one redacted bucket.
@@ -8445,6 +8469,15 @@ evidence floor:
   failure vocabularies differ or an invalid class was stored. Compare exact
   artifacts and add a reviewed bounded class when intentional; the raw value
   remains private.
+
+A dominant `no_exit_ip` class is a shared observation-stage pattern, not
+an identified failing component. It does not isolate echo reachability,
+certificate or response validation, provider-tunnel admission,
+provider-specific paths or shared route capacity. Direct healthy echo
+traffic does not certify the provider-tunnel path. Require bounded
+same-attempt phase/outcome evidence and running-artifact identity before
+causal attribution or a corrective change; thresholds and due-window
+handling do not change.
 
 Low current-attempt volume and an unobserved population are not independent
 faults: successful providers legitimately probe less often. Use §2.19 for
