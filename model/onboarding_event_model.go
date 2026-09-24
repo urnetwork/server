@@ -369,6 +369,16 @@ func recordConnectDayWrite(job connectDayWriteJob) {
 		}
 	}()
 	server.Tx(writeCtx, func(tx server.PgTx) {
+		// Different clients in one network can connect at the same time. Lock
+		// their shared UTC day before the read-committed absence check so two
+		// workers cannot both insert the network's single daily event.
+		server.RaisePgResult(tx.Exec(
+			writeCtx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('connect.day:' || nc.network_id::text || ':' || $2::bigint::text, 0))
+			 FROM network_client nc WHERE nc.client_id = $1`,
+			job.clientId,
+			job.day.Unix()/86400,
+		))
 		server.RaisePgResult(tx.Exec(
 			writeCtx,
 			`

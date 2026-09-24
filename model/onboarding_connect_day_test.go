@@ -99,11 +99,12 @@ func awaitConnectDayEventCount(t testing.TB, ctx context.Context, networkId serv
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if count := connectDayEventCount(t, ctx, networkId); count == want {
+		count := connectDayEventCount(t, ctx, networkId)
+		if count == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("connect.day events never reached %d", want)
+			t.Fatalf("connect.day events = %d, want %d", count, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
