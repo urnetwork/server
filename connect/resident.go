@@ -2074,7 +2074,9 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	e.Encode(header)
 	headerBytes := b.Bytes()
 
-	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout)); err != nil {
+		return err
+	}
 	if err := self.framer.Write(conn, headerBytes); err != nil {
 		return err
 	}
@@ -2083,7 +2085,9 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout)); err != nil {
+		return nil, err
+	}
 	headerBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
@@ -2115,7 +2119,10 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		}
 		self.writeStorage = make([]byte, storageByteCount)
 	}
-	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+		connect.MessagePoolReturn(transferFrameBytes)
+		return err
+	}
 	err := self.framer.WriteBatchWithStorage(
 		conn,
 		[][]byte{transferFrameBytes},
@@ -2157,7 +2164,12 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+		for _, message := range transferFrameBytesBatch {
+			connect.MessagePoolReturn(message)
+		}
+		return err
+	}
 
 	headers := connect.MessagePoolGet(exchangeIOFrameHeaderByteCount * len(transferFrameBytesBatch))
 	defer connect.MessagePoolReturn(headers)
@@ -2189,7 +2201,9 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout)); err != nil {
+		return nil, err
+	}
 	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
