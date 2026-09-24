@@ -179,6 +179,7 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
+| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-selected full-run receipts are missing; `egress-site-pool` and `egress-outcomes` do not attest country-ranked lists or the 13/13 sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -7704,9 +7705,18 @@ sweep's naming four days old, and tomorrow's partition dropped — and assert
 exactly the sweep part each one is.
 
 ### 2.19d Country-specific egress site coverage and freshness
-Probe: `egress-country-sites`
+Planned probe: `egress-country-sites`
 
-The full quality probe's `site` sample is 13 general destinations and 13
+Coverage status: no registered runtime probe currently implements this
+section. The country-site candidate helpers filter proposed websites; they
+do not publish a country-list manifest or attest the served pool or full-run
+selection. The required country-list provenance/verification records,
+published country-pool generation and generation-linked split-run/skip
+receipts are missing from the current producer/storage contract. This is an
+explicit measurement coverage gap, not healthy country coverage. The
+requirements below remain the acceptance contract for implementation.
+
+The required full quality probe `site` sample is 13 general destinations and 13
 destinations selected for the provider's published country
 (`connect/GEOMAP.md` §11.5). A missing country list is **not** provider
 failure: it makes that full quality result unscorable and must not be hidden
@@ -7754,7 +7764,7 @@ provider failure. False-negative qualifiers: a 13/13 count alone does not
 prove distinct domains, current source evidence, correct country selection,
 or successful load verification. Use source and pool generation together.
 
-Implementation convention: §2.19d (`egress-country-sites`) maps to
+Planned implementation convention: §2.19d (`egress-country-sites`) maps to
 `signal_egress_country_sites.go` and `signal_egress_country_sites_test.go`.
 Deterministic tests use synthetic countries and reserved example domains for
 all coverage, freshness, missing-source, disjointness, enabled/legacy,
