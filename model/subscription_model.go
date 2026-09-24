@@ -2509,6 +2509,7 @@ func CloseContract(
                 FROM transfer_contract
                 WHERE
                     contract_id = $1
+                FOR UPDATE
             `,
 			contractId,
 		)
@@ -3780,7 +3781,8 @@ func recordForceCloseContract(resolution string, tag string) {
 	}
 }
 
-// closes all open contracts with no update in the last `timeout`
+// Closes contracts whose creation and latest report are at or before minTime.
+// A retained expiry proof resumes immediately even after synthetic reports.
 // cases handled:
 // - no closes
 // - single close
@@ -3863,20 +3865,7 @@ func ForceCloseOpenContractIds(
 		})
 	*/
 
-	type OpenContract struct {
-		contractId    server.Id
-		sourceId      server.Id
-		destinationId server.Id
-		dispute       bool
-
-		sourceCloseTime             *time.Time
-		sourceUsedTransferByteCount *ByteCount
-		sourceCheckpoint            *bool
-
-		destinationCloseTime             *time.Time
-		destinationUsedTransferByteCount *ByteCount
-		destinationCheckpoint            *bool
-	}
+	type OpenContract = contractExpiryState
 
 	openContracts := []*OpenContract{}
 	openContractIndexes := map[server.Id]int{}
@@ -3925,7 +3914,11 @@ func ForceCloseOpenContractIds(
 
                     WHERE
                         transfer_contract.open AND
-                        transfer_contract.create_time <= $3
+                        (transfer_contract.usage_unverified OR (
+                            transfer_contract.create_time <= $3 AND
+                            NOT EXISTS (SELECT 1 FROM contract_close recent_close
+                                WHERE recent_close.contract_id=transfer_contract.contract_id AND recent_close.close_time > $3)
+                        ))
 
                     ORDER BY transfer_contract.create_time
 
@@ -3985,7 +3978,11 @@ func ForceCloseOpenContractIds(
                 WHERE
                     dispute AND
                     outcome IS NULL AND
-                    create_time <= $1
+                    (usage_unverified OR (
+                        create_time <= $1 AND
+                        NOT EXISTS (SELECT 1 FROM contract_close recent_close
+                            WHERE recent_close.contract_id=transfer_contract.contract_id AND recent_close.close_time > $1)
+                    ))
                 ORDER BY create_time
                 LIMIT $2
             `,
@@ -4320,6 +4317,7 @@ func ForceCloseOpenContractIds(
 		return i
 	}
 
+	attempted := make([]bool, len(openContracts))
 	contractErrors := make([]error, len(openContracts))
 	contractCompleted := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
@@ -4341,9 +4339,33 @@ func ForceCloseOpenContractIds(
 
 					openContract := openContracts[j]
 					tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
-					closeErr := runForceClose(func() error {
-						return closeContract(tag, openContract)
+					var fresh *OpenContract
+					prepareErr := runForceClose(func() error {
+						var err error
+						server.Tx(ctx, func(tx server.PgTx) {
+							fresh, err = prepareContractExpiryInTx(ctx, tx, openContract.contractId, minTime)
+							server.Raise(err)
+						}, server.TxReadCommitted)
+						return err
 					})
+					if prepareErr != nil && !errors.Is(prepareErr, errContractAlreadySettled) {
+						// A failed proof read/write is not authority to quarantine.
+						contractErrors[j] = prepareErr
+						continue
+					}
+					if fresh == nil && prepareErr == nil {
+						// A real report arrived after the scan. Preserve its stream
+						// and let the next quiet-period candidate own retirement.
+						continue
+					}
+					attempted[j] = true
+					closeErr := prepareErr
+					if fresh != nil {
+						openContract = fresh
+						closeErr = runForceClose(func() error {
+							return closeContract(tag, openContract)
+						})
+					}
 					var quarantineErr, cleanupErr error
 					var quarantineClaimed bool
 					contractErrors[j] = finishForceCloseContract(
@@ -4381,7 +4403,11 @@ func ForceCloseOpenContractIds(
 	wg.Wait()
 	close(workerErrors)
 
-	closeCount += int64(len(openContracts))
+	for _, closed := range attempted {
+		if closed {
+			closeCount++
+		}
+	}
 	accountingOnly := true
 	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
 	for index, contractErr := range contractErrors {
