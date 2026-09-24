@@ -67,7 +67,7 @@ func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *Network
 	}
 }
 
-// The three tables of C1 exist on a fresh database with the indexes the reads
+// The extender tables exist on a fresh database with the indexes the reads
 // and the upsert depend on. The unique key on public_key is not decoration:
 // the activation upsert is keyed by it, which is what makes a second family
 // add an address instead of creating a second extender.
@@ -115,6 +115,7 @@ func TestExtenderMigrationsApply(t *testing.T) {
 
 		wantTables := []string{
 			"network_extender",
+			"network_extender_activation",
 			"network_extender_address",
 			"network_extender_publish",
 		}
@@ -124,6 +125,8 @@ func TestExtenderMigrationsApply(t *testing.T) {
 		for _, wantIndex := range []string{
 			"network_extender_pkey",
 			"network_extender_public_key_key",
+			"network_extender_activation_pkey",
+			"network_extender_activation_extender_id_activate_time",
 			"network_extender_address_pkey",
 			"network_extender_address_active_last_publish_time",
 			"network_extender_publish_pkey",
