@@ -4016,6 +4016,11 @@ func ForceCloseOpenContractIds(
 
 		claimed := false
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Billing failure cannot revoke independently retained delivered
+			// usage. Validate it under the outcome lock before quarantining;
+			// a missing or corrupt original proof grants no new credit.
+			usage, usageErr := contractUsageSnapshotInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			server.Raise(usageErr)
 			commandTag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -4024,7 +4029,7 @@ func ForceCloseOpenContractIds(
                         outcome = $2,
                         close_time = $3,
                         usage_unverified = true,
-                        provider_usage = '{"version":1,"byte_count":0,"providers":[],"excluded_reason":"expired_unconfirmed"}'::jsonb
+                        provider_usage = $4
                     WHERE
                         contract_id = $1 AND
                         outcome IS NULL AND
@@ -4033,6 +4038,7 @@ func ForceCloseOpenContractIds(
 				openContract.contractId,
 				ContractOutcomeSettled,
 				server.NowUtc(),
+				usage,
 			))
 			claimed = commandTag.RowsAffected() == 1
 		}, server.TxReadCommitted)
