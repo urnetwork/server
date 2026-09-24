@@ -166,6 +166,41 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 	}
 }
 
+// The immutable-round trigger is a second winner gate. The v691 honesty
+// trigger alone cannot publish a best-safe staging winner if this one still
+// requires takeover eligibility.
+func TestMigrationsSignalStagingLifecycleGuardRequiredAt720(t *testing.T) {
+	for _, version := range []int{719, 720} {
+		row := syntheticMigrationArtifactRow(version)
+		row[131] = "f"
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(version), nil
+			}
+			if !strings.Contains(query, "competition_round_immutable_guard") ||
+				!strings.Contains(query, "NEW.staging OR") {
+				t.Fatal("migration query omitted the staging lifecycle guard")
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version == 719 {
+			requireAlertClass(t, alerts, "migration-behind")
+			if len(alerts) != 1 {
+				t.Fatalf("version 719 alerts=%+v, want only migration-behind", alerts)
+			}
+			continue
+		}
+		alert := requireAlertClass(t, alerts, "migration-schema-drift")
+		if len(alerts) != 1 || !strings.Contains(alert.Markdown(), "competition staging lifecycle winner eligibility@v720") {
+			t.Fatalf("version 720 alerts=%+v, want lifecycle-guard drift", alerts)
+		}
+	}
+}
+
 // Execute the production artifact expression over synthetic catalog rows using
 // only a read-only connection, including policy, trigger and function drift.
 func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {

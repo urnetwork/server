@@ -108,7 +108,7 @@ production-only; its
 entries, including the winner, retain `honesty_review: not_reviewed`. This
 creates no honesty-review, promotion, or production-winner state; a named
 staging winner is not an honesty or safety approval. Historical finalized
-results are unchanged. The best-safe staging policy requires migration 691,
+results are unchanged. The best-safe staging policy requires migrations 691 and 720,
 API, and worker rollout before epoch 8 closes; the
 [release record](launch/STAGING-5-RELEASE.md) retains the historical epoch-5
 opening worker identity and policy.

@@ -294,6 +294,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_ping_pinger_day day partitions and pinger key", requiredVersion: 717, rowColumn: 128},
 	{name: "network_ping_target_day day partitions and target key", requiredVersion: 718, rowColumn: 129},
 	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
+	{name: "competition staging lifecycle winner eligibility", requiredVersion: 720, rowColumn: 131},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1988,7 +1989,15 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 AND definition = 'PRIMARY KEY (hour, target_extender_id, pinger_kind)'
 		                 AND validated
 		           )
-		           AND `+migrationDayPartitionsArtifactQuery("network_ping_target_hour_tally")+`
+			   AND `+migrationDayPartitionsArtifactQuery("network_ping_target_hour_tally")+`
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM pg_proc AS function_record
+		           JOIN pg_namespace AS namespace ON namespace.oid = function_record.pronamespace
+		           WHERE namespace.nspname = 'public'
+		             AND function_record.proname = 'competition_round_immutable_guard'
+		             AND position('NEW.staging OR (job.score_json->>''takeover_eligible'')::boolean'
+		                          in pg_get_functiondef(function_record.oid)) > 0
 		       )
 		FROM version;
 	`)

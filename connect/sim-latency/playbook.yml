@@ -61,10 +61,10 @@ honesty_review:
 
 staging_winner_policy:
   deployment: best_safe_control_plane_follow_up_pending
-  deployment_order: current_migration_runner_apply_691_then_main_api_then_competition_worker
+  deployment_order: current_migration_runner_apply_720_then_main_api_then_competition_worker
   api_contract: updated_sn_api_competition_yml
   pending_openapi_sha256: bb4b57f8bf584211cc18f89be0ae43769213c39655804e360719d87ac95e4610
-  monitor_cli: refresh_separately_for_migration_691_guard
+  monitor_cli: refresh_separately_for_migration_720_guard
   evaluator_rebuild: not_required
   baseline_reset: not_required
   config_updater_rollout: not_required

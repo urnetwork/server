@@ -137,6 +137,36 @@ func TestCompetitionStagingBestWinnerMigrationPreservesProductionGate(t *testing
 	}
 }
 
+// The best-safe winner query and honesty guard are insufficient if the
+// independent immutable-round trigger still requires takeover eligibility.
+// Migration 720 must relax only staging while preserving all production and
+// immutable-field checks from the published admission-close migration.
+func TestCompetitionStagingWinnerLifecycleGuardMigration(t *testing.T) {
+	oldIndex := sqlMigrationIndex(t, "ADD COLUMN admission_closed_at")
+	newIndex := sqlMigrationIndex(t, "staging_best_safe_winner_immutable_guard_v720")
+	if oldIndex != 652 || newIndex != 719 {
+		t.Fatalf("lifecycle guard migration indices = %d/%d, want 652/719", oldIndex, newIndex)
+	}
+	oldSql := migrations[oldIndex].(*SqlMigration).sql
+	newSql := migrations[newIndex].(*SqlMigration).sql
+	const marker = "CREATE OR REPLACE FUNCTION competition_round_immutable_guard()"
+	_, oldFunction, oldFound := strings.Cut(oldSql, marker)
+	_, newFunction, newFound := strings.Cut(newSql, marker)
+	if !oldFound || !newFound {
+		t.Fatal("staging lifecycle migration does not replace the published guard")
+	}
+	const oldPredicate = "(job.score_json->>'takeover_eligible')::boolean"
+	const newPredicate = "(NEW.staging OR (job.score_json->>'takeover_eligible')::boolean)"
+	if !strings.Contains(oldFunction, oldPredicate) || !strings.Contains(newFunction, newPredicate) {
+		t.Fatal("staging lifecycle migration did not relax takeover eligibility")
+	}
+	normalizedOld := strings.Join(strings.Fields(oldFunction), " ")
+	normalizedNew := strings.Join(strings.Fields(strings.Replace(newFunction, newPredicate, oldPredicate, 1)), " ")
+	if normalizedOld != normalizedNew {
+		t.Fatal("staging lifecycle migration changed another immutable-field or production rule")
+	}
+}
+
 func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }

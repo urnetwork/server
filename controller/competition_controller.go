@@ -4373,8 +4373,8 @@ func (self PostgresStore) CloseStagingRound(
 	return round, err
 }
 
-// Publishes a drained staging epoch with its highest-ranked statistically
-// eligible job, without honesty review or source promotion. An unfinished
+// Publishes a drained staging epoch with its highest-ranked placeable job
+// passing every gate, without honesty review or source promotion. An unfinished
 // round is returned unchanged while admission or queued evaluation continues.
 func (self PostgresStore) FinalizeStagingRound(
 	ctx context.Context,

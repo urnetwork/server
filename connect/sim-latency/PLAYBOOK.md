@@ -7,7 +7,7 @@ preserved; shared-baseline staging epoch 8 open with four completed jobs and a
 running singleton worker; results remain embargoed until finalization**
 
 Launch-control validation: **staging API/evaluator active; best-safe staging
-winner policy requires migration 691, API, and worker rollout; production
+winner policy requires migrations 691 and 720, API, and worker rollout; production
 qualification and external launch actions pending**
 
 After close and FIFO drain, staging selects the highest-ranked placeable
@@ -19,7 +19,7 @@ honesty/safety nor promotes source, config, thresholds, or a production winner.
 Production retains mandatory review. Historical finalized results stay intact.
 
 Rollout remains pending for this policy: deploy the current migration runner
-(`bringyourctl` or `competitiondbinit`) and apply migration 691 before new API readiness or
+(`bringyourctl` or `competitiondbinit`) and apply migrations 691 and 720 before new API readiness or
 worker startup, then deploy the main API built with the updated `sn` contract
 and rebuild/deploy the competition worker on sille. Refresh the monitor CLI
 separately to observe the new migration guard. None of these requires an
@@ -213,7 +213,7 @@ has an owner and a recorded value.
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
-| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. Staging publishes its best placeable candidate passing every gate, or null when none qualifies, through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion; the best-safe policy requires migration 691/API/worker rollout. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
+| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. Staging publishes its best placeable candidate passing every gate, or null when none qualifies, through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion; the best-safe policy requires migrations 691 and 720/API/worker rollout. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `launch/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally

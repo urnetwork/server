@@ -8994,4 +8994,55 @@ var migrations = []any{
 		FROM network_ping
 		GROUP BY 1, 2, 3
 	`),
+
+	// The earlier staging winner migration updated the honesty-review guard,
+	// but the separate lifecycle guard still required takeover_eligible. Keep
+	// that production requirement while allowing a placeable staging winner.
+	newSqlMigration(`
+		-- staging_best_safe_winner_immutable_guard_v720
+		CREATE OR REPLACE FUNCTION competition_round_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_epoch_lifecycle_guard$
+		BEGIN
+			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
+			   OLD.epoch_number IS DISTINCT FROM NEW.epoch_number OR
+			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
+			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
+			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
+			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
+			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
+			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
+			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
+			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
+			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
+			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
+			   (OLD.admission_closed_at IS NOT NULL AND
+			       OLD.admission_closed_at IS DISTINCT FROM NEW.admission_closed_at) OR
+			   (OLD.canceled AND NOT NEW.canceled) OR
+			   (OLD.finalized_at IS NOT NULL AND (
+			       OLD.finalized_at IS DISTINCT FROM NEW.finalized_at OR
+			       OLD.winner_job_id IS DISTINCT FROM NEW.winner_job_id
+			   )) OR
+			   (NEW.finalized_at IS NULL AND NEW.winner_job_id IS NOT NULL) OR
+			   (NEW.finalized_at IS NOT NULL AND
+			       NEW.finalized_at < COALESCE(NEW.admission_closed_at, NEW.closes_at))
+			THEN
+				RAISE EXCEPTION 'competition round immutable fields changed';
+			END IF;
+			IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM competition_job AS job
+				WHERE job.job_id = NEW.winner_job_id
+				  AND job.round_id = NEW.round_id
+				  AND job.state = 'succeeded'
+				  AND (job.score_json->>'placeable')::boolean
+				  AND (NEW.staging OR (job.score_json->>'takeover_eligible')::boolean)
+			) THEN
+				RAISE EXCEPTION 'competition winner is not an eligible job in this round';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_epoch_lifecycle_guard$;
+	`),
 }
