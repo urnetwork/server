@@ -20,6 +20,7 @@ type contractUsageSnapshot struct {
 	ByteCount      ByteCount               `json:"byte_count"`
 	Providers      []contractProviderUsage `json:"providers"`
 	ExcludedReason string                  `json:"excluded_reason,omitempty"`
+	Expiry         *contractUsageExpiry    `json:"expiry,omitempty"`
 }
 
 // Includes same-network service clients; monetary eligibility is unrelated.
@@ -29,10 +30,11 @@ type contractProviderUsage struct {
 	ByteCount ByteCount `json:"byte_count"`
 }
 
-// A checkpoint is unfinished evidence, not a completed party report.
+// A checkpoint does not complete ordinary settlement. Once expiry owns
+// retirement, its accumulated bytes remain an authenticated lower bound.
 type contractUsageClose struct {
-	ByteCount  ByteCount
-	Checkpoint bool
+	ByteCount  ByteCount `json:"byte_count"`
+	Checkpoint bool      `json:"checkpoint"`
 }
 
 // Ordinary usage requires both completed reports and credits their lower
@@ -100,17 +102,18 @@ func contractUsageSnapshotInTx(ctx context.Context, tx server.PgTx, contractId s
 	var priorOutcome *ContractOutcome
 	var capacity ByteCount
 	var unverified bool
+	var retained []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT usage_origin_is_source, outcome, transfer_byte_count, usage_unverified
+		SELECT usage_origin_is_source, outcome, transfer_byte_count, usage_unverified, provider_usage
 		FROM transfer_contract WHERE contract_id = $1 FOR UPDATE
-	`, contractId).Scan(&usageOriginIsSource, &priorOutcome, &capacity, &unverified); err != nil {
+	`, contractId).Scan(&usageOriginIsSource, &priorOutcome, &capacity, &unverified, &retained); err != nil {
 		return nil, fmt.Errorf("read contract usage owner: %w", err)
 	}
 	if priorOutcome != nil {
 		return nil, nil
 	}
 	if unverified {
-		return &contractUsageSnapshot{Version: 1, Providers: []contractProviderUsage{}, ExcludedReason: "expired_unconfirmed"}, nil
+		return retainedContractExpiryUsage(retained)
 	}
 	if usageOriginIsSource == nil {
 		return nil, nil
@@ -160,6 +163,13 @@ func decodeContractUsageSnapshot(data []byte) (*contractUsageSnapshot, error) {
 			ByteCount *ByteCount `json:"byte_count"`
 		} `json:"providers"`
 		ExcludedReason string `json:"excluded_reason,omitempty"`
+		Expiry         *struct {
+			Capacity *ByteCount `json:"capacity"`
+			Reports  *map[ContractParty]struct {
+				ByteCount  *ByteCount `json:"byte_count"`
+				Checkpoint *bool      `json:"checkpoint"`
+			} `json:"reports"`
+		} `json:"expiry,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -170,6 +180,28 @@ func decodeContractUsageSnapshot(data []byte) (*contractUsageSnapshot, error) {
 		return nil, fmt.Errorf("missing contract usage fields")
 	}
 	snapshot := contractUsageSnapshot{Version: record.Version, ByteCount: *record.ByteCount, Providers: []contractProviderUsage{}, ExcludedReason: record.ExcludedReason}
+	if record.Expiry != nil {
+		if record.Expiry.Capacity == nil || record.Expiry.Reports == nil {
+			return nil, fmt.Errorf("missing original expiry report fields")
+		}
+		snapshot.Expiry = &contractUsageExpiry{Capacity: *record.Expiry.Capacity, Reports: map[ContractParty]contractUsageClose{}}
+		for party, report := range *record.Expiry.Reports {
+			if report.ByteCount == nil || report.Checkpoint == nil {
+				return nil, fmt.Errorf("incomplete original expiry report")
+			}
+			snapshot.Expiry.Reports[party] = contractUsageClose{ByteCount: *report.ByteCount, Checkpoint: *report.Checkpoint}
+		}
+		byteCount, err := contractExpiryCompletedUsage(snapshot.Expiry)
+		if err != nil {
+			return nil, err
+		}
+		if byteCount != snapshot.ByteCount {
+			return nil, fmt.Errorf("expiry usage differs from original bilateral reports")
+		}
+		if (len(snapshot.Expiry.Reports) < 2) != (snapshot.ExcludedReason == "expired_unconfirmed") {
+			return nil, fmt.Errorf("expiry exclusion differs from original report presence")
+		}
+	}
 	for _, provider := range *record.Providers {
 		if provider.ByteCount == nil {
 			return nil, fmt.Errorf("missing contract provider usage count")
