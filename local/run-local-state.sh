@@ -311,7 +311,10 @@ local_run_lock_acquire() {
     local_state_error "refusing malformed local launcher ownership"
     return 1
   fi
-  if ! (umask 077 && mkdir "$lock_dir") 2>/dev/null; then
+  # The launcher defers signals until our result and token are published. Its
+  # mkdir child must also survive a group signal after the directory is created
+  # but before mkdir reports success, or the caller cannot know it owns it.
+  if ! (trap '' HUP INT TERM; umask 077 && mkdir "$lock_dir") 2>/dev/null; then
     local_state_error "local launcher lock is already held: $lock_dir"
     return 1
   fi

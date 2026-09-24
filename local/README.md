@@ -86,6 +86,24 @@ loopback alias. It removes readiness only when both the lock and attestation
 still contain its owner token; ambiguous state is retained for inspection and
 future preflights fail closed.
 
+The launcher defers `HUP`, `INT`, and `TERM` during lock acquisition and ignores
+further signals once cleanup starts, so an ordinary interruption cannot strand
+the lock between directory creation and owner publication, or between owner
+removal and directory removal. `SIGKILL`, host failure, and filesystem errors
+can still leave incomplete state.
+
+An empty `/tmp/urnetwork-server-run-local.lock` is not proof that the services
+are unowned. For recovery, first prevent concurrent launcher starts and test
+runs, confirm that the original launcher and its cleanup have ended, and retain
+the lock metadata plus the current hosts, interface, and exact Compose-service
+identities. Recover only the residual mappings, alias, and containers whose
+ownership is established; preserve any ambiguous or unrelated state. Once the
+lock is confirmed abandoned and still empty, use
+`rmdir /tmp/urnetwork-server-run-local.lock`, which refuses unexpected contents.
+Do not recursively delete it or infer abandonment from a missing owner record
+or a PID alone. Start a fresh foreground launcher and wait for `Local
+environment is up` before resuming tests.
+
 An isolated portable environment may provision its own disposable PostgreSQL
 and Redis services instead of using this launcher. That workflow must select
 the checked-in resources and opt out of launcher ownership explicitly:

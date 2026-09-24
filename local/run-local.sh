@@ -469,8 +469,19 @@ STACK_OWNED=0
 CLEANED=0
 RUN_LOCK_HELD=0
 RUN_LOCK_OWNER="v1:${MAIN_PID}:${RANDOM}:${RANDOM}"
+RUN_LOCK_DEFERRED_SIGNAL_STATUS=0
+
+defer_lock_signal() {
+  if [[ "$RUN_LOCK_DEFERRED_SIGNAL_STATUS" == 0 ]]; then
+    RUN_LOCK_DEFERRED_SIGNAL_STATUS="$1"
+  fi
+}
 
 cleanup() {
+  # A second interrupt must not exit this EXIT trap between withdrawing the
+  # owner record and removing its directory, or abandon the earlier teardown.
+  trap '' HUP INT TERM
+  trap - EXIT
   [[ "$CLEANED" == 1 ]] && return
   CLEANED=1
   if [[ "$RUN_LOCK_HELD" == 1 ]]; then
@@ -521,17 +532,29 @@ cleanup() {
 }
 
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 HOSTS_BACKUP="$(mktemp -t urnetwork-hosts-backup.XXXXXX)"
 HOSTS_APPLIED="$(mktemp -t urnetwork-hosts-applied.XXXXXX)"
-# Arm the token-checked release before acquisition. If a signal lands after the
-# helper publishes our owner token but before it returns, cleanup still owns it.
+# mkdir and owner publication are separate operations. Defer catchable signals
+# across both, including the acquisition result, so cleanup never sees our own
+# freshly created directory without the token it requires to release it.
+trap 'defer_lock_signal 129' HUP
+trap 'defer_lock_signal 130' INT
+trap 'defer_lock_signal 143' TERM
 RUN_LOCK_HELD=1
 if ! local_run_lock_acquire "$RUN_LOCK_DIR" "$RUN_LOCK_OWNER"; then
   RUN_LOCK_HELD=0
-  rm -f "$HOSTS_BACKUP" "$HOSTS_APPLIED"
+fi
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$RUN_LOCK_DEFERRED_SIGNAL_STATUS" != 0 ]]; then
+  exit "$RUN_LOCK_DEFERRED_SIGNAL_STATUS"
+fi
+if [[ "$RUN_LOCK_HELD" != 1 ]]; then
   die "another local launcher owns $RUN_LOCK_DIR; inspect it before removing a stale lock"
 fi
 

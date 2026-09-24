@@ -459,6 +459,7 @@ func TestRunLocalInstallsCleanupTrapsBeforeOwnershipResources(t *testing.T) {
 	}
 	for _, trap := range []string{
 		"trap cleanup EXIT",
+		"trap 'exit 129' HUP",
 		"trap 'exit 130' INT",
 		"trap 'exit 143' TERM",
 	} {
@@ -554,6 +555,106 @@ local_run_lock_acquire "$2" second-owner`
 	firstWaited = true
 	if _, err := os.Stat(lockDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("released lock still exists: %v", err)
+	}
+}
+
+// Execute the production lifecycle and its traps, but never the launcher code
+// that invokes sudo, changes host networking, or starts Docker. Deterministic
+// command hooks deliver each signal in the otherwise tiny ownerless windows.
+func TestRunLocalLifecycleFinishesOwnershipTransitionsOnSignal(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("local", "run-local.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycleStart := bytes.Index(content, []byte("# --- lifecycle / cleanup"))
+	lifecycleEnd := bytes.Index(content, []byte("# --- run ---"))
+	if lifecycleStart < 0 || lifecycleEnd <= lifecycleStart {
+		t.Fatal("local launcher lifecycle boundaries are missing")
+	}
+	lifecycle := string(content[lifecycleStart:lifecycleEnd])
+
+	for _, signal := range []struct {
+		name   string
+		status int
+	}{{"HUP", 129}, {"INT", 130}, {"TERM", 143}} {
+		for _, phase := range []string{"acquire", "acquire-child", "contended", "release"} {
+			t.Run(phase+"/"+signal.name, func(t *testing.T) {
+				tempDir := t.TempDir()
+				lockDir := filepath.Join(tempDir, "run-local.lock")
+				if phase == "contended" {
+					if err := os.Mkdir(lockDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("foreign-owner\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				script := `set -euo pipefail
+source "$1"
+RUN_LOCK_DIR="$2/run-local.lock"
+phase="$3"
+signal="$4"
+KEEP_UP=0
+EPHEMERAL_RANGE_CHANGED=0
+CONNTRACK_MAX_CHANGED=0
+NETDEV_BACKLOG_CHANGED=0
+SYN_BACKLOG_CHANGED=0
+SOMAXCONN_CHANGED=0
+log() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+mkdir() {
+  local status=0
+  command mkdir "$@" || status=$?
+  if [[ "$1" == "$RUN_LOCK_DIR" && "$phase" != release ]]; then
+    kill -"$signal" "$MAIN_PID"
+    if [[ "$phase" == acquire-child ]]; then
+      # A terminal/process-group signal also reaches the mkdir subshell.
+      sh -c 'kill -"$1" "$PPID"' local-mkdir-signal-test "$signal"
+    fi
+  fi
+  return "$status"
+}
+rm() {
+  command rm "$@" || return $?
+  if [[ "$1" == "$RUN_LOCK_DIR/owner" && "$phase" == release ]]; then
+    kill -"$signal" "$MAIN_PID"
+  fi
+}
+` + lifecycle + `
+exit 37
+`
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "bash", "-c", script, "local-lifecycle-signal-test",
+					filepath.Join("local", "run-local-state.sh"), tempDir, phase, signal.name)
+				cmd.Env = testCommandEnvironment(map[string]string{"TMPDIR": tempDir})
+				output, err := cmd.CombinedOutput()
+				wantStatus := signal.status
+				if phase == "release" {
+					wantStatus = 37 // A second signal must not replace the original failure.
+				}
+				if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != wantStatus {
+					t.Errorf("%s signal at %s = %v, %q; want exit %d", signal.name, phase, err, output, wantStatus)
+				}
+				if phase == "contended" {
+					owner, err := os.ReadFile(filepath.Join(lockDir, "owner"))
+					if err != nil || string(owner) != "foreign-owner\n" {
+						t.Fatalf("signal changed competing owner to %q: %v", owner, err)
+					}
+				} else if entries, err := os.ReadDir(lockDir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s signal at %s stranded lock entries %v: %v; output=%s", signal.name, phase, entries, err, output)
+				}
+				entries, err := os.ReadDir(tempDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if phase != "contended" || entry.Name() != "run-local.lock" {
+						t.Errorf("signal stranded temporary state %s", entry.Name())
+					}
+				}
+			})
+		}
 	}
 }
 
