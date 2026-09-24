@@ -278,12 +278,20 @@ func TestNetworkCreateTestAuthIsImmediatelyVerified(t *testing.T) {
 
 		// Simulate a fixture left pending by the previous server version. Correct
 		// password login must repair it without sending or requesting a code.
+		normalPhone, _ := NormalUserAuthV1(&phone)
+		if normalPhone == nil {
+			t.Fatal("configured phone did not normalize")
+		}
 		server.Db(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(
+			result, err := conn.Exec(
 				ctx,
 				"UPDATE network_user_auth_password SET verified = false WHERE user_auth = $1",
-				phone,
-			))
+				*normalPhone,
+			)
+			server.Raise(err)
+			if result.RowsAffected() != 1 {
+				t.Fatalf("fixture reset changed %d phone rows, want one", result.RowsAffected())
+			}
 		}, server.OptReadWrite())
 		withReadOnlyModelDbSession(t, ctx, func() {
 			phoneLogin, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
