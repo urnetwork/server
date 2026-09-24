@@ -533,31 +533,126 @@ var findProviders2AnsweredProviders = prometheus.NewCounterVec(prometheus.Counte
 // within one count pass of the verdict. One key, so the read is one command.
 const providerHardExclusionsKey = "{provider_hard_exclusions}"
 
-// Which of clientIds the set holds. A missing set -- no count pass has written
-// one yet, or its ttl lapsed with the writer -- excludes nothing here; the
-// score cache still leaves out what its last export saw excluded.
+// The same atomic set carries evidence that even an empty publication exists.
+// This reserved member cannot be a provider id. Older writers omit it.
+const providerHardExclusionsReadyMember = "ready:v1"
+
+// Which candidates the complete cached set excludes. A missing, expired or
+// legacy snapshot has unknown coverage, so read only these candidates from
+// the primary database. Backend errors never become an empty exclusion set.
 func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excludedClientIds map[server.Id]bool, returnErr error) {
 	excludedClientIds = map[server.Id]bool{}
 	if len(clientIds) == 0 {
 		return
 	}
-	members := make([]any, 0, len(clientIds))
+	members := make([]any, 0, len(clientIds)+1)
+	members = append(members, providerHardExclusionsReadyMember)
 	for _, clientId := range clientIds {
 		members = append(members, clientId.String())
 	}
+	complete := false
 	server.Redis(ctx, func(r server.RedisClient) {
 		memberships, err := r.SMIsMember(ctx, providerHardExclusionsKey, members...).Result()
 		if err != nil {
 			returnErr = err
 			return
 		}
-		for i, member := range memberships {
+		if len(memberships) != len(members) {
+			returnErr = fmt.Errorf("incomplete provider hard-exclusion membership response")
+			return
+		}
+		complete = memberships[0]
+		if !complete {
+			return
+		}
+		for i, member := range memberships[1:] {
 			if member {
 				excludedClientIds[clientIds[i]] = true
 			}
 		}
 	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	if !complete {
+		return readProviderHardExclusions(ctx, clientIds)
+	}
 	return
+}
+
+// Read-through uses the exporter's exact dark and TLS rules without loading
+// the fleet. Each query has at most 256 distinct candidates and result rows;
+// it observes the caller's context and never publishes a partial global set.
+func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
+	const chunkSize = 256
+	uniqueClientIds := make([]server.Id, 0, len(clientIds))
+	seenClientIds := make(map[server.Id]bool, len(clientIds))
+	for _, clientId := range clientIds {
+		if !seenClientIds[clientId] {
+			seenClientIds[clientId] = true
+			uniqueClientIds = append(uniqueClientIds, clientId)
+		}
+	}
+	excludedClientIds := map[server.Id]bool{}
+	if len(uniqueClientIds) == 0 {
+		return excludedClientIds, nil
+	}
+	minCheckedAt := server.NowUtc().Add(-ProviderBlackholeCheckMaxAge)
+	rules := GetProviderEgressRules()
+	query := `
+		SELECT client_id
+		FROM provider_blackhole_check
+		WHERE client_id = ANY($1)
+		  AND ` + ProviderBlackholeDarkSql("provider_blackhole_check", "$2", rules) + `
+		UNION
+		SELECT client_id
+		FROM provider_egress_health
+		WHERE client_id = ANY($1) AND tls_authentication_failure = true
+	`
+	var returnErr error
+	// This is a safety decision, not an analytics read: do not use a replica
+	// whose lag could re-admit a provider with a newly accepted hard verdict.
+	server.Db(ctx, func(conn server.PgConn) {
+		for start := 0; start < len(uniqueClientIds); start += chunkSize {
+			chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
+			chunkClientIdSet := make(map[server.Id]bool, len(chunkClientIds))
+			for _, clientId := range chunkClientIds {
+				chunkClientIdSet[clientId] = true
+			}
+			if err := ctx.Err(); err != nil {
+				returnErr = err
+				return
+			}
+			rows, err := conn.Query(ctx, query, chunkClientIds, minCheckedAt.UTC())
+			if err != nil {
+				returnErr = err
+				return
+			}
+			func() {
+				defer rows.Close()
+				for rows.Next() {
+					var clientId server.Id
+					if err := rows.Scan(&clientId); err != nil {
+						returnErr = err
+						return
+					}
+					if !chunkClientIdSet[clientId] || excludedClientIds[clientId] {
+						returnErr = fmt.Errorf("invalid provider hard-exclusion result population")
+						return
+					}
+					excludedClientIds[clientId] = true
+				}
+				returnErr = rows.Err()
+			}()
+			if returnErr != nil {
+				return
+			}
+		}
+	}, server.OptReadOnly(), server.OptNoRetry())
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return excludedClientIds, nil
 }
 
 // The newer of a provider's two runs, the health run and the location probe,

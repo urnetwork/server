@@ -100,7 +100,8 @@ func (self *ProviderBlackholeCheck) IsDark(now time.Time, rules ProviderEgressRu
 	if !self.OK && self.Failure == ProviderBlackholeTlsAuthenticationFailure {
 		return true
 	}
-	return rules.DarkConsecutiveFailures <= self.ConsecutiveFailures &&
+	// A legacy passing write can leave the prior streak columns intact.
+	return !self.OK && rules.DarkConsecutiveFailures <= self.ConsecutiveFailures &&
 		self.FirstFailedAt != nil &&
 		!self.CheckedAt.Add(-rules.DarkMinimumSpan()).Before(*self.FirstFailedAt)
 }
@@ -117,6 +118,7 @@ func ProviderBlackholeDarkSql(alias string, minCheckedAtSql string, rules Provid
 		%[2]s <= %[1]s.checked_at AND (
 			(%[1]s.ok = false AND %[1]s.failure = '%[3]s') OR
 			(
+				%[1]s.ok = false AND
 				%[4]d <= %[1]s.consecutive_failures AND
 				%[1]s.first_failed_at IS NOT NULL AND
 				%[1]s.first_failed_at <= %[1]s.checked_at - interval '%[5]d seconds'
@@ -180,6 +182,11 @@ func NextProviderBlackholeCheck(
 			}
 		} else {
 			next = *previous
+			if next.OK {
+				// Preserve the measured pass, not an older writer's stale run.
+				next.ConsecutiveFailures = 0
+				next.FirstFailedAt = nil
+			}
 		}
 		nextDueAt := now.Add(rules.DarkBackoff(next.ConsecutiveFailures))
 		next.NextDueAt = &nextDueAt
@@ -198,7 +205,7 @@ func NextProviderBlackholeCheck(
 	}
 
 	next.Failure = report.Failure
-	if previous != nil && 0 < previous.ConsecutiveFailures && previous.FirstFailedAt != nil {
+	if previous != nil && !previous.OK && 0 < previous.ConsecutiveFailures && previous.FirstFailedAt != nil {
 		next.ConsecutiveFailures = previous.ConsecutiveFailures + 1
 		firstFailedAt := *previous.FirstFailedAt
 		next.FirstFailedAt = &firstFailedAt
@@ -291,13 +298,15 @@ func RecordProviderBlackholeChecks(
 // older check overwrite a newer one that raced it in.
 func writeProviderBlackholeCheck(ctx context.Context, tx server.PgTx, c *ProviderBlackholeCheck, now time.Time) {
 	failure := c.Failure
+	consecutiveFailures := c.ConsecutiveFailures
 	if c.OK {
-		// a successful check has nothing to explain, and storing a failure class
-		// beside ok=true would leave two contradictory answers in one row
+		// A pass ends the run even when a backfill supplies retained columns.
+		// Normalize the stored copy without mutating the caller's evidence.
 		failure = ""
+		consecutiveFailures = 0
 	}
 	var firstFailedAt *time.Time
-	if c.FirstFailedAt != nil && 0 < c.ConsecutiveFailures {
+	if c.FirstFailedAt != nil && 0 < consecutiveFailures {
 		utc := c.FirstFailedAt.UTC()
 		firstFailedAt = &utc
 	}
@@ -335,7 +344,7 @@ func writeProviderBlackholeCheck(ctx context.Context, tx server.PgTx, c *Provide
 		c.CheckedAt.UTC(),
 		c.OK,
 		failure,
-		c.ConsecutiveFailures,
+		consecutiveFailures,
 		firstFailedAt,
 		nextDueAt,
 		now,

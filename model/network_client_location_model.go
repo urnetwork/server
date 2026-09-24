@@ -4002,8 +4002,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// load as the counts so the two agree. The set is replaced whole in one
 	// transaction, so a reader sees the last set or this one and never part of
 	// one, and with the counts' ttl, so a stalled pass lets both lapse
-	// together; the score cache's own exclusions stand after it.
-	hardExcludedMembers := []any{}
+	// together. The marker distinguishes an authoritative empty publication
+	// from missing coverage; missing or legacy sets use candidate-only SQL.
+	hardExcludedMembers := []any{providerHardExclusionsReadyMember}
 	for clientId, blackholed := range countFilter.blackholed {
 		if blackholed {
 			hardExcludedMembers = append(hardExcludedMembers, clientId.String())
@@ -4018,9 +4019,6 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	server.Redis(ctx, func(r server.RedisClient) {
 		_, hardExclusionsErr = r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			pipe.Del(ctx, providerHardExclusionsKey)
-			if len(hardExcludedMembers) == 0 {
-				return nil
-			}
 			pipe.SAdd(ctx, providerHardExclusionsKey, hardExcludedMembers...)
 			pipe.Expire(ctx, providerHardExclusionsKey, ttl)
 			return nil
