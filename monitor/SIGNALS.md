@@ -588,6 +588,24 @@ FROM failures GROUP BY task;
   through its owning policy, without deleting/replaying the task or weakening
   the guard. Only the target's positive typed batch proof can request this
   cadence; diagnostic error text alone cannot authorize it.
+
+  Retry/progress authority: max_errors is a cumulative stored retry count,
+  not a failed-contract count or a matched-window execution rate.
+  outcome=failed is intentional when the target retains any unresolved
+  accounting failure, even if healthy siblings were terminal-verified.
+  The grouped query does not observe per-attempt progress, typed retry
+  authority, the selected delay or executor lineage; other/unclassified
+  does not distinguish ordinary backoff from retained target cadence.
+  The completed-batch summary currently carries no task or attempt identity.
+  A nearby timestamp or matching diagnostic text does not establish its
+  identity with the sampled pending row. A missing summary is unknown, not zero terminal progress.
+  A filtered evaluator line can omit joined-error continuations and
+  does not prove accounting-only classification. False-positive control:
+  keep observed healthy sibling progress separate from the failed task.
+  False-negative control: keep the warning and financial guard for a truly
+  parked or zero-progress retry; prompt scheduling, a fresh heartbeat or an
+  unjoined positive summary cannot resolve it. Require exact private
+  task/run correlation and complete error authority for a stronger claim.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
